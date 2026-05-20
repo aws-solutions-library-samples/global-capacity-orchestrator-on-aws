@@ -82,15 +82,44 @@ jobs:
       - name: Install pip-audit
         run: |
           pip install pip-audit
+      - name: Validate .pip-audit-ignore expirations
+        # Every entry in .pip-audit-ignore must carry an `exp:YYYY-MM-DD`
+        # marker (per the file's own rules). The script fails the job when:
+        #   - any entry's exp: date is on-or-before today, or
+        #   - any entry is missing an `exp:` marker entirely.
+        # That way a stale suppression can't quietly hide a CVE forever —
+        # whoever added it has to come back, re-evaluate, and either remove
+        # it or extend the date with fresh rationale (mirroring how we treat
+        # .trivyignore today). Logic and tests live in
+        # .github/scripts/check_pip_audit_ignore.py +
+        # tests/test_pip_audit_ignore_validator.py.
+        run: python3 .github/scripts/check_pip_audit_ignore.py .pip-audit-ignore
       - name: Run pip-audit
         # First invocation writes the artifact even on failure; the second
         # fails the job when vulnerabilities are present. Mirrors the
         # retired GitLab pipeline.
+        #
+        # IGNORE_FLAGS expands the project-local .pip-audit-ignore file
+        # into repeated `--ignore-vuln ID` flags. pip-audit has no native
+        # ignore-file format — this is our convention (same shape as
+        # .trivyignore, with expiration dates and rationale). Lines that
+        # start with `#` and blank lines are skipped; anything after the
+        # first whitespace token (e.g. `exp:YYYY-MM-DD`) is treated as a
+        # human comment and dropped before the ID is passed to pip-audit.
         run: |
           set -uo pipefail
+          IGNORE_FLAGS=()
+          if [ -f .pip-audit-ignore ]; then
+            while IFS= read -r id; do
+              [ -z "$id" ] && continue
+              IGNORE_FLAGS+=(--ignore-vuln "$id")
+            done < <(grep -vE '^[[:space:]]*(#|$)' .pip-audit-ignore | awk '{print $1}')
+          fi
           pip-audit -r requirements-lock.txt --format json \
-            --output pip-audit-report.json --desc || true
-          pip-audit -r requirements-lock.txt --desc
+            --output pip-audit-report.json --desc \
+            "${IGNORE_FLAGS[@]}" || true
+          pip-audit -r requirements-lock.txt --desc \
+            "${IGNORE_FLAGS[@]}"
       - name: Upload pip-audit report
         if: always()
         uses: ./.github/actions/upload-artifact-with-retry

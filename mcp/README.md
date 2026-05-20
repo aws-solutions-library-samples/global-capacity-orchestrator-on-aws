@@ -57,7 +57,7 @@ An MCP (Model Context Protocol) server that exposes the GCO CLI as tools for LLM
 
 ## Overview
 
-The MCP server wraps the `gco` CLI, exposing 90 tools by default (up to 111 with all flags enabled) that cover the full lifecycle of GPU workload management:
+The MCP server wraps the `gco` CLI, exposing 92 tools by default (up to 113 with all flags enabled) that cover the full lifecycle of GPU workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments

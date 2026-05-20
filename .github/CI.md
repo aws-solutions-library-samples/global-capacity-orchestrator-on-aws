@@ -20,6 +20,7 @@ For contributor-facing docs (how to run tests locally, release process, dependen
 - [Dependabot](#dependabot)
 - [Helper scripts](#helper-scripts)
   - [Dependency-scan script](#dependency-scan-script)
+  - [pip-audit-ignore validator](#pip-audit-ignore-validator)
 - [Kind config](#kind-config)
 - [Markdownlint config](#markdownlint-config)
 - [Running checks locally](#running-checks-locally)
@@ -148,6 +149,7 @@ Ecosystems tracked:
 ## Helper scripts
 
 - **`scripts/dependency-scan.sh`** — backs the `deps-scan` workflow. See [below](#dependency-scan-script) for the full reference.
+- **`scripts/check_pip_audit_ignore.py`** — backs the `security:pip-audit:deps` job. See [below](#pip-audit-ignore-validator) for the full reference.
 
 ### Dependency-scan script
 
@@ -284,6 +286,73 @@ To turn the check on without introducing long-lived access keys, configure a Git
    ```
 
 The script self-detects the credentials via `aws sts get-caller-identity`. No script changes are needed when you flip this on.
+
+### pip-audit-ignore validator
+
+`scripts/check_pip_audit_ignore.py` gates the `security:pip-audit:deps` job in `workflows/security.yml`. It validates the project-local `.pip-audit-ignore` file before pip-audit itself runs, so a stale CVE suppression can't quietly outlive its expiration date and hide a finding forever.
+
+#### What it checks
+
+Each non-comment, non-blank line in `.pip-audit-ignore` must:
+
+- start with the vulnerability ID (e.g. `PYSEC-2025-183`, `CVE-2025-45768`, `GHSA-xxxx-xxxx-xxxx`); and
+- carry an `exp:YYYY-MM-DD` marker somewhere on the same line.
+
+The script fails the workflow when:
+
+- any entry's `exp:` date is on-or-before today (inclusive — the listed date is itself expired, no bonus day); or
+- any entry is missing the `exp:` marker entirely or has a malformed date (e.g. `exp:2026-13-40`).
+
+Comment lines (`#…`) and blank lines are skipped. A missing `.pip-audit-ignore` file is treated as clean, not as an error — the suppression file is opt-in.
+
+#### How it's wired
+
+The `security:pip-audit:deps` job runs the validator as a dedicated step before the actual `pip-audit` invocation:
+
+```yaml
+- name: Validate .pip-audit-ignore expirations
+  run: python3 .github/scripts/check_pip_audit_ignore.py .pip-audit-ignore
+
+- name: Run pip-audit
+  # ... reads .pip-audit-ignore and converts each ID into --ignore-vuln <ID>
+```
+
+Splitting validation into its own step makes the failure surface clearly in the GitHub Actions UI when a suppression expires — the step name itself tells the operator what's wrong.
+
+#### Running it locally
+
+```bash
+# Pass current date (default)
+python3 .github/scripts/check_pip_audit_ignore.py .pip-audit-ignore
+
+# Pin "today" to a specific date — useful for previewing what will fail
+# on or after that date
+python3 .github/scripts/check_pip_audit_ignore.py .pip-audit-ignore --today 2026-09-01
+```
+
+Exit codes: `0` (clean), `1` (one or more entries failed), `2` (argparse / I/O error).
+
+#### Tests
+
+Validator coverage lives in `tests/test_pip_audit_ignore_validator.py` (19 tests). It covers happy paths, expired-date detection (boundary tests for ±1 day and equal-to-today), missing or malformed markers, `main()` exit codes / stdout, and a live-file check that runs the committed `.pip-audit-ignore` against the validator with today's date. The live-file check is what catches drift between the suppression file and the validator's own rules.
+
+#### Adding a suppression
+
+Append a single line to `.pip-audit-ignore` with rationale and an expiration date:
+
+```text
+# CVE-2026-12345 — Brief one-line description.
+#
+# Why we're suppressing it (disputed, no upstream fix, not on a code path
+# we exercise, etc.). Link to the upstream advisory and any tracking issue
+# so the next reviewer can verify the rationale still holds.
+#
+# CVE record: https://www.cve.org/CVERecord?id=CVE-2026-12345
+# OSV record: https://github.com/pypa/advisory-database/blob/main/vulns/<package>/PYSEC-XXXX-XXX.yaml
+PYSEC-XXXX-XXX exp:2026-09-30
+```
+
+Pick an `exp:` date that gives upstream a reasonable window to ship a fix or have the advisory withdrawn (90 days is the typical default). When the date arrives, the validator step fails and forces a re-evaluation — extend with fresh rationale or remove the entry once the underlying CVE is fixed.
 
 ## Kind config
 
