@@ -503,7 +503,7 @@ class ConfigLoader:
 
         - ``manifest_processor``: service-specific settings (replicas, image,
           resource_limits, allowed_namespaces, validation_enabled,
-          max_request_body_bytes, yaml_max_depth, yaml_allow_aliases)
+          max_request_body_bytes, yaml_max_depth)
         - ``job_validation_policy``: shared validation policy (resource_quotas,
           trusted_registries, trusted_dockerhub_orgs, manifest_security_policy,
           allowed_kinds). Pulled in verbatim so the REST path reads the same

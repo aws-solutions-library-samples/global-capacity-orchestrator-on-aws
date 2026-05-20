@@ -14,8 +14,14 @@
     ]
   },
   "context": {
+    "_comment_format": "JSON has no comments. Per-block documentation lives in sibling '_comment_<block>' keys placed immediately before the block they describe. Anything starting with '_comment' is ignored at runtime — no code reads those keys.",
+
     "_comment_project": "Project identity and deployment topology",
+
+    "_comment_project_name": "Used as the resource-name prefix for every stack (e.g., '<project>-<region>') and as the SSM parameter path root for cross-region ALB hostname registration.",
     "project_name": "gco",
+
+    "_comment_deployment_regions": "Where each stack class deploys. 'global' hosts Global Accelerator, ECR, S3, and the cross-region SSM hostname registry. 'api_gateway' and 'monitoring' often co-locate with 'global' but can be split. 'regional' is the list of EKS clusters; one regional stack per entry.",
     "deployment_regions": {
       "global": "us-east-2",
       "api_gateway": "us-east-2",
@@ -24,27 +30,27 @@
         "us-east-1"
       ]
     },
+
+    "_comment_tags": "Common tags applied to every stack and resource that supports tagging (cost-allocation, ownership, compliance). Add or override here. WARNING: every key in this block becomes a literal AWS tag — do not add documentation keys here.",
     "tags": {
       "Project": "GCO",
       "Environment": "production",
       "Owner": "platform-team"
     },
-    "_comment_eks": "EKS cluster version and node configuration",
+
+    "_comment_eks": "EKS cluster version and access posture. GCO runs EKS Auto Mode (https://docs.aws.amazon.com/eks/latest/userguide/automode.html), so node provisioning is managed by AWS — GPU/inference/EFA/Neuron compute is steered via the Karpenter NodePool manifests in lambda/kubectl-applier-simple/manifests/ (40-* through 44-*).",
+
+    "_comment_kubernetes_version": "EKS minor version. kubectl in Dockerfile.dev should track this within the ±1 minor skew policy (https://kubernetes.io/releases/version-skew-policy/).",
     "kubernetes_version": "1.35",
+
+    "_comment_eks_cluster": "endpoint_access controls who can reach the EKS API server. PRIVATE = inside the VPC only (production posture). Set to PUBLIC_AND_PRIVATE for kubectl access from the internet during dev. See docs/CUSTOMIZATION.md (EKS Endpoint Access).",
     "eks_cluster": {
       "endpoint_access": "PRIVATE"
     },
-    "node_groups": {
-      "gpu_instances": [
-        "g4dn.xlarge",
-        "g4dn.2xlarge",
-        "p3.2xlarge"
-      ],
-      "min_size": 0,
-      "max_size": 100,
-      "desired_size": 2
-    },
+
     "_comment_networking": "Networking, security, and ingress",
+
+    "_comment_global_accelerator": "AWS Global Accelerator front door. health_check_grace_period: seconds before a new endpoint starts being probed. health_check_interval: seconds between probes. health_check_timeout: seconds to wait per probe. health_check_path: HTTP path probed on each regional ALB. See https://docs.aws.amazon.com/global-accelerator/latest/dg/about-endpoint-groups-health-check-options.html.",
     "global_accelerator": {
       "name": "gco-accelerator",
       "health_check_grace_period": 30,
@@ -52,12 +58,16 @@
       "health_check_timeout": 5,
       "health_check_path": "/api/v1/health"
     },
+
+    "_comment_alb_config": "Internal ALB target-group health checks for the manifest-processor service. health_check_interval / health_check_timeout in seconds. healthy_threshold / unhealthy_threshold are the consecutive-probe counts before a target flips state. See https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-target-groups.html.",
     "alb_config": {
       "health_check_interval": 30,
       "health_check_timeout": 5,
       "healthy_threshold": 2,
       "unhealthy_threshold": 2
     },
+
+    "_comment_api_gateway": "Edge-optimized REST API behavior. throttle_rate_limit (req/s) and throttle_burst_limit (peak burst) are the account-level caps. log_level applies to access/execution logs. metrics_enabled and tracing_enabled toggle CloudWatch metrics and X-Ray tracing for the stage. See https://docs.aws.amazon.com/apigateway/latest/developerguide/how-to-deploy-api.html.",
     "api_gateway": {
       "throttle_rate_limit": 1000,
       "throttle_burst_limit": 2000,
@@ -65,16 +75,20 @@
       "metrics_enabled": true,
       "tracing_enabled": true
     },
+
+    "_comment_waf": "WAFv2 web ACL in front of API Gateway. per_ip_rate_limit is the WAF rate-based rule's request budget per source IP over a 5-minute window. See https://docs.aws.amazon.com/waf/latest/developerguide/waf-rule-statement-type-rate-based.html.",
     "waf": {
       "per_ip_rate_limit": 100
     },
+
+    "_comment_vpc_endpoint_cidrs": "CIDR blocks allowed to reach VPC endpoints, applied as NetworkPolicy egress rules in the cluster. Defaults to the VPC's own CIDR; widen to include peered VPC ranges if needed.",
     "vpc_endpoint_cidrs": [
       "10.0.0.0/16"
     ],
-    "webhook_security": {
-      "allowed_domains": []
-    },
+
     "_comment_workloads": "Job submission, validation, and processing pipelines",
+
+    "_comment_manifest_processor": "Service that validates POST /api/v1/manifests and writes accepted jobs to SQS. image: container image for the deployment. replicas: pod count behind the internal ALB. resource_limits: per-pod CPU/memory caps. validation_enabled: master switch for the security-policy validator. max_request_body_bytes: hard request-size cap (1 MiB default). yaml_max_depth: YAML parser nesting cap to defuse billion-laughs / alias-bomb attacks. See docs/CUSTOMIZATION.md (Manifest Processor, Security Policy Configuration).",
     "manifest_processor": {
       "image": "gco/manifest-processor:latest",
       "replicas": 3,
@@ -84,9 +98,10 @@
       },
       "validation_enabled": true,
       "max_request_body_bytes": 1048576,
-      "yaml_max_depth": 50,
-      "yaml_allow_aliases": false
+      "yaml_max_depth": 50
     },
+
+    "_comment_queue_processor": "SQS-backed job submitter. enabled: master toggle (when false the post-helm-sqs-consumer manifest is skipped). polling_interval: SQS receive interval in seconds. max_concurrent_jobs: in-flight jobs per pod. messages_per_job: SQS messages drained per worker iteration. successful_jobs_history / failed_jobs_history: K8s Job .spec history caps.",
     "queue_processor": {
       "enabled": true,
       "polling_interval": 10,
@@ -95,8 +110,9 @@
       "successful_jobs_history": 20,
       "failed_jobs_history": 10
     },
+
+    "_comment_job_validation_policy": "Shared validation policy applied by BOTH the REST manifest_processor (POST /api/v1/manifests) and the SQS queue_processor (gco jobs submit-sqs). CDK wires these values into both services at deploy time so a single change applies uniformly. An attacker holding sqs:SendMessage cannot bypass checks the REST path enforces. allowed_namespaces: namespaces a submitted manifest may target. resource_quotas: per-manifest caps applied before admission. trusted_registries / trusted_dockerhub_orgs: image source allowlist. manifest_security_policy.block_*: hardening flags rejecting privileged or host-namespace pods. allowed_kinds: K8s resource kinds the gateway will accept. See docs/CUSTOMIZATION.md (Security Policy Configuration).",
     "job_validation_policy": {
-      "_comment": "Shared validation policy applied by BOTH the REST manifest_processor (POST /api/v1/manifests) and the SQS queue_processor (gco jobs submit-sqs). CDK wires these values into both services at deploy time so a single change applies uniformly. An attacker holding sqs:SendMessage cannot bypass checks the REST path enforces.",
       "allowed_namespaces": [
         "default",
         "gco-jobs"
@@ -147,6 +163,8 @@
         "Pod"
       ]
     },
+
+    "_comment_resource_quota": "K8s ResourceQuota / LimitRange values applied to the gco-jobs namespace. max_*: namespace-wide ceilings. container_max_*: per-container ceilings (LimitRange). Tune these to match the cluster's expected multi-tenant footprint.",
     "resource_quota": {
       "max_cpu": "100",
       "max_memory": "512Gi",
@@ -156,6 +174,8 @@
       "container_max_memory": "64Gi",
       "container_max_gpu": "4"
     },
+
+    "_comment_resource_thresholds": "Health monitor thresholds that drive the /api/v1/health regional capacity report. cpu_threshold / memory_threshold / gpu_threshold are utilization percentages above which the region is reported as 'busy'; set any to -1 to disable that dimension. pending_pods_threshold counts pods in Pending state. pending_requested_cpu_vcpus / pending_requested_memory_gb / pending_requested_gpus sum unscheduled resource requests across pending pods.",
     "resource_thresholds": {
       "cpu_threshold": 60,
       "memory_threshold": 60,
@@ -165,7 +185,8 @@
       "pending_requested_memory_gb": 200,
       "pending_requested_gpus": -1
     },
-    "_comment_images": "ECR image registry. 'retain' preserves repos across stack destroy; 'destroy' deletes them",
+
+    "_comment_images": "ECR image registry. removal_policy: 'retain' keeps repos when the stack is destroyed (production default); 'destroy' wipes them. empty_on_delete: only honored with removal_policy='destroy'; if false, non-empty repos block stack deletion. lifecycle.keep_tagged: number of most-recent tagged images retained. lifecycle.expire_untagged_days: untagged image TTL in days. See https://docs.aws.amazon.com/AmazonECR/latest/userguide/LifecyclePolicies.html.",
     "images": {
       "removal_policy": "retain",
       "empty_on_delete": false,
@@ -174,7 +195,10 @@
         "expire_untagged_days": 7
       }
     },
-    "_comment_storage": "Optional storage backends (disabled by default, enable then deploy-all)",
+
+    "_comment_storage": "Optional storage backends (disabled by default; flip enabled then 'gco stacks deploy-all').",
+
+    "_comment_fsx_lustre": "FSx for Lustre filesystem mounted into job pods. enabled: master toggle. storage_capacity_gib: provisioned size. deployment_type: SCRATCH_1, SCRATCH_2 (recommended), or PERSISTENT_*. file_system_type_version: Lustre version. per_unit_storage_throughput: only relevant for PERSISTENT_* (MB/s/TiB). data_compression_type: NONE or LZ4. import_path / export_path: optional S3 data-repo URIs. auto_import_policy: which S3 events trigger metadata sync (NONE, NEW, NEW_CHANGED, NEW_CHANGED_DELETED). See docs/CUSTOMIZATION.md (Configure FSx Storage) and https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html.",
     "fsx_lustre": {
       "enabled": false,
       "storage_capacity_gib": 1200,
@@ -186,16 +210,23 @@
       "export_path": null,
       "auto_import_policy": "NEW_CHANGED_DELETED"
     },
+
+    "_comment_s3_access_logs": "Retention (days) for S3 server-access-log buckets. Logs older than this are expired by a bucket lifecycle rule. See https://docs.aws.amazon.com/AmazonS3/latest/userguide/enable-server-access-logging.html.",
     "s3_access_logs": {
       "retention_days": 90
     },
+
     "_comment_addons": "Optional add-on services (toggle enabled, then deploy-all to provision)",
+
+    "_comment_valkey": "ElastiCache Serverless Valkey (Redis-compatible) cache. enabled: master toggle. max_data_storage_gb / max_ecpu_per_second: serverless usage caps (cost ceiling). snapshot_retention_limit: days of automatic backups retained. See docs/CUSTOMIZATION.md (Configure Valkey Cache) and https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/WhatIs.html.",
     "valkey": {
       "enabled": false,
       "max_data_storage_gb": 5,
       "max_ecpu_per_second": 5000,
       "snapshot_retention_limit": 1
     },
+
+    "_comment_aurora_pgvector": "Aurora Serverless v2 PostgreSQL with pgvector. enabled: master toggle. min_acu / max_acu: Aurora Capacity Unit range; min_acu=0 enables scale-to-zero. backup_retention_days: automated backup TTL. deletion_protection: blocks accidental cluster deletion when true. See docs/CUSTOMIZATION.md (Configure Aurora pgvector) and https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html.",
     "aurora_pgvector": {
       "enabled": false,
       "min_acu": 0,
@@ -203,6 +234,8 @@
       "backup_retention_days": 7,
       "deletion_protection": false
     },
+
+    "_comment_analytics_environment": "SageMaker Studio / HyperPod / Canvas analytics stack. enabled: master toggle (off by default). hyperpod.enabled / canvas.enabled: opt-in subfeatures. cognito.domain_prefix: optional custom Cognito UI domain (null = auto). cognito.removal_policy / efs.removal_policy: 'destroy' wipes user pools and EFS on stack delete (dev default); 'retain' preserves them. studio.user_profile_name_prefix: optional Studio user-profile name prefix. See docs/ANALYTICS.md and https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated.html.",
     "analytics_environment": {
       "enabled": false,
       "hyperpod": {
@@ -222,57 +255,76 @@
         "user_profile_name_prefix": null
       }
     },
-    "_comment_helm": "Helm chart installation and infrastructure services",
+
+    "_comment_helm": "Helm chart installation toggles. Each key maps to one or more charts in lambda/helm-installer/charts.yaml; flip enabled=false to skip a chart. Charts install in dependency order with kueue last (its mutating webhook intercepts every Job/Deployment). Cross-scheduler coexistence is documented in docs/SCHEDULERS.md.",
     "helm": {
+      "_comment_keda": "KEDA — Kubernetes Event-Driven Autoscaling. Powers GCO's built-in SQS queue processor by scaling workloads on external event sources (SQS depth, CloudWatch metrics, etc.). See docs/KEDA.md.",
       "keda": {
         "enabled": true
       },
+      "_comment_nvidia_gpu_operator": "NVIDIA GPU Operator — installs the GPU device plugin, MIG manager, DCGM exporter, and container toolkit so GPUs are schedulable as nvidia.com/gpu. Upstream: https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/.",
       "nvidia_gpu_operator": {
         "enabled": true
       },
+      "_comment_nvidia_dra_driver": "NVIDIA Dynamic Resource Allocation driver — fine-grained GPU scheduling (MIG slicing, MPS) via Kubernetes DRA APIs. Upstream: https://github.com/NVIDIA/k8s-dra-driver.",
       "nvidia_dra_driver": {
         "enabled": true
       },
+      "_comment_nvidia_network_operator": "NVIDIA Network Operator — RDMA / GPUDirect over RoCE for multi-node training. Upstream: https://docs.nvidia.com/networking/display/cokan10/network+operator.",
       "nvidia_network_operator": {
         "enabled": true
       },
+      "_comment_aws_efa_device_plugin": "AWS EFA device plugin — exposes Elastic Fabric Adapter as a schedulable resource (vpc.amazonaws.com/efa) for HPC/ML jobs that need low-latency multi-node networking. Upstream: https://github.com/aws/eks-charts/tree/master/stable/aws-efa-k8s-device-plugin.",
       "aws_efa_device_plugin": {
         "enabled": true
       },
+      "_comment_aws_neuron_device_plugin": "AWS Neuron device plugin — exposes Trainium / Inferentia chips as schedulable resources (aws.amazon.com/neuron). Upstream: https://github.com/aws-neuron/neuron-helm-charts.",
       "aws_neuron_device_plugin": {
         "enabled": true
       },
+      "_comment_volcano": "Volcano — batch scheduler purpose-built for AI/ML and HPC: gang scheduling, fair-share queues, priority. Pods opt in via schedulerName: volcano. See docs/VOLCANO.md.",
       "volcano": {
         "enabled": true
       },
+      "_comment_kuberay": "KubeRay operator — runs Ray clusters and Ray Jobs as Kubernetes resources for distributed Python / ML workloads. See docs/KUBERAY.md.",
       "kuberay": {
         "enabled": true
       },
+      "_comment_cert_manager": "cert-manager — issues and rotates TLS certs for cluster webhooks. Required by kueue and several other charts. Upstream: https://cert-manager.io/docs/.",
       "cert_manager": {
         "enabled": true
       },
+      "_comment_slurm": "Slurm-on-Kubernetes via the Slinky operator. Off by default. See docs/SLURM_OPERATOR.md.",
       "slurm": {
         "enabled": false
       },
+      "_comment_yunikorn": "Apache YuniKorn — alternative batch scheduler with hierarchical queues. Pods opt in via schedulerName: yunikorn, so it coexists cleanly with Volcano and the default scheduler. Off by default. See docs/YUNIKORN.md.",
       "yunikorn": {
         "enabled": false
       },
+      "_comment_kueue": "Kueue — job-queueing layer for fair sharing across teams. Must install last because its mutating webhook intercepts every Job/Deployment. See docs/KUEUE.md.",
       "kueue": {
         "enabled": true
       }
     },
+
+    "_comment_inference_monitor": "Long-running controller that reconciles InferenceEndpoint CRs into Deployments / Services / Ingresses / HPAs. reconcile_interval: seconds between reconciliation passes (also drives the leader-election lease duration). unhealthy_threshold_seconds: how long an endpoint may stay NotReady before its ingress is removed. See docs/INFERENCE.md.",
     "inference_monitor": {
       "reconcile_interval": 15,
       "unhealthy_threshold_seconds": 300
     },
+
+    "_comment_mcp_server": "MCP (Model Context Protocol) server IAM role provisioning. enabled: when true, the regional stack creates a least-privilege role and exports its ARN as the McpServerRoleArn CFN output. Operators set GCO_MCP_ROLE_ARN to that exported value when launching the MCP server. See mcp/README.md and https://modelcontextprotocol.io/.",
     "mcp_server": {
-      "enabled": true,
-      "role_arn": ""
+      "enabled": true
     },
+
+    "_comment_drift_detection": "CloudFormation drift detection schedule. enabled: master toggle. schedule_hours: EventBridge rate (hours) at which the drift-detection Lambda runs and publishes findings to SNS. See docs/RUNBOOKS.md and https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/detect-drift-stack.html.",
     "drift_detection": {
       "enabled": true,
       "schedule_hours": 24
     },
+
     "_comment_cdk_flags": "CDK feature flags (do not modify unless upgrading CDK)",
     "@aws-cdk/aws-apigateway:authorizerChangeDeploymentLogicalId": true,
     "@aws-cdk/aws-apigateway:disableCloudWatchRole": true,
