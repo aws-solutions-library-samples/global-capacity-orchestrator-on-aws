@@ -18,42 +18,31 @@
 #   CVE-XXXX-XXXXX exp:YYYY-MM-DD
 # =============================================================================
 
-# CVE-2026-4046 — glibc iconv() DoS in AL2023 base image (lambda/helm-installer).
-# ALAS2023-2026-1622 (published 2026-04-30) lists fixed RPMs
-# (glibc-2.34-231.amzn2023.0.4) in AL2023 repo snapshot 2023.11.20260427, but
-# public.ecr.aws/lambda/python:3.14 still ships glibc-2.34-231.amzn2023.0.3
-# confirmed by CI scan on 2026-05-13. The image is pinned to a repo snapshot
-# older than 2026-04-27, so `dnf upgrade glibc` in the Dockerfile would be the
-# only way to pull the fix — and that would make builds non-reproducible.
-# Wait for AWS to publish a rebuilt Lambda Python base image.
-#
-# CVE record:  https://www.cve.org/CVERecord?id=CVE-2026-4046
-# AL2023 ALAS: https://alas.aws.amazon.com/AL2023/ALAS2023-2026-1622.html
-# Base image:  public.ecr.aws/lambda/python:3.14
-CVE-2026-4046 exp:2026-07-18
-
 # CVE-2026-33811, CVE-2026-33814, CVE-2026-39820, CVE-2026-39836,
-# CVE-2026-42499 — Go stdlib vulnerabilities (net, net/http, net/mail)
-# affecting three binaries in the helm-installer Lambda container:
-#   - aws-lambda-rie (Go 1.26.2, bundled in public.ecr.aws/lambda/python:3.14)
-#   - helm v4.1.4 (Go 1.25.9, latest release as of 2026-05-18)
-#   - kubectl v1.35.4 pinned in Dockerfile (Go 1.25.9; v1.35.5 released
-#     2026-05-12 is still go1.25.9 per build-image/cross/VERSION)
+# CVE-2026-42499 — Go stdlib vulnerabilities (net, net/http, net/mail).
+# Fix line: Go ≥ 1.25.10 or ≥ 1.26.3 in the compiled binary
+# (released 2026-05-07: https://groups.google.com/g/golang-announce/c/qcCIEXso47M).
 #
-# Fix requires Go ≥1.25.10 or ≥1.26.3 in the compiled binaries. Go released
-# those versions on 2026-05-07, but no downstream rebuild has shipped yet:
-#   - Helm: v4.1.4 is still latest (https://github.com/helm/helm/releases);
-#     v4.2.0-rc.1 exists but we pin to stable.
-#   - kubectl: v1.35.5 (2026-05-12) still ships Go 1.25.9
-#     (https://raw.githubusercontent.com/kubernetes/kubernetes/v1.35.5/build/build-image/cross/VERSION)
-#   - aws-lambda-rie: latest is v1.35 (2026-03-30) still Go 1.26.2;
-#     AWS-controlled, no user-serviceable update path.
+# Helm: RESOLVED. Helm v4.2.0 (released 2026-05-14) ships the fix —
+# `go version helm` reports `go1.26.3`. Bumped from v4.1.4 to v4.2.0 in
+# lambda/helm-installer/Dockerfile, .github/workflows/deps-scan.yml, and
+# .gitlab-ci.yml on this branch.
 #
-# Re-evaluate when Helm ships v4.1.5+ with Go 1.25.10, when kubectl ships
-# v1.35.6+ rebuilt with Go 1.25.10, and when AWS rebuilds aws-lambda-rie.
-# Go release: https://groups.google.com/g/golang-announce/c/qcCIEXso47M
-CVE-2026-33811 exp:2026-07-18
-CVE-2026-33814 exp:2026-07-18
-CVE-2026-39820 exp:2026-07-18
-CVE-2026-39836 exp:2026-07-18
-CVE-2026-42499 exp:2026-07-18
+# Two binaries in the helm-installer Lambda container still match these
+# CVEs and keep these entries alive:
+#   - kubectl v1.35.4 pinned in Dockerfile. Latest patch v1.35.5
+#     (2026-05-12) is still go1.25.9 per `go version kubectl`, confirmed
+#     against build-image/cross/VERSION on the v1.35.5 tag.
+#   - aws-lambda-rie bundled in public.ecr.aws/lambda/python:3.14. Latest
+#     RIE release is v1.35 (2026-03-30, Go 1.26.2). AWS-controlled, no
+#     user-serviceable bump path — clears when AWS rebuilds the Lambda
+#     Python base image with a newer RIE.
+#
+# Re-evaluate when kubernetes ships v1.35.6+ rebuilt with Go 1.25.10
+# (track sig-release/release-engineering/handbooks/go.md) and when AWS
+# refreshes the Lambda Python 3.14 base image with a Go-1.26.3+ RIE.
+CVE-2026-33811 exp:2026-08-22
+CVE-2026-33814 exp:2026-08-22
+CVE-2026-39820 exp:2026-08-22
+CVE-2026-39836 exp:2026-08-22
+CVE-2026-42499 exp:2026-08-22

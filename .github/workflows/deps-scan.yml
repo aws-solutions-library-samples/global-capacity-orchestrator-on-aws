@@ -47,7 +47,7 @@ permissions:
   id-token: write  # Required for OIDC authentication to AWS
 
 env:
-  HELM_VERSION: "v4.1.4"
+  HELM_VERSION: "v4.2.0"
   KUBECTL_VERSION: "v1.35.4"
 
 jobs:
