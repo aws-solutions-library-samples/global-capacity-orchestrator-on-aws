@@ -2,6 +2,12 @@
 # Purpose-built ML accelerators using the Neuron SDK instead of CUDA.
 # Pods request Neuron devices via: resources.limits["aws.amazon.com/neuron"]
 # Requires: Neuron device plugin (helm.aws_neuron_device_plugin.enabled = true in cdk.json)
+#
+# EFA support: trn1.32xlarge and trn2.48xlarge expose EFA for high-bandwidth
+# multi-node Neuron training (3,200 Gbps). Pods that need EFA must tolerate
+# vpc.amazonaws.com/efa=true:NoSchedule and request the
+# vpc.amazonaws.com/efa resource. Inferentia (inf2) is single-node inference
+# and does not use EFA — it can run here without the EFA toleration.
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
@@ -31,6 +37,9 @@ spec:
           values: ["on-demand", "spot"]
       taints:
         - key: aws.amazon.com/neuron
+          value: "true"
+          effect: NoSchedule
+        - key: vpc.amazonaws.com/efa
           value: "true"
           effect: NoSchedule
   limits:
