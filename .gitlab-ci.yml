@@ -76,7 +76,7 @@ variables:
   # scan uses the same binaries as the runtime Lambda. Bump these in lockstep
   # with the Dockerfile (grep for helm-v and dl.k8s.io/release/v).
   HELM_VERSION: "v4.2.0"
-  KUBECTL_VERSION: "v1.35.4"
+  KUBECTL_VERSION: "v1.35.5"
   # Pin Trivy so the scheduled weekly CVE scan uses the same version as the
   # pipeline's security:trivy job. Bump in lockstep with the security:trivy
   # image tag below.

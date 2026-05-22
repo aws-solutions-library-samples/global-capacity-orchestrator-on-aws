@@ -19,7 +19,7 @@ RUN dnf install -y tar gzip && \
     dnf clean all
 
 # Install kubectl for cluster connectivity verification
-RUN curl -LO "https://dl.k8s.io/release/v1.35.4/bin/linux/amd64/kubectl" && \
+RUN curl -LO "https://dl.k8s.io/release/v1.35.5/bin/linux/amd64/kubectl" && \
     chmod +x kubectl && \
     mv kubectl /usr/local/bin/kubectl
 

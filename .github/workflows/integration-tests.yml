@@ -390,7 +390,7 @@ jobs:
       - name: Verify helm + kubectl binaries
         # This is a Lambda container, not a server. The meaningful check is
         # that the image's helm and kubectl binaries are invocable at the
-        # pinned versions from the Dockerfile (helm v4.2.0, kubectl v1.35.4).
+        # pinned versions from the Dockerfile (helm v4.2.0, kubectl v1.35.5).
         run: |
           docker run --rm --entrypoint helm helm-installer:ci version --short
           docker run --rm --entrypoint kubectl helm-installer:ci version --client=true

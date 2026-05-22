@@ -48,7 +48,7 @@ permissions:
 
 env:
   HELM_VERSION: "v4.2.0"
-  KUBECTL_VERSION: "v1.35.4"
+  KUBECTL_VERSION: "v1.35.5"
 
 jobs:
   deps-scan:

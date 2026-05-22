@@ -30,9 +30,10 @@
 #
 # Two binaries in the helm-installer Lambda container still match these
 # CVEs and keep these entries alive:
-#   - kubectl v1.35.4 pinned in Dockerfile. Latest patch v1.35.5
-#     (2026-05-12) is still go1.25.9 per `go version kubectl`, confirmed
-#     against build-image/cross/VERSION on the v1.35.5 tag.
+#   - kubectl v1.35.5 pinned in Dockerfile. Still go1.25.9 per
+#     `go version kubectl` and build-image/cross/VERSION on the
+#     v1.35.5 tag — patches between 1.35.4 and 1.35.5 didn't include
+#     a Go bump. Awaiting v1.35.6+ rebuilt with Go 1.25.10.
 #   - aws-lambda-rie bundled in public.ecr.aws/lambda/python:3.14. Latest
 #     RIE release is v1.35 (2026-03-30, Go 1.26.2). AWS-controlled, no
 #     user-serviceable bump path — clears when AWS rebuilds the Lambda
