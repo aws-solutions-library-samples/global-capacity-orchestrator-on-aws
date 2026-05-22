@@ -375,7 +375,7 @@ pygments==2.20.0
     # via
     #   pytest
     #   rich
-pyjwt==2.12.1
+pyjwt==2.13.0
     # via mcp
 pyperclip==1.11.0
     # via fastmcp
@@ -495,7 +495,7 @@ sortedcontainers==2.4.0
     # via hypothesis
 sse-starlette==3.4.1
     # via mcp
-starlette==1.0.0
+starlette==1.0.1
     # via
     #   fastapi
     #   mcp

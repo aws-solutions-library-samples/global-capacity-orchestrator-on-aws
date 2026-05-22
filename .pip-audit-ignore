@@ -19,21 +19,4 @@
 #   <PYSEC-or-GHSA-or-CVE-ID> exp:YYYY-MM-DD
 # =============================================================================
 
-# PYSEC-2025-183 / CVE-2025-45768 — pyjwt "weak encryption" finding.
-#
-# Disputed by the supplier: the finding is that an application can pass an
-# HMAC signing key shorter than the digest size, and pyjwt accepts it. The
-# key length is the application's responsibility, not the library's. The
-# advisory's `versions:` list covers every release through the latest (2.12.1
-# at time of writing) with no `fixed` event, so there is nothing to bump to.
-#
-# We use pyjwt as a transitive of `mcp` for verifying inbound tokens, not for
-# signing — the exposed surface (signing with a too-short key) is not on any
-# code path GCO controls.
-#
-# Re-evaluate when upstream either ships a fix (a `fixed` event in the OSV
-# record) or the advisory is withdrawn from the PyPA database.
-#
-# CVE record: https://www.cve.org/CVERecord?id=CVE-2025-45768
-# OSV record: https://github.com/pypa/advisory-database/blob/main/vulns/pyjwt/PYSEC-2025-183.yaml
-PYSEC-2025-183 exp:2026-08-20
+# (no active suppressions)
