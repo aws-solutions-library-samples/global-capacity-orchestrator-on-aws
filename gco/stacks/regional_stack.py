@@ -844,7 +844,7 @@ class GCORegionalStack(Stack):
         # - 40-nodepool-gpu-x86.yaml: x86_64 GPU instances (g4dn, g5, g6, g6e, p3)
         # - 41-nodepool-gpu-arm.yaml: ARM64 GPU instances (g5g)
         # - 42-nodepool-inference.yaml: inference-optimized GPU instances
-        # - 43-nodepool-efa.yaml: EFA-enabled instances (p4d, p5, p6)
+        # - 43-nodepool-efa.yaml: EFA-enabled instances (p4d, p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200)
         # - 44-nodepool-neuron.yaml: Trainium/Inferentia instances
         # These will be applied by the kubectl Lambda custom resource (created below)
 

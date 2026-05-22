@@ -94,7 +94,7 @@ EXAMPLE_METADATA: dict[str, dict[str, str | list[str]]] = {
     },
     "efa-distributed-training": {
         "category": "Jobs & Training",
-        "summary": "Elastic Fabric Adapter (EFA) for high-bandwidth inter-node communication (up to 3.2 Tbps on P5, 28.8 Tbps on P6e). For p4d/p5/p6/trn instances.",
+        "summary": "Elastic Fabric Adapter (EFA) for high-bandwidth inter-node communication (up to 3.2 Tbps on P5, 28.8 Tbps on P6e). For p4d/p5/p5e/p5en/p6-b200/p6-b300/p6e-gb200/trn instances.",
         "gpu": "NVIDIA + EFA",
         "opt_in": "",
         "submission": "gco jobs submit-direct examples/efa-distributed-training.yaml -r us-east-1",

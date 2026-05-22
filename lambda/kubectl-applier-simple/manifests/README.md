@@ -74,7 +74,7 @@ when adding new CRD-dependent resources, just use the prefix.
 | `40-nodepool-gpu-x86.yaml` | x86_64 GPU pool (g4dn, g5, g6, g6e, p3) — on-demand + spot |
 | `41-nodepool-gpu-arm.yaml` | ARM64 GPU pool (g5g) — on-demand |
 | `42-nodepool-inference.yaml` | Inference GPU pool — on-demand only, WhenEmpty consolidation |
-| `43-nodepool-efa.yaml` | EFA pool (p4d, p5, p6) — high-performance distributed training |
+| `43-nodepool-efa.yaml` | EFA pool (p4d, p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200) — high-performance distributed training |
 | `44-nodepool-neuron.yaml` | Neuron pool (trn1, trn2, trn3, inf2) — AWS Trainium/Inferentia |
 | `45-nodepool-cpu-general.yaml` | General CPU pool (c/m/r families) — spot-preferred, no GPUs |
 

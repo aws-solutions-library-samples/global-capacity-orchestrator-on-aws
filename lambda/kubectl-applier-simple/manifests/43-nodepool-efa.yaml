@@ -1,8 +1,20 @@
-# EFA NodePool — high-performance distributed training (p4d, p5, p6)
+# EFA NodePool — high-performance distributed training (p4d, p5/p5e/p5en, p6-b200/p6e-gb200/p6-b300)
 # EFA (Elastic Fabric Adapter) enables low-latency, high-bandwidth inter-node
 # communication for large-scale distributed training jobs.
 # Uses WhenEmpty consolidation to avoid interrupting long-running training runs.
 # Requires: EFA device plugin (helm.aws_efa_device_plugin.enabled = true in cdk.json)
+#
+# NOTE on instance-family values: EKS Auto Mode labels nodes with the family
+# segment that AWS uses in its EC2 catalog. P5 / P6 each have multiple
+# distinct families:
+#   p5.48xlarge      -> family "p5"
+#   p5e.48xlarge     -> family "p5e"
+#   p5en.48xlarge    -> family "p5en"
+#   p6-b200.48xlarge -> family "p6-b200"
+#   p6-b300.48xlarge -> family "p6-b300"
+#   p6e-gb200.*      -> family "p6e-gb200"
+# A bare "p5" or "p6" entry only matches the single base family, so all
+# generations need to be enumerated explicitly here.
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
@@ -23,7 +35,7 @@ spec:
       requirements:
         - key: "eks.amazonaws.com/instance-family"
           operator: In
-          values: ["p4d", "p5", "p6"]
+          values: ["p4d", "p5", "p5e", "p5en", "p6-b200", "p6-b300", "p6e-gb200"]
         - key: "kubernetes.io/arch"
           operator: In
           values: ["amd64"]
