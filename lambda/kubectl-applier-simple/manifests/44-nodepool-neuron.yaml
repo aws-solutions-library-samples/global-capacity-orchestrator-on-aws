@@ -1,13 +1,15 @@
-# Neuron NodePool — AWS Trainium (trn1, trn2, trn3) and Inferentia (inf2)
+# Neuron NodePool — AWS Trainium (trn1, trn1n, trn2) and Inferentia (inf2)
 # Purpose-built ML accelerators using the Neuron SDK instead of CUDA.
 # Pods request Neuron devices via: resources.limits["aws.amazon.com/neuron"]
 # Requires: Neuron device plugin (helm.aws_neuron_device_plugin.enabled = true in cdk.json)
 #
-# EFA support: trn1.32xlarge and trn2.48xlarge expose EFA for high-bandwidth
-# multi-node Neuron training (3,200 Gbps). Pods that need EFA must tolerate
-# vpc.amazonaws.com/efa=true:NoSchedule and request the
-# vpc.amazonaws.com/efa resource. Inferentia (inf2) is single-node inference
-# and does not use EFA — it can run here without the EFA toleration.
+# EFA support (per AWS EC2 docs, EFA-supported instance types):
+#   - trn1.32xlarge / trn1n.32xlarge (Nitro v4): EFA, RDMA read+write
+#   - trn2.3xlarge / trn2.48xlarge / trn2u.48xlarge (Nitro v5): EFA, RDMA read+write
+#   - inf2.*: no EFA (single-node inference, no inter-node traffic)
+# Pods that need EFA must tolerate vpc.amazonaws.com/efa=true:NoSchedule and
+# request the vpc.amazonaws.com/efa resource. The toleration on this NodePool
+# is permissive — inf2 pods schedule normally without requesting EFA.
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
@@ -28,7 +30,7 @@ spec:
       requirements:
         - key: "eks.amazonaws.com/instance-family"
           operator: In
-          values: ["trn1", "trn2", "trn3", "inf2"]
+          values: ["trn1", "trn1n", "trn2", "inf2"]
         - key: "kubernetes.io/arch"
           operator: In
           values: ["amd64"]
