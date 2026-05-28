@@ -157,11 +157,24 @@ async def _run_long_task(
         with contextlib.suppress(AttributeError, NotImplementedError):
             await progress.set_total(int(total_units))
 
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    # ``asyncio.create_subprocess_exec`` itself can be cancelled mid-
+    # call (the inner ``_make_subprocess_transport`` awaits a waiter).
+    # When that happens for a stack-op invocation, surface the same
+    # partial-state disclaimer the post-creation cancel path emits —
+    # AWS state may already be in flight even if our local subprocess
+    # never got a PID. Without this guard a fast cancellation lands as
+    # a bare ``CancelledError`` and the operator sees no warning that
+    # CloudFormation may need inspection.
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except asyncio.CancelledError:
+        if is_stack_op:
+            raise asyncio.CancelledError(_PARTIAL_STATE_DISCLAIMER) from None
+        raise
 
     # Disk-backed status: parallel observability channel that doesn't
     # depend on the MCP client surfacing notifications. Reads land in

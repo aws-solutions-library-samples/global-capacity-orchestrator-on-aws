@@ -175,7 +175,9 @@ async def _list_tools_async() -> list[Any]:
     from server import mcp
 
     try:
-        return await mcp._list_tools()
+        # ``_list_tools`` returns a ``Sequence[Tool]``; widen to
+        # ``list[Any]`` for the JSON-projection helpers below.
+        return list(await mcp._list_tools())
     except Exception:
         return []
 
@@ -185,11 +187,15 @@ async def _list_resources_async() -> tuple[list[Any], list[Any]]:
     from server import mcp
 
     try:
-        resources = await mcp._list_resources()
+        # ``_list_resources`` and ``_list_resource_templates`` return
+        # ``Sequence[Resource]`` and ``Sequence[ResourceTemplate]``
+        # respectively; widen to ``list[Any]`` so the JSON-projection
+        # helpers don't have to know FastMCP's concrete classes.
+        resources = list(await mcp._list_resources())
     except Exception:
         resources = []
     try:
-        templates = await mcp._list_resource_templates()
+        templates = list(await mcp._list_resource_templates())
     except Exception:
         templates = []
     return resources, templates
