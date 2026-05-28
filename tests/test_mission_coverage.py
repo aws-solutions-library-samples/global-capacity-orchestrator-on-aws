@@ -1912,6 +1912,55 @@ class TestAuditCollector:
         # And the module-level get_collector returns the same instance.
         assert mission_audit.get_collector() is first
 
+    def test_install_collector_floors_logger_at_info(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """install_collector boosts an unconfigured audit logger to INFO.
+
+        Python's stdlib ``logging`` defaults the effective level to
+        ``WARNING``, so an ``audit_logger.info(...)`` call from a
+        process that never ran ``logging.basicConfig`` would silently
+        drop before reaching any handler. The audit-replay resource
+        depends on those entries — its ring buffer fills off the
+        ``gco.mcp.audit`` logger — so ``install_collector`` floors
+        the logger at ``INFO``.
+
+        Pin both invariants:
+        1. Unconfigured / NOTSET / WARNING+ → boosted to INFO.
+        2. Already-finer threshold (DEBUG) → left alone.
+        """
+        import logging
+
+        from mission import audit as mission_audit
+
+        # Reset the module-level collector cache and the logger level
+        # before each scenario; otherwise the first call's side
+        # effects leak into the second.
+        def _reset() -> None:
+            monkeypatch.setattr(mission_audit, "_COLLECTOR", None, raising=False)
+            for h in list(mission_audit.audit_logger.handlers):
+                if isinstance(h, mission_audit.MissionAuditCollectorHandler):
+                    mission_audit.audit_logger.removeHandler(h)
+
+        # 1a. NOTSET (the default for a fresh getLogger): boosted.
+        _reset()
+        mission_audit.audit_logger.setLevel(logging.NOTSET)
+        mission_audit.install_collector()
+        assert mission_audit.audit_logger.level == logging.INFO
+
+        # 1b. WARNING (Python's effective default): boosted.
+        _reset()
+        mission_audit.audit_logger.setLevel(logging.WARNING)
+        mission_audit.install_collector()
+        assert mission_audit.audit_logger.level == logging.INFO
+
+        # 2. DEBUG (operator explicitly opted in to verbose logs): preserved.
+        _reset()
+        mission_audit.audit_logger.setLevel(logging.DEBUG)
+        mission_audit.install_collector()
+        assert mission_audit.audit_logger.level == logging.DEBUG
+
     def test_collector_filters_non_mission_event_types(
         self,
         monkeypatch: pytest.MonkeyPatch,

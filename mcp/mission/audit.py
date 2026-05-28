@@ -363,11 +363,28 @@ def install_collector(
     existing handler. The function exists so test fixtures can clear
     and re-attach the handler between cases without leaking captured
     entries across the boundary.
+
+    Logger level boost. Python's stdlib ``logging`` defaults the root
+    threshold to ``WARNING``, which means an unconfigured caller that
+    never calls ``logging.basicConfig(level=logging.INFO)`` would
+    silently drop every ``audit_logger.info(...)`` call before it
+    reaches a handler — including this collector. The
+    ``mission://sessions/{id}/audit-replay`` resource needs entries
+    to flow regardless of the host's logging setup, so we floor the
+    logger's level at ``INFO`` here. Hosts that have already set a
+    finer threshold (e.g. ``DEBUG``) keep theirs; only the
+    "unconfigured" case is repaired.
     """
     global _COLLECTOR
     if _COLLECTOR is None:
         _COLLECTOR = MissionAuditCollectorHandler(capacity=capacity)
         audit_logger.addHandler(_COLLECTOR)
+    # Floor at INFO so audit_logger.info() entries reach the handler
+    # even when the host has not configured logging at all. We never
+    # *raise* the threshold — a host that explicitly set DEBUG keeps
+    # DEBUG.
+    if audit_logger.level == logging.NOTSET or audit_logger.level > logging.INFO:
+        audit_logger.setLevel(logging.INFO)
     return _COLLECTOR
 
 
