@@ -414,7 +414,6 @@ def _make_e2e_session(session_id: str) -> dict[str, object]:
         "created_at": "2025-01-01T00:00:00Z",
         "iterations": [],
         "no_progress_counter": 0,
-        "accumulated_cost_usd": 0.0,
     }
 
 
@@ -501,7 +500,6 @@ async def test_scripted_strategy_runs_end_to_end(
         tool_dispatcher=dispatcher,
         sampling_callable=None,
         sandbox_runner=sandbox_runner,
-        cost_estimators={},
     )
 
     # Force Propose_Phase to emit the scripted Strategy. Same
@@ -584,11 +582,10 @@ async def test_scripted_strategy_runs_end_to_end(
 # End-to-end: sandbox cap propagation
 # ---------------------------------------------------------------------------
 #
-# When a scripted Strategy trips the sandbox's wall-clock cap or
-# accumulates enough estimated cost to breach the session's
-# ``max_cost_usd`` budget, the iteration must still complete cleanly:
-# the verdict is a budget-cap ``terminate`` rather than a phase
-# failure. The two tests below exercise both seams:
+# When a scripted Strategy trips the sandbox's wall-clock cap, the
+# iteration must still complete cleanly: the verdict is a budget-cap
+# ``terminate`` rather than a phase failure. The test below exercises
+# the seam:
 #
 # * ``test_scripted_strategy_terminated_by_max_duration`` patches the
 #   sandbox's module-level duration cap to 1.0 second and runs a
@@ -602,27 +599,15 @@ async def test_scripted_strategy_runs_end_to_end(
 #   "max_wall_clock")``. The execute phase is recorded as
 #   ``status="succeeded"`` because the engine handled the cap
 #   internally — the cap is a budget event, not a phase exception.
-#
-# * ``test_scripted_strategy_terminated_by_max_cost`` registers a
-#   cost estimator on the dispatcher's allowlisted tool so each
-#   in-script call adds a fixed dollar amount to
-#   ``session["accumulated_cost_usd"]``. The script calls the tool in
-#   a loop; before the loop completes the accumulated cost crosses
-#   ``max_cost_usd`` and the Decide_Phase's existing
-#   :func:`mcp.mission.decide._cost_exceeded` check fires, producing
-#   ``("terminate", "max_cost")``. This test pins the contract that
-#   per-call cost is plumbed through the in-script wrapper exactly the
-#   way it is on the engine's direct ``_dispatch_one_call`` path.
 
 
 def _make_terminated_session(
     session_id: str,
     *,
     allowlist: list[str],
-    max_cost_usd: float | None = None,
     max_iterations: int = 10,
 ) -> dict[str, object]:
-    """Build a SessionState for the cap-propagation tests.
+    """Build a SessionState for the cap-propagation test.
 
     The criterion target is unreachable so completion never fires —
     the cap path is the only way an iteration can transition to
@@ -635,8 +620,6 @@ def _make_terminated_session(
         "max_iterations": max_iterations,
         "max_wall_clock_seconds": 600,
     }
-    if max_cost_usd is not None:
-        budget["max_cost_usd"] = max_cost_usd
     return {
         "version": SCHEMA_VERSION,
         "session_id": session_id,
@@ -661,7 +644,6 @@ def _make_terminated_session(
         "created_at": "2025-01-01T00:00:00Z",
         "iterations": [],
         "no_progress_counter": 0,
-        "accumulated_cost_usd": 0.0,
     }
 
 
@@ -671,24 +653,6 @@ def _make_terminated_session(
 # runtime layer is the only thing that can stop it. Monty's per-call
 # duration cap fires within the patched 1.0-second window.
 _DURATION_CAP_SCRIPT: str = "while True:\n    pass\n"
-
-
-# The cost-cap script invokes the allowlisted tool 1000 times in a
-# tight loop. Each call returns a trivial dict so the assertion stays
-# focused on the cost-accumulation side; the cost estimator below is
-# what actually drives ``accumulated_cost_usd`` past the cap. Using
-# ``range(1000)`` keeps the source deterministic and small — the
-# loop terminates cleanly long before completing all 1000 iterations
-# because the ``MontyTypingError`` raised by the in-script wrapper on
-# the cap-breaching call propagates out of the script as a
-# ``SandboxTerminated`` (the wrapper itself does not enforce the cap;
-# the sandbox does that). In practice the cost cap fires during
-# Decide_Phase regardless of how many calls the script managed to
-# make before its iteration finished.
-_COST_CAP_SCRIPT: str = (
-    "for i in range(1000):\n"
-    "    _ = await submit_job_sqs(manifest_path='x.yaml', region='us-east-1')\n"
-)
 
 
 async def test_scripted_strategy_terminated_by_max_duration(
@@ -739,7 +703,6 @@ async def test_scripted_strategy_terminated_by_max_duration(
         tool_dispatcher=dispatcher,
         sampling_callable=None,
         sandbox_runner=sandbox_runner,
-        cost_estimators={},
     )
 
     def fake_deterministic_strategy(self_engine: MissionEngine, sess: dict) -> dict:
@@ -770,89 +733,3 @@ async def test_scripted_strategy_terminated_by_max_duration(
     assert persisted is not None
     assert persisted["status"] == "terminated"
     assert len(persisted["iterations"]) == 1
-
-
-async def test_scripted_strategy_terminated_by_max_cost(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Per-call in-script cost accumulation drives ``("terminate", "max_cost")``.
-
-    The cost estimator on ``submit_job_sqs`` returns a fixed $5.00
-    per call; the session declares ``max_cost_usd=12.0``. The script
-    loops up to 1000 times calling the tool, but the in-script
-    wrapper accumulates cost onto ``session["accumulated_cost_usd"]``
-    on every successful call. Long before the loop completes, the
-    accumulated cost crosses $12, and the next iteration's
-    Decide_Phase reads the running total and emits ``("terminate",
-    "max_cost")`` via the existing
-    :func:`mcp.mission.decide._cost_exceeded` check.
-
-    The cap fires during Decide_Phase, not mid-script, so the script
-    runs to completion of the iteration's Execute_Phase (or until
-    Monty's duration cap fires, whichever comes first); either way
-    the accumulated cost is at or above the cap by the time
-    Decide_Phase runs. The assertion that
-    ``persisted["accumulated_cost_usd"] >= 12.0`` pins this contract.
-    """
-    monkeypatch.setattr(sandbox_module, "_DURATION_LIMIT_SECS", 30.0)
-    monkeypatch.setattr(sandbox_module, "_MEMORY_LIMIT_BYTES", 200_000_000)
-
-    backend = FilesystemBackend(root=tmp_path)
-    session = _make_terminated_session(
-        session_id="sess-cost-cap",
-        allowlist=["submit_job_sqs"],
-        max_cost_usd=12.0,
-    )
-    backend.save_session(session)
-
-    async def dispatcher(tool_name: str, args: dict, ctx: object) -> object:
-        # Every call returns a trivial successful response so the
-        # in-script wrapper records ``status="ok"`` and accumulates
-        # cost via the registered estimator below.
-        return {"status": "queued"}
-
-    # The cost estimator returns $5 per call regardless of args. The
-    # session caps at $12, so after three successful calls the
-    # accumulated cost is $15, the cap is breached, and the next
-    # Decide_Phase emits ``("terminate", "max_cost")``.
-    cost_estimators = {"submit_job_sqs": lambda args: 5.0}
-
-    sandbox_runner = make_default_sandbox_runner(
-        ["submit_job_sqs"], session, cost_estimators=cost_estimators
-    )
-    engine = MissionEngine(
-        backend=backend,
-        tool_dispatcher=dispatcher,
-        sampling_callable=None,
-        sandbox_runner=sandbox_runner,
-        cost_estimators=cost_estimators,
-    )
-
-    def fake_deterministic_strategy(self_engine: MissionEngine, sess: dict) -> dict:
-        return {
-            "script": _COST_CAP_SCRIPT,
-            "rationale": "fixture: cost-incurring loop tripping max_cost",
-        }
-
-    monkeypatch.setattr(
-        MissionEngine,
-        "_deterministic_strategy",
-        fake_deterministic_strategy,
-    )
-
-    record = await engine.run_iteration(session["session_id"])
-
-    # The Decide_Phase's existing ``_cost_exceeded`` branch fires
-    # because the in-script wrapper drove ``accumulated_cost_usd``
-    # past the cap during Execute_Phase.
-    assert record["verdict"] == "terminate"
-    assert record["verdict_reason"] == "max_cost"
-
-    # The persisted accumulated cost is at or above the cap. The
-    # exact value depends on how many in-script calls landed before
-    # the iteration finished (Monty's duration cap could also have
-    # fired during the loop), but the floor is the cap itself.
-    persisted = backend.load_session(session["session_id"])
-    assert persisted is not None
-    assert persisted["status"] == "terminated"
-    assert persisted["accumulated_cost_usd"] >= 12.0

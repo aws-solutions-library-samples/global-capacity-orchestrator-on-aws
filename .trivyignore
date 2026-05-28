@@ -30,20 +30,58 @@
 #
 # Two binaries in the helm-installer Lambda container still match these
 # CVEs and keep these entries alive:
-#   - kubectl v1.35.5 pinned in Dockerfile. Still go1.25.9 per
+#   - kubectl v1.35.5 pinned in Dockerfile. Built with Go 1.25.9 per
 #     `go version kubectl` and build-image/cross/VERSION on the
-#     v1.35.5 tag — patches between 1.35.4 and 1.35.5 didn't include
-#     a Go bump. Awaiting v1.35.6+ rebuilt with Go 1.25.10.
+#     v1.35.5 tag. v1.36.1 (the current latest k8s patch release,
+#     2026-05-12) is built with Go 1.26.2 — still on the wrong side
+#     of the fix line, so a minor bump does not clear these. Awaiting
+#     a kubectl release rebuilt with Go ≥ 1.25.10 / ≥ 1.26.3.
 #   - aws-lambda-rie bundled in public.ecr.aws/lambda/python:3.14. Latest
 #     RIE release is v1.35 (2026-03-30, Go 1.26.2). AWS-controlled, no
 #     user-serviceable bump path — clears when AWS rebuilds the Lambda
 #     Python base image with a newer RIE.
 #
-# Re-evaluate when kubernetes ships v1.35.6+ rebuilt with Go 1.25.10
-# (track sig-release/release-engineering/handbooks/go.md) and when AWS
-# refreshes the Lambda Python 3.14 base image with a Go-1.26.3+ RIE.
+# Re-evaluate when kubernetes ships a patch release rebuilt with
+# Go ≥ 1.25.10 / ≥ 1.26.3 (track sig-release/release-engineering/
+# handbooks/go.md) and when AWS refreshes the Lambda Python 3.14 base
+# image with a Go-1.26.3+ RIE.
 CVE-2026-33811 exp:2026-08-22
 CVE-2026-33814 exp:2026-08-22
 CVE-2026-39820 exp:2026-08-22
 CVE-2026-39836 exp:2026-08-22
 CVE-2026-42499 exp:2026-08-22
+
+# CVE-2026-27142, CVE-2026-39823, CVE-2026-39825, CVE-2026-39826 — second
+# wave of Go stdlib advisories disclosed 2026-05-15 / 2026-05-22.
+# CVE-2026-27142 (html/template URL escaping in <meta content>) — fixed
+#   in Go 1.25.10 / 1.26.3
+#   (https://groups.google.com/g/golang-announce/c/qcCIEXso47M).
+# CVE-2026-39823 (re-disclosed companion of CVE-2026-27142) — same fix
+#   line; both clear on the same upstream rebuild.
+# CVE-2026-39825 (net/http/httputil ReverseProxy query-parameter
+#   forwarding) — fixed in Go 1.25.10 / 1.26.3 per
+#   https://github.com/advisories/GHSA-h74g-238j-357m.
+# CVE-2026-39826 (html/template <script type=""> escaping) — fixed in
+#   Go 1.26.3 per https://nvd.nist.gov/vuln/detail/CVE-2026-39826.
+#
+# These ride on:
+#   - kubectl v1.35.5 (built with Go 1.25.9): trips all four entries.
+#     v1.36.1 (current latest, 2026-05-12) is built with Go 1.26.2,
+#     which is still vulnerable to all four — kubectl needs a release
+#     rebuilt with Go ≥ 1.25.10 / ≥ 1.26.3 before this clears.
+#   - aws-lambda-rie bundled in `public.ecr.aws/lambda/python:3.14`:
+#     trips the three Go-stdlib entries. AWS-controlled, no
+#     user-serviceable bump path.
+#   - libcap package in `public.ecr.aws/lambda/python:3.14`: trips the
+#     CVE-2026-27142 / CVE-2026-39823 surface from the helm-installer
+#     image scan. Amazon Linux 2023 advisory ALAS2023-2026-1750
+#     (2026-05-26) ships the rebuilt libcap; clears once AWS refreshes
+#     the Lambda Python 3.14 base image with the rebuilt package.
+#
+# Re-evaluate alongside the first batch when kubernetes ships a
+# patch release rebuilt with Go ≥ 1.25.10 / ≥ 1.26.3 and when AWS
+# refreshes the Lambda Python 3.14 base image.
+CVE-2026-27142 exp:2026-08-22
+CVE-2026-39823 exp:2026-08-22
+CVE-2026-39825 exp:2026-08-22
+CVE-2026-39826 exp:2026-08-22

@@ -31,11 +31,25 @@ The Mission package is loaded via ``sys.path``-on-``mcp/`` (the same trick
 ``run_mcp.py`` uses for the rest of the MCP modules), so ``audit_logger`` is
 imported as ``from audit import audit_logger`` — matching every
 ``mcp/tools/*.py`` module.
+
+In-process audit ring buffer
+============================
+Mission also installs a bounded in-process collector
+(``MissionAuditCollectorHandler``) on the shared ``gco.mcp.audit``
+logger so the ``mission://sessions/{session_id}/audit-replay``
+resource has a source of phase / verdict entries to feed
+:func:`replay_audit_entries`. The buffer is capped at 5000 entries
+(FIFO eviction) so a long-running process cannot OOM through the
+audit channel; the cap fits comfortably above a 1000-iteration
+session's ~6000 entries since the session would have terminated on
+the iteration cap by then.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+from collections import deque
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -258,8 +272,202 @@ __all__ = [
     "EVENT_TYPE_SAMPLING",
     "EVENT_TYPE_SCRIPT_CALL",
     "EVENT_TYPE_VERDICT",
+    "MissionAuditCollectorHandler",
     "emit_phase_event",
     "emit_sampling_event",
     "emit_script_call_event",
     "emit_verdict_event",
+    "get_collector",
+    "install_collector",
+    "replay_audit_entries",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Audit-replay helper
+# ---------------------------------------------------------------------------
+
+
+# Default cap on the in-process collector ring buffer. 5000 entries is
+# big enough to cover a session that runs to its iteration budget
+# (six entries per iteration × ~800 iterations) but small enough that
+# a long-running process cannot OOM through the audit channel.
+_DEFAULT_COLLECTOR_CAPACITY = 5000
+
+
+class MissionAuditCollectorHandler(logging.Handler):
+    """Bounded ring-buffer logging handler that captures Mission audit JSON.
+
+    Attached to the shared ``gco.mcp.audit`` logger by
+    :func:`install_collector` so the
+    ``mission://sessions/{session_id}/audit-replay`` resource has a
+    source of phase / verdict entries to feed
+    :func:`replay_audit_entries`. The handler filters by
+    ``event_type`` so non-Mission audit emitters (the standard MCP
+    tool-invocation decorator, the startup-log helper) do not pollute
+    the buffer.
+
+    Bounded via :class:`collections.deque(maxlen=N)` so a long-running
+    process never grows the buffer without bound. Operators who want a
+    larger or smaller window can construct the handler explicitly with
+    ``capacity=`` or call :func:`install_collector(capacity=...)`.
+    """
+
+    _MISSION_EVENT_TYPES = frozenset(
+        {
+            EVENT_TYPE_PHASE,
+            EVENT_TYPE_VERDICT,
+            EVENT_TYPE_SAMPLING,
+            EVENT_TYPE_SCRIPT_CALL,
+        }
+    )
+
+    def __init__(self, capacity: int = _DEFAULT_COLLECTOR_CAPACITY) -> None:
+        super().__init__(level=logging.INFO)
+        self._buffer: deque[dict[str, Any]] = deque(maxlen=capacity)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Capture Mission audit JSON entries into the ring buffer."""
+        try:
+            payload = json.loads(record.getMessage())
+        except TypeError, ValueError:
+            return
+        if not isinstance(payload, dict):
+            return
+        if payload.get("event_type") not in self._MISSION_EVENT_TYPES:
+            return
+        self._buffer.append(payload)
+
+    def entries_for(self, session_id: str) -> list[dict[str, Any]]:
+        """Return a list copy of every captured entry for ``session_id``."""
+        return [dict(e) for e in list(self._buffer) if e.get("mission_session_id") == session_id]
+
+    def clear(self) -> None:
+        """Drop every captured entry. Useful for test isolation."""
+        self._buffer.clear()
+
+
+# Module-level collector. ``None`` until :func:`install_collector` is
+# called — the resources/__init__.py wiring installs it once at import
+# time so every Mission audit entry the engine emits during the
+# process lifetime is reachable from the audit-replay resource.
+_COLLECTOR: MissionAuditCollectorHandler | None = None
+
+
+def install_collector(
+    capacity: int = _DEFAULT_COLLECTOR_CAPACITY,
+) -> MissionAuditCollectorHandler:
+    """Attach a :class:`MissionAuditCollectorHandler` to the audit logger.
+
+    Idempotent: a second call with the same parameters returns the
+    existing handler. The function exists so test fixtures can clear
+    and re-attach the handler between cases without leaking captured
+    entries across the boundary.
+    """
+    global _COLLECTOR
+    if _COLLECTOR is None:
+        _COLLECTOR = MissionAuditCollectorHandler(capacity=capacity)
+        audit_logger.addHandler(_COLLECTOR)
+    return _COLLECTOR
+
+
+def get_collector() -> MissionAuditCollectorHandler | None:
+    """Return the installed collector or ``None`` when nothing is attached."""
+    return _COLLECTOR
+
+
+def replay_audit_entries(
+    session_id: str,
+    entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Reconstruct iteration history from a stream of Mission audit entries.
+
+    Pure function. Each iteration produces five
+    ``mission_phase_event`` entries (one per phase) plus one
+    ``mission_verdict_event`` entry that closes it out, in emission
+    order. This walker filters ``entries`` to the events whose
+    ``mission_session_id`` matches ``session_id``, accumulates phase
+    events into the active iteration's ``phases`` list, and stamps
+    the verdict + reason from the matching verdict event before
+    appending the completed record.
+
+    Returns a list of dicts shaped like
+    ``{"iteration_index": int, "phases": [{"phase", "status",
+    "started_at", "ended_at", "error_message"}, ...], "verdict": str
+    | None, "verdict_reason": str | None, "revision_rationale": str
+    | None}``. The shape is intentionally narrow — it covers only
+    the fields the audit stream is expected to fully describe, not
+    the strategy / observation / criteria-evaluation fields the
+    engine persists separately to the session backend.
+
+    A phase event whose ``iteration_index`` jumps ahead of the
+    active iteration before its verdict event has landed flushes
+    the active iteration with ``verdict=None`` / ``verdict_reason
+    =None`` so a malformed audit stream surfaces as a visible
+    sentinel rather than a silent merge. An iteration with no
+    closing verdict event at end-of-stream is appended the same way.
+    """
+    matching = [
+        e for e in entries if isinstance(e, dict) and e.get("mission_session_id") == session_id
+    ]
+
+    iterations: list[dict[str, Any]] = []
+    current_index: int | None = None
+    current_phases: list[dict[str, Any]] = []
+
+    def _flush_current(verdict: str | None, reason: str | None, rationale: str | None) -> None:
+        """Append the active iteration to the result list."""
+        if current_index is None:
+            return
+        iterations.append(
+            {
+                "iteration_index": current_index,
+                "phases": list(current_phases),
+                "verdict": verdict,
+                "verdict_reason": reason,
+                "revision_rationale": rationale,
+            }
+        )
+
+    for entry in matching:
+        event_type = entry.get("event_type")
+        iteration_index = entry.get("iteration_index")
+
+        if event_type == EVENT_TYPE_PHASE:
+            if current_index is not None and current_index != iteration_index:
+                # New iteration arrived before the prior closed —
+                # flush the prior with sentinel verdict / reason so
+                # the caller can see the orphaned phases.
+                _flush_current(None, None, None)
+                current_phases = []
+            current_index = iteration_index
+            phase_record: dict[str, Any] = {
+                "phase": entry.get("phase"),
+                "status": entry.get("phase_status"),
+                "started_at": entry.get("phase_started_at"),
+                "ended_at": entry.get("phase_ended_at"),
+            }
+            if "error_message" in entry:
+                phase_record["error_message"] = entry["error_message"]
+            current_phases.append(phase_record)
+        elif event_type == EVENT_TYPE_VERDICT:
+            # ``current_index`` may legitimately be ``None`` when a
+            # verdict-only iteration arrives (e.g. a synthetic
+            # ``cadence_skip``); in that case stamp the iteration
+            # index from the verdict event itself.
+            if current_index is None:
+                current_index = iteration_index
+            _flush_current(
+                entry.get("verdict"),
+                entry.get("verdict_reason"),
+                entry.get("revision_rationale"),
+            )
+            current_index = None
+            current_phases = []
+
+    # Stream ended mid-iteration — flush the unclosed iteration with
+    # null verdict so the caller sees the partial record.
+    if current_index is not None:
+        _flush_current(None, None, None)
+
+    return iterations

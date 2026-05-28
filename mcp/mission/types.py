@@ -40,7 +40,6 @@ VerdictReason = Literal[
     "heuristic_unproductive",
     "max_iterations",
     "max_wall_clock",
-    "max_cost",
     "no_progress",
     "user_abort",
 ]
@@ -125,17 +124,26 @@ class CriterionResult(TypedDict):
 
 
 class BudgetControls(TypedDict):
-    """The mandatory caps every Mission_Session declares at start time.
+    """Loop-control caps every Mission_Session declares at start time.
 
-    ``max_cost_usd`` is required only when the session's ``tool_allowlist``
-    contains a tool whose registered tag set includes ``cost-incurring``,
-    ``data-upload``, ``image``, or ``infrastructure`` (per Risk_Tier table
-    in ``mcp/README.md``). The validator enforces this conditionally.
+    These are **loop-control** caps — not financial budgets. Mission
+    enforces only the caps the loop has direct visibility into:
+    iteration count and wall-clock seconds. Cost guardrails live
+    out-of-band; configure AWS Budgets and Cost Anomaly Detection at
+    the account level for those.
+
+    Both ``max_iterations`` and ``max_wall_clock_seconds`` accept
+    either a strictly-positive integer cap or the explicit sentinel
+    ``-1`` to opt out of that axis. The validator rejects every other
+    shape (zero, other negatives, non-integer types, missing keys),
+    and additionally rejects both caps being ``-1`` simultaneously
+    (with ``reason="at_least_one_cap_required"``) since that would
+    leave the loop with no axis-driven termination — a runaway-loop
+    config error.
     """
 
     max_iterations: int
     max_wall_clock_seconds: int
-    max_cost_usd: NotRequired[float]
 
 
 class Cadence(TypedDict):
@@ -170,7 +178,6 @@ class ToolCallRecord(TypedDict):
     result_summary: Any
     duration_ms: int
     error_message: NotRequired[str]
-    cost_usd: NotRequired[float]
 
 
 class Strategy(TypedDict, total=False):
@@ -243,9 +250,8 @@ class IterationRecord(TypedDict):
     # cascade reads this sentinel before any other branch and emits
     # ``("terminate", <reason>)`` so a sandbox cap propagates up to the
     # budget-cap path rather than failing the iteration as a phase
-    # exception. Carries one of the budget-cap :data:`VerdictReason`
-    # values (``max_wall_clock`` for duration / memory / runtime caps,
-    # ``max_cost`` for the cost cap).
+    # exception. Carries the wall-clock :data:`VerdictReason`
+    # ``max_wall_clock`` for duration / memory / runtime caps.
     sandbox_terminated_reason: NotRequired[VerdictReason]
 
 
@@ -277,7 +283,6 @@ class SessionState(TypedDict):
     ended_at: NotRequired[str]
     iterations: list[IterationRecord]
     no_progress_counter: int
-    accumulated_cost_usd: float
     last_checkpoint_at: NotRequired[str]
     final_verdict: NotRequired[VerdictLabel]
     final_report_path: NotRequired[str]

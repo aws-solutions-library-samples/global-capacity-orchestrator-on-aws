@@ -205,27 +205,27 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3144=>operation: 'Parse and validate a Mission script source string.\n\n    On success, the function returns ``None`` and the caller may pass\n    ``script`` to the sandbox runtime layer. On any disallowed\n    construct, raises :class:`ScriptRejected` carrying ``reason``,\n    ``failing_node``, ``lineno``, and ``col_offset``. The script is\n    *never* executed by this function; it only walks the AST.\n\n    ``allowlist`` is the per-session list of MCP tool names the script\n    may call. Each name becomes a visible bare-Name and a permitted\n    call target. Names not in the allowlist (and not in the safe\n    builtin / exception / mission set) are rejected at every Name\n    lookup.\n    '
-cond3147=>operation: raise ScriptRejected('not_a_string', message='script source must be a str') if  not isinstance(script, str)
-op3160=>operation: parsed = ast.parse(script, mode='exec')
-cond3157=>condition: exception raised?
-cond3162=>condition: except SyntaxError as exc
-op3166=>operation: rejection = ScriptRejected('syntax_error', message=f'could not parse script: {exc.msg}')
-op3168=>operation: rejection.lineno = exc.lineno
-op3170=>operation: rejection.col_offset = exc.offset
-sub3172=>subroutine: raise rejection from exc
-sub3177=>subroutine: _ScriptValidator(allowlist).visit(parsed)
+        <div><textarea id="code" style="width: 100%;" rows="11">op364=>operation: 'Parse and validate a Mission script source string.\n\n    On success, the function returns ``None`` and the caller may pass\n    ``script`` to the sandbox runtime layer. On any disallowed\n    construct, raises :class:`ScriptRejected` carrying ``reason``,\n    ``failing_node``, ``lineno``, and ``col_offset``. The script is\n    *never* executed by this function; it only walks the AST.\n\n    ``allowlist`` is the per-session list of MCP tool names the script\n    may call. Each name becomes a visible bare-Name and a permitted\n    call target. Names not in the allowlist (and not in the safe\n    builtin / exception / mission set) are rejected at every Name\n    lookup.\n    '
+cond367=>operation: raise ScriptRejected('not_a_string', message='script source must be a str') if  not isinstance(script, str)
+op380=>operation: parsed = ast.parse(script, mode='exec')
+cond377=>condition: exception raised?
+cond382=>condition: except SyntaxError as exc
+op386=>operation: rejection = ScriptRejected('syntax_error', message=f'could not parse script: {exc.msg}')
+op388=>operation: rejection.lineno = exc.lineno
+op390=>operation: rejection.col_offset = exc.offset
+sub392=>subroutine: raise rejection from exc
+sub397=>subroutine: _ScriptValidator(allowlist).visit(parsed)
 
-op3144->cond3147
-cond3147->op3160
-op3160->cond3157
-cond3157(yes)->cond3162
-cond3162(yes)->op3166
-op3166->op3168
-op3168->op3170
-op3170->sub3172
-cond3162(no)->sub3177
-cond3157(no)->sub3177
+op364->cond367
+cond367->op380
+op380->cond377
+cond377(yes)->cond382
+cond382(yes)->op386
+op386->op388
+op388->op390
+op390->sub392
+cond382(no)->sub397
+cond377(no)->sub397
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

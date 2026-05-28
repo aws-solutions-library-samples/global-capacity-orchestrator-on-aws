@@ -110,7 +110,6 @@ def _make_prompt(
     recent_iterations: list[dict[str, Any]] | None = None,
     tool_allowlist: list[str] | None = None,
     tool_docstrings: dict[str, str] | None = None,
-    remaining_budget_usd: float | None = 12.50,
     remaining_iterations: int = 7,
     remaining_wall_clock_secs: float | None = 1800.0,
     allow_scripts: bool = False,
@@ -145,7 +144,6 @@ def _make_prompt(
             "submit_job_sqs": "Submit a job to the SQS queue.",
             "find_examples": "Search the example catalog.",
         },
-        remaining_budget_usd=remaining_budget_usd,
         remaining_iterations=remaining_iterations,
         remaining_wall_clock_secs=remaining_wall_clock_secs,
         allow_scripts=allow_scripts,
@@ -202,15 +200,11 @@ def _iteration_strategy(draw: st.DrawFn, iteration_index: int = 0) -> dict[str, 
 @given(
     directive=_text.filter(lambda s: s.strip() != ""),
     iteration_count=st.integers(min_value=0, max_value=4),
-    remaining_budget=st.one_of(
-        st.none(), st.floats(min_value=0.0, max_value=1000.0, allow_nan=False, allow_infinity=False)
-    ),
     remaining_iters=st.integers(min_value=0, max_value=20),
 )
 def test_assemble_is_deterministic(
     directive: str,
     iteration_count: int,
-    remaining_budget: float | None,
     remaining_iters: int,
 ) -> None:
     """Same SamplingPrompt input → byte-identical assemble() output."""
@@ -218,7 +212,6 @@ def test_assemble_is_deterministic(
     p = _make_prompt(
         directive=directive,
         recent_iterations=iterations,
-        remaining_budget_usd=remaining_budget,
         remaining_iterations=remaining_iters,
     )
     first = p.assemble()
@@ -228,7 +221,6 @@ def test_assemble_is_deterministic(
     p2 = _make_prompt(
         directive=directive,
         recent_iterations=iterations,
-        remaining_budget_usd=remaining_budget,
         remaining_iterations=remaining_iters,
     )
     assert p2.assemble() == first
@@ -1084,8 +1076,6 @@ def test_validate_strategy_accepts_well_formed_tool_calls() -> None:
         strategy=_good_strategy(),
         allowlist=["submit_job_sqs"],
         registered_tools=_REGISTERED,
-        remaining_budget_usd=10.0,
-        cost_estimators={},
         allow_scripts=False,
     )
 
@@ -1097,8 +1087,6 @@ def test_validate_strategy_rejects_tool_not_allowlisted() -> None:
             strategy=_good_strategy(),
             allowlist=["other_tool"],
             registered_tools=_REGISTERED,
-            remaining_budget_usd=10.0,
-            cost_estimators={},
             allow_scripts=False,
         )
     except MissionValidationError as err:
@@ -1119,8 +1107,6 @@ def test_validate_strategy_rejects_tool_args_invalid() -> None:
             strategy=strategy,
             allowlist=["submit_job_sqs"],
             registered_tools=_REGISTERED,
-            remaining_budget_usd=10.0,
-            cost_estimators={},
             allow_scripts=False,
         )
     except MissionValidationError as err:
@@ -1136,59 +1122,6 @@ def test_validate_strategy_rejects_tool_args_invalid() -> None:
         raise AssertionError("expected MissionValidationError")
 
 
-def test_validate_strategy_rejects_over_budget() -> None:
-    """Estimated total cost > remaining budget surfaces ``over_budget``."""
-    strategy: dict[str, Any] = {
-        "tool_calls": [
-            {
-                "tool_name": "submit_job_sqs",
-                "args": {"manifest_path": f"j{i}.yaml", "region": "us-east-1"},
-            }
-            for i in range(3)
-        ]
-    }
-    try:
-        validate_strategy_against_catalog(
-            strategy=strategy,
-            allowlist=["submit_job_sqs"],
-            registered_tools=_REGISTERED,
-            remaining_budget_usd=10.0,
-            cost_estimators={"submit_job_sqs": lambda args: 5.0},
-            allow_scripts=False,
-        )
-    except MissionValidationError as err:
-        assert err.code == "validation_error"
-        assert err.details is not None
-        assert err.details["reason"] == "over_budget"
-        assert err.details["estimated_cost_usd"] == 15.0
-        assert err.details["remaining_budget_usd"] == 10.0
-    else:
-        raise AssertionError("expected MissionValidationError")
-
-
-def test_validate_strategy_passes_when_remaining_budget_is_none() -> None:
-    """``remaining_budget_usd=None`` disables the budget check entirely."""
-    strategy: dict[str, Any] = {
-        "tool_calls": [
-            {
-                "tool_name": "submit_job_sqs",
-                "args": {"manifest_path": f"j{i}.yaml", "region": "us-east-1"},
-            }
-            for i in range(3)
-        ]
-    }
-    # Same shape as the over_budget test but with budget set to None —
-    # would-be cost of 15 USD does not trigger.
-    validate_strategy_against_catalog(
-        strategy=strategy,
-        allowlist=["submit_job_sqs"],
-        registered_tools=_REGISTERED,
-        remaining_budget_usd=None,
-        cost_estimators={"submit_job_sqs": lambda args: 5.0},
-        allow_scripts=False,
-    )
-
-
 def test_validate_strategy_skips_args_check_when_tool_has_no_input_schema() -> None:
     """A tool whose registered ``input_schema`` is None bypasses args validation."""
     strategy: dict[str, Any] = {
@@ -1199,8 +1132,6 @@ def test_validate_strategy_skips_args_check_when_tool_has_no_input_schema() -> N
         strategy=strategy,
         allowlist=["find_examples"],
         registered_tools=_REGISTERED,
-        remaining_budget_usd=10.0,
-        cost_estimators={},
         allow_scripts=False,
     )
 
@@ -1213,8 +1144,6 @@ def test_validate_strategy_rejects_script_when_allow_scripts_false() -> None:
             strategy=strategy,
             allowlist=["submit_job_sqs"],
             registered_tools=_REGISTERED,
-            remaining_budget_usd=10.0,
-            cost_estimators={},
             allow_scripts=False,
         )
     except MissionValidationError as err:
@@ -1236,8 +1165,6 @@ def test_validate_strategy_accepts_clean_script_when_allow_scripts_true() -> Non
         strategy=strategy,
         allowlist=["submit_job_sqs"],
         registered_tools=_REGISTERED,
-        remaining_budget_usd=10.0,
-        cost_estimators={},
         allow_scripts=True,
     )
 
@@ -1250,8 +1177,6 @@ def test_validate_strategy_rejects_script_with_dunder() -> None:
             strategy=strategy,
             allowlist=["submit_job_sqs"],
             registered_tools=_REGISTERED,
-            remaining_budget_usd=10.0,
-            cost_estimators={},
             allow_scripts=True,
         )
     except MissionValidationError as err:
@@ -1292,8 +1217,6 @@ def test_validate_strategy_rejects_both_tool_calls_and_script() -> None:
             strategy=strategy,
             allowlist=["submit_job_sqs"],
             registered_tools=_REGISTERED,
-            remaining_budget_usd=10.0,
-            cost_estimators={},
             allow_scripts=True,
         )
     except MissionValidationError as err:
@@ -1311,8 +1234,6 @@ def test_validate_strategy_rejects_neither_tool_calls_nor_script() -> None:
             strategy={},
             allowlist=["submit_job_sqs"],
             registered_tools=_REGISTERED,
-            remaining_budget_usd=10.0,
-            cost_estimators={},
             allow_scripts=False,
         )
     except MissionValidationError as err:
@@ -1342,8 +1263,6 @@ def test_validate_strategy_estimator_zero_for_unmapped_tool() -> None:
         strategy=strategy,
         allowlist=["submit_job_sqs", "find_examples"],
         registered_tools=_REGISTERED,
-        remaining_budget_usd=10.0,
-        cost_estimators={"submit_job_sqs": lambda args: 1.0},
         allow_scripts=False,
     )
 
@@ -1421,7 +1340,6 @@ def _make_session(
         "created_at": "2025-01-01T00:00:00+00:00",
         "iterations": iterations if iterations is not None else [],
         "no_progress_counter": 0,
-        "accumulated_cost_usd": 0.0,
     }
 
 
@@ -1487,8 +1405,6 @@ def test_maybe_sample_strategy_revision_no_backend() -> None:
                 allowlist=["submit_job_sqs"],
                 registered_tools=_REGISTERED,
                 tool_docstrings={},
-                remaining_budget_usd=10.0,
-                cost_estimators={},
                 remaining_iterations=5,
                 remaining_wall_clock_secs=600.0,
                 allow_scripts=False,
@@ -1535,8 +1451,6 @@ def test_maybe_sample_strategy_revision_used_path() -> None:
                 allowlist=["submit_job_sqs"],
                 registered_tools=_REGISTERED,
                 tool_docstrings={"submit_job_sqs": "submit"},
-                remaining_budget_usd=10.0,
-                cost_estimators={},
                 remaining_iterations=5,
                 remaining_wall_clock_secs=600.0,
                 allow_scripts=False,
@@ -1576,8 +1490,6 @@ def test_maybe_sample_strategy_revision_transport_error() -> None:
                 allowlist=["submit_job_sqs"],
                 registered_tools=_REGISTERED,
                 tool_docstrings={},
-                remaining_budget_usd=10.0,
-                cost_estimators={},
                 remaining_iterations=5,
                 remaining_wall_clock_secs=600.0,
                 allow_scripts=False,
@@ -1611,8 +1523,6 @@ def test_maybe_sample_strategy_revision_json_parse_error() -> None:
                 allowlist=["submit_job_sqs"],
                 registered_tools=_REGISTERED,
                 tool_docstrings={},
-                remaining_budget_usd=10.0,
-                cost_estimators={},
                 remaining_iterations=5,
                 remaining_wall_clock_secs=600.0,
                 allow_scripts=False,
@@ -1643,8 +1553,6 @@ def test_maybe_sample_strategy_revision_schema_mismatch() -> None:
                 allowlist=["submit_job_sqs"],
                 registered_tools=_REGISTERED,
                 tool_docstrings={},
-                remaining_budget_usd=10.0,
-                cost_estimators={},
                 remaining_iterations=5,
                 remaining_wall_clock_secs=600.0,
                 allow_scripts=False,
@@ -1684,8 +1592,6 @@ def test_maybe_sample_strategy_revision_tool_not_allowlisted() -> None:
                 allowlist=["submit_job_sqs"],
                 registered_tools=_REGISTERED,
                 tool_docstrings={},
-                remaining_budget_usd=10.0,
-                cost_estimators={},
                 remaining_iterations=5,
                 remaining_wall_clock_secs=600.0,
                 allow_scripts=False,
@@ -1698,58 +1604,6 @@ def test_maybe_sample_strategy_revision_tool_not_allowlisted() -> None:
     kwargs = emit.call_args.kwargs
     assert kwargs["sampling_status"] == "rejected"
     assert kwargs["validation_error"] == "tool_not_allowlisted"
-
-
-def test_maybe_sample_strategy_revision_over_budget() -> None:
-    """A schema-valid payload whose estimated cost exceeds the remaining
-    budget falls back as ``reason="over_budget"``."""
-    session = _make_session()
-    iteration = _make_iteration_for_orch()
-    payload = {
-        "revision_rationale": "spend big",
-        "next_strategy": {
-            "tool_calls": [
-                {
-                    "tool_name": "submit_job_sqs",
-                    "args": {"manifest_path": "x.yaml", "region": "us-east-1"},
-                },
-                {
-                    "tool_name": "submit_job_sqs",
-                    "args": {"manifest_path": "y.yaml", "region": "us-east-1"},
-                },
-                {
-                    "tool_name": "submit_job_sqs",
-                    "args": {"manifest_path": "z.yaml", "region": "us-east-1"},
-                },
-            ]
-        },
-        "confidence": 0.9,
-    }
-    backend = _FakeBackend(returns=json.dumps(payload))
-
-    with mock.patch.object(sampling._mission_audit, "emit_sampling_event") as emit:
-        result = _run(
-            maybe_sample_strategy_revision(
-                backend=backend,
-                session=session,
-                iteration=iteration,
-                allowlist=["submit_job_sqs"],
-                registered_tools=_REGISTERED,
-                tool_docstrings={},
-                remaining_budget_usd=10.0,
-                cost_estimators={"submit_job_sqs": lambda args: 5.0},
-                remaining_iterations=5,
-                remaining_wall_clock_secs=600.0,
-                allow_scripts=False,
-            )
-        )
-
-    assert isinstance(result, SamplingFallback)
-    assert result.reason == "over_budget"
-    assert emit.call_count == 1
-    kwargs = emit.call_args.kwargs
-    assert kwargs["sampling_status"] == "rejected"
-    assert kwargs["validation_error"] == "over_budget"
 
 
 def test_maybe_sample_strategy_revision_extracts_json_from_prose() -> None:
@@ -1780,8 +1634,6 @@ def test_maybe_sample_strategy_revision_extracts_json_from_prose() -> None:
                 allowlist=["submit_job_sqs"],
                 registered_tools=_REGISTERED,
                 tool_docstrings={},
-                remaining_budget_usd=10.0,
-                cost_estimators={},
                 remaining_iterations=5,
                 remaining_wall_clock_secs=600.0,
                 allow_scripts=False,
@@ -2065,8 +1917,6 @@ class TestMCPSampling:
                     allowlist=["submit_job_sqs"],
                     registered_tools=_REGISTERED,
                     tool_docstrings={"submit_job_sqs": "submit"},
-                    remaining_budget_usd=10.0,
-                    cost_estimators={},
                     remaining_iterations=5,
                     remaining_wall_clock_secs=600.0,
                     allow_scripts=False,
@@ -2104,8 +1954,6 @@ class TestMCPSampling:
                     allowlist=["submit_job_sqs"],
                     registered_tools=_REGISTERED,
                     tool_docstrings={},
-                    remaining_budget_usd=10.0,
-                    cost_estimators={},
                     remaining_iterations=5,
                     remaining_wall_clock_secs=600.0,
                     allow_scripts=False,
@@ -2147,8 +1995,6 @@ class TestMCPSampling:
                     allowlist=["submit_job_sqs"],
                     registered_tools=_REGISTERED,
                     tool_docstrings={},
-                    remaining_budget_usd=10.0,
-                    cost_estimators={},
                     remaining_iterations=5,
                     remaining_wall_clock_secs=600.0,
                     allow_scripts=False,
@@ -2164,56 +2010,6 @@ class TestMCPSampling:
         assert kwargs["sampling_status"] == "rejected"
         assert kwargs["sampling_backend"] == "mcp"
         assert kwargs["validation_error"] == "tool_not_allowlisted"
-
-    def test_rejected_over_budget(self) -> None:
-        """JSON proposes a strategy whose cost exceeds remaining budget →
-        fallback, ``validation_error="over_budget"``."""
-        payload = {
-            "revision_rationale": "spend the whole budget",
-            "next_strategy": {
-                "tool_calls": [
-                    {
-                        "tool_name": "submit_job_sqs",
-                        "args": {
-                            "manifest_path": f"j{i}.yaml",
-                            "region": "us-east-1",
-                        },
-                    }
-                    for i in range(4)
-                ]
-            },
-            "confidence": 0.9,
-        }
-        ctx = _CannedCtx(returns=json.dumps(payload))
-        backend = self._bind_backend(ctx)
-
-        with mock.patch.object(sampling._mission_audit, "emit_sampling_event") as emit:
-            result = _run(
-                maybe_sample_strategy_revision(
-                    backend=backend,
-                    session=self._make_session(),
-                    iteration=self._make_iteration(),
-                    allowlist=["submit_job_sqs"],
-                    registered_tools=_REGISTERED,
-                    tool_docstrings={},
-                    # 4 calls × $5 each = $20 > $10 remaining.
-                    remaining_budget_usd=10.0,
-                    cost_estimators={"submit_job_sqs": lambda args: 5.0},
-                    remaining_iterations=5,
-                    remaining_wall_clock_secs=600.0,
-                    allow_scripts=False,
-                )
-            )
-
-        assert isinstance(result, SamplingFallback)
-        assert result.reason == "over_budget"
-        assert result.backend_name == "mcp"
-
-        assert emit.call_count == 1
-        kwargs = emit.call_args.kwargs
-        assert kwargs["sampling_status"] == "rejected"
-        assert kwargs["sampling_backend"] == "mcp"
-        assert kwargs["validation_error"] == "over_budget"
 
     def test_rejected_script_ast_failure(self) -> None:
         """Proposed strategy has a script with ``__import__`` → fallback,
@@ -2242,8 +2038,6 @@ class TestMCPSampling:
                     allowlist=["submit_job_sqs"],
                     registered_tools=_REGISTERED,
                     tool_docstrings={},
-                    remaining_budget_usd=10.0,
-                    cost_estimators={},
                     remaining_iterations=5,
                     remaining_wall_clock_secs=600.0,
                     # Even with allow_scripts=True, the AST validator
@@ -2303,8 +2097,6 @@ class TestMCPSampling:
                     allowlist=["submit_job_sqs"],
                     registered_tools=_REGISTERED,
                     tool_docstrings={},
-                    remaining_budget_usd=10.0,
-                    cost_estimators={},
                     remaining_iterations=5,
                     remaining_wall_clock_secs=600.0,
                     allow_scripts=False,
@@ -2405,8 +2197,6 @@ class TestBedrockSampling:
                     allowlist=["submit_job_sqs"],
                     registered_tools=_REGISTERED,
                     tool_docstrings={"submit_job_sqs": "submit"},
-                    remaining_budget_usd=10.0,
-                    cost_estimators={},
                     remaining_iterations=5,
                     remaining_wall_clock_secs=600.0,
                     allow_scripts=False,
@@ -2455,8 +2245,6 @@ class TestBedrockSampling:
                     allowlist=["submit_job_sqs"],
                     registered_tools=_REGISTERED,
                     tool_docstrings={},
-                    remaining_budget_usd=10.0,
-                    cost_estimators={},
                     remaining_iterations=5,
                     remaining_wall_clock_secs=600.0,
                     allow_scripts=False,
@@ -2500,8 +2288,6 @@ class TestBedrockSampling:
                     allowlist=["submit_job_sqs"],
                     registered_tools=_REGISTERED,
                     tool_docstrings={},
-                    remaining_budget_usd=10.0,
-                    cost_estimators={},
                     remaining_iterations=5,
                     remaining_wall_clock_secs=600.0,
                     allow_scripts=False,
@@ -2542,8 +2328,6 @@ class TestBedrockSampling:
                     allowlist=["submit_job_sqs"],
                     registered_tools=_REGISTERED,
                     tool_docstrings={},
-                    remaining_budget_usd=10.0,
-                    cost_estimators={},
                     remaining_iterations=5,
                     remaining_wall_clock_secs=600.0,
                     allow_scripts=False,
@@ -2622,8 +2406,6 @@ class TestBedrockSampling:
                         allowlist=["submit_job_sqs"],
                         registered_tools=_REGISTERED,
                         tool_docstrings={},
-                        remaining_budget_usd=10.0,
-                        cost_estimators={},
                         remaining_iterations=5,
                         remaining_wall_clock_secs=600.0,
                         allow_scripts=False,
@@ -2668,8 +2450,6 @@ class TestBedrockSampling:
                     allowlist=["submit_job_sqs"],
                     registered_tools=_REGISTERED,
                     tool_docstrings={},
-                    remaining_budget_usd=10.0,
-                    cost_estimators={},
                     remaining_iterations=5,
                     remaining_wall_clock_secs=600.0,
                     allow_scripts=False,

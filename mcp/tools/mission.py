@@ -150,23 +150,18 @@ if is_enabled(FLAG_MISSION):
             out.append(copy)
         return out
 
-    def _remaining_budget(session: Mapping[str, Any]) -> float | None:
-        """Return remaining USD budget for a session, or ``None`` when uncapped."""
-        cap = session.get("budget", {}).get("max_cost_usd")
-        if cap is None:
-            return None
-        accumulated = float(session.get("accumulated_cost_usd", 0.0) or 0.0)
-        return max(0.0, float(cap) - accumulated)
-
     def _remaining_wall_clock(session: Mapping[str, Any]) -> float | None:
         """Return remaining wall-clock seconds for a session, or ``None``.
 
         Uses the session's ``started_at`` (set on the pending → running
         edge) as the anchor. Sessions that haven't started yet report
-        the full cap.
+        the full cap. Sessions whose ``max_wall_clock_seconds`` is the
+        ``-1`` "uncapped" sentinel return ``None`` so the sampling
+        prompt's budget context renders ``"remaining_wall_clock_seconds":
+        null`` rather than a meaningless negative number.
         """
         cap = session.get("budget", {}).get("max_wall_clock_seconds")
-        if cap is None:
+        if cap is None or cap == -1:
             return None
         started_raw = session.get("started_at")
         if not started_raw:
@@ -261,10 +256,9 @@ if is_enabled(FLAG_MISSION):
         The sampling callable is wired only when the session opted into
         sampling and a concrete backend resolves. The sandbox runner is
         wired only when the session permits scripted strategies. Cost
-        estimators are an empty mapping in this slice — Phase 7 punts
-        on cost estimation; the validator already enforces
-        ``max_cost_usd`` presence at session-start time for cost-
-        incurring allowlists.
+        guardrails live out-of-band via AWS Budgets / Cost Anomaly
+        Detection — Mission only enforces the iteration and wall-clock
+        caps the loop has direct visibility into.
         """
         registered_tools = await _registered_tools_dict()
         tool_docstrings = await _tool_docstrings_dict()
@@ -283,10 +277,15 @@ if is_enabled(FLAG_MISSION):
                 if latest is None:
                     return None
                 budget = session.get("budget") or {}
-                remaining_iters = max(
-                    0,
-                    int(budget.get("max_iterations", 0)) - len(iterations),
-                )
+                # ``max_iterations=-1`` is the "uncapped" sentinel; the
+                # sampling prompt's budget context expects an
+                # informational remaining-iterations count, so we report
+                # zero in that mode (the model is told nothing about
+                # the iteration axis when there's no cap to count down
+                # from). For finite caps we subtract the count of
+                # already-recorded iterations and clamp at zero.
+                cap = int(budget.get("max_iterations", 0))
+                remaining_iters = 0 if cap == -1 else max(0, cap - len(iterations))
                 return await mission_sampling.maybe_sample_strategy_revision(
                     backend=backend_obj,
                     session=cast("SessionState", session),
@@ -294,8 +293,6 @@ if is_enabled(FLAG_MISSION):
                     allowlist=list(session.get("tool_allowlist") or []),
                     registered_tools=registered_tools,
                     tool_docstrings=tool_docstrings,
-                    remaining_budget_usd=_remaining_budget(session),
-                    cost_estimators={},
                     remaining_iterations=remaining_iters,
                     remaining_wall_clock_secs=_remaining_wall_clock(session),
                     allow_scripts=bool(session.get("allow_scripted_strategies", False)),
@@ -331,7 +328,6 @@ if is_enabled(FLAG_MISSION):
             tool_dispatcher=_dispatch_tool,
             sampling_callable=sampling_callable,
             sandbox_runner=sandbox_runner,
-            cost_estimators={},
         )
 
     # ------------------------------------------------------------------ #
@@ -358,8 +354,8 @@ if is_enabled(FLAG_MISSION):
             criteria: List of success criterion dicts (``metric_threshold``,
                 ``event``, or ``predicate`` kinds).
             budget: Budget controls dict with ``max_iterations`` and
-                ``max_wall_clock_seconds`` (and ``max_cost_usd`` when the
-                allowlist contains a cost-incurring tool).
+                ``max_wall_clock_seconds``. Cost guardrails live
+                out-of-band via AWS Budgets and Cost Anomaly Detection.
             tool_allowlist: List of tool names the session may invoke.
             checkpoint_cadence: Optional cadence dict (default
                 ``{"kind": "every_iteration"}``).
@@ -416,7 +412,6 @@ if is_enabled(FLAG_MISSION):
             "created_at": datetime.now(UTC).isoformat(),
             "iterations": [],
             "no_progress_counter": 0,
-            "accumulated_cost_usd": 0.0,
         }
         if sampling_model_preferences is not None:
             session["sampling_model_preferences"] = sampling_model_preferences

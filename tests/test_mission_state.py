@@ -93,7 +93,6 @@ def _make_session(session_id: str = "sess-001", status: str = "running") -> dict
         "created_at": "2025-01-01T00:00:00Z",
         "iterations": [],
         "no_progress_counter": 0,
-        "accumulated_cost_usd": 0.0,
     }
 
 
@@ -149,7 +148,7 @@ def test_atomic_write_survives_mid_write_crash(
 
     # The would-be "next" version that should never be written.
     next_version = _make_session(session_id="sess-atomic", status="completed")
-    next_version["accumulated_cost_usd"] = 99.99
+    next_version["no_progress_counter"] = 99
 
     with pytest.raises(OSError, match="simulated mid-write fsync failure"):
         backend.save_session(next_version)

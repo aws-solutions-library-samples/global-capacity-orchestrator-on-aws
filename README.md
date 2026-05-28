@@ -299,6 +299,15 @@ See [Architecture Details](docs/ARCHITECTURE.md) for the full deep dive.
 
 - **ML & Analytics Environment**: Optional SageMaker Studio domain + EMR Serverless + Cognito user pool for interactive notebook analytics, with an always-on `Cluster_Shared_Bucket` that all cluster jobs can read and write. Off by default — enable with `gco analytics enable`. See [Analytics Guide](docs/ANALYTICS.md).
 
+### Mission
+
+Goal-directed iteration loop for orchestrated workflows. The operator declares a natural-language directive plus machine-checkable success criteria, a tool allowlist, and a budget; Mission runs five-phase iterations (propose → execute → observe → evaluate → decide) until a verdict is reached. Off by default — enable with `GCO_ENABLE_MISSION=true`. See [Mission Guide](docs/MISSION.md).
+
+- **Deterministic verdict cascade** with optional advisory LLM sampling (MCP host or Amazon Bedrock). Sampling shapes only the next strategy; it never moves the verdict.
+- **Budget caps** on iterations and wall clock — the engine terminates cleanly when any cap fires. Cost guardrails live out-of-band via AWS Budgets and Cost Anomaly Detection at the account level.
+- **Scripted strategies** opt-in: an AST-validated Python sandbox with bounded duration and memory limits.
+- **CLI + MCP surface**: nine `gco mission` subcommands and matching MCP tools, plus three `mission://sessions/{id}` resource templates.
+
 ## Documentation
 
 **New to GCO?** Start here:
@@ -319,6 +328,7 @@ See [Architecture Details](docs/ARCHITECTURE.md) for the full deep dive.
 | Fix issues | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | Respond to incidents | [Operational Runbooks](docs/RUNBOOKS.md) |
 | Run interactive notebook analytics | [Analytics Guide](docs/ANALYTICS.md) |
+| Drive a goal-directed iteration loop | [Mission Guide](docs/MISSION.md) |
 
 **Customization and development:**
 

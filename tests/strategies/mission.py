@@ -130,33 +130,17 @@ def cadences(draw: st.DrawFn) -> dict[str, Any]:
 @st.composite
 def budgets(
     draw: st.DrawFn,
-    *,
-    include_max_cost: bool | None = None,
 ) -> dict[str, Any]:
     """Draw a BudgetControls dict.
 
     ``max_iterations`` and ``max_wall_clock_seconds`` are always
     drawn from a small positive-int range so verdict-cascade tests
     can exercise both "budget exhausted" and "budget plenty" cases.
-    ``max_cost_usd`` is included according to ``include_max_cost``:
-    ``None`` (the default) lets Hypothesis decide, ``True`` forces
-    inclusion, ``False`` forces omission.
     """
-    budget: dict[str, Any] = {
+    return {
         "max_iterations": draw(st.integers(min_value=1, max_value=20)),
         "max_wall_clock_seconds": draw(st.integers(min_value=1, max_value=86_400)),
     }
-    include = draw(st.booleans()) if include_max_cost is None else include_max_cost
-    if include:
-        budget["max_cost_usd"] = draw(
-            st.floats(
-                min_value=0.01,
-                max_value=10_000.0,
-                allow_nan=False,
-                allow_infinity=False,
-            )
-        )
-    return budget
 
 
 # ---------------------------------------------------------------------------
@@ -385,14 +369,6 @@ def session_states(
     ]
     stagnation_threshold = draw(st.integers(min_value=1, max_value=10))
     no_progress = draw(st.integers(min_value=0, max_value=stagnation_threshold + 2))
-    accumulated_cost = draw(
-        st.floats(
-            min_value=0.0,
-            max_value=10_000.0,
-            allow_nan=False,
-            allow_infinity=False,
-        )
-    )
     return {
         "version": SCHEMA_VERSION,
         "session_id": draw(_id_text),
@@ -409,7 +385,6 @@ def session_states(
         "started_at": started.isoformat(),
         "iterations": iterations,
         "no_progress_counter": no_progress,
-        "accumulated_cost_usd": accumulated_cost,
         "last_checkpoint_at": last_checkpoint.isoformat(),
     }
 

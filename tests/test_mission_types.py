@@ -179,7 +179,6 @@ _session_state = st.fixed_dictionaries(
         "created_at": _text,
         "iterations": st.lists(_iteration_record, max_size=3),
         "no_progress_counter": _non_negative_ints,
-        "accumulated_cost_usd": _finite_floats,
     }
 )
 

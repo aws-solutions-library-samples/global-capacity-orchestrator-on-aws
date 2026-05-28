@@ -98,6 +98,7 @@ from typing import Final, NoReturn
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Flowchart(s) generated from this file:
 #   * ``validate_script_ast`` -> ``diagrams/code_diagrams/mcp/mission/sandbox.validate_script_ast.html``
+#     (PNG: ``diagrams/code_diagrams/mcp/mission/sandbox.validate_script_ast.png``)
 # Regenerate with ``python diagrams/code_diagrams/generate.py``.
 # <pyflowchart-code-diagram> END
 
@@ -1370,7 +1371,6 @@ def _make_tool_wrapper(
     script_call_log: list[dict[str, Any]],
     session_id: str,
     iteration_index: int,
-    cost_estimators: dict[str, Callable[[dict[str, Any]], float]] | None = None,
 ) -> Callable[..., Awaitable[Any]]:
     """Build the per-tool async wrapper inserted into ``external_functions``.
 
@@ -1402,21 +1402,7 @@ def _make_tool_wrapper(
     lets consumers distinguish in-script invocations from direct
     ``tool_calls`` strategy invocations without having to walk
     timestamps.
-
-    ``cost_estimators`` is consulted on every successful call so the
-    resulting :class:`ToolCallRecord` carries an accurate ``cost_usd``
-    field. The engine's ``_execute_script`` walks the returned
-    ``script_call_log`` after the sandbox returns and folds those
-    per-call costs onto the engine's loaded
-    ``session["accumulated_cost_usd"]`` so the Decide_Phase's
-    ``_cost_exceeded`` check observes the same running total it would
-    on the direct ``_dispatch_one_call`` path. Defaults to ``None``
-    (an empty estimator map) so older callers that don't thread cost
-    estimators through stay working unchanged; without estimators the
-    ``cost_usd`` field is omitted from the record (matching the
-    direct-dispatch convention).
     """
-    estimators = cost_estimators or {}
 
     async def wrapper(**kwargs: Any) -> Any:
         # Snapshot the kwargs into a fresh dict before dispatch so the
@@ -1455,26 +1441,6 @@ def _make_tool_wrapper(
             )
             raise
         duration_ms = max(int((time.monotonic() - started) * 1000), 0)
-        # Record the per-call cost on the call record (matching the
-        # direct-dispatch shape on :class:`ToolCallRecord`). The
-        # engine's ``_execute_script`` walks the returned call log
-        # after the sandbox returns and folds these into the live
-        # ``session["accumulated_cost_usd"]`` so the Decide_Phase's
-        # ``_cost_exceeded`` check sees the same running total it
-        # would on the direct dispatch path. Cost accumulation lives
-        # on the engine side rather than here so the sandbox can hold
-        # the session as an immutable construction-time snapshot
-        # without risking that script-side mutations land on a stale
-        # copy of the session record.
-        cost = 0.0
-        estimator = estimators.get(tool_name)
-        if estimator is not None:
-            try:
-                raw_cost = estimator(args)
-            except Exception:
-                raw_cost = 0.0
-            if isinstance(raw_cost, (int, float)) and not isinstance(raw_cost, bool):
-                cost = float(raw_cost)
         record: dict[str, Any] = {
             "tool_name": tool_name,
             "args": args,
@@ -1482,8 +1448,6 @@ def _make_tool_wrapper(
             "result_summary": result,
             "duration_ms": duration_ms,
         }
-        if cost:
-            record["cost_usd"] = cost
         script_call_log.append(record)
         _audit.emit_script_call_event(
             session_id,
@@ -1640,7 +1604,6 @@ class MissionSandbox:
         self,
         allowlist: list[str],
         session: Any,
-        cost_estimators: dict[str, Callable[[dict[str, Any]], float]] | None = None,
     ) -> None:
         # Defensive copy of the allowlist: the engine pins the
         # allowlist on the session at create time, but a shared list
@@ -1648,24 +1611,6 @@ class MissionSandbox:
         # validator's frozenset (which is constructed once per
         # validation call from ``self._allowlist``).
         self._allowlist: list[str] = list(allowlist)
-
-        # Cost estimators flow through to the in-script tool wrapper
-        # so each successful call records ``cost_usd`` on its
-        # :class:`ToolCallRecord`. The engine's ``_execute_script``
-        # walks the returned ``script_call_log`` after the sandbox
-        # returns (or after :class:`SandboxTerminated` carries the
-        # partial log out of a killed script) and folds the per-call
-        # costs onto ``session["accumulated_cost_usd"]`` so the
-        # Decide_Phase's existing ``_cost_exceeded`` check fires on
-        # the same running total it would on the direct
-        # ``_dispatch_one_call`` path. Holding the estimators on the
-        # sandbox rather than threading them through ``run`` keeps
-        # the per-call hot path free of lookups against a parameter
-        # that never changes between calls on the same sandbox
-        # instance.
-        self._cost_estimators: dict[str, Callable[[dict[str, Any]], float]] = dict(
-            cost_estimators or {}
-        )
 
         # Build the per-iteration mission namespace as an immutable
         # snapshot. Each iteration summary carries only the four
@@ -1835,7 +1780,6 @@ class MissionSandbox:
                 script_call_log,
                 session_id,
                 iteration_index,
-                cost_estimators=self._cost_estimators,
             )
 
         # The two helper functions ride alongside the per-tool
@@ -1912,7 +1856,6 @@ class MissionSandbox:
 def make_default_sandbox_runner(
     allowlist: list[str],
     session: Any,
-    cost_estimators: dict[str, Callable[[dict[str, Any]], float]] | None = None,
 ) -> Callable[
     [str, Any, Callable[[str, dict[str, Any], Any], Awaitable[Any]]],
     Awaitable[tuple[dict[str, Any], list[dict[str, Any]]]],
@@ -1933,18 +1876,10 @@ def make_default_sandbox_runner(
     construction path therefore calls this factory once per
     ``mission_start`` and pins the returned callable on the engine
     instance for the session's lifetime.
-
-    ``cost_estimators`` flows through to the in-script tool wrapper so
-    a scripted strategy that calls a cost-incurring tool 1000 times in
-    a loop accumulates cost onto ``session["accumulated_cost_usd"]``
-    just like the engine's direct ``_dispatch_one_call`` path would.
-    Defaults to ``None`` (an empty estimator map) so older callers
-    that don't thread cost estimators through stay working unchanged.
     """
     sandbox = MissionSandbox(
         allowlist=allowlist,
         session=session,
-        cost_estimators=cost_estimators,
     )
     return sandbox.run
 

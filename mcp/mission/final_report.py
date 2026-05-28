@@ -98,7 +98,7 @@ def build_deterministic_report(
     * Outcome — ``iterations_run``, ``final_verdict``,
       ``final_verdict_reason``, ``final_criteria_evaluation`` (the last
       iteration's per-Criterion results, or ``None`` when no iteration
-      ran), and ``accumulated_cost_usd``.
+      ran).
     * Iteration history — ``iterations``, deep-copied with private
       ``_parsed_ast`` keys stripped throughout.
     * Templated narrative — ``lessons`` and ``recommended_followups``
@@ -133,7 +133,6 @@ def build_deterministic_report(
         "final_verdict": verdict,
         "final_verdict_reason": reason,
         "final_criteria_evaluation": _final_criteria_evaluation(session),
-        "accumulated_cost_usd": session.get("accumulated_cost_usd", 0.0),
         "lessons": _build_lessons_template(session, verdict, reason),
         "recommended_followups": _build_followups_template(session, verdict, reason),
         "iterations": _strip_parsed_ast_from_iterations(session.get("iterations") or []),
@@ -282,11 +281,6 @@ def _build_followups_template(
         suggestions.append(
             "Re-run with a higher max_wall_clock_seconds budget, or split "
             "the directive into smaller sub-goals."
-        )
-    elif reason == "max_cost":
-        suggestions.append(
-            "Re-run with a higher max_cost_usd budget, or restrict the "
-            "tool allowlist to cheaper alternatives."
         )
     elif reason == "no_progress":
         suggestions.append(

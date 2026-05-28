@@ -54,8 +54,10 @@ examples/
 # =============================================================================
 # Build artifacts and generated code
 # =============================================================================
-lambda/kubectl-applier-simple-build/
-lambda/helm-installer-build/
+# Note: lambda/kubectl-applier-simple-build/ and lambda/helm-installer-build/
+# are gitignored, so semgrep skips them via --use-git-ignore on every recent
+# version (default since 1.62). They are NOT listed here — listing
+# already-gitignored paths is redundant and bloats the file.
 cdk.out/
 .venv/
 htmlcov/

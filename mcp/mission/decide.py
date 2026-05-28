@@ -21,8 +21,6 @@ The cascade order is fixed:
    * ``max_wall_clock`` — ``now - session["started_at"] >= max_wall_clock_seconds``.
      Returns False when ``started_at`` is missing (the session has
      not yet transitioned out of ``pending``).
-   * ``max_cost`` — ``session["accumulated_cost_usd"] >= max_cost_usd``.
-     Returns False when no cap is set.
    * ``no_progress`` — ``no_progress_counter >= stagnation_threshold``.
 
 2. **Completion** — every ``required=True`` Criterion has status
@@ -53,6 +51,13 @@ including the current one" composes the current ``iteration`` with
 Determinism: same ``(session, iteration, now)`` triples produce the same
 ``(VerdictLabel, VerdictReason)`` tuples. This is enforced by a property
 test in ``tests/test_mission_decide_determinism.py``.
+
+Cost guardrails are intentionally absent from this cascade. Real-time
+workload cost tracking is structurally inaccurate (Spot vs on-demand
+drift, EBS / EFA / egress not in the Pricing API, Cost Explorer 24h
+latency). Operators who need a cost cap should configure AWS Budgets
+and Cost Anomaly Detection at the account level — Mission caps only
+the controls the loop has direct visibility into.
 """
 
 from __future__ import annotations
@@ -66,6 +71,7 @@ from .types import IterationRecord, SessionState, VerdictLabel, VerdictReason
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Flowchart(s) generated from this file:
 #   * ``decide_verdict`` -> ``diagrams/code_diagrams/mcp/mission/decide.decide_verdict.html``
+#     (PNG: ``diagrams/code_diagrams/mcp/mission/decide.decide_verdict.png``)
 # Regenerate with ``python diagrams/code_diagrams/generate.py``.
 # <pyflowchart-code-diagram> END
 
@@ -95,9 +101,8 @@ def decide_verdict(
     ``iteration["sandbox_terminated_reason"]`` and the cascade returns
     that reason verbatim before anything else is consulted. The
     sandbox limit is a true budget cap — the script ran out of wall
-    clock or out of cost during execution — so it routes to a
-    ``terminate`` verdict on the same path as the
-    ``BudgetControls``-driven caps below.
+    clock during execution — so it routes to a ``terminate`` verdict
+    on the same path as the ``BudgetControls``-driven caps below.
     """
     # 0. Sandbox-cap propagation. ``_execute_script`` stashes the
     # reason on the in-progress iteration when the sandbox runner
@@ -111,19 +116,17 @@ def decide_verdict(
     # 1a. max_iterations — the +1 captures "this in-progress iteration
     # would be the Nth one to land", so a session with budget=N and N-1
     # already-recorded iterations terminates on the Nth's Decide_Phase.
-    if len(session["iterations"]) + 1 >= session["budget"]["max_iterations"]:
+    # ``-1`` is the explicit "uncapped" sentinel; the validator
+    # already enforced that any other non-positive value is rejected.
+    max_iter = session["budget"]["max_iterations"]
+    if max_iter != -1 and len(session["iterations"]) + 1 >= max_iter:
         return ("terminate", "max_iterations")
     # 1b. max_wall_clock — pure time arithmetic; missing started_at
     # means the session has not yet recorded its first iteration's
     # start, so no wall-clock can be measured.
     if _wall_clock_exceeded(session, now):
         return ("terminate", "max_wall_clock")
-    # 1c. max_cost — only fires when a cap was declared. Cost-incurring
-    # tools require the cap (validation enforces it); the unbounded
-    # default applies when no cost-incurring tool is in the allowlist.
-    if _cost_exceeded(session):
-        return ("terminate", "max_cost")
-    # 1d. no_progress — the counter is incremented by the engine only
+    # 1c. no_progress — the counter is incremented by the engine only
     # on evaluated iterations, so a session with all-skipped checkpoints
     # cannot terminate for stagnation.
     if session["no_progress_counter"] >= session["stagnation_threshold"]:
@@ -163,29 +166,20 @@ def _wall_clock_exceeded(session: SessionState, now: datetime) -> bool:
     wall-clock budget. The engine writes ``started_at`` on the first
     iteration entry, so this guard only matters for the synthetic
     "decide called before run_iteration" path used in unit tests.
+
+    Returns False when ``max_wall_clock_seconds`` is the explicit
+    ``-1`` "uncapped" sentinel — the operator opted out of the wall-
+    clock cap and the cascade should fall through to the next branch
+    rather than terminate spuriously.
     """
     started_iso = session.get("started_at")
     if not started_iso:
         return False
-    started = datetime.fromisoformat(started_iso)
     max_seconds = session["budget"]["max_wall_clock_seconds"]
-    return now - started >= timedelta(seconds=max_seconds)
-
-
-def _cost_exceeded(session: SessionState) -> bool:
-    """True iff the accumulated cost is at or above the declared cap.
-
-    The cap is optional: ``max_cost_usd`` is only required by the
-    validators when the Tool_Allowlist contains a cost-incurring tool.
-    When the cap is absent we treat the budget as unbounded and return
-    False — the validator's allowlist check is what actually prevents
-    a cost-incurring tool from running without a cap.
-    """
-    accumulated = session.get("accumulated_cost_usd", 0.0) or 0.0
-    cap = session["budget"].get("max_cost_usd")
-    if cap is None:
+    if max_seconds == -1:
         return False
-    return accumulated >= cap
+    started = datetime.fromisoformat(started_iso)
+    return now - started >= timedelta(seconds=max_seconds)
 
 
 # ---------------------------------------------------------------------------

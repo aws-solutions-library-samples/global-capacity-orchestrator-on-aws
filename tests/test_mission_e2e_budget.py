@@ -1,7 +1,7 @@
-"""End-to-end Mission sessions terminated by budget caps.
+"""End-to-end Mission session terminated by the iteration budget cap.
 
-Walks two full Mission sessions through the engine without going near
-the MCP or CLI surfaces. Both sessions configure a Criterion the
+Walks one full Mission session through the engine without going near
+the MCP or CLI surfaces. The session configures a Criterion the
 dispatcher can never satisfy, so completion never fires and the verdict
 cascade is forced down its budget-cap branch:
 
@@ -10,39 +10,28 @@ cascade is forced down its budget-cap branch:
   ``("terminate", "max_iterations")`` on the iteration where
   ``len(session["iterations"]) + 1 >= budget["max_iterations"]`` first
   flips True.
-* ``test_terminate_on_max_cost`` — wires a cost estimator that adds
-  ``$5.00`` per successful tool call, caps the budget at ``$12.00``,
-  and asserts the cascade returns ``("terminate", "max_cost")`` on the
-  iteration where the running ``accumulated_cost_usd`` first reaches
-  the cap.
 
-Both tests share the structure of :mod:`tests.test_mission_e2e_train_to_loss`
+The test shares the structure of :mod:`tests.test_mission_e2e_train_to_loss`
 and the precedent search / converge modules — a hand-built
 :class:`SessionState` dict, a stub async dispatcher, a
 :class:`MissionEngine` constructed with the dispatcher, and a small
 driver loop that runs iterations until the cascade emits a terminal
 verdict. The :class:`FilesystemBackend` is rooted at ``tmp_path`` so
-both runs are offline and self-contained — no AWS, no network, no real
+the run is offline and self-contained — no AWS, no network, no real
 LLM.
 
 Where this test diverges from the precedents and why:
 
-* **Unreachable Criterion.** Both tests use a ``metric_threshold``
+* **Unreachable Criterion.** The test uses a ``metric_threshold``
   Criterion with ``target=-1.0`` and ``op="<="``. The dispatcher
   returns a positive ``val_loss``, so the comparison is always
   ``unmet`` and the verdict cascade never reaches the completion
   branch. The cap branches above completion are the only way out of
-  the loop, which is precisely what these tests exercise.
-* **Cost wiring.** ``test_terminate_on_max_cost`` registers a single
-  cost estimator on the engine — a closure that returns ``5.0`` for
-  every call regardless of args. The engine's ``_dispatch_one_call``
-  adds the estimator's return to ``session["accumulated_cost_usd"]``
-  after every successful call, and the Decide_Phase reads the same
-  field on every iteration. The exact number of iterations the
-  cascade takes to terminate depends on the cost-accumulation order
-  (Execute_Phase runs before Decide_Phase, so the running total
-  visible to Decide is post-Execute), so the assertion is bounded
-  rather than equality-pinned: 2 or 3 iterations are both valid.
+  the loop, which is precisely what this test exercises.
+
+Cost guardrails live out-of-band via AWS Budgets / Cost Anomaly
+Detection rather than in the Mission cascade, so there is no
+companion ``max_cost`` test in this module.
 """
 
 from __future__ import annotations
@@ -66,20 +55,13 @@ from mission.state import FilesystemBackend  # noqa: E402
 # Shared parameters
 # ---------------------------------------------------------------------------
 
-# Operator-language directives carried verbatim through each loop. Two
-# distinct directives so a regression that crosses-wires the sessions
-# (e.g. one test loading the other's persisted state) surfaces as a
-# directive mismatch rather than a vague verdict drift.
+# Operator-language directive carried verbatim through the loop.
 _DIRECTIVE_MAX_ITER = (
     "Drive validation loss to or below an unreachable target so the "
     "iteration cap is the only thing that ends the run."
 )
-_DIRECTIVE_MAX_COST = (
-    "Run cost-incurring tools repeatedly until the accumulated spend "
-    "reaches the declared budget cap."
-)
 
-# The single tool both sessions allowlist. Picked because it is on the
+# The single tool the session allowlists. Picked because it is on the
 # safe-tier in the rest of the test corpus — no AWS calls, no network,
 # no real side effects when the dispatcher is stubbed. The dispatcher
 # in this module ignores the tool name entirely, but the engine's
@@ -87,28 +69,13 @@ _DIRECTIVE_MAX_COST = (
 # fallback chooses an allowlisted name.
 _ALLOWLISTED_TOOL = "find_examples"
 
-# The Propose_Phase deterministic fallback synthesises a single-call
-# Strategy per iteration when no prior successful call exists, and
-# re-runs that same call on every subsequent iteration. With one call
-# per iteration the cost accumulator advances by exactly one estimator
-# return per iteration, which is the simplest pattern for asserting
-# "after 2 or 3 calls the cap fires".
-_COST_PER_CALL_USD = 5.0
-_MAX_COST_USD = 12.0
-
-# Iteration cap for the max_iterations test. Three was specified by the
+# Iteration cap for the test. Three was specified by the original
 # task brief; the cascade fires ``("terminate", "max_iterations")`` on
 # the iteration where ``len(iterations) + 1 >= 3`` first holds, which
 # is the third iteration (0-indexed iteration 2, count of 3).
 _MAX_ITERATIONS_CAP = 3
 
-# Iteration cap for the max_cost test. Picked high enough that the cost
-# branch fires before the iteration branch can — at $5/call and a $12
-# cap, the cost branch fires on call 3 at the latest, well below this
-# generous cap.
-_MAX_ITERATIONS_GENEROUS = 50
-
-# Driver-loop safety bound. Both tests should reach a terminal verdict
+# Driver-loop safety bound. The test should reach a terminal verdict
 # in well under this many iterations; the bound exists so a regression
 # in cap detection surfaces as a clean test failure rather than an
 # infinite loop.
@@ -181,44 +148,6 @@ def _make_session_max_iter() -> dict[str, Any]:
         "created_at": "2025-01-01T00:00:00Z",
         "iterations": [],
         "no_progress_counter": 0,
-        "accumulated_cost_usd": 0.0,
-    }
-
-
-def _make_session_max_cost() -> dict[str, Any]:
-    """Build the session for the ``max_cost`` test.
-
-    Same shape as :func:`_make_session_max_iter` but with the iteration
-    cap relaxed and a cost cap declared. The cost cap is the only
-    constraint that can fire here:
-
-    * The completion branch is locked off by the unreachable Criterion.
-    * The iteration cap (``50``) is generous — at one call per
-      iteration and a ``$5.00`` per-call estimator, the cost cap
-      fires at iteration 2 or 3, far below the iteration cap.
-    * The wall-clock and stagnation branches are kept dormant by
-      large values for the same reason as the precedent tests.
-    """
-    return {
-        "version": SCHEMA_VERSION,
-        "session_id": "sess-budget-cost",
-        "directive_text": _DIRECTIVE_MAX_COST,
-        "criteria": [_make_unreachable_criterion()],
-        "budget": {
-            "max_iterations": _MAX_ITERATIONS_GENEROUS,
-            "max_wall_clock_seconds": 600,
-            "max_cost_usd": _MAX_COST_USD,
-        },
-        "tool_allowlist": [_ALLOWLISTED_TOOL],
-        "checkpoint_cadence": {"kind": "every_iteration"},
-        "stagnation_threshold": 100,
-        "use_sampling": False,
-        "allow_scripted_strategies": False,
-        "status": "pending",
-        "created_at": "2025-01-01T00:00:00Z",
-        "iterations": [],
-        "no_progress_counter": 0,
-        "accumulated_cost_usd": 0.0,
     }
 
 
@@ -239,7 +168,7 @@ def _unmet_metric_dispatcher() -> Any:
     gating before this callable is invoked.
 
     No mutable state is captured — the dispatcher is purely a constant
-    function, which keeps both tests free of cross-iteration coupling
+    function, which keeps the test free of cross-iteration coupling
     in the dispatcher itself.
     """
 
@@ -279,7 +208,6 @@ async def test_terminate_on_max_iterations(tmp_path: Path) -> None:
         tool_dispatcher=_unmet_metric_dispatcher(),
         sampling_callable=None,
         sandbox_runner=None,
-        cost_estimators={},
     )
 
     final_record: dict[str, Any] | None = None
@@ -300,8 +228,8 @@ async def test_terminate_on_max_iterations(tmp_path: Path) -> None:
     # ------------------------------------------------------------------ #
     # Verdict invariant — the iteration cap is the only branch that
     # could have fired (completion is locked off by the unreachable
-    # Criterion; the wall-clock, cost, and stagnation branches are
-    # kept dormant by their generous limits).
+    # Criterion; the wall-clock and stagnation branches are kept
+    # dormant by their generous limits).
     # ------------------------------------------------------------------ #
     assert final_record["verdict"] == "terminate"
     assert final_record["verdict_reason"] == "max_iterations"
@@ -331,100 +259,127 @@ async def test_terminate_on_max_iterations(tmp_path: Path) -> None:
     assert report_path.exists()
 
 
+# ---------------------------------------------------------------------------
+# Uncapped-sentinel coverage
+# ---------------------------------------------------------------------------
+
+
+def _make_session_uncapped_iter(reachable: bool) -> dict[str, Any]:
+    """Build a session with ``max_iterations=-1`` (uncapped iterations).
+
+    With the iteration cap disabled, the cascade is forced to exit
+    through one of the other branches: completion (when ``reachable``
+    is True), or — in the wall-clock-paired test — wall-clock. Wall
+    clock is set to a finite 600 here so the only way out is
+    completion.
+    """
+    target = 0.5 if reachable else -1.0  # ``<=`` against val_loss=0.5
+    return {
+        "version": SCHEMA_VERSION,
+        "session_id": f"sess-uncapped-iter-{'reach' if reachable else 'unreach'}",
+        "directive_text": "Iteration cap disabled; completion must drive termination.",
+        "criteria": [
+            {
+                "criterion_id": "loss",
+                "kind": "metric_threshold",
+                "required": True,
+                "metric": "metrics.val_loss",
+                "op": "<=",
+                "target": target,
+            }
+        ],
+        "budget": {
+            "max_iterations": -1,  # explicit uncapped sentinel
+            "max_wall_clock_seconds": 600,
+        },
+        "tool_allowlist": [_ALLOWLISTED_TOOL],
+        "checkpoint_cadence": {"kind": "every_iteration"},
+        "stagnation_threshold": 100,
+        "use_sampling": False,
+        "allow_scripted_strategies": False,
+        "status": "pending",
+        "created_at": "2025-01-01T00:00:00Z",
+        "iterations": [],
+        "no_progress_counter": 0,
+    }
+
+
 @pytest.mark.mission_e2e
-async def test_terminate_on_max_cost(tmp_path: Path) -> None:
-    """Cascade returns ``terminate / max_cost`` once accumulated cost hits the cap.
+async def test_uncapped_iterations_does_not_terminate_on_iteration_count(
+    tmp_path: Path,
+) -> None:
+    """``max_iterations=-1`` disables the iteration cap entirely.
 
-    With ``budget["max_cost_usd"]=12.0`` and a ``$5.00`` per-call cost
-    estimator, the cascade walks the running total up:
-
-    * iteration 0 — Execute adds ``$5``, total ``$5 < $12`` → continue
-    * iteration 1 — Execute adds ``$5``, total ``$10 < $12`` → continue
-    * iteration 2 — Execute adds ``$5``, total ``$15 >= $12`` → terminate
-
-    The exact iteration count where the cascade fires is bounded
-    rather than equality-pinned (``2 or 3``) so the test is robust to
-    any future change in the order of the budget-cap evaluations
-    inside :func:`decide.decide_verdict` — what matters is that the
-    cap fires and that the verdict reason is ``max_cost``.
+    With the cap off and the Criterion set to a reachable target, the
+    session completes via the criterion-met branch on iteration 0 —
+    the cascade never enters the (now-dormant) iteration-cap branch.
+    The point of the test is the negative invariant: even if the
+    completion branch were buggy, the iteration-cap branch must not
+    fire when the cap is the explicit ``-1`` sentinel.
     """
     backend = FilesystemBackend(root=tmp_path)
-    session = _make_session_max_cost()
+    session = _make_session_uncapped_iter(reachable=True)
     backend.save_session(session)
-
-    # The engine accepts a ``cost_estimators`` mapping keyed by tool
-    # name. The estimator is invoked once per successful call inside
-    # :meth:`MissionEngine._dispatch_one_call`; its return is added to
-    # ``session["accumulated_cost_usd"]``. A constant return ignores
-    # the args dict, which is fine for this test — the cap-detection
-    # logic does not depend on per-call variation.
-    cost_estimators = {_ALLOWLISTED_TOOL: lambda args: _COST_PER_CALL_USD}
 
     engine = MissionEngine(
         backend=backend,
         tool_dispatcher=_unmet_metric_dispatcher(),
         sampling_callable=None,
         sandbox_runner=None,
-        cost_estimators=cost_estimators,
     )
 
-    final_record: dict[str, Any] | None = None
-    iteration_count = 0
-    for _ in range(_DRIVER_LOOP_BOUND):
-        record = await engine.run_iteration(session["session_id"])
-        iteration_count += 1
-        if record["verdict"] in ("complete", "terminate"):
-            final_record = record
-            break
-    else:  # pragma: no cover — safety bound
-        pytest.fail(
-            "Mission did not reach a terminal verdict within the driver "
-            "loop bound; max_cost cap detection may be misconfigured."
-        )
+    record = await engine.run_iteration(session["session_id"])
 
-    assert final_record is not None
-    # ------------------------------------------------------------------ #
-    # Verdict invariant — the cost cap is the only branch that could
-    # have fired (completion is locked off by the unreachable
-    # Criterion; the iteration cap is generous; wall-clock and
-    # stagnation are dormant).
-    # ------------------------------------------------------------------ #
-    assert final_record["verdict"] == "terminate"
-    assert final_record["verdict_reason"] == "max_cost"
+    # The session terminated via completion, not the iteration cap. A
+    # regression that reads ``max_iterations=-1`` as "max == -1" would
+    # fire the iteration cap on iteration 0 (since ``0 + 1 >= -1`` is
+    # always True for non-negative iteration counts) — this assertion
+    # rules that out.
+    assert record["verdict"] == "complete"
+    assert record["verdict_reason"] == "criteria_met"
 
-    # ------------------------------------------------------------------ #
-    # Iteration-count invariant — bounded rather than equality-pinned.
-    # At ``$5/call`` and a ``$12`` cap, the running total reaches the
-    # cap on call 3 (total ``$15``). The exact iteration the cascade
-    # observes that depends on the order of Execute and Decide inside
-    # ``run_iteration`` — Execute runs first, so Decide sees the
-    # post-Execute total and fires on iteration 2 (the 0-indexed
-    # third iteration). Allowing 2 or 3 keeps the test robust to a
-    # future re-ordering that reads the cost mid-iteration.
-    # ------------------------------------------------------------------ #
-    assert iteration_count in (2, 3)
 
-    # ------------------------------------------------------------------ #
-    # Cost-accumulator invariant — the running total at termination is
-    # at or above the cap. This is the predicate the cascade actually
-    # tests, so a regression in the accumulator (e.g. costs being
-    # double-counted, or zeroed between iterations) shows up here as
-    # a precise diff rather than as a verdict mismatch.
-    # ------------------------------------------------------------------ #
-    persisted = backend.load_session(session["session_id"])
-    assert persisted is not None
-    assert persisted["accumulated_cost_usd"] >= _MAX_COST_USD
+@pytest.mark.mission_e2e
+async def test_uncapped_wall_clock_does_not_terminate_on_time(tmp_path: Path) -> None:
+    """``max_wall_clock_seconds=-1`` disables the wall-clock cap entirely.
 
-    # ------------------------------------------------------------------ #
-    # Persistence invariant — the session is now in the ``terminated``
-    # status and the persisted iteration list matches the count.
-    # ------------------------------------------------------------------ #
-    assert persisted["status"] == "terminated"
-    assert persisted["final_verdict"] == "terminate"
-    assert len(persisted["iterations"]) == iteration_count
+    Set the iteration cap to 1 so the only thing that could end the
+    run before completion is the wall-clock cap. Pass ``-1`` to
+    disable that cap explicitly. The session terminates on
+    ``max_iterations`` after exactly one iteration; a regression that
+    treated ``-1`` as "any elapsed time exceeds it" would terminate
+    with ``max_wall_clock`` instead.
+    """
+    backend = FilesystemBackend(root=tmp_path)
+    session = {
+        "version": SCHEMA_VERSION,
+        "session_id": "sess-uncapped-wall",
+        "directive_text": "Wall-clock cap disabled; iteration cap drives termination.",
+        "criteria": [_make_unreachable_criterion()],
+        "budget": {
+            "max_iterations": 1,
+            "max_wall_clock_seconds": -1,  # explicit uncapped sentinel
+        },
+        "tool_allowlist": [_ALLOWLISTED_TOOL],
+        "checkpoint_cadence": {"kind": "every_iteration"},
+        "stagnation_threshold": 100,
+        "use_sampling": False,
+        "allow_scripted_strategies": False,
+        "status": "pending",
+        "created_at": "2025-01-01T00:00:00Z",
+        "iterations": [],
+        "no_progress_counter": 0,
+    }
+    backend.save_session(session)
 
-    # The Final_Report is the durable exit artifact; sanity-check that
-    # it lands so an operator reading the report sees the same story
-    # the in-memory record did.
-    report_path = Path(persisted["final_report_path"])
-    assert report_path.exists()
+    engine = MissionEngine(
+        backend=backend,
+        tool_dispatcher=_unmet_metric_dispatcher(),
+        sampling_callable=None,
+        sandbox_runner=None,
+    )
+
+    record = await engine.run_iteration(session["session_id"])
+
+    assert record["verdict"] == "terminate"
+    assert record["verdict_reason"] == "max_iterations"

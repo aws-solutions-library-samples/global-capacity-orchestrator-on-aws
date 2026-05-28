@@ -46,6 +46,9 @@ def register_all_resources() -> None:
         mission as _mission,
     )
     from resources import (
+        self as _self_introspection,
+    )
+    from resources import (
         tasks as _tasks,
     )
 
@@ -56,3 +59,4 @@ def register_all_resources() -> None:
     _costs.register(_mcp)
     _tasks.register(_mcp)
     _mission.register(_mcp)
+    _self_introspection.register(_mcp)

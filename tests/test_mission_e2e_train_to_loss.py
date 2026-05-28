@@ -114,7 +114,6 @@ def _make_session(*, session_id: str = "sess-train-to-loss") -> dict[str, Any]:
         "created_at": "2025-01-01T00:00:00Z",
         "iterations": [],
         "no_progress_counter": 0,
-        "accumulated_cost_usd": 0.0,
     }
 
 
@@ -198,7 +197,6 @@ async def test_train_to_target_loss_completes_within_max_iterations(
         tool_dispatcher=_val_loss_dispatcher(),
         sampling_callable=None,
         sandbox_runner=None,
-        cost_estimators={},
     )
 
     # Drive iterations until the verdict cascade ends the run. The 20

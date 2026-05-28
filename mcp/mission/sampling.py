@@ -42,7 +42,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
@@ -53,6 +53,7 @@ from .validation import MissionValidationError
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Flowchart(s) generated from this file:
 #   * ``maybe_sample_strategy_revision`` -> ``diagrams/code_diagrams/mcp/mission/sampling.maybe_sample_strategy_revision.html``
+#     (PNG: ``diagrams/code_diagrams/mcp/mission/sampling.maybe_sample_strategy_revision.png``)
 # Regenerate with ``python diagrams/code_diagrams/generate.py``.
 # <pyflowchart-code-diagram> END
 
@@ -448,21 +449,17 @@ def _render_budget_context(
     *,
     remaining_iterations: int,
     remaining_wall_clock_secs: float | None,
-    remaining_budget_usd: float | None,
     allow_scripts: bool,
 ) -> dict[str, Any]:
     """Render the budget context block. Stable shape regardless of inputs.
 
-    ``None`` for either of the budget caps is rendered verbatim as JSON
+    ``None`` for the wall-clock cap is rendered verbatim as JSON
     ``null`` so the model can disambiguate "unbounded" from "0".
     """
     return {
         "remaining_iterations": int(remaining_iterations),
         "remaining_wall_clock_seconds": (
             float(remaining_wall_clock_secs) if remaining_wall_clock_secs is not None else None
-        ),
-        "remaining_budget_usd": (
-            float(remaining_budget_usd) if remaining_budget_usd is not None else None
         ),
         "allow_scripted_strategies": bool(allow_scripts),
     }
@@ -492,7 +489,6 @@ class SamplingPrompt:
     recent_iterations: Sequence[IterationRecord]
     tool_allowlist: Sequence[str]
     tool_docstrings: Mapping[str, str]
-    remaining_budget_usd: float | None
     remaining_iterations: int
     remaining_wall_clock_secs: float | None
     allow_scripts: bool = field(default=False)
@@ -571,7 +567,6 @@ class SamplingPrompt:
         budget_block = _render_budget_context(
             remaining_iterations=self.remaining_iterations,
             remaining_wall_clock_secs=self.remaining_wall_clock_secs,
-            remaining_budget_usd=self.remaining_budget_usd,
             allow_scripts=self.allow_scripts,
         )
 
@@ -1037,39 +1032,13 @@ def _resolve_input_schema(tool: Any) -> Any:
     return schema
 
 
-def _estimate_total_cost(
-    tool_calls: Sequence[Mapping[str, Any]],
-    cost_estimators: Mapping[str, Callable[[dict[str, Any]], float]],
-) -> float:
-    """Sum the estimated cost contribution of every tool call.
-
-    Calls without a registered estimator contribute 0.0. Each estimator
-    is called with the call's ``args`` dict (defaulting to an empty
-    dict when ``args`` is missing or non-dict) and the float result is
-    accumulated.
-    """
-    total = 0.0
-    for call in tool_calls:
-        name = call.get("tool_name")
-        estimator = cost_estimators.get(name) if isinstance(name, str) else None
-        if estimator is None:
-            continue
-        args = call.get("args")
-        if not isinstance(args, dict):
-            args = {}
-        total += float(estimator(args))
-    return total
-
-
 def validate_strategy_against_catalog(
     strategy: Strategy,
     allowlist: list[str],
     registered_tools: dict[str, Any],
-    remaining_budget_usd: float | None,
-    cost_estimators: dict[str, Callable[[dict[str, Any]], float]],
     allow_scripts: bool,
 ) -> None:
-    """Validate a Strategy against the live tool catalog and budget.
+    """Validate a Strategy against the live tool catalog.
 
     Returns ``None`` on accept; raises :class:`MissionValidationError`
     with a structured ``details.reason`` enum on reject. The function
@@ -1082,9 +1051,7 @@ def validate_strategy_against_catalog(
        exposed under ``Tool.input_schema`` (or the older
        ``Tool.inputSchema``); calls whose tool has neither attribute or
        a ``None`` schema skip args validation.
-    4. Estimated total cost ≤ ``remaining_budget_usd`` (skipped when
-       ``remaining_budget_usd is None``).
-    5. For scripted strategies, ``allow_scripts`` is True and the
+    4. For scripted strategies, ``allow_scripts`` is True and the
        script's AST passes :func:`mission.sandbox.validate_script_ast`.
 
     Args:
@@ -1094,11 +1061,6 @@ def validate_strategy_against_catalog(
             object (typed ``Any`` so the module imports without
             FastMCP). Read-only — only ``input_schema`` /
             ``inputSchema`` is consulted.
-        remaining_budget_usd: Remaining USD budget, or ``None`` to
-            disable the budget check (treated as unbounded).
-        cost_estimators: Mapping from tool name to a callable that
-            takes the call's ``args`` dict and returns the estimated
-            USD cost as a float. Tools without an entry contribute 0.
         allow_scripts: Session-level flag gating scripted strategies.
     """
     # 1. Structural validation: mutual exclusivity, script-allow gating,
@@ -1205,20 +1167,9 @@ def validate_strategy_against_catalog(
                     },
                 ) from exc
 
-        # 4. Cost estimation against remaining budget. Skipped when
-        #    remaining_budget_usd is None (unbounded).
-        if remaining_budget_usd is not None:
-            total = _estimate_total_cost(tool_calls, cost_estimators)
-            if total > remaining_budget_usd:
-                raise MissionValidationError(
-                    "validation_error",
-                    details={
-                        "field": "strategy",
-                        "reason": "over_budget",
-                        "estimated_cost_usd": total,
-                        "remaining_budget_usd": remaining_budget_usd,
-                    },
-                )
+        # 4. Cost estimation against remaining budget. Removed —
+        #    cost guardrails live out-of-band via AWS Budgets / Cost
+        #    Anomaly Detection rather than in the Mission cascade.
     # Scripted strategies: validate_strategy already ran allow_scripts
     # gating and the AST validator. No catalog-aware checks are layered
     # on top here — the script-side enforcement happens at execute time
@@ -1375,8 +1326,6 @@ async def maybe_sample_strategy_revision(
     allowlist: list[str],
     registered_tools: dict[str, Any],
     tool_docstrings: dict[str, str],
-    remaining_budget_usd: float | None,
-    cost_estimators: dict[str, Callable[[dict[str, Any]], float]],
     remaining_iterations: int,
     remaining_wall_clock_secs: float | None,
     allow_scripts: bool,
@@ -1384,9 +1333,9 @@ async def maybe_sample_strategy_revision(
     """Consult the advisory LLM for a Strategy_Revision, or fall back.
 
     Returns a :class:`SamplingUsed` when the bound backend produces a
-    JSON object that clears schema validation and the catalog /
-    budget checks. Returns a :class:`SamplingFallback` carrying the
-    deterministic rationale from
+    JSON object that clears schema validation and the catalog checks.
+    Returns a :class:`SamplingFallback` carrying the deterministic
+    rationale from
     :func:`mission.decide.build_revision_rationale_template` on every
     rejection class. Emits exactly one
     :func:`mission.audit.emit_sampling_event` per call.
@@ -1427,7 +1376,6 @@ async def maybe_sample_strategy_revision(
         recent_iterations=recent_iterations,
         tool_allowlist=allowlist,
         tool_docstrings=tool_docstrings,
-        remaining_budget_usd=remaining_budget_usd,
         remaining_iterations=remaining_iterations,
         remaining_wall_clock_secs=remaining_wall_clock_secs,
         allow_scripts=allow_scripts,
@@ -1493,19 +1441,17 @@ async def maybe_sample_strategy_revision(
             model_id=model_id,
         )
 
-    # ---- Catalog + budget validation on the proposed next_strategy. ------
+    # ---- Catalog validation on the proposed next_strategy. ---------------
     try:
         validate_strategy_against_catalog(
             parsed["next_strategy"],
             allowlist,
             registered_tools,
-            remaining_budget_usd,
-            cost_estimators,
             allow_scripts,
         )
     except MissionValidationError as err:
         # ``err.details["reason"]`` carries the structured rejection
-        # token (e.g. ``"tool_not_allowlisted"``, ``"over_budget"``,
+        # token (e.g. ``"tool_not_allowlisted"``,
         # ``"tool_args_invalid"``). Fall back to a generic label when
         # the validator emits a rejection without a ``reason`` key.
         details = err.details or {}
@@ -1555,7 +1501,6 @@ async def maybe_sample_final_lessons(
     session: _SessionState,
     remaining_iterations: int = 0,
     remaining_wall_clock_secs: float | None = None,
-    remaining_budget_usd: float | None = None,
     allow_scripts: bool = False,
     tool_docstrings: dict[str, str] | None = None,
 ) -> SamplingUsed | SamplingFallback:
@@ -1606,7 +1551,6 @@ async def maybe_sample_final_lessons(
         recent_iterations=list(session["iterations"]),
         tool_allowlist=session.get("tool_allowlist", []),
         tool_docstrings=tool_docstrings or {},
-        remaining_budget_usd=remaining_budget_usd,
         remaining_iterations=remaining_iterations,
         remaining_wall_clock_secs=remaining_wall_clock_secs,
         allow_scripts=allow_scripts,

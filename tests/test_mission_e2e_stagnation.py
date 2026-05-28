@@ -202,7 +202,6 @@ def _make_session(*, session_id: str) -> dict[str, Any]:
         "created_at": "2025-01-01T00:00:00Z",
         "iterations": [],
         "no_progress_counter": 0,
-        "accumulated_cost_usd": 0.0,
     }
 
 
@@ -269,7 +268,6 @@ async def test_adjust_fires_before_terminate(tmp_path: Path) -> None:
         tool_dispatcher=_unmet_metric_dispatcher(),
         sampling_callable=None,
         sandbox_runner=None,
-        cost_estimators={},
     )
 
     # Walk the loop until the cascade terminates, recording each
@@ -396,7 +394,6 @@ async def test_terminate_on_no_progress(tmp_path: Path) -> None:
         tool_dispatcher=_unmet_metric_dispatcher(),
         sampling_callable=None,
         sandbox_runner=None,
-        cost_estimators={},
     )
 
     final_record: dict[str, Any] | None = None

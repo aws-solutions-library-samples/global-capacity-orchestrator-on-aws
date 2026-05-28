@@ -195,19 +195,13 @@ def mission_cmd() -> None:
     "--max-iterations",
     type=int,
     required=True,
-    help="Hard cap on the number of iterations.",
+    help="Hard cap on the iteration count. Pass -1 to opt out (uncapped).",
 )
 @click.option(
     "--max-wall-clock",
     type=int,
     required=True,
-    help="Hard cap on wall-clock seconds.",
-)
-@click.option(
-    "--max-cost",
-    type=float,
-    default=None,
-    help="Hard cap on USD cost. Required when the allowlist contains a cost-incurring tool.",
+    help="Hard cap on wall-clock seconds. Pass -1 to opt out (uncapped).",
 )
 @click.option(
     "--tool-allowlist",
@@ -280,7 +274,6 @@ def mission_start(
     criteria_file: str | None,
     max_iterations: int,
     max_wall_clock: int,
-    max_cost: float | None,
     tool_allowlist: tuple[str, ...],
     cadence: str,
     cadence_n: int | None,
@@ -354,8 +347,6 @@ def mission_start(
         "max_iterations": max_iterations,
         "max_wall_clock_seconds": max_wall_clock,
     }
-    if max_cost is not None:
-        budget["max_cost_usd"] = max_cost
 
     # Build the cadence dict.
     cadence_dict: dict[str, Any] = {"kind": cadence}
@@ -414,7 +405,6 @@ def mission_start(
         "created_at": now_iso,
         "iterations": [],
         "no_progress_counter": 0,
-        "accumulated_cost_usd": 0.0,
     }
     if bedrock_model_id:
         session["bedrock_model_id"] = bedrock_model_id
@@ -465,12 +455,13 @@ def _run_to_completion(session_id: str) -> None:
     backend = mission_state.get_backend()
 
     async def _drive() -> None:
+        # Import inside the closure to keep the CLI's --help path
+        # cheap.
         engine = MissionEngine(
             backend=backend,
             tool_dispatcher=_make_stub_dispatcher(),
             sampling_callable=None,
             sandbox_runner=None,
-            cost_estimators={},
         )
         while True:
             try:
@@ -574,6 +565,11 @@ def mission_iterate_cmd(session_id: str, max_iterations: int, output: str) -> No
     from mission.state import get_backend  # noqa: PLC0415
 
     if max_iterations <= 0:
+        # This is the per-call iteration count (how many iterations to
+        # run THIS call), NOT the session-wide ``budget.max_iterations``
+        # cap. The budget cap accepts ``-1`` as the "uncapped" sentinel;
+        # this per-call count must always be a positive int because a
+        # zero or negative value here would be a no-op invocation.
         _emit_error(
             "validation_error",
             {"field": "max-iterations", "reason": "must_be_positive_int"},
@@ -588,7 +584,6 @@ def mission_iterate_cmd(session_id: str, max_iterations: int, output: str) -> No
             tool_dispatcher=_make_stub_dispatcher(),
             sampling_callable=None,
             sandbox_runner=None,
-            cost_estimators={},
         )
         records: list[dict[str, Any]] = []
         for _ in range(max_iterations):
@@ -900,3 +895,186 @@ def mission_list_cmd(status: str | None, output: str) -> None:
             click.echo(f"  {sid:<40}  {st:<11}  {it:>5}  {ca}")
     else:
         _emit_json({"sessions": sessions})
+
+
+# ---------------------------------------------------------------------------
+# scaffold-criteria
+# ---------------------------------------------------------------------------
+
+
+@mission_cmd.command("scaffold-criteria")
+@click.option(
+    "--directive",
+    required=True,
+    help="Natural-language goal description used to seed the criteria.",
+)
+@click.option(
+    "--allowlist",
+    "allowlist",
+    multiple=True,
+    help=(
+        "Optional tool names that the resulting session would be "
+        "configured with. Used informationally on the deterministic "
+        "path; on the sampling path, shapes the prompt so the model "
+        "picks metric/event names plausibly produced by the listed tools."
+    ),
+)
+@click.option(
+    "--use-sampling/--no-sampling",
+    "use_sampling",
+    default=None,
+    help=(
+        "Force the sampling path on/off. Default auto-detects: MCP "
+        "host capability, then Bedrock credentials, then deterministic."
+    ),
+)
+@click.option(
+    "--bedrock-model-id",
+    default=None,
+    help="Override the Bedrock model id used by the CLI sampling backend.",
+)
+@click.option(
+    "--max-criteria",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Cap on the number of criterion entries scaffolded.",
+)
+@click.option(
+    "--retries",
+    type=int,
+    default=3,
+    show_default=True,
+    help="Sampling-path retry budget on validator rejections.",
+)
+@click.option(
+    "--output-file",
+    "output_file",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Write the JSON to this file instead of stdout.",
+)
+@click.option(
+    "--output",
+    type=click.Choice(["json", "table"]),
+    default="json",
+    show_default=True,
+    help="Output format (table mode prints a per-entry summary alongside the JSON).",
+)
+def mission_scaffold_criteria_cmd(
+    directive: str,
+    allowlist: tuple[str, ...],
+    use_sampling: bool | None,
+    bedrock_model_id: str | None,
+    max_criteria: int,
+    retries: int,
+    output_file: str | None,
+    output: str,
+) -> None:
+    """Scaffold a criteria.json from a natural-language directive.
+
+    Resolves the sampling state via ``mission.sampling.resolve_sampling_state``;
+    when a backend resolves and ``--use-sampling`` permits, the resolved
+    backend is asked for a JSON array. The response is validated through
+    ``validate_criteria`` and retried up to ``--retries`` times on
+    rejection. Falls back to the deterministic keyword-template
+    generator when sampling is unavailable, disabled, or after the
+    retry budget is exhausted.
+
+    The output always validates through ``validate_criteria`` so the
+    resulting file is immediately usable with ``mission start
+    --criteria-file``.
+    """
+    from mission import (  # noqa: PLC0415 — lazy: avoids cost when help-only
+        criteria_scaffold,
+    )
+    from mission import (
+        sampling as mission_sampling,
+    )
+
+    if max_criteria < 1:
+        _emit_error(
+            "validation_error",
+            {"field": "max-criteria", "reason": "must_be_positive_int"},
+        )
+        sys.exit(1)
+    if retries < 0:
+        _emit_error(
+            "validation_error",
+            {"field": "retries", "reason": "must_be_non_negative_int"},
+        )
+        sys.exit(1)
+
+    use_sampling_resolved, backend_resolved = mission_sampling.resolve_sampling_state(
+        None, use_sampling
+    )
+
+    criteria: list[dict[str, Any]] | None = None
+    sampling_path_taken = False
+    if use_sampling_resolved and backend_resolved != "none":
+        backend_obj = mission_sampling.select_sampling_backend(
+            None,
+            model_id=bedrock_model_id,
+            prefs=None,
+        )
+        if backend_obj is not None:
+            try:
+                criteria = asyncio.run(
+                    criteria_scaffold.generate_sampled_criteria(
+                        backend_obj,
+                        directive,
+                        allowlist=list(allowlist),
+                        max_criteria=max_criteria,
+                        retries=retries,
+                    )
+                )
+                sampling_path_taken = True
+            except criteria_scaffold.ScaffoldSamplingError as exc:
+                # The sampling path failed; emit a one-line warning to
+                # stderr so the operator sees what happened, then fall
+                # through to the deterministic generator.
+                click.echo(
+                    f"sampling path failed ({exc.last_reason}); "
+                    "falling back to deterministic templates.",
+                    err=True,
+                )
+                criteria = None
+
+    if criteria is None:
+        criteria = criteria_scaffold.generate_deterministic_criteria(
+            directive,
+            max_criteria=max_criteria,
+        )
+
+    payload = json.dumps(criteria, indent=2, sort_keys=False)
+
+    if output_file:
+        Path(output_file).write_text(payload + "\n", encoding="utf-8")
+        # Echo a structured summary on the chosen format so the operator
+        # can see what was written without re-reading the file.
+        if output == "table":
+            for c in criteria:
+                click.echo(
+                    f"  {c.get('criterion_id'):<32}  "
+                    f"kind={c.get('kind'):<16}  required={c.get('required')}"
+                )
+            click.echo(f"  written to {output_file}")
+        else:
+            _emit_json(
+                {
+                    "output_file": output_file,
+                    "criteria_count": len(criteria),
+                    "sampling_path": sampling_path_taken,
+                }
+            )
+        return
+
+    # No --output-file: write JSON to stdout.
+    if output == "table":
+        for c in criteria:
+            click.echo(
+                f"  {c.get('criterion_id'):<32}  "
+                f"kind={c.get('kind'):<16}  required={c.get('required')}"
+            )
+        return
+    click.echo(payload)

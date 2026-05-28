@@ -141,16 +141,64 @@ def _session_report_resource(session_id: str) -> str:
     return json.dumps(report, default=str)
 
 
+def _session_audit_replay_resource(session_id: str) -> str:
+    """Return the iteration history reconstructed from in-process audit entries.
+
+    Reads from the :class:`mission.audit.MissionAuditCollectorHandler`
+    ring buffer attached at server start, projects through
+    :func:`mission.audit.replay_audit_entries`, and returns
+    ``{"session_id": session_id, "iterations": [...], "note":
+    "Reconstructed from in-process audit handler"}`` as JSON.
+
+    Returns ``iterations: []`` when the session is unknown to the
+    handler — does NOT 404. The motivation: a Mission session that
+    finished before the resource was first read still has a valid
+    entry in the persistent session backend, but its audit entries
+    may have aged out of the bounded ring buffer. An empty
+    reconstruction is the honest answer; a 404 would imply the
+    session never existed.
+    """
+    from mission.audit import get_collector, replay_audit_entries
+
+    collector = get_collector()
+    note = "Reconstructed from in-process audit handler"
+    if collector is None:
+        # No handler attached (e.g. a CLI process that imported the
+        # resources package without the install hook firing). Empty
+        # reconstruction.
+        return json.dumps(
+            {"session_id": session_id, "iterations": [], "note": note},
+            default=str,
+        )
+
+    entries = collector.entries_for(session_id)
+    iterations = replay_audit_entries(session_id, entries)
+    return json.dumps(
+        {"session_id": session_id, "iterations": iterations, "note": note},
+        default=str,
+    )
+
+
 def register(mcp_instance: Any) -> None:
     """Register Mission resource templates against the shared MCP server.
 
     Gated by :data:`feature_flags.FLAG_MISSION`: when the flag is unset
     this function is a no-op so importing this module from
-    :mod:`resources` stays side-effect-free. With the flag set, both
+    :mod:`resources` stays side-effect-free. With the flag set, three
     templates are registered and become reachable via the synthetic
     ``read_resource`` tool from the Resources As Tools transform.
     """
     if not is_enabled(FLAG_MISSION):
         return
+    # Install the in-process collector when the resource module is
+    # registered so the audit-replay path always has a buffer to
+    # read from. Idempotent — call-safe across reloads.
+    from mission.audit import install_collector
+
+    install_collector()
+
     mcp_instance.resource("mission://sessions/{session_id}")(_session_resource)
     mcp_instance.resource("mission://sessions/{session_id}/report")(_session_report_resource)
+    mcp_instance.resource("mission://sessions/{session_id}/audit-replay")(
+        _session_audit_replay_resource
+    )

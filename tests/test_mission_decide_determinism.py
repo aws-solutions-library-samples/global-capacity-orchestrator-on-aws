@@ -386,7 +386,6 @@ def test_decide_verdict_smoke_returns_tuple() -> None:
         "started_at": "2025-06-01T00:00:00+00:00",
         "iterations": [],
         "no_progress_counter": 0,
-        "accumulated_cost_usd": 0.0,
     }
     iteration: dict[str, Any] = {
         "iteration_index": 0,
@@ -414,6 +413,122 @@ def test_decide_verdict_smoke_returns_tuple() -> None:
     label, reason = verdict
     assert isinstance(label, str)
     assert isinstance(reason, str)
+
+
+# ---------------------------------------------------------------------------
+# -1 sentinel — iteration / wall-clock cap disabled
+# ---------------------------------------------------------------------------
+
+
+def test_decide_verdict_minus_one_iter_cap_does_not_terminate() -> None:
+    """With ``max_iterations=-1`` the cap branch never fires.
+
+    Synthesise a session that has 200 iterations already on it (which
+    would normally trip *any* finite ``max_iterations`` cap) and the
+    -1 sentinel. The cascade falls through to ``continue`` /
+    ``in_progress`` rather than terminating on the iteration cap.
+    """
+    iteration: dict[str, Any] = {
+        "iteration_index": 200,
+        "started_at": "2025-06-01T00:00:01+00:00",
+        "ended_at": "2025-06-01T00:00:02+00:00",
+        "phases": [],
+        "strategy": {"tool_calls": [{"tool_name": "any_tool", "args": {}}]},
+        "observation": {
+            "tool_results": [],
+            "metrics": {},
+            "events": [],
+            "errors": [],
+            "phase_started_at": "2025-06-01T00:00:01+00:00",
+            "phase_ended_at": "2025-06-01T00:00:02+00:00",
+        },
+        "criteria_evaluation": [],
+        "verdict": "continue",
+        "verdict_reason": "in_progress",
+        "checkpoint_evaluated": True,
+    }
+    # Build 200 prior iterations as plausible empty stubs — the
+    # cascade only reads their length and the final element's
+    # observation, so the placeholder content is enough.
+    priors: list[dict[str, Any]] = [dict(iteration, iteration_index=i) for i in range(200)]
+    session: dict[str, Any] = {
+        "version": 1,
+        "session_id": "uncapped-iter",
+        "directive_text": "uncapped",
+        "criteria": [],
+        # The -1 sentinel disables the iteration cap entirely;
+        # max_wall_clock_seconds is set to a finite value so the
+        # both-uncapped guard does not apply.
+        "budget": {"max_iterations": -1, "max_wall_clock_seconds": 3600},
+        "tool_allowlist": ["any_tool"],
+        "checkpoint_cadence": {"kind": "every_iteration"},
+        "stagnation_threshold": 1_000_000,
+        "use_sampling": False,
+        "allow_scripted_strategies": False,
+        "status": "running",
+        "created_at": "2025-06-01T00:00:00+00:00",
+        "started_at": "2025-06-01T00:00:00+00:00",
+        "iterations": priors,
+        "no_progress_counter": 0,
+    }
+    now = datetime(2025, 6, 1, 0, 0, 5, tzinfo=UTC)
+    label, reason = decide_verdict(session, iteration, now)
+    # The cascade did NOT fire on the iteration cap.
+    assert (label, reason) != ("terminate", "max_iterations")
+    # Specifically, the cascade fell through to in_progress because
+    # there are no criteria to satisfy and no other branch fired.
+    assert (label, reason) == ("continue", "in_progress")
+
+
+def test_decide_verdict_minus_one_wall_clock_cap_does_not_terminate() -> None:
+    """With ``max_wall_clock_seconds=-1`` the cap branch never fires.
+
+    Synthesise a session whose ``started_at`` is years in the past
+    (which would normally trip *any* finite wall-clock cap) and the
+    -1 sentinel. The cascade falls through rather than terminating
+    on the wall-clock cap.
+    """
+    iteration: dict[str, Any] = {
+        "iteration_index": 0,
+        "started_at": "2025-06-01T00:00:01+00:00",
+        "ended_at": "2025-06-01T00:00:02+00:00",
+        "phases": [],
+        "strategy": {"tool_calls": [{"tool_name": "any_tool", "args": {}}]},
+        "observation": {
+            "tool_results": [],
+            "metrics": {},
+            "events": [],
+            "errors": [],
+            "phase_started_at": "2025-06-01T00:00:01+00:00",
+            "phase_ended_at": "2025-06-01T00:00:02+00:00",
+        },
+        "criteria_evaluation": [],
+        "verdict": "continue",
+        "verdict_reason": "in_progress",
+        "checkpoint_evaluated": True,
+    }
+    session: dict[str, Any] = {
+        "version": 1,
+        "session_id": "uncapped-wall",
+        "directive_text": "uncapped",
+        "criteria": [],
+        "budget": {"max_iterations": 10, "max_wall_clock_seconds": -1},
+        "tool_allowlist": ["any_tool"],
+        "checkpoint_cadence": {"kind": "every_iteration"},
+        "stagnation_threshold": 1_000_000,
+        "use_sampling": False,
+        "allow_scripted_strategies": False,
+        "status": "running",
+        # 5 years in the past — any finite wall-clock cap fires.
+        "created_at": "2020-01-01T00:00:00+00:00",
+        "started_at": "2020-01-01T00:00:00+00:00",
+        "iterations": [],
+        "no_progress_counter": 0,
+    }
+    now = datetime(2025, 6, 1, 0, 0, 5, tzinfo=UTC)
+    label, reason = decide_verdict(session, iteration, now)
+    assert (label, reason) != ("terminate", "max_wall_clock")
+    assert (label, reason) == ("continue", "in_progress")
 
 
 # Module-level marker so a stray ``pytest -k`` filter that excludes the

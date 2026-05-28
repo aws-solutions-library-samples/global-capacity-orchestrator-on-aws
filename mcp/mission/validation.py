@@ -80,16 +80,6 @@ class MissionValidationError(Exception):
 _DIRECTIVE_MAX_LEN: Final[int] = 8192
 """The hard cap on directive_text length, in characters."""
 
-_COST_TAGS: Final[frozenset[str]] = frozenset(
-    {"cost-incurring", "data-upload", "image", "infrastructure"}
-)
-"""Tool tag set that forces ``max_cost_usd`` to be present on the budget.
-
-Any registered tool whose tag set intersects this set is considered
-cost-incurring; a session whose tool_allowlist includes such a tool must
-declare ``max_cost_usd`` so the engine has a hard cap to enforce.
-"""
-
 _CRITERION_KINDS: Final[frozenset[str]] = frozenset({"metric_threshold", "event", "predicate"})
 """The three valid Criterion ``kind`` values."""
 
@@ -112,6 +102,23 @@ def _is_positive_int(value: Any) -> bool:
     # bool is a subclass of int; reject it explicitly so True/False cannot
     # silently masquerade as a positive integer count.
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_positive_int_or_uncapped(value: Any) -> bool:
+    """Return True iff ``value`` is a strictly-positive int OR the sentinel ``-1``.
+
+    The Mission budget caps (``max_iterations``, ``max_wall_clock_seconds``)
+    accept ``-1`` as an explicit "uncapped" sentinel. Any other negative
+    integer, zero, non-integer, or bool is rejected — the operator must
+    pick exactly one of: a positive cap, or the explicit ``-1`` opt-out.
+    Allowing zero would silently terminate every session on iteration 1
+    / second 0; allowing arbitrary negatives would mask typos.
+    """
+    if isinstance(value, bool):
+        return False
+    if not isinstance(value, int):
+        return False
+    return value > 0 or value == -1
 
 
 def _is_number(value: Any) -> bool:
@@ -340,84 +347,60 @@ def validate_criteria(criteria: list[dict[str, Any]]) -> list[Criterion]:
 # ---------------------------------------------------------------------------
 
 
-def _allowlist_includes_cost_tool(
-    allowlist: list[str], registered_tags: dict[str, set[str]]
-) -> bool:
-    """True iff any tool in the allowlist carries a cost-incurring tag."""
-    for tool_name in allowlist:
-        tags = registered_tags.get(tool_name)
-        if tags is not None and tags & _COST_TAGS:
-            return True
-    return False
-
-
 def validate_budget(
     budget: dict[str, Any],
     allowlist: list[str],
     registered_tags: dict[str, set[str]],
 ) -> BudgetControls:
-    """Validate a budget dict against the allowlist's tag profile.
+    """Validate a budget dict.
 
-    Required keys: ``max_iterations`` and ``max_wall_clock_seconds``,
-    both positive ints. ``max_cost_usd`` is required only when the
-    ``allowlist`` contains at least one tool whose registered tag set
-    (looked up in ``registered_tags``) intersects :data:`_COST_TAGS`.
-    When required and present, ``max_cost_usd`` must be a positive
-    number. Returns a normalized dict suitable for use as a
+    Required keys: ``max_iterations`` and ``max_wall_clock_seconds``.
+    Each accepts either a strictly-positive int OR the explicit
+    sentinel ``-1`` ("uncapped"). The operator must pick one;
+    omitting the key, passing zero, passing any other negative
+    number, or passing a non-integer is rejected. **At least one** of
+    the two caps must be a positive int — both being ``-1`` would be
+    a runaway loop with no axis-driven termination, so the validator
+    rejects that combination eagerly with
+    ``reason="at_least_one_cap_required"``.
+
+    Cost guardrails live out-of-band — Mission only enforces caps the
+    loop has direct visibility into. ``allowlist`` and
+    ``registered_tags`` are kept on the signature for API stability
+    so existing callers don't have to change shape; both are unused.
+    Returns a normalized dict suitable for use as a
     :class:`BudgetControls`.
     """
+    del allowlist, registered_tags  # accepted for API stability; unused
     if not isinstance(budget, dict):
         raise MissionValidationError(
             "validation_error",
             details={"field": "budget", "reason": "not_a_dict"},
         )
     max_iterations = budget.get("max_iterations")
-    if not _is_positive_int(max_iterations):
+    if not _is_positive_int_or_uncapped(max_iterations):
         raise MissionValidationError(
             "validation_error",
             details={
                 "field": "budget",
                 "subfield": "max_iterations",
-                "reason": "missing_or_not_positive_int",
+                "reason": "missing_or_not_positive_int_or_minus_one",
             },
         )
     max_wall = budget.get("max_wall_clock_seconds")
-    if not _is_positive_int(max_wall):
+    if not _is_positive_int_or_uncapped(max_wall):
         raise MissionValidationError(
             "validation_error",
             details={
                 "field": "budget",
                 "subfield": "max_wall_clock_seconds",
-                "reason": "missing_or_not_positive_int",
+                "reason": "missing_or_not_positive_int_or_minus_one",
             },
         )
-    cost_required = _allowlist_includes_cost_tool(allowlist, registered_tags)
     normalized: dict[str, Any] = {
         "max_iterations": max_iterations,
         "max_wall_clock_seconds": max_wall,
     }
-    if "max_cost_usd" in budget:
-        max_cost = budget["max_cost_usd"]
-        if not (_is_number(max_cost) and max_cost > 0):
-            raise MissionValidationError(
-                "validation_error",
-                details={
-                    "field": "budget",
-                    "subfield": "max_cost_usd",
-                    "reason": "not_a_positive_number",
-                },
-            )
-        normalized["max_cost_usd"] = max_cost
-    elif cost_required:
-        raise MissionValidationError(
-            "validation_error",
-            details={
-                "field": "budget",
-                "subfield": "max_cost_usd",
-                "reason": "required_for_cost_incurring_allowlist",
-                "cost_tags": sorted(_COST_TAGS),
-            },
-        )
     return cast("BudgetControls", normalized)
 
 

@@ -146,7 +146,6 @@ def _make_session(*, session_id: str = "sess-no-aws") -> dict[str, Any]:
         "created_at": "2025-01-01T00:00:00Z",
         "iterations": [],
         "no_progress_counter": 0,
-        "accumulated_cost_usd": 0.0,
     }
 
 
@@ -261,7 +260,6 @@ async def test_no_aws_smoke_session_completes_without_credentials(
         tool_dispatcher=dispatcher,
         sampling_callable=None,
         sandbox_runner=None,
-        cost_estimators={},
     )
 
     # Drive iterations until the cascade ends the run. The bound is

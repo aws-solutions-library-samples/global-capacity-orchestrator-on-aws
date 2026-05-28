@@ -432,14 +432,18 @@ _REGISTERED_TAGS: dict[str, set[str]] = {
 
 
 class TestValidateBudget:
-    """Budget caps must be positive ints; max_cost_usd is conditional."""
+    """Budget caps must be positive ints. Cost guardrails live out-of-band."""
 
     @given(
         # Non-positive ints, bools (which the validator excludes from the
         # int test on purpose), strings, and floats — everything the
-        # validator must reject for max_iterations.
+        # validator must reject for max_iterations. Excludes ``-1``
+        # explicitly because the validator now accepts it as the
+        # "uncapped" sentinel; every other negative or zero is still
+        # invalid.
         bad_iterations=st.one_of(
-            st.integers(max_value=0),
+            st.integers(max_value=-2),
+            st.just(0),
             st.booleans(),
             st.text(min_size=0, max_size=4),
             st.floats(allow_nan=False, allow_infinity=False),
@@ -455,14 +459,15 @@ class TestValidateBudget:
         err = _expect_validation_error(
             lambda: validation.validate_budget(budget, ["tool.cheap"], _REGISTERED_TAGS),
             field="budget",
-            reason="missing_or_not_positive_int",
+            reason="missing_or_not_positive_int_or_minus_one",
         )
         assert err.details is not None
         assert err.details["subfield"] == "max_iterations"
 
     @given(
         bad_wall=st.one_of(
-            st.integers(max_value=0),
+            st.integers(max_value=-2),
+            st.just(0),
             st.booleans(),
             st.text(min_size=0, max_size=4),
             st.none(),
@@ -477,72 +482,75 @@ class TestValidateBudget:
         err = _expect_validation_error(
             lambda: validation.validate_budget(budget, ["tool.cheap"], _REGISTERED_TAGS),
             field="budget",
-            reason="missing_or_not_positive_int",
+            reason="missing_or_not_positive_int_or_minus_one",
         )
         assert err.details is not None
         assert err.details["subfield"] == "max_wall_clock_seconds"
 
-    @given(
-        # When the allowlist contains any tool whose tags intersect the
-        # cost-incurring set, max_cost_usd is mandatory.
-        cost_tool=st.sampled_from(["tool.expensive", "tool.image", "tool.upload", "tool.infra"]),
-    )
-    @_PBT_SETTINGS
-    def test_cost_incurring_allowlist_requires_max_cost_usd(self, cost_tool: str) -> None:
-        budget = {"max_iterations": 5, "max_wall_clock_seconds": 60}
-        err = _expect_validation_error(
-            lambda: validation.validate_budget(budget, [cost_tool], _REGISTERED_TAGS),
-            field="budget",
-            reason="required_for_cost_incurring_allowlist",
-        )
-        assert err.details is not None
-        assert err.details["subfield"] == "max_cost_usd"
-
-    @given(
-        # When max_cost_usd is supplied but is non-positive or wrong-typed,
-        # the validator rejects it regardless of whether the allowlist
-        # makes it mandatory.
-        bad_cost=st.one_of(
-            st.integers(max_value=0),
-            st.floats(max_value=0.0, allow_nan=False, allow_infinity=False),
-            st.text(min_size=0, max_size=4),
-            st.booleans(),
-            st.none(),
-        ),
-    )
-    @_PBT_SETTINGS
-    def test_max_cost_usd_when_present_must_be_positive_number(self, bad_cost: object) -> None:
-        budget: dict[str, Any] = {
-            "max_iterations": 5,
-            "max_wall_clock_seconds": 60,
-            "max_cost_usd": bad_cost,
-        }
-        err = _expect_validation_error(
-            lambda: validation.validate_budget(budget, ["tool.cheap"], _REGISTERED_TAGS),
-            field="budget",
-            reason="not_a_positive_number",
-        )
-        assert err.details is not None
-        assert err.details["subfield"] == "max_cost_usd"
-
-    def test_well_formed_budget_no_cost_returns_normalized(self) -> None:
+    def test_well_formed_budget_returns_normalized(self) -> None:
         budget = {"max_iterations": 5, "max_wall_clock_seconds": 60}
         result = validation.validate_budget(budget, ["tool.cheap"], _REGISTERED_TAGS)
         assert result == {"max_iterations": 5, "max_wall_clock_seconds": 60}
-        assert "max_cost_usd" not in result
 
-    def test_well_formed_budget_with_cost_returns_normalized(self) -> None:
+    def test_uncapped_iterations_accepted(self) -> None:
+        """``max_iterations=-1`` is accepted as the explicit uncapped sentinel."""
+        budget = {"max_iterations": -1, "max_wall_clock_seconds": 60}
+        result = validation.validate_budget(budget, ["tool.cheap"], _REGISTERED_TAGS)
+        assert result == {"max_iterations": -1, "max_wall_clock_seconds": 60}
+
+    def test_uncapped_wall_clock_accepted(self) -> None:
+        """``max_wall_clock_seconds=-1`` is accepted as the explicit uncapped sentinel."""
+        budget = {"max_iterations": 5, "max_wall_clock_seconds": -1}
+        result = validation.validate_budget(budget, ["tool.cheap"], _REGISTERED_TAGS)
+        assert result == {"max_iterations": 5, "max_wall_clock_seconds": -1}
+
+    def test_both_uncapped_accepted(self) -> None:
+        """Both caps being ``-1`` is allowed — the operator's informed-consent opt-out.
+
+        Mission treats double-uncapped as an explicit configuration:
+        the loop runs until a Criterion satisfies completion, the
+        operator aborts, or — for scripted strategies — the sandbox
+        cap fires. Validation is deliberately permissive here so the
+        operator can drive a session purely by Criterion semantics.
+        """
+        budget = {"max_iterations": -1, "max_wall_clock_seconds": -1}
+        result = validation.validate_budget(budget, ["tool.cheap"], _REGISTERED_TAGS)
+        assert result == {"max_iterations": -1, "max_wall_clock_seconds": -1}
+
+    def test_zero_iterations_rejected(self) -> None:
+        """``max_iterations=0`` is rejected — only ``-1`` is the special sentinel."""
+        budget = {"max_iterations": 0, "max_wall_clock_seconds": 60}
+        err = _expect_validation_error(
+            lambda: validation.validate_budget(budget, ["tool.cheap"], _REGISTERED_TAGS),
+            field="budget",
+            reason="missing_or_not_positive_int_or_minus_one",
+        )
+        assert err.details is not None
+        assert err.details["subfield"] == "max_iterations"
+
+    def test_negative_other_than_minus_one_rejected(self) -> None:
+        """Any negative other than ``-1`` is rejected — typo guard."""
+        budget = {"max_iterations": -2, "max_wall_clock_seconds": 60}
+        err = _expect_validation_error(
+            lambda: validation.validate_budget(budget, ["tool.cheap"], _REGISTERED_TAGS),
+            field="budget",
+            reason="missing_or_not_positive_int_or_minus_one",
+        )
+        assert err.details is not None
+        assert err.details["subfield"] == "max_iterations"
+
+    def test_extra_keys_are_ignored(self) -> None:
+        """Operator-supplied extra keys (e.g. legacy max_cost_usd) are dropped silently."""
         budget = {
             "max_iterations": 5,
             "max_wall_clock_seconds": 60,
             "max_cost_usd": 1.50,
         }
         result = validation.validate_budget(budget, ["tool.expensive"], _REGISTERED_TAGS)
-        assert result == {
-            "max_iterations": 5,
-            "max_wall_clock_seconds": 60,
-            "max_cost_usd": 1.50,
-        }
+        # Only the two real caps land in the normalized output; the
+        # legacy cost field (kept on operator-supplied dicts during the
+        # post-rip-out transition) is ignored.
+        assert result == {"max_iterations": 5, "max_wall_clock_seconds": 60}
 
 
 # ---------------------------------------------------------------------------

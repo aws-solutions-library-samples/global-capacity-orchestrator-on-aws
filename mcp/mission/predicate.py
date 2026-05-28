@@ -557,4 +557,14 @@ def evaluate_predicate(parsed: ast.Expression, obs: dict[str, Any]) -> Any:
     """
     code = compile(parsed, "<predicate>", "eval")
     locals_namespace: dict[str, Any] = {"obs": obs, **_SAFE_CALLABLES}
-    return eval(code, _SAFE_GLOBALS, locals_namespace)  # noqa: S307
+    # The AST handed in here has already been validated by the
+    # parse_predicate allowlist (see _PredicateValidator above);
+    # __builtins__ is empty and the locals namespace exposes only
+    # ``obs`` plus the eight safe pure callables in _SAFE_CALLABLES. The
+    # double-empty __builtins__ + explicit safe-callable namespace is
+    # the established sandbox pattern from the precedent script-sandbox
+    # work, deliberately preferred over a less-restricted alternative
+    # for the Criterion(kind="predicate") surface.
+    return eval(  # nosemgrep: python.lang.security.audit.eval-detected.eval-detected
+        code, _SAFE_GLOBALS, locals_namespace
+    )  # noqa: S307

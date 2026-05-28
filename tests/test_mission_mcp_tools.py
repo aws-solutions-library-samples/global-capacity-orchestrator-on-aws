@@ -69,6 +69,7 @@ _MISSION_TOOL_NAMES: frozenset[str] = frozenset(
 _MISSION_RESOURCE_TEMPLATES: tuple[str, ...] = (
     "mission://sessions/{session_id}",
     "mission://sessions/{session_id}/report",
+    "mission://sessions/{session_id}/audit-replay",
 )
 
 
@@ -772,3 +773,276 @@ class TestMissionResources:
         # The report mirrors the iteration history; with one
         # iteration run, ``iterations_run`` is 1.
         assert "iterations" in report
+
+
+# ---------------------------------------------------------------------------
+# Coverage backfill — error envelopes and unwrap branches
+# ---------------------------------------------------------------------------
+
+
+class TestMissionToolErrorEnvelopes:
+    """Cover the negative-path error envelopes that aren't pinned elsewhere."""
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
+    async def test_mission_status_unknown_session(self, isolated_backend):
+        """``mission_status`` against an unknown id returns ``session_not_found``."""
+        _reload_run_mcp_fresh()
+        from fastmcp import Client
+
+        async with Client(run_mcp.mcp) as client:
+            result = await client.call_tool("mission_status", {"session_id": "no-such"})
+        envelope = json.loads(result.content[0].text)
+        assert envelope["code"] == "session_not_found"
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
+    async def test_mission_iterate_invalid_max_iterations(self, isolated_backend):
+        """``mission_iterate`` with ``max_iterations_this_call=0`` errors."""
+        _reload_run_mcp_fresh()
+        from fastmcp import Client
+
+        async with Client(run_mcp.mcp) as client:
+            result = await client.call_tool(
+                "mission_iterate",
+                {"session_id": "any", "max_iterations_this_call": 0},
+            )
+        envelope = json.loads(result.content[0].text)
+        assert envelope["code"] == "invalid_argument"
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
+    async def test_mission_checkpoint_unknown_session(self, isolated_backend):
+        """``mission_checkpoint`` on an unknown id returns ``session_not_found``."""
+        _reload_run_mcp_fresh()
+        from fastmcp import Client
+
+        async with Client(run_mcp.mcp) as client:
+            result = await client.call_tool("mission_checkpoint", {"session_id": "no-such"})
+        envelope = json.loads(result.content[0].text)
+        assert envelope["code"] == "session_not_found"
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
+    async def test_mission_checkpoint_no_iterations(self, isolated_backend):
+        """``mission_checkpoint`` on a fresh session returns ``no_iterations``."""
+        _reload_run_mcp_fresh()
+        from fastmcp import Client
+
+        async with Client(run_mcp.mcp) as client:
+            start = await client.call_tool("mission_start", _start_kwargs())
+            sid = json.loads(start.content[0].text)["session_id"]
+            result = await client.call_tool("mission_checkpoint", {"session_id": sid})
+        envelope = json.loads(result.content[0].text)
+        assert envelope["code"] == "no_iterations"
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
+    async def test_mission_complete_unknown_session(self, isolated_backend):
+        """``mission_complete`` on an unknown id returns ``session_not_found``."""
+        _reload_run_mcp_fresh()
+        from fastmcp import Client
+
+        async with Client(run_mcp.mcp) as client:
+            result = await client.call_tool("mission_complete", {"session_id": "no-such"})
+        envelope = json.loads(result.content[0].text)
+        assert envelope["code"] == "session_not_found"
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
+    async def test_mission_complete_terminal_session(self, isolated_backend):
+        """``mission_complete`` on a terminal session returns ``session_terminal``."""
+        _reload_run_mcp_fresh()
+        from fastmcp import Client
+
+        async with Client(run_mcp.mcp) as client:
+            start = await client.call_tool("mission_start", _start_kwargs())
+            sid = json.loads(start.content[0].text)["session_id"]
+            await client.call_tool("mission_complete", {"session_id": sid})
+            result = await client.call_tool("mission_complete", {"session_id": sid})
+        envelope = json.loads(result.content[0].text)
+        assert envelope["code"] == "session_terminal"
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
+    async def test_mission_abort_unknown_session(self, isolated_backend):
+        """``mission_abort`` on an unknown id returns ``session_not_found``."""
+        _reload_run_mcp_fresh()
+        from fastmcp import Client
+
+        async with Client(run_mcp.mcp) as client:
+            result = await client.call_tool("mission_abort", {"session_id": "no-such"})
+        envelope = json.loads(result.content[0].text)
+        assert envelope["code"] == "session_not_found"
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
+    async def test_mission_abort_terminal_session(self, isolated_backend):
+        """``mission_abort`` on a terminal session returns ``session_terminal``."""
+        _reload_run_mcp_fresh()
+        from fastmcp import Client
+
+        async with Client(run_mcp.mcp) as client:
+            start = await client.call_tool("mission_start", _start_kwargs())
+            sid = json.loads(start.content[0].text)["session_id"]
+            await client.call_tool("mission_complete", {"session_id": sid})
+            result = await client.call_tool("mission_abort", {"session_id": sid})
+        envelope = json.loads(result.content[0].text)
+        assert envelope["code"] == "session_terminal"
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
+    async def test_mission_resume_unknown_session(self, isolated_backend):
+        """``mission_resume`` on an unknown id returns ``session_not_found``."""
+        _reload_run_mcp_fresh()
+        from fastmcp import Client
+
+        async with Client(run_mcp.mcp) as client:
+            result = await client.call_tool("mission_resume", {"session_id": "no-such"})
+        envelope = json.loads(result.content[0].text)
+        assert envelope["code"] == "session_not_found"
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
+    async def test_mission_history_unknown_session(self, isolated_backend):
+        """``mission_history`` on an unknown id returns ``session_not_found``."""
+        _reload_run_mcp_fresh()
+        from fastmcp import Client
+
+        async with Client(run_mcp.mcp) as client:
+            result = await client.call_tool("mission_history", {"session_id": "no-such"})
+        envelope = json.loads(result.content[0].text)
+        assert envelope["code"] == "session_not_found"
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_MISSION": "true"})
+    async def test_mission_history_full_format(self, isolated_backend):
+        """``mission_history(format='full')`` returns full iteration records."""
+        _reload_run_mcp_fresh()
+        from fastmcp import Client
+
+        async with Client(run_mcp.mcp) as client:
+            start = await client.call_tool("mission_start", _start_kwargs())
+            sid = json.loads(start.content[0].text)["session_id"]
+            await client.call_tool(
+                "mission_iterate", {"session_id": sid, "max_iterations_this_call": 1}
+            )
+            result = await client.call_tool(
+                "mission_history", {"session_id": sid, "format": "full"}
+            )
+        payload = json.loads(result.content[0].text)
+        assert "iterations" in payload
+        assert len(payload["iterations"]) == 1
+        # full format includes the strategy and observation fields
+        assert "strategy" in payload["iterations"][0]
+
+
+# ---------------------------------------------------------------------------
+# Resource handler edge cases
+# ---------------------------------------------------------------------------
+#
+# These hit the fallback paths in ``mcp/resources/mission.py``:
+#
+# * ``_session_resource`` returning the ``session_not_found`` envelope when
+#   the backend has no record of the requested id (line block 74-82).
+# * ``_session_report_resource`` taking the non-filesystem-backend branch
+#   that reads the embedded ``final_report`` field on the session
+#   (line block 131-141).
+#
+# Both are exercised through direct calls to the handler functions
+# rather than through the FastMCP ``read_resource`` transport so the
+# test does not depend on FastMCP's error mapping behaviour.
+
+
+class TestMissionResourceFallbacks:
+    """Coverage for the resource-handler fallback paths."""
+
+    def test_session_resource_returns_envelope_for_unknown_id(
+        self,
+        isolated_backend,  # noqa: ARG002
+    ):
+        """``_session_resource`` returns a JSON error envelope for unknown ids.
+
+        The handler is intentionally non-raising so the synthetic
+        ``read_resource`` tool from the Resources As Tools transform
+        gets a string body it can return — raising would surface as an
+        MCP error instead of a typed envelope. Calling the handler
+        function directly bypasses the FastMCP transport.
+        """
+        from resources.mission import _session_resource
+
+        body = _session_resource("mission-does-not-exist")
+        envelope = json.loads(body)
+        assert envelope["error"] == "session_not_found"
+        assert envelope["session_id"] == "mission-does-not-exist"
+
+    def test_report_resource_reads_embedded_final_report(
+        self,
+        isolated_backend,
+        tmp_path,
+        monkeypatch,  # noqa: ARG002
+    ):
+        """``_session_report_resource`` reads ``session["final_report"]`` for non-filesystem backends.
+
+        Builds a fake non-filesystem backend that returns a session
+        carrying an embedded ``final_report`` field (the contract for
+        backends other than :class:`FilesystemBackend`). The handler
+        should serialise the embedded payload rather than reading from
+        disk.
+        """
+        from resources.mission import _session_report_resource
+
+        # A minimal non-filesystem backend: returns whatever session
+        # we hand it, advertises itself as not-FilesystemBackend.
+        class _StubBackend:
+            def load_session(self, session_id):  # noqa: ARG002
+                return {
+                    "session_id": "mission-stub",
+                    "status": "completed",
+                    "final_report": {
+                        "session_id": "mission-stub",
+                        "final_verdict": "complete",
+                        "iterations_run": 3,
+                    },
+                }
+
+        # Patch ``get_backend`` so the handler picks up the stub.
+        from mission import state as mission_state
+
+        monkeypatch.setattr(mission_state, "_BACKEND_INSTANCE", _StubBackend())
+
+        body = _session_report_resource("mission-stub")
+        report = json.loads(body)
+        assert report["session_id"] == "mission-stub"
+        assert report["final_verdict"] == "complete"
+        assert report["iterations_run"] == 3
+
+    def test_report_resource_raises_when_embedded_report_missing(
+        self,
+        isolated_backend,
+        monkeypatch,  # noqa: ARG002
+    ):
+        """The handler raises not-found when the terminal session has no embedded report.
+
+        Hits the ``report is None`` branch — a non-filesystem backend
+        whose terminal session has no ``final_report`` key. The
+        handler raises rather than silently returning an empty body.
+        """
+        from resources.mission import _session_report_resource
+
+        class _BareTerminalBackend:
+            def load_session(self, session_id):  # noqa: ARG002
+                return {
+                    "session_id": "mission-bare",
+                    "status": "completed",
+                    # No `final_report` key.
+                }
+
+        from mission import state as mission_state
+
+        monkeypatch.setattr(mission_state, "_BACKEND_INSTANCE", _BareTerminalBackend())
+
+        with pytest.raises(Exception) as exc_info:
+            _session_report_resource("mission-bare")
+        # The raised exception's string mentions the not-found shape.
+        assert "report not found" in str(exc_info.value).lower()

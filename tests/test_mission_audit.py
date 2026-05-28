@@ -109,7 +109,6 @@ def _make_session(
         "created_at": "2025-01-01T00:00:00Z",
         "iterations": [],
         "no_progress_counter": 0,
-        "accumulated_cost_usd": 0.0,
     }
 
 
@@ -277,7 +276,6 @@ async def test_audit_log_reconstructs_full_iteration_history(
         tool_dispatcher=dispatcher,
         sampling_callable=None,
         sandbox_runner=None,
-        cost_estimators={},
     )
 
     # Drive iterations until the verdict cascade ends the run. The
@@ -336,3 +334,227 @@ async def test_audit_log_reconstructs_full_iteration_history(
     expected = _shape_persisted_iterations(persisted["iterations"])
 
     assert reconstructed == expected
+
+
+# ---------------------------------------------------------------------------
+# replay_audit_entries — pure-function reconstruction helper
+# ---------------------------------------------------------------------------
+#
+# The :func:`mission.audit.replay_audit_entries` helper rebuilds the
+# iteration list from a flat audit-entry stream. The shape is narrow
+# on purpose — only the fields the audit stream is expected to fully
+# describe (iteration index, ordered phase / status pairs, verdict +
+# reason, optional revision rationale) — so the assertions stay
+# focused on the audit-completeness invariant rather than on details
+# the audit log does not pretend to mirror.
+
+
+class TestReplayAuditEntries:
+    """Pure-function reconstruction tests for ``replay_audit_entries``."""
+
+    def test_replay_audit_entries_reconstructs_iterations(self):
+        """Synthetic phase + verdict entries round-trip through the replay helper."""
+        from mission.audit import (
+            EVENT_TYPE_PHASE,
+            EVENT_TYPE_VERDICT,
+            replay_audit_entries,
+        )
+
+        sid = "sess-replay-roundtrip"
+        entries: list[dict[str, Any]] = []
+        for index in range(2):
+            for phase in ("propose", "execute", "observe", "evaluate", "decide"):
+                entries.append(
+                    {
+                        "event_type": EVENT_TYPE_PHASE,
+                        "mission_session_id": sid,
+                        "iteration_index": index,
+                        "phase": phase,
+                        "phase_status": "succeeded",
+                        "phase_started_at": f"2026-05-28T00:0{index}:00+00:00",
+                        "phase_ended_at": f"2026-05-28T00:0{index}:01+00:00",
+                    }
+                )
+            entries.append(
+                {
+                    "event_type": EVENT_TYPE_VERDICT,
+                    "mission_session_id": sid,
+                    "iteration_index": index,
+                    "verdict": "continue" if index == 0 else "terminate",
+                    "verdict_reason": "in_progress" if index == 0 else "max_iterations",
+                }
+            )
+
+        result = replay_audit_entries(sid, entries)
+
+        assert len(result) == 2
+        assert result[0]["iteration_index"] == 0
+        assert result[0]["verdict"] == "continue"
+        assert [p["phase"] for p in result[0]["phases"]] == [
+            "propose",
+            "execute",
+            "observe",
+            "evaluate",
+            "decide",
+        ]
+        assert result[1]["verdict"] == "terminate"
+        assert result[1]["verdict_reason"] == "max_iterations"
+
+    def test_replay_with_empty_entries_returns_empty_list(self):
+        """An empty input list reconstructs to an empty iteration list."""
+        from mission.audit import replay_audit_entries
+
+        assert replay_audit_entries("sess-empty", []) == []
+
+    def test_replay_filters_by_session_id(self):
+        """Entries from other sessions are ignored when filtering by session_id."""
+        from mission.audit import EVENT_TYPE_PHASE, EVENT_TYPE_VERDICT, replay_audit_entries
+
+        entries: list[dict[str, Any]] = [
+            {
+                "event_type": EVENT_TYPE_PHASE,
+                "mission_session_id": "other-session",
+                "iteration_index": 0,
+                "phase": "propose",
+                "phase_status": "succeeded",
+            },
+            {
+                "event_type": EVENT_TYPE_PHASE,
+                "mission_session_id": "wanted",
+                "iteration_index": 0,
+                "phase": "propose",
+                "phase_status": "succeeded",
+            },
+            {
+                "event_type": EVENT_TYPE_VERDICT,
+                "mission_session_id": "wanted",
+                "iteration_index": 0,
+                "verdict": "continue",
+                "verdict_reason": "in_progress",
+            },
+        ]
+
+        result = replay_audit_entries("wanted", entries)
+
+        assert len(result) == 1
+        assert len(result[0]["phases"]) == 1
+
+    def test_replay_with_only_phase_entries_no_verdict(self):
+        """An iteration without a closing verdict is included with verdict=None."""
+        from mission.audit import EVENT_TYPE_PHASE, replay_audit_entries
+
+        sid = "sess-no-verdict"
+        entries = [
+            {
+                "event_type": EVENT_TYPE_PHASE,
+                "mission_session_id": sid,
+                "iteration_index": 0,
+                "phase": "propose",
+                "phase_status": "succeeded",
+            },
+            {
+                "event_type": EVENT_TYPE_PHASE,
+                "mission_session_id": sid,
+                "iteration_index": 0,
+                "phase": "execute",
+                "phase_status": "failed",
+                "error_message": "tool dispatcher exploded",
+            },
+        ]
+
+        result = replay_audit_entries(sid, entries)
+
+        assert len(result) == 1
+        assert result[0]["iteration_index"] == 0
+        assert result[0]["verdict"] is None
+        assert result[0]["verdict_reason"] is None
+        # The error_message field rides through the projection.
+        assert result[0]["phases"][1]["error_message"] == "tool dispatcher exploded"
+
+    def test_replay_handles_jumped_iteration_index_with_sentinel(self):
+        """Phase events that jump ahead before the prior verdict flush sentinel."""
+        from mission.audit import EVENT_TYPE_PHASE, EVENT_TYPE_VERDICT, replay_audit_entries
+
+        sid = "sess-jump"
+        entries = [
+            {
+                "event_type": EVENT_TYPE_PHASE,
+                "mission_session_id": sid,
+                "iteration_index": 0,
+                "phase": "propose",
+                "phase_status": "succeeded",
+            },
+            # Jumps to iteration 1 without a verdict closing iteration 0.
+            {
+                "event_type": EVENT_TYPE_PHASE,
+                "mission_session_id": sid,
+                "iteration_index": 1,
+                "phase": "propose",
+                "phase_status": "succeeded",
+            },
+            {
+                "event_type": EVENT_TYPE_VERDICT,
+                "mission_session_id": sid,
+                "iteration_index": 1,
+                "verdict": "continue",
+                "verdict_reason": "in_progress",
+            },
+        ]
+
+        result = replay_audit_entries(sid, entries)
+
+        # Two iterations: the orphaned 0 (sentinel) and the closed 1.
+        assert len(result) == 2
+        assert result[0]["iteration_index"] == 0
+        assert result[0]["verdict"] is None
+        assert result[1]["iteration_index"] == 1
+        assert result[1]["verdict"] == "continue"
+
+    def test_collector_captures_and_clears(self):
+        """``MissionAuditCollectorHandler`` rounds-trips a Mission entry."""
+        import logging as _logging
+
+        from mission.audit import (
+            EVENT_TYPE_VERDICT,
+            MissionAuditCollectorHandler,
+        )
+
+        handler = MissionAuditCollectorHandler(capacity=10)
+        # Simulate the audit emitter writing one verdict entry.
+        record = _logging.LogRecord(
+            name="gco.mcp.audit",
+            level=_logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg=json.dumps(
+                {
+                    "event_type": EVENT_TYPE_VERDICT,
+                    "mission_session_id": "captured",
+                    "iteration_index": 3,
+                    "verdict": "complete",
+                    "verdict_reason": "criterion_met",
+                }
+            ),
+            args=(),
+            exc_info=None,
+        )
+        handler.emit(record)
+        captured = handler.entries_for("captured")
+        assert len(captured) == 1
+        assert captured[0]["iteration_index"] == 3
+
+        # Non-Mission entries are filtered out.
+        unrelated = _logging.LogRecord(
+            name="gco.mcp.audit",
+            level=_logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg=json.dumps({"event_type": "mcp.tool.invocation"}),
+            args=(),
+            exc_info=None,
+        )
+        handler.emit(unrelated)
+        assert len(handler.entries_for("captured")) == 1
+
+        handler.clear()
+        assert handler.entries_for("captured") == []

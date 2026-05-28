@@ -115,7 +115,6 @@ def _make_session(
         "created_at": "2025-01-01T00:00:00Z",
         "iterations": [],
         "no_progress_counter": 0,
-        "accumulated_cost_usd": 0.0,
     }
 
 
@@ -134,7 +133,6 @@ def _make_engine(
         tool_dispatcher=dispatcher,
         sampling_callable=None,
         sandbox_runner=None,
-        cost_estimators={},
     )
 
 
@@ -287,6 +285,57 @@ async def test_run_iteration_terminates_on_max_iterations(
     with pytest.raises(MissionEngineError) as excinfo:
         await engine.run_iteration(session["session_id"])
     assert excinfo.value.code == "session_terminal"
+
+
+# ---------------------------------------------------------------------------
+# -1 sentinel: max_iterations disabled
+# ---------------------------------------------------------------------------
+
+
+async def test_run_iteration_max_iterations_minus_one_does_not_terminate(
+    backend: FilesystemBackend,
+) -> None:
+    """``max_iterations=-1`` disables the iteration cap branch entirely.
+
+    The cascade reads the cap value before comparing — when the
+    sentinel is set, the iteration-count branch never fires. With an
+    unreachable Criterion and the cap disabled, the loop has to
+    survive past 100 iterations driven only by the deterministic
+    ``continue`` / ``in_progress`` verdict; we drive the engine in a
+    bounded loop and assert no iteration came back as ``terminate``
+    via the iteration cap.
+
+    A regression that compared ``len(iterations)+1 >= -1`` raw
+    (always True) would terminate on iteration 0, so the test fails
+    loudly on that path.
+    """
+
+    async def dispatcher(tool_name: str, args: dict, ctx: Any) -> dict:
+        return {"some": "result"}
+
+    session = _make_session(
+        session_id="sess-uncapped-iter",
+        max_iterations=-1,
+        stagnation_threshold=10_000,
+    )
+    backend.save_session(session)
+    engine = _make_engine(backend, dispatcher)
+
+    # Drive 105 iterations. With ``max_iterations=-1`` the cascade
+    # cannot fire ``("terminate", "max_iterations")`` at all, so every
+    # verdict must be a non-terminal one.
+    for _ in range(105):
+        record = await engine.run_iteration(session["session_id"])
+        assert record["verdict"] not in ("terminate", "complete"), (
+            f"Loop terminated unexpectedly on iteration "
+            f"{record['iteration_index']}: "
+            f"{record['verdict']} / {record['verdict_reason']}"
+        )
+
+    persisted = backend.load_session(session["session_id"])
+    assert persisted is not None
+    assert len(persisted["iterations"]) == 105
+    assert persisted["status"] == "running"
 
 
 # ---------------------------------------------------------------------------
@@ -693,7 +742,6 @@ async def test_run_iteration_dispatches_script_through_sandbox_runner(
         tool_dispatcher=dispatcher,
         sampling_callable=None,
         sandbox_runner=fake_sandbox_runner,
-        cost_estimators={},
     )
 
     def fake_deterministic_strategy(self_engine: Any, sess: dict) -> dict:
@@ -810,7 +858,6 @@ async def test_run_iteration_translates_script_rejected_from_runner(
         tool_dispatcher=dispatcher,
         sampling_callable=None,
         sandbox_runner=fake_sandbox_runner,
-        cost_estimators={},
     )
 
     def fake_deterministic_strategy(self_engine: Any, sess: dict) -> dict:
@@ -881,7 +928,6 @@ async def test_run_iteration_translates_sandbox_terminated_from_runner(
         tool_dispatcher=dispatcher,
         sampling_callable=None,
         sandbox_runner=fake_sandbox_runner,
-        cost_estimators={},
     )
 
     def fake_deterministic_strategy(self_engine: Any, sess: dict) -> dict:
@@ -1025,7 +1071,6 @@ async def test_engine_uses_sampling_used_strategy_when_sampling_callable_returns
         tool_dispatcher=dispatcher,
         sampling_callable=sampling_callable,
         sandbox_runner=None,
-        cost_estimators={},
     )
 
     record = await engine.run_iteration(session["session_id"])
@@ -1132,7 +1177,6 @@ async def test_engine_falls_back_when_sampling_callable_returns_sampling_fallbac
         tool_dispatcher=dispatcher,
         sampling_callable=sampling_callable,
         sandbox_runner=None,
-        cost_estimators={},
     )
 
     await engine.run_iteration(session["session_id"])
@@ -1217,7 +1261,6 @@ async def test_engine_legacy_dict_sampling_callable_still_works(
         tool_dispatcher=dispatcher,
         sampling_callable=sampling_callable,
         sandbox_runner=None,
-        cost_estimators={},
     )
 
     await engine.run_iteration(session["session_id"])
@@ -1293,7 +1336,6 @@ async def test_engine_final_lessons_callable_overlays_lessons(
         tool_dispatcher=dispatcher,
         sampling_callable=None,
         sandbox_runner=None,
-        cost_estimators={},
         final_lessons_callable=final_lessons_callable,
     )
 
@@ -1362,7 +1404,6 @@ async def test_engine_final_lessons_callable_failure_keeps_template(
         tool_dispatcher=dispatcher,
         sampling_callable=None,
         sandbox_runner=None,
-        cost_estimators={},
         final_lessons_callable=final_lessons_callable,
     )
 

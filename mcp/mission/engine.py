@@ -79,6 +79,7 @@ from .types import (
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Flowchart(s) generated from this file:
 #   * ``MissionEngine.run_iteration`` -> ``diagrams/code_diagrams/mcp/mission/engine.MissionEngine_run_iteration.html``
+#     (PNG: ``diagrams/code_diagrams/mcp/mission/engine.MissionEngine_run_iteration.png``)
 # Regenerate with ``python diagrams/code_diagrams/generate.py``.
 # <pyflowchart-code-diagram> END
 
@@ -153,7 +154,6 @@ SandboxRunner = Callable[
     [str, Any, ToolDispatcher],
     Awaitable[tuple[dict[str, Any], list[ToolCallRecord]]],
 ]
-CostEstimator = Callable[[dict[str, Any]], float]
 
 
 @dataclass
@@ -178,11 +178,6 @@ class MissionEngine:
       tool_dispatcher) -> (observation_dict, script_call_log)``. ``None``
       means the engine refuses any scripted strategy with a clear
       error instead of silently executing operator-supplied code.
-    * ``cost_estimators`` — per-tool cost-estimator functions keyed by
-      tool name. Each estimator takes the tool's args dict and returns
-      a USD float. Tools without an estimator contribute ``0.0`` to
-      the session's accumulated cost; the validator already warned at
-      session start about missing estimators on cost-incurring tools.
     * ``now`` — injectable clock. Defaults to a UTC clock; tests pin it
       so deterministic verdicts (the Decide_Phase consults the clock
       for budget caps and for the cadence resolver) are reproducible.
@@ -192,7 +187,6 @@ class MissionEngine:
     tool_dispatcher: ToolDispatcher
     sampling_callable: SamplingCallable | None
     sandbox_runner: SandboxRunner | None
-    cost_estimators: dict[str, CostEstimator]
     now: Callable[[], datetime] = field(default_factory=_default_now)
     # Optional async callable that drives the Final_Report's
     # ``lessons`` and ``recommended_followups`` overlay. Loose typing
@@ -692,8 +686,8 @@ class MissionEngine:
           stored on ``record["script_call_log"]``.
 
         For both modes, every successful call (or each successful
-        embedded call in script mode) contributes its cost-estimator
-        output to the session's ``accumulated_cost_usd``.
+        embedded call in script mode) is recorded into the iteration
+        record for audit and replay.
         """
 
         async def body() -> list[ToolCallRecord]:
@@ -764,6 +758,7 @@ class MissionEngine:
         ctx: Any | None,
     ) -> ToolCallRecord:
         """Invoke one allowlisted tool through the dispatcher."""
+        del session  # accepted for symmetry with the execute path; unused
         started = self.now()
         try:
             result = await self.tool_dispatcher(tool_name, args, ctx)
@@ -778,12 +773,6 @@ class MissionEngine:
                 "error_message": f"{type(exc).__name__}: {exc}"[:200],
             }
         duration_ms = self._elapsed_ms(started)
-        cost = self._estimate_cost(tool_name, args)
-        # ``accumulated_cost_usd`` is a float and the validator caps
-        # are USD; we keep the running total here so the Decide_Phase
-        # can compare it against ``budget["max_cost_usd"]`` without
-        # re-walking the iteration history.
-        session["accumulated_cost_usd"] = (session.get("accumulated_cost_usd", 0.0) or 0.0) + cost
         record: ToolCallRecord = {
             "tool_name": tool_name,
             "args": args,
@@ -791,8 +780,6 @@ class MissionEngine:
             "result_summary": result,
             "duration_ms": duration_ms,
         }
-        if cost:
-            record["cost_usd"] = cost
         return record
 
     async def _execute_script(
@@ -840,6 +827,7 @@ class MissionEngine:
         failed Execute_Phase, which is the right behaviour even
         without per-class translation.
         """
+        del session  # accepted for symmetry with the execute path; unused
         if self.sandbox_runner is None:
             raise MissionEngineError("script_rejected")
         script = strategy["script"]
@@ -883,14 +871,6 @@ class MissionEngine:
                 record["script_call_log"] = cast(
                     "list[ToolCallRecord]", list(exc.partial_script_call_log)
                 )
-                # Fold per-call costs from the partial log onto the
-                # engine's loaded session so a partial script that
-                # made cost-incurring calls before being killed
-                # contributes those costs to the accumulator. The
-                # cost cap path in Decide_Phase reads the same
-                # ``accumulated_cost_usd`` value the direct-dispatch
-                # path would have produced.
-                self._accumulate_script_costs(session, exc.partial_script_call_log)
                 # Build a minimal Observation from the partial
                 # logs so Evaluate_Phase has the same shape it
                 # would have on a successful sandbox run. Missing
@@ -920,64 +900,7 @@ class MissionEngine:
         # pre-built Observation.
         record["script_call_log"] = cast("list[ToolCallRecord]", list(script_call_log))
         record["observation"] = cast(Observation, dict(observation_dict))
-        # Fold per-call costs from the successful run onto the
-        # session so the Decide_Phase's ``_cost_exceeded`` check sees
-        # the same running total it would on the direct-dispatch
-        # path. The wrapper records ``cost_usd`` on each call record;
-        # the engine is the single place where those per-call costs
-        # land on the live session record.
-        self._accumulate_script_costs(session, script_call_log)
         return list(script_call_log)
-
-    def _accumulate_script_costs(
-        self,
-        session: SessionState,
-        call_log: list[dict[str, Any]] | list[ToolCallRecord],
-    ) -> None:
-        """Fold per-call ``cost_usd`` from a script call log onto the session.
-
-        The in-script tool wrapper records ``cost_usd`` on each
-        successful :class:`ToolCallRecord` (or omits it for tools
-        without an estimator). Walking the log here, after the
-        sandbox returns, lets the engine treat the sandbox as a
-        construction-time-immutable component that does not have to
-        hold a live reference to the session record. Both the
-        successful-return path and the
-        :class:`SandboxTerminated` partial-log path call this so a
-        script that made cost-incurring calls before being killed
-        still contributes those costs to the running total.
-        """
-        for call in call_log:
-            cost = call.get("cost_usd") if isinstance(call, dict) else None
-            if cost is None:
-                continue
-            if not isinstance(cost, (int, float)) or isinstance(cost, bool):
-                continue
-            session["accumulated_cost_usd"] = (
-                session.get("accumulated_cost_usd", 0.0) or 0.0
-            ) + float(cost)
-
-    def _estimate_cost(self, tool_name: str, args: dict[str, Any]) -> float:
-        """Return the cost estimate for one successful call, or 0.0.
-
-        Tools without a registered estimator contribute 0.0; the
-        validator already warned about missing estimators on
-        cost-incurring tools at session start, so the engine's job
-        here is simply to honour whatever map the caller supplied.
-        Any exception raised by the estimator is treated as a 0.0
-        cost — a flaky estimator must not be allowed to fail an
-        Execute_Phase.
-        """
-        estimator = self.cost_estimators.get(tool_name)
-        if estimator is None:
-            return 0.0
-        try:
-            value = estimator(args)
-        except Exception:
-            return 0.0
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            return 0.0
-        return float(value)
 
     def _elapsed_ms(self, started: datetime) -> int:
         """Return integer milliseconds elapsed since ``started``."""
