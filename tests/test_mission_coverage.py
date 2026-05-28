@@ -608,15 +608,59 @@ class TestEvaluatePhaseHelpers:
         assert result[0] == "met"
         assert result[1] == {"event_name": "started", "x": 1}
 
-    def test_predicate_evaluator_inconclusive_when_no_cached_ast(self) -> None:
-        """A predicate criterion without ``_parsed_ast`` is inconclusive."""
+    def test_predicate_evaluator_reparses_when_no_cached_ast(self) -> None:
+        """A predicate criterion without ``_parsed_ast`` is re-parsed.
+
+        Persistence layers strip the cached AST before serialisation,
+        so a session reloaded from disk must still evaluate predicates
+        correctly. The evaluator re-parses ``expression`` on demand
+        and runs against the observation as if the cache were warm.
+        """
         from mission.engine import MissionEngine
 
         result = MissionEngine._evaluate_predicate(
             {"expression": "True"},  # type: ignore[arg-type]
             {"metrics": {}},
         )
+        assert result[0] == "met"
+        assert result[1] is True
+
+    def test_predicate_evaluator_inconclusive_when_no_expression_either(self) -> None:
+        """A predicate without a cached AST AND no expression → inconclusive.
+
+        Only triggers under degenerate input (a malformed criterion the
+        validator never accepted). The evaluator surfaces the rejection
+        rather than crashing.
+        """
+        from mission.engine import MissionEngine
+
+        result = MissionEngine._evaluate_predicate(
+            {"expression": ""},  # type: ignore[arg-type]
+            {"metrics": {}},
+        )
         assert result[0] == "inconclusive"
+        assert result[1] == "predicate_ast_not_cached"
+
+    def test_predicate_evaluator_rejects_tampered_expression_post_load(self) -> None:
+        """A post-load tampered ``expression`` surfaces as inconclusive.
+
+        Confirms a post-load tampering of ``expression`` cannot bypass
+        the predicate sandbox: ``parse_predicate`` raises
+        :class:`PredicateRejected`, and the evaluator translates that
+        into a stable ``inconclusive`` evidence string rather than
+        propagating the exception to the iteration record.
+        """
+        from mission.engine import MissionEngine
+
+        result = MissionEngine._evaluate_predicate(
+            # Cached AST stripped (post-load shape) and expression
+            # tampered into a disallowed construct.
+            {"expression": "__import__('os')"},  # type: ignore[arg-type]
+            {},
+        )
+        assert result[0] == "inconclusive"
+        assert isinstance(result[1], str)
+        assert result[1].startswith("predicate_rejected_post_load:")
 
     def test_predicate_evaluator_handles_runtime_error(self) -> None:
         """A predicate AST that raises at evaluation time → inconclusive."""

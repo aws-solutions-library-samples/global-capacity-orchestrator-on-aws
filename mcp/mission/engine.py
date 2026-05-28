@@ -59,7 +59,7 @@ from typing import Any, cast
 
 from . import audit, decide, final_report
 from .checkpoints import mark_checkpoint
-from .predicate import evaluate_predicate
+from .predicate import PredicateRejected, evaluate_predicate, parse_predicate
 from .sampling import SamplingFallback, SamplingUsed
 from .types import (
     TERMINAL_STATES,
@@ -1107,12 +1107,30 @@ class MissionEngine:
 
     @staticmethod
     def _evaluate_predicate(criterion: Criterion, observation: dict[str, Any]) -> tuple[str, Any]:
-        """Run the cached parsed AST against the Observation."""
+        """Run the cached parsed AST against the Observation.
+
+        The validator caches an :class:`ast.Expression` under
+        ``_parsed_ast`` when ``validate_criteria`` runs in-process.
+        Persistence layers strip that key before serialisation (the
+        AST node is not JSON-safe), so a session reloaded from disk
+        carries criteria *without* ``_parsed_ast``. We detect the
+        missing cache and re-parse on demand from ``expression``;
+        the parser was already accepted at validation time so a
+        re-parse is a pure no-op short of re-reading the source. A
+        post-load tampering with ``expression`` would cause
+        :class:`PredicateRejected`, which we surface as a structured
+        ``inconclusive`` evidence string rather than letting it
+        propagate.
+        """
         parsed = criterion.get("_parsed_ast")
         if parsed is None:
-            # The validator should always cache the AST; if it didn't,
-            # treat the criterion as inconclusive rather than skipping.
-            return "inconclusive", "predicate_ast_not_cached"
+            expression = criterion.get("expression")
+            if not isinstance(expression, str) or not expression:
+                return "inconclusive", "predicate_ast_not_cached"
+            try:
+                parsed = parse_predicate(expression)
+            except PredicateRejected as exc:
+                return "inconclusive", f"predicate_rejected_post_load: {exc.reason}"
         try:
             value = evaluate_predicate(parsed, observation)
         except Exception as exc:
