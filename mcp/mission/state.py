@@ -330,13 +330,13 @@ class DynamoDBBackend:
     so a fresh checkout (or CI run without the env var set) lines up
     with the default project name in ``cli/config.py``.
 
-    A dedicated SSM helper does not yet exist in ``cli/aws_client.py``
-    (the closest neighbour, ``check_ssm_parameter`` in
-    ``cli/analytics_user_mgmt.py``, only verifies existence and returns
-    a boolean). Rather than introduce a new ``mcp -> cli`` import edge
-    just to thread a one-line ``get_parameter`` call through, this
-    backend does the lookup inline with ``boto3.client("ssm")`` —
-    matching the established pattern in ``cli/models.py``.
+    The SSM lookup goes through :func:`gco.services.aws_ssm.get_ssm_parameter`,
+    the shared helper that consolidates the pattern previously duplicated
+    across ``cli/models.py``, ``cli/analytics_user_mgmt.py``, and
+    ``gco/services/health_monitor.py``. Putting the helper under
+    ``gco/services/`` (rather than ``cli/aws_client.py``) keeps
+    ``mcp/`` free of the forbidden ``mcp -> cli`` import edge while
+    still letting every backend share one implementation.
     """
 
     def __init__(self, table_name: str | None = None) -> None:
@@ -358,14 +358,12 @@ class DynamoDBBackend:
         if self._table_name is not None:
             return self._table_name
 
-        import boto3
+        from gco.services.aws_ssm import get_ssm_parameter
 
         project_name = os.environ.get("GCO_PROJECT_NAME", "gco")
         param_name = f"/{project_name}/missions-table-name"
 
-        ssm = boto3.client("ssm")
-        response = ssm.get_parameter(Name=param_name)
-        self._table_name = response["Parameter"]["Value"]
+        self._table_name = get_ssm_parameter(param_name)
         return self._table_name
 
     def _get_table(self) -> Any:  # pragma: no cover - boto3 resource

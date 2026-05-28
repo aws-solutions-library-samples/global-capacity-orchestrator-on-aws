@@ -434,16 +434,17 @@ def check_stack_complete(region: str, stack_name: str) -> tuple[bool, str]:
 
 
 def check_ssm_parameter(region: str, param_name: str) -> tuple[bool, str]:
-    """Return ``(True, "")`` iff the SSM parameter exists in ``region``."""
-    import boto3
-    from botocore.exceptions import BotoCoreError, ClientError
+    """Return ``(True, "")`` iff the SSM parameter exists in ``region``.
 
-    try:
-        ssm = boto3.client("ssm", region_name=region)
-        ssm.get_parameter(Name=param_name)
-        return True, ""
-    except (ClientError, BotoCoreError) as exc:
-        return False, str(exc)
+    Thin alias over :func:`gco.services.aws_ssm.check_ssm_parameter`
+    that preserves the historical positional ``(region, param_name)``
+    argument order. Kept as a re-export so existing callers and the
+    public ``__all__`` surface stay stable; new code should reach for
+    the keyword-style helper directly.
+    """
+    from gco.services.aws_ssm import check_ssm_parameter as _check
+
+    return _check(param_name, region=region)
 
 
 def scan_orphan_analytics_resources(region: str) -> list[str]:

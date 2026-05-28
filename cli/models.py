@@ -32,10 +32,13 @@ class ModelManager:
         if self._bucket_name:
             return self._bucket_name
 
-        ssm = boto3.client("ssm", region_name=self.config.global_region)
+        from gco.services.aws_ssm import get_ssm_parameter
+
         try:
-            response = ssm.get_parameter(Name=f"/{self.config.project_name}/model-bucket-name")
-            self._bucket_name = response["Parameter"]["Value"]
+            self._bucket_name = get_ssm_parameter(
+                f"/{self.config.project_name}/model-bucket-name",
+                region=self.config.global_region,
+            )
             return self._bucket_name
         except Exception as e:
             raise RuntimeError(

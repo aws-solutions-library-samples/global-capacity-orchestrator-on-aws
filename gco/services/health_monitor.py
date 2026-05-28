@@ -554,18 +554,16 @@ class HealthMonitor:
             # Compare with SSM parameter
             import os
 
-            import boto3
+            from gco.services.aws_ssm import (
+                get_ssm_parameter_optional,
+                put_ssm_parameter,
+            )
 
             global_region = os.environ.get("GLOBAL_REGION", "us-east-2")
             project_name = os.environ.get("PROJECT_NAME", "gco")
-            ssm = boto3.client("ssm", region_name=global_region)
             param_name = f"/{project_name}/alb-hostname-{self.region}"
 
-            try:
-                resp = ssm.get_parameter(Name=param_name)
-                stored_hostname = resp["Parameter"]["Value"]
-            except ssm.exceptions.ParameterNotFound:
-                stored_hostname = None
+            stored_hostname = get_ssm_parameter_optional(param_name, region=global_region)
 
             if stored_hostname != current_hostname:
                 logger.warning(
@@ -573,11 +571,12 @@ class HealthMonitor:
                     stored_hostname,
                     current_hostname,
                 )
-                ssm.put_parameter(
-                    Name=param_name,
-                    Value=current_hostname,
-                    Type="String",
-                    Overwrite=True,
+                put_ssm_parameter(
+                    param_name,
+                    current_hostname,
+                    region=global_region,
+                    parameter_type="String",
+                    overwrite=True,
                 )
                 logger.info("Updated SSM parameter %s to %s", param_name, current_hostname)
 
