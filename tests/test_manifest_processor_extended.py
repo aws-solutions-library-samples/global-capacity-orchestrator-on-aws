@@ -1363,8 +1363,24 @@ _anchor_name = st.from_regex(r"[a-zA-Z_][a-zA-Z0-9_\-]{0,19}", fullmatch=True)
 # Strategy: generate simple scalar values for the anchor target
 _scalar_value = st.from_regex(r"[a-z][a-z0-9]{0,15}", fullmatch=True)
 
-# Strategy: generate a simple key name for YAML mappings
-_yaml_key = st.from_regex(r"[a-z][a-z0-9_]{0,10}", fullmatch=True)
+# YAML 1.1 reserved tokens that PyYAML's SafeLoader coerces to bool / None
+# when used as bare scalars. The mapping-key tests below look up
+# ``result[key]`` after parsing, so a generated key like ``"no"`` would
+# resolve to ``False`` in the parsed dict and the lookup would raise
+# KeyError. Excluding these tokens keeps the test focused on the
+# alias-resolution semantics it was written to exercise. The regex below
+# is lowercase-only because ``_yaml_key`` itself is lowercase-only;
+# capitalised forms (``Yes``, ``True``, …) cannot be drawn.
+_YAML_11_RESERVED_KEYS = frozenset(
+    {"y", "n", "yes", "no", "true", "false", "on", "off", "null"}
+)
+
+# Strategy: generate a simple key name for YAML mappings. Filtered to
+# exclude YAML 1.1 reserved scalar tokens so generated keys round-trip
+# through PyYAML as strings rather than coerced booleans / None.
+_yaml_key = st.from_regex(r"[a-z][a-z0-9_]{0,10}", fullmatch=True).filter(
+    lambda s: s not in _YAML_11_RESERVED_KEYS
+)
 
 
 class TestYamlAnchorAliasRejectionProperty:

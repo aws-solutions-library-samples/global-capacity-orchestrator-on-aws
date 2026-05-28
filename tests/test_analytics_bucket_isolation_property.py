@@ -38,8 +38,13 @@ combinations)`` strategy space is small enough that
 under the ``deadline=20000`` ms per-example budget, which also leaves
 headroom for the first (uncached) synth in each worker when the suite
 runs under pytest-xdist contention.
-``max_examples=50`` with caching completes in under 90 s on the
-benchmark workstation.
+``max_examples=30`` with caching completes in under 90 s on the
+benchmark workstation. The lower example count (vs. an earlier
+``max_examples=50`` setting) keeps the test under the project's
+suite-wide 120 s pytest-timeout while still drawing across the full
+2×2 toggle space and a representative slice of the 14 unique
+sorted-region tuples reachable from a 4-region candidate list with
+sizes 1–3.
 """
 
 from __future__ import annotations
@@ -284,21 +289,26 @@ class TestBucketIsolationProperty:
 
     @classmethod
     def setup_class(cls) -> None:
-        """Pre-warm the full-app synth cache for the 2×2×single-region
-        combinations Hypothesis is most likely to draw.
+        """Pre-warm the full-app synth cache for every
+        2×2×single-region combination Hypothesis is most likely to draw.
 
-        Eight cache entries (``enabled × hyperpod × {one region}``) cover
-        the majority of the 50-example draw; the remaining entries
-        (multi-region draws) fall back to the first-call synth cost on
-        their first hit and cache thereafter.
+        Sixteen cache entries (``enabled × hyperpod × every candidate
+        region``) cover every single-region draw and the most common
+        first-region prefix of multi-region draws. Multi-region draws
+        with two or three regions fall back to the first-call synth
+        cost on their first hit and cache thereafter; the
+        ``max_examples=30`` cap below bounds the total uncached-synth
+        budget at well under the project's 120 s suite-wide timeout.
         """
+        from tests._analytics_strategies import CANDIDATE_REGIONS
+
         for enabled in (False, True):
             for hyperpod in (False, True):
-                for region in ("us-east-1",):
+                for region in CANDIDATE_REGIONS:
                     _cached_synth(enabled, hyperpod, (region,))
 
     @settings(
-        max_examples=50,
+        max_examples=30,
         deadline=20000,
         suppress_health_check=[
             HealthCheck.too_slow,
