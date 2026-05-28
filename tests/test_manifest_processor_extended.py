@@ -1371,9 +1371,7 @@ _scalar_value = st.from_regex(r"[a-z][a-z0-9]{0,15}", fullmatch=True)
 # alias-resolution semantics it was written to exercise. The regex below
 # is lowercase-only because ``_yaml_key`` itself is lowercase-only;
 # capitalised forms (``Yes``, ``True``, …) cannot be drawn.
-_YAML_11_RESERVED_KEYS = frozenset(
-    {"y", "n", "yes", "no", "true", "false", "on", "off", "null"}
-)
+_YAML_11_RESERVED_KEYS = frozenset({"y", "n", "yes", "no", "true", "false", "on", "off", "null"})
 
 # Strategy: generate a simple key name for YAML mappings. Filtered to
 # exclude YAML 1.1 reserved scalar tokens so generated keys round-trip

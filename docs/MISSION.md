@@ -99,8 +99,8 @@ Resolution precedence at session start:
 
 Defaults:
 
-* Model — `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Override via `GCO_MISSION_BEDROCK_MODEL_ID` or `--bedrock-model-id`.
-* Region — `us-east-1`. Override via `GCO_MISSION_BEDROCK_REGION`.
+- Model — `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Override via `GCO_MISSION_BEDROCK_MODEL_ID` or `--bedrock-model-id`.
+- Region — `us-east-1`. Override via `GCO_MISSION_BEDROCK_REGION`.
 
 Every sampling attempt emits one structured audit event (`sampling_purpose`, `sampling_status`, `sampling_backend`, `sampling_model_id`, `model_output_bytes`, `validation_error`). Sampling rejections (transport errors, malformed JSON, schema mismatch, allowlist or budget violations, AST rejections on proposed scripts) cause an automatic deterministic fallback — the iteration still runs.
 
@@ -182,8 +182,8 @@ The MCP surface mirrors the CLI. All nine tools are gated by `GCO_ENABLE_MISSION
 
 Two resource templates expose session state:
 
-* `mission://sessions/{session_id}` — the live session JSON. Available as soon as the session exists.
-* `mission://sessions/{session_id}/report` — the Final_Report JSON. Available once the session reaches a terminal state (`completed`, `terminated`, `failed`).
+- `mission://sessions/{session_id}` — the live session JSON. Available as soon as the session exists.
+- `mission://sessions/{session_id}/report` — the Final_Report JSON. Available once the session reaches a terminal state (`completed`, `terminated`, `failed`).
 
 Tool-only clients reach both resources through the synthetic `read_resource` tool produced by the Resources As Tools transform.
 
