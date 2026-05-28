@@ -82,7 +82,7 @@ A loss-keyword directive produces a `metric_threshold`:
     "criterion_id": "loss_target",
     "kind": "metric_threshold",
     "required": true,
-    "metric": "val_loss",
+    "metric": "metrics.val_loss",
     "op": "<=",
     "target": 0.1
   }
@@ -320,7 +320,7 @@ cat > criteria.json <<'EOF'
   {"criterion_id": "loss",
    "kind": "metric_threshold",
    "required": true,
-   "metric": "val_loss", "op": "<", "target": 0.1}
+   "metric": "metrics.val_loss", "op": "<", "target": 0.1}
 ]
 EOF
 

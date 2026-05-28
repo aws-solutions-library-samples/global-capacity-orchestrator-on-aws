@@ -133,6 +133,17 @@ def _build_metric_threshold(directive: str, captured: str, op: str) -> dict[str,
     common validation-loss / val-accuracy convention; the target is a
     placeholder the operator should override (0.1 for lower-is-better
     metrics, 0.9 for higher-is-better metrics).
+
+    The dot-path is prefixed with ``metrics.`` because the engine's
+    Observe_Phase merges the dispatcher's top-level ``metrics`` dict
+    into the Observation under the ``metrics`` key, and the
+    ``_evaluate_metric_threshold`` resolver walks the path against the
+    Observation root. A bare ``val_loss`` (no prefix) would land on
+    every iteration as ``inconclusive: metric_path_missing`` because
+    the Observation's top level carries ``tool_results``, ``metrics``,
+    ``events`` — not loose metric values. See
+    :data:`tests.test_mission_e2e_train_to_loss` for the canonical
+    end-to-end shape this prefix lines up with.
     """
     slug = _slugify(captured, fallback="metric")
     target = 0.1 if op in ("<", "<=") else 0.9
@@ -141,7 +152,7 @@ def _build_metric_threshold(directive: str, captured: str, op: str) -> dict[str,
         "criterion_id": f"{slug}_target",
         "kind": "metric_threshold",
         "required": True,
-        "metric": metric_name,
+        "metric": f"metrics.{metric_name}",
         "op": op,
         "target": target,
     }

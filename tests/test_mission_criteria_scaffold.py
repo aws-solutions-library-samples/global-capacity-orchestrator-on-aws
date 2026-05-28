@@ -57,7 +57,12 @@ class TestDeterministicLossKeyword:
         c = result[0]
         assert c["kind"] == "metric_threshold"
         assert c["op"] == "<="
-        assert c["metric"] == "latency"
+        # The metric path is prefixed with ``metrics.`` so the engine's
+        # dot-path resolver against the Observation root picks up the
+        # value the dispatcher returns under ``{"metrics": {...}}``.
+        # Without the prefix the criterion would land as
+        # ``inconclusive: metric_path_missing`` on every iteration.
+        assert c["metric"] == "metrics.latency"
 
 
 class TestDeterministicHigherIsBetter:
@@ -77,7 +82,10 @@ class TestDeterministicHigherIsBetter:
         result = criteria_scaffold.generate_deterministic_criteria("Increase throughput.")
         assert len(result) == 1
         assert result[0]["op"] == ">="
-        assert result[0]["metric"] == "throughput"
+        # See the latency-keyword test above for the ``metrics.`` prefix
+        # rationale — the dispatcher emits ``{"metrics": {...}}`` and the
+        # engine's metric-path resolver walks against the Observation root.
+        assert result[0]["metric"] == "metrics.throughput"
 
 
 class TestDeterministicSearchKeyword:
