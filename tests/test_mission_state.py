@@ -282,3 +282,112 @@ def test_dynamodb_backend_smoke() -> None:
     type, which is verified by simply importing the module at the top
     of this file.
     """
+
+
+# ---------------------------------------------------------------------------
+# Defense-in-depth: persistence layer strips _parsed_ast
+# ---------------------------------------------------------------------------
+
+
+def test_save_session_strips_parsed_ast_defensively(backend: FilesystemBackend) -> None:
+    """``save_session`` must succeed on a session that still carries cached AST.
+
+    Pin the persistence-layer's defense-in-depth strip. The validators
+    in ``mcp/mission/validation.py`` attach a cached
+    :class:`ast.Expression` under ``_parsed_ast`` on every
+    ``predicate`` criterion. Earlier slices required every caller to
+    strip those keys before hand-off; a single missed callsite caused
+    a real production bug where ``mission_start`` raised
+    ``TypeError('Object of type Expression is not JSON serializable')``
+    on every predicate criterion.
+
+    The fix moved the strip to ``FilesystemBackend.save_session`` so
+    every callsite is correct by construction. This test pins that
+    contract: a session whose criteria still carry ``_parsed_ast``
+    must round-trip without any caller-side intervention.
+    """
+    from mission.predicate import parse_predicate
+
+    session = _make_session(session_id="sess-with-cached-ast")
+    # Replace the metric_threshold criterion with a predicate carrying
+    # the parser-attached ast.Expression cache. ``parse_predicate``
+    # returns the same shape ``validate_criteria`` would attach.
+    parsed_ast = parse_predicate("len(obs['tool_results']) > 0")
+    session["criteria"] = [
+        {
+            "criterion_id": "predicate_with_cached_ast",
+            "kind": "predicate",
+            "required": True,
+            "expression": "len(obs['tool_results']) > 0",
+            "_parsed_ast": parsed_ast,
+        }
+    ]
+
+    # The save would have raised TypeError pre-fix because
+    # json.dump can't serialize ast.Expression. Post-fix the strip
+    # at save_session time keeps the call correct.
+    backend.save_session(session)  # type: ignore[arg-type]
+
+    # Round-trip — the loaded session has the criteria minus the
+    # private cache. The expression string is preserved so the engine
+    # re-parses on demand.
+    loaded = backend.load_session("sess-with-cached-ast")
+    assert loaded is not None
+    crits = loaded["criteria"]
+    assert len(crits) == 1
+    crit = crits[0]
+    assert crit["criterion_id"] == "predicate_with_cached_ast"
+    assert crit["expression"] == "len(obs['tool_results']) > 0"
+    # The cached AST is gone — that's the whole point.
+    assert "_parsed_ast" not in crit
+
+
+def test_save_session_strips_parsed_ast_from_iteration_history(
+    backend: FilesystemBackend,
+) -> None:
+    """Iteration history's ``criteria_evaluation`` shape is also stripped.
+
+    When the engine writes an iteration record after an Evaluate_Phase
+    that ran predicate criteria, the ``criteria_evaluation`` entries
+    can carry the same ``_parsed_ast`` cache. The strip walks both
+    ``criteria`` and ``iterations`` so the on-disk JSON is fully
+    portable regardless of which path produced the in-memory shape.
+    """
+    from mission.predicate import parse_predicate
+
+    parsed_ast = parse_predicate("True")
+    session = _make_session(session_id="sess-iter-history-strip")
+    session["iterations"] = [
+        {
+            "iteration_index": 0,
+            "started_at": "2025-01-01T00:00:00Z",
+            "ended_at": "2025-01-01T00:00:01Z",
+            "phases": [],
+            "strategy": {},
+            "observation": {},
+            "criteria_evaluation": [
+                {
+                    "criterion_id": "p1",
+                    "status": "met",
+                    "evidence": True,
+                    "_parsed_ast": parsed_ast,
+                }
+            ],
+            "verdict": "complete",
+            "verdict_reason": "criteria_met",
+            "checkpoint_evaluated": True,
+        }
+    ]
+
+    backend.save_session(session)  # type: ignore[arg-type]
+
+    loaded = backend.load_session("sess-iter-history-strip")
+    assert loaded is not None
+    iterations = loaded.get("iterations") or []
+    assert len(iterations) == 1
+    eval_entries = iterations[0].get("criteria_evaluation") or []
+    assert len(eval_entries) == 1
+    assert eval_entries[0]["criterion_id"] == "p1"
+    assert eval_entries[0]["status"] == "met"
+    # The cached AST in the iteration evaluation is gone too.
+    assert "_parsed_ast" not in eval_entries[0]

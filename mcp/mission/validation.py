@@ -33,6 +33,7 @@ Design notes:
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any, Final, cast
 
 from . import predicate
@@ -684,3 +685,111 @@ def validate_strategy(
             )
         normalized["rationale"] = rationale
     return cast("Strategy", normalized)
+
+
+# ---------------------------------------------------------------------------
+# JSON-safety strippers
+# ---------------------------------------------------------------------------
+#
+# Why these live here rather than next to the persistence backend or
+# next to each call site: the only key that needs stripping today is
+# ``_parsed_ast``, which is also created here (by ``validate_criteria``
+# attaching the cached :class:`ast.Expression` to predicate criteria).
+# Putting the strippers next to the producer keeps the lifecycle
+# obvious — anyone who reads ``validate_criteria`` sees the matching
+# ``strip_private_fields`` helper one screen down.
+#
+# Three earlier slices each had their own near-duplicate implementation
+# (``cli/commands/mission_cmd.py::_strip_private_criteria``,
+# ``mcp/tools/mission.py::_strip_private_fields`` plus the iterations
+# variant, ``mcp/resources/mission.py::_strip_private_fields``). Those
+# now delegate here so a single source of truth governs the JSON-safety
+# contract.
+
+# Sentinel marking which keys count as "private" — anything starting
+# with an underscore. ``ast.Expression`` is the only object the
+# validators currently attach, but the rule is intentionally broad so
+# a future cache (a normalised JSON-Pointer for the metric path, a
+# pre-resolved tool-tag set) can ride on the same convention without
+# breaking persistence.
+_PRIVATE_PREFIX: Final[str] = "_"
+
+
+def _is_public_key(key: Any) -> bool:
+    """Return True iff ``key`` is a non-private dict key."""
+    return not str(key).startswith(_PRIVATE_PREFIX)
+
+
+def _strip_private_dict(d: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a shallow copy of ``d`` with private keys removed."""
+    return {k: v for k, v in d.items() if _is_public_key(k)}
+
+
+def strip_private_fields(session: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a JSON-safe copy of ``session`` with private criterion keys dropped.
+
+    Walks ``session["criteria"]`` and ``session["iterations"]`` and
+    drops any leading-underscore keys from each Criterion dict and
+    each ``criteria_evaluation`` entry on each iteration. Other
+    fields pass through verbatim — the strip is intentionally narrow
+    so a future field that legitimately starts with an underscore
+    (e.g. ``_meta`` for backwards compatibility) doesn't get
+    silently eaten outside the criterion / criterion-eval shapes.
+
+    Args:
+        session: Any session-shaped mapping; usually a
+            :class:`SessionState` ``TypedDict`` but the function is
+            duck-typed against ``Mapping[str, Any]`` so callers can
+            pass a partial session under construction without first
+            casting to the full type.
+
+    Returns:
+        A shallow copy of ``session`` with the criterion and
+        criterion-eval shapes cleaned. The original is never mutated.
+    """
+    cleaned: dict[str, Any] = dict(session)
+    criteria = cleaned.get("criteria")
+    if isinstance(criteria, list):
+        cleaned["criteria"] = [
+            _strip_private_dict(c) if isinstance(c, Mapping) else c for c in criteria
+        ]
+    iterations = cleaned.get("iterations")
+    if isinstance(iterations, list):
+        cleaned["iterations"] = strip_private_fields_iterations(iterations)
+    return cleaned
+
+
+def strip_private_fields_iterations(
+    iterations: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Strip private keys from each iteration's ``criteria_evaluation`` shape.
+
+    The Decide_Phase appends ``CriterionResult`` entries under
+    ``iteration["criteria_evaluation"]``. When a criterion is a
+    ``predicate``, the entry carries the same ``_parsed_ast`` cache
+    as the source criterion. Drop those keys so the iteration
+    history is JSON-safe.
+
+    Args:
+        iterations: A sequence of iteration dicts. Non-dict entries
+            (which shouldn't appear in a typed iteration list, but
+            could surface from a corrupt on-disk file) pass through
+            verbatim so the caller can still observe the corruption.
+
+    Returns:
+        A new list of shallow-copied iteration dicts. The originals
+        are never mutated.
+    """
+    out: list[dict[str, Any]] = []
+    for iteration in iterations:
+        if not isinstance(iteration, Mapping):
+            out.append(cast("dict[str, Any]", iteration))
+            continue
+        copy = dict(iteration)
+        evals = copy.get("criteria_evaluation")
+        if isinstance(evals, list):
+            copy["criteria_evaluation"] = [
+                _strip_private_dict(e) if isinstance(e, Mapping) else e for e in evals
+            ]
+        out.append(copy)
+    return out

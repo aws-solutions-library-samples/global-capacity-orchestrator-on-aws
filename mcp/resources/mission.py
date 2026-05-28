@@ -40,20 +40,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 def _strip_private_fields(session: Mapping[str, Any]) -> dict[str, Any]:
     """Return a JSON-safe copy of ``session`` with private criterion keys dropped.
 
-    The validators cache an ``ast.Expression`` on each predicate
-    Criterion under ``_parsed_ast``; that object is not JSON-
-    serialisable. Strip every leading-underscore key from each
-    Criterion dict so :func:`json.dumps` round-trips cleanly. Mirrors
-    the helper of the same name in :mod:`mcp.tools.mission`.
+    Thin alias over :func:`mission.validation.strip_private_fields` —
+    the canonical implementation lives next to ``validate_criteria``
+    (which creates the ``_parsed_ast`` keys) so a single function
+    governs the JSON-safety contract across CLI, MCP tools, and MCP
+    resources.
     """
-    cleaned = dict(session)
-    criteria = cleaned.get("criteria")
-    if isinstance(criteria, list):
-        cleaned["criteria"] = [
-            {k: v for k, v in c.items() if not str(k).startswith("_")} if isinstance(c, dict) else c
-            for c in criteria
-        ]
-    return cleaned
+    from mission.validation import strip_private_fields
+
+    return strip_private_fields(session)
 
 
 def _make_not_found(message: str) -> Exception:

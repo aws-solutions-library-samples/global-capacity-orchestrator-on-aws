@@ -110,45 +110,23 @@ if is_enabled(FLAG_MISSION):
     def _strip_private_fields(session: Mapping[str, Any]) -> dict[str, Any]:
         """Return a JSON-safe copy of ``session`` with private criterion keys dropped.
 
-        The validators attach a cached ``ast.Expression`` to predicate
-        criteria under ``_parsed_ast``; that object isn't JSON-
-        serialisable. Strip every leading-underscore key from each
-        Criterion dict so ``json.dumps`` round-trips cleanly.
+        Thin alias over :func:`mission.validation.strip_private_fields`.
+        Kept as a module-private name so call sites in this file
+        (``mission_start``, ``mission_complete``, etc.) read at a
+        glance without having to qualify the canonical helper through
+        the long ``mission.validation`` path.
         """
-        cleaned = dict(session)
-        criteria = cleaned.get("criteria")
-        if isinstance(criteria, list):
-            cleaned["criteria"] = [
-                {k: v for k, v in c.items() if not str(k).startswith("_")}
-                if isinstance(c, dict)
-                else c
-                for c in criteria
-            ]
-        return cleaned
+        return mission_validation.strip_private_fields(session)
 
     def _strip_private_fields_iterations(
         iterations: Sequence[Mapping[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Strip private keys from each iteration's ``criteria_evaluation`` shape."""
-        out: list[dict[str, Any]] = []
-        for iteration in iterations:
-            if not isinstance(iteration, dict):
-                # Defence-in-depth: a non-dict entry shouldn't appear in
-                # a typed iteration list, but if it does we still emit
-                # it verbatim so the caller can see the corruption.
-                out.append(cast("dict[str, Any]", iteration))
-                continue
-            copy = dict(iteration)
-            evals = copy.get("criteria_evaluation")
-            if isinstance(evals, list):
-                copy["criteria_evaluation"] = [
-                    {k: v for k, v in e.items() if not str(k).startswith("_")}
-                    if isinstance(e, dict)
-                    else e
-                    for e in evals
-                ]
-            out.append(copy)
-        return out
+        """Strip private keys from each iteration's ``criteria_evaluation`` shape.
+
+        Thin alias over
+        :func:`mission.validation.strip_private_fields_iterations`.
+        """
+        return mission_validation.strip_private_fields_iterations(iterations)
 
     def _remaining_wall_clock(session: Mapping[str, Any]) -> float | None:
         """Return remaining wall-clock seconds for a session, or ``None``.

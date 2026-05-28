@@ -187,10 +187,28 @@ class FilesystemBackend:
         ``os.replace``s onto the final path. A failure mid-write leaves
         the temp file behind but never replaces the existing final file,
         so the previously-persisted state remains loadable.
+
+        Defense-in-depth strip. The validators in
+        :mod:`mcp.mission.validation` attach a cached
+        :class:`ast.Expression` under ``_parsed_ast`` on every
+        ``predicate`` criterion. That object is not JSON-serialisable;
+        a caller that hands a freshly-validated session straight to
+        ``save_session`` without first stripping the cache would
+        raise :class:`TypeError` at ``json.dump`` time. We strip
+        unconditionally here so every persistence path stays correct
+        regardless of which caller forgot. The strip is cheap and
+        idempotent on already-clean inputs.
         """
+        # Local import: ``mission.validation`` is part of the same
+        # package so this isn't a cross-package edge, just a
+        # dependency-direction kept lazy to keep the eager import
+        # surface of ``state`` minimal.
+        from .validation import strip_private_fields
+
         self._ensure_root()
         session_id = session["session_id"]
         final = self._session_path(session_id)
+        cleaned = cast("SessionState", strip_private_fields(session))
 
         try:
             tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115 - explicit close+replace below
@@ -202,7 +220,7 @@ class FilesystemBackend:
                 delete=False,
             )
             try:
-                json.dump(session, tmp)
+                json.dump(cleaned, tmp)
                 tmp.flush()
                 os.fsync(tmp.fileno())
             finally:
@@ -397,9 +415,18 @@ class DynamoDBBackend:
         return cast("SessionState", item)
 
     def save_session(self, session: SessionState) -> None:  # pragma: no cover - DynamoDB
-        """Persist the session via ``put_item`` (atomic single-item write)."""
+        """Persist the session via ``put_item`` (atomic single-item write).
+
+        Defense-in-depth strip — same rationale as
+        :meth:`FilesystemBackend.save_session`. DynamoDB serialises
+        through boto3's own type-converter, which raises
+        :class:`TypeError` on an :class:`ast.Expression` just like
+        the JSON path; stripping here keeps both backends symmetric.
+        """
+        from .validation import strip_private_fields
+
         table = self._get_table()
-        table.put_item(Item=dict(session))
+        table.put_item(Item=strip_private_fields(session))
 
     def list_sessions(
         self, filter: dict[str, Any] | None = None

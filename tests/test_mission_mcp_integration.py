@@ -223,6 +223,25 @@ class TestMissionMcpFullLifecycle:
 
         _reload_with_mission_flag(True)
 
+        # Other tests in this process may have left the audit-collector
+        # singleton in a torn-down state — ``test_mission_coverage.py
+        # ::TestAuditCollector::test_install_collector_floors_logger_at_info``
+        # uses ``monkeypatch.setattr(mission_audit, "_COLLECTOR", None)``
+        # which restores the attribute on teardown, but the handler
+        # additions / removals to ``audit_logger.handlers`` are not
+        # tracked by monkeypatch and can leave the singleton pointing
+        # at a Handler instance that's no longer attached to the
+        # logger. Force a clean install: drop the cached singleton,
+        # remove every leftover handler instance, then re-install.
+        from mission import audit as mission_audit
+
+        mission_audit._COLLECTOR = None
+        for handler in list(mission_audit.audit_logger.handlers):
+            if isinstance(handler, mission_audit.MissionAuditCollectorHandler):
+                mission_audit.audit_logger.removeHandler(handler)
+        collector = mission_audit.install_collector()
+        collector.clear()
+
         _isolate_mission_backend(monkeypatch, tmp_path)
 
         # Predicate criterion that completes the moment the dispatcher

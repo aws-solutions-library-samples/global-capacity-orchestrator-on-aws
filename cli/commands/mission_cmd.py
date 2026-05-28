@@ -78,37 +78,29 @@ def _check_feature_flag() -> None:
 def _strip_private_criteria(session: Mapping[str, Any]) -> dict[str, Any]:
     """Return a JSON-safe copy of ``session`` with private criterion keys dropped.
 
-    The validators cache an ``ast.Expression`` on each ``predicate``
-    criterion under the private key ``_parsed_ast``. That object is not
-    JSON-serialisable, so strip every leading-underscore key from each
-    Criterion dict before output. Iteration history is similarly
-    cleaned: each ``criteria_evaluation`` entry gets the same treatment.
+    Thin alias over :func:`mission.validation.strip_private_fields` —
+    the canonical implementation lives next to ``validate_criteria``
+    (which creates the ``_parsed_ast`` keys). Kept under the older
+    ``_strip_private_criteria`` name so the call sites in this file
+    don't churn while the underlying logic is consolidated.
     """
-    cleaned = dict(session)
-    criteria = cleaned.get("criteria")
-    if isinstance(criteria, list):
-        cleaned["criteria"] = [
-            {k: v for k, v in c.items() if not str(k).startswith("_")} if isinstance(c, dict) else c
-            for c in criteria
-        ]
-    iterations = cleaned.get("iterations")
-    if isinstance(iterations, list):
-        cleaned["iterations"] = [_strip_iteration(it) for it in iterations]
-    return cleaned
+    from mission.validation import strip_private_fields  # noqa: PLC0415
+
+    return strip_private_fields(session)
 
 
 def _strip_iteration(iteration: Any) -> Any:
-    """Strip private keys from an iteration's ``criteria_evaluation`` shape."""
-    if not isinstance(iteration, dict):
+    """Strip private keys from an iteration's ``criteria_evaluation`` shape.
+
+    Thin alias over the iteration variant of the canonical helper.
+    Returns non-dict input verbatim so a corrupt history entry stays
+    observable to the caller.
+    """
+    if not isinstance(iteration, Mapping):
         return iteration
-    copy = dict(iteration)
-    evals = copy.get("criteria_evaluation")
-    if isinstance(evals, list):
-        copy["criteria_evaluation"] = [
-            {k: v for k, v in e.items() if not str(k).startswith("_")} if isinstance(e, dict) else e
-            for e in evals
-        ]
-    return copy
+    from mission.validation import strip_private_fields_iterations  # noqa: PLC0415
+
+    return strip_private_fields_iterations([iteration])[0]
 
 
 def _emit_json(payload: Any, *, err: bool = False) -> None:

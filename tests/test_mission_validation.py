@@ -879,3 +879,122 @@ class TestValidateStrategy:
             field="strategy",
             reason="not_a_dict",
         )
+
+
+class TestStripPrivateFields:
+    """The canonical ``_parsed_ast``-stripping helpers in validation.py.
+
+    Three places in the tree previously had their own near-duplicate
+    implementations (``cli/commands/mission_cmd.py::_strip_private_criteria``,
+    ``mcp/tools/mission.py::_strip_private_fields`` plus its iterations
+    variant, ``mcp/resources/mission.py::_strip_private_fields``). They
+    now delegate to the canonical helpers under
+    :mod:`mcp.mission.validation` so a single source of truth governs
+    the JSON-safety contract. These tests pin that contract.
+    """
+
+    def test_strip_returns_shallow_copy_not_mutating_input(self) -> None:
+        """The original session and criteria are never mutated."""
+        from mission.validation import strip_private_fields
+
+        original = {
+            "session_id": "s",
+            "criteria": [
+                {"criterion_id": "c1", "kind": "predicate", "_parsed_ast": object()},
+            ],
+        }
+        cleaned = strip_private_fields(original)
+        # The cleaned version dropped the private key.
+        assert "_parsed_ast" not in cleaned["criteria"][0]
+        # The original still has it — the helper never mutates input.
+        assert "_parsed_ast" in original["criteria"][0]
+        # Different list instance (shallow copy).
+        assert cleaned["criteria"] is not original["criteria"]
+
+    def test_strip_drops_every_leading_underscore_key(self) -> None:
+        """Every leading-underscore key is dropped, not just ``_parsed_ast``.
+
+        The strip rule is intentionally broad so a future cache (a
+        normalised JSON-Pointer for the metric path, a pre-resolved
+        tool-tag set) can ride on the same convention without
+        breaking persistence.
+        """
+        from mission.validation import strip_private_fields
+
+        session = {
+            "criteria": [
+                {
+                    "criterion_id": "c1",
+                    "kind": "predicate",
+                    "_parsed_ast": object(),
+                    "_other_cache": "something",
+                    "_meta": {"nested": "still-dropped"},
+                }
+            ],
+        }
+        cleaned = strip_private_fields(session)
+        crit = cleaned["criteria"][0]
+        assert crit == {"criterion_id": "c1", "kind": "predicate"}
+
+    def test_strip_handles_empty_criteria_and_iterations(self) -> None:
+        """Empty / missing criteria / iterations don't trip the strip."""
+        from mission.validation import strip_private_fields
+
+        # Empty list — no crash.
+        cleaned = strip_private_fields({"criteria": [], "iterations": []})
+        assert cleaned == {"criteria": [], "iterations": []}
+        # Missing keys — no crash.
+        cleaned = strip_private_fields({"session_id": "s"})
+        assert cleaned == {"session_id": "s"}
+
+    def test_strip_handles_non_dict_criterion_entries(self) -> None:
+        """Defensive: corrupt non-dict entries pass through verbatim."""
+        from mission.validation import strip_private_fields
+
+        cleaned = strip_private_fields({"criteria": ["not_a_dict", 42, None]})
+        assert cleaned["criteria"] == ["not_a_dict", 42, None]
+
+    def test_strip_walks_iterations_criteria_evaluation(self) -> None:
+        """``iterations[*].criteria_evaluation[*]._parsed_ast`` is dropped."""
+        from mission.validation import strip_private_fields
+
+        session = {
+            "iterations": [
+                {
+                    "iteration_index": 0,
+                    "criteria_evaluation": [
+                        {"criterion_id": "p1", "status": "met", "_parsed_ast": object()},
+                    ],
+                },
+            ],
+        }
+        cleaned = strip_private_fields(session)
+        eval_entries = cleaned["iterations"][0]["criteria_evaluation"]
+        assert eval_entries == [{"criterion_id": "p1", "status": "met"}]
+
+    def test_strip_iterations_variant_handles_non_dict_entries(self) -> None:
+        """The iterations variant tolerates non-dict entries (corruption surfaces)."""
+        from mission.validation import strip_private_fields_iterations
+
+        out = strip_private_fields_iterations(["corrupt-string-entry", {"iteration_index": 0}])
+        assert out[0] == "corrupt-string-entry"
+        assert out[1]["iteration_index"] == 0
+
+    def test_strip_idempotent(self) -> None:
+        """Running ``strip_private_fields`` twice gives the same result.
+
+        The strip is the persistence layer's last defence; saving an
+        already-clean session should not be a no-cost-but-different
+        operation. Pin idempotency so a future change that re-attaches
+        a private key on the second pass is caught here.
+        """
+        from mission.validation import strip_private_fields
+
+        session = {
+            "criteria": [
+                {"criterion_id": "c1", "_parsed_ast": object(), "kind": "predicate"},
+            ],
+        }
+        once = strip_private_fields(session)
+        twice = strip_private_fields(once)
+        assert once == twice
