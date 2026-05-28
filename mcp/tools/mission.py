@@ -417,7 +417,14 @@ if is_enabled(FLAG_MISSION):
             session["sampling_model_preferences"] = sampling_model_preferences
 
         backend = mission_state.get_backend()
-        backend.save_session(cast("SessionState", session))
+        # Strip the validator's cached ``_parsed_ast`` AST nodes from
+        # predicate criteria before persistence — ``ast.Expression``
+        # is not JSON-serialisable and the FilesystemBackend writes
+        # via ``json.dump``. The engine re-parses on demand from the
+        # ``expression`` string when it next loads the session, so
+        # stripping here is lossless. Mirrors ``_strip_private_criteria``
+        # in ``cli/commands/mission_cmd.py``.
+        backend.save_session(cast("SessionState", _strip_private_fields(session)))
 
         return json.dumps(
             {
@@ -613,7 +620,12 @@ if is_enabled(FLAG_MISSION):
         session["status"] = "completed"
         session["final_verdict"] = "complete"
         session["ended_at"] = datetime.now(UTC).isoformat()
-        backend.save_session(session)
+        # Defensive strip — sessions loaded from the backend were
+        # already private-field-clean, but a future change that
+        # re-attaches ``_parsed_ast`` somewhere in the flow shouldn't
+        # silently break persistence. ``_strip_private_fields`` is
+        # cheap and idempotent on already-clean inputs.
+        backend.save_session(cast("SessionState", _strip_private_fields(session)))
         return json.dumps({"session_id": session_id, "status": "completed"})
 
     # ------------------------------------------------------------------ #
@@ -664,7 +676,8 @@ if is_enabled(FLAG_MISSION):
             if ctx is not None:
                 with contextlib.suppress(Exception):
                     await ctx.warning(f"Mission session {session_id} terminated by operator.")
-        backend.save_session(session)
+        # Defensive strip — see mission_complete for the rationale.
+        backend.save_session(cast("SessionState", _strip_private_fields(session)))
         return json.dumps({"session_id": session_id, "status": session["status"]})
 
     # ------------------------------------------------------------------ #
@@ -702,7 +715,8 @@ if is_enabled(FLAG_MISSION):
                 }
             )
         session["status"] = "running"
-        backend.save_session(session)
+        # Defensive strip — see mission_complete for the rationale.
+        backend.save_session(cast("SessionState", _strip_private_fields(session)))
         return json.dumps({"session_id": session_id, "status": "running"})
 
     # ------------------------------------------------------------------ #

@@ -1226,16 +1226,18 @@ class TestScriptedStrategiesWiring:
         }
         try:
             runner = mission_cmd_module._maybe_make_sandbox_runner(session)
-        except SystemError as exc:
-            # MissionSandbox transitively imports fastmcp → pydantic.
-            # Skip cleanly when the local env carries a pydantic /
-            # pydantic-core ABI mismatch; CI has pinned versions and
-            # exercises the real path. The pin is the test's actual
-            # contract — the helper not returning None when the flag
-            # is on — so a transitive-import error is environmental
-            # rather than a regression.
-            if "pydantic" in str(exc).lower():
-                pytest.skip(f"local pydantic env mismatch (CI exercises this path): {exc}")
+        except (SystemError, ModuleNotFoundError) as exc:
+            # MissionSandbox transitively imports fastmcp → pydantic
+            # and the Code Mode sandbox provider's pydantic_monty
+            # dependency. Skip cleanly when the local env hits either
+            # the pydantic / pydantic-core ABI mismatch or a missing
+            # transitive package; CI installs the full lock file.
+            # The pin is the test's actual contract — the helper not
+            # returning None when the flag is on — so a transitive-
+            # import error is environmental rather than a regression.
+            msg = str(exc).lower()
+            if "pydantic" in msg or "pydantic_monty" in msg:
+                pytest.skip(f"local sandbox-runtime env not installed: {exc}")
             raise
         assert runner is not None
         # The runner is the bound run method on a MissionSandbox instance.
