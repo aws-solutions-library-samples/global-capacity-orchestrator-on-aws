@@ -31,6 +31,7 @@ from .commands import (
     images,
     inference,
     jobs,
+    mission_cmd,
     models,
     nodepools,
     queue,
@@ -147,6 +148,7 @@ cli.add_command(files)
 cli.add_command(config_cmd)
 cli.add_command(analytics)
 cli.add_command(tasks)
+cli.add_command(mission_cmd)
 
 
 def main() -> None:

@@ -793,3 +793,49 @@ class TestStartupLogNewFields:
         entry = _last_startup_entry(caplog)
         assert entry["tool_search"] == "bm25"
         assert "code_mode_experimental" not in entry
+
+    def test_emit_startup_log_includes_mission_enabled_when_set(self, caplog, monkeypatch):
+        """GCO_ENABLE_MISSION=true → mission_enabled: true in the startup entry.
+
+        Mirrors the all_tools_enabled / tool_search convention: the field is
+        only emitted when the gating flag is on. Audit consumers can use
+        this to detect whether the Mission loop is active for a given run
+        without inspecting env vars.
+        """
+        monkeypatch.delenv("GCO_ENABLE_ALL_TOOLS", raising=False)
+        monkeypatch.delenv("GCO_MCP_TOOL_SEARCH", raising=False)
+        monkeypatch.setenv("GCO_ENABLE_MISSION", "true")
+
+        with caplog.at_level(logging.INFO, logger="gco.mcp.audit"):
+            run_mcp.emit_startup_log()
+
+        entry = _last_startup_entry(caplog)
+        assert entry["mission_enabled"] is True
+
+    def test_emit_startup_log_includes_mission_enabled_via_umbrella(self, caplog, monkeypatch):
+        """GCO_ENABLE_ALL_TOOLS=true also flips mission_enabled on.
+
+        Per the established feature_flags.is_enabled semantics, the umbrella
+        flag enables every per-tool flag — the Mission flag included.
+        """
+        monkeypatch.delenv("GCO_ENABLE_MISSION", raising=False)
+        monkeypatch.delenv("GCO_MCP_TOOL_SEARCH", raising=False)
+        monkeypatch.setenv("GCO_ENABLE_ALL_TOOLS", "true")
+
+        with caplog.at_level(logging.INFO, logger="gco.mcp.audit"):
+            run_mcp.emit_startup_log()
+
+        entry = _last_startup_entry(caplog)
+        assert entry["mission_enabled"] is True
+
+    def test_emit_startup_log_omits_mission_enabled_when_unset(self, caplog, monkeypatch):
+        """GCO_ENABLE_MISSION unset → field omitted, matching all_tools_enabled."""
+        monkeypatch.delenv("GCO_ENABLE_ALL_TOOLS", raising=False)
+        monkeypatch.delenv("GCO_ENABLE_MISSION", raising=False)
+        monkeypatch.delenv("GCO_MCP_TOOL_SEARCH", raising=False)
+
+        with caplog.at_level(logging.INFO, logger="gco.mcp.audit"):
+            run_mcp.emit_startup_log()
+
+        entry = _last_startup_entry(caplog)
+        assert "mission_enabled" not in entry

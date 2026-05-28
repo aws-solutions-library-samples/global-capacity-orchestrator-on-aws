@@ -205,36 +205,36 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub1820=>subroutine: kwargs.setdefault('cross_region_references', True)
-sub1822=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op1824=>operation: self.config = config
-op1826=>operation: self.global_stack = global_stack
-op1828=>operation: self.regional_stacks = regional_stacks
-op1830=>operation: self.api_gateway_stack = api_gateway_stack
-op1832=>operation: self.project_name = config.get_project_name()
-op1834=>operation: self.regions = config.get_regions()
-op1836=>operation: self.alert_topic = self._create_alert_topic()
-op1838=>operation: self.dashboard = self._create_dashboard()
-sub1840=>subroutine: self._create_alarms()
-sub1842=>subroutine: self._create_composite_alarms()
-sub1844=>subroutine: self._create_custom_metrics()
-sub1846=>subroutine: self._create_outputs()
-sub1848=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub1834=>subroutine: kwargs.setdefault('cross_region_references', True)
+sub1836=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op1838=>operation: self.config = config
+op1840=>operation: self.global_stack = global_stack
+op1842=>operation: self.regional_stacks = regional_stacks
+op1844=>operation: self.api_gateway_stack = api_gateway_stack
+op1846=>operation: self.project_name = config.get_project_name()
+op1848=>operation: self.regions = config.get_regions()
+op1850=>operation: self.alert_topic = self._create_alert_topic()
+op1852=>operation: self.dashboard = self._create_dashboard()
+sub1854=>subroutine: self._create_alarms()
+sub1856=>subroutine: self._create_composite_alarms()
+sub1858=>subroutine: self._create_custom_metrics()
+sub1860=>subroutine: self._create_outputs()
+sub1862=>subroutine: self._apply_nag_suppressions()
 
-sub1820->sub1822
-sub1822->op1824
-op1824->op1826
-op1826->op1828
-op1828->op1830
-op1830->op1832
-op1832->op1834
-op1834->op1836
-op1836->op1838
-op1838->sub1840
-sub1840->sub1842
-sub1842->sub1844
-sub1844->sub1846
-sub1846->sub1848
+sub1834->sub1836
+sub1836->op1838
+op1838->op1840
+op1840->op1842
+op1842->op1844
+op1844->op1846
+op1846->op1848
+op1848->op1850
+op1850->op1852
+op1852->sub1854
+sub1854->sub1856
+sub1856->sub1858
+sub1858->sub1860
+sub1860->sub1862
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

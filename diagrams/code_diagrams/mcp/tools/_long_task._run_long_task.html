@@ -205,93 +205,198 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2362=>operation: 'Run a long-running subprocess, streaming progress through FastMCP.\n\n    Spawns ``argv`` via :func:`asyncio.create_subprocess_exec`, drains stdout\n    and stderr concurrently, forwards every line as a progress message\n    (truncated to 200 chars), increments the progress counter on every line\n    matching ``(CREATE|UPDATE|DELETE)_COMPLETE``, and surfaces stderr lines\n    through ``ctx.info`` so MCP clients see them.\n\n    On cancellation, sends ``SIGTERM``, waits up to ``_CANCEL_GRACE_SECONDS``\n    for graceful shutdown, sends ``SIGKILL`` on timeout, cancels the drain\n    tasks, and re-raises ``CancelledError``. When ``is_stack_op`` is True, the\n    re-raised exception\'s message includes a CloudFormation partial-state\n    disclaimer so operators know AWS state may be inconsistent.\n\n    Returns a JSON string:\n      * ``{"status": "ok", "completes": <count>}`` on a clean zero exit code.\n      * ``{"error": "exit_code=<rc>", "completes": <count>}`` on non-zero exit.\n      * ``{"error": "path_traversal_detected", "argv_index": <i>, "value": <v>}``\n        when any non-flag argv element contains a ``..`` path segment; in that\n        case no subprocess is spawned.\n    '
-op2364=>operation: hit = _argv_has_traversal(argv)
-cond2367=>condition: if hit is not None
-op2371=>operation: idx, val = hit
-io2376=>inputoutput: output: json.dumps({'error': 'path_traversal_detected', 'argv_index': idx, 'value': val})
-e2374=>end: end function return
-op2382=>operation: proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-op2384=>operation: completes = 0
-st2387=>start: start _drain
-io2389=>inputoutput: input: stream, label
-op2392=>operation: nonlocal completes
-op2394=>operation: assert stream is not None
-cond2397=>condition: async for raw in stream
-op2401=>operation: line = raw.decode('utf-8', errors='replace').rstrip()
-cond2404=>operation: continue if  not line
-op2414=>operation: await progress.set_message(line[:200])
-cond2417=>condition: if _CFN_COMPLETE_RE.search(line)
-op2421=>operation: completes += 1
-op2423=>operation: await progress.increment()
-cond2429=>operation: await ctx.info(f'stderr: {line[:200]}') if  label == 'stderr'
-e2441=>end: end _drain
-op2444=>operation: drains = [asyncio.create_task(_drain(proc.stdout, 'stdout')), asyncio.create_task(_drain(proc.stderr, 'stderr'))]
-op2447=>operation: rc = await proc.wait()
+        <div><textarea id="code" style="width: 100%;" rows="11">op2376=>operation: 'Run a long-running subprocess with rich status reporting.\n\n    Spawns ``argv`` via :func:`asyncio.create_subprocess_exec`, drains stdout\n    and stderr concurrently, and streams progress through three channels:\n\n    * ``progress.set_message(...)`` for every meaningful line (≤ 200 chars)\n    * ``progress.increment()`` once per stack completion (CDK\'s ``✅ gco-…``\n      / ``✨ gco-…`` lines), so the progress counter tracks AWS-side stack\n      milestones rather than per-resource CFN events\n    * ``ctx.info(...)`` for stderr lines so MCP clients with a Context\n      surface render them through the standard MCP logging channel\n\n    When ``total_units`` is supplied, it\'s forwarded to\n    ``progress.set_total(total_units)`` once at startup so the client\n    can render a proper percentage. Callers that know how many stacks\n    they\'re processing (e.g. ``deploy_all`` knowing the cdk.json\n    deployment_regions count) should pass it; callers that don\'t can\n    omit it and the client falls back to indeterminate progress.\n\n    A periodic heartbeat fires every ``_HEARTBEAT_INTERVAL_SECONDS`` when\n    no output has been seen, so the client never sees a stalled progress\n    state during quiet CDK phases (EKS cluster creation, VPC teardown).\n    The heartbeat carries the elapsed wall-clock and the most recent\n    stack name observed in the output, in the form\n    ``"still running … 4m12s elapsed (last: gco-us-east-1)"``.\n\n    On cancellation, sends ``SIGTERM``, waits up to ``_CANCEL_GRACE_SECONDS``\n    for graceful shutdown, sends ``SIGKILL`` on timeout, cancels the drain\n    tasks, and re-raises ``CancelledError``. When ``is_stack_op`` is True,\n    the re-raised exception\'s message includes a CloudFormation\n    partial-state disclaimer so operators know AWS state may be inconsistent.\n\n    Returns a JSON string on success:\n\n    * ``{"status": "ok", "stacks_completed": <n>, "duration_seconds": <s>,\n       "last_stack": <str|null>}``\n\n    Raises :class:`fastmcp.exceptions.ToolError` on subprocess failure with\n    a structured message that includes:\n\n    * The exit code\n    * The number of stacks completed before failure\n    * The last stack the run was working on (parsed from output)\n    * Whether any ``*_FAILED`` line was seen\n    * The tail of stderr (up to ``_STDERR_TAIL_LINES`` lines)\n    * The partial-state disclaimer (when ``is_stack_op=True``)\n\n    The structured payload lives in the ToolError ``args[0]`` as a JSON\n    string so MCP clients can deserialize and render it; FastMCP forwards\n    the message to the client\'s ``CallToolResult.content`` automatically.\n\n    Path-traversal rejection is unchanged — returns the same JSON stub\n    without spawning a subprocess.\n    '
+op2378=>operation: hit = _argv_has_traversal(argv)
+cond2381=>condition: if hit is not None
+op2385=>operation: idx, val = hit
+io2390=>inputoutput: output: json.dumps({'error': 'path_traversal_detected', 'argv_index': idx, 'value': val})
+e2388=>end: end function return
+op2396=>operation: started = time.monotonic()
+cond2399=>operation: with contextlib.suppress(AttributeError, NotImplementedError):
+    await progress.set_total(int(total_units)) if  total_units is not None and total_units > 0
+op2409=>operation: proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+cond2412=>condition: if len(argv) >= 3 and argv[0] == 'gco'
+op2416=>operation: tool_name = f"{argv[1]}_{argv[2].replace('-', '_')}"
+op2433=>operation: task_id = make_task_id(tool_name)
+op2435=>operation: status_writer = TaskStatusWriter(task_id=task_id, tool=tool_name, argv=list(argv), pid=proc.pid, total_units=total_units)
+op2437=>operation: stacks_completed = 0
+op2439=>operation: failed_lines: list[str] = []
+op2441=>operation: stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
+op2443=>operation: last_activity = time.monotonic()
+op2445=>operation: last_stack: str | None = None
+op2447=>operation: completed_stacks_set: set[str] = set()
+st2450=>start: start _drain
+io2452=>inputoutput: input: stream, label
+op2455=>operation: nonlocal stacks_completed, last_activity, last_stack
+op2457=>operation: assert stream is not None
+cond2460=>condition: async for raw in stream
+op2464=>operation: line = raw.decode('utf-8', errors='replace').rstrip()
+cond2467=>operation: continue if  not line
+op2477=>operation: last_activity = time.monotonic()
+op2479=>operation: await progress.set_message(line[:200])
+sub2481=>subroutine: status_writer.record_line(line, stream=label)
+op2483=>operation: stack_done = _CDK_STACK_DONE_RE.search(line)
+cond2486=>condition: if stack_done is not None
+op2490=>operation: name = stack_done.group(1)
+cond2493=>condition: if name not in completed_stacks_set
+sub2497=>subroutine: completed_stacks_set.add(name)
+op2499=>operation: stacks_completed += 1
+op2501=>operation: await progress.increment()
+sub2503=>subroutine: status_writer.increment_stacks(name)
+cond2512=>operation: failed_lines.append(line[:200]) if  _CFN_FAILED_RE.search(line)
+op2522=>operation: stack_match = _CDK_STACK_LINE_RE.search(line)
+cond2525=>condition: if stack_match
+op2529=>operation: last_stack = stack_match.group(1)
+sub2531=>subroutine: status_writer.set_last_stack(last_stack)
+cond2537=>condition: if label == 'stderr'
+sub2541=>subroutine: stderr_tail.append(line)
+op2543=>operation: await ctx.info(f'stderr: {line[:200]}')
+e2550=>end: end _drain
+st2554=>start: start _heartbeat
+io2556=>inputoutput: input: 
+op2559=>operation: "Emit a periodic 'still running' status when the subprocess is quiet.\n\n        The heartbeat does NOT call ``progress.increment()`` — that's\n        reserved for AWS-side milestones. It only updates the message\n        so the client sees activity, and emits a parallel ``ctx.info``\n        so clients without a Progress observer still get the signal.\n        "
+cond2562=>condition: while True
+op2566=>operation: await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+op2568=>operation: silent_for = time.monotonic() - last_activity
+cond2571=>operation: continue if  silent_for < _HEARTBEAT_INTERVAL_SECONDS
+op2581=>operation: elapsed = int(time.monotonic() - started)
+op2583=>operation: stack_part = f' (last: {last_stack})' if last_stack else ''
+op2585=>operation: msg = f'still running … {_format_duration(elapsed)} elapsed{stack_part}'
+op2587=>operation: await progress.set_message(msg)
+op2589=>operation: await ctx.info(msg)
+e2593=>end: end _heartbeat
+op2596=>operation: drains = [asyncio.create_task(_drain(proc.stdout, 'stdout')), asyncio.create_task(_drain(proc.stderr, 'stderr'))]
+op2598=>operation: heartbeat = asyncio.create_task(_heartbeat())
+op2601=>operation: rc = await proc.wait()
 await asyncio.gather(*drains, return_exceptions=True)
-cond2446=>condition: exception raised?
-cond2449=>condition: except asyncio.CancelledError
-cond2454=>condition: if proc.returncode is None
-sub2458=>subroutine: proc.send_signal(signal.SIGTERM)
-op2463=>operation: await asyncio.wait_for(proc.wait(), timeout=_CANCEL_GRACE_SECONDS)
-cond2460=>condition: exception raised?
-cond2465=>condition: except TimeoutError
-cond2470=>operation: proc.send_signal(signal.SIGKILL) if  proc.returncode is None
-op2480=>operation: await proc.wait()
-cond2489=>operation: d.cancel() while  d in drains
-cond2499=>operation: raise asyncio.CancelledError(_PARTIAL_STATE_DISCLAIMER) from None if  is_stack_op
-sub2509=>subroutine: raise
-cond2515=>condition: if rc != 0
-io2522=>inputoutput: output: json.dumps({'error': f'exit_code={rc}', 'completes': completes})
-e2520=>end: end function return
-io2531=>inputoutput: output: json.dumps({'status': 'ok', 'completes': completes})
-e2529=>end: end function return
+cond2600=>condition: exception raised?
+cond2603=>condition: except asyncio.CancelledError
+cond2608=>condition: if proc.returncode is None
+sub2612=>subroutine: proc.send_signal(signal.SIGTERM)
+op2617=>operation: await asyncio.wait_for(proc.wait(), timeout=_CANCEL_GRACE_SECONDS)
+cond2614=>condition: exception raised?
+cond2619=>condition: except TimeoutError
+cond2624=>operation: proc.send_signal(signal.SIGKILL) if  proc.returncode is None
+op2634=>operation: await proc.wait()
+cond2643=>operation: d.cancel() while  d in drains
+sub2652=>subroutine: heartbeat.cancel()
+sub2654=>subroutine: status_writer.finish(state='cancelled', exit_code=proc.returncode, error=_PARTIAL_STATE_DISCLAIMER if is_stack_op else 'cancelled')
+cond2657=>operation: raise asyncio.CancelledError(_PARTIAL_STATE_DISCLAIMER) from None if  is_stack_op
+sub2667=>subroutine: raise
+sub2673=>subroutine: heartbeat.cancel()
+op2675=>operation: duration = int(time.monotonic() - started)
+cond2678=>condition: if rc != 0
+op2682=>operation: payload: dict[str, Any] = {'error': f'exit_code={rc}', 'exit_code': rc, 'task_id': task_id, 'stacks_completed': stacks_completed, 'duration_seconds': duration, 'last_stack': last_stack, 'failed_events': failed_lines[:10], 'stderr_tail': list(stderr_tail)}
+cond2685=>operation: payload['disclaimer'] = _PARTIAL_STATE_DISCLAIMER if  is_stack_op
+sub2695=>subroutine: status_writer.finish(state='failed', exit_code=rc, error=f'exit_code={rc}')
+sub2697=>subroutine: raise ToolError(json.dumps(payload))
+sub2702=>subroutine: status_writer.finish(state='succeeded', exit_code=rc)
+io2707=>inputoutput: output: json.dumps({'status': 'ok', 'task_id': task_id, 'stacks_completed': stacks_completed, 'duration_seconds': duration, 'last_stack': last_stack})
+e2705=>end: end function return
+cond2421=>condition: if len(argv) >= 2 and argv[0] == 'gco'
+op2425=>operation: tool_name = argv[1]
+op2429=>operation: tool_name = argv[0] if argv else 'task'
 
-op2362->op2364
-op2364->cond2367
-cond2367(yes)->op2371
-op2371->io2376
-io2376->e2374
-cond2367(no)->op2382
-op2382->op2384
-op2384->st2387
-st2387->io2389
-io2389->op2392
-op2392->op2394
-op2394->cond2397
-cond2397(yes)->op2401
-op2401->cond2404
-cond2404->op2414
-op2414->cond2417
-cond2417(yes)->op2421
-op2421->op2423
-op2423->cond2429
-cond2429->cond2397
-cond2417(no)->cond2429
-cond2397(no)->e2441
-e2441->op2444
-op2444->op2447
-op2447->cond2446
-cond2446(yes)->cond2449
-cond2449(yes)->cond2454
-cond2454(yes)->sub2458
-sub2458->op2463
-op2463->cond2460
-cond2460(yes)->cond2465
-cond2465(yes)->cond2470
-cond2470->op2480
-op2480->cond2489
-cond2489->cond2499
-cond2499->sub2509
-cond2465(no)->cond2489
-cond2460(no)->cond2489
-cond2454(no)->cond2489
-cond2449(no)->cond2515
-cond2515(yes)->io2522
-io2522->e2520
-cond2515(no)->io2531
-io2531->e2529
-cond2446(no)->cond2515
+op2376->op2378
+op2378->cond2381
+cond2381(yes)->op2385
+op2385->io2390
+io2390->e2388
+cond2381(no)->op2396
+op2396->cond2399
+cond2399->op2409
+op2409->cond2412
+cond2412(yes)->op2416
+op2416->op2433
+op2433->op2435
+op2435->op2437
+op2437->op2439
+op2439->op2441
+op2441->op2443
+op2443->op2445
+op2445->op2447
+op2447->st2450
+st2450->io2452
+io2452->op2455
+op2455->op2457
+op2457->cond2460
+cond2460(yes)->op2464
+op2464->cond2467
+cond2467->op2477
+op2477->op2479
+op2479->sub2481
+sub2481->op2483
+op2483->cond2486
+cond2486(yes)->op2490
+op2490->cond2493
+cond2493(yes)->sub2497
+sub2497->op2499
+op2499->op2501
+op2501->sub2503
+sub2503->cond2512
+cond2512->op2522
+op2522->cond2525
+cond2525(yes)->op2529
+op2529->sub2531
+sub2531->cond2537
+cond2537(yes)->sub2541
+sub2541->op2543
+op2543->cond2460
+cond2537(no)->cond2460
+cond2525(no)->cond2537
+cond2493(no)->cond2512
+cond2486(no)->cond2512
+cond2460(no)->e2550
+e2550->st2554
+st2554->io2556
+io2556->op2559
+op2559->cond2562
+cond2562(yes)->op2566
+op2566->op2568
+op2568->cond2571
+cond2571->op2581
+op2581->op2583
+op2583->op2585
+op2585->op2587
+op2587->op2589
+op2589(left)->cond2562
+cond2562(no)->e2593
+e2593->op2596
+op2596->op2598
+op2598->op2601
+op2601->cond2600
+cond2600(yes)->cond2603
+cond2603(yes)->cond2608
+cond2608(yes)->sub2612
+sub2612->op2617
+op2617->cond2614
+cond2614(yes)->cond2619
+cond2619(yes)->cond2624
+cond2624->op2634
+op2634->cond2643
+cond2643->sub2652
+sub2652->sub2654
+sub2654->cond2657
+cond2657->sub2667
+cond2619(no)->cond2643
+cond2614(no)->cond2643
+cond2608(no)->cond2643
+cond2603(no)->sub2673
+sub2673->op2675
+op2675->cond2678
+cond2678(yes)->op2682
+op2682->cond2685
+cond2685->sub2695
+sub2695->sub2697
+cond2678(no)->sub2702
+sub2702->io2707
+io2707->e2705
+cond2600(no)->sub2673
+cond2412(no)->cond2421
+cond2421(yes)->op2425
+op2425->op2433
+cond2421(no)->op2429
+op2429->op2433
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

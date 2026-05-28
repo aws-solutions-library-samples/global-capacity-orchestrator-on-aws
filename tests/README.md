@@ -39,6 +39,29 @@ python -m pytest tests/test_manifest_api.py::TestManifestSubmission::test_submit
 python -m pytest -k "health" -v
 ```
 
+## Mission End-to-End Tests
+
+The `mission_e2e` marker (registered in `pytest.ini`) tags the eight end-to-end tests that drive a complete Mission session through `MissionEngine`. The covered files are `test_mission_e2e_train_to_loss.py`, `test_mission_e2e_search.py`, `test_mission_e2e_converge.py`, `test_mission_e2e_budget.py`, `test_mission_e2e_stagnation.py`, and `test_mission_no_aws.py`.
+
+```bash
+# Run only the Mission e2e suite (about 11 seconds wall-clock on a laptop)
+python -m pytest -m mission_e2e
+
+# CI-friendly invocation — caps each test at 30 seconds. Requires
+# pytest-timeout, which is not pinned by this project; install ad hoc
+# (`pip install pytest-timeout`) for the local run if you want the
+# per-test gate.
+python -m pytest -m mission_e2e --timeout=30
+
+# No-extra-deps alternative — wraps the whole invocation in coreutils
+# `timeout` so the wall-clock gate still fires without pytest-timeout.
+# (Linux ships `timeout` in coreutils; macOS users can `brew install
+# coreutils` and substitute `gtimeout`.)
+command timeout 30 python -m pytest -m mission_e2e
+```
+
+Every test wires a stub dispatcher and a `FilesystemBackend(root=tmp_path)` so the suite runs offline — no AWS credentials, no network, no real LLM. The full set completes in well under 30 seconds on a fresh checkout.
+
 ## Test Organization
 
 Tests are organized by the component they test:

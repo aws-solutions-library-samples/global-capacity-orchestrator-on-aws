@@ -178,3 +178,68 @@ class TestFeatureFlags:
             assert feature_flags.is_enabled(feature_flags.FLAG_IMAGE_PUBLISH) is False, (
                 "umbrella unset and FLAG_IMAGE_PUBLISH unset → must be disabled"
             )
+
+
+class TestMissionFlag:
+    """Tests for FLAG_MISSION (``GCO_ENABLE_MISSION``).
+
+    Mirrors the per-flag verification pattern: each test isolates one
+    leg of the truth table (umbrella off + per-flag off, umbrella off
+    + per-flag on, umbrella on + per-flag explicitly off) so a regression
+    in any single leg surfaces with a named, focused failure rather than
+    a single sprawling test. The fourth test pins down the ``ALL_FLAGS``
+    tuple membership so iterating callers (the umbrella test above, the
+    feature-flag table emit in ``audit.emit_startup_log``) cover the new
+    flag automatically.
+    """
+
+    def test_flag_mission_disabled_by_default(self) -> None:
+        """FLAG_MISSION is disabled when both per-flag and umbrella are unset.
+
+        This is the default posture for an MCP server that has not
+        explicitly opted into Mission. The umbrella is forced empty
+        and ``GCO_ENABLE_MISSION`` is popped so the assertion tests
+        the unset case directly rather than an inherited shell value.
+        """
+        with patch.dict(os.environ, {feature_flags.FLAG_ALL_TOOLS: ""}, clear=False):
+            os.environ.pop(feature_flags.FLAG_MISSION, None)
+            assert feature_flags.is_enabled(feature_flags.FLAG_MISSION) is False
+
+    def test_flag_mission_enabled_via_env(self) -> None:
+        """FLAG_MISSION is enabled when GCO_ENABLE_MISSION="true" with umbrella unset.
+
+        Confirms the per-flag opt-in path: setting only the named env
+        var must enable the flag without requiring the umbrella. The
+        umbrella is forced empty so this leg of the truth table is
+        tested in isolation.
+        """
+        env = {
+            feature_flags.FLAG_ALL_TOOLS: "",
+            feature_flags.FLAG_MISSION: "true",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            assert feature_flags.is_enabled(feature_flags.FLAG_MISSION) is True
+
+    def test_flag_mission_enabled_via_umbrella(self) -> None:
+        """FLAG_MISSION is enabled by GCO_ENABLE_ALL_TOOLS=true even with per-flag=false.
+
+        The umbrella is mutually inclusive — an explicit per-flag opt-out
+        does NOT shadow it. This is the established semantic from
+        ``feature_flags.is_enabled`` and Mission must not deviate from it.
+        """
+        env = {
+            feature_flags.FLAG_ALL_TOOLS: "true",
+            feature_flags.FLAG_MISSION: "false",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            assert feature_flags.is_enabled(feature_flags.FLAG_MISSION) is True
+
+    def test_flag_mission_in_all_flags_tuple(self) -> None:
+        """FLAG_MISSION is registered in the ALL_FLAGS tuple.
+
+        The constant must be defined as ``GCO_ENABLE_MISSION`` and added
+        to ``ALL_FLAGS`` so iterating callers (the umbrella test, the
+        startup-log emitter) cover the new flag without further changes.
+        """
+        assert feature_flags.FLAG_MISSION == "GCO_ENABLE_MISSION"
+        assert feature_flags.FLAG_MISSION in feature_flags.ALL_FLAGS

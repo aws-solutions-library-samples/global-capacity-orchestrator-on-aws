@@ -247,4 +247,25 @@ TARGETS: list[Target] = [
         function="lambda_handler",
         title="Image-lookup-or-create custom resource Lambda",
     ),
+    # --- Mission goal-directed iteration loop ----------------------------
+    Target(
+        source="mcp/mission/engine.py",
+        function="MissionEngine.run_iteration",
+        title="Mission iteration loop (propose -> execute -> observe -> evaluate -> decide)",
+    ),
+    Target(
+        source="mcp/mission/decide.py",
+        function="decide_verdict",
+        title="Mission verdict cascade (budget caps, completion, cadence-skip, heuristic)",
+    ),
+    Target(
+        source="mcp/mission/sampling.py",
+        function="maybe_sample_strategy_revision",
+        title="Mission strategy-revision sampling (orchestrator + deterministic fallback)",
+    ),
+    Target(
+        source="mcp/mission/sandbox.py",
+        function="validate_script_ast",
+        title="Mission script AST validator (parse-time allowlist enforcement)",
+    ),
 ]

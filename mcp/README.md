@@ -251,6 +251,7 @@ A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, de
 | `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` | `false` | `deploy_stack`, `deploy_all`, `bootstrap_cdk` | Creates or updates CloudFormation stacks. A full `deploy_all` runs 30-60 minutes wall-clock and can provision EKS clusters, NodePools, and storage that incur ongoing charges. |
 | `GCO_ENABLE_INFRASTRUCTURE_DESTROY` | `false` | `destroy_stack`, `destroy_all` | Tears down CloudFormation stacks. Cancellation mid-flight can leave partial state behind that has to be cleaned up by hand. |
 | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` | `false` | `delete_job`, `delete_inference`, `delete_template`, `delete_webhook`, `delete_model`, `delete_nodepool`, `analytics_user_remove`, `cancel_queue_job`, `images_cleanup`, `images_prune`, `images_delete_tag`, `images_delete_repo` | Delete operations are irreversible — once data, jobs, models, or images are removed they can't be recovered without a backup. |
+| `GCO_ENABLE_MISSION` | `false` | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list` | Runs an autonomous goal-directed loop that can call any tool in its allowlist. Gated to prevent unattended autonomous execution. |
 
 ### Enabling a Flag
 

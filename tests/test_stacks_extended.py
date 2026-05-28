@@ -1063,3 +1063,49 @@ class TestGetStackStatus:
         with patch("boto3.client", return_value=fake_cfn):
             manager = StackManager(config)
             assert manager._get_stack_status("gco-nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# CDK synthesis assertion: the missions DynamoDB table on GCOGlobalStack
+# ---------------------------------------------------------------------------
+#
+# The mission iteration loop persists session state in a DynamoDB table
+# named ``<project>-missions`` with a ``status-index`` GSI for paginated
+# listing by status. This class synthesizes ``GCOGlobalStack`` against
+# the same ``MockConfigLoader`` fixture used by ``test_regional_stack.py``
+# and asserts the table + GSI surface in the synthesized CloudFormation
+# template.
+
+
+class TestGlobalStackMissionsTable:
+    """Synthesis-level assertions for the ``MissionsTable`` resource."""
+
+    def test_global_stack_creates_missions_table_with_status_index(self):
+        """``GCOGlobalStack`` synthesizes a DynamoDB table named
+        ``<project>-missions`` with a GSI named ``status-index``."""
+        import aws_cdk as cdk
+        from aws_cdk import assertions
+
+        from gco.stacks.global_stack import GCOGlobalStack
+        from tests.test_regional_stack import MockConfigLoader
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+        stack = GCOGlobalStack(app, "test-synth-missions", config=config)
+
+        template = assertions.Template.from_stack(stack)
+        # ``MockConfigLoader.get_project_name()`` returns ``"gco-test"``,
+        # so the missions table's TableName is ``"gco-test-missions"``.
+        template.has_resource_properties(
+            "AWS::DynamoDB::Table",
+            {
+                "TableName": f"{config.get_project_name()}-missions",
+                "GlobalSecondaryIndexes": assertions.Match.array_with(
+                    [
+                        assertions.Match.object_like(
+                            {"IndexName": "status-index"},
+                        ),
+                    ],
+                ),
+            },
+        )

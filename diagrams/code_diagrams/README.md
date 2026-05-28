@@ -135,5 +135,11 @@ has multiple charted entry points.
 - **`mcp/`**
   - MCP audit_logged decorator (sync + async dispatch, Context capture) &mdash; `mcp/audit.py::audit_logged` &mdash; [HTML](./mcp/audit.audit_logged.html) · [PNG](./mcp/audit.audit_logged.png)
 
+- **`mcp/mission/`**
+  - Mission iteration loop (propose -> execute -> observe -> evaluate -> decide) &mdash; `mcp/mission/engine.py::MissionEngine.run_iteration` &mdash; [HTML](./mcp/mission/engine.MissionEngine_run_iteration.html)
+  - Mission verdict cascade (budget caps, completion, cadence-skip, heuristic) &mdash; `mcp/mission/decide.py::decide_verdict` &mdash; [HTML](./mcp/mission/decide.decide_verdict.html)
+  - Mission strategy-revision sampling (orchestrator + deterministic fallback) &mdash; `mcp/mission/sampling.py::maybe_sample_strategy_revision` &mdash; [HTML](./mcp/mission/sampling.maybe_sample_strategy_revision.html)
+  - Mission script AST validator (parse-time allowlist enforcement) &mdash; `mcp/mission/sandbox.py::validate_script_ast` &mdash; [HTML](./mcp/mission/sandbox.validate_script_ast.html)
+
 - **`mcp/tools/`**
   - MCP long-task runner (drain, progress, cancel + SIGTERM/SIGKILL) &mdash; `mcp/tools/_long_task.py::_run_long_task` &mdash; [HTML](./mcp/tools/_long_task._run_long_task.html) · [PNG](./mcp/tools/_long_task._run_long_task.png)

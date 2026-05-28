@@ -205,56 +205,56 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1430=>operation: "\n        Deploy an inference endpoint to one or more regions.\n\n        The endpoint spec is written to DynamoDB. The inference_monitor\n        in each target region picks it up and creates the K8s resources.\n\n        Args:\n            endpoint_name: Unique name for the endpoint\n            image: Container image (e.g. vllm/vllm-openai:v0.8.0)\n            target_regions: Regions to deploy to (default: all deployed regions)\n            replicas: Number of replicas per region\n            gpu_count: GPUs per replica\n            gpu_type: GPU instance type hint for node selector\n            port: Container port\n            model_path: EFS path for model weights\n            health_check_path: Health check endpoint path\n            env: Environment variables\n            namespace: Kubernetes namespace\n            labels: Labels for the endpoint\n            rewrite_image: When True (the default), rewrite ECR URIs in\n                ``image`` to target each region's local replica. Non-ECR\n                refs (Docker Hub, GHCR, etc.) are left unchanged. When\n                False, the URI is written verbatim to every region's\n                spec — the operator is responsible for cross-region\n                pulls. Per-region rewrites are stored under a\n                ``region_overrides`` map on the spec keyed by region.\n\n        Returns:\n            Created endpoint record\n        "
-cond1433=>condition: if not target_regions
-op1437=>operation: stacks = self._aws_client.discover_regional_stacks()
-op1439=>operation: target_regions = list(stacks.keys())
-cond1442=>operation: raise ValueError('No deployed regions found. Deploy infrastructure first.') if  not target_regions
-op1455=>operation: region_image_map: dict[str, str] = {}
-cond1458=>condition: if rewrite_image
-op1462=>operation: from .images import _rewrite_image_uri_for_region
-cond1465=>operation: region_image_map[region] = _rewrite_image_uri_for_region(image, region) while  region in target_regions
-op1477=>operation: spec = {'image': image, 'port': port, 'replicas': replicas, 'gpu_count': gpu_count, 'health_check_path': health_check_path}
-cond1480=>operation: spec['region_image_uris'] = region_image_map if  region_image_map and any((uri != image for uri in region_image_map.values()))
-cond1491=>operation: spec['gpu_type'] = gpu_type if  gpu_type
-cond1502=>operation: spec['model_path'] = model_path if  model_path
-cond1513=>operation: spec['model_source'] = model_source if  model_source
-cond1524=>operation: spec['env'] = env if  env
-cond1535=>operation: spec['autoscaling'] = autoscaling if  autoscaling
-cond1546=>operation: spec['capacity_type'] = capacity_type if  capacity_type
-cond1557=>operation: spec['args'] = extra_args if  extra_args
-cond1568=>operation: spec['accelerator'] = accelerator if  accelerator != 'nvidia'
-cond1579=>operation: spec['node_selector'] = node_selector if  node_selector
-op1589=>operation: store = self._get_store()
-op1591=>operation: result: dict[str, Any] = store.create_endpoint(endpoint_name=endpoint_name, spec=spec, target_regions=target_regions, namespace=namespace, labels=labels)
-io1596=>inputoutput: output: result
-e1594=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op1444=>operation: "\n        Deploy an inference endpoint to one or more regions.\n\n        The endpoint spec is written to DynamoDB. The inference_monitor\n        in each target region picks it up and creates the K8s resources.\n\n        Args:\n            endpoint_name: Unique name for the endpoint\n            image: Container image (e.g. vllm/vllm-openai:v0.8.0)\n            target_regions: Regions to deploy to (default: all deployed regions)\n            replicas: Number of replicas per region\n            gpu_count: GPUs per replica\n            gpu_type: GPU instance type hint for node selector\n            port: Container port\n            model_path: EFS path for model weights\n            health_check_path: Health check endpoint path\n            env: Environment variables\n            namespace: Kubernetes namespace\n            labels: Labels for the endpoint\n            rewrite_image: When True (the default), rewrite ECR URIs in\n                ``image`` to target each region's local replica. Non-ECR\n                refs (Docker Hub, GHCR, etc.) are left unchanged. When\n                False, the URI is written verbatim to every region's\n                spec — the operator is responsible for cross-region\n                pulls. Per-region rewrites are stored under a\n                ``region_overrides`` map on the spec keyed by region.\n\n        Returns:\n            Created endpoint record\n        "
+cond1447=>condition: if not target_regions
+op1451=>operation: stacks = self._aws_client.discover_regional_stacks()
+op1453=>operation: target_regions = list(stacks.keys())
+cond1456=>operation: raise ValueError('No deployed regions found. Deploy infrastructure first.') if  not target_regions
+op1469=>operation: region_image_map: dict[str, str] = {}
+cond1472=>condition: if rewrite_image
+op1476=>operation: from ._image_uri import rewrite_image_uri_for_region
+cond1479=>operation: region_image_map[region] = rewrite_image_uri_for_region(image, region) while  region in target_regions
+op1491=>operation: spec = {'image': image, 'port': port, 'replicas': replicas, 'gpu_count': gpu_count, 'health_check_path': health_check_path}
+cond1494=>operation: spec['region_image_uris'] = region_image_map if  region_image_map and any((uri != image for uri in region_image_map.values()))
+cond1505=>operation: spec['gpu_type'] = gpu_type if  gpu_type
+cond1516=>operation: spec['model_path'] = model_path if  model_path
+cond1527=>operation: spec['model_source'] = model_source if  model_source
+cond1538=>operation: spec['env'] = env if  env
+cond1549=>operation: spec['autoscaling'] = autoscaling if  autoscaling
+cond1560=>operation: spec['capacity_type'] = capacity_type if  capacity_type
+cond1571=>operation: spec['args'] = extra_args if  extra_args
+cond1582=>operation: spec['accelerator'] = accelerator if  accelerator != 'nvidia'
+cond1593=>operation: spec['node_selector'] = node_selector if  node_selector
+op1603=>operation: store = self._get_store()
+op1605=>operation: result: dict[str, Any] = store.create_endpoint(endpoint_name=endpoint_name, spec=spec, target_regions=target_regions, namespace=namespace, labels=labels)
+io1610=>inputoutput: output: result
+e1608=>end: end function return
 
-op1430->cond1433
-cond1433(yes)->op1437
-op1437->op1439
-op1439->cond1442
-cond1442->op1455
-op1455->cond1458
-cond1458(yes)->op1462
-op1462->cond1465
-cond1465->op1477
-op1477->cond1480
-cond1480->cond1491
-cond1491->cond1502
-cond1502->cond1513
-cond1513->cond1524
-cond1524->cond1535
-cond1535->cond1546
-cond1546->cond1557
-cond1557->cond1568
-cond1568->cond1579
-cond1579->op1589
-op1589->op1591
-op1591->io1596
-io1596->e1594
-cond1458(no)->op1477
-cond1433(no)->op1455
+op1444->cond1447
+cond1447(yes)->op1451
+op1451->op1453
+op1453->cond1456
+cond1456->op1469
+op1469->cond1472
+cond1472(yes)->op1476
+op1476->cond1479
+cond1479->op1491
+op1491->cond1494
+cond1494->cond1505
+cond1505->cond1516
+cond1516->cond1527
+cond1527->cond1538
+cond1538->cond1549
+cond1549->cond1560
+cond1560->cond1571
+cond1571->cond1582
+cond1582->cond1593
+cond1593->op1603
+op1603->op1605
+op1605->io1610
+io1610->e1608
+cond1472(no)->op1491
+cond1447(no)->op1469
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

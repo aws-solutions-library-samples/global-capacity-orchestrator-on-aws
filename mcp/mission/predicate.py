@@ -1,0 +1,560 @@
+"""Restricted AST evaluator for ``Criterion(kind="predicate")`` expressions.
+
+A Mission criterion of kind ``predicate`` carries a small Python expression
+that runs against an ``Observation`` dict. Operator-supplied source must be
+treated as untrusted: the same JSON that carries it travels across MCP, the
+CLI, and disk. We parse the expression once at session start (so the
+operator sees errors immediately, not on iteration N), validate it against
+a tight allowlist, and cache the AST on the criterion so every later
+evaluation reuses it without reparsing.
+
+The sandbox has two layers:
+
+1. **Parse-time validation.** :func:`parse_predicate` parses the source in
+   ``eval`` mode and walks the tree with :class:`_PredicateValidator`. The
+   first disallowed construct raises :class:`PredicateRejected` and the
+   evaluator is never reached.
+2. **Eval-time isolation.** :func:`evaluate_predicate` compiles the
+   already-validated AST and calls :func:`eval` with an empty
+   ``__builtins__`` plus an explicit safe-callable namespace. With
+   ``__builtins__`` cleared, even a tree that smuggled past the validator
+   could not look up ``__import__``, ``open``, ``compile``, etc.
+
+Allowed surface
+---------------
+Names: ``obs`` (the dict argument), and the read-only callables ``len``,
+``min``, ``max``, ``sum``, ``abs``, ``any``, ``all``, ``sorted``.
+
+Operators: arithmetic (``+ - * / // % ** @``), unary (``+ - not ~``),
+comparisons (``< <= > >= == != is is_not in not_in``), boolean
+(``and or``), and the ternary ``a if b else c``.
+
+Containers and collections: ``List``, ``Tuple``, ``Dict``, ``Set``, plus
+``ListComp``, ``SetComp``, ``DictComp``, ``GeneratorExp`` (their iteration
+targets must not shadow a name from the allowlist).
+
+Calls: only to a name from the callable allowlist above. ``obs(...)`` is
+rejected because ``obs`` is data, not a callable.
+
+Attribute access: only ``obs.<attr>`` (one level), and the attribute name
+itself must not start with ``__``. Anything more elaborate (chained
+attribute walks, attribute access on a subscript or call, etc.) is
+rejected — predicates that need nested data should use subscripting.
+
+Subscripts: any ``value[...]`` chain whose ultimate base is an allowlisted
+name. Rejection happens automatically because every nested ``Name`` lookup
+is validated.
+
+f-strings: ``JoinedStr`` and ``FormattedValue`` recurse normally so any
+embedded name lookup re-enters this same allowlist check.
+
+Rejected outright
+-----------------
+``Import`` / ``ImportFrom`` (also unreachable in ``eval`` mode), ``Lambda``
+(it would let a predicate ship hidden code), the walrus ``NamedExpr``,
+``Yield`` / ``YieldFrom`` / ``Await`` and other async constructs, any
+identifier or string constant that starts with ``__``, and every
+``Name``/``Attribute``/``Call`` whose target is not on the allowlist.
+"""
+
+from __future__ import annotations
+
+import ast
+from typing import Any, Final, NoReturn
+
+# ---------------------------------------------------------------------------
+# Allowlists
+# ---------------------------------------------------------------------------
+
+_ALLOWED_CALLABLES: Final[frozenset[str]] = frozenset(
+    {"len", "min", "max", "sum", "abs", "any", "all", "sorted"}
+)
+"""Builtin callables a predicate may invoke. Pure, side-effect-free."""
+
+_ALLOWED_DATA_NAMES: Final[frozenset[str]] = frozenset({"obs"})
+"""Top-level data names the predicate may read."""
+
+_ALLOWED_NAMES: Final[frozenset[str]] = _ALLOWED_DATA_NAMES | _ALLOWED_CALLABLES
+"""Every globally-allowed identifier the predicate may reference."""
+
+_ALLOWED_BIN_OPS: Final[tuple[type[ast.operator], ...]] = (
+    ast.Add,
+    ast.Sub,
+    ast.Mult,
+    ast.Div,
+    ast.FloorDiv,
+    ast.Mod,
+    ast.Pow,
+    ast.MatMult,
+)
+
+_ALLOWED_UNARY_OPS: Final[tuple[type[ast.unaryop], ...]] = (
+    ast.UAdd,
+    ast.USub,
+    ast.Not,
+    ast.Invert,
+)
+
+_ALLOWED_COMPARE_OPS: Final[tuple[type[ast.cmpop], ...]] = (
+    ast.Eq,
+    ast.NotEq,
+    ast.Lt,
+    ast.LtE,
+    ast.Gt,
+    ast.GtE,
+    ast.Is,
+    ast.IsNot,
+    ast.In,
+    ast.NotIn,
+)
+
+_ALLOWED_BOOL_OPS: Final[tuple[type[ast.boolop], ...]] = (ast.And, ast.Or)
+
+
+# ---------------------------------------------------------------------------
+# Exception
+# ---------------------------------------------------------------------------
+
+
+class PredicateRejected(Exception):
+    """Raised when a predicate source contains a disallowed construct.
+
+    The :attr:`reason` field is a short stable token (e.g.
+    ``"forbidden_call"``) so callers can render structured errors. The
+    :attr:`failing_node` field is the ``ast`` node that triggered the
+    rejection; it is ``None`` only when the source failed to parse at all.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        failing_node: ast.AST | None = None,
+        message: str | None = None,
+    ) -> None:
+        self.reason: str = reason
+        self.failing_node: ast.AST | None = failing_node
+        self.lineno: int | None = (
+            getattr(failing_node, "lineno", None) if failing_node is not None else None
+        )
+        self.col_offset: int | None = (
+            getattr(failing_node, "col_offset", None) if failing_node is not None else None
+        )
+        rendered = message if message is not None else reason
+        if self.lineno is not None:
+            rendered = f"{rendered} (line {self.lineno}, col {self.col_offset})"
+        super().__init__(rendered)
+
+
+# ---------------------------------------------------------------------------
+# Validator
+# ---------------------------------------------------------------------------
+
+
+class _PredicateValidator(ast.NodeVisitor):
+    """Walk a predicate AST and reject any construct outside the allowlist.
+
+    The validator tracks per-scope local names introduced by comprehensions
+    so a tight expression like ``all(x > 0 for x in obs["xs"])`` works
+    while the comprehension target ``x`` cannot shadow ``obs`` or any of
+    the allowed callables.
+    """
+
+    def __init__(self) -> None:
+        # Stack of frozensets of locally-bound names. The base scope is
+        # empty; comprehensions push a frame containing their targets.
+        self._scopes: list[frozenset[str]] = [frozenset()]
+
+    # ---- helpers -------------------------------------------------------
+
+    def _current_locals(self) -> frozenset[str]:
+        return self._scopes[-1]
+
+    def _name_is_visible(self, name: str) -> bool:
+        return name in _ALLOWED_NAMES or name in self._current_locals()
+
+    @staticmethod
+    def _is_dunder(name: str) -> bool:
+        return name.startswith("__")
+
+    @staticmethod
+    def _reject(reason: str, node: ast.AST, message: str | None = None) -> NoReturn:
+        raise PredicateRejected(reason, failing_node=node, message=message)
+
+    def _push_scope(self, locals_: frozenset[str]) -> None:
+        self._scopes.append(self._current_locals() | locals_)
+
+    def _pop_scope(self) -> None:
+        self._scopes.pop()
+
+    def _collect_target_names(self, target: ast.AST) -> list[ast.Name]:
+        """Flatten a comprehension/assignment target into Name nodes.
+
+        Tuples and lists nest (``for (a, b) in pairs``); Starred wraps
+        (``for *xs, last in rows``). Anything else under a target is a
+        validation error reported by the caller.
+        """
+        if isinstance(target, ast.Name):
+            return [target]
+        if isinstance(target, (ast.Tuple, ast.List)):
+            collected: list[ast.Name] = []
+            for elt in target.elts:
+                collected.extend(self._collect_target_names(elt))
+            return collected
+        if isinstance(target, ast.Starred):
+            return self._collect_target_names(target.value)
+        # Anything else (Subscript, Attribute, ...) as a target is invalid.
+        self._reject(
+            "invalid_comprehension_target",
+            target,
+            "comprehension target must be a plain identifier",
+        )
+        return []  # unreachable; _reject raises
+
+    # ---- top-level entry ----------------------------------------------
+
+    def visit_Expression(self, node: ast.Expression) -> None:
+        # ast.parse(..., mode="eval") guarantees a single Expression root;
+        # walk its body.
+        self.visit(node.body)
+
+    # ---- catch-all -----------------------------------------------------
+
+    def generic_visit(self, node: ast.AST) -> None:
+        # Default rejection: every node type we accept has a dedicated
+        # ``visit_*`` method below. If we reach generic_visit it means the
+        # source contained something we did not explicitly opt into
+        # (Lambda, NamedExpr, Yield, async constructs, FunctionDef, etc.).
+        self._reject(
+            "forbidden_node",
+            node,
+            f"{type(node).__name__} is not allowed in a predicate",
+        )
+
+    # ---- leaves --------------------------------------------------------
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        # Reject dunder strings even when used as plain data. We never
+        # need them in a numeric/boolean/string literal, and forbidding
+        # them closes off the most common escape patterns
+        # (``getattr(x, "__class__")``, ``obs["__import__"]``, etc.) even
+        # if a future change accidentally widens the allowlist.
+        if isinstance(node.value, str) and self._is_dunder(node.value):
+            self._reject(
+                "dunder_string",
+                node,
+                "string constants starting with '__' are not allowed",
+            )
+        # Other constants (int, float, bool, None, bytes, complex, str)
+        # are inert.
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if self._is_dunder(node.id):
+            self._reject(
+                "dunder_name",
+                node,
+                f"identifier '{node.id}' starts with '__'",
+            )
+        if not self._name_is_visible(node.id):
+            self._reject(
+                "name_not_allowed",
+                node,
+                f"name '{node.id}' is not in the predicate allowlist",
+            )
+
+    # ---- containers ----------------------------------------------------
+
+    def visit_List(self, node: ast.List) -> None:
+        for elt in node.elts:
+            self.visit(elt)
+
+    def visit_Tuple(self, node: ast.Tuple) -> None:
+        for elt in node.elts:
+            self.visit(elt)
+
+    def visit_Set(self, node: ast.Set) -> None:
+        for elt in node.elts:
+            self.visit(elt)
+
+    def visit_Dict(self, node: ast.Dict) -> None:
+        for key in node.keys:
+            if key is not None:
+                self.visit(key)
+            else:
+                # ``{**other}`` unpacking would let an attacker splat
+                # arbitrary mappings; reject to keep the surface tight.
+                self._reject(
+                    "dict_unpacking",
+                    node,
+                    "dict unpacking is not allowed in a predicate",
+                )
+        for value in node.values:
+            self.visit(value)
+
+    def visit_Starred(self, node: ast.Starred) -> None:
+        # ``[*xs]`` / ``f(*xs)`` — recurse into the inner expression so
+        # the nested Name still hits the allowlist check.
+        self.visit(node.value)
+
+    # ---- operators -----------------------------------------------------
+
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        if not isinstance(node.op, _ALLOWED_BIN_OPS):
+            self._reject(
+                "binop_not_allowed",
+                node,
+                f"binary operator {type(node.op).__name__} is not allowed",
+            )
+        self.visit(node.left)
+        self.visit(node.right)
+
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> None:
+        if not isinstance(node.op, _ALLOWED_UNARY_OPS):
+            self._reject(
+                "unaryop_not_allowed",
+                node,
+                f"unary operator {type(node.op).__name__} is not allowed",
+            )
+        self.visit(node.operand)
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> None:
+        if not isinstance(node.op, _ALLOWED_BOOL_OPS):
+            self._reject(
+                "boolop_not_allowed",
+                node,
+                f"bool operator {type(node.op).__name__} is not allowed",
+            )
+        for value in node.values:
+            self.visit(value)
+
+    def visit_Compare(self, node: ast.Compare) -> None:
+        for op in node.ops:
+            if not isinstance(op, _ALLOWED_COMPARE_OPS):
+                self._reject(
+                    "compareop_not_allowed",
+                    node,
+                    f"comparison operator {type(op).__name__} is not allowed",
+                )
+        self.visit(node.left)
+        for comparator in node.comparators:
+            self.visit(comparator)
+
+    def visit_IfExp(self, node: ast.IfExp) -> None:
+        self.visit(node.test)
+        self.visit(node.body)
+        self.visit(node.orelse)
+
+    # ---- attribute and subscript --------------------------------------
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        # Only ``obs.<attr>`` is permitted. Anything more elaborate
+        # (chained walks, attributes on calls or subscripts) is rejected:
+        # nested data should use subscript notation.
+        if self._is_dunder(node.attr):
+            self._reject(
+                "dunder_attribute",
+                node,
+                f"attribute '{node.attr}' starts with '__'",
+            )
+        if not (isinstance(node.value, ast.Name) and node.value.id in _ALLOWED_DATA_NAMES):
+            self._reject(
+                "attribute_target_not_allowed",
+                node,
+                "attribute access is only allowed on 'obs'",
+            )
+        # The base Name is in _ALLOWED_DATA_NAMES, so we know it passes
+        # the visit_Name check; visit it anyway to stay regular.
+        self.visit(node.value)
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        # No special restriction beyond "the base Name must be on the
+        # allowlist", which falls out of recursing into ``node.value``.
+        # ``node.slice`` may itself contain Names and Calls; recurse so
+        # they hit the same allowlist gate.
+        self.visit(node.value)
+        self.visit(node.slice)
+
+    def visit_Slice(self, node: ast.Slice) -> None:
+        if node.lower is not None:
+            self.visit(node.lower)
+        if node.upper is not None:
+            self.visit(node.upper)
+        if node.step is not None:
+            self.visit(node.step)
+
+    # ---- calls ---------------------------------------------------------
+
+    def visit_Call(self, node: ast.Call) -> None:
+        # The callee must be a bare Name on the callable allowlist.
+        # Attribute calls (``x.foo()``) and subscript-then-call patterns
+        # (``builtins["eval"](...)``) are both rejected because their
+        # ``func`` is not a Name.
+        if not isinstance(node.func, ast.Name):
+            self._reject(
+                "call_target_not_name",
+                node,
+                "predicate calls must target a bare callable name",
+            )
+        if node.func.id not in _ALLOWED_CALLABLES:
+            self._reject(
+                "call_target_not_allowed",
+                node,
+                f"call to '{node.func.id}' is not allowed",
+            )
+        for arg in node.args:
+            self.visit(arg)
+        for kw in node.keywords:
+            # ``**kwargs`` shows up as a keyword with arg=None; allow the
+            # value but recurse so its content is still validated.
+            self.visit(kw.value)
+
+    # ---- f-strings -----------------------------------------------------
+
+    def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
+        for value in node.values:
+            self.visit(value)
+
+    def visit_FormattedValue(self, node: ast.FormattedValue) -> None:
+        self.visit(node.value)
+        if node.format_spec is not None:
+            self.visit(node.format_spec)
+
+    # ---- comprehensions -----------------------------------------------
+
+    def _validate_comprehensions(self, generators: list[ast.comprehension]) -> frozenset[str]:
+        """Walk comprehension generators and return their target names.
+
+        Each generator's ``iter`` is validated against the *outer* scope
+        (it cannot reference the targets of its own generator), then the
+        targets are added to the local set so the next generator's
+        ``ifs`` and any later ``iter`` can see them.
+        """
+        accumulated: set[str] = set()
+        for gen in generators:
+            if gen.is_async:
+                self._reject(
+                    "async_comprehension",
+                    gen.iter,
+                    "async comprehensions are not allowed",
+                )
+            # Validate the iterable in the scope visible *before* this
+            # generator's targets are bound.
+            self.visit(gen.iter)
+            target_names = self._collect_target_names(gen.target)
+            for name_node in target_names:
+                if self._is_dunder(name_node.id):
+                    self._reject(
+                        "dunder_comprehension_target",
+                        name_node,
+                        f"comprehension target '{name_node.id}' starts with '__'",
+                    )
+                if name_node.id in _ALLOWED_NAMES:
+                    self._reject(
+                        "comprehension_target_shadows_allowlist",
+                        name_node,
+                        f"comprehension target '{name_node.id}' shadows an allowlisted name",
+                    )
+                accumulated.add(name_node.id)
+            # Subsequent ``ifs`` and any later generator may reference
+            # these targets; push them now.
+            self._push_scope(frozenset(accumulated))
+            try:
+                for if_clause in gen.ifs:
+                    self.visit(if_clause)
+            finally:
+                self._pop_scope()
+        return frozenset(accumulated)
+
+    def _visit_comprehension_like(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.GeneratorExp,
+    ) -> None:
+        locals_ = self._validate_comprehensions(node.generators)
+        self._push_scope(locals_)
+        try:
+            self.visit(node.elt)
+        finally:
+            self._pop_scope()
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension_like(node)
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension_like(node)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension_like(node)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        locals_ = self._validate_comprehensions(node.generators)
+        self._push_scope(locals_)
+        try:
+            self.visit(node.key)
+            self.visit(node.value)
+        finally:
+            self._pop_scope()
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def parse_predicate(src: str) -> ast.Expression:
+    """Parse and validate a predicate source string.
+
+    Returns the parsed :class:`ast.Expression` so callers can cache it and
+    feed it to :func:`evaluate_predicate` without reparsing. Raises
+    :class:`PredicateRejected` if the source fails to parse or contains
+    any disallowed construct.
+    """
+    if not isinstance(src, str):
+        raise PredicateRejected(
+            "not_a_string",
+            message="predicate source must be a str",
+        )
+    try:
+        parsed = ast.parse(src, mode="eval")
+    except SyntaxError as exc:
+        rejection = PredicateRejected(
+            "syntax_error",
+            message=f"could not parse predicate: {exc.msg}",
+        )
+        rejection.lineno = exc.lineno
+        rejection.col_offset = exc.offset
+        raise rejection from exc
+    _PredicateValidator().visit(parsed)
+    return parsed
+
+
+# Pre-built sandbox namespace. The double-empty ``__builtins__`` plus an
+# explicit safe-callable namespace is the established sandbox pattern: it
+# blocks lookup of every dangerous builtin (``__import__``, ``open``,
+# ``eval``, ``compile``, ``exec``, ``getattr``, ...) even if the validator
+# were ever bypassed by a future AST node we forgot about.
+_SAFE_GLOBALS: Final[dict[str, Any]] = {"__builtins__": {}}
+_SAFE_CALLABLES: Final[dict[str, Any]] = {
+    "len": len,
+    "min": min,
+    "max": max,
+    "sum": sum,
+    "abs": abs,
+    "any": any,
+    "all": all,
+    "sorted": sorted,
+}
+
+
+def evaluate_predicate(parsed: ast.Expression, obs: dict[str, Any]) -> Any:
+    """Evaluate an already-validated predicate AST against ``obs``.
+
+    The caller is responsible for passing only an :class:`ast.Expression`
+    that came from :func:`parse_predicate`; the function does not
+    re-validate. Compilation is per-call to keep the function pure (the
+    AST itself is the cached unit of work). Returns whatever the
+    expression evaluates to — typically a ``bool``, but the criterion
+    layer handles other values.
+    """
+    code = compile(parsed, "<predicate>", "eval")
+    locals_namespace: dict[str, Any] = {"obs": obs, **_SAFE_CALLABLES}
+    return eval(code, _SAFE_GLOBALS, locals_namespace)  # noqa: S307

@@ -315,6 +315,8 @@ def emit_startup_log() -> None:
     }
     if feature_flags.all_tools_enabled():
         entry["all_tools_enabled"] = True
+    if feature_flags.is_enabled(feature_flags.FLAG_MISSION):
+        entry["mission_enabled"] = True
     tool_search = _resolve_tool_search()
     entry["tool_search"] = tool_search
     if tool_search == "code_mode":

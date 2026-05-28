@@ -14,6 +14,7 @@ from .files_cmd import files
 from .images_cmd import images
 from .inference_cmd import inference
 from .jobs_cmd import jobs
+from .mission_cmd import mission_cmd
 from .models_cmd import models
 from .nodepools_cmd import nodepools
 from .queue_cmd import queue
@@ -32,6 +33,7 @@ __all__ = [
     "images",
     "inference",
     "jobs",
+    "mission_cmd",
     "models",
     "nodepools",
     "queue",

@@ -20,6 +20,7 @@ def register_all_tools() -> None:
         images,
         inference,
         jobs,
+        mission,
         models,
         nodepools,
         queue,

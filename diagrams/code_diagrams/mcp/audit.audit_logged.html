@@ -205,70 +205,70 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2280=>operation: 'Decorator that emits structured JSON audit entries for tool invocations.\n\n    Dispatches on ``inspect.iscoroutinefunction(func)``: async tools get an\n    async wrapper that ``await``s the call, sync tools keep the existing\n    sync path. Both wrappers share ``_build_audit_entry``.\n    '
-cond2283=>condition: if inspect.iscoroutinefunction(func)
-st2288=>start: start async_wrapper
-io2290=>inputoutput: input: 
-op2293=>operation: start = time.time()
-op2295=>operation: sanitized_args = _sanitize_arguments(kwargs)
-op2298=>operation: result = await func(*args, **kwargs)
+        <div><textarea id="code" style="width: 100%;" rows="11">op2294=>operation: 'Decorator that emits structured JSON audit entries for tool invocations.\n\n    Dispatches on ``inspect.iscoroutinefunction(func)``: async tools get an\n    async wrapper that ``await``s the call, sync tools keep the existing\n    sync path. Both wrappers share ``_build_audit_entry``.\n    '
+cond2297=>condition: if inspect.iscoroutinefunction(func)
+st2302=>start: start async_wrapper
+io2304=>inputoutput: input: 
+op2307=>operation: start = time.time()
+op2309=>operation: sanitized_args = _sanitize_arguments(kwargs)
+op2312=>operation: result = await func(*args, **kwargs)
 duration_ms = (time.time() - start) * 1000
 audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'success', duration_ms, None, result)))
 return result
-cond2297=>condition: exception raised?
-cond2300=>condition: except Exception as e
-op2304=>operation: duration_ms = (time.time() - start) * 1000
-sub2306=>subroutine: audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'error', duration_ms, str(e), None)))
-sub2308=>subroutine: raise
-e2313=>end: end async_wrapper
-io2319=>inputoutput: output: async_wrapper
-e2317=>end: end function return
-st2326=>start: start sync_wrapper
-io2328=>inputoutput: input: 
-op2331=>operation: start = time.time()
-op2333=>operation: sanitized_args = _sanitize_arguments(kwargs)
-op2336=>operation: result = func(*args, **kwargs)
+cond2311=>condition: exception raised?
+cond2314=>condition: except Exception as e
+op2318=>operation: duration_ms = (time.time() - start) * 1000
+sub2320=>subroutine: audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'error', duration_ms, str(e), None)))
+sub2322=>subroutine: raise
+e2327=>end: end async_wrapper
+io2333=>inputoutput: output: async_wrapper
+e2331=>end: end function return
+st2340=>start: start sync_wrapper
+io2342=>inputoutput: input: 
+op2345=>operation: start = time.time()
+op2347=>operation: sanitized_args = _sanitize_arguments(kwargs)
+op2350=>operation: result = func(*args, **kwargs)
 duration_ms = (time.time() - start) * 1000
 audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'success', duration_ms, None, result)))
 return result
-cond2335=>condition: exception raised?
-cond2338=>condition: except Exception as e
-op2342=>operation: duration_ms = (time.time() - start) * 1000
-sub2344=>subroutine: audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'error', duration_ms, str(e), None)))
-sub2346=>subroutine: raise
-e2351=>end: end sync_wrapper
-io2357=>inputoutput: output: sync_wrapper
-e2355=>end: end function return
+cond2349=>condition: exception raised?
+cond2352=>condition: except Exception as e
+op2356=>operation: duration_ms = (time.time() - start) * 1000
+sub2358=>subroutine: audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'error', duration_ms, str(e), None)))
+sub2360=>subroutine: raise
+e2365=>end: end sync_wrapper
+io2371=>inputoutput: output: sync_wrapper
+e2369=>end: end function return
 
-op2280->cond2283
-cond2283(yes)->st2288
-st2288->io2290
-io2290->op2293
-op2293->op2295
-op2295->op2298
-op2298->cond2297
-cond2297(yes)->cond2300
-cond2300(yes)->op2304
-op2304->sub2306
-sub2306->sub2308
-cond2300(no)->e2313
-e2313->io2319
-io2319->e2317
-cond2297(no)->e2313
-cond2283(no)->st2326
-st2326->io2328
-io2328->op2331
-op2331->op2333
-op2333->op2336
-op2336->cond2335
-cond2335(yes)->cond2338
-cond2338(yes)->op2342
-op2342->sub2344
-sub2344->sub2346
-cond2338(no)->e2351
-e2351->io2357
-io2357->e2355
-cond2335(no)->e2351
+op2294->cond2297
+cond2297(yes)->st2302
+st2302->io2304
+io2304->op2307
+op2307->op2309
+op2309->op2312
+op2312->cond2311
+cond2311(yes)->cond2314
+cond2314(yes)->op2318
+op2318->sub2320
+sub2320->sub2322
+cond2314(no)->e2327
+e2327->io2333
+io2333->e2331
+cond2311(no)->e2327
+cond2297(no)->st2340
+st2340->io2342
+io2342->op2345
+op2345->op2347
+op2347->op2350
+op2350->cond2349
+cond2349(yes)->cond2352
+cond2352(yes)->op2356
+op2356->sub2358
+sub2358->sub2360
+cond2352(no)->e2365
+e2365->io2371
+io2371->e2369
+cond2349(no)->e2365
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

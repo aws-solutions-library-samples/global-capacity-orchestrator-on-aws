@@ -278,11 +278,11 @@ class TestGlobalStackSynthesis:
         stack = GCOGlobalStack(app, "test-synth-ssm", config=config)
 
         template = assertions.Template.from_stack(stack)
-        # 1 for endpoint groups + 4 for DynamoDB tables (templates, webhooks, jobs,
-        # inference-endpoints) + 1 for model bucket name + 3 for the always-on
-        # Cluster_Shared_Bucket (/gco/cluster-shared-bucket/name, /arn, /region)
-        # published unconditionally by GCOGlobalStack.
-        template.resource_count_is("AWS::SSM::Parameter", 9)
+        # 1 for endpoint groups + 5 for DynamoDB tables (templates, webhooks, jobs,
+        # inference-endpoints, missions) + 1 for model bucket name + 3 for the
+        # always-on Cluster_Shared_Bucket (/gco/cluster-shared-bucket/name, /arn,
+        # /region) published unconditionally by GCOGlobalStack.
+        template.resource_count_is("AWS::SSM::Parameter", 10)
 
 
 class TestMonitoringStackMethods:

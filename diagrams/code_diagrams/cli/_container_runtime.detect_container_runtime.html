@@ -205,24 +205,24 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2013=>operation: '\n    Detect available container runtime (cached).\n\n    Returns:\n        Runtime name (``"docker"``, ``"finch"``, or ``"podman"``) if a\n        runtime is found and running, ``None`` if nothing is available.\n\n    Note:\n        If the ``CDK_DOCKER`` environment variable is set, that value\n        is returned without checking if the runtime is available.\n    '
-op2015=>operation: global _container_runtime_cache, _container_runtime_checked
-cond2018=>condition: if _container_runtime_checked
-io2025=>inputoutput: output: _container_runtime_cache
-e2023=>end: end function return
-op2031=>operation: _container_runtime_cache = _detect_container_runtime_uncached()
-op2033=>operation: _container_runtime_checked = True
-io2038=>inputoutput: output: _container_runtime_cache
-e2036=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op2027=>operation: '\n    Detect available container runtime (cached).\n\n    Returns:\n        Runtime name (``"docker"``, ``"finch"``, or ``"podman"``) if a\n        runtime is found and running, ``None`` if nothing is available.\n\n    Note:\n        If the ``CDK_DOCKER`` environment variable is set, that value\n        is returned without checking if the runtime is available.\n    '
+op2029=>operation: global _container_runtime_cache
+cond2032=>condition: if _container_runtime_cache is not _UNCHECKED
+io2039=>inputoutput: output: _container_runtime_cache
+e2037=>end: end function return
+op2045=>operation: result = _detect_container_runtime_uncached()
+op2047=>operation: _container_runtime_cache = result
+io2052=>inputoutput: output: result
+e2050=>end: end function return
 
-op2013->op2015
-op2015->cond2018
-cond2018(yes)->io2025
-io2025->e2023
-cond2018(no)->op2031
-op2031->op2033
-op2033->io2038
-io2038->e2036
+op2027->op2029
+op2029->cond2032
+cond2032(yes)->io2039
+io2039->e2037
+cond2032(no)->op2045
+op2045->op2047
+op2047->io2052
+io2052->e2050
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

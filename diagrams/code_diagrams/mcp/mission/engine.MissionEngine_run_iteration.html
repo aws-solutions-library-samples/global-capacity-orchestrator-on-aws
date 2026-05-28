@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <title>Mission iteration loop (propose -> execute -> observe -> evaluate -> decide)</title>
+        <style type="text/css">
+          .end-element { fill : #FFCCFF; }
+        </style>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/raphael/2.3.0/raphael.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/flowchart/1.17.1/flowchart.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.1/js/bootstrap.bundle.min.js"></script>
+        <!-- <script src="../release/flowchart.min.js"></script> -->
+        <script>
+
+            window.onload = function () {
+                var btn = document.getElementById("run"),
+                    cd = document.getElementById("code"),
+                    chart;
+                    
+                (btn.onclick = function () {
+                    var code = cd.value;
+
+                    if (chart) {
+                      chart.clean();
+                    }
+
+                    chart = flowchart.parse(code);
+                    chart.drawSVG('canvas', {
+                      'x': 0,
+                      'y': 0,
+                      'line-width': 3,
+                      //'maxWidth': 15,//ensures the flowcharts fits within a certain width
+                      'line-length': 50,
+                      'text-margin': 10,
+                      'font-size': 14,
+                      'font': 'normal',
+                      'font-family': 'Helvetica',
+                      'font-weight': 'normal',
+                      'font-color': 'black',
+                      'line-color': 'black',
+                      'element-color': 'black',
+                      'fill': 'white',
+                      'yes-text': 'yes',
+                      'no-text': 'no',
+                      'arrow-end': 'block',
+                      'scale': 1,
+                      'symbols': {
+                        'start': {
+                          'font-size': 14,
+                          'font-color': 'yellow',
+                          'element-color': 'blue',
+                          'fill': 'green',
+                          'class': 'start-element'
+                        },
+                        'inputoutput': {
+                          'font-color': 'black',
+                          'element-color': 'black',
+                          'fill': 'bisque'
+                        },
+                        'operation': {
+                          'font-color': 'black',
+                          'element-color': 'black',
+                          'fill': 'linen'
+                        },
+                        'subroutine': {
+                          'font-color': 'black',
+                          'element-color': 'blue',
+                          'fill': 'lightgreen'
+                        },
+                        'condition': {
+                          'font-color': 'red',
+                          'element-color': 'black',
+                          'fill': 'yellow'
+                        },
+                        'end':{
+                          'font-size': 20,
+                          'class': 'end-element'
+                        }
+                      },
+                      'flowstate' : {
+                        //'past' : { 'fill' : '#CCCCCC', 'font-size' : 12},
+                        //'current' : {'fill' : 'yellow', 'font-color' : 'red', 'font-weight' : 'bold'},
+                        //'future' : { 'fill' : '#FFFF99'},
+                        'request' : { 'fill' : 'blue'},
+                        'invalid': {'fill' : '#444444'},
+                        'approved' : { 'fill' : '#58C4A3', 'font-size' : 12, 'yes-text' : 'APPROVED', 'no-text' : 'n/a' },
+                        'rejected' : { 'fill' : '#C45879', 'font-size' : 12, 'yes-text' : 'n/a', 'no-text' : 'REJECTED' }
+                      }
+                    });
+                    //create base64 encoding of SVG to generate download link for title(without html or htm).SVG
+                    var currentCanvasDIV = document.getElementById('canvas')
+                    var currentDrawSVG = currentCanvasDIV.innerHTML.replaceAll('ë','e');
+
+                    const OUTsvgBASE64 = btoa(currentDrawSVG)
+                    doctitle = document.title.replace('.html','');
+                    doctitle = doctitle.replace('.htm','');
+
+
+                    var currentCanvasDIV = document.getElementById('canvas')
+                    var currentDrawSVG = currentCanvasDIV.innerHTML.replaceAll('ë','e');
+                    svgSource = currentDrawSVG
+                    svgXML = currentDrawSVG;
+                    // Use SVG Height and Width from the SVG XML to set canvas size
+                    svgXMLsubstringHeight = svgXML.substring(svgXML.indexOf('height='), svgXML.indexOf('version='));
+                    svgXMLsubstringWidth = svgXML.substring(svgXML.indexOf('width='), svgXML.indexOf('xmlns='));
+                    HeightValue = svgXMLsubstringHeight.substring(svgXMLsubstringHeight.indexOf('"')+1,svgXMLsubstringHeight.lastIndexOf('"'));
+                    WidthValue = svgXMLsubstringWidth.substring(svgXMLsubstringWidth.indexOf('"')+1,svgXMLsubstringWidth.lastIndexOf('"'));
+                    HeightValueInt = Math.round(HeightValue)
+                    WidthValueInt = Math.round(WidthValue)
+                    // setup input for base64SvgToBase64Png
+                    let svgSrc = "data:image/svg+xml;base64,"+OUTsvgBASE64;
+                    var pngBase
+                    imageUtil.base64SvgToBase64Png(svgSrc, WidthValueInt, HeightValueInt).then(pngSrc => {
+                    pngBase = pngSrc
+                    // output download link for base64 PNG converted on download from base64
+                    var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
+                    document.getElementById("pngbase64").innerHTML=pngOutHtml;
+                    });    
+                    // output download link for base64 SVG converted on download from base64
+                    var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
+                        document.getElementById("svgbase64").innerHTML=svgOutHtml;
+                    })();
+
+                            };
+                 
+
+// derived from https://stackoverflow.com/a/64800570
+// we need to use web browser canvas to generate a image. In this case png
+let imageUtil = {};
+/**
+ * converts a base64 encoded data url SVG image to a PNG image
+ * @param originalBase64 data url of svg image
+ * @param width target width in pixel of PNG image
+ * @param secondTry used internally to prevent endless recursion
+ * @return {Promise<unknown>} resolves to png data url of the image
+ */
+imageUtil.base64SvgToBase64Png = function (originalBase64, width, height, secondTry) {
+    return new Promise(resolve => {
+        let img = document.createElement('img');
+        img.onload = function () {
+            if (!secondTry && (img.naturalWidth === 0 || img.naturalHeight === 0)) {
+                let svgDoc = base64ToSvgDocument(originalBase64);
+                let fixedDoc = fixSvgDocumentFF(svgDoc);
+                return imageUtil.base64SvgToBase64Png(svgDocumentToBase64(fixedDoc), width, height, true).then(result => {
+                    resolve(result);
+                });
+            }
+            //document.body.appendChild(img);
+            let canvas2 = document.createElement("canvas");
+            //document.body.removeChild(img);
+            canvas2.width = width;
+            canvas2.height = height;
+            let ctx = canvas2.getContext("2d");
+            ctx.drawImage(img, 0, 0, canvas2.width, canvas2.height);
+            try {
+                let data = canvas2.toDataURL('image/png');
+                resolve(data);
+            } catch (e) {
+                resolve(null);
+            }
+        };
+        img.src = originalBase64;
+    });
+}
+
+//needed because Firefox doesn't correctly handle SVG with size = 0, see https://bugzilla.mozilla.org/show_bug.cgi?id=700533
+function fixSvgDocumentFF(svgDocument) {
+    try {
+        let widthInt = parseInt(svgDocument.documentElement.width.baseVal.value) || 500;
+        let heightInt = parseInt(svgDocument.documentElement.height.baseVal.value) || 500;
+        svgDocument.documentElement.width.baseVal.newValueSpecifiedUnits(SVGLength.SVG_LENGTHTYPE_PX, widthInt);
+        svgDocument.documentElement.height.baseVal.newValueSpecifiedUnits(SVGLength.SVG_LENGTHTYPE_PX, heightInt);
+        return svgDocument;
+    } catch (e) {
+        return svgDocument;
+    }
+}
+
+function svgDocumentToBase64(svgDocument) {
+    try {
+        let base64EncodedSVG = btoa(new XMLSerializer().serializeToString(svgDocument));
+        return 'data:image/svg+xml;base64,' + base64EncodedSVG;
+    } catch (e) {
+        return null;
+    }
+}
+
+function base64ToSvgDocument(base64) {
+    let svg = atob(base64.substring(base64.indexOf('base64,') + 7));
+    svg = svg.substring(svg.indexOf('<svg'));
+    let parser = new DOMParser();
+    return parser.parseFromString(svg, "image/svg+xml");
+} 
+        </script>
+
+        <script>
+            function HelpText() {
+              var x = document.getElementById("HelpTextBlock");
+              if (x.style.display === "none") {
+                x.style.display = "block";
+              } else {
+                x.style.display = "none";
+              }
+            }
+        </script>
+    </head>
+    <body>
+        <div><textarea id="code" style="width: 100%;" rows="11">op2756=>operation: 'Run one full iteration for ``session_id`` and return its record.\n\n        Lifecycle:\n\n        1. Load the session; raise ``session_not_found`` when missing.\n        2. Refuse a session in any terminal state (``failed`` →\n           ``session_failed``; ``completed`` / ``terminated`` →\n           ``session_terminal``) or in ``paused`` (``session_paused``).\n        3. Transition ``pending → running`` on the very first iteration\n           and stamp ``session["started_at"]``.\n        4. Allocate a fresh :class:`IterationRecord` and run the five\n           phases in order. Each phase emits exactly one\n           ``audit.emit_phase_event`` regardless of outcome.\n        5. On any phase exception: append the partial iteration to\n           ``session["iterations"]``, mark the session ``failed``, save,\n           and re-raise. The session JSON stays inspectable.\n        6. On success: stamp the verdict on the iteration, append it,\n           update the no-progress counter, save the session.\n        7. On terminal verdict (``complete`` / ``terminate``): transition\n           the session status, write the Final_Report, save again.\n        8. Emit one ``audit.emit_verdict_event`` regardless of outcome.\n        9. Return the iteration record.\n        '
+op2758=>operation: session = self.backend.load_session(session_id)
+cond2761=>operation: raise MissionEngineError('session_not_found') if  session is None
+op2771=>operation: status = session['status']
+cond2774=>operation: raise MissionEngineError('session_failed') if  status == 'failed'
+cond2785=>operation: raise MissionEngineError('session_terminal') if  status in TERMINAL_STATES
+cond2796=>operation: raise MissionEngineError('session_paused') if  status == 'paused'
+op2806=>operation: iteration_start = self.now()
+cond2809=>condition: if session['status'] == 'pending'
+op2813=>operation: session['status'] = 'running'
+op2815=>operation: session['started_at'] = iteration_start.isoformat()
+op2820=>operation: iteration_index = len(session['iterations'])
+op2822=>operation: record = self._make_iteration_record(iteration_index, iteration_start)
+op2825=>operation: strategy = await self._propose_phase(session, ctx, record)
+executed_calls = await self._execute_phase(session, strategy, ctx, record)
+await self._observe_phase(session, strategy, executed_calls, record)
+await self._evaluate_phase(session, record)
+verdict, reason = await self._decide_phase(session, record)
+cond2824=>condition: exception raised?
+cond2827=>condition: except Exception
+op2831=>operation: record['ended_at'] = self.now().isoformat()
+sub2833=>subroutine: session['iterations'].append(record)
+op2835=>operation: session['status'] = 'failed'
+op2837=>operation: session['ended_at'] = record['ended_at']
+sub2842=>subroutine: self.backend.save_session(session)
+cond2839=>condition: exception raised?
+cond2844=>condition: except Exception
+op2848=>operation: pass
+sub2853=>subroutine: raise
+op2858=>operation: record['verdict'] = verdict
+op2860=>operation: record['verdict_reason'] = reason
+op2862=>operation: record['ended_at'] = self.now().isoformat()
+sub2864=>subroutine: session['iterations'].append(record)
+sub2866=>subroutine: self._update_session_post_iteration(session, record)
+sub2868=>subroutine: self.backend.save_session(session)
+cond2871=>condition: if verdict in TERMINAL_VERDICTS
+op2875=>operation: await self._finalise_terminal_session(session, record, verdict, reason)
+sub2877=>subroutine: self.backend.save_session(session)
+sub2882=>subroutine: audit.emit_verdict_event(session_id=session_id, iteration_index=iteration_index, verdict=verdict, verdict_reason=reason, revision_rationale=record.get('revision_rationale'))
+io2887=>inputoutput: output: record
+e2885=>end: end function return
+
+op2756->op2758
+op2758->cond2761
+cond2761->op2771
+op2771->cond2774
+cond2774->cond2785
+cond2785->cond2796
+cond2796->op2806
+op2806->cond2809
+cond2809(yes)->op2813
+op2813->op2815
+op2815->op2820
+op2820->op2822
+op2822->op2825
+op2825->cond2824
+cond2824(yes)->cond2827
+cond2827(yes)->op2831
+op2831->sub2833
+sub2833->op2835
+op2835->op2837
+op2837->sub2842
+sub2842->cond2839
+cond2839(yes)->cond2844
+cond2844(yes)->op2848
+op2848->sub2853
+cond2844(no)->sub2853
+cond2839(no)->sub2853
+cond2827(no)->op2858
+op2858->op2860
+op2860->op2862
+op2862->sub2864
+sub2864->sub2866
+sub2866->sub2868
+sub2868->cond2871
+cond2871(yes)->op2875
+op2875->sub2877
+sub2877->sub2882
+sub2882->io2887
+io2887->e2885
+cond2871(no)->sub2882
+cond2824(no)->op2858
+cond2809(no)->op2820
+</textarea></div>
+        <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
+        <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
+... and the other symbols too... like sub1(right)<br/>
+You can also tweak the <b>diagram.drawSVG('diagram', {});</b> script in this file for more changes<br/>
+This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on github</a> and <a href="http://flowchart.js.org">http://flowchart.js.org</a> more documentation can be found over there.
+</div><br/><div id="svgbase64"></div>
+        <div id="pngbase64"></div>
+
+        <div id="canvas"></div>
+    </body>
+</html>

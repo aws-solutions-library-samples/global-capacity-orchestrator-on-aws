@@ -205,48 +205,48 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub1657=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op1659=>operation: self.config = config
-op1661=>operation: self.regional_endpoints: dict[str, str] = {}
-op1663=>operation: self.endpoint_groups: dict[str, ga.EndpointGroup] = {}
-op1665=>operation: ga_config = self.config.get_global_accelerator_config()
-op1667=>operation: self.accelerator_name = ga_config['name']
-sub1669=>subroutine: self._create_dynamodb_tables()
-sub1671=>subroutine: self._create_model_bucket()
-sub1673=>subroutine: self._create_cluster_shared_kms_key()
-sub1675=>subroutine: self._create_cluster_shared_bucket()
-sub1677=>subroutine: self._publish_cluster_shared_bucket_ssm_params()
-sub1679=>subroutine: self._create_backup_plan()
-op1681=>operation: self.images_config = _parse_images_config(self.node.try_get_context('images'))
-sub1683=>subroutine: self._create_image_replication_rule()
-sub1685=>subroutine: self._create_image_lookup_lambda()
-op1687=>operation: self.accelerator = ga.Accelerator(self, 'GCOAccelerator', accelerator_name=self.accelerator_name, enabled=True)
-op1689=>operation: self.accelerator_id = Fn.select(1, Fn.split('/', self.accelerator.accelerator_arn))
-op1691=>operation: self.listener = self.accelerator.add_listener('GCOListener', port_ranges=[ga.PortRange(from_port=80, to_port=80), ga.PortRange(from_port=443, to_port=443)], protocol=ga.ConnectionProtocol.TCP, client_affinity=ga.ClientAffinity.NONE)
-cond1694=>operation: self._create_endpoint_group(region) while  region in self.config.get_regions()
-sub1703=>subroutine: self._create_outputs()
-sub1705=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub1671=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op1673=>operation: self.config = config
+op1675=>operation: self.regional_endpoints: dict[str, str] = {}
+op1677=>operation: self.endpoint_groups: dict[str, ga.EndpointGroup] = {}
+op1679=>operation: ga_config = self.config.get_global_accelerator_config()
+op1681=>operation: self.accelerator_name = ga_config['name']
+sub1683=>subroutine: self._create_dynamodb_tables()
+sub1685=>subroutine: self._create_model_bucket()
+sub1687=>subroutine: self._create_cluster_shared_kms_key()
+sub1689=>subroutine: self._create_cluster_shared_bucket()
+sub1691=>subroutine: self._publish_cluster_shared_bucket_ssm_params()
+sub1693=>subroutine: self._create_backup_plan()
+op1695=>operation: self.images_config = _parse_images_config(self.node.try_get_context('images'))
+sub1697=>subroutine: self._create_image_replication_rule()
+sub1699=>subroutine: self._create_image_lookup_lambda()
+op1701=>operation: self.accelerator = ga.Accelerator(self, 'GCOAccelerator', accelerator_name=self.accelerator_name, enabled=True)
+op1703=>operation: self.accelerator_id = Fn.select(1, Fn.split('/', self.accelerator.accelerator_arn))
+op1705=>operation: self.listener = self.accelerator.add_listener('GCOListener', port_ranges=[ga.PortRange(from_port=80, to_port=80), ga.PortRange(from_port=443, to_port=443)], protocol=ga.ConnectionProtocol.TCP, client_affinity=ga.ClientAffinity.NONE)
+cond1708=>operation: self._create_endpoint_group(region) while  region in self.config.get_regions()
+sub1717=>subroutine: self._create_outputs()
+sub1719=>subroutine: self._apply_nag_suppressions()
 
-sub1657->op1659
-op1659->op1661
-op1661->op1663
-op1663->op1665
-op1665->op1667
-op1667->sub1669
-sub1669->sub1671
-sub1671->sub1673
-sub1673->sub1675
-sub1675->sub1677
-sub1677->sub1679
-sub1679->op1681
+sub1671->op1673
+op1673->op1675
+op1675->op1677
+op1677->op1679
+op1679->op1681
 op1681->sub1683
 sub1683->sub1685
-sub1685->op1687
-op1687->op1689
-op1689->op1691
-op1691->cond1694
-cond1694->sub1703
-sub1703->sub1705
+sub1685->sub1687
+sub1687->sub1689
+sub1689->sub1691
+sub1691->sub1693
+sub1693->op1695
+op1695->sub1697
+sub1697->sub1699
+sub1699->op1701
+op1701->op1703
+op1703->op1705
+op1705->cond1708
+cond1708->sub1717
+sub1717->sub1719
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

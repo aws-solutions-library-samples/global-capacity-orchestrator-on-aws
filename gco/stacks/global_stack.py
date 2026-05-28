@@ -160,6 +160,7 @@ class GCOGlobalStack(Stack):
         endpoint_groups: Dict mapping region names to endpoint groups
         templates_table: DynamoDB table for job templates
         webhooks_table: DynamoDB table for webhooks
+        missions_table: DynamoDB table for mission session state
     """
 
     def __init__(
@@ -353,7 +354,7 @@ class GCOGlobalStack(Stack):
         raise ValueError(f"No endpoint group found for region: {region}")
 
     def _create_dynamodb_tables(self) -> None:
-        """Create DynamoDB tables for templates, webhooks, and jobs."""
+        """Create DynamoDB tables for templates, webhooks, jobs, inference endpoints, and missions."""
         project_name = self.config.get_project_name()
 
         # Job Templates table - stores reusable job templates
@@ -544,6 +545,55 @@ class GCOGlobalStack(Stack):
             export_name=f"{project_name}-inference-endpoints-table-arn",
         )
 
+        # Missions table - persists goal-directed iteration session state
+        # Partition by session_id; the status-index GSI supports paginated
+        # listing by status (e.g. running, completed, terminated, failed).
+        self.missions_table = dynamodb.Table(
+            self,
+            "MissionsTable",
+            table_name=f"{project_name}-missions",
+            partition_key=dynamodb.Attribute(
+                name="session_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True
+            ),
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+        )
+
+        # GSI for paginating sessions by status (sorted by creation time)
+        self.missions_table.add_global_secondary_index(
+            index_name="status-index",
+            partition_key=dynamodb.Attribute(
+                name="status",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="created_at",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
+        CfnOutput(
+            self,
+            "MissionsTableName",
+            value=self.missions_table.table_name,
+            description="DynamoDB table name for mission session state",
+            export_name=f"{project_name}-missions-table-name",
+        )
+
+        CfnOutput(
+            self,
+            "MissionsTableArn",
+            value=self.missions_table.table_arn,
+            description="DynamoDB table ARN for mission session state",
+            export_name=f"{project_name}-missions-table-arn",
+        )
+
         # Store table names in SSM for cross-region access
         ssm.StringParameter(
             self,
@@ -575,6 +625,14 @@ class GCOGlobalStack(Stack):
             parameter_name=f"/{project_name}/inference-endpoints-table-name",
             string_value=self.inference_endpoints_table.table_name,
             description="DynamoDB table name for inference endpoint state",
+        )
+
+        ssm.StringParameter(
+            self,
+            "MissionsTableNameParam",
+            parameter_name=f"/{project_name}/missions-table-name",
+            string_value=self.missions_table.table_name,
+            description="DynamoDB table name for mission session state",
         )
 
     def _create_model_bucket(self) -> None:
@@ -777,6 +835,7 @@ class GCOGlobalStack(Stack):
                 backup.BackupResource.from_dynamo_db_table(self.webhooks_table),
                 backup.BackupResource.from_dynamo_db_table(self.jobs_table),
                 backup.BackupResource.from_dynamo_db_table(self.inference_endpoints_table),
+                backup.BackupResource.from_dynamo_db_table(self.missions_table),
             ],
         )
 

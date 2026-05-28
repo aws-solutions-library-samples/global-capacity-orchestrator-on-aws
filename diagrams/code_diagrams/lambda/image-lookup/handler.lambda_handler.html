@@ -205,32 +205,32 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2536=>operation: 'Lookup-or-create custom resource handler for ECR repositories.\n\n    Dispatches on ``event["RequestType"]`` and returns the standard\n    CloudFormation custom resource response shape. The CDK Provider\n    framework wraps this dict into the protocol-required envelope.\n    '
-op2538=>operation: request_type = event.get('RequestType', '')
-op2540=>operation: properties = event.get('ResourceProperties', {}) or {}
-op2542=>operation: physical_id = event.get('PhysicalResourceId', '')
-sub2544=>subroutine: logger.info('Image-Lookup CR event: %s for %s', request_type, properties.get('RepositoryName'))
-op2546=>operation: ecr = _ecr_client()
-cond2549=>condition: if request_type in ('Create', 'Update')
-io2556=>inputoutput: output: _handle_create_or_update(ecr, properties)
-e2554=>end: end function return
-cond2563=>condition: if request_type == 'Delete'
-io2570=>inputoutput: output: _handle_delete(ecr, properties, physical_id)
-e2568=>end: end function return
-sub2576=>subroutine: raise ValueError(f'Unsupported RequestType: {request_type!r}')
+        <div><textarea id="code" style="width: 100%;" rows="11">op2712=>operation: 'Lookup-or-create custom resource handler for ECR repositories.\n\n    Dispatches on ``event["RequestType"]`` and returns the standard\n    CloudFormation custom resource response shape. The CDK Provider\n    framework wraps this dict into the protocol-required envelope.\n    '
+op2714=>operation: request_type = event.get('RequestType', '')
+op2716=>operation: properties = event.get('ResourceProperties', {}) or {}
+op2718=>operation: physical_id = event.get('PhysicalResourceId', '')
+sub2720=>subroutine: logger.info('Image-Lookup CR event: %s for %s', request_type, properties.get('RepositoryName'))
+op2722=>operation: ecr = _ecr_client()
+cond2725=>condition: if request_type in ('Create', 'Update')
+io2732=>inputoutput: output: _handle_create_or_update(ecr, properties)
+e2730=>end: end function return
+cond2739=>condition: if request_type == 'Delete'
+io2746=>inputoutput: output: _handle_delete(ecr, properties, physical_id)
+e2744=>end: end function return
+sub2752=>subroutine: raise ValueError(f'Unsupported RequestType: {request_type!r}')
 
-op2536->op2538
-op2538->op2540
-op2540->op2542
-op2542->sub2544
-sub2544->op2546
-op2546->cond2549
-cond2549(yes)->io2556
-io2556->e2554
-cond2549(no)->cond2563
-cond2563(yes)->io2570
-io2570->e2568
-cond2563(no)->sub2576
+op2712->op2714
+op2714->op2716
+op2716->op2718
+op2718->sub2720
+sub2720->op2722
+op2722->cond2725
+cond2725(yes)->io2732
+io2732->e2730
+cond2725(no)->cond2739
+cond2739(yes)->io2746
+io2746->e2744
+cond2739(no)->sub2752
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

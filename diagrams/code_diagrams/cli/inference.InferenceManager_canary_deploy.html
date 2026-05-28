@@ -205,32 +205,32 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1601=>operation: 'Start a canary deployment for an existing endpoint.\n\n        Creates a canary variant with the new image receiving `weight`%\n        of traffic. The primary deployment continues serving the rest.\n\n        Args:\n            endpoint_name: Existing endpoint to canary\n            image: New container image for the canary\n            weight: Percentage of traffic to route to canary (1-99)\n            replicas: Number of canary replicas\n\n        Returns:\n            Updated endpoint record, or None if endpoint not found\n        '
-cond1604=>operation: raise ValueError('Canary weight must be between 1 and 99') if  not 1 <= weight <= 99
-op1614=>operation: store = self._get_store()
-op1616=>operation: endpoint = store.get_endpoint(endpoint_name)
-cond1619=>condition: if not endpoint
-io1626=>inputoutput: output: None
-e1624=>end: end function return
-cond1633=>operation: raise ValueError(f"Cannot canary an endpoint in '{endpoint.get('desired_state')}' state. Endpoint must be running.") if  endpoint.get('desired_state') not in ('running', 'deploying')
-op1643=>operation: spec = endpoint.get('spec', {})
-op1645=>operation: spec['canary'] = {'image': image, 'weight': weight, 'replicas': replicas}
-op1647=>operation: result: dict[str, Any] | None = store.update_spec(endpoint_name, spec)
-io1652=>inputoutput: output: result
-e1650=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op1615=>operation: 'Start a canary deployment for an existing endpoint.\n\n        Creates a canary variant with the new image receiving `weight`%\n        of traffic. The primary deployment continues serving the rest.\n\n        Args:\n            endpoint_name: Existing endpoint to canary\n            image: New container image for the canary\n            weight: Percentage of traffic to route to canary (1-99)\n            replicas: Number of canary replicas\n\n        Returns:\n            Updated endpoint record, or None if endpoint not found\n        '
+cond1618=>operation: raise ValueError('Canary weight must be between 1 and 99') if  not 1 <= weight <= 99
+op1628=>operation: store = self._get_store()
+op1630=>operation: endpoint = store.get_endpoint(endpoint_name)
+cond1633=>condition: if not endpoint
+io1640=>inputoutput: output: None
+e1638=>end: end function return
+cond1647=>operation: raise ValueError(f"Cannot canary an endpoint in '{endpoint.get('desired_state')}' state. Endpoint must be running.") if  endpoint.get('desired_state') not in ('running', 'deploying')
+op1657=>operation: spec = endpoint.get('spec', {})
+op1659=>operation: spec['canary'] = {'image': image, 'weight': weight, 'replicas': replicas}
+op1661=>operation: result: dict[str, Any] | None = store.update_spec(endpoint_name, spec)
+io1666=>inputoutput: output: result
+e1664=>end: end function return
 
-op1601->cond1604
-cond1604->op1614
-op1614->op1616
-op1616->cond1619
-cond1619(yes)->io1626
-io1626->e1624
-cond1619(no)->cond1633
-cond1633->op1643
-op1643->op1645
-op1645->op1647
-op1647->io1652
-io1652->e1650
+op1615->cond1618
+cond1618->op1628
+op1628->op1630
+op1630->cond1633
+cond1633(yes)->io1640
+io1640->e1638
+cond1633(no)->cond1647
+cond1647->op1657
+op1657->op1659
+op1659->op1661
+op1661->io1666
+io1666->e1664
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

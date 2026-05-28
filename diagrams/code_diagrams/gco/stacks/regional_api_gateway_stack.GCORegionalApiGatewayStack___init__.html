@@ -205,26 +205,26 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub1798=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op1800=>operation: self.config = config
-op1802=>operation: self.deployment_region = region
-op1804=>operation: self.vpc = vpc
-op1806=>operation: self.alb_dns_name = alb_dns_name
-op1808=>operation: self.auth_secret_arn = auth_secret_arn
-op1810=>operation: self.proxy_lambda = self._create_vpc_proxy_lambda()
-op1812=>operation: self.api = self._create_api_gateway()
-sub1814=>subroutine: self._create_outputs()
-sub1816=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub1812=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op1814=>operation: self.config = config
+op1816=>operation: self.deployment_region = region
+op1818=>operation: self.vpc = vpc
+op1820=>operation: self.alb_dns_name = alb_dns_name
+op1822=>operation: self.auth_secret_arn = auth_secret_arn
+op1824=>operation: self.proxy_lambda = self._create_vpc_proxy_lambda()
+op1826=>operation: self.api = self._create_api_gateway()
+sub1828=>subroutine: self._create_outputs()
+sub1830=>subroutine: self._apply_nag_suppressions()
 
-sub1798->op1800
-op1800->op1802
-op1802->op1804
-op1804->op1806
-op1806->op1808
-op1808->op1810
-op1810->op1812
-op1812->sub1814
-sub1814->sub1816
+sub1812->op1814
+op1814->op1816
+op1816->op1818
+op1818->op1820
+op1820->op1822
+op1822->op1824
+op1824->op1826
+op1826->sub1828
+sub1828->sub1830
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

@@ -12,6 +12,7 @@ line numbers if any of the prohibited substrings appear.
 
 Prohibited substrings (matched case-insensitively as plain substrings):
 
+* ``.kiro/specs``
 * ``requirements.md``
 * ``design.md``
 * ``tasks.md``
@@ -91,6 +92,7 @@ TESTS_README = (PROJECT_ROOT / "tests" / "README.md").resolve()
 
 # Prohibited substrings, lowercase. Matched against the lowercased line.
 PROHIBITED_SUBSTRINGS: tuple[str, ...] = (
+    ".kiro/specs",
     "requirements.md",
     "design.md",
     "tasks.md",
