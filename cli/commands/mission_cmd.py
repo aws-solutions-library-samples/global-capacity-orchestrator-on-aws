@@ -158,6 +158,32 @@ def _make_stub_dispatcher() -> Any:
     return _dispatch
 
 
+def _maybe_make_sandbox_runner(session: Any) -> Any | None:
+    """Return a sandbox runner when the session opted into scripted strategies.
+
+    When ``allow_scripted_strategies`` was set at ``mission start``,
+    the persisted session carries the flag and any iterate / run-mode
+    invocation needs to honour it by wiring a real sandbox runner;
+    leaving it ``None`` would silently drop scripted strategies on
+    the floor (the engine's ``_dispatch_script`` raises
+    ``script_rejected`` when no runner is wired). Sessions without
+    the opt-in still get ``None`` so the sandbox is never imported
+    on the default path.
+    """
+    if not session.get("allow_scripted_strategies"):
+        return None
+    # Lazy import: importing ``mission.sandbox`` pulls in the FastMCP
+    # transforms surface for the Code Mode provider, which is heavier
+    # than the rest of the CLI. Operators who never set the flag pay
+    # nothing for the import.
+    from mission.sandbox import make_default_sandbox_runner  # noqa: PLC0415
+
+    return make_default_sandbox_runner(
+        list(session.get("tool_allowlist") or []),
+        session,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Click group
 # ---------------------------------------------------------------------------
@@ -453,6 +479,15 @@ def _run_to_completion(session_id: str) -> None:
     from mission.state import FilesystemBackend  # noqa: PLC0415
 
     backend = mission_state.get_backend()
+    # Honour the per-session ``allow_scripted_strategies`` flag set at
+    # ``mission start``. Sessions that opted out still get the cheap
+    # ``None`` path; sessions that opted in get a real sandbox runner
+    # so scripted strategies actually execute instead of failing with
+    # ``script_rejected``.
+    session_for_runner = backend.load_session(session_id)
+    sandbox_runner = (
+        _maybe_make_sandbox_runner(session_for_runner) if session_for_runner is not None else None
+    )
 
     async def _drive() -> None:
         # Import inside the closure to keep the CLI's --help path
@@ -461,7 +496,7 @@ def _run_to_completion(session_id: str) -> None:
             backend=backend,
             tool_dispatcher=_make_stub_dispatcher(),
             sampling_callable=None,
-            sandbox_runner=None,
+            sandbox_runner=sandbox_runner,
         )
         while True:
             try:
@@ -577,13 +612,19 @@ def mission_iterate_cmd(session_id: str, max_iterations: int, output: str) -> No
         sys.exit(1)
 
     backend = get_backend()
+    # Mirror the run-mode behaviour: honour the per-session
+    # ``allow_scripted_strategies`` flag stamped at ``mission start``.
+    session_for_runner = backend.load_session(session_id)
+    sandbox_runner = (
+        _maybe_make_sandbox_runner(session_for_runner) if session_for_runner is not None else None
+    )
 
     async def _drive() -> dict[str, Any]:
         engine = MissionEngine(
             backend=backend,
             tool_dispatcher=_make_stub_dispatcher(),
             sampling_callable=None,
-            sandbox_runner=None,
+            sandbox_runner=sandbox_runner,
         )
         records: list[dict[str, Any]] = []
         for _ in range(max_iterations):

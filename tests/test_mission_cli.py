@@ -1159,3 +1159,148 @@ class TestMissionStartUncappedCli:
         assert envelope["code"] == "validation_error"
         assert envelope["details"]["reason"] == "missing_or_not_positive_int_or_minus_one"
         assert envelope["details"]["subfield"] == "max_iterations"
+
+
+class TestScriptedStrategiesWiring:
+    """The CLI honours the per-session ``allow_scripted_strategies`` flag.
+
+    Sessions started with ``--allow-scripted-strategies`` carry
+    ``allow_scripted_strategies=true`` on their persisted state.
+    Subsequent ``iterate`` and ``start --run`` invocations need to
+    wire a real sandbox runner so a scripted Strategy actually
+    executes; leaving ``sandbox_runner=None`` would raise
+    ``script_rejected`` from the engine's script dispatcher, silently
+    dropping the operator's opt-in.
+
+    Two assertions per scenario:
+
+    1. **Scripted-on**: ``--allow-scripted-strategies`` set at start
+       → :func:`mission_cmd._maybe_make_sandbox_runner` returns a
+       non-``None`` callable (the bound :meth:`MissionSandbox.run`).
+    2. **Scripted-off** (default): the helper returns ``None`` so the
+       cheap fast path stays cheap and ``mcp.mission.sandbox`` is
+       never imported on the default iterate path.
+    """
+
+    def test_helper_returns_none_when_flag_off(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        isolated_backend: Path,
+    ) -> None:
+        """The default opt-out keeps ``_maybe_make_sandbox_runner`` cheap."""
+        _enable_flag(monkeypatch)
+        # ``cli.commands.mission_cmd`` resolves to the Click ``Group``
+        # (re-exported by ``cli/commands/__init__.py``); reach the
+        # underlying module via ``importlib.import_module`` so we hit
+        # the real module namespace.
+        import importlib
+
+        mission_cmd_module = importlib.import_module("cli.commands.mission_cmd")
+        session = {
+            "allow_scripted_strategies": False,
+            "tool_allowlist": ["any_tool"],
+        }
+        assert mission_cmd_module._maybe_make_sandbox_runner(session) is None
+
+    def test_helper_returns_runner_when_flag_on(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        isolated_backend: Path,
+    ) -> None:
+        """Opting in returns a real bound ``MissionSandbox.run`` callable."""
+        _enable_flag(monkeypatch)
+        import importlib
+
+        mission_cmd_module = importlib.import_module("cli.commands.mission_cmd")
+        session = {
+            "allow_scripted_strategies": True,
+            "tool_allowlist": ["any_tool"],
+            # The factory snapshots additional fields onto the sandbox
+            # namespace (directive, criteria, budget); fill them with
+            # placeholders so the constructor accepts the dict.
+            "directive_text": "smoke",
+            "criteria": [],
+            "budget": {"max_iterations": 1, "max_wall_clock_seconds": 60},
+            "iterations": [],
+            "session_id": "smoke",
+        }
+        try:
+            runner = mission_cmd_module._maybe_make_sandbox_runner(session)
+        except SystemError as exc:
+            # MissionSandbox transitively imports fastmcp → pydantic.
+            # Skip cleanly when the local env carries a pydantic /
+            # pydantic-core ABI mismatch; CI has pinned versions and
+            # exercises the real path. The pin is the test's actual
+            # contract — the helper not returning None when the flag
+            # is on — so a transitive-import error is environmental
+            # rather than a regression.
+            if "pydantic" in str(exc).lower():
+                pytest.skip(f"local pydantic env mismatch (CI exercises this path): {exc}")
+            raise
+        assert runner is not None
+        # The runner is the bound run method on a MissionSandbox instance.
+        assert callable(runner)
+
+    def test_iterate_path_wires_runner_from_persisted_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        isolated_backend: Path,
+    ) -> None:
+        """``iterate`` reads ``allow_scripted_strategies`` off the persisted session.
+
+        Pin the wiring point so a regression that goes back to the
+        ``sandbox_runner=None`` shape (silently dropping scripted
+        strategies on the floor) fails here. Spy on
+        :func:`mission_cmd._maybe_make_sandbox_runner` and assert it
+        was called with the loaded session.
+        """
+        _enable_flag(monkeypatch)
+        criteria = _write_criteria(tmp_path)
+
+        # First, start a session with the opt-in flag.
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "mission",
+                "start",
+                "--directive",
+                "scripted-on",
+                "--criteria-file",
+                str(criteria),
+                "--max-iterations",
+                "5",
+                "--max-wall-clock",
+                "60",
+                "--tool-allowlist",
+                "find_examples",
+                "--allow-scripted-strategies",
+            ],
+        )
+        assert result.exit_code == 0, result.stderr
+        sid = json.loads(result.stdout)["session_id"]
+
+        # Spy on the helper so we can pin the wiring without booting
+        # the sandbox runtime.
+        import importlib
+
+        mission_cmd_module = importlib.import_module("cli.commands.mission_cmd")
+
+        captured: list[Any] = []
+
+        def _spy(session: Any) -> Any:
+            captured.append(session)
+            # Return None so the engine takes the no-runner path; the
+            # test only cares that the helper was invoked with the
+            # correct session shape, not that the sandbox actually ran.
+            return None
+
+        monkeypatch.setattr(mission_cmd_module, "_maybe_make_sandbox_runner", _spy)
+
+        result = runner.invoke(cli, ["mission", "iterate", sid, "--max-iterations", "1"])
+        assert result.exit_code == 0, result.stderr
+        # The helper was called exactly once, with the persisted
+        # session whose allow_scripted_strategies is True.
+        assert len(captured) == 1
+        assert captured[0]["allow_scripted_strategies"] is True
