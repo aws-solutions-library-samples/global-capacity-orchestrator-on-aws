@@ -662,6 +662,39 @@ class TestAuditContextCapture:
         )
 
     @pytest.mark.asyncio
+    async def test_audit_captures_client_error(self, caplog):
+        """ctx.error() during a tool call lands in client_messages.
+
+        Exercises the ``_spy_error`` wrapper installed by
+        ``audit_middleware._install_context_patches``: the message must
+        be appended to the active capture buffer with ``level=error``
+        before the original ``Context.error`` runs.
+        """
+
+        test_mcp = FastMCP("audit-test-error")
+        test_mcp.add_middleware(AuditCaptureMiddleware())
+
+        @test_mcp.tool
+        @run_mcp.audit_logged
+        async def errorer() -> str:
+            """Tool that emits an error log line."""
+            ctx = get_context()
+            await ctx.error("something broke")
+            return "ok"
+
+        with caplog.at_level(logging.INFO, logger="gco.mcp.audit"):
+            async with Client(test_mcp) as client:
+                await client.call_tool("errorer", {})
+
+        entry = _last_invocation_entry(caplog)
+        assert entry["status"] == "success"
+        assert entry["tool"] == "errorer"
+        msgs = entry["client_messages"]
+        assert any(
+            m.get("level") == "error" and m.get("message") == "something broke" for m in msgs
+        ), msgs
+
+    @pytest.mark.asyncio
     async def test_audit_captures_elicitation_response(self, caplog):
         """ctx.elicit() returning accept lands in the elicitations field."""
 

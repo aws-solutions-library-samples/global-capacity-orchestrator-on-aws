@@ -1391,6 +1391,39 @@ class TestInfraResources:
         content = result.contents[0].content
         assert len(content) > 10
 
+    def test_infra_dockerfile_unknown_filename_returns_available_list(self):
+        """Reading ``infra://gco/dockerfiles/<missing>`` returns the available list.
+
+        Pins the file-not-found branch in
+        ``mcp/resources/infra.py::dockerfile_resource``: the resource
+        returns ``"File 'X' not found. Available:\\n..."`` rather than
+        raising, so a tool-only client gets a guiding string body
+        rather than an opaque transport error.
+        """
+        result = asyncio.run(
+            run_mcp.mcp.read_resource("infra://gco/dockerfiles/nonexistent-zzz-file"),
+        )
+        content = result.contents[0].content
+        assert "not found" in content
+        assert "Available:" in content
+
+    def test_infra_helm_charts_resource_returns_real_yaml(self):
+        """``infra://gco/helm/charts.yaml`` reads the on-disk file verbatim.
+
+        Exercises the happy path of ``helm_charts_resource``. The
+        not-found branch (line 65) is untestable in this configuration
+        because the file ships with the repo, but the read path needed
+        coverage and was missing it.
+        """
+        result = asyncio.run(run_mcp.mcp.read_resource("infra://gco/helm/charts.yaml"))
+        content = result.contents[0].content
+        # The charts.yaml is real YAML keyed by chart name; assert
+        # loose shape rather than pinning specific chart names that
+        # could legitimately drift.
+        assert len(content) > 10
+        # Some line in the file must be valid YAML key syntax.
+        assert ":" in content
+
 
 class TestCIResources:
     """Tests for the ci:// resource group (``.github/`` tree).

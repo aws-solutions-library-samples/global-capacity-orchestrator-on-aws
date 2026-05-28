@@ -999,3 +999,44 @@ class TestInfrastructureToolTaskMode:
     def test_destroy_all_task_mode_is_optional(self):
         importlib.reload(run_mcp)
         self._expect_optional_mode("destroy_all")
+
+
+# ---------------------------------------------------------------------------
+# _format_duration helper — direct unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestFormatDuration:
+    """The duration formatter used by the heartbeat message renderer.
+
+    Pinned here so the seconds / minutes / hours branches are
+    exercised directly without standing up a long-running subprocess
+    test for each cardinality.
+    """
+
+    def test_seconds_only(self) -> None:
+        from tools._long_task import _format_duration
+
+        assert _format_duration(0) == "0s"
+        assert _format_duration(1) == "1s"
+        assert _format_duration(45) == "45s"
+        assert _format_duration(59) == "59s"
+
+    def test_minutes_and_seconds(self) -> None:
+        from tools._long_task import _format_duration
+
+        # Exactly one minute zero-pads the seconds.
+        assert _format_duration(60) == "1m00s"
+        assert _format_duration(90) == "1m30s"
+        assert _format_duration(125) == "2m05s"
+        # Largest minute-only value is one second short of an hour.
+        assert _format_duration(3599) == "59m59s"
+
+    def test_hours_minutes_seconds(self) -> None:
+        from tools._long_task import _format_duration
+
+        assert _format_duration(3600) == "1h00m00s"
+        assert _format_duration(3661) == "1h01m01s"
+        assert _format_duration(7200) == "2h00m00s"
+        # Multi-day operation — the hour count climbs without rolling.
+        assert _format_duration(86400) == "24h00m00s"

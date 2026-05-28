@@ -345,6 +345,26 @@ class TestClusterTopology:
         payload = json.loads(body)
         assert payload["pending_pods"]["error"] == "failed to parse kubectl output"
 
+    def test_kubectl_valid_json_list_wrapped_in_value(self) -> None:
+        """When kubectl returns a valid JSON *list* (not a dict), the resolver
+        wraps it under ``{"value": parsed}`` so the JSON shape is uniform.
+        Covers the trailing branch in ``_pending_pods``.
+        """
+        kubectl_result = MagicMock()
+        kubectl_result.returncode = 0
+        kubectl_result.stdout = "[1, 2, 3]"  # valid JSON, not a dict
+        kubectl_result.stderr = ""
+        with (
+            patch("resources.cluster.cli_runner._run_cli", return_value="{}"),
+            patch(
+                "resources.cluster.cli_runner.subprocess.run",
+                return_value=kubectl_result,
+            ),
+        ):
+            body = _read_resource("gco://cluster/us-east-1/topology")
+        payload = json.loads(body)
+        assert payload["pending_pods"] == {"value": [1, 2, 3]}
+
 
 # ---------------------------------------------------------------------------
 # mcp/resources/k8s.py — gco://k8s/{namespace}/{kind}/{name}
@@ -402,6 +422,45 @@ class TestK8sLiveResource:
             body = _read_resource("gco://k8s/default/pod/missing")
         payload = json.loads(body)
         assert payload["error"] == "not found"
+
+
+class TestK8sManifestStaticResource:
+    """Direct exercises of ``k8s_manifest_resource`` and the manifests index."""
+
+    def test_manifest_resource_returns_file_text(self) -> None:
+        """A real manifest filename returns the file's text contents."""
+        from resources.k8s import MANIFESTS_DIR, k8s_manifest_resource
+
+        # Pick any real manifest file shipped under
+        # ``lambda/kubectl-applier-simple/manifests`` so the test
+        # stays honest about what's actually deployed.
+        yaml_files = sorted(MANIFESTS_DIR.glob("*.yaml"))
+        assert yaml_files, "no manifest files to read — packaging regression?"
+        target = yaml_files[0]
+        body = k8s_manifest_resource(target.name)
+        # The first manifest is real YAML, so we expect at least the
+        # ``apiVersion:`` field. Match loosely so a future re-ordering
+        # of the manifest list doesn't break the test.
+        assert "apiVersion" in body
+
+    def test_manifest_resource_missing_file_returns_available_list(self) -> None:
+        """Unknown filename returns ``Manifest 'X' not found.`` plus an available list."""
+        from resources.k8s import k8s_manifest_resource
+
+        body = k8s_manifest_resource("nonexistent-manifest-zzz.yaml")
+        assert "not found" in body
+        assert "Available:" in body
+
+    def test_manifests_index_lists_known_manifests(self) -> None:
+        """``k8s_manifests_index`` lists every yaml under ``MANIFESTS_DIR``."""
+        from resources.k8s import MANIFESTS_DIR, k8s_manifests_index
+
+        body = k8s_manifests_index()
+        assert "Kubernetes Cluster Manifests" in body
+        # Every yaml file must be linked from the index.
+        yaml_files = sorted(MANIFESTS_DIR.glob("*.yaml"))
+        for path in yaml_files:
+            assert path.name in body, f"manifest {path.name!r} missing from index"
 
 
 # ---------------------------------------------------------------------------

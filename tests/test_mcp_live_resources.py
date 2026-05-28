@@ -71,6 +71,25 @@ class TestJobsLiveResource:
         assert "not found" in parsed["error"]
         assert parsed["exit_code"] == 1
 
+    def test_jobs_resource_reports_kubectl_not_found(self):
+        """When ``kubectl`` is missing from PATH, return a structured error."""
+        with patch("cli_runner.subprocess.run", side_effect=FileNotFoundError):
+            content = _read_resource("gco://jobs/some-job")
+        parsed = json.loads(content)
+        assert parsed["error"] == "kubectl not found"
+
+    def test_jobs_resource_reports_kubectl_timeout(self):
+        """A ``kubectl`` invocation that exceeds the timeout returns a structured error."""
+        import subprocess as _subprocess
+
+        with patch(
+            "cli_runner.subprocess.run",
+            side_effect=_subprocess.TimeoutExpired(cmd="kubectl", timeout=30),
+        ):
+            content = _read_resource("gco://jobs/some-job")
+        parsed = json.loads(content)
+        assert "timed out" in parsed["error"]
+
 
 # ---------------------------------------------------------------------------
 # gco://inference/{endpoint_name}
@@ -107,6 +126,24 @@ class TestInferenceLiveResource:
         mock.assert_not_called()
         parsed = json.loads(content)
         assert parsed["error"] == "invalid endpoint_name"
+
+    def test_inference_resource_wraps_manager_exception_as_error_json(self):
+        """``InferenceManager.get_endpoint`` raising returns a structured error.
+
+        Pins the broad ``except Exception`` branch in
+        ``mcp/resources/inference.py``: any unexpected error from
+        the manager (network blip, malformed DynamoDB record, etc.)
+        surfaces as ``{"error": str(e), "endpoint_name": ...}``
+        rather than propagating to the resource layer where it would
+        become an opaque JSON-RPC ``-32603`` internal error.
+        """
+        manager = MagicMock()
+        manager.get_endpoint.side_effect = RuntimeError("dynamodb throttled")
+        with patch("cli.inference.InferenceManager", return_value=manager):
+            content = _read_resource("gco://inference/some-endpoint")
+        parsed = json.loads(content)
+        assert "throttled" in parsed["error"]
+        assert parsed["endpoint_name"] == "some-endpoint"
 
 
 # ---------------------------------------------------------------------------
