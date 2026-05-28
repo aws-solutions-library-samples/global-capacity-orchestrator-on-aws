@@ -372,3 +372,135 @@ class TestBuildScaffoldPrompt:
             max_criteria=7,
         )
         assert "at most 7" in prompt
+
+
+class TestPromptObservationSchema:
+    """The prompt teaches the model the Observation shape and metric path convention.
+
+    A live smoke test against Bedrock revealed that without explicit
+    schema documentation the model emits bare metric names
+    (``"val_loss"``) instead of the dot-path
+    (``"metrics.val_loss"``) the engine actually walks. Sessions
+    built from those criteria silently evaluated
+    ``inconclusive: metric_path_missing`` on every iteration. The
+    prompt now documents the Observation shape and the metric-path
+    convention; pin those documentation strings here so a future
+    edit that drops them flips this test red.
+    """
+
+    def test_prompt_describes_observation_fields(self) -> None:
+        """The prompt names every Observation field the validator exposes."""
+        prompt = criteria_scaffold.build_scaffold_prompt("Lower latency.")
+        assert "Observation shape" in prompt
+        # Each canonical Observation field is mentioned by name so
+        # the model knows what subscripts predicates can reach.
+        assert "tool_results" in prompt
+        assert '"metrics"' in prompt
+        assert '"events"' in prompt
+
+    def test_prompt_documents_metric_dot_path_convention(self) -> None:
+        """The prompt explicitly says metric paths are dot-paths into ``metrics``."""
+        prompt = criteria_scaffold.build_scaffold_prompt("Lower latency.")
+        # The prompt names the canonical example so the model emits
+        # ``metrics.val_loss`` rather than ``val_loss``.
+        assert "metrics.val_loss" in prompt
+        # And explicitly warns about the bare-name failure mode so a
+        # future model that needs more hand-holding understands the
+        # consequence.
+        assert "metric_path_missing" in prompt
+
+    def test_prompt_warns_about_attribute_access(self) -> None:
+        """The prompt tells the model attribute access is rejected.
+
+        The predicate AST validator rejects attribute access on
+        ``obs`` (``obs.metrics`` raises ``attribute_target_not_allowed``)
+        but accepts subscript notation (``obs['metrics']``). Models
+        that emit attribute access burn retries; the prompt now
+        flags this convention explicitly.
+        """
+        prompt = criteria_scaffold.build_scaffold_prompt("Lower latency.")
+        assert "subscript" in prompt.lower()
+
+
+class TestNormalizeMetricPath:
+    """``_normalize_metric_path`` injects ``metrics.`` prefix on bare names."""
+
+    def test_bare_name_gets_metrics_prefix(self) -> None:
+        """A metric_threshold criterion with no ``.`` gets ``metrics.`` prefix."""
+        out = criteria_scaffold._normalize_metric_path(
+            {
+                "criterion_id": "loss",
+                "kind": "metric_threshold",
+                "metric": "val_loss",
+                "op": "<",
+                "target": 0.1,
+            }
+        )
+        assert out["metric"] == "metrics.val_loss"
+
+    def test_already_qualified_path_passes_through(self) -> None:
+        """A metric path that already contains a ``.`` is left alone."""
+        out = criteria_scaffold._normalize_metric_path(
+            {
+                "criterion_id": "loss",
+                "kind": "metric_threshold",
+                "metric": "metrics.val_loss",
+                "op": "<",
+                "target": 0.1,
+            }
+        )
+        assert out["metric"] == "metrics.val_loss"
+
+    def test_arbitrary_dot_path_passes_through(self) -> None:
+        """Tool-results dot-paths are not rewritten — only bare names are."""
+        out = criteria_scaffold._normalize_metric_path(
+            {
+                "criterion_id": "score",
+                "kind": "metric_threshold",
+                "metric": "tool_results.0.score",
+                "op": ">=",
+                "target": 0.9,
+            }
+        )
+        assert out["metric"] == "tool_results.0.score"
+
+    def test_non_metric_threshold_passes_through(self) -> None:
+        """``predicate`` and ``event`` criteria are never touched."""
+        pred = {
+            "criterion_id": "p",
+            "kind": "predicate",
+            "expression": "obs['x'] > 0",
+            "required": True,
+        }
+        assert criteria_scaffold._normalize_metric_path(pred) is pred
+        evt = {
+            "criterion_id": "e",
+            "kind": "event",
+            "event_name": "started",
+            "required": True,
+        }
+        assert criteria_scaffold._normalize_metric_path(evt) is evt
+
+    def test_does_not_mutate_input(self) -> None:
+        """The normaliser returns a shallow copy; the input is untouched."""
+        original = {
+            "criterion_id": "loss",
+            "kind": "metric_threshold",
+            "metric": "val_loss",
+            "op": "<",
+            "target": 0.1,
+        }
+        out = criteria_scaffold._normalize_metric_path(original)
+        assert out is not original
+        assert original["metric"] == "val_loss"  # input still bare
+        assert out["metric"] == "metrics.val_loss"  # output prefixed
+
+    def test_empty_or_non_string_metric_passes_through(self) -> None:
+        """Defensive: a malformed metric value triggers the ``return criterion`` path."""
+        # The validator will reject these later; the normaliser just
+        # passes them through so the validator's error message stays
+        # the canonical signal.
+        empty = {"kind": "metric_threshold", "metric": ""}
+        assert criteria_scaffold._normalize_metric_path(empty) is empty
+        non_str = {"kind": "metric_threshold", "metric": 42}
+        assert criteria_scaffold._normalize_metric_path(non_str) is non_str

@@ -298,6 +298,25 @@ def build_scaffold_prompt(
     sections.append("")
     sections.append(f"=== Cap: at most {max_criteria} criterion entries ===")
     sections.append("")
+    sections.append("=== Observation shape (read by predicates and metric paths) ===")
+    sections.append(
+        "Each iteration's Observation is a dict with these fields:\n"
+        '  - "tool_results": list[dict] — every tool the iteration\n'
+        "    called returns one entry. Each entry is whatever the\n"
+        "    tool itself returned, plus a top-level ``_status`` flag.\n"
+        '  - "metrics": dict[str, Any] — numeric / scalar values\n'
+        "    surfaced by tools that emit them. The dot-path for a\n"
+        "    metric_threshold criterion against ``val_loss`` is\n"
+        '    ``"metrics.val_loss"`` (NOT ``"val_loss"``); the engine\n'
+        "    walks the path against the Observation root and a bare\n"
+        "    name will land as ``inconclusive: metric_path_missing``\n"
+        "    on every iteration.\n"
+        '  - "events": list[dict] — emitted events, each with an\n'
+        "    ``event_name`` key.\n"
+        '  - "errors" (optional): list[dict] — errors any tool raised.\n'
+        '  - "phase_started_at" / "phase_ended_at": ISO-8601 strings.'
+    )
+    sections.append("")
     sections.append("=== Output schema ===")
     sections.append(
         "Return a single JSON array. Each entry is an object with "
@@ -306,12 +325,20 @@ def build_scaffold_prompt(
         '  - "kind": one of "metric_threshold" / "event" / "predicate"\n'
         '  - "required": JSON boolean\n'
         "Plus the kind-specific keys:\n"
-        '  metric_threshold -> "metric" (string), '
+        '  metric_threshold -> "metric" (DOT-PATH into the Observation,\n'
+        "                      e.g. ``metrics.val_loss``,\n"
+        "                      ``tool_results.0.score``), "
         '"op" (one of <, <=, >, >=, ==, !=), "target" (number)\n'
-        '  event            -> "event_name" (non-empty string)\n'
-        '  predicate        -> "expression" (a Python expression '
-        "evaluated against `obs`; allowlist: `obs`, `len`, `min`, "
-        "`max`, `sum`, `abs`, `any`, `all`, `sorted`)"
+        '  event            -> "event_name" (non-empty string; matched\n'
+        '                      against entries in obs["events"])\n'
+        '  predicate        -> "expression" (a Python expression\n'
+        "                      evaluated against `obs` — only the\n"
+        "                      Observation fields above are reachable;\n"
+        "                      attribute access is rejected, only\n"
+        "                      subscript notation works\n"
+        "                      (e.g. ``obs['metrics']['loss']``);\n"
+        "                      callable allowlist: `obs`, `len`, `min`,\n"
+        "                      `max`, `sum`, `abs`, `any`, `all`, `sorted`)"
     )
     sections.append("")
     sections.append("Output only the JSON array. No prose, no markdown fences.")
@@ -350,6 +377,40 @@ def _parse_response(text: str) -> list[dict[str, Any]]:
         if not isinstance(entry, dict):
             raise ValueError("array entry is not an object")
         out.append(entry)
+    return out
+
+
+def _normalize_metric_path(criterion: dict[str, Any]) -> dict[str, Any]:
+    """Auto-prefix bare metric names with ``metrics.`` for ``metric_threshold``.
+
+    The engine's metric path resolver walks the dot-path against the
+    Observation root, where canonical metric values live under the
+    ``metrics`` sub-dict. A bare ``"val_loss"`` lands as
+    ``inconclusive: metric_path_missing`` on every iteration.
+
+    Models trained on generic metric semantics tend to emit bare
+    names anyway. Rather than reject the response and burn a retry,
+    this normaliser injects the ``metrics.`` prefix when:
+
+    1. ``kind == "metric_threshold"``,
+    2. ``metric`` is a non-empty string,
+    3. The string contains no ``.`` separator (so already-qualified
+       paths like ``tool_results.0.score`` or
+       ``metrics.something.nested`` pass through verbatim).
+
+    Returns a shallow copy so the input is never mutated. The strip is
+    idempotent on already-prefixed values: ``"metrics.foo"`` has a
+    ``.`` so it falls through unchanged.
+    """
+    if criterion.get("kind") != "metric_threshold":
+        return criterion
+    metric = criterion.get("metric")
+    if not isinstance(metric, str) or not metric:
+        return criterion
+    if "." in metric:
+        return criterion
+    out = dict(criterion)
+    out["metric"] = f"metrics.{metric}"
     return out
 
 
@@ -411,6 +472,15 @@ async def generate_sampled_criteria(
         # below catches everything else.
         if len(parsed) > max_criteria:
             parsed = parsed[:max_criteria]
+        # Best-effort normalisation: a model that emits a bare metric
+        # name (``"val_loss"``) instead of the dot-path
+        # (``"metrics.val_loss"``) the engine actually walks would
+        # otherwise produce a session whose metric_threshold criterion
+        # silently evaluates ``inconclusive: metric_path_missing`` on
+        # every iteration. The prompt now teaches this convention but
+        # we still post-process for robustness against older prompts
+        # and models that ignore the schema.
+        parsed = [_normalize_metric_path(c) for c in parsed]
         try:
             validated = _validation.validate_criteria(parsed)
         except MissionValidationError as exc:
