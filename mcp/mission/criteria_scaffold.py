@@ -396,11 +396,13 @@ def build_scaffold_prompt(
         "allowed surface:\n"
         "\n"
         "Names: ``obs`` (the Observation dict).\n"
-        "Top-level callables (eight, all pure stdlib):\n"
+        "Top-level callables (twelve, all pure stdlib):\n"
         "  ``len``, ``min``, ``max``, ``sum``, ``abs``,\n"
-        "  ``any``, ``all``, ``sorted``\n"
-        "Read-only dict/list method calls (four, on any value):\n"
-        "  ``.get(key[, default])``, ``.keys()``, ``.values()``, ``.items()``\n"
+        "  ``any``, ``all``, ``sorted``,\n"
+        "  ``str``, ``int``, ``float``, ``bool`` (type coercions).\n"
+        "Read-only method calls on any value (seven, all pure):\n"
+        "  ``.get(key[, default])``, ``.keys()``, ``.values()``,\n"
+        "  ``.items()``, ``.lower()``, ``.upper()``, ``.strip()``\n"
         "Operators: arithmetic, comparisons (<, <=, >, >=, ==, !=,\n"
         "  is, is not, in, not in), boolean (and, or, not), ternary\n"
         "  (a if b else c).\n"
@@ -413,11 +415,11 @@ def build_scaffold_prompt(
         "  for read-only access; subscript form is preferred). Nested\n"
         "  walks like ``obs.a.b`` are rejected — use ``obs['a']['b']``.\n"
         "\n"
-        "Method calls outside the four pure-accessor names are\n"
+        "Method calls outside the seven pure-accessor names are\n"
         "rejected (no ``.append``, ``.update``, ``.pop``, ``.count``,\n"
-        "``.startswith``, ``.lower``, etc.). Calls to non-allowlisted\n"
-        "names (``str``, ``list``, ``dict``, ``getattr``, ``isinstance``,\n"
-        "...) are rejected."
+        "``.startswith``, ``.split``, etc.). Calls to non-allowlisted\n"
+        "names (``list``, ``dict``, ``getattr``, ``isinstance``, ...)\n"
+        "are rejected."
     )
     sections.append("")
     sections.append("=== Predicate examples (do NOT use rejected forms) ===")
@@ -430,15 +432,16 @@ def build_scaffold_prompt(
         "  all(r.get('_status') == 'ok' for r in obs['tool_results'])\n"
         "  any(r.get('_status') == 'ok' and r.get('tool_name') == 'find_docs'\n"
         "      for r in obs['tool_results'])\n"
+        "  any('inference' in str(r).lower() for r in obs['tool_results'])\n"
         "  len(obs.get('errors', [])) == 0\n"
         "  any(k == 'val_loss' for k in obs['metrics'].keys())\n"
         "\n"
         "REJECTED predicate expressions (will fail validation):\n"
         "  obs.metrics.val_loss < 0.1       # nested attribute walk; use obs['metrics']['val_loss']\n"  # noqa: E501
-        "  obs['tool_results'].count('ok')  # ``.count`` is not on the dict-method allowlist\n"
+        "  obs['tool_results'].count('ok')  # ``.count`` is not on the method allowlist\n"
         "  obs['tool_results'].append(1)    # ``.append`` mutates and is not allowed\n"
-        "  any(str(r) == 'x' for r in obs['tool_results'])  # ``str`` not on callable allowlist\n"
-        "  any(k.startswith('val_') for k in obs['metrics'].keys())  # ``.startswith`` not on dict-method allowlist\n"  # noqa: E501
+        "  any(r.split(',') for r in obs['tool_results'])  # ``.split`` not on method allowlist\n"
+        "  any(k.startswith('val_') for k in obs['metrics'].keys())  # ``.startswith`` not on method allowlist\n"  # noqa: E501
         "  getattr(obs, 'tool_results')     # ``getattr`` not on callable allowlist\n"
         "  obs['x'].y.z                     # attribute walk after subscript"
     )

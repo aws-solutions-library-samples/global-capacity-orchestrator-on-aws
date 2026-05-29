@@ -1,0 +1,29 @@
+{
+  "model_id": "us.meta.llama3-3-70b-instruct-v1:0",
+  "region": "us-east-1",
+  "captured_at": "2026-05-29T12:36:26.192113+00:00",
+  "captures": {
+    "search_inference_docs": {
+      "prompt_directive": "Find documentation about inference endpoints.",
+      "prompt_allowlist": [
+        "find_examples",
+        "find_docs"
+      ],
+      "raw_response": "[\n  {\n    \"criterion_id\": \"find_docs_call_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\"\n  },\n  {\n    \"criterion_id\": \"find_examples_call_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": false,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"docs_found\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(r.get('_status') == 'ok' and r.get('tool_name') == 'find_docs' for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"docs_tool_result\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(r.get('tool_name') == 'find_docs' for r in obs['tool_results'])\"\n  }\n]"
+    },
+    "metric_drive_loss": {
+      "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "raw_response": "[\n  {\n    \"criterion_id\": \"val_loss_below_0_1\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  }\n]"
+    },
+    "event_goal_reached": {
+      "prompt_directive": "Wait for the training job to emit a goal_reached event.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "raw_response": "[\n  {\n    \"criterion_id\": \"goal_reached_event\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"goal_reached\"\n  }\n]"
+    }
+  }
+}

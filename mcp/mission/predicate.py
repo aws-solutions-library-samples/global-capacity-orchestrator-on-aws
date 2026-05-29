@@ -23,7 +23,8 @@ The sandbox has two layers:
 Allowed surface
 ---------------
 Names: ``obs`` (the dict argument), and the read-only callables ``len``,
-``min``, ``max``, ``sum``, ``abs``, ``any``, ``all``, ``sorted``.
+``min``, ``max``, ``sum``, ``abs``, ``any``, ``all``, ``sorted``, plus
+the four type coercions ``str``, ``int``, ``float``, ``bool``.
 
 Operators: arithmetic (``+ - * / // % ** @``), unary (``+ - not ~``),
 comparisons (``< <= > >= == != is is_not in not_in``), boolean
@@ -33,14 +34,16 @@ Containers and collections: ``List``, ``Tuple``, ``Dict``, ``Set``, plus
 ``ListComp``, ``SetComp``, ``DictComp``, ``GeneratorExp`` (their iteration
 targets must not shadow a name from the allowlist).
 
-Calls: bare-name calls to one of the eight stdlib callables above, OR
-read-only dict/list method calls — ``.get(key[, default])``, ``.keys()``,
-``.values()``, ``.items()``. Method calls accept any receiver the
-predicate could otherwise produce: ``Name`` (``obs``), ``Subscript``
+Calls: bare-name calls to one of the twelve stdlib callables above, OR
+read-only method calls — ``.get(key[, default])``, ``.keys()``,
+``.values()``, ``.items()``, ``.lower()``, ``.upper()``, ``.strip()``.
+Method calls accept any receiver the predicate could otherwise
+produce: ``Name`` (``obs``), ``Subscript``
 (``obs['tool_results']``), or comprehension-bound names
 (``r.get('_status')`` inside ``for r in obs['tool_results']``). Method
 calls outside the allowlist (``.update``, ``.pop``, ``.count``,
-``.append``, ...) are rejected with ``call_target_method_not_allowed``.
+``.append``, ``.startswith``, ...) are rejected with
+``call_target_method_not_allowed``.
 
 Attribute access: only ``obs.<attr>`` (one level), and the attribute
 name itself must not start with ``__``. Anything more elaborate
@@ -73,32 +76,50 @@ from typing import Any, Final, NoReturn
 # ---------------------------------------------------------------------------
 
 _ALLOWED_CALLABLES: Final[frozenset[str]] = frozenset(
-    {"len", "min", "max", "sum", "abs", "any", "all", "sorted"}
+    {"len", "min", "max", "sum", "abs", "any", "all", "sorted", "str", "int", "float", "bool"}
 )
-"""Builtin callables a predicate may invoke. Pure, side-effect-free."""
+"""Builtin callables a predicate may invoke. Pure, side-effect-free.
 
-_ALLOWED_METHOD_CALLS: Final[frozenset[str]] = frozenset({"get", "keys", "values", "items"})
-"""Read-only dict accessor methods a predicate may invoke on any value.
+The eight stdlib aggregate / comparison helpers (``len``, ``min``,
+``max``, ``sum``, ``abs``, ``any``, ``all``, ``sorted``) plus four
+type coercions (``str``, ``int``, ``float``, ``bool``). The
+coercions are useful for normalising values before comparison —
+``str(r.get('count')) == '0'`` and ``bool(obs['errors'])`` are
+common idioms — and none of them can escape the eval-time sandbox
+(empty ``__builtins__``, no ``__import__`` / ``open`` / ``getattr``
+in scope) regardless of input.
+"""
 
-Models trained on Python idioms gravitate toward ``r.get('_status')``
-and ``r.items()`` for dict access inside comprehensions. The four
-methods listed here are all pure read-only accessors:
+_ALLOWED_METHOD_CALLS: Final[frozenset[str]] = frozenset(
+    {"get", "keys", "values", "items", "lower", "upper", "strip"}
+)
+"""Read-only methods a predicate may invoke on any value.
+
+Models trained on Python idioms gravitate toward ``r.get('_status')``,
+``r.items()``, and ``str(...).lower()`` for case-insensitive substring
+search. The seven methods listed here are all pure read-only
+accessors / transformations:
 
 * ``dict.get(key[, default])`` returns the value at ``key`` (or
   ``default``); identical to subscript except it tolerates missing
   keys without raising.
 * ``dict.keys()`` / ``dict.values()`` / ``dict.items()`` return views
   that the comprehension protocol then iterates.
+* ``str.lower()`` / ``str.upper()`` return a new string with
+  case-folded contents; common in case-insensitive substring
+  search like ``'foo' in str(x).lower()``.
+* ``str.strip()`` returns a new string with leading and trailing
+  whitespace removed; common in normalising values before
+  comparison.
 
-None of the four can mutate state, escape ``__builtins__``, or reach a
+None of the seven can mutate state, escape ``__builtins__``, or reach a
 callable that we did not already opt into through the eval-time
 sandbox (``__builtins__`` is empty; ``eval`` / ``compile`` /
 ``__import__`` / ``getattr`` / ``setattr`` / ``open`` are all
 unreachable). Allowing them lets the model write the natural
-expression ``any(r.get('_status') == 'ok' for r in obs['tool_results'])``
-instead of being forced into the more verbose ``any(r['_status'] == 'ok'
-for r in obs['tool_results'] if '_status' in r)`` — which the model
-rarely produces unprompted.
+expression ``any('inference' in str(r).lower() for r in obs['tool_results'])``
+instead of being forced into the more verbose subscript-only equivalent
+that the model rarely produces unprompted.
 
 Method-call gating still applies in two places:
 
@@ -633,6 +654,13 @@ _SAFE_CALLABLES: Final[dict[str, Any]] = {
     "any": any,
     "all": all,
     "sorted": sorted,
+    # Type coercions — pure, side-effect-free transforms used in
+    # idioms like ``str(r.get('count')) == '0'``. None of them can
+    # escape the empty-``__builtins__`` namespace regardless of input.
+    "str": str,
+    "int": int,
+    "float": float,
+    "bool": bool,
 }
 
 

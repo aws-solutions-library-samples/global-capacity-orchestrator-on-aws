@@ -267,20 +267,23 @@ Predicate expressions run inside a tight sandbox with two layers of defence: a *
 | Name | Type | Notes |
 |------|------|-------|
 | `obs` | dict | The Observation. The only data name. Cannot be called as a function. |
-| `len`, `min`, `max`, `sum`, `abs`, `any`, `all`, `sorted` | builtin callable | Pure, side-effect-free reads. |
+| `len`, `min`, `max`, `sum`, `abs`, `any`, `all`, `sorted` | builtin callable | Pure, side-effect-free reads / aggregates. |
+| `str`, `int`, `float`, `bool` | builtin callable | Pure type coercions used for normalising values before comparison. None can escape the eval-time empty-`__builtins__` namespace. |
 
 No other names are visible — no `print`, no `open`, no `__import__`, no `eval`, no `compile`, no module references, no comprehension target shadows.
 
 ### Allowed method calls
 
-A small set of read-only dict / list accessor methods may be called on any value the predicate can produce (`obs`, a subscript result, or a comprehension-bound name):
+A small set of read-only methods may be called on any value the predicate can produce (`obs`, a subscript result, a callable result, or a comprehension-bound name):
 
 | Method | Notes |
 |--------|-------|
 | `.get(key[, default])` | Read-only dict accessor. Tolerates missing keys without raising; returns `default` (or `None` if omitted). |
 | `.keys()`, `.values()`, `.items()` | Read-only dict views; the comprehension protocol then iterates. |
+| `.lower()`, `.upper()` | Pure string transformations used in case-insensitive substring search like `'foo' in str(x).lower()`. |
+| `.strip()` | Pure string transformation — leading and trailing whitespace removed. |
 
-These four methods land in this list because they are pure read-only accessors that cannot mutate state, escape the sandbox, or reach a builtin that the eval-time namespace blocks. Method names outside this list (`.append`, `.update`, `.pop`, `.setdefault`, `.count`, `.startswith`, `.lower`, ...) are rejected at parse time.
+These seven methods land in this list because they are pure read-only accessors / transformations that cannot mutate state, escape the sandbox, or reach a builtin that the eval-time namespace blocks. Method names outside this list (`.append`, `.update`, `.pop`, `.setdefault`, `.count`, `.startswith`, `.split`, ...) are rejected at parse time.
 
 ### Allowed operators and constructs
 
@@ -291,7 +294,7 @@ These four methods land in this list because they are pure read-only accessors t
 - Ternary: `a if b else c`
 - Containers: list / tuple / dict / set literals
 - Comprehensions: list / set / dict / generator (target names cannot shadow `obs` or any allowed callable)
-- Calls: bare-name calls to one of the eight stdlib callables, or read-only method calls from the four-method allowlist above.
+- Calls: bare-name calls to one of the twelve stdlib callables, or read-only method calls from the seven-method allowlist above.
 - Attribute access: only `obs.<attr>` (one level deep). Attribute names cannot start with `__`. Anything more elaborate (chained walks, attributes on a subscript) is rejected — use subscripting for nested data.
 - Subscripts: any `value[...]` chain whose ultimate base is an allowed name. Slices with step (`xs[::2]`) are allowed; the slice values themselves go through the same allowlist check.
 - f-strings: allowed; embedded expressions re-enter the same allowlist check.
@@ -309,7 +312,7 @@ These four methods land in this list because they are pure read-only accessors t
 | `obs[(0).__class__]` | `attribute_target_not_allowed` |
 | `obs.a.b` (chained attribute access) | `attribute_target_not_allowed` |
 | `obs["xs"].append(1)` (mutating method) | `call_target_method_not_allowed` |
-| `obs["xs"].count(0)` (read-only method outside the four-method allowlist) | `call_target_method_not_allowed` |
+| `obs["xs"].count(0)` (read-only method outside the seven-method allowlist) | `call_target_method_not_allowed` |
 | `getattr(obs, "x").get("y")` (call-then-call shape) | `call_target_not_allowed` |
 | `dict(other={"a": 1})` (only the eight pure callables are allowed) | `call_target_not_allowed` |
 | `{**other}` | `dict_unpacking` |
@@ -331,6 +334,8 @@ all(r.get("_status") == "ok" and r.get("tool_name") == "find_docs"
     for r in obs["tool_results"])
 len(obs.get("errors", [])) == 0
 any(k == "val_loss" for k in obs["metrics"].keys())
+any("inference" in str(r).lower() for r in obs["tool_results"])
+str(obs.get("count", 0)) == "0"
 obs["metrics"]["loss"] < 0.5 and obs["metrics"]["accuracy"] > 0.9
 not obs["errors"]
 ```
