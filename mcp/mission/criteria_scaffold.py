@@ -41,6 +41,7 @@ from .validation import MissionValidationError
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Flowchart(s) generated from this file:
 #   * ``generate_sampled_criteria`` -> ``diagrams/code_diagrams/mcp/mission/criteria_scaffold.generate_sampled_criteria.html``
+#     (PNG: ``diagrams/code_diagrams/mcp/mission/criteria_scaffold.generate_sampled_criteria.png``)
 # Regenerate with ``python diagrams/code_diagrams/generate.py``.
 # <pyflowchart-code-diagram> END
 

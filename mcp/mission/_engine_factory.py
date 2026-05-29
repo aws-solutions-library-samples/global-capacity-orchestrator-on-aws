@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, cast
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Flowchart(s) generated from this file:
 #   * ``build_engine_dependencies`` -> ``diagrams/code_diagrams/mcp/mission/_engine_factory.build_engine_dependencies.html``
+#     (PNG: ``diagrams/code_diagrams/mcp/mission/_engine_factory.build_engine_dependencies.png``)
 # Regenerate with ``python diagrams/code_diagrams/generate.py``.
 # <pyflowchart-code-diagram> END
 
