@@ -3989,9 +3989,7 @@ class TestAnnotateToolResult:
         """A call record without a status falls back to ``unknown``."""
         from mission.engine import MissionEngine
 
-        annotated = MissionEngine._annotate_tool_result(
-            {"tool_name": "x", "result_summary": {}}
-        )
+        annotated = MissionEngine._annotate_tool_result({"tool_name": "x", "result_summary": {}})
         assert annotated["_status"] == "unknown"
 
     def test_sandbox_annotate_helper_matches_engine_helper(self) -> None:

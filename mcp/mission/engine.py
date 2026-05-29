@@ -879,8 +879,7 @@ class MissionEngine:
                 # the partial doesn't carry.
                 partial_observation: dict[str, Any] = {
                     "tool_results": [
-                        self._annotate_tool_result(call)
-                        for call in exc.partial_script_call_log
+                        self._annotate_tool_result(call) for call in exc.partial_script_call_log
                     ],
                     "metrics": {},
                     "events": list(exc.partial_events),
@@ -959,7 +958,7 @@ class MissionEngine:
         await self._run_phase(session, record, _OBSERVE, body)
 
     @staticmethod
-    def _annotate_tool_result(call: ToolCallRecord) -> Any:
+    def _annotate_tool_result(call: ToolCallRecord | dict[str, Any]) -> Any:
         """Wrap a call's ``result_summary`` with the per-call call markers.
 
         The Observation's ``tool_results`` list is the canonical input
