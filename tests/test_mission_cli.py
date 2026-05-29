@@ -757,13 +757,82 @@ class TestMissionCliCoverage:
         """``history --format full --output table`` prints rows."""
         sid = self._make_session(monkeypatch, tmp_path, isolated_backend)
         runner = CliRunner()
-        runner.invoke(cli, ["mission", "iterate", sid, "--max-iterations", "1"])
+        runner.invoke(cli, ["mission", "iterate", sid, "--max-iterations", "1", "--dry-run"])
         result = runner.invoke(
             cli,
             ["mission", "history", sid, "--format", "full", "--output", "table"],
         )
         assert result.exit_code == 0
         assert "Iteration" in result.stdout
+
+    def test_history_full_without_observations_strips_them(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        isolated_backend: Path,
+    ) -> None:
+        """``history --format full`` without --include-observations strips observation/strategy."""
+        sid = self._make_session(monkeypatch, tmp_path, isolated_backend)
+        runner = CliRunner()
+        runner.invoke(cli, ["mission", "iterate", sid, "--max-iterations", "1", "--dry-run"])
+        result = runner.invoke(cli, ["mission", "history", sid, "--format", "full"])
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        it0 = payload["iterations"][0]
+        assert "observation" not in it0
+        assert "strategy" not in it0
+        # But verdict is still present.
+        assert "verdict" in it0
+
+    def test_history_full_with_include_observations_keeps_them(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        isolated_backend: Path,
+    ) -> None:
+        """``history --format full --include-observations`` keeps observation and strategy."""
+        sid = self._make_session(monkeypatch, tmp_path, isolated_backend)
+        runner = CliRunner()
+        runner.invoke(cli, ["mission", "iterate", sid, "--max-iterations", "1", "--dry-run"])
+        result = runner.invoke(
+            cli,
+            ["mission", "history", sid, "--format", "full", "--include-observations"],
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        it0 = payload["iterations"][0]
+        assert "observation" in it0
+        assert "strategy" in it0
+        # Observation has tool_results.
+        assert "tool_results" in it0["observation"]
+
+    def test_history_full_table_with_include_observations_shows_details(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        isolated_backend: Path,
+    ) -> None:
+        """``--include-observations --output table`` shows tool names and rationale."""
+        sid = self._make_session(monkeypatch, tmp_path, isolated_backend)
+        runner = CliRunner()
+        runner.invoke(cli, ["mission", "iterate", sid, "--max-iterations", "1", "--dry-run"])
+        result = runner.invoke(
+            cli,
+            [
+                "mission",
+                "history",
+                sid,
+                "--format",
+                "full",
+                "--include-observations",
+                "--output",
+                "table",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "tools:" in result.stdout
+        assert "rationale:" in result.stdout
+        assert "tool_results:" in result.stdout
 
     def test_list_with_status_filter(
         self,

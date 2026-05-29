@@ -749,21 +749,21 @@ mcp/
 │   ├── tasks.py           — Task management tools
 │   └── mission.py         — Mission goal-directed loop tools [gated by GCO_ENABLE_MISSION]
 ├── mission/               — Mission engine package (goal-directed iteration loop)
-│   ├── __init__.py        — Package marker + SCHEMA_VERSION export
-│   ├── _engine_factory.py — Shared engine factory (CLI + MCP tool surface)
-│   ├── _environment.py    — Live-signal gatherer (queue depth, GPU util, regions)
-│   ├── audit.py           — Mission-specific audit events (phase, verdict, sampling)
-│   ├── checkpoints.py     — Checkpoint cadence resolver
+│   ├── __init__.py          — Package marker + SCHEMA_VERSION export
+│   ├── _engine_factory.py   — Shared engine factory (CLI + MCP tool surface)
+│   ├── _environment.py      — Live-signal gatherer (queue depth, GPU util, regions)
+│   ├── audit.py             — Mission-specific audit events (phase, verdict, sampling)
+│   ├── checkpoints.py       — Checkpoint cadence resolver
 │   ├── criteria_scaffold.py — Bedrock-driven criteria generation from directives
-│   ├── decide.py          — Pure deterministic verdict cascade
-│   ├── engine.py          — Five-phase iteration loop driver (MissionEngine)
-│   ├── final_report.py    — Final_Report builder (deterministic + sampled overlay)
-│   ├── predicate.py       — Restricted AST evaluator for predicate criteria
-│   ├── sampling.py        — Bedrock/MCP sampling backends + Strategy_Revision prompt
-│   ├── sandbox.py         — Script sandbox (MontySandboxProvider + AST validator)
-│   ├── state.py           — Persistence backends (filesystem, DynamoDB)
-│   ├── types.py           — TypedDict definitions (SessionState, Strategy, etc.)
-│   └── validation.py      — Input validators (criteria, budget, allowlist, cadence)
+│   ├── decide.py            — Pure deterministic verdict cascade
+│   ├── engine.py            — Five-phase iteration loop driver (MissionEngine)
+│   ├── final_report.py      — Final_Report builder (deterministic + sampled overlay)
+│   ├── predicate.py         — Restricted AST evaluator for predicate criteria
+│   ├── sampling.py          — Bedrock/MCP sampling backends + Strategy_Revision prompt
+│   ├── sandbox.py           — Script sandbox (MontySandboxProvider + AST validator)
+│   ├── state.py             — Persistence backends (filesystem, DynamoDB)
+│   ├── types.py             — TypedDict definitions (SessionState, Strategy, etc.)
+│   └── validation.py        — Input validators (criteria, budget, allowlist, cadence)
 └── resources/             — MCP resource definitions (one file per scheme)
     ├── docs.py            — docs:// (documentation + examples with metadata)
     ├── source.py          — source:// (full source code browser)
