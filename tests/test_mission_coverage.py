@@ -693,6 +693,114 @@ class TestEvaluatePhaseHelpers:
         assert _compare_numbers(1.0, "==", 1.0) is True
         assert _compare_numbers(1.0, "!=", 2.0) is True
 
+    def test_tool_call_succeeded_missing_field_inconclusive(self) -> None:
+        """No ``tool_results`` key in the Observation → inconclusive."""
+        from mission.engine import MissionEngine
+
+        result = MissionEngine._evaluate_tool_call_succeeded(
+            {"tool_name": "find_docs"},  # type: ignore[arg-type]
+            {"metrics": {}},
+        )
+        assert result[0] == "inconclusive"
+        assert "tool_results_field_missing" in str(result[1])
+
+    def test_tool_call_succeeded_field_not_a_list_inconclusive(self) -> None:
+        """``tool_results`` of the wrong shape → inconclusive."""
+        from mission.engine import MissionEngine
+
+        result = MissionEngine._evaluate_tool_call_succeeded(
+            {"tool_name": "find_docs"},  # type: ignore[arg-type]
+            {"tool_results": "not-a-list"},
+        )
+        assert result[0] == "inconclusive"
+
+    def test_tool_call_succeeded_no_match_unmet(self) -> None:
+        """Non-matching entries → unmet, evidence reports the count."""
+        from mission.engine import MissionEngine
+
+        result = MissionEngine._evaluate_tool_call_succeeded(
+            {"tool_name": "find_docs"},  # type: ignore[arg-type]
+            {"tool_results": [{"tool_name": "find_examples", "_status": "ok"}]},
+        )
+        assert result[0] == "unmet"
+        assert result[1]["successful_call_count"] == 0
+
+    def test_tool_call_succeeded_status_not_ok_unmet(self) -> None:
+        """A matching tool_name but non-ok _status does not count."""
+        from mission.engine import MissionEngine
+
+        result = MissionEngine._evaluate_tool_call_succeeded(
+            {"tool_name": "find_docs"},  # type: ignore[arg-type]
+            {"tool_results": [{"tool_name": "find_docs", "_status": "error"}]},
+        )
+        assert result[0] == "unmet"
+        assert result[1]["successful_call_count"] == 0
+
+    def test_tool_call_succeeded_one_match_default_min_count_met(self) -> None:
+        """A single matching entry meets the default ``min_count`` of 1."""
+        from mission.engine import MissionEngine
+
+        result = MissionEngine._evaluate_tool_call_succeeded(
+            {"tool_name": "find_docs"},  # type: ignore[arg-type]
+            {
+                "tool_results": [
+                    {"tool_name": "find_docs", "_status": "ok"},
+                    {"tool_name": "find_examples", "_status": "ok"},
+                ]
+            },
+        )
+        assert result[0] == "met"
+        assert result[1]["successful_call_count"] == 1
+        assert result[1]["min_count"] == 1
+
+    def test_tool_call_succeeded_min_count_not_met(self) -> None:
+        """``min_count=3`` with one match → unmet."""
+        from mission.engine import MissionEngine
+
+        result = MissionEngine._evaluate_tool_call_succeeded(
+            {"tool_name": "find_docs", "min_count": 3},  # type: ignore[arg-type]
+            {
+                "tool_results": [
+                    {"tool_name": "find_docs", "_status": "ok"},
+                ]
+            },
+        )
+        assert result[0] == "unmet"
+
+    def test_tool_call_succeeded_min_count_met(self) -> None:
+        """Exactly ``min_count`` matches → met."""
+        from mission.engine import MissionEngine
+
+        result = MissionEngine._evaluate_tool_call_succeeded(
+            {"tool_name": "find_docs", "min_count": 2},  # type: ignore[arg-type]
+            {
+                "tool_results": [
+                    {"tool_name": "find_docs", "_status": "ok"},
+                    {"tool_name": "find_docs", "_status": "ok"},
+                    {"tool_name": "find_examples", "_status": "ok"},
+                ]
+            },
+        )
+        assert result[0] == "met"
+        assert result[1]["successful_call_count"] == 2
+
+    def test_tool_call_succeeded_skips_non_dict_entries(self) -> None:
+        """Defensive: non-dict entries in tool_results are ignored, not crashed on."""
+        from mission.engine import MissionEngine
+
+        result = MissionEngine._evaluate_tool_call_succeeded(
+            {"tool_name": "find_docs"},  # type: ignore[arg-type]
+            {
+                "tool_results": [
+                    "not-a-dict",
+                    None,
+                    {"tool_name": "find_docs", "_status": "ok"},
+                ]
+            },
+        )
+        assert result[0] == "met"
+        assert result[1]["successful_call_count"] == 1
+
 
 class TestEngineCoerceStrategy:
     """Cover the strategy-coercion guard in MissionEngine."""
@@ -905,11 +1013,82 @@ class TestPredicateOperators:
             parse_predicate("[obs for obs in [1, 2]]")
 
     def test_predicate_rejects_call_target_not_name(self) -> None:
-        """Attribute calls are rejected at the call gate."""
+        """Method calls outside the read-only allowlist are rejected."""
         from mission.predicate import PredicateRejected, parse_predicate
 
         with pytest.raises(PredicateRejected):
             parse_predicate("obs.something()")
+
+    def test_predicate_accepts_dict_get_method(self) -> None:
+        """The relaxed validator accepts ``.get(key, default)`` on any value."""
+        from mission.predicate import parse_predicate
+
+        # Direct on obs.
+        parse_predicate("obs.get('errors', [])")
+        # On a comprehension target.
+        parse_predicate("any(r.get('_status') == 'ok' for r in obs['tool_results'])")
+        # On a subscript result.
+        parse_predicate("obs['x'].get('y') is not None")
+
+    def test_predicate_accepts_dict_keys_values_items(self) -> None:
+        """The relaxed validator accepts ``.keys()`` / ``.values()`` / ``.items()``."""
+        from mission.predicate import parse_predicate
+
+        parse_predicate("any(k == 'val_loss' for k in obs['metrics'].keys())")
+        parse_predicate("any(v > 0 for v in obs['metrics'].values())")
+        parse_predicate("any(k == 'val_loss' for k, v in obs['metrics'].items())")
+
+    def test_predicate_rejects_mutating_method(self) -> None:
+        """Mutating dict / list methods are NOT in the read-only allowlist."""
+        from mission.predicate import PredicateRejected, parse_predicate
+
+        for src in (
+            "obs['xs'].append(1)",
+            "obs['xs'].pop()",
+            "obs.setdefault('k', [])",
+            "obs.update({'a': 1})",
+            "obs.clear()",
+        ):
+            with pytest.raises(PredicateRejected):
+                parse_predicate(src)
+
+    def test_predicate_rejects_str_or_list_method_outside_allowlist(self) -> None:
+        """Other read-only methods (``startswith``, ``count``) still reject."""
+        from mission.predicate import PredicateRejected, parse_predicate
+
+        for src in (
+            "any(k.startswith('val_') for k in obs['metrics'].keys())",
+            "obs['xs'].count(0) > 0",
+        ):
+            with pytest.raises(PredicateRejected):
+                parse_predicate(src)
+
+    def test_predicate_rejects_dunder_method(self) -> None:
+        """Dunder method calls reject even though the receiver is allowed."""
+        from mission.predicate import PredicateRejected, parse_predicate
+
+        with pytest.raises(PredicateRejected):
+            parse_predicate("obs.__class__()")
+
+    def test_predicate_evaluates_dict_get_against_observation(self) -> None:
+        """The new method-call shape evaluates correctly at runtime."""
+        from mission.predicate import evaluate_predicate, parse_predicate
+
+        ast_node = parse_predicate("any(r.get('_status') == 'ok' for r in obs['tool_results'])")
+        assert (
+            evaluate_predicate(
+                ast_node,
+                {"tool_results": [{"_status": "ok"}, {"_status": "fail"}]},
+            )
+            is True
+        )
+        assert (
+            evaluate_predicate(
+                ast_node,
+                {"tool_results": [{"_status": "fail"}]},
+            )
+            is False
+        )
 
     def test_predicate_rejects_disallowed_callable(self) -> None:
         """Calling a name that isn't in the allowlist is rejected."""

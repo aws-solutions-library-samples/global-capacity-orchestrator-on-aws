@@ -33,12 +33,18 @@ Containers and collections: ``List``, ``Tuple``, ``Dict``, ``Set``, plus
 ``ListComp``, ``SetComp``, ``DictComp``, ``GeneratorExp`` (their iteration
 targets must not shadow a name from the allowlist).
 
-Calls: only to a name from the callable allowlist above. ``obs(...)`` is
-rejected because ``obs`` is data, not a callable.
+Calls: bare-name calls to one of the eight stdlib callables above, OR
+read-only dict/list method calls — ``.get(key[, default])``, ``.keys()``,
+``.values()``, ``.items()``. Method calls accept any receiver the
+predicate could otherwise produce: ``Name`` (``obs``), ``Subscript``
+(``obs['tool_results']``), or comprehension-bound names
+(``r.get('_status')`` inside ``for r in obs['tool_results']``). Method
+calls outside the allowlist (``.update``, ``.pop``, ``.count``,
+``.append``, ...) are rejected with ``call_target_method_not_allowed``.
 
-Attribute access: only ``obs.<attr>`` (one level), and the attribute name
-itself must not start with ``__``. Anything more elaborate (chained
-attribute walks, attribute access on a subscript or call, etc.) is
+Attribute access: only ``obs.<attr>`` (one level), and the attribute
+name itself must not start with ``__``. Anything more elaborate
+(chained attribute walks, attributes on calls or subscripts) is
 rejected — predicates that need nested data should use subscripting.
 
 Subscripts: any ``value[...]`` chain whose ultimate base is an allowlisted
@@ -70,6 +76,43 @@ _ALLOWED_CALLABLES: Final[frozenset[str]] = frozenset(
     {"len", "min", "max", "sum", "abs", "any", "all", "sorted"}
 )
 """Builtin callables a predicate may invoke. Pure, side-effect-free."""
+
+_ALLOWED_METHOD_CALLS: Final[frozenset[str]] = frozenset({"get", "keys", "values", "items"})
+"""Read-only dict accessor methods a predicate may invoke on any value.
+
+Models trained on Python idioms gravitate toward ``r.get('_status')``
+and ``r.items()`` for dict access inside comprehensions. The four
+methods listed here are all pure read-only accessors:
+
+* ``dict.get(key[, default])`` returns the value at ``key`` (or
+  ``default``); identical to subscript except it tolerates missing
+  keys without raising.
+* ``dict.keys()`` / ``dict.values()`` / ``dict.items()`` return views
+  that the comprehension protocol then iterates.
+
+None of the four can mutate state, escape ``__builtins__``, or reach a
+callable that we did not already opt into through the eval-time
+sandbox (``__builtins__`` is empty; ``eval`` / ``compile`` /
+``__import__`` / ``getattr`` / ``setattr`` / ``open`` are all
+unreachable). Allowing them lets the model write the natural
+expression ``any(r.get('_status') == 'ok' for r in obs['tool_results'])``
+instead of being forced into the more verbose ``any(r['_status'] == 'ok'
+for r in obs['tool_results'] if '_status' in r)`` — which the model
+rarely produces unprompted.
+
+Method-call gating still applies in two places:
+
+1. The attribute *name* must be in this set. ``r.update(...)``,
+   ``r.pop(...)``, ``r.setdefault(...)``, etc. raise
+   ``call_target_method_not_allowed`` even though they would otherwise
+   parse as ``Attribute -> Call``.
+2. Method calls are only permitted on values produced by the
+   predicate's allowed surface — ``Name``, ``Subscript``, comprehension
+   targets. A method call on a literal expression (``[1, 2].count(1)``)
+   parses but the call goes through ``visit_Call`` → still rejected
+   because the receiver is not on the data namespace. See
+   ``visit_Call`` for the full set of acceptable receivers.
+"""
 
 _ALLOWED_DATA_NAMES: Final[frozenset[str]] = frozenset({"obs"})
 """Top-level data names the predicate may read."""
@@ -347,9 +390,18 @@ class _PredicateValidator(ast.NodeVisitor):
     # ---- attribute and subscript --------------------------------------
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
-        # Only ``obs.<attr>`` is permitted. Anything more elaborate
-        # (chained walks, attributes on calls or subscripts) is rejected:
-        # nested data should use subscript notation.
+        # Three shapes are allowed:
+        #
+        # 1. ``obs.<attr>`` — single-level read off the data dict.
+        # 2. ``<inner>.<method>`` *only when* visited from
+        #    ``visit_Call`` and ``<method>`` is in
+        #    ``_ALLOWED_METHOD_CALLS``. ``visit_Call`` handles that
+        #    case by validating the inner expression itself rather
+        #    than recursing into ``visit_Attribute``, so by the time a
+        #    bare ``Attribute`` lands here we know it is *not* the
+        #    receiver of an allowed method call.
+        # 3. Nothing else: chained walks (``obs.a.b``), attributes on
+        #    calls, and attributes on subscripts are all rejected.
         if self._is_dunder(node.attr):
             self._reject(
                 "dunder_attribute",
@@ -360,7 +412,8 @@ class _PredicateValidator(ast.NodeVisitor):
             self._reject(
                 "attribute_target_not_allowed",
                 node,
-                "attribute access is only allowed on 'obs'",
+                "attribute access is only allowed on 'obs' "
+                "(or as a read-only method call on a dict/list)",
             )
         # The base Name is in _ALLOWED_DATA_NAMES, so we know it passes
         # the visit_Name check; visit it anyway to stay regular.
@@ -385,21 +438,59 @@ class _PredicateValidator(ast.NodeVisitor):
     # ---- calls ---------------------------------------------------------
 
     def visit_Call(self, node: ast.Call) -> None:
-        # The callee must be a bare Name on the callable allowlist.
-        # Attribute calls (``x.foo()``) and subscript-then-call patterns
-        # (``builtins["eval"](...)``) are both rejected because their
-        # ``func`` is not a Name.
-        if not isinstance(node.func, ast.Name):
+        # Two callable shapes are allowed:
+        #
+        # 1. Bare-name calls to one of ``_ALLOWED_CALLABLES`` —
+        #    ``len(x)``, ``any(...)``, ``sorted(xs)``. The validator
+        #    enforces the name appears on the allowlist.
+        # 2. Method calls of the form ``<expr>.<method>(...)`` where
+        #    ``<method>`` is in ``_ALLOWED_METHOD_CALLS`` (the four
+        #    pure dict/list read accessors). The receiver expression
+        #    is validated through the normal visit chain so a method
+        #    call on something the predicate cannot otherwise see
+        #    (e.g. ``getattr(x, 'y').get(...)``) is rejected at the
+        #    receiver-validation step before the method allowlist is
+        #    even consulted.
+        #
+        # Anything else — subscript-then-call (``builtins["eval"]()``),
+        # call-then-call (``factory()()``), method calls to non-
+        # allowlisted attribute names — is rejected.
+        if isinstance(node.func, ast.Attribute):
+            if self._is_dunder(node.func.attr):
+                self._reject(
+                    "dunder_attribute",
+                    node.func,
+                    f"attribute '{node.func.attr}' starts with '__'",
+                )
+            if node.func.attr not in _ALLOWED_METHOD_CALLS:
+                self._reject(
+                    "call_target_method_not_allowed",
+                    node,
+                    f"method '.{node.func.attr}()' is not allowed; "
+                    f"the read-only method allowlist is "
+                    f"{sorted(_ALLOWED_METHOD_CALLS)}",
+                )
+            # Validate the receiver itself. Recursing here (rather
+            # than into ``visit_Attribute``) bypasses the
+            # ``visit_Attribute`` rule that only ``obs.<attr>``
+            # is allowed — but only because the *method name* is on
+            # the explicit pure-accessor allowlist above. Any other
+            # attribute name still falls through ``visit_Attribute``'s
+            # tighter rules.
+            self.visit(node.func.value)
+        elif isinstance(node.func, ast.Name):
+            if node.func.id not in _ALLOWED_CALLABLES:
+                self._reject(
+                    "call_target_not_allowed",
+                    node,
+                    f"call to '{node.func.id}' is not allowed",
+                )
+        else:
+            # Subscript-then-call, call-then-call, etc. — reject.
             self._reject(
                 "call_target_not_name",
                 node,
-                "predicate calls must target a bare callable name",
-            )
-        if node.func.id not in _ALLOWED_CALLABLES:
-            self._reject(
-                "call_target_not_allowed",
-                node,
-                f"call to '{node.func.id}' is not allowed",
+                "predicate calls must target a bare callable name or a read-only dict/list method",
             )
         for arg in node.args:
             self.visit(arg)

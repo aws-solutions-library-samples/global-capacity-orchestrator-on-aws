@@ -1076,6 +1076,7 @@ def mission_scaffold_criteria_cmd(
     if criteria is None:
         criteria = criteria_scaffold.generate_deterministic_criteria(
             directive,
+            allowlist=list(allowlist) or None,
             max_criteria=max_criteria,
         )
 
@@ -1111,3 +1112,263 @@ def mission_scaffold_criteria_cmd(
             )
         return
     click.echo(payload)
+
+
+# ---------------------------------------------------------------------------
+# run — chain scaffold + start + iterate-to-completion in one call
+# ---------------------------------------------------------------------------
+
+
+@mission_cmd.command("run")
+@click.option(
+    "--directive",
+    required=True,
+    help="Natural-language goal description.",
+)
+@click.option(
+    "--tool-allowlist",
+    multiple=True,
+    required=True,
+    help="Tool name to allowlist; pass multiple times for multiple tools.",
+)
+@click.option(
+    "--max-iterations",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Hard cap on the iteration count. Pass -1 to opt out (uncapped).",
+)
+@click.option(
+    "--max-wall-clock",
+    type=int,
+    default=300,
+    show_default=True,
+    help="Hard cap on wall-clock seconds. Pass -1 to opt out (uncapped).",
+)
+@click.option(
+    "--max-criteria",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Cap on the number of criterion entries scaffolded.",
+)
+@click.option(
+    "--retries",
+    type=int,
+    default=3,
+    show_default=True,
+    help="Sampling-path retry budget on validator rejections during scaffolding.",
+)
+@click.option(
+    "--use-sampling/--no-sampling",
+    "use_sampling",
+    default=None,
+    help=(
+        "Force the sampling path on/off for both the scaffolder and "
+        "the loop's Strategy_Revision sampler. Default auto-detects: "
+        "MCP host capability, then Bedrock credentials, then deterministic."
+    ),
+)
+@click.option(
+    "--bedrock-model-id",
+    default=None,
+    help="Override the Bedrock model id used by the CLI sampling backend.",
+)
+@click.option(
+    "--allow-scripted-strategies",
+    is_flag=True,
+    help="Allow scripted strategies to run via the Mission sandbox.",
+)
+@click.option(
+    "--save-criteria",
+    "save_criteria",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Optional path to also persist the scaffolded criteria JSON to disk.",
+)
+@click.option(
+    "--stagnation-threshold",
+    type=int,
+    default=3,
+    show_default=True,
+    help="Iterations of no progress before terminate.",
+)
+@click.option(
+    "--cadence",
+    type=click.Choice(["every_iteration", "every_n_iterations", "every_t_seconds", "on_event"]),
+    default="every_iteration",
+    show_default=True,
+    help="Checkpoint cadence kind.",
+)
+def mission_run_cmd(
+    directive: str,
+    tool_allowlist: tuple[str, ...],
+    max_iterations: int,
+    max_wall_clock: int,
+    max_criteria: int,
+    retries: int,
+    use_sampling: bool | None,
+    bedrock_model_id: str | None,
+    allow_scripted_strategies: bool,
+    save_criteria: str | None,
+    stagnation_threshold: int,
+    cadence: str,
+) -> None:
+    """Scaffold criteria and run a Mission session to completion in one call.
+
+    The chained shorthand for the most common Mission invocation: turn
+    a natural-language directive into a criteria file via
+    ``scaffold-criteria`` (sampling path with deterministic fallback),
+    persist a new session with ``start``'s validators, then drive it
+    through ``run-to-completion`` with the same per-call verdict
+    streaming as ``mission start --run``.
+
+    Per-iteration verdict updates land on stderr as JSON lines; the
+    Final_Report (or persisted session JSON when no Final_Report file
+    was written) lands on stdout when the loop terminates.
+
+    With ``--save-criteria PATH``, the scaffolded criteria JSON is
+    also written to ``PATH`` so the operator can inspect / re-use it
+    without re-running the scaffold step.
+    """
+    from mission import (  # noqa: PLC0415 — lazy
+        criteria_scaffold,
+    )
+    from mission import (
+        sampling as mission_sampling,
+    )
+    from mission import (
+        state as mission_state,
+    )
+    from mission import (
+        validation as mission_validation,
+    )
+    from mission.types import SCHEMA_VERSION
+    from mission.validation import MissionValidationError
+
+    if max_criteria < 1:
+        _emit_error(
+            "validation_error",
+            {"field": "max-criteria", "reason": "must_be_positive_int"},
+        )
+        sys.exit(1)
+    if retries < 0:
+        _emit_error(
+            "validation_error",
+            {"field": "retries", "reason": "must_be_non_negative_int"},
+        )
+        sys.exit(1)
+
+    # ---- Step 1: scaffold criteria. -------------------------------------
+    # Resolve the sampling state once; reuse it for both the scaffold
+    # call and the persisted session's ``use_sampling`` field so the
+    # operator's --use-sampling/--no-sampling intent applies end-to-end.
+    use_sampling_resolved, backend_resolved = mission_sampling.resolve_sampling_state(
+        None, use_sampling
+    )
+
+    criteria: list[dict[str, Any]] | None = None
+    sampling_path_taken = False
+    if use_sampling_resolved and backend_resolved != "none":
+        backend_obj = mission_sampling.select_sampling_backend(
+            None,
+            model_id=bedrock_model_id,
+            prefs=None,
+        )
+        if backend_obj is not None:
+            try:
+                criteria = asyncio.run(
+                    criteria_scaffold.generate_sampled_criteria(
+                        backend_obj,
+                        directive,
+                        allowlist=list(tool_allowlist),
+                        max_criteria=max_criteria,
+                        retries=retries,
+                    )
+                )
+                sampling_path_taken = True
+            except criteria_scaffold.ScaffoldSamplingError as exc:
+                click.echo(
+                    f"sampling path failed ({exc.last_reason}); "
+                    "falling back to deterministic templates.",
+                    err=True,
+                )
+                criteria = None
+
+    if criteria is None:
+        criteria = criteria_scaffold.generate_deterministic_criteria(
+            directive,
+            allowlist=list(tool_allowlist) or None,
+            max_criteria=max_criteria,
+        )
+
+    if save_criteria:
+        Path(save_criteria).write_text(
+            json.dumps(criteria, indent=2, sort_keys=False) + "\n",
+            encoding="utf-8",
+        )
+
+    # ---- Step 2: validate everything and persist the session. -----------
+    budget: dict[str, Any] = {
+        "max_iterations": max_iterations,
+        "max_wall_clock_seconds": max_wall_clock,
+    }
+    cadence_dict: dict[str, Any] = {"kind": cadence}
+
+    try:
+        directive_clean = mission_validation.validate_directive(directive)
+        criteria_clean = mission_validation.validate_criteria(criteria)
+        budget_clean = mission_validation.validate_budget(budget, list(tool_allowlist), {})
+        cadence_clean = mission_validation.validate_cadence(cadence_dict)
+    except MissionValidationError as exc:
+        _emit_error(exc.code, exc.details)
+        sys.exit(1)
+
+    if not isinstance(stagnation_threshold, int) or stagnation_threshold <= 0:
+        _emit_error(
+            "validation_error",
+            {"field": "stagnation-threshold", "reason": "must_be_positive_int"},
+        )
+        sys.exit(1)
+
+    session_id = f"mission-{secrets.token_hex(8)}"
+    now_iso = datetime.now(UTC).isoformat()
+    session: dict[str, Any] = {
+        "version": SCHEMA_VERSION,
+        "session_id": session_id,
+        "directive_text": directive_clean,
+        "criteria": criteria_clean,
+        "budget": budget_clean,
+        "tool_allowlist": list(tool_allowlist),
+        "checkpoint_cadence": cadence_clean,
+        "stagnation_threshold": stagnation_threshold,
+        "use_sampling": use_sampling_resolved,
+        "sampling_backend_resolved": backend_resolved,
+        "allow_scripted_strategies": bool(allow_scripted_strategies),
+        "status": "pending",
+        "created_at": now_iso,
+        "iterations": [],
+        "no_progress_counter": 0,
+    }
+    if bedrock_model_id:
+        session["bedrock_model_id"] = bedrock_model_id
+
+    backend = mission_state.get_backend()
+    backend.save_session(cast("SessionState", _strip_private_criteria(session)))
+
+    # Emit a one-line scaffold summary to stderr so the operator can see
+    # what shape the criteria landed in before the loop starts. Stdout is
+    # reserved for the Final_Report at the end.
+    _emit_json(
+        {
+            "event": "mission.run.scaffolded",
+            "session_id": session_id,
+            "criteria_count": len(criteria),
+            "sampling_path": sampling_path_taken,
+            "sampling_backend_resolved": backend_resolved,
+        },
+        err=True,
+    )
+
+    # ---- Step 3: iterate to completion. ---------------------------------
+    _run_to_completion(session_id)

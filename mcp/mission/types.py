@@ -48,8 +48,8 @@ VerdictReason = Literal[
 StatusLabel = Literal["pending", "running", "paused", "completed", "terminated", "failed"]
 """The lifecycle states of a :class:`SessionState`."""
 
-CriterionKind = Literal["metric_threshold", "event", "predicate"]
-"""The three Criterion evaluator kinds."""
+CriterionKind = Literal["metric_threshold", "event", "predicate", "tool_call_succeeded"]
+"""The four Criterion evaluator kinds."""
 
 SamplingStatus = Literal["used", "rejected", "fallback", "unavailable", "disabled"]
 """The terminal status of a single sampling attempt on an iteration."""
@@ -89,11 +89,11 @@ class Criterion(TypedDict):
 
     The kind-specific keys (``metric``/``op``/``target`` for
     ``metric_threshold``, ``event_name`` for ``event``, ``expression`` for
-    ``predicate``) are not declared on the base ``TypedDict`` because they
-    are mutually exclusive per ``kind``. Validators in
-    ``mcp.mission.validation`` verify the right keys are present for each
-    ``kind`` and may attach a private cached AST under ``_parsed_ast`` for
-    ``predicate`` entries.
+    ``predicate``, ``tool_name``/``min_count`` for ``tool_call_succeeded``)
+    are not declared on the base ``TypedDict`` because they are mutually
+    exclusive per ``kind``. Validators in ``mcp.mission.validation`` verify
+    the right keys are present for each ``kind`` and may attach a private
+    cached AST under ``_parsed_ast`` for ``predicate`` entries.
     """
 
     criterion_id: str
@@ -105,6 +105,8 @@ class Criterion(TypedDict):
     target: NotRequired[float]
     event_name: NotRequired[str]
     expression: NotRequired[str]
+    tool_name: NotRequired[str]
+    min_count: NotRequired[int]
     # Cached parsed AST attached by ``validate_criteria`` for predicate entries.
     _parsed_ast: NotRequired[Any]
 

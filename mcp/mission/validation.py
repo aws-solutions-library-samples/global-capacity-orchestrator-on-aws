@@ -81,8 +81,10 @@ class MissionValidationError(Exception):
 _DIRECTIVE_MAX_LEN: Final[int] = 8192
 """The hard cap on directive_text length, in characters."""
 
-_CRITERION_KINDS: Final[frozenset[str]] = frozenset({"metric_threshold", "event", "predicate"})
-"""The three valid Criterion ``kind`` values."""
+_CRITERION_KINDS: Final[frozenset[str]] = frozenset(
+    {"metric_threshold", "event", "predicate", "tool_call_succeeded"}
+)
+"""The four valid Criterion ``kind`` values."""
 
 _METRIC_OPS: Final[frozenset[str]] = frozenset({"<", "<=", ">", ">=", "==", "!="})
 """The six valid comparison operators on a ``metric_threshold`` criterion."""
@@ -250,6 +252,49 @@ def _validate_predicate_criterion(entry: dict[str, Any], criterion_id: str) -> A
         ) from exc
 
 
+def _validate_tool_call_succeeded(entry: dict[str, Any], criterion_id: str) -> None:
+    """Check the kind-specific keys for a ``tool_call_succeeded`` criterion.
+
+    Required: ``tool_name`` (non-empty str). Optional: ``min_count``
+    (positive int; default 1). The criterion is met when the
+    Observation's ``tool_results`` list contains at least
+    ``min_count`` entries whose ``tool_name`` field equals
+    ``tool_name`` and whose ``_status`` equals ``"ok"``.
+
+    This kind exists so the most common Mission goal — "this tool
+    ran and succeeded N times" — does not require the operator (or
+    a sampling model) to write a Python predicate. It is a strict
+    subset of what ``predicate`` can express, but the engine
+    evaluates it server-side without going through the AST sandbox,
+    so the validator never needs to reason about syntax errors,
+    method-call shapes, or attribute walks for this case.
+    """
+    tool_name = entry.get("tool_name")
+    if not isinstance(tool_name, str) or not tool_name:
+        raise MissionValidationError(
+            "validation_error",
+            details={
+                "field": "criteria",
+                "criterion_id": criterion_id,
+                "reason": "tool_name_missing_or_invalid",
+            },
+        )
+    # ``min_count`` is optional; default 1 (any successful call).
+    if "min_count" in entry:
+        min_count = entry.get("min_count")
+        # bool is a subclass of int — reject explicitly so True/False cannot
+        # masquerade as 1/0 and silently pass through.
+        if isinstance(min_count, bool) or not isinstance(min_count, int) or min_count < 1:
+            raise MissionValidationError(
+                "validation_error",
+                details={
+                    "field": "criteria",
+                    "criterion_id": criterion_id,
+                    "reason": "min_count_must_be_positive_int",
+                },
+            )
+
+
 def validate_criteria(criteria: list[dict[str, Any]]) -> list[Criterion]:
     """Validate a list of criteria and attach cached predicate ASTs.
 
@@ -336,6 +381,8 @@ def validate_criteria(criteria: list[dict[str, Any]]) -> list[Criterion]:
             _validate_metric_threshold(entry, criterion_id)
         elif kind == "event":
             _validate_event_criterion(entry, criterion_id)
+        elif kind == "tool_call_succeeded":
+            _validate_tool_call_succeeded(entry, criterion_id)
         else:  # kind == "predicate"
             parsed = _validate_predicate_criterion(entry, criterion_id)
             normalized_entry["_parsed_ast"] = parsed

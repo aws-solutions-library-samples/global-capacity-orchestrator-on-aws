@@ -1054,6 +1054,8 @@ class MissionEngine:
             status, evidence = self._evaluate_event(criterion, observation)
         elif kind == "predicate":
             status, evidence = self._evaluate_predicate(criterion, observation)
+        elif kind == "tool_call_succeeded":
+            status, evidence = self._evaluate_tool_call_succeeded(criterion, observation)
         else:
             # Unreachable when the validator has run — but if a
             # malformed session somehow lands here, surface the bad
@@ -1136,6 +1138,55 @@ class MissionEngine:
         except Exception as exc:
             return "inconclusive", f"{type(exc).__name__}: {exc}"
         return ("met" if value else "unmet"), value
+
+    @staticmethod
+    def _evaluate_tool_call_succeeded(
+        criterion: Criterion, observation: dict[str, Any]
+    ) -> tuple[str, Any]:
+        """Count successful tool_results matching the named tool.
+
+        The criterion is met when at least ``min_count`` (default 1)
+        entries in ``observation["tool_results"]`` have ``tool_name``
+        equal to the criterion's ``tool_name`` and ``_status`` equal
+        to ``"ok"``. Returns a ``(status, evidence)`` tuple where
+        ``evidence`` is a structured dict so the audit log shows the
+        match shape.
+
+        This is a strict subset of what a ``predicate`` could express
+        (``len([r for r in obs['tool_results'] if r.get('_status') ==
+        'ok' and r.get('tool_name') == 'X']) >= N``) but the engine
+        evaluates it without going through the AST sandbox. That
+        keeps the most common Mission goal — "this tool ran and
+        succeeded" — out of the predicate-validator critical path so
+        a sampling model that prefers any other Pythonic shape
+        (``r.values()``, ``r.startswith``, etc.) does not block the
+        criterion from being structurally valid.
+        """
+        target_tool = criterion.get("tool_name")
+        min_count = criterion.get("min_count", 1)
+        # ``tool_results`` is the canonical observation key the
+        # dispatcher writes; missing means the iteration never ran a
+        # tool, which is genuinely inconclusive (vs. unmet).
+        if "tool_results" not in observation:
+            return "inconclusive", "tool_results_field_missing"
+        results = observation.get("tool_results")
+        if not isinstance(results, list):
+            return "inconclusive", "tool_results_field_not_a_list"
+        successful = [
+            r
+            for r in results
+            if isinstance(r, dict)
+            and r.get("tool_name") == target_tool
+            and r.get("_status") == "ok"
+        ]
+        evidence = {
+            "tool_name": target_tool,
+            "min_count": min_count,
+            "successful_call_count": len(successful),
+        }
+        if len(successful) >= min_count:
+            return "met", evidence
+        return "unmet", evidence
 
     # ------------------------------------------------------------------ #
     # Phase 5 — decide

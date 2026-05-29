@@ -504,3 +504,262 @@ class TestNormalizeMetricPath:
         assert criteria_scaffold._normalize_metric_path(empty) is empty
         non_str = {"kind": "metric_threshold", "metric": 42}
         assert criteria_scaffold._normalize_metric_path(non_str) is non_str
+
+
+class TestAutofixPredicate:
+    """``_autofix_predicate`` rewrites attribute-walk predicates into subscript form.
+
+    The scaffold loop runs this best-effort rewrite after the metric-path
+    normaliser and before the validator. Mechanical attribute-to-subscript
+    rewrites cover the most common rejection class (``call_target_not_name``
+    on attribute walks) without burning a retry; method-call shapes that
+    cannot be rewritten safely fall through to the standard
+    retry-with-feedback path.
+    """
+
+    def test_already_valid_predicate_unchanged(self) -> None:
+        """A predicate that already validates is returned verbatim."""
+        crit = {
+            "criterion_id": "x",
+            "kind": "predicate",
+            "required": True,
+            "expression": "len(obs['tool_results']) > 0",
+        }
+        out = criteria_scaffold._autofix_predicate(crit)
+        # When the source already validates, return the input dict
+        # unchanged so the caller can detect "did nothing" by identity.
+        assert out is crit
+
+    def test_nested_attribute_walk_rewritten_to_subscript(self) -> None:
+        """``obs.metrics.val_loss`` -> ``obs['metrics']['val_loss']``."""
+        crit = {
+            "criterion_id": "loss",
+            "kind": "predicate",
+            "required": True,
+            "expression": "obs.metrics.val_loss < 0.1",
+        }
+        out = criteria_scaffold._autofix_predicate(crit)
+        assert out is not crit
+        assert out["expression"] == "obs['metrics']['val_loss'] < 0.1"
+
+    def test_mixed_subscript_then_attribute_rewritten(self) -> None:
+        """``obs.tool_results[0].score`` -> ``obs['tool_results'][0]['score']``."""
+        crit = {
+            "criterion_id": "score",
+            "kind": "predicate",
+            "required": True,
+            "expression": "obs.tool_results[0].score > 0.9",
+        }
+        out = criteria_scaffold._autofix_predicate(crit)
+        assert out["expression"] == "obs['tool_results'][0]['score'] > 0.9"
+
+    def test_method_call_on_obs_left_unchanged(self) -> None:
+        """``obs.tool_results.any()`` cannot be safely rewritten — left alone.
+
+        The standard retry-with-feedback loop is responsible for teaching
+        the model to use ``any(... for ... in obs[...])`` instead.
+        """
+        crit = {
+            "criterion_id": "x",
+            "kind": "predicate",
+            "required": True,
+            "expression": "obs.tool_results.any()",
+        }
+        out = criteria_scaffold._autofix_predicate(crit)
+        # Returned verbatim so the validator emits the original
+        # rejection token the model needs as feedback.
+        assert out is crit
+
+    def test_obs_get_method_left_unchanged(self) -> None:
+        """``obs.get('x')`` is a method call on obs — autofix bails."""
+        crit = {
+            "criterion_id": "x",
+            "kind": "predicate",
+            "required": True,
+            "expression": "obs.get('tool_results') is not None",
+        }
+        out = criteria_scaffold._autofix_predicate(crit)
+        assert out is crit
+
+    def test_non_predicate_passes_through(self) -> None:
+        """``metric_threshold`` and ``event`` criteria are never touched."""
+        metric = {
+            "criterion_id": "loss",
+            "kind": "metric_threshold",
+            "metric": "metrics.val_loss",
+            "op": "<",
+            "target": 0.1,
+        }
+        assert criteria_scaffold._autofix_predicate(metric) is metric
+        evt = {
+            "criterion_id": "e",
+            "kind": "event",
+            "event_name": "done",
+            "required": True,
+        }
+        assert criteria_scaffold._autofix_predicate(evt) is evt
+
+    def test_missing_or_non_string_expression_passes_through(self) -> None:
+        """Defensive: malformed expressions are handed to the validator unchanged."""
+        empty = {"kind": "predicate", "expression": ""}
+        assert criteria_scaffold._autofix_predicate(empty) is empty
+        non_str = {"kind": "predicate", "expression": 42}
+        assert criteria_scaffold._autofix_predicate(non_str) is non_str
+
+    def test_syntax_error_passes_through(self) -> None:
+        """A predicate with bad Python syntax is left alone for the validator."""
+        crit = {
+            "criterion_id": "x",
+            "kind": "predicate",
+            "required": True,
+            "expression": "obs..tool_results > 0",  # SyntaxError
+        }
+        out = criteria_scaffold._autofix_predicate(crit)
+        assert out is crit
+
+    def test_does_not_mutate_input(self) -> None:
+        """The autofix returns a shallow copy; the input dict is untouched."""
+        original = {
+            "criterion_id": "loss",
+            "kind": "predicate",
+            "required": True,
+            "expression": "obs.metrics.val_loss < 0.1",
+        }
+        out = criteria_scaffold._autofix_predicate(original)
+        assert out is not original
+        assert original["expression"] == "obs.metrics.val_loss < 0.1"
+
+    @pytest.mark.asyncio
+    async def test_sampling_loop_recovers_attribute_walk(self) -> None:
+        """End-to-end: an attribute-walk response is autofixed and accepted.
+
+        The sampling loop should run the autofix before the validator so a
+        single ``obs.metrics.val_loss``-style response succeeds on the
+        first attempt — no retry needed.
+        """
+        canned = (
+            "["
+            '{"criterion_id": "loss", "kind": "predicate", "required": true, '
+            '"expression": "obs.metrics.val_loss < 0.1"}'
+            "]"
+        )
+        backend = _FakeBackend([canned])
+        result = await criteria_scaffold.generate_sampled_criteria(
+            backend,  # type: ignore[arg-type]
+            "Drive validation loss below 0.1.",
+            allowlist=[],
+        )
+        assert len(result) == 1
+        # The autofix injected subscript notation before the validator
+        # ever saw the source.
+        assert result[0]["expression"] == "obs['metrics']['val_loss'] < 0.1"
+        # And the backend was hit exactly once — no retry burned.
+        assert len(backend.calls) == 1
+
+
+class TestPromptRejectedExamples:
+    """The scaffolder prompt shows concrete REJECTED predicate forms.
+
+    Negative examples land harder than allowlist-only prose for catching
+    the model's default Pythonic idioms.
+    """
+
+    def test_prompt_shows_method_call_rejection(self) -> None:
+        prompt = criteria_scaffold.build_scaffold_prompt("Find documents.")
+        assert "REJECTED predicate expressions" in prompt
+        # Concrete examples covering the two main rejection classes the
+        # validator surfaces today: nested attribute walks and method
+        # calls outside the read-only-accessor allowlist.
+        assert "obs.metrics.val_loss" in prompt
+        assert ".count(" in prompt
+        assert "getattr" in prompt
+
+    def test_prompt_shows_accepted_examples(self) -> None:
+        prompt = criteria_scaffold.build_scaffold_prompt("Find documents.")
+        assert "ACCEPTED predicate expressions" in prompt
+        assert "len(obs['tool_results']) > 0" in prompt
+        # The relaxed validator now accepts dict-method calls; the
+        # prompt must teach that explicitly so the model reaches for
+        # ``r.get(...)`` instead of writing a less-readable predicate.
+        assert "r.get('_status')" in prompt
+
+
+class TestDeterministicAllowlistAware:
+    """When a search-flavoured directive ships with an allowlist, the
+    deterministic generator emits per-tool ``tool_call_succeeded`` criteria.
+
+    This keeps the most common Mission goal — "this tool ran" — out of
+    the predicate AST sandbox entirely, sidestepping the whole class of
+    rejection failures the sampling path was hitting.
+    """
+
+    def test_search_with_allowlist_emits_tool_call_succeeded(self) -> None:
+        result = criteria_scaffold.generate_deterministic_criteria(
+            "Find documentation about inference endpoints.",
+            allowlist=["find_docs", "find_examples"],
+        )
+        assert len(result) == 2
+        assert {c["kind"] for c in result} == {"tool_call_succeeded"}
+        assert {c["tool_name"] for c in result} == {"find_docs", "find_examples"}
+        for c in result:
+            assert c["required"] is True
+
+    def test_search_without_allowlist_falls_back_to_predicate(self) -> None:
+        # No allowlist -> the existing predicate-fallback shape stays put.
+        result = criteria_scaffold.generate_deterministic_criteria(
+            "Find documentation about inference endpoints."
+        )
+        assert len(result) == 1
+        assert result[0]["kind"] == "predicate"
+        assert "tool_results" in result[0]["expression"]
+
+    def test_max_criteria_caps_per_tool_emission(self) -> None:
+        """``max_criteria`` truncates the per-tool list."""
+        result = criteria_scaffold.generate_deterministic_criteria(
+            "Find documents.",
+            allowlist=["a", "b", "c", "d", "e", "f"],
+            max_criteria=3,
+        )
+        assert len(result) == 3
+        assert [c["tool_name"] for c in result] == ["a", "b", "c"]
+
+    def test_non_search_directive_ignores_allowlist(self) -> None:
+        # Loss directives still produce metric_threshold; the allowlist
+        # is a hint for search-flavoured goals only.
+        result = criteria_scaffold.generate_deterministic_criteria(
+            "Drive validation loss below 0.1.",
+            allowlist=["foo", "bar"],
+        )
+        assert len(result) == 1
+        assert result[0]["kind"] == "metric_threshold"
+
+    def test_each_tool_call_succeeded_validates_through_validate_criteria(self) -> None:
+        """Output of the new path round-trips through the structural validator."""
+        from mission.validation import validate_criteria
+
+        result = criteria_scaffold.generate_deterministic_criteria(
+            "Find documentation.",
+            allowlist=["find_docs", "find_examples"],
+        )
+        # Should not raise.
+        validated = validate_criteria(result)
+        assert len(validated) == 2
+
+
+class TestPromptToolCallSucceededTeach:
+    """The scaffolder prompt teaches the model about the new criterion kind."""
+
+    def test_prompt_documents_tool_call_succeeded(self) -> None:
+        prompt = criteria_scaffold.build_scaffold_prompt("Find docs.")
+        assert "tool_call_succeeded" in prompt
+        # The prompt must steer the model toward the new kind for
+        # tool-success goals so it stops reaching for predicates.
+        assert "PREFER" in prompt
+
+    def test_prompt_documents_relaxed_predicate_vocabulary(self) -> None:
+        """The prompt teaches that ``.get()``, ``.keys()``, etc. are allowed."""
+        prompt = criteria_scaffold.build_scaffold_prompt("Find docs.")
+        assert ".get(" in prompt
+        assert ".items()" in prompt
+        assert ".keys()" in prompt
+        assert ".values()" in prompt

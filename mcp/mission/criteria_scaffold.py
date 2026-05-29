@@ -28,12 +28,14 @@ decoupled so each can be tested in isolation.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from . import validation as _validation
+from .predicate import PredicateRejected, parse_predicate
 from .validation import MissionValidationError
 
 if TYPE_CHECKING:  # pragma: no cover - type-checker only
@@ -175,6 +177,24 @@ def _build_predicate_search() -> dict[str, Any]:
     }
 
 
+def _build_tool_call_succeeded(tool_name: str) -> dict[str, Any]:
+    """Build a ``tool_call_succeeded`` criterion targeting ``tool_name``.
+
+    The slug is derived from the tool name so two ``tool_call_succeeded``
+    entries in the same list don't collide on ``criterion_id``. The
+    default ``min_count`` of 1 is left implicit on the criterion shape
+    so the operator can edit it after scaffolding without first
+    deleting an explicit value.
+    """
+    slug = _slugify(tool_name, fallback="tool")
+    return {
+        "criterion_id": f"{slug}_called",
+        "kind": "tool_call_succeeded",
+        "required": True,
+        "tool_name": tool_name,
+    }
+
+
 def _build_event(captured: str) -> dict[str, Any]:
     """Build an ``event`` criterion using the captured keyword as the name."""
     return {
@@ -210,6 +230,7 @@ def _build_default_placeholder() -> dict[str, Any]:
 def generate_deterministic_criteria(
     directive: str,
     *,
+    allowlist: list[str] | None = None,
     max_criteria: int = DEFAULT_MAX_CRITERIA,
 ) -> list[dict[str, Any]]:
     """Build a criteria list deterministically from a directive.
@@ -222,6 +243,16 @@ def generate_deterministic_criteria(
 
     Args:
         directive: The natural-language goal.
+        allowlist: Optional list of tool names. When the directive is
+            a search-flavoured goal *and* an allowlist is supplied,
+            the generator emits one ``tool_call_succeeded`` criterion
+            per allowlisted tool (capped at ``max_criteria``) instead
+            of the loose ``len(obs['tool_results']) > 0`` predicate.
+            That gives the operator concrete per-tool success
+            signals out of the box and keeps the criterion server-
+            evaluated rather than going through the predicate AST
+            sandbox. Falls back to the predicate when no allowlist
+            is supplied so existing callers keep their shape.
         max_criteria: Cap on the number of entries returned. Always
             at least 1; values less than 1 are clamped.
 
@@ -239,6 +270,15 @@ def generate_deterministic_criteria(
     if match.kind == "metric_threshold_higher":
         return [_build_metric_threshold(directive, match.captured, ">=")]
     if match.kind == "predicate_search":
+        # Prefer per-tool ``tool_call_succeeded`` criteria when the
+        # operator told us what tools they intend to allowlist —
+        # those are server-evaluated and require zero predicate
+        # syntax. Fall back to the loose predicate when no
+        # allowlist is available so the no-allowlist call shape
+        # stays exactly as it was.
+        if allowlist:
+            tool_names = list(allowlist)[:max_criteria]
+            return [_build_tool_call_succeeded(name) for name in tool_names]
         return [_build_predicate_search()]
     if match.kind == "event":
         return [_build_event(match.captured)]
@@ -322,23 +362,85 @@ def build_scaffold_prompt(
         "Return a single JSON array. Each entry is an object with "
         "these required keys:\n"
         '  - "criterion_id": unique non-empty string\n'
-        '  - "kind": one of "metric_threshold" / "event" / "predicate"\n'
+        '  - "kind": one of "metric_threshold" / "event" / '
+        '"predicate" / "tool_call_succeeded"\n'
         '  - "required": JSON boolean\n'
         "Plus the kind-specific keys:\n"
-        '  metric_threshold -> "metric" (DOT-PATH into the Observation,\n'
-        "                      e.g. ``metrics.val_loss``,\n"
-        "                      ``tool_results.0.score``), "
+        '  metric_threshold     -> "metric" (DOT-PATH into the\n'
+        "                          Observation, e.g.\n"
+        "                          ``metrics.val_loss``,\n"
+        "                          ``tool_results.0.score``), "
         '"op" (one of <, <=, >, >=, ==, !=), "target" (number)\n'
-        '  event            -> "event_name" (non-empty string; matched\n'
-        '                      against entries in obs["events"])\n'
-        '  predicate        -> "expression" (a Python expression\n'
-        "                      evaluated against `obs` — only the\n"
-        "                      Observation fields above are reachable;\n"
-        "                      attribute access is rejected, only\n"
-        "                      subscript notation works\n"
-        "                      (e.g. ``obs['metrics']['loss']``);\n"
-        "                      callable allowlist: `obs`, `len`, `min`,\n"
-        "                      `max`, `sum`, `abs`, `any`, `all`, `sorted`)"
+        '  event                -> "event_name" (non-empty string;\n'
+        '                          matched against entries in obs["events"])\n'
+        '  tool_call_succeeded  -> "tool_name" (non-empty string;\n'
+        "                          matched against entries in\n"
+        '                          ``obs["tool_results"]`` whose\n'
+        '                          ``_status`` equals ``"ok"``).\n'
+        '                          Optional: "min_count" (positive\n'
+        "                          int, default 1).\n"
+        "                          PREFER this kind over a predicate\n"
+        '                          when the goal is "this tool ran\n'
+        '                          and succeeded" — it is server-\n'
+        "                          evaluated and never goes through\n"
+        "                          the predicate AST sandbox.\n"
+        '  predicate            -> "expression" (a Python expression\n'
+        "                          evaluated against `obs` — see\n"
+        "                          the predicate vocabulary section\n"
+        "                          below for the exact surface)"
+    )
+    sections.append("")
+    sections.append("=== Predicate vocabulary ===")
+    sections.append(
+        "Predicate expressions run inside a tight AST sandbox. The\n"
+        "allowed surface:\n"
+        "\n"
+        "Names: ``obs`` (the Observation dict).\n"
+        "Top-level callables (eight, all pure stdlib):\n"
+        "  ``len``, ``min``, ``max``, ``sum``, ``abs``,\n"
+        "  ``any``, ``all``, ``sorted``\n"
+        "Read-only dict/list method calls (four, on any value):\n"
+        "  ``.get(key[, default])``, ``.keys()``, ``.values()``, ``.items()``\n"
+        "Operators: arithmetic, comparisons (<, <=, >, >=, ==, !=,\n"
+        "  is, is not, in, not in), boolean (and, or, not), ternary\n"
+        "  (a if b else c).\n"
+        "Containers: list/tuple/dict/set literals, list / set / dict\n"
+        "  / generator comprehensions (the comprehension target may\n"
+        "  not shadow ``obs`` or any callable name).\n"
+        "Subscripts: ``obs['key']``, ``obs['k']['nested']``,\n"
+        "  ``obs['list'][0]``, etc.\n"
+        "Attribute access: ONLY single-level on ``obs`` (e.g. ``obs.events``\n"
+        "  for read-only access; subscript form is preferred). Nested\n"
+        "  walks like ``obs.a.b`` are rejected — use ``obs['a']['b']``.\n"
+        "\n"
+        "Method calls outside the four pure-accessor names are\n"
+        "rejected (no ``.append``, ``.update``, ``.pop``, ``.count``,\n"
+        "``.startswith``, ``.lower``, etc.). Calls to non-allowlisted\n"
+        "names (``str``, ``list``, ``dict``, ``getattr``, ``isinstance``,\n"
+        "...) are rejected."
+    )
+    sections.append("")
+    sections.append("=== Predicate examples (do NOT use rejected forms) ===")
+    sections.append(
+        "ACCEPTED predicate expressions:\n"
+        "  len(obs['tool_results']) > 0\n"
+        "  obs['metrics']['val_loss'] < 0.1\n"
+        "  any(e['event_name'] == 'goal_reached' for e in obs['events'])\n"
+        "  any(r.get('_status') == 'ok' for r in obs['tool_results'])\n"
+        "  all(r.get('_status') == 'ok' for r in obs['tool_results'])\n"
+        "  any(r.get('_status') == 'ok' and r.get('tool_name') == 'find_docs'\n"
+        "      for r in obs['tool_results'])\n"
+        "  len(obs.get('errors', [])) == 0\n"
+        "  any(k == 'val_loss' for k in obs['metrics'].keys())\n"
+        "\n"
+        "REJECTED predicate expressions (will fail validation):\n"
+        "  obs.metrics.val_loss < 0.1       # nested attribute walk; use obs['metrics']['val_loss']\n"  # noqa: E501
+        "  obs['tool_results'].count('ok')  # ``.count`` is not on the dict-method allowlist\n"
+        "  obs['tool_results'].append(1)    # ``.append`` mutates and is not allowed\n"
+        "  any(str(r) == 'x' for r in obs['tool_results'])  # ``str`` not on callable allowlist\n"
+        "  any(k.startswith('val_') for k in obs['metrics'].keys())  # ``.startswith`` not on dict-method allowlist\n"  # noqa: E501
+        "  getattr(obs, 'tool_results')     # ``getattr`` not on callable allowlist\n"
+        "  obs['x'].y.z                     # attribute walk after subscript"
     )
     sections.append("")
     sections.append("Output only the JSON array. No prose, no markdown fences.")
@@ -414,6 +516,111 @@ def _normalize_metric_path(criterion: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+class _AttributeToSubscriptRewriter(ast.NodeTransformer):
+    """Rewrite ``obs.<attr>`` chains as ``obs['<attr>']`` chains.
+
+    The predicate validator accepts a single-level attribute read on
+    ``obs`` (``obs.tool_results``) but rejects nested attribute walks
+    (``obs.metrics.val_loss``) and method-style calls
+    (``obs.x.any()``, ``obs.get('x')``). Models routinely emit those
+    shapes because they are the obvious Pythonic idioms. This
+    transformer rewrites the *attribute-walk* shapes mechanically;
+    method-call shapes that need creative rewriting are left alone so
+    the standard retry-with-feedback loop can teach the model.
+
+    The walk only rewrites attribute reads whose innermost base is the
+    ``Name('obs')`` — every other attribute access (e.g. on a list
+    element returned from a comprehension, on a number) is left
+    untouched so the validator's other guards still apply.
+    """
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:  # noqa: N802 - ast hook name
+        # Recurse into the value first so a nested attribute walk gets
+        # rewritten bottom-up: ``obs.metrics.val_loss`` -> visit
+        # ``obs.metrics`` first (which becomes ``obs['metrics']``)
+        # then wrap the result in ``[...]['val_loss']``.
+        self.generic_visit(node)
+        # Only rewrite when the rewritten base is one of:
+        #   * Name('obs') — the simple ``obs.x`` case
+        #   * Subscript whose ultimate base is Name('obs') — the
+        #     already-rewritten ``obs['metrics']`` case
+        # Anything else (attribute on a Call, on a list literal, on a
+        # comprehension target) is left as-is so the validator's
+        # rejections still fire on shapes the autofix shouldn't try to
+        # silently rescue.
+        base = node.value
+        innermost = base
+        while isinstance(innermost, ast.Subscript):
+            innermost = innermost.value
+        if not (isinstance(innermost, ast.Name) and innermost.id == "obs"):
+            return node
+        return ast.Subscript(
+            value=base,
+            slice=ast.Constant(value=node.attr),
+            ctx=node.ctx,
+        )
+
+
+def _autofix_predicate(criterion: dict[str, Any]) -> dict[str, Any]:
+    """Best-effort rewrite of attribute-walk predicates into subscript form.
+
+    Keeps the crit dict unchanged when:
+
+    * ``kind != "predicate"``
+    * the expression is missing or non-string
+    * the expression already parses cleanly through
+      :func:`mission.predicate.parse_predicate`
+    * source has a syntax error (the validator will reject it with the
+      original code anyway)
+    * the rewritten expression *still* fails validation (so the
+      retry-with-feedback path runs against the original source the
+      model emitted, not a partially-rewritten one)
+
+    Returns a shallow copy with the rewritten ``expression`` only when
+    the rewrite produced a predicate that clears the validator. This
+    mirrors :func:`_normalize_metric_path` — never mutates input,
+    always returns a JSON-safe dict.
+    """
+    if criterion.get("kind") != "predicate":
+        return criterion
+    expression = criterion.get("expression")
+    if not isinstance(expression, str) or not expression:
+        return criterion
+    # Cheap fast path: if the source is already valid, don't pay the
+    # cost of an AST round-trip on the happy case.
+    try:
+        parse_predicate(expression)
+        return criterion
+    except PredicateRejected:
+        pass
+
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError:
+        return criterion
+
+    rewritten_tree = _AttributeToSubscriptRewriter().visit(tree)
+    ast.fix_missing_locations(rewritten_tree)
+    try:
+        rewritten_src = ast.unparse(rewritten_tree)
+    except Exception:  # noqa: BLE001 - unparse failure leaves us no better off
+        return criterion
+
+    # Re-validate the rewrite. If the rewrite still doesn't validate
+    # (e.g. a method call like ``obs.x.any()`` produced
+    # ``obs['x'].any()`` which is still a method-call-on-subscript),
+    # fall back to the original so the retry-with-feedback loop sees
+    # the model's actual emission.
+    try:
+        parse_predicate(rewritten_src)
+    except PredicateRejected:
+        return criterion
+
+    out = dict(criterion)
+    out["expression"] = rewritten_src
+    return out
+
+
 async def generate_sampled_criteria(
     backend: SamplingBackend,
     directive: str,
@@ -481,6 +688,16 @@ async def generate_sampled_criteria(
         # we still post-process for robustness against older prompts
         # and models that ignore the schema.
         parsed = [_normalize_metric_path(c) for c in parsed]
+        # Best-effort autofix for predicate expressions: the predicate
+        # AST validator rejects attribute-walk patterns
+        # (``obs.metrics.val_loss``) and method-call shapes
+        # (``obs.get('x')``, ``obs.x.any()``) — both are common Python
+        # idioms the model defaults to. The rewriter rescues the
+        # attribute-walk shape into subscript notation; method-call
+        # shapes that need creative rewriting fall through to the
+        # standard retry-with-feedback path so the model gets the
+        # rejection token and tries again.
+        parsed = [_autofix_predicate(c) for c in parsed]
         try:
             validated = _validation.validate_criteria(parsed)
         except MissionValidationError as exc:

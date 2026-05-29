@@ -414,6 +414,83 @@ class TestValidateCriteria:
         assert normalized[0]["metric"] == "loss"
         assert normalized[1]["event_name"] == "training_complete"
 
+    def test_tool_call_succeeded_minimal_shape_accepted(self) -> None:
+        """The new kind validates with just ``tool_name`` (default min_count=1)."""
+        criteria = [
+            {
+                "criterion_id": "find_docs_called",
+                "kind": "tool_call_succeeded",
+                "required": True,
+                "tool_name": "find_docs",
+            }
+        ]
+        normalized = validation.validate_criteria(criteria)
+        assert len(normalized) == 1
+        assert normalized[0]["kind"] == "tool_call_succeeded"
+        assert normalized[0]["tool_name"] == "find_docs"
+        # ``min_count`` was not provided; the validator does not inject
+        # a default so the engine reads ``criterion.get("min_count", 1)``.
+        assert "min_count" not in normalized[0]
+
+    def test_tool_call_succeeded_with_min_count_accepted(self) -> None:
+        criteria = [
+            {
+                "criterion_id": "find_docs_three_times",
+                "kind": "tool_call_succeeded",
+                "required": True,
+                "tool_name": "find_docs",
+                "min_count": 3,
+            }
+        ]
+        normalized = validation.validate_criteria(criteria)
+        assert normalized[0]["min_count"] == 3
+
+    def test_tool_call_succeeded_missing_tool_name_rejected(self) -> None:
+        criteria = [
+            {
+                "criterion_id": "x",
+                "kind": "tool_call_succeeded",
+                "required": True,
+            }
+        ]
+        _expect_validation_error(
+            lambda: validation.validate_criteria(criteria),
+            field="criteria",
+            reason="tool_name_missing_or_invalid",
+        )
+
+    def test_tool_call_succeeded_empty_tool_name_rejected(self) -> None:
+        criteria = [
+            {
+                "criterion_id": "x",
+                "kind": "tool_call_succeeded",
+                "required": True,
+                "tool_name": "",
+            }
+        ]
+        _expect_validation_error(
+            lambda: validation.validate_criteria(criteria),
+            field="criteria",
+            reason="tool_name_missing_or_invalid",
+        )
+
+    @pytest.mark.parametrize("bad_count", [0, -1, 1.5, "1", True, False])
+    def test_tool_call_succeeded_invalid_min_count_rejected(self, bad_count: object) -> None:
+        criteria = [
+            {
+                "criterion_id": "x",
+                "kind": "tool_call_succeeded",
+                "required": True,
+                "tool_name": "find_docs",
+                "min_count": bad_count,
+            }
+        ]
+        _expect_validation_error(
+            lambda: validation.validate_criteria(criteria),
+            field="criteria",
+            reason="min_count_must_be_positive_int",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Budget

@@ -121,12 +121,12 @@ The `--allowlist` flag (repeatable) is informational for the deterministic path;
 
 The criteria file is a JSON **array** — one or more criterion objects. Every criterion declares what "done" looks like for that dimension of the goal. The Evaluate phase walks the array on every checkpoint and stamps each criterion as `met`, `unmet`, or `inconclusive`. The session reaches a `complete` verdict only when **every required criterion is `met`** and **none are `inconclusive`** — see [Required vs optional criteria](#required-vs-optional-criteria).
 
-Three criterion kinds are supported. Every criterion regardless of kind carries these three required keys:
+Four criterion kinds are supported. Every criterion regardless of kind carries these three required keys:
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `criterion_id` | non-empty string | Stable identifier, unique across the file. Used by the audit log, the Final_Report, and the verdict cascade. |
-| `kind` | string | One of `metric_threshold`, `event`, `predicate`. |
+| `kind` | string | One of `metric_threshold`, `event`, `predicate`, `tool_call_succeeded`. |
 | `required` | bool | When `true`, this criterion must be `met` for the session to complete. When `false`, it's tracked but not blocking. |
 
 The kind-specific keys are documented per section below.
@@ -172,6 +172,30 @@ Example:
   "event_name": "training_checkpoint_saved"
 }
 ```
+
+### `tool_call_succeeded` criterion
+
+The simplest and most common criterion shape: "this tool ran and succeeded". The Evaluate phase counts entries in `obs["tool_results"]` whose `tool_name` matches the criterion's `tool_name` and whose `_status` equals `"ok"`. Met when the count is at least `min_count`.
+
+This kind is **server-evaluated** — it never goes through the predicate AST sandbox, so a sampling model that prefers any Python idiom that the predicate validator rejects (`r.startswith(...)`, `list(r.items())`, `getattr(r, ...)`, etc.) cannot block this kind from being structurally valid. Prefer `tool_call_succeeded` over a `predicate` whenever the goal is "this tool succeeded N times".
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `tool_name` | non-empty string | The `tool_name` field on a `tool_results` entry to match. |
+| `min_count` | positive int | Optional; defaults to `1`. The criterion is met when at least this many matching entries are present in the iteration's `tool_results`. |
+
+Example:
+
+```json
+{
+  "criterion_id": "find_docs_called",
+  "kind": "tool_call_succeeded",
+  "required": true,
+  "tool_name": "find_docs"
+}
+```
+
+The `gco mission scaffold-criteria` command emits one `tool_call_succeeded` criterion per allowlisted tool when the directive is search-flavoured and an `--allowlist` is supplied, so the most common case scaffolds without ever consulting the model.
 
 ### `predicate` criterion
 
@@ -225,6 +249,8 @@ The `validate_criteria` validator emits structured rejections through `MissionVa
 | `target_not_a_number` | `metric_threshold` `target` was not a JSON number. |
 | `event_name_missing_or_invalid` | `event` criterion lacks a non-empty `event_name`. |
 | `expression_missing_or_invalid` | `predicate` criterion lacks a non-empty `expression`. |
+| `tool_name_missing_or_invalid` | `tool_call_succeeded` lacks a non-empty `tool_name`. |
+| `min_count_must_be_positive_int` | `tool_call_succeeded` `min_count` was not a positive int. |
 | any AST-validator reason | The predicate parser rejected the expression. The reason token is propagated verbatim from `predicate.PredicateRejected`. See [Predicate Permissions](#predicate-permissions). |
 
 ## Predicate Permissions
@@ -240,6 +266,17 @@ Predicate expressions run inside a tight sandbox with two layers of defence: a *
 
 No other names are visible — no `print`, no `open`, no `__import__`, no `eval`, no `compile`, no module references, no comprehension target shadows.
 
+### Allowed method calls
+
+A small set of read-only dict / list accessor methods may be called on any value the predicate can produce (`obs`, a subscript result, or a comprehension-bound name):
+
+| Method | Notes |
+|--------|-------|
+| `.get(key[, default])` | Read-only dict accessor. Tolerates missing keys without raising; returns `default` (or `None` if omitted). |
+| `.keys()`, `.values()`, `.items()` | Read-only dict views; the comprehension protocol then iterates. |
+
+These four methods land in this list because they are pure read-only accessors that cannot mutate state, escape the sandbox, or reach a builtin that the eval-time namespace blocks. Method names outside this list (`.append`, `.update`, `.pop`, `.setdefault`, `.count`, `.startswith`, `.lower`, ...) are rejected at parse time.
+
 ### Allowed operators and constructs
 
 - Arithmetic: `+ - * / // % ** @`
@@ -249,8 +286,8 @@ No other names are visible — no `print`, no `open`, no `__import__`, no `eval`
 - Ternary: `a if b else c`
 - Containers: list / tuple / dict / set literals
 - Comprehensions: list / set / dict / generator (target names cannot shadow `obs` or any allowed callable)
-- Calls: only on the names in the callable allowlist above. `obs(...)` is rejected because `obs` is data, not a callable.
-- Attribute access: only `obs.<attr>` (one level deep). Attribute names cannot start with `__`. Anything more elaborate (chained walks, attributes on a subscript, etc.) is rejected — use subscripting for nested data.
+- Calls: bare-name calls to one of the eight stdlib callables, or read-only method calls from the four-method allowlist above.
+- Attribute access: only `obs.<attr>` (one level deep). Attribute names cannot start with `__`. Anything more elaborate (chained walks, attributes on a subscript) is rejected — use subscripting for nested data.
 - Subscripts: any `value[...]` chain whose ultimate base is an allowed name. Slices with step (`xs[::2]`) are allowed; the slice values themselves go through the same allowlist check.
 - f-strings: allowed; embedded expressions re-enter the same allowlist check.
 
@@ -266,6 +303,9 @@ No other names are visible — no `print`, no `open`, no `__import__`, no `eval`
 | `obs.__class__` | `dunder_attribute` |
 | `obs[(0).__class__]` | `attribute_target_not_allowed` |
 | `obs.a.b` (chained attribute access) | `attribute_target_not_allowed` |
+| `obs["xs"].append(1)` (mutating method) | `call_target_method_not_allowed` |
+| `obs["xs"].count(0)` (read-only method outside the four-method allowlist) | `call_target_method_not_allowed` |
+| `getattr(obs, "x").get("y")` (call-then-call shape) | `call_target_not_allowed` |
 | `dict(other={"a": 1})` (only the eight pure callables are allowed) | `call_target_not_allowed` |
 | `{**other}` | `dict_unpacking` |
 | `func(*args)` where `func` is not on the callable allowlist | `call_target_not_allowed` |
@@ -281,6 +321,11 @@ Violations raise `PredicateRejected` at session-start time, **before** the expre
 ```python
 len(obs["tool_results"]) > 0
 any(r["score"] > 0.9 for r in obs["tool_results"])
+any(r.get("_status") == "ok" for r in obs["tool_results"])
+all(r.get("_status") == "ok" and r.get("tool_name") == "find_docs"
+    for r in obs["tool_results"])
+len(obs.get("errors", [])) == 0
+any(k == "val_loss" for k in obs["metrics"].keys())
 obs["metrics"]["loss"] < 0.5 and obs["metrics"]["accuracy"] > 0.9
 not obs["errors"]
 ```
@@ -288,10 +333,12 @@ not obs["errors"]
 #### Rejected predicates
 
 ```python
-__import__("os").system("rm -rf /")        # → call_target_not_allowed
-obs.__class__                              # → dunder_attribute
-obs.metrics.loss                           # → attribute_target_not_allowed (chained attribute)
-[x for x in obs["xs"] for x in [1,2]]      # → comprehension_target_shadows_allowlist
+__import__("os").system("rm -rf /")            # → call_target_not_allowed
+obs.__class__                                  # → dunder_attribute
+obs.metrics.loss                               # → attribute_target_not_allowed (chained attribute)
+obs["xs"].append(1)                            # → call_target_method_not_allowed
+any(k.startswith("v") for k in obs["m"].keys()) # → call_target_method_not_allowed
+[x for x in obs["xs"] for x in [1,2]]          # → comprehension_target_shadows_allowlist
 lambda r: r["score"] > 0.9                 # → forbidden_node
 ```
 

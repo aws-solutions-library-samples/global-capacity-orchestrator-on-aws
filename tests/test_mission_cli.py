@@ -1306,3 +1306,181 @@ class TestScriptedStrategiesWiring:
         # session whose allow_scripted_strategies is True.
         assert len(captured) == 1
         assert captured[0]["allow_scripted_strategies"] is True
+
+
+# ---------------------------------------------------------------------------
+# run — chained scaffold + start + iterate-to-completion
+# ---------------------------------------------------------------------------
+
+
+class TestMissionRunCli:
+    """CLI tests for ``gco mission run``.
+
+    The command chains ``scaffold-criteria`` + ``start --run`` in one
+    call. With ``--no-sampling`` it takes the deterministic-template
+    scaffold path so every test stays sealed against the network. The
+    stub dispatcher means iterations always succeed structurally;
+    completion happens via the budget cap or, for goals that lend
+    themselves to it, the placeholder predicate.
+    """
+
+    def test_run_scaffolds_and_completes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        isolated_backend: Path,
+    ) -> None:
+        """``run`` writes a scaffold-summary line on stderr then iterates to terminal."""
+        _enable_flag(monkeypatch)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "mission",
+                "run",
+                "--directive",
+                "Find documentation about inference endpoints.",
+                "--tool-allowlist",
+                "find_examples",
+                "--tool-allowlist",
+                "find_docs",
+                "--max-iterations",
+                "1",
+                "--max-wall-clock",
+                "30",
+                "--no-sampling",
+            ],
+        )
+
+        assert result.exit_code == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
+
+        # The scaffold-summary line is the first JSON entry on stderr.
+        stderr_lines = [line for line in result.stderr.splitlines() if line.strip()]
+        scaffold = json.loads(stderr_lines[0])
+        assert scaffold["event"] == "mission.run.scaffolded"
+        assert scaffold["criteria_count"] >= 1
+        # No-sampling forces the deterministic path, so the bool must
+        # explicitly read False — never absent.
+        assert scaffold["sampling_path"] is False
+        assert scaffold["sampling_backend_resolved"] in {"none", "bedrock", "mcp"}
+
+        # The Final_Report (or persisted session JSON) lands on stdout
+        # when the loop terminates. Either shape carries ``session_id``.
+        report = json.loads(result.stdout)
+        assert "session_id" in report
+
+    def test_run_save_criteria_writes_file(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        isolated_backend: Path,
+    ) -> None:
+        """``--save-criteria PATH`` persists the scaffolded JSON for inspection."""
+        _enable_flag(monkeypatch)
+        save_path = tmp_path / "saved-criteria.json"
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "mission",
+                "run",
+                "--directive",
+                "Find documentation.",
+                "--tool-allowlist",
+                "find_docs",
+                "--max-iterations",
+                "1",
+                "--max-wall-clock",
+                "30",
+                "--no-sampling",
+                "--save-criteria",
+                str(save_path),
+            ],
+        )
+
+        assert result.exit_code == 0, result.stderr
+        assert save_path.is_file()
+        criteria = json.loads(save_path.read_text(encoding="utf-8"))
+        assert isinstance(criteria, list)
+        assert len(criteria) >= 1
+
+    def test_run_rejects_invalid_max_criteria(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``--max-criteria 0`` triggers the validator-error envelope."""
+        _enable_flag(monkeypatch)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "mission",
+                "run",
+                "--directive",
+                "Find docs.",
+                "--tool-allowlist",
+                "find_docs",
+                "--no-sampling",
+                "--max-criteria",
+                "0",
+            ],
+        )
+
+        assert result.exit_code == 1
+        envelope = json.loads(result.stderr)
+        assert envelope["code"] == "validation_error"
+        assert envelope["details"]["field"] == "max-criteria"
+
+    def test_run_rejects_negative_retries(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``--retries -1`` triggers the validator-error envelope."""
+        _enable_flag(monkeypatch)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "mission",
+                "run",
+                "--directive",
+                "Find docs.",
+                "--tool-allowlist",
+                "find_docs",
+                "--no-sampling",
+                "--retries",
+                "-1",
+            ],
+        )
+
+        assert result.exit_code == 1
+        envelope = json.loads(result.stderr)
+        assert envelope["code"] == "validation_error"
+        assert envelope["details"]["field"] == "retries"
+
+    def test_run_feature_flag_gate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Without ``GCO_ENABLE_MISSION``, the gate fires before anything runs."""
+        monkeypatch.delenv("GCO_ENABLE_MISSION", raising=False)
+        monkeypatch.delenv("GCO_ENABLE_ALL_TOOLS", raising=False)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "mission",
+                "run",
+                "--directive",
+                "Find docs.",
+                "--tool-allowlist",
+                "find_docs",
+            ],
+        )
+
+        assert result.exit_code == 2
+        assert "Mission tools are gated" in result.stderr
