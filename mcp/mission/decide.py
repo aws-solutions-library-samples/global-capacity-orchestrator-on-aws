@@ -22,6 +22,12 @@ The cascade order is fixed:
      Returns False when ``started_at`` is missing (the session has
      not yet transitioned out of ``pending``).
    * ``no_progress`` — ``no_progress_counter >= stagnation_threshold``.
+     When the session has ``use_sampling=true``, the heuristic (step
+     4) gets priority so the sampler can revise the strategy before
+     the loop terminates. Without sampling, ``no_progress``
+     terminates immediately. If the heuristic doesn't fire (e.g.,
+     the tool sequence changed after a prior revision), the deferred
+     stagnation check (step 4b) terminates.
 
 2. **Completion** — every ``required=True`` Criterion has status
    ``met`` in the in-progress iteration's ``criteria_evaluation``, AND
@@ -39,6 +45,10 @@ The cascade order is fixed:
    half the stagnation threshold, OR new errors in the latest
    Observation that didn't appear in the prior Observation. Returns
    ``("adjust", "heuristic_unproductive")`` when either clause fires.
+
+4b. **Deferred stagnation** — if step 1c deferred the ``no_progress``
+    check (because sampling is enabled) and the heuristic didn't fire,
+    terminate now.
 
 5. **Default** — ``("continue", "in_progress")``.
 
@@ -128,9 +138,21 @@ def decide_verdict(
         return ("terminate", "max_wall_clock")
     # 1c. no_progress — the counter is incremented by the engine only
     # on evaluated iterations, so a session with all-skipped checkpoints
-    # cannot terminate for stagnation.
+    # cannot terminate for stagnation. When the session has sampling
+    # enabled, the heuristic gets priority (step 4 below) so the
+    # sampler can revise the strategy before the loop terminates.
+    # Without sampling, ``adjust`` is purely informational and
+    # ``no_progress`` terminates immediately.
     if session["no_progress_counter"] >= session["stagnation_threshold"]:
-        return ("terminate", "no_progress")
+        if not session.get("use_sampling"):
+            return ("terminate", "no_progress")
+        # With sampling enabled, fall through to the heuristic check
+        # below. If the heuristic fires, the sampler gets one more
+        # chance. If it doesn't fire (e.g., the tool sequence changed
+        # after a prior revision), terminate for stagnation.
+        _stagnation_pending = True
+    else:
+        _stagnation_pending = False
 
     # 2. Completion — every required Criterion met AND nothing inconclusive.
     if _completion_satisfied(session, iteration):
@@ -148,6 +170,12 @@ def decide_verdict(
     unproductive, _heuristic_reason = _strategy_unproductive(session, iteration)
     if unproductive:
         return ("adjust", "heuristic_unproductive")
+
+    # 4b. Deferred stagnation — the counter hit the threshold but the
+    # heuristic didn't fire (e.g., the tool sequence changed after a
+    # prior sampled revision). Terminate now.
+    if _stagnation_pending:
+        return ("terminate", "no_progress")
 
     # 5. Default.
     return ("continue", "in_progress")

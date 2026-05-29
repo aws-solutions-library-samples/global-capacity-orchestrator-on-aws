@@ -1084,13 +1084,13 @@ class MissionEngine:
             observation = cast(dict[str, Any], record.get("observation") or {})
             results: list[CriterionResult] = []
             for criterion in session.get("criteria") or []:
-                results.append(self._evaluate_one_criterion(criterion, observation))
+                results.append(self._evaluate_one_criterion(criterion, observation, session))
             record["criteria_evaluation"] = results
 
         await self._run_phase(session, record, _EVALUATE, body)
 
     def _evaluate_one_criterion(
-        self, criterion: Criterion, observation: dict[str, Any]
+        self, criterion: Criterion, observation: dict[str, Any], session: SessionState
     ) -> CriterionResult:
         """Dispatch to the right evaluator and produce a result row."""
         criterion_id = criterion["criterion_id"]
@@ -1104,7 +1104,7 @@ class MissionEngine:
         elif kind == "predicate":
             status, evidence = self._evaluate_predicate(criterion, observation)
         elif kind == "tool_call_succeeded":
-            status, evidence = self._evaluate_tool_call_succeeded(criterion, observation)
+            status, evidence = self._evaluate_tool_call_succeeded(criterion, observation, session)
         else:
             # Unreachable when the validator has run — but if a
             # malformed session somehow lands here, surface the bad
@@ -1190,43 +1190,53 @@ class MissionEngine:
 
     @staticmethod
     def _evaluate_tool_call_succeeded(
-        criterion: Criterion, observation: dict[str, Any]
+        criterion: Criterion,
+        observation: dict[str, Any],
+        session: SessionState | dict[str, Any] | None = None,
     ) -> tuple[str, Any]:
-        """Count successful tool_results matching the named tool.
+        """Count successful tool_results matching the named tool across all iterations.
 
         The criterion is met when at least ``min_count`` (default 1)
-        entries in ``observation["tool_results"]`` have ``tool_name``
-        equal to the criterion's ``tool_name`` and ``_status`` equal
-        to ``"ok"``. Returns a ``(status, evidence)`` tuple where
-        ``evidence`` is a structured dict so the audit log shows the
-        match shape.
+        entries across the **entire session history** (all prior
+        iterations' observations plus the current one) have
+        ``tool_name`` equal to the criterion's ``tool_name`` and
+        ``_status`` equal to ``"ok"``. This cumulative evaluation
+        means a multi-tool goal where each tool runs in a different
+        iteration can still converge — the criterion remembers that
+        the tool succeeded in a prior iteration even if the current
+        iteration called a different tool.
 
-        This is a strict subset of what a ``predicate`` could express
-        (``len([r for r in obs['tool_results'] if r.get('_status') ==
-        'ok' and r.get('tool_name') == 'X']) >= N``) but the engine
-        evaluates it without going through the AST sandbox. That
-        keeps the most common Mission goal — "this tool ran and
-        succeeded" — out of the predicate-validator critical path so
-        a sampling model that prefers any other Pythonic shape
-        (``r.values()``, ``r.startswith``, etc.) does not block the
-        criterion from being structurally valid.
+        Returns a ``(status, evidence)`` tuple where ``evidence`` is
+        a structured dict so the audit log shows the match shape.
         """
         target_tool = criterion.get("tool_name")
         min_count = criterion.get("min_count", 1)
-        # ``tool_results`` is the canonical observation key the
-        # dispatcher writes; missing means the iteration never ran a
-        # tool, which is genuinely inconclusive (vs. unmet).
-        if "tool_results" not in observation:
+
+        # Collect tool_results from all prior iterations + the current observation.
+        all_results: list[dict[str, Any]] = []
+
+        # Prior iterations' observations (when session is provided).
+        if session is not None:
+            for prior_iteration in session.get("iterations") or []:
+                prior_obs = prior_iteration.get("observation") or {}
+                prior_results = prior_obs.get("tool_results")
+                if isinstance(prior_results, list):
+                    for r in prior_results:
+                        if isinstance(r, dict):
+                            all_results.append(r)
+
+        # Current iteration's observation.
+        current_results = observation.get("tool_results")
+        if isinstance(current_results, list):
+            for r in current_results:
+                if isinstance(r, dict):
+                    all_results.append(r)
+
+        if not all_results:
             return "inconclusive", "tool_results_field_missing"
-        results = observation.get("tool_results")
-        if not isinstance(results, list):
-            return "inconclusive", "tool_results_field_not_a_list"
+
         successful = [
-            r
-            for r in results
-            if isinstance(r, dict)
-            and r.get("tool_name") == target_tool
-            and r.get("_status") == "ok"
+            r for r in all_results if r.get("tool_name") == target_tool and r.get("_status") == "ok"
         ]
         evidence = {
             "tool_name": target_tool,

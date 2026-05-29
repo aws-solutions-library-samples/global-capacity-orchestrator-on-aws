@@ -498,23 +498,28 @@ def _pair_criteria_with_status(
 def _render_tool_allowlist(
     allowlist: Sequence[str],
     docstrings: Mapping[str, str],
-) -> list[dict[str, str]]:
-    """Pair every allowlisted tool name with its docstring.
+    schemas: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Pair every allowlisted tool name with its docstring and input schema.
 
     Tools without a registered docstring get an empty string — the
     prompt remains valid; the model just sees a tool name with no
-    inline description. Names are emitted in the caller's allowlist
-    order so the prompt is identical for two callers that pass the
-    same list.
+    inline description. Tools without a schema get ``null`` so the
+    model knows no args are required. Names are emitted in the
+    caller's allowlist order so the prompt is identical for two
+    callers that pass the same list.
     """
-    rendered: list[dict[str, str]] = []
+    rendered: list[dict[str, Any]] = []
     for name in allowlist:
-        rendered.append(
-            {
-                "tool_name": name,
-                "docstring": str(docstrings.get(name, "")),
-            }
-        )
+        entry: dict[str, Any] = {
+            "tool_name": name,
+            "docstring": str(docstrings.get(name, "")),
+        }
+        if schemas:
+            schema = schemas.get(name)
+            if schema is not None:
+                entry["input_schema"] = schema
+        rendered.append(entry)
     return rendered
 
 
@@ -570,6 +575,11 @@ class SamplingPrompt:
     remaining_iterations: int
     remaining_wall_clock_secs: float | None
     allow_scripts: bool = field(default=False)
+    #: Per-tool JSON Schema for the input parameters. Keyed by tool
+    #: name; values are the JSON-serialisable schema dict (or ``None``
+    #: for tools that take no args). Included in the prompt so the
+    #: Strategy_Revision model can propose valid ``args`` dicts.
+    tool_schemas: Mapping[str, Any] = field(default_factory=dict)
     #: Optional snapshot of slow-moving live signals (per-region queue
     #: depth, GPU utilisation, deployed-region list, reservation
     #: counts, etc.) gathered once at session start and reused on
@@ -649,7 +659,9 @@ class SamplingPrompt:
         free text because that is how the operator wrote it.
         """
         criteria_block = _pair_criteria_with_status(self.success_criteria, self.criteria_status)
-        tool_block = _render_tool_allowlist(self.tool_allowlist, self.tool_docstrings)
+        tool_block = _render_tool_allowlist(
+            self.tool_allowlist, self.tool_docstrings, self.tool_schemas
+        )
         budget_block = _render_budget_context(
             remaining_iterations=self.remaining_iterations,
             remaining_wall_clock_secs=self.remaining_wall_clock_secs,
@@ -1130,6 +1142,38 @@ def _resolve_input_schema(tool: Any) -> Any:
     return schema
 
 
+def _extract_tool_json_schemas(
+    allowlist: Sequence[str],
+    registered_tools: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Extract JSON Schema dicts for each allowlisted tool's input parameters.
+
+    Calls ``.model_json_schema()`` on the Pydantic model exposed by
+    ``_resolve_input_schema``. Falls back gracefully: tools without a
+    schema, tools whose schema isn't a Pydantic model, and any
+    exception during schema extraction all yield ``None`` for that
+    tool (omitted from the output dict). The caller renders the
+    result into the Strategy_Revision prompt so the model can propose
+    valid ``args`` dicts.
+    """
+    schemas: dict[str, Any] = {}
+    for name in allowlist:
+        tool = registered_tools.get(name)
+        if tool is None:
+            continue
+        model = _resolve_input_schema(tool)
+        if model is None:
+            continue
+        try:
+            # Pydantic v2 models expose model_json_schema() as a classmethod.
+            json_schema = model.model_json_schema()
+            schemas[name] = json_schema
+        except Exception:
+            # Non-Pydantic schema, or a mock that doesn't support it.
+            continue
+    return schemas
+
+
 def validate_strategy_against_catalog(
     strategy: Strategy,
     allowlist: list[str],
@@ -1468,6 +1512,7 @@ async def maybe_sample_strategy_revision(
     # plain slice; ``RECENT_ITERATIONS_LIMIT`` is enforced inside the
     # prompt builder as a defensive cap.
     recent_iterations = list(session["iterations"][-RECENT_ITERATIONS_LIMIT:])
+    tool_schemas = _extract_tool_json_schemas(allowlist, registered_tools)
     prompt = SamplingPrompt(
         directive=session["directive_text"],
         success_criteria=session["criteria"],
@@ -1478,6 +1523,7 @@ async def maybe_sample_strategy_revision(
         remaining_iterations=remaining_iterations,
         remaining_wall_clock_secs=remaining_wall_clock_secs,
         allow_scripts=allow_scripts,
+        tool_schemas=tool_schemas,
         environment_context=environment_context,
     )
 
