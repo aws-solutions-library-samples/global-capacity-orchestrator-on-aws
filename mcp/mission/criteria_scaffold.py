@@ -485,6 +485,54 @@ def _parse_response(text: str) -> list[dict[str, Any]]:
     return out
 
 
+def _normalize_kind_name(criterion: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite obvious ``kind`` typos to the canonical names.
+
+    Models occasionally emit a near-miss for the criterion ``kind``
+    field — pluralising (``tool_calls_succeeded`` instead of the
+    canonical ``tool_call_succeeded``), abbreviating
+    (``threshold`` instead of ``metric_threshold``), or hyphenating
+    (``tool-call-succeeded`` instead of underscore form). The
+    structural validator rejects these with ``kind_invalid`` and the
+    retry-with-feedback path can recover, but the typos are
+    mechanical: a closed alias map covers every captured emission
+    we have seen across Bedrock models.
+
+    The map is intentionally narrow — we only canonicalise a name
+    when it is unambiguously a typo for one of the four valid
+    kinds, never a name a future kind extension might claim. Returns
+    the input unchanged when the kind is already canonical, missing,
+    or not a string. Returns a shallow copy when a rewrite fires so
+    the input dict is never mutated.
+    """
+    kind = criterion.get("kind")
+    if not isinstance(kind, str):
+        return criterion
+    canonical = _KIND_ALIASES.get(kind)
+    if canonical is None:
+        return criterion
+    if canonical == kind:
+        return criterion
+    out = dict(criterion)
+    out["kind"] = canonical
+    return out
+
+
+# Closed alias map for ``_normalize_kind_name``. Every entry here was
+# observed in the captured fixture corpus under
+# ``tests/fixtures/scaffold_responses/`` — adding a new entry is the
+# right move only when a captured model emits a near-miss the
+# rejection-feedback retry doesn't recover on the next attempt.
+_KIND_ALIASES: dict[str, str] = {
+    # Llama 4 Scout pluralises the kind name in its first emission.
+    "tool_calls_succeeded": "tool_call_succeeded",
+    # Hyphenated forms occasionally surface from JSON-schema-trained
+    # smaller models that map ``snake_case`` onto ``kebab-case``.
+    "tool-call-succeeded": "tool_call_succeeded",
+    "metric-threshold": "metric_threshold",
+}
+
+
 def _normalize_metric_path(criterion: dict[str, Any]) -> dict[str, Any]:
     """Auto-prefix bare metric names with ``metrics.`` for ``metric_threshold``.
 
@@ -682,6 +730,14 @@ async def generate_sampled_criteria(
         # below catches everything else.
         if len(parsed) > max_criteria:
             parsed = parsed[:max_criteria]
+        # Best-effort kind-name normalisation runs first so the
+        # metric-path / predicate-autofix passes branch correctly on
+        # the canonical ``kind``. Models occasionally pluralise
+        # (``tool_calls_succeeded``) or hyphenate
+        # (``tool-call-succeeded``) the kind name; rewriting to the
+        # canonical form here saves a retry round-trip. The map is
+        # closed and explicit — see ``_KIND_ALIASES``.
+        parsed = [_normalize_kind_name(c) for c in parsed]
         # Best-effort normalisation: a model that emits a bare metric
         # name (``"val_loss"``) instead of the dot-path
         # (``"metrics.val_loss"``) the engine actually walks would

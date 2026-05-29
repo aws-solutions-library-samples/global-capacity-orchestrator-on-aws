@@ -1,0 +1,29 @@
+{
+  "model_id": "us.anthropic.claude-opus-4-5-20251101-v1:0",
+  "region": "us-east-1",
+  "captured_at": "2026-05-29T12:49:32.275747+00:00",
+  "captures": {
+    "search_inference_docs": {
+      "prompt_directive": "Find documentation about inference endpoints.",
+      "prompt_allowlist": [
+        "find_examples",
+        "find_docs"
+      ],
+      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"find_docs_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"tool_name\": \"find_docs\",\n    \"required\": true\n  },\n  {\n    \"criterion_id\": \"results_contain_inference\",\n    \"kind\": \"predicate\",\n    \"expression\": \"any('inference' in str(r).lower() for r in obs['tool_results'])\",\n    \"required\": true\n  },\n  {\n    \"criterion_id\": \"results_contain_endpoint\",\n    \"kind\": \"predicate\",\n    \"expression\": \"any('endpoint' in str(r).lower() for r in obs['tool_results'])\",\n    \"required\": true\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"expression\": \"len(obs.get('errors', [])) == 0\",\n    \"required\": false\n  },\n  {\n    \"criterion_id\": \"has_tool_results\",\n    \"kind\": \"predicate\",\n    \"expression\": \"len(obs['tool_results']) > 0\",\n    \"required\": true\n  }\n]\n```"
+    },
+    "metric_drive_loss": {
+      "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"val_loss_below_threshold\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"training_completed_event\",\n    \"kind\": \"event\",\n    \"required\": false,\n    \"event_name\": \"training_completed\"\n  },\n  {\n    \"criterion_id\": \"has_val_loss_metric\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(k == 'val_loss' for k in obs.get('metrics', {}).keys())\"\n  }\n]\n```"
+    },
+    "event_goal_reached": {
+      "prompt_directive": "Wait for the training job to emit a goal_reached event.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"goal_reached_event\",\n    \"kind\": \"event\",\n    \"event_name\": \"goal_reached\",\n    \"required\": true\n  }\n]\n```"
+    }
+  }
+}

@@ -1,7 +1,7 @@
 {
   "model_id": "us.amazon.nova-pro-v1:0",
   "region": "us-east-1",
-  "captured_at": "2026-05-29T12:36:18.723725+00:00",
+  "captured_at": "2026-05-29T12:49:38.060922+00:00",
   "captures": {
     "search_inference_docs": {
       "prompt_directive": "Find documentation about inference endpoints.",
@@ -9,7 +9,7 @@
         "find_examples",
         "find_docs"
       ],
-      "raw_response": "[\n  {\n    \"criterion_id\": \"c1\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\"\n  },\n  {\n    \"criterion_id\": \"c2\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(r.get('_status') == 'ok' and r.get('tool_name') == 'find_docs' for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"c3\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"c4\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs['tool_results']) > 0\"\n  },\n  {\n    \"criterion_id\": \"c5\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(e['event_name'] == 'documentation_found' for e in obs['events'])\"\n  }\n]"
+      "raw_response": "[\n  {\n    \"criterion_id\": \"c1\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\"\n  },\n  {\n    \"criterion_id\": \"c2\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any('inference' in str(r).lower() for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"c3\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"c4\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs['tool_results']) > 0\"\n  },\n  {\n    \"criterion_id\": \"c5\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"all(r.get('_status') == 'ok' for r in obs['tool_results'])\"\n  }\n]"
     },
     "metric_drive_loss": {
       "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
@@ -23,7 +23,7 @@
       "prompt_allowlist": [
         "find_examples"
       ],
-      "raw_response": "[\n  {\n    \"criterion_id\": \"event_goal_reached\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"goal_reached\"\n  },\n  {\n    \"criterion_id\": \"tool_find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"predicate_no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"predicate_tool_results_non_empty\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs['tool_results']) > 0\"\n  },\n  {\n    \"criterion_id\": \"predicate_all_tools_succeeded\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"all(r.get('_status') == 'ok' for r in obs['tool_results'])\"\n  }\n]"
+      "raw_response": "[\n  {\n    \"criterion_id\": \"event-goal_reached\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"goal_reached\"\n  },\n  {\n    \"criterion_id\": \"tool-find_examples-succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"no-errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"tool-results-non-empty\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs['tool_results']) > 0\"\n  },\n  {\n    \"criterion_id\": \"all-tools-succeeded\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"all(r.get('_status') == 'ok' for r in obs['tool_results'])\"\n  }\n]"
     }
   }
 }

@@ -1,7 +1,7 @@
 {
   "model_id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
   "region": "us-east-1",
-  "captured_at": "2026-05-29T12:36:07.741481+00:00",
+  "captured_at": "2026-05-29T12:49:15.018063+00:00",
   "captures": {
     "search_inference_docs": {
       "prompt_directive": "Find documentation about inference endpoints.",
@@ -9,14 +9,14 @@
         "find_examples",
         "find_docs"
       ],
-      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"find_docs_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\",\n    \"min_count\": 1\n  },\n  {\n    \"criterion_id\": \"inference_endpoints_mentioned\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(r.get('_status') == 'ok' and r.get('tool_name') == 'find_docs' for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"at_least_one_tool_succeeded\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(r.get('_status') == 'ok' for r in obs['tool_results'])\"\n  }\n]\n```"
+      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"find_docs_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\",\n    \"min_count\": 1\n  },\n  {\n    \"criterion_id\": \"inference_keyword_found\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any('inference' in str(r).lower() for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"endpoints_keyword_found\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any('endpoint' in str(r).lower() for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"multiple_results\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"len(obs['tool_results']) >= 2\"\n  }\n]\n```"
     },
     "metric_drive_loss": {
       "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
       "prompt_allowlist": [
         "find_examples"
       ],
-      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"val_loss_below_threshold\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\",\n    \"min_count\": 1\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"val_loss_metric_present\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(k == 'val_loss' for k in obs['metrics'].keys())\"\n  }\n]\n```"
+      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"val_loss_below_threshold\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\",\n    \"min_count\": 1\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"metrics_present\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(k == 'val_loss' for k in obs.get('metrics', {}).keys())\"\n  }\n]\n```"
     },
     "event_goal_reached": {
       "prompt_directive": "Wait for the training job to emit a goal_reached event.",

@@ -41,6 +41,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 # Mirror the path-injection pattern used throughout the Mission tree
 # so ``mission.*`` resolves regardless of how the script is launched.
@@ -50,6 +51,7 @@ sys.path.insert(0, str(_REPO_ROOT / "mcp"))
 from mission import criteria_scaffold  # noqa: E402
 from mission.sampling import (  # noqa: E402
     BedrockSamplingBackend,
+    SamplingPrompt,
     SamplingTransportError,
 )
 
@@ -100,17 +102,35 @@ _DIRECTIVES: tuple[_Directive, ...] = (
 # access to. Add a model here and the next ``capture`` run picks it
 # up; failures (denied access, transient errors) are reported per-
 # model and never abort the run.
+#
+# The list intentionally spans families (Anthropic, Amazon Nova,
+# Meta Llama, Mistral, DeepSeek) and sizes (small / mid / large)
+# so the replay test stays representative of the long tail of
+# Pythonic emission shapes. When a new family or size lands in
+# Bedrock, add it here and re-run the capture script.
 _DEFAULT_MODELS: tuple[str, ...] = (
-    # Anthropic family — the current default.
+    # Anthropic family — current default + adjacent sizes for diversity.
     "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
     "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    # Amazon Nova family.
+    "us.anthropic.claude-opus-4-5-20251101-v1:0",
+    "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+    "us.anthropic.claude-3-haiku-20240307-v1:0",
+    # Amazon Nova family — every visible CRIS profile.
+    "us.amazon.nova-premier-v1:0",
     "us.amazon.nova-pro-v1:0",
     "us.amazon.nova-lite-v1:0",
-    # Meta Llama family.
+    "us.amazon.nova-micro-v1:0",
+    "us.amazon.nova-2-lite-v1:0",
+    # Meta Llama family — Llama 4 + recent Llama 3.
+    "us.meta.llama4-maverick-17b-instruct-v1:0",
+    "us.meta.llama4-scout-17b-instruct-v1:0",
     "us.meta.llama3-3-70b-instruct-v1:0",
-    # Mistral family.
-    "us.mistral.large-2407-v1:0",
+    "us.meta.llama3-2-90b-instruct-v1:0",
+    "us.meta.llama3-1-70b-instruct-v1:0",
+    # Mistral family — the visible text-instruction profile.
+    "us.mistral.pixtral-large-2502-v1:0",
+    # DeepSeek family.
+    "us.deepseek.r1-v1:0",
 )
 
 
@@ -163,7 +183,7 @@ class _PromptAdapter:
 async def _capture_one(
     backend: BedrockSamplingBackend,
     directive: _Directive,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Render the scaffold prompt and capture the raw model response.
 
     Returns a dict carrying both the prompt and the response so a
@@ -174,7 +194,13 @@ async def _capture_one(
         directive.text,
         allowlist=list(directive.allowlist),
     )
-    raw = await backend.sample(_PromptAdapter(prompt_str))
+    # ``BedrockSamplingBackend.sample`` is typed against
+    # :class:`SamplingPrompt`, which requires session-shaped data we
+    # don't have at capture time. The backend only ever calls
+    # ``prompt.assemble()`` on its argument, so a duck-typed
+    # ``_PromptAdapter`` is sufficient at runtime; cast to satisfy
+    # mypy without weakening the production signature.
+    raw = await backend.sample(cast(SamplingPrompt, _PromptAdapter(prompt_str)))
     return {
         "prompt_directive": directive.text,
         "prompt_allowlist": list(directive.allowlist),
@@ -196,7 +222,7 @@ async def _capture_model(
     replay test.
     """
     backend = BedrockSamplingBackend(model_id=model_id, region=region)
-    captures: dict[str, dict[str, str]] = {}
+    captures: dict[str, dict[str, Any]] = {}
     for directive in _DIRECTIVES:
         try:
             captures[directive.slug] = await _capture_one(backend, directive)

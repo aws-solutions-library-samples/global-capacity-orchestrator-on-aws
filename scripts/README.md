@@ -11,6 +11,7 @@ Utility scripts for development, testing, and operations.
   - [Test CDK Synthesis](#test-cdk-synthesis)
   - [Dump cdk-nag Findings](#dump-cdk-nag-findings)
   - [Test Webhook Delivery](#test-webhook-delivery)
+  - [Capture Mission Scaffolder Fixtures](#capture-mission-scaffolder-fixtures)
 
 ## Contents
 
@@ -20,6 +21,7 @@ Utility scripts for development, testing, and operations.
 | `bump_version.py` | Bumps the project version across all locations (pyproject.toml, CLI, docs). Supports major, minor, and patch increments. |
 | `dump_nag_findings.py` | Dev-only debugging helper: runs the `tests/test_nag_compliance.py` harness and prints every cdk-nag finding grouped by rule + resource path + config. Use this when the compliance test gate fails in CI and you want a compact per-finding view instead of pytest's `AssertionError` repr. |
 | `test_webhook_delivery.py` | Tests the webhook dispatcher by sending sample events and verifying delivery, HMAC signatures, and retry behavior. |
+| `capture_scaffold_fixtures.py` | Captures raw model output for the Mission scaffolder prompt across a curated cross-family Bedrock model set. Writes one JSON file per model under `tests/fixtures/scaffold_responses/` for the replay test (`tests/test_scaffold_fixture_replay.py`) to drive on every CI run. See the [fixture-replay runbook](../tests/fixtures/scaffold_responses/README.md) for the full lifecycle. |
 
 > CI-only scripts live under [`.github/scripts/`](../.github/scripts/). In particular, [`.github/scripts/dependency-scan.sh`](../.github/scripts/dependency-scan.sh) powers the monthly `deps-scan` workflow — see [`.github/CI.md`](../.github/CI.md#dependency-scan-script) for its full reference.
 
@@ -72,3 +74,23 @@ pytest tests/test_nag_compliance.py -n auto -q
 ```bash
 python3 scripts/test_webhook_delivery.py
 ```
+
+### Capture Mission Scaffolder Fixtures
+
+Captures raw Bedrock model output for the Mission scaffolder prompt across a curated cross-family model set (Anthropic Claude, Amazon Nova, Meta Llama, Mistral, DeepSeek). Each captured response is checked into `tests/fixtures/scaffold_responses/` and replayed by `tests/test_scaffold_fixture_replay.py` on every CI run, so a regression that breaks one model is caught against every captured model on the next push.
+
+```bash
+# Capture every default model against the canonical directive set
+# (writes one JSON file per model). Per-model failures (denied
+# access, transient errors) are reported and never abort the run.
+python3 scripts/capture_scaffold_fixtures.py
+
+# Capture a single model.
+python3 scripts/capture_scaffold_fixtures.py \
+  --model us.anthropic.claude-haiku-4-5-20251001-v1:0
+
+# Use a different region.
+python3 scripts/capture_scaffold_fixtures.py --region us-west-2
+```
+
+Requires AWS credentials with `bedrock:InvokeModel` access to the listed models. Schedule it as a quarterly canary if you want fresh data; otherwise the existing fixtures continue to protect the validator surface. The full lifecycle (adding a new model, what to do when the replay test fires red) is documented in [`tests/fixtures/scaffold_responses/README.md`](../tests/fixtures/scaffold_responses/README.md).

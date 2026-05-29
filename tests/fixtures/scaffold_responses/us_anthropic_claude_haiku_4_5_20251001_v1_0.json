@@ -1,7 +1,7 @@
 {
   "model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
   "region": "us-east-1",
-  "captured_at": "2026-05-29T12:36:14.212923+00:00",
+  "captured_at": "2026-05-29T12:49:21.863130+00:00",
   "captures": {
     "search_inference_docs": {
       "prompt_directive": "Find documentation about inference endpoints.",
@@ -9,7 +9,7 @@
         "find_examples",
         "find_docs"
       ],
-      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"find_docs_called\",\n    \"kind\": \"tool_call_succeeded\",\n    \"tool_name\": \"find_docs\",\n    \"required\": true\n  },\n  {\n    \"criterion_id\": \"find_docs_returned_results\",\n    \"kind\": \"predicate\",\n    \"expression\": \"any(r.get('tool_name') == 'find_docs' and r.get('_status') == 'ok' and len(r.get('results', [])) > 0 for r in obs['tool_results'])\",\n    \"required\": true\n  },\n  {\n    \"criterion_id\": \"inference_endpoint_docs_found\",\n    \"kind\": \"predicate\",\n    \"expression\": \"any('inference' in str(r.get('results', [])).lower() and 'endpoint' in str(r.get('results', [])).lower() for r in obs['tool_results'] if r.get('tool_name') == 'find_docs')\",\n    \"required\": true\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"expression\": \"len(obs.get('errors', [])) == 0\",\n    \"required\": true\n  },\n  {\n    \"criterion_id\": \"documentation_search_complete\",\n    \"kind\": \"event\",\n    \"event_name\": \"goal_reached\",\n    \"required\": false\n  }\n]\n```"
+      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"find_docs_called\",\n    \"kind\": \"tool_call_succeeded\",\n    \"tool_name\": \"find_docs\",\n    \"required\": true\n  },\n  {\n    \"criterion_id\": \"inference_endpoint_docs_found\",\n    \"kind\": \"predicate\",\n    \"expression\": \"any('inference' in str(r).lower() and 'endpoint' in str(r).lower() for r in obs['tool_results'])\",\n    \"required\": true\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"expression\": \"len(obs.get('errors', [])) == 0\",\n    \"required\": true\n  },\n  {\n    \"criterion_id\": \"documentation_retrieved\",\n    \"kind\": \"predicate\",\n    \"expression\": \"any(r.get('_status') == 'ok' for r in obs['tool_results'])\",\n    \"required\": true\n  },\n  {\n    \"criterion_id\": \"at_least_one_tool_succeeded\",\n    \"kind\": \"predicate\",\n    \"expression\": \"len([r for r in obs['tool_results'] if r.get('_status') == 'ok']) >= 1\",\n    \"required\": true\n  }\n]\n```"
     },
     "metric_drive_loss": {
       "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
@@ -23,7 +23,7 @@
       "prompt_allowlist": [
         "find_examples"
       ],
-      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"goal_reached_event\",\n    \"kind\": \"event\",\n    \"event_name\": \"goal_reached\",\n    \"required\": true\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"tool_name\": \"find_examples\",\n    \"required\": false\n  }\n]\n```"
+      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"goal_reached_event\",\n    \"kind\": \"event\",\n    \"event_name\": \"goal_reached\",\n    \"required\": true\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"tool_name\": \"find_examples\",\n    \"required\": false\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"expression\": \"len(obs.get('errors', [])) == 0\",\n    \"required\": false\n  }\n]\n```"
     }
   }
 }

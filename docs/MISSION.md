@@ -418,11 +418,13 @@ gco mission run \
 
 1. **Scaffold criteria from the directive.** Same logic as `gco mission scaffold-criteria` — sampling path with deterministic fallback. When the directive is search-flavoured and you supplied an allowlist, the deterministic path emits one `tool_call_succeeded` criterion per allowlisted tool, so the most common case scaffolds without ever consulting the model.
 2. **Persist a new session** with the same validators `gco mission start` runs. A scaffold-summary JSON line lands on stderr so you can see the criteria shape before tools fire:
+
    ```json
    {"event": "mission.run.scaffolded", "session_id": "mission-abc123",
     "criteria_count": 2, "sampling_path": false,
     "sampling_backend_resolved": "none"}
    ```
+
 3. **Iterate to completion synchronously**, exactly as `gco mission start --run` does. Per-iteration verdicts stream to stderr as JSON; the Final_Report lands on stdout when a terminal verdict fires.
 
 Useful options:

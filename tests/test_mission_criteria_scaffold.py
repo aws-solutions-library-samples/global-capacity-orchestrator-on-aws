@@ -506,6 +506,110 @@ class TestNormalizeMetricPath:
         assert criteria_scaffold._normalize_metric_path(non_str) is non_str
 
 
+class TestNormalizeKindName:
+    """``_normalize_kind_name`` rewrites known typo aliases to canonical kind names.
+
+    The closed alias map covers every typo we have observed in the
+    captured fixture corpus under
+    ``tests/fixtures/scaffold_responses/``. Adding a new entry to
+    the map is the right move only when a captured model produces a
+    near-miss that the rejection-feedback retry loop does not
+    rescue on the next attempt.
+    """
+
+    def test_canonical_kind_passes_through(self) -> None:
+        """A criterion with the canonical kind is returned unchanged."""
+        crit = {
+            "criterion_id": "x",
+            "kind": "tool_call_succeeded",
+            "required": True,
+            "tool_name": "find_docs",
+        }
+        assert criteria_scaffold._normalize_kind_name(crit) is crit
+
+    def test_pluralised_alias_canonicalised(self) -> None:
+        """``tool_calls_succeeded`` -> ``tool_call_succeeded`` (Llama 4 Scout)."""
+        crit = {
+            "criterion_id": "x",
+            "kind": "tool_calls_succeeded",
+            "required": True,
+            "tool_name": "find_docs",
+        }
+        out = criteria_scaffold._normalize_kind_name(crit)
+        assert out is not crit
+        assert out["kind"] == "tool_call_succeeded"
+        # Non-kind fields pass through verbatim.
+        assert out["tool_name"] == "find_docs"
+
+    def test_hyphenated_alias_canonicalised(self) -> None:
+        """``tool-call-succeeded`` -> ``tool_call_succeeded`` (kebab-case)."""
+        crit = {
+            "criterion_id": "x",
+            "kind": "tool-call-succeeded",
+            "required": True,
+            "tool_name": "find_docs",
+        }
+        out = criteria_scaffold._normalize_kind_name(crit)
+        assert out["kind"] == "tool_call_succeeded"
+
+    def test_metric_threshold_hyphen_alias_canonicalised(self) -> None:
+        """``metric-threshold`` -> ``metric_threshold`` (kebab-case)."""
+        crit = {
+            "criterion_id": "x",
+            "kind": "metric-threshold",
+            "required": True,
+            "metric": "metrics.val_loss",
+            "op": "<",
+            "target": 0.1,
+        }
+        out = criteria_scaffold._normalize_kind_name(crit)
+        assert out["kind"] == "metric_threshold"
+
+    def test_unknown_kind_passes_through(self) -> None:
+        """A kind not in the alias map is left for the validator to reject."""
+        crit = {"criterion_id": "x", "kind": "totally-made-up-kind"}
+        assert criteria_scaffold._normalize_kind_name(crit) is crit
+
+    def test_missing_or_non_string_kind_passes_through(self) -> None:
+        """Defensive: malformed kinds are handed to the validator unchanged."""
+        empty = {"criterion_id": "x"}
+        assert criteria_scaffold._normalize_kind_name(empty) is empty
+        non_str: dict[str, object] = {"kind": 42}
+        assert criteria_scaffold._normalize_kind_name(non_str) is non_str
+
+    def test_does_not_mutate_input(self) -> None:
+        """The normaliser returns a shallow copy when it rewrites."""
+        original = {
+            "criterion_id": "x",
+            "kind": "tool_calls_succeeded",
+            "required": True,
+            "tool_name": "find_docs",
+        }
+        out = criteria_scaffold._normalize_kind_name(original)
+        assert original["kind"] == "tool_calls_succeeded"  # input untouched
+        assert out["kind"] == "tool_call_succeeded"
+
+    @pytest.mark.asyncio
+    async def test_sampling_loop_recovers_kind_alias(self) -> None:
+        """End-to-end: a pluralised kind is canonicalised before the validator."""
+        canned = (
+            "["
+            '{"criterion_id": "find_docs_called", "kind": "tool_calls_succeeded", '
+            '"required": true, "tool_name": "find_docs"}'
+            "]"
+        )
+        backend = _FakeBackend([canned])
+        result = await criteria_scaffold.generate_sampled_criteria(
+            backend,  # type: ignore[arg-type]
+            "Find documentation.",
+            allowlist=["find_docs"],
+        )
+        assert len(result) == 1
+        assert result[0]["kind"] == "tool_call_succeeded"
+        # And the backend was hit exactly once — no retry burned.
+        assert len(backend.calls) == 1
+
+
 class TestAutofixPredicate:
     """``_autofix_predicate`` rewrites attribute-walk predicates into subscript form.
 

@@ -9,6 +9,14 @@ metric-path normalisation, predicate autofix, and the structural
 validator — so a regression that breaks one model is caught against
 every model on the next CI run.
 
+## Table of Contents
+
+- [Why this exists](#why-this-exists)
+- [File layout](#file-layout)
+- [Adding a new model](#adding-a-new-model)
+- [When the replay test fails](#when-the-replay-test-fails)
+- [What the capture does NOT do](#what-the-capture-does-not-do)
+
 ## Why this exists
 
 The scaffolder's sampling path is sensitive to the shapes a model
@@ -22,7 +30,7 @@ seen continues to round-trip through the validator.
 
 ## File layout
 
-```
+```text
 tests/fixtures/scaffold_responses/
 ├── README.md                                   # this file
 ├── us_anthropic_claude_sonnet_4_5_*.json

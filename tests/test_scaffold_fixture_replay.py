@@ -13,6 +13,9 @@ the same pipeline the live scaffolder uses:
     -> ``criteria_scaffold._parse_response`` (JSON extraction,
        markdown-fence strip)
     -> truncate to ``max_criteria``
+    -> ``criteria_scaffold._normalize_kind_name`` (rewrite
+       ``tool_calls_succeeded`` and other captured typos to the
+       canonical kind name)
     -> ``criteria_scaffold._normalize_metric_path`` (auto-prefix bare
        metric names with ``metrics.``)
     -> ``criteria_scaffold._autofix_predicate`` (rewrite
@@ -159,6 +162,7 @@ def test_captured_response_round_trips_through_scaffolder(
     parsed = criteria_scaffold._parse_response(raw_response)
     if len(parsed) > _MAX:
         parsed = parsed[:_MAX]
+    parsed = [criteria_scaffold._normalize_kind_name(c) for c in parsed]
     parsed = [criteria_scaffold._normalize_metric_path(c) for c in parsed]
     parsed = [criteria_scaffold._autofix_predicate(c) for c in parsed]
 

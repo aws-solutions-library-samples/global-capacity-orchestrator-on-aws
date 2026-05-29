@@ -66,6 +66,8 @@ if TYPE_CHECKING:  # pragma: no cover - import-time only
     from fastmcp import Context as _FastMCPContext  # noqa: F401
 
 __all__ = [
+    "BEDROCK_MAX_TOKENS",
+    "BEDROCK_TEMPERATURE",
     "DEFAULT_BEDROCK_MODEL_ID",
     "DEFAULT_BEDROCK_REGION",
     "ENV_BEDROCK_MODEL_ID",
@@ -207,6 +209,21 @@ ENV_BEDROCK_MODEL_ID: str = "GCO_MISSION_BEDROCK_MODEL_ID"
 
 #: Env var that overrides :data:`DEFAULT_BEDROCK_REGION` at runtime.
 ENV_BEDROCK_REGION: str = "GCO_MISSION_BEDROCK_REGION"
+
+#: Maximum response tokens for the Bedrock Converse call. Sized for the
+#: criteria-array prompt's worst case: a five-criterion array with
+#: predicates can be 800-1500 output tokens by itself, and reasoning
+#: models (DeepSeek R1, Claude reasoning variants) consume an
+#: additional 1500-3000 think tokens that count against the same
+#: budget. 8192 leaves comfortable headroom on every visible CRIS
+#: profile while staying well under any model's context window.
+BEDROCK_MAX_TOKENS: int = 8192
+
+#: Sampling temperature for the Bedrock Converse call. Low — the
+#: scaffolder asks for a strict JSON-array shape, not creative
+#: variety; high temperatures invite the model to wander into
+#: rejected attribute / method shapes.
+BEDROCK_TEMPERATURE: float = 0.2
 
 
 # ---------------------------------------------------------------------------
@@ -1004,7 +1021,10 @@ class BedrockSamplingBackend:
                 client.converse,
                 modelId=self.model_id,
                 messages=[{"role": "user", "content": [{"text": text}]}],
-                inferenceConfig={"maxTokens": 4096, "temperature": 0.2},
+                inferenceConfig={
+                    "maxTokens": BEDROCK_MAX_TOKENS,
+                    "temperature": BEDROCK_TEMPERATURE,
+                },
             )
         except ClientError as err:
             # ``e.response`` is documented to be present on ClientError

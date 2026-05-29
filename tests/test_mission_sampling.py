@@ -691,6 +691,8 @@ def test_mcp_backend_satisfies_protocol() -> None:
 import unittest.mock as mock  # noqa: E402
 
 from mission.sampling import (  # noqa: E402
+    BEDROCK_MAX_TOKENS,
+    BEDROCK_TEMPERATURE,
     DEFAULT_BEDROCK_MODEL_ID,
     DEFAULT_BEDROCK_REGION,
     ENV_BEDROCK_MODEL_ID,
@@ -929,7 +931,12 @@ def test_bedrock_backend_passes_correct_inference_config() -> None:
     kwargs = fake_client.converse_calls[0]
     assert kwargs["modelId"] == "explicit-model"
     assert kwargs["messages"] == [{"role": "user", "content": [{"text": prompt.assemble()}]}]
-    assert kwargs["inferenceConfig"] == {"maxTokens": 4096, "temperature": 0.2}
+    # Pinned to the named constants so a tunable bump in one place
+    # carries through here without producing a test-only regression.
+    assert kwargs["inferenceConfig"] == {
+        "maxTokens": BEDROCK_MAX_TOKENS,
+        "temperature": BEDROCK_TEMPERATURE,
+    }
 
 
 # ---------------------------------------------------------------------------

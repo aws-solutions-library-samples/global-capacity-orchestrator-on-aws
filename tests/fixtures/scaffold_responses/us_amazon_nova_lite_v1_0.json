@@ -1,7 +1,7 @@
 {
   "model_id": "us.amazon.nova-lite-v1:0",
   "region": "us-east-1",
-  "captured_at": "2026-05-29T12:36:23.245518+00:00",
+  "captured_at": "2026-05-29T12:49:43.599067+00:00",
   "captures": {
     "search_inference_docs": {
       "prompt_directive": "Find documentation about inference endpoints.",
@@ -9,21 +9,21 @@
         "find_examples",
         "find_docs"
       ],
-      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"criterion_1\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"criterion_2\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\"\n  },\n  {\n    \"criterion_id\": \"criterion_3\",\n    \"kind\": \"metric_threshold\",\n    \"required\": false,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"criterion_4\",\n    \"kind\": \"event\",\n    \"required\": false,\n    \"event_name\": \"goal_reached\"\n  },\n  {\n    \"criterion_id\": \"criterion_5\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"len(obs['tool_results']) > 0\"\n  }\n]\n```"
+      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"criterion_1\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"criterion_2\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\"\n  },\n  {\n    \"criterion_id\": \"criterion_3\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"criterion_4\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(r.get('_status') == 'ok' and r.get('tool_name') == 'find_docs' for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"criterion_5\",\n    \"kind\": \"event\",\n    \"required\": false,\n    \"event_name\": \"goal_reached\"\n  }\n]\n```"
     },
     "metric_drive_loss": {
       "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
       "prompt_allowlist": [
         "find_examples"
       ],
-      "raw_response": "[\n  {\n    \"criterion_id\": \"criterion_1\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<=\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"criterion_2\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"criterion_3\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"len(obs['tool_results']) > 0\"\n  },\n  {\n    \"criterion_id\": \"criterion_4\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"any(r.get('_status') == 'ok' for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"criterion_5\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  }\n]"
+      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"criterion_1\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<=\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"criterion_2\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"criterion_3\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"len(obs['tool_results']) > 0\"\n  },\n  {\n    \"criterion_id\": \"criterion_4\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"any(r.get('_status') == 'ok' and r.get('tool_name') == 'find_examples' for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"criterion_5\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  }\n]\n```"
     },
     "event_goal_reached": {
       "prompt_directive": "Wait for the training job to emit a goal_reached event.",
       "prompt_allowlist": [
         "find_examples"
       ],
-      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"wait_for_goal_reached_event\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"goal_reached\"\n  },\n  {\n    \"criterion_id\": \"find_examples_tool_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"no_errors_in_tool_results\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"at_least_one_tool_result\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs['tool_results']) > 0\"\n  },\n  {\n    \"criterion_id\": \"validation_loss_below_threshold\",\n    \"kind\": \"metric_threshold\",\n    \"required\": false,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<\",\n    \"target\": 0.1\n  }\n]\n```"
+      "raw_response": "```json\n[\n  {\n    \"criterion_id\": \"wait_for_goal_reached_event\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"goal_reached\"\n  },\n  {\n    \"criterion_id\": \"find_examples_tool_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"no_errors_in_tool_results\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"at_least_one_tool_result_with_status_ok\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"any(r.get('_status') == 'ok' for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"all_tool_results_status_ok\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"all(r.get('_status') == 'ok' for r in obs['tool_results'])\"\n  }\n]\n```"
     }
   }
 }
