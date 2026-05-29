@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <title>Mission script AST validator (parse-time allowlist enforcement)</title>
+        <title>Mission engine factory (live vs stub dispatcher, sampling, sandbox wiring)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
         </style>
@@ -205,27 +205,26 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3175=>operation: 'Parse and validate a Mission script source string.\n\n    On success, the function returns ``None`` and the caller may pass\n    ``script`` to the sandbox runtime layer. On any disallowed\n    construct, raises :class:`ScriptRejected` carrying ``reason``,\n    ``failing_node``, ``lineno``, and ``col_offset``. The script is\n    *never* executed by this function; it only walks the AST.\n\n    ``allowlist`` is the per-session list of MCP tool names the script\n    may call. Each name becomes a visible bare-Name and a permitted\n    call target. Names not in the allowlist (and not in the safe\n    builtin / exception / mission set) are rejected at every Name\n    lookup.\n    '
-cond3178=>operation: raise ScriptRejected('not_a_string', message='script source must be a str') if  not isinstance(script, str)
-op3191=>operation: parsed = ast.parse(script, mode='exec')
-cond3188=>condition: exception raised?
-cond3193=>condition: except SyntaxError as exc
-op3197=>operation: rejection = ScriptRejected('syntax_error', message=f'could not parse script: {exc.msg}')
-op3199=>operation: rejection.lineno = exc.lineno
-op3201=>operation: rejection.col_offset = exc.offset
-sub3203=>subroutine: raise rejection from exc
-sub3208=>subroutine: _ScriptValidator(allowlist).visit(parsed)
+        <div><textarea id="code" style="width: 100%;" rows="11">op3308=>operation: 'Build the :class:`MissionEngine` dependency triple for ``session``.\n\n    Looks up the live FastMCP registry to populate the registered-tools\n    map and per-tool docstring cache, then assembles the production\n    wiring: a live tool dispatcher (or the canned-stub when\n    ``use_stub_dispatcher`` is True), the Strategy_Revision sampler\n    when sampling resolved to a real backend, and a sandbox runner\n    when the session permits scripted strategies.\n\n    The CLI passes ``use_stub_dispatcher=True`` only on the\n    ``--dry-run`` path; the MCP tool surface always uses the live\n    dispatcher.\n    '
+cond3311=>condition: if use_stub_dispatcher
+io3318=>inputoutput: output: EngineDependencies(tool_dispatcher=make_stub_dispatcher(), sampling_callable=None, sandbox_runner=_build_sandbox_runner(session))
+e3316=>end: end function return
+op3324=>operation: registered_tools, tool_docstrings = await fetch_registered_tool_metadata()
+op3326=>operation: sampling_callable = _build_sampling_callable(session, ctx, registered_tools=registered_tools, tool_docstrings=tool_docstrings)
+op3328=>operation: sandbox_runner = _build_sandbox_runner(session)
+op3330=>operation: final_lessons = _build_final_lessons_callable(session, ctx, tool_docstrings)
+io3335=>inputoutput: output: EngineDependencies(tool_dispatcher=_live_dispatch_tool, sampling_callable=sampling_callable, sandbox_runner=sandbox_runner, final_lessons_callable=final_lessons)
+e3333=>end: end function return
 
-op3175->cond3178
-cond3178->op3191
-op3191->cond3188
-cond3188(yes)->cond3193
-cond3193(yes)->op3197
-op3197->op3199
-op3199->op3201
-op3201->sub3203
-cond3193(no)->sub3208
-cond3188(no)->sub3208
+op3308->cond3311
+cond3311(yes)->io3318
+io3318->e3316
+cond3311(no)->op3324
+op3324->op3326
+op3326->op3328
+op3328->op3330
+op3330->io3335
+io3335->e3333
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

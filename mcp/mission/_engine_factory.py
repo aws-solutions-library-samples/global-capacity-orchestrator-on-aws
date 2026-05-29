@@ -38,6 +38,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+# <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Flowchart(s) generated from this file:
+#   * ``build_engine_dependencies`` -> ``diagrams/code_diagrams/mcp/mission/_engine_factory.build_engine_dependencies.html``
+# Regenerate with ``python diagrams/code_diagrams/generate.py``.
+# <pyflowchart-code-diagram> END
+
+
 # The mission package and the FastMCP server module both live under
 # ``mcp/``; the path-injection pattern matches the rest of the MCP
 # surface so ``import server`` and ``import mission.*`` resolve

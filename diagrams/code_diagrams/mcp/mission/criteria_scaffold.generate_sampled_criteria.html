@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <title>Mission script AST validator (parse-time allowlist enforcement)</title>
+        <title>Mission criteria scaffolder (Bedrock sampling + retry + autofix pipeline)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
         </style>
@@ -205,27 +205,69 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3175=>operation: 'Parse and validate a Mission script source string.\n\n    On success, the function returns ``None`` and the caller may pass\n    ``script`` to the sandbox runtime layer. On any disallowed\n    construct, raises :class:`ScriptRejected` carrying ``reason``,\n    ``failing_node``, ``lineno``, and ``col_offset``. The script is\n    *never* executed by this function; it only walks the AST.\n\n    ``allowlist`` is the per-session list of MCP tool names the script\n    may call. Each name becomes a visible bare-Name and a permitted\n    call target. Names not in the allowlist (and not in the safe\n    builtin / exception / mission set) are rejected at every Name\n    lookup.\n    '
-cond3178=>operation: raise ScriptRejected('not_a_string', message='script source must be a str') if  not isinstance(script, str)
-op3191=>operation: parsed = ast.parse(script, mode='exec')
-cond3188=>condition: exception raised?
-cond3193=>condition: except SyntaxError as exc
-op3197=>operation: rejection = ScriptRejected('syntax_error', message=f'could not parse script: {exc.msg}')
-op3199=>operation: rejection.lineno = exc.lineno
-op3201=>operation: rejection.col_offset = exc.offset
-sub3203=>subroutine: raise rejection from exc
-sub3208=>subroutine: _ScriptValidator(allowlist).visit(parsed)
+        <div><textarea id="code" style="width: 100%;" rows="11">op3212=>operation: 'Drive a sampling backend to produce a validated criteria list.\n\n    Builds the prompt, calls ``backend.sample(prompt_str)``, parses\n    the JSON, validates through :func:`validate_criteria`, and on\n    rejection retries up to ``retries`` times with feedback. Returns\n    the validated list (with private ``_parsed_ast`` keys stripped so\n    the result is JSON-safe). Raises :class:`ScaffoldSamplingError`\n    when every attempt was rejected.\n\n    The backend is duck-typed against the ``SamplingBackend`` protocol\n    on purpose — tests can substitute a stub object whose ``sample``\n    method returns canned strings without bringing in a transport.\n    '
+op3214=>operation: feedback: str | None = None
+op3216=>operation: last_reason = 'no_attempts'
+cond3219=>condition: for attempt in range(retries + 1)
+op3223=>operation: prompt_str = build_scaffold_prompt(directive, allowlist=allowlist, max_criteria=max_criteria, feedback=feedback)
+op3228=>operation: raw = await _call_backend(backend, prompt_str)
+cond3225=>condition: exception raised?
+cond3230=>condition: except Exception as exc
+sub3234=>subroutine: raise ScaffoldSamplingError('transport_error', message=f'sampling backend raised {type(exc).__name__}: {exc}') from exc
+op3242=>operation: parsed = _parse_response(raw)
+cond3239=>condition: exception raised?
+cond3244=>condition: except (ValueError, json.JSONDecodeError) as exc
+op3248=>operation: last_reason = 'json_parse'
+op3250=>operation: feedback = f'Your previous response could not be parsed as a JSON array. Return a single JSON array, no prose, no markdown fences. ({exc})'
+sub3252=>subroutine: continue
+cond3258=>operation: parsed = parsed[:max_criteria] if  len(parsed) > max_criteria
+op3268=>operation: parsed = [_normalize_kind_name(c) for c in parsed]
+op3270=>operation: parsed = [_normalize_metric_path(c) for c in parsed]
+op3272=>operation: parsed = [_autofix_predicate(c) for c in parsed]
+op3277=>operation: validated = _validation.validate_criteria(parsed)
+cond3274=>condition: exception raised?
+cond3279=>condition: except MissionValidationError as exc
+op3283=>operation: details = exc.details or {}
+op3285=>operation: last_reason = str(details.get('reason') or exc.code)
+op3287=>operation: feedback = f'Your previous response was rejected by the validator. Rejection reason: {last_reason}. Details: {details!r}. Re-emit a corrected JSON array.'
+sub3289=>subroutine: continue
+op3294=>operation: del attempt
+io3299=>inputoutput: output: [{k: v for k, v in entry.items() if not str(k).startswith('_')} for entry in validated]
+e3297=>end: end function return
+sub3304=>subroutine: raise ScaffoldSamplingError(last_reason)
 
-op3175->cond3178
-cond3178->op3191
-op3191->cond3188
-cond3188(yes)->cond3193
-cond3193(yes)->op3197
-op3197->op3199
-op3199->op3201
-op3201->sub3203
-cond3193(no)->sub3208
-cond3188(no)->sub3208
+op3212->op3214
+op3214->op3216
+op3216->cond3219
+cond3219(yes)->op3223
+op3223->op3228
+op3228->cond3225
+cond3225(yes)->cond3230
+cond3230(yes)->sub3234
+cond3230(no)->op3242
+op3242->cond3239
+cond3239(yes)->cond3244
+cond3244(yes)->op3248
+op3248->op3250
+op3250->sub3252
+cond3244(no)->cond3258
+cond3258->op3268
+op3268->op3270
+op3270->op3272
+op3272->op3277
+op3277->cond3274
+cond3274(yes)->cond3279
+cond3279(yes)->op3283
+op3283->op3285
+op3285->op3287
+op3287->sub3289
+cond3279(no)->op3294
+op3294->io3299
+io3299->e3297
+cond3274(no)->op3294
+cond3239(no)->cond3258
+cond3225(no)->op3242
+cond3219(no)->sub3304
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

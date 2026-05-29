@@ -268,4 +268,14 @@ TARGETS: list[Target] = [
         function="validate_script_ast",
         title="Mission script AST validator (parse-time allowlist enforcement)",
     ),
+    Target(
+        source="mcp/mission/criteria_scaffold.py",
+        function="generate_sampled_criteria",
+        title="Mission criteria scaffolder (Bedrock sampling + retry + autofix pipeline)",
+    ),
+    Target(
+        source="mcp/mission/_engine_factory.py",
+        function="build_engine_dependencies",
+        title="Mission engine factory (live vs stub dispatcher, sampling, sandbox wiring)",
+    ),
 ]

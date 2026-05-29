@@ -205,58 +205,73 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op126=>operation: 'Return the deterministic Verdict for the in-progress iteration.\n\n    The cascade order is fixed (see module docstring). The first matching\n    branch wins: a session that has both run out of iterations and has\n    every Criterion met returns ``("terminate", "max_iterations")``, not\n    ``("complete", "criteria_met")`` — budget caps are evaluated before\n    completion so the operator can tell the loop ended because it ran\n    out of budget rather than because the goal was reached on the\n    closing iteration.\n    Note: When the prior Execute_Phase ran a scripted Strategy and the\n    sandbox cap fired, ``_execute_script`` writes\n    ``iteration["sandbox_terminated_reason"]`` and the cascade returns\n    that reason verbatim before anything else is consulted. The\n    sandbox limit is a true budget cap — the script ran out of wall\n    clock during execution — so it routes to a ``terminate`` verdict\n    on the same path as the ``BudgetControls``-driven caps below.\n    '
-op128=>operation: sandbox_reason = iteration.get('sandbox_terminated_reason')
-cond131=>condition: if sandbox_reason is not None
-io138=>inputoutput: output: ('terminate', sandbox_reason)
-e136=>end: end function return
-cond145=>condition: if len(session['iterations']) + 1 >= session['budget']['max_iterations']
-io152=>inputoutput: output: ('terminate', 'max_iterations')
-e150=>end: end function return
-cond159=>condition: if _wall_clock_exceeded(session, now)
-io166=>inputoutput: output: ('terminate', 'max_wall_clock')
-e164=>end: end function return
-cond173=>condition: if session['no_progress_counter'] >= session['stagnation_threshold']
-io180=>inputoutput: output: ('terminate', 'no_progress')
-e178=>end: end function return
-cond187=>condition: if _completion_satisfied(session, iteration)
-io194=>inputoutput: output: ('complete', 'criteria_met')
-e192=>end: end function return
-cond201=>condition: if not should_evaluate_now(session, len(session['iterations']), now)
-io208=>inputoutput: output: ('continue', 'cadence_skip')
-e206=>end: end function return
-op214=>operation: unproductive, _heuristic_reason = _strategy_unproductive(session, iteration)
-cond217=>condition: if unproductive
-io224=>inputoutput: output: ('adjust', 'heuristic_unproductive')
-e222=>end: end function return
-io233=>inputoutput: output: ('continue', 'in_progress')
-e231=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op2903=>operation: 'Return the deterministic Verdict for the in-progress iteration.\n\n    The cascade order is fixed (see module docstring). The first matching\n    branch wins: a session that has both run out of iterations and has\n    every Criterion met returns ``("terminate", "max_iterations")``, not\n    ``("complete", "criteria_met")`` — budget caps are evaluated before\n    completion so the operator can tell the loop ended because it ran\n    out of budget rather than because the goal was reached on the\n    closing iteration.\n    Note: When the prior Execute_Phase ran a scripted Strategy and the\n    sandbox cap fired, ``_execute_script`` writes\n    ``iteration["sandbox_terminated_reason"]`` and the cascade returns\n    that reason verbatim before anything else is consulted. The\n    sandbox limit is a true budget cap — the script ran out of wall\n    clock during execution — so it routes to a ``terminate`` verdict\n    on the same path as the ``BudgetControls``-driven caps below.\n    '
+op2905=>operation: sandbox_reason = iteration.get('sandbox_terminated_reason')
+cond2908=>condition: if sandbox_reason is not None
+io2915=>inputoutput: output: ('terminate', sandbox_reason)
+e2913=>end: end function return
+op2921=>operation: max_iter = session['budget']['max_iterations']
+cond2924=>condition: if max_iter != -1 and len(session['iterations']) + 1 >= max_iter
+io2931=>inputoutput: output: ('terminate', 'max_iterations')
+e2929=>end: end function return
+cond2938=>condition: if _wall_clock_exceeded(session, now)
+io2945=>inputoutput: output: ('terminate', 'max_wall_clock')
+e2943=>end: end function return
+cond2952=>condition: if session['no_progress_counter'] >= session['stagnation_threshold']
+cond2957=>condition: if not session.get('use_sampling')
+io2964=>inputoutput: output: ('terminate', 'no_progress')
+e2962=>end: end function return
+op2970=>operation: _stagnation_pending = True
+cond2978=>condition: if _completion_satisfied(session, iteration)
+io2985=>inputoutput: output: ('complete', 'criteria_met')
+e2983=>end: end function return
+cond2992=>condition: if not should_evaluate_now(session, len(session['iterations']), now)
+io2999=>inputoutput: output: ('continue', 'cadence_skip')
+e2997=>end: end function return
+op3005=>operation: unproductive, _heuristic_reason = _strategy_unproductive(session, iteration)
+cond3008=>condition: if unproductive
+io3015=>inputoutput: output: ('adjust', 'heuristic_unproductive')
+e3013=>end: end function return
+cond3022=>condition: if _stagnation_pending
+io3029=>inputoutput: output: ('terminate', 'no_progress')
+e3027=>end: end function return
+io3038=>inputoutput: output: ('continue', 'in_progress')
+e3036=>end: end function return
+op2974=>operation: _stagnation_pending = False
 
-op126->op128
-op128->cond131
-cond131(yes)->io138
-io138->e136
-cond131(no)->cond145
-cond145(yes)->io152
-io152->e150
-cond145(no)->cond159
-cond159(yes)->io166
-io166->e164
-cond159(no)->cond173
-cond173(yes)->io180
-io180->e178
-cond173(no)->cond187
-cond187(yes)->io194
-io194->e192
-cond187(no)->cond201
-cond201(yes)->io208
-io208->e206
-cond201(no)->op214
-op214->cond217
-cond217(yes)->io224
-io224->e222
-cond217(no)->io233
-io233->e231
+op2903->op2905
+op2905->cond2908
+cond2908(yes)->io2915
+io2915->e2913
+cond2908(no)->op2921
+op2921->cond2924
+cond2924(yes)->io2931
+io2931->e2929
+cond2924(no)->cond2938
+cond2938(yes)->io2945
+io2945->e2943
+cond2938(no)->cond2952
+cond2952(yes)->cond2957
+cond2957(yes)->io2964
+io2964->e2962
+cond2957(no)->op2970
+op2970->cond2978
+cond2978(yes)->io2985
+io2985->e2983
+cond2978(no)->cond2992
+cond2992(yes)->io2999
+io2999->e2997
+cond2992(no)->op3005
+op3005->cond3008
+cond3008(yes)->io3015
+io3015->e3013
+cond3008(no)->cond3022
+cond3022(yes)->io3029
+io3029->e3027
+cond3022(no)->io3038
+io3038->e3036
+cond2952(no)->op2974
+op2974->cond2978
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

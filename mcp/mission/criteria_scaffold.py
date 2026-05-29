@@ -38,6 +38,13 @@ from . import validation as _validation
 from .predicate import PredicateRejected, parse_predicate
 from .validation import MissionValidationError
 
+# <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Flowchart(s) generated from this file:
+#   * ``generate_sampled_criteria`` -> ``diagrams/code_diagrams/mcp/mission/criteria_scaffold.generate_sampled_criteria.html``
+# Regenerate with ``python diagrams/code_diagrams/generate.py``.
+# <pyflowchart-code-diagram> END
+
+
 if TYPE_CHECKING:  # pragma: no cover - type-checker only
     from .sampling import SamplingBackend
 

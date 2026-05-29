@@ -205,82 +205,82 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: 'Run one full iteration for ``session_id`` and return its record.\n\n        Lifecycle:\n\n        1. Load the session; raise ``session_not_found`` when missing.\n        2. Refuse a session in any terminal state (``failed`` →\n           ``session_failed``; ``completed`` / ``terminated`` →\n           ``session_terminal``) or in ``paused`` (``session_paused``).\n        3. Transition ``pending → running`` on the very first iteration\n           and stamp ``session["started_at"]``.\n        4. Allocate a fresh :class:`IterationRecord` and run the five\n           phases in order. Each phase emits exactly one\n           ``audit.emit_phase_event`` regardless of outcome.\n        5. On any phase exception: append the partial iteration to\n           ``session["iterations"]``, mark the session ``failed``, save,\n           and re-raise. The session JSON stays inspectable.\n        6. On success: stamp the verdict on the iteration, append it,\n           update the no-progress counter, save the session.\n        7. On terminal verdict (``complete`` / ``terminate``): transition\n           the session status, write the Final_Report, save again.\n        8. Emit one ``audit.emit_verdict_event`` regardless of outcome.\n        9. Return the iteration record.\n        '
-op4=>operation: session = self.backend.load_session(session_id)
-cond7=>operation: raise MissionEngineError('session_not_found') if  session is None
-op17=>operation: status = session['status']
-cond20=>operation: raise MissionEngineError('session_failed') if  status == 'failed'
-cond31=>operation: raise MissionEngineError('session_terminal') if  status in TERMINAL_STATES
-cond42=>operation: raise MissionEngineError('session_paused') if  status == 'paused'
-op52=>operation: iteration_start = self.now()
-cond55=>condition: if session['status'] == 'pending'
-op59=>operation: session['status'] = 'running'
-op61=>operation: session['started_at'] = iteration_start.isoformat()
-op66=>operation: iteration_index = len(session['iterations'])
-op68=>operation: record = self._make_iteration_record(iteration_index, iteration_start)
-op71=>operation: strategy = await self._propose_phase(session, ctx, record)
+        <div><textarea id="code" style="width: 100%;" rows="11">op2779=>operation: 'Run one full iteration for ``session_id`` and return its record.\n\n        Lifecycle:\n\n        1. Load the session; raise ``session_not_found`` when missing.\n        2. Refuse a session in any terminal state (``failed`` →\n           ``session_failed``; ``completed`` / ``terminated`` →\n           ``session_terminal``) or in ``paused`` (``session_paused``).\n        3. Transition ``pending → running`` on the very first iteration\n           and stamp ``session["started_at"]``.\n        4. Allocate a fresh :class:`IterationRecord` and run the five\n           phases in order. Each phase emits exactly one\n           ``audit.emit_phase_event`` regardless of outcome.\n        5. On any phase exception: append the partial iteration to\n           ``session["iterations"]``, mark the session ``failed``, save,\n           and re-raise. The session JSON stays inspectable.\n        6. On success: stamp the verdict on the iteration, append it,\n           update the no-progress counter, save the session.\n        7. On terminal verdict (``complete`` / ``terminate``): transition\n           the session status, write the Final_Report, save again.\n        8. Emit one ``audit.emit_verdict_event`` regardless of outcome.\n        9. Return the iteration record.\n        '
+op2781=>operation: session = self.backend.load_session(session_id)
+cond2784=>operation: raise MissionEngineError('session_not_found') if  session is None
+op2794=>operation: status = session['status']
+cond2797=>operation: raise MissionEngineError('session_failed') if  status == 'failed'
+cond2808=>operation: raise MissionEngineError('session_terminal') if  status in TERMINAL_STATES
+cond2819=>operation: raise MissionEngineError('session_paused') if  status == 'paused'
+op2829=>operation: iteration_start = self.now()
+cond2832=>condition: if session['status'] == 'pending'
+op2836=>operation: session['status'] = 'running'
+op2838=>operation: session['started_at'] = iteration_start.isoformat()
+op2843=>operation: iteration_index = len(session['iterations'])
+op2845=>operation: record = self._make_iteration_record(iteration_index, iteration_start)
+op2848=>operation: strategy = await self._propose_phase(session, ctx, record)
 executed_calls = await self._execute_phase(session, strategy, ctx, record)
 await self._observe_phase(session, strategy, executed_calls, record)
 await self._evaluate_phase(session, record)
 verdict, reason = await self._decide_phase(session, record)
-cond70=>condition: exception raised?
-cond73=>condition: except Exception
-op77=>operation: record['ended_at'] = self.now().isoformat()
-sub79=>subroutine: session['iterations'].append(record)
-op81=>operation: session['status'] = 'failed'
-op83=>operation: session['ended_at'] = record['ended_at']
-op85=>operation: with contextlib.suppress(Exception):
+cond2847=>condition: exception raised?
+cond2850=>condition: except Exception
+op2854=>operation: record['ended_at'] = self.now().isoformat()
+sub2856=>subroutine: session['iterations'].append(record)
+op2858=>operation: session['status'] = 'failed'
+op2860=>operation: session['ended_at'] = record['ended_at']
+op2862=>operation: with contextlib.suppress(Exception):
     self.backend.save_session(session)
-sub87=>subroutine: raise
-op92=>operation: record['verdict'] = verdict
-op94=>operation: record['verdict_reason'] = reason
-op96=>operation: record['ended_at'] = self.now().isoformat()
-sub98=>subroutine: session['iterations'].append(record)
-sub100=>subroutine: self._update_session_post_iteration(session, record)
-sub102=>subroutine: self.backend.save_session(session)
-cond105=>condition: if verdict in TERMINAL_VERDICTS
-op109=>operation: await self._finalise_terminal_session(session, record, verdict, reason)
-sub111=>subroutine: self.backend.save_session(session)
-sub116=>subroutine: audit.emit_verdict_event(session_id=session_id, iteration_index=iteration_index, verdict=verdict, verdict_reason=reason, revision_rationale=record.get('revision_rationale'))
-io121=>inputoutput: output: record
-e119=>end: end function return
+sub2864=>subroutine: raise
+op2869=>operation: record['verdict'] = verdict
+op2871=>operation: record['verdict_reason'] = reason
+op2873=>operation: record['ended_at'] = self.now().isoformat()
+sub2875=>subroutine: session['iterations'].append(record)
+sub2877=>subroutine: self._update_session_post_iteration(session, record)
+sub2879=>subroutine: self.backend.save_session(session)
+cond2882=>condition: if verdict in TERMINAL_VERDICTS
+op2886=>operation: await self._finalise_terminal_session(session, record, verdict, reason)
+sub2888=>subroutine: self.backend.save_session(session)
+sub2893=>subroutine: audit.emit_verdict_event(session_id=session_id, iteration_index=iteration_index, verdict=verdict, verdict_reason=reason, revision_rationale=record.get('revision_rationale'))
+io2898=>inputoutput: output: record
+e2896=>end: end function return
 
-op2->op4
-op4->cond7
-cond7->op17
-op17->cond20
-cond20->cond31
-cond31->cond42
-cond42->op52
-op52->cond55
-cond55(yes)->op59
-op59->op61
-op61->op66
-op66->op68
-op68->op71
-op71->cond70
-cond70(yes)->cond73
-cond73(yes)->op77
-op77->sub79
-sub79->op81
-op81->op83
-op83->op85
-op85->sub87
-cond73(no)->op92
-op92->op94
-op94->op96
-op96->sub98
-sub98->sub100
-sub100->sub102
-sub102->cond105
-cond105(yes)->op109
-op109->sub111
-sub111->sub116
-sub116->io121
-io121->e119
-cond105(no)->sub116
-cond70(no)->op92
-cond55(no)->op66
+op2779->op2781
+op2781->cond2784
+cond2784->op2794
+op2794->cond2797
+cond2797->cond2808
+cond2808->cond2819
+cond2819->op2829
+op2829->cond2832
+cond2832(yes)->op2836
+op2836->op2838
+op2838->op2843
+op2843->op2845
+op2845->op2848
+op2848->cond2847
+cond2847(yes)->cond2850
+cond2850(yes)->op2854
+op2854->sub2856
+sub2856->op2858
+op2858->op2860
+op2860->op2862
+op2862->sub2864
+cond2850(no)->op2869
+op2869->op2871
+op2871->op2873
+op2873->sub2875
+sub2875->sub2877
+sub2877->sub2879
+sub2879->cond2882
+cond2882(yes)->op2886
+op2886->sub2888
+sub2888->sub2893
+sub2893->io2898
+io2898->e2896
+cond2882(no)->sub2893
+cond2847(no)->op2869
+cond2832(no)->op2843
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
