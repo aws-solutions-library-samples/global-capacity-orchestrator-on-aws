@@ -1090,6 +1090,72 @@ class TestPredicateOperators:
             is False
         )
 
+    def test_predicate_evaluates_str_inside_genexpr(self) -> None:
+        """A safe callable referenced from inside a genexpr resolves at runtime.
+
+        Names referenced from a comprehension body resolve through the
+        enclosing scope's *globals*, not the eval ``locals`` argument
+        (each comprehension compiles to its own implicit function).
+        Regression test for an earlier bug where an
+        ``any(str(r).lower() ... for r in obs[...])`` predicate was
+        accepted by ``parse_predicate`` but raised
+        ``NameError: name 'str' is not defined`` at evaluation time
+        because ``str`` lived only in the locals dict.
+        """
+        from mission.predicate import evaluate_predicate, parse_predicate
+
+        ast_node = parse_predicate("any('gpu' in str(r).lower() for r in obs['tool_results'])")
+        assert (
+            evaluate_predicate(
+                ast_node,
+                {"tool_results": [{"name": "GPU-job"}, {"name": "cpu-job"}]},
+            )
+            is True
+        )
+        assert (
+            evaluate_predicate(
+                ast_node,
+                {"tool_results": [{"name": "cpu-job"}]},
+            )
+            is False
+        )
+
+    def test_predicate_evaluates_int_float_bool_inside_genexpr(self) -> None:
+        """Each type-coercion safe callable resolves from inside a comprehension."""
+        from mission.predicate import evaluate_predicate, parse_predicate
+
+        # int() inside a list comprehension
+        ast_int = parse_predicate("sum(int(x) for x in obs['xs']) > 0")
+        assert evaluate_predicate(ast_int, {"xs": [1, 2, 3]}) is True
+
+        # float() inside a generator expression
+        ast_float = parse_predicate("any(float(v) > 0.5 for v in obs['vs'])")
+        assert evaluate_predicate(ast_float, {"vs": [0.1, 0.7]}) is True
+
+        # bool() inside a comprehension
+        ast_bool = parse_predicate("all(bool(x) for x in obs['flags'])")
+        assert evaluate_predicate(ast_bool, {"flags": [1, "a", True]}) is True
+        assert evaluate_predicate(ast_bool, {"flags": [1, "", True]}) is False
+
+    def test_predicate_evaluator_still_blocks_builtins_inside_genexpr(self) -> None:
+        """Even with safe names in globals, ``__builtins__`` stays empty.
+
+        Belt-and-braces check that the genexpr-scoping fix did not
+        relax the sandbox: a disallowed builtin like ``open`` must
+        still raise ``NameError`` at evaluation time even if a
+        future regression somehow let the parser accept it.
+        """
+        import ast as _ast
+
+        from mission.predicate import evaluate_predicate
+
+        # Hand-build the AST to bypass parse_predicate (which would
+        # reject ``open`` at parse time). The point is to prove the
+        # eval-time sandbox is still locked down.
+        forbidden = _ast.parse("[open(x) for x in obs['paths']]", mode="eval")
+        with pytest.raises(NameError):
+            evaluate_predicate(forbidden, {"paths": ["/tmp/nope"]})
+
     def test_predicate_rejects_disallowed_callable(self) -> None:
         """Calling a name that isn't in the allowlist is rejected."""
         from mission.predicate import PredicateRejected, parse_predicate

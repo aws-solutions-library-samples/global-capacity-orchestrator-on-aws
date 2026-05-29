@@ -675,15 +675,20 @@ def evaluate_predicate(parsed: ast.Expression, obs: dict[str, Any]) -> Any:
     layer handles other values.
     """
     code = compile(parsed, "<predicate>", "eval")
-    locals_namespace: dict[str, Any] = {"obs": obs, **_SAFE_CALLABLES}
-    # The AST handed in here has already been validated by the
-    # parse_predicate allowlist (see _PredicateValidator above);
-    # __builtins__ is empty and the locals namespace exposes only
-    # ``obs`` plus the eight safe pure callables in _SAFE_CALLABLES. The
-    # double-empty __builtins__ + explicit safe-callable namespace is
-    # the established sandbox pattern from the precedent script-sandbox
-    # work, deliberately preferred over a less-restricted alternative
-    # for the Criterion(kind="predicate") surface.
+    # Names referenced from inside a comprehension or generator
+    # expression resolve through the enclosing function's *globals*
+    # at runtime, not the ``locals`` mapping passed to ``eval`` —
+    # because each comprehension compiles to its own implicit
+    # function scope. So validated free names (``obs`` plus the
+    # safe callables) must live in the globals dict to remain
+    # visible from inside ``any(str(r) ... for r in obs[...])``
+    # idioms; an earlier "locals-only" arrangement raised
+    # ``NameError: name 'str' is not defined`` at runtime even
+    # though parse_predicate had accepted the source. The empty
+    # ``__builtins__`` still keeps the sandbox tight: every name
+    # the body can reach is one we put in the globals dict
+    # ourselves.
+    eval_globals: dict[str, Any] = {**_SAFE_GLOBALS, "obs": obs, **_SAFE_CALLABLES}
     return eval(  # nosemgrep: python.lang.security.audit.eval-detected.eval-detected
-        code, _SAFE_GLOBALS, locals_namespace
+        code, eval_globals, {}
     )  # noqa: S307
