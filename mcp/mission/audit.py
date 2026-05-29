@@ -174,6 +174,8 @@ def emit_sampling_event(
     sampling_model_id: str | None = None,
     model_output_bytes: int | None = None,
     validation_error: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
 ) -> None:
     """Emit one ``mission_sampling_event`` audit entry.
 
@@ -222,6 +224,10 @@ def emit_sampling_event(
         entry["model_output_bytes"] = model_output_bytes
     if validation_error:
         entry["validation_error"] = validation_error[:200]
+    if input_tokens is not None:
+        entry["input_tokens"] = input_tokens
+    if output_tokens is not None:
+        entry["output_tokens"] = output_tokens
 
     _emit(entry)
 

@@ -1057,6 +1057,15 @@ class BedrockSamplingBackend:
             )
             raise SamplingTransportError(f"bedrock_{code}") from err
 
+        # Capture token usage from the Converse response for the audit
+        # trail. The ``usage`` block is present on every successful
+        # Converse response and carries ``inputTokens`` and
+        # ``outputTokens``. Store on the instance so callers can read
+        # it after each sample() call without changing the protocol.
+        usage = response.get("usage") or {}
+        self.last_input_tokens: int | None = usage.get("inputTokens")
+        self.last_output_tokens: int | None = usage.get("outputTokens")
+
         try:
             return str(response["output"]["message"]["content"][0]["text"])
         except (KeyError, IndexError, TypeError) as err:
@@ -1627,6 +1636,10 @@ async def maybe_sample_strategy_revision(
         )
 
     # ---- Success path. ---------------------------------------------------
+    # Extract token usage from the backend if available (Bedrock backend
+    # stores it as a side-channel after each sample() call).
+    _input_tokens = getattr(backend, "last_input_tokens", None)
+    _output_tokens = getattr(backend, "last_output_tokens", None)
     _mission_audit.emit_sampling_event(
         session_id,
         iteration_index,
@@ -1635,6 +1648,8 @@ async def maybe_sample_strategy_revision(
         sampling_backend=backend_name,
         sampling_model_id=model_id or None,
         model_output_bytes=len(output_text.encode("utf-8")),
+        input_tokens=_input_tokens,
+        output_tokens=_output_tokens,
     )
     return SamplingUsed(
         output_text=output_text,
@@ -1779,6 +1794,8 @@ async def maybe_sample_final_lessons(
         )
 
     # ---- Success path. ---------------------------------------------------
+    _input_tokens = getattr(backend, "last_input_tokens", None)
+    _output_tokens = getattr(backend, "last_output_tokens", None)
     _mission_audit.emit_sampling_event(
         session_id,
         None,
@@ -1787,6 +1804,8 @@ async def maybe_sample_final_lessons(
         sampling_backend=backend_name,
         sampling_model_id=model_id or None,
         model_output_bytes=len(output_text.encode("utf-8")),
+        input_tokens=_input_tokens,
+        output_tokens=_output_tokens,
     )
     return SamplingUsed(
         output_text=output_text,
