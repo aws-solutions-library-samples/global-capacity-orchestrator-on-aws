@@ -567,44 +567,97 @@ class MissionEngine:
     def _deterministic_strategy(self, session: SessionState) -> Strategy:
         """Build the fallback Strategy when sampling is off or unusable.
 
-        Re-runs the most recent successful tool call (same name, same
-        args) so the loop makes a forward attempt without random
-        flailing. When no successful call exists yet, the first tool
-        in the allowlist runs with empty args — the simplest possible
-        forward step. A future slice can replace "same args" with a
-        proper widening rule once the design has the per-tool
-        widening table.
+        Re-runs the most recent successful tool call. When the prior
+        call used empty args and there are unmet criteria, the
+        widening rule injects a ``query`` parameter derived from the
+        unmet criterion IDs — this gives catalog-search tools
+        (``find_examples``, ``find_docs``) a chance to return
+        relevant content without needing the sampler. When no
+        successful call exists yet, the first tool in the allowlist
+        runs with widened args if possible, empty args otherwise.
         """
         prior_call = self._find_most_recent_successful_call(session)
         if prior_call is not None:
             tool_name, args = prior_call
-            # Same args verbatim — slice 6 owns the "widening" rule that
-            # tweaks numeric params upward / downward to break out of
-            # local minima. Until then, repetition is the deterministic
-            # default.
+            widened = self._widen_args(args, session)
+            rationale_suffix = " with widened args" if widened != args else " with prior args"
             return cast(
                 Strategy,
                 {
-                    "tool_calls": [{"tool_name": tool_name, "args": dict(args)}],
-                    "rationale": (f"deterministic fallback: re-run {tool_name} with prior args"),
+                    "tool_calls": [{"tool_name": tool_name, "args": dict(widened)}],
+                    "rationale": f"deterministic fallback: re-run {tool_name}{rationale_suffix}",
                 },
             )
         allowlist = session.get("tool_allowlist") or []
         if not allowlist:
-            # Safety net: a session whose allowlist somehow ended up
-            # empty cannot run anything. Surface the misconfiguration
-            # rather than silently invent a Strategy.
             raise MissionEngineError("propose_no_tool_available")
+        widened = self._widen_args({}, session)
         return cast(
             Strategy,
             {
-                "tool_calls": [{"tool_name": allowlist[0], "args": {}}],
+                "tool_calls": [{"tool_name": allowlist[0], "args": widened}],
                 "rationale": (
                     "deterministic fallback: invoking first allowlisted "
+                    "tool with widened args from unmet criteria"
+                    if widened
+                    else "deterministic fallback: invoking first allowlisted "
                     "tool with empty args (no prior successful call)"
                 ),
             },
         )
+
+    @staticmethod
+    def _widen_args(args: dict[str, Any], session: SessionState) -> dict[str, Any]:
+        """Inject a ``query`` parameter from unmet criteria when args are empty.
+
+        The widening rule is intentionally simple: if the args dict
+        has no ``query`` key (or it's empty), extract keywords from
+        the IDs of unmet criteria (splitting on ``_``) and join them
+        as a space-separated query string. This gives catalog-search
+        tools a chance to return relevant content on the deterministic
+        path without needing the sampler.
+
+        Returns the original args unchanged when:
+        - ``query`` is already populated (don't override operator intent)
+        - No unmet criteria exist (nothing to widen toward)
+        - The session has no iteration history (first call, no eval yet)
+        """
+        # Don't override an existing query.
+        if args.get("query"):
+            return args
+
+        # Find unmet criteria from the latest iteration's evaluation.
+        iterations = session.get("iterations") or []
+        if not iterations:
+            return args
+        latest = iterations[-1]
+        criteria_eval = latest.get("criteria_evaluation") or []
+        unmet_ids: list[str] = []
+        for result in criteria_eval:
+            if isinstance(result, dict) and result.get("status") == "unmet":
+                cid = result.get("criterion_id", "")
+                if cid:
+                    unmet_ids.append(cid)
+        if not unmet_ids:
+            return args
+
+        # Build a query from the unmet criterion IDs by splitting on
+        # underscores and deduplicating. Skip generic words.
+        skip_words = {"called", "succeeded", "found", "present", "no", "errors", "occurred"}
+        keywords: list[str] = []
+        seen: set[str] = set()
+        for cid in unmet_ids:
+            for word in cid.split("_"):
+                word_lower = word.lower()
+                if word_lower not in skip_words and word_lower not in seen and len(word) > 2:
+                    keywords.append(word_lower)
+                    seen.add(word_lower)
+        if not keywords:
+            return args
+
+        widened = dict(args)
+        widened["query"] = " ".join(keywords[:5])  # Cap at 5 keywords
+        return widened
 
     @staticmethod
     def _find_most_recent_successful_call(
