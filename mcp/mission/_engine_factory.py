@@ -70,13 +70,13 @@ __all__ = [
 class EngineDependencies:
     """Dependency triple consumed by :class:`MissionEngine`.
 
-    Holds the three callables :class:`MissionEngine` needs at
-    construction time so callers can build them once and pass them
-    through. A simple namespace class rather than a NamedTuple so
-    fields can be optional without the boilerplate.
+    Holds the callables :class:`MissionEngine` needs at construction
+    time so callers can build them once and pass them through. A simple
+    namespace class rather than a NamedTuple so fields can be optional
+    without the boilerplate.
     """
 
-    __slots__ = ("sampling_callable", "sandbox_runner", "tool_dispatcher")
+    __slots__ = ("final_lessons_callable", "sampling_callable", "sandbox_runner", "tool_dispatcher")
 
     def __init__(
         self,
@@ -84,10 +84,12 @@ class EngineDependencies:
         tool_dispatcher: ToolDispatcher,
         sampling_callable: Callable[..., Awaitable[Any]] | None,
         sandbox_runner: SandboxRunner | None,
+        final_lessons_callable: Callable[..., Awaitable[Any]] | None = None,
     ) -> None:
         self.tool_dispatcher = tool_dispatcher
         self.sampling_callable = sampling_callable
         self.sandbox_runner = sandbox_runner
+        self.final_lessons_callable = final_lessons_callable
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +340,46 @@ def _build_sampling_callable(
 
 
 # ---------------------------------------------------------------------------
+# Final lessons callable
+# ---------------------------------------------------------------------------
+
+
+def _build_final_lessons_callable(
+    session: Mapping[str, Any],
+    ctx: Any | None,
+    tool_docstrings: dict[str, str],
+) -> Callable[..., Awaitable[Any]] | None:
+    """Wire the Final_Report lessons overlay when sampling is enabled.
+
+    When the session opted into sampling and a backend resolves, the
+    engine calls this after a terminal verdict to produce model-derived
+    ``lessons`` and ``recommended_followups`` for the Final_Report.
+    Without it, the report uses deterministic templates.
+    """
+    if not session.get("use_sampling"):
+        return None
+    if session.get("sampling_backend_resolved") == "none":
+        return None
+
+    backend_obj = mission_sampling.select_sampling_backend(
+        ctx,
+        model_id=session.get("bedrock_model_id"),
+        prefs=session.get("sampling_model_preferences"),
+    )
+    if backend_obj is None:
+        return None
+
+    async def _final_lessons(*, session: dict[str, Any], ctx: Any | None) -> Any:
+        return await mission_sampling.maybe_sample_final_lessons(
+            backend=backend_obj,
+            session=cast("SessionState", session),
+            tool_docstrings=tool_docstrings,
+        )
+
+    return _final_lessons
+
+
+# ---------------------------------------------------------------------------
 # Public factory
 # ---------------------------------------------------------------------------
 
@@ -381,10 +423,12 @@ async def build_engine_dependencies(
         tool_docstrings=tool_docstrings,
     )
     sandbox_runner = _build_sandbox_runner(session)
+    final_lessons = _build_final_lessons_callable(session, ctx, tool_docstrings)
     return EngineDependencies(
         tool_dispatcher=_live_dispatch_tool,
         sampling_callable=sampling_callable,
         sandbox_runner=sandbox_runner,
+        final_lessons_callable=final_lessons,
     )
 
 
@@ -410,4 +454,5 @@ async def build_mission_engine(
         tool_dispatcher=deps.tool_dispatcher,
         sampling_callable=deps.sampling_callable,
         sandbox_runner=deps.sandbox_runner,
+        final_lessons_callable=deps.final_lessons_callable,
     )

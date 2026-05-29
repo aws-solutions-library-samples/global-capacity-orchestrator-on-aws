@@ -1082,15 +1082,61 @@ class MissionEngine:
 
         async def body() -> None:
             observation = cast(dict[str, Any], record.get("observation") or {})
+            # Build a cumulative observation for predicates: merge all
+            # prior iterations' tool_results into the current one so
+            # predicates like ``any('gpu' in str(r) for r in
+            # obs['tool_results'])`` can see results from prior
+            # iterations. Metrics and events stay per-iteration (they
+            # represent the current state, not history).
+            cumulative_obs = self._build_cumulative_observation(observation, session)
             results: list[CriterionResult] = []
             for criterion in session.get("criteria") or []:
-                results.append(self._evaluate_one_criterion(criterion, observation, session))
+                results.append(
+                    self._evaluate_one_criterion(criterion, observation, cumulative_obs, session)
+                )
             record["criteria_evaluation"] = results
 
         await self._run_phase(session, record, _EVALUATE, body)
 
+    @staticmethod
+    def _build_cumulative_observation(
+        current_obs: dict[str, Any], session: SessionState
+    ) -> dict[str, Any]:
+        """Merge prior iterations' tool_results into a cumulative view.
+
+        The cumulative observation is used by predicate criteria so
+        they can see tool results from all iterations, not just the
+        current one. This enables multi-tool goals where each tool
+        runs in a different iteration to converge on predicates that
+        check for content across tools.
+
+        Only ``tool_results`` is cumulative; ``metrics``, ``events``,
+        and ``errors`` stay per-iteration because they represent the
+        current state (metrics can change between iterations; events
+        are per-iteration signals; errors are per-call).
+        """
+        all_tool_results: list[Any] = []
+        for prior in session.get("iterations") or []:
+            prior_obs = prior.get("observation") or {}
+            prior_results = prior_obs.get("tool_results")
+            if isinstance(prior_results, list):
+                all_tool_results.extend(prior_results)
+        # Append current iteration's results.
+        current_results = current_obs.get("tool_results")
+        if isinstance(current_results, list):
+            all_tool_results.extend(current_results)
+        # Build the cumulative view: tool_results is cumulative,
+        # everything else comes from the current observation.
+        cumulative: dict[str, Any] = dict(current_obs)
+        cumulative["tool_results"] = all_tool_results
+        return cumulative
+
     def _evaluate_one_criterion(
-        self, criterion: Criterion, observation: dict[str, Any], session: SessionState
+        self,
+        criterion: Criterion,
+        observation: dict[str, Any],
+        cumulative_obs: dict[str, Any],
+        session: SessionState,
     ) -> CriterionResult:
         """Dispatch to the right evaluator and produce a result row."""
         criterion_id = criterion["criterion_id"]
@@ -1102,7 +1148,9 @@ class MissionEngine:
         elif kind == "event":
             status, evidence = self._evaluate_event(criterion, observation)
         elif kind == "predicate":
-            status, evidence = self._evaluate_predicate(criterion, observation)
+            # Predicates evaluate against the cumulative observation so
+            # they can see tool_results from all prior iterations.
+            status, evidence = self._evaluate_predicate(criterion, cumulative_obs)
         elif kind == "tool_call_succeeded":
             status, evidence = self._evaluate_tool_call_succeeded(criterion, observation, session)
         else:

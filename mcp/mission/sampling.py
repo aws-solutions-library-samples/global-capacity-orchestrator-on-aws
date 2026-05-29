@@ -677,7 +677,15 @@ class SamplingPrompt:
                 "computed server-side and are unaffected by your output. "
                 "Your role is advisory: the rationale and next_strategy "
                 "you produce are validated against the Tool_Allowlist and "
-                "the remaining budget before being adopted."
+                "the remaining budget before being adopted.\n\n"
+                "IMPORTANT: You may propose MULTIPLE tool calls in a "
+                "single iteration by including multiple entries in the "
+                "tool_calls array. This is especially useful when the "
+                "unmet criteria require results from different tools — "
+                "calling them all in one iteration lets the evaluator "
+                "see all results together. Use the input_schema in the "
+                "Tool allowlist section to construct valid args for each "
+                "tool call."
             )
             recent_header = "Recent iterations (oldest first)"
         else:
