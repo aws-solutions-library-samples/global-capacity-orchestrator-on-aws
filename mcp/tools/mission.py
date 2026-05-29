@@ -59,8 +59,8 @@ if is_enabled(FLAG_MISSION):
         validation as mission_validation,
     )
     from mission.decide import decide_verdict
-    from mission.engine import MissionEngine, MissionEngineError, SandboxRunner, ToolDispatcher
-    from mission.types import SCHEMA_VERSION, TERMINAL_STATES, SessionState, ToolCallRecord
+    from mission.engine import MissionEngineError
+    from mission.types import SCHEMA_VERSION, TERMINAL_STATES, SessionState
     from mission.validation import MissionValidationError
 
     # ------------------------------------------------------------------ #
@@ -128,207 +128,16 @@ if is_enabled(FLAG_MISSION):
         """
         return mission_validation.strip_private_fields_iterations(iterations)
 
-    def _remaining_wall_clock(session: Mapping[str, Any]) -> float | None:
-        """Return remaining wall-clock seconds for a session, or ``None``.
-
-        Uses the session's ``started_at`` (set on the pending → running
-        edge) as the anchor. Sessions that haven't started yet report
-        the full cap. Sessions whose ``max_wall_clock_seconds`` is the
-        ``-1`` "uncapped" sentinel return ``None`` so the sampling
-        prompt's budget context renders ``"remaining_wall_clock_seconds":
-        null`` rather than a meaningless negative number.
-        """
-        cap = session.get("budget", {}).get("max_wall_clock_seconds")
-        if cap is None or cap == -1:
-            return None
-        started_raw = session.get("started_at")
-        if not started_raw:
-            return float(cap)
-        try:
-            started = datetime.fromisoformat(started_raw)
-        except TypeError, ValueError:
-            return float(cap)
-        elapsed = (datetime.now(UTC) - started).total_seconds()
-        return max(0.0, float(cap) - elapsed)
-
     # ------------------------------------------------------------------ #
     # Engine wiring
     # ------------------------------------------------------------------ #
 
-    async def _dispatch_tool(
-        tool_name: str,
-        args: dict[str, Any],
-        ctx_inner: Any | None,
-    ) -> Any:
-        """Tool dispatcher closure threaded into :class:`MissionEngine`.
-
-        Looks the tool up in the live FastMCP registry and invokes it
-        with the operator-supplied args. The raw ``tool.run()`` return
-        is a FastMCP ``ToolResult`` Pydantic model, which is *not*
-        JSON-serialisable — and the engine persists the dispatcher's
-        return verbatim under ``ToolCallRecord.result_summary`` to the
-        session backend. Returning the raw model would make every
-        Mission session unsaveable the first time it dispatched a
-        live tool. To keep the engine + backend pure-JSON, this
-        helper unwraps the result before returning:
-
-        * Prefer ``structured_content`` when present — every FastMCP
-          tool with a typed return surfaces a rich dict here that
-          ``pydantic_core.to_jsonable_python`` already normalised.
-        * Fall back to the first content block's ``text`` field; most
-          ``mission_*``-style string-returning tools come through
-          this path. Try ``json.loads`` so the engine sees a
-          structured object when the tool produced one, and the raw
-          string otherwise.
-        * Anything else returns ``None`` so the engine records a
-          benign placeholder rather than a non-serialisable object.
-
-        Raises ``RuntimeError`` for unknown tool names so the engine's
-        per-call try/except records a ``failed`` outcome rather than
-        silently invoking nothing.
-        """
-        # Reuse the active request context when available so tools that
-        # introspect ``get_context()`` see the right one. Fall back to
-        # the engine-supplied ``ctx_inner`` when no request is active
-        # (CLI path or unit-test path).
-        context: Any | None
-        try:
-            from fastmcp.server.dependencies import get_context
-
-            try:
-                context = get_context()
-            except Exception:
-                context = ctx_inner
-        except Exception:
-            context = ctx_inner
-        del context  # currently unused; FastMCP uses contextvars internally
-
-        tool_obj = await mcp.get_tool(tool_name)
-        if tool_obj is None:
-            raise RuntimeError(f"tool {tool_name!r} not registered")
-        result = await tool_obj.run(args)
-
-        # Unwrap to a JSON-safe shape. ``structured_content`` is
-        # already a JSON-able dict per FastMCP's own contract, so
-        # prefer it. Otherwise pull the text payload out of the first
-        # content block and best-effort JSON-parse so structured
-        # tools (the ``mission_*`` family, the ``cli_runner``-backed
-        # tools) round-trip as dicts.
-        structured = getattr(result, "structured_content", None)
-        if isinstance(structured, dict):
-            return structured
-        content_blocks = getattr(result, "content", None) or []
-        if content_blocks:
-            first = content_blocks[0]
-            text_payload = getattr(first, "text", None)
-            if isinstance(text_payload, str):
-                try:
-                    return json.loads(text_payload)
-                except TypeError, ValueError:
-                    return text_payload
-        return None
-
-    async def _build_engine(session: Mapping[str, Any], ctx: Any | None) -> MissionEngine:
-        """Construct a :class:`MissionEngine` with production-wired dependencies.
-
-        The sampling callable is wired only when the session opted into
-        sampling and a concrete backend resolves. The sandbox runner is
-        wired only when the session permits scripted strategies. Cost
-        guardrails live out-of-band via AWS Budgets / Cost Anomaly
-        Detection — Mission only enforces the iteration and wall-clock
-        caps the loop has direct visibility into.
-        """
-        registered_tools = await _registered_tools_dict()
-        tool_docstrings = await _tool_docstrings_dict()
-
-        sampling_callable = None
-        if session.get("use_sampling") and session.get("sampling_backend_resolved") != "none":
-            backend_obj = mission_sampling.select_sampling_backend(
-                ctx,
-                model_id=session.get("bedrock_model_id"),
-                prefs=session.get("sampling_model_preferences"),
-            )
-
-            # Slow-moving live signals (per-region queue depth, GPU
-            # utilisation, deployed-region list, reservation counts).
-            # Cached on the closure so a single ``_build_engine`` call —
-            # one MCP request that may iterate the loop several times —
-            # only pays the AWS round-trip once. Outer-list trick keeps
-            # the cache mutable through the inner closure without a
-            # ``nonlocal`` declaration.
-            from mission._environment import gather_session_environment  # noqa: PLC0415
-
-            env_cache: list[Mapping[str, Any] | None] = []
-
-            async def _sampler(*, session: dict[str, Any], ctx: Any | None) -> Any:
-                iterations = session.get("iterations") or []
-                latest = iterations[-1] if iterations else None
-                if latest is None:
-                    return None
-                budget = session.get("budget") or {}
-                # ``max_iterations=-1`` is the "uncapped" sentinel; the
-                # sampling prompt's budget context expects an
-                # informational remaining-iterations count, so we report
-                # zero in that mode (the model is told nothing about
-                # the iteration axis when there's no cap to count down
-                # from). For finite caps we subtract the count of
-                # already-recorded iterations and clamp at zero.
-                cap = int(budget.get("max_iterations", 0))
-                remaining_iters = 0 if cap == -1 else max(0, cap - len(iterations))
-                # Gather the env block on first call only. ``None``
-                # (offline / no creds / probe failed) is cached too —
-                # we don't want to retry the AWS probe on every
-                # iteration when it has already declined to respond.
-                if not env_cache:
-                    try:
-                        env_cache.append(gather_session_environment(session))
-                    except Exception:  # noqa: BLE001
-                        env_cache.append(None)
-                env_ctx = env_cache[0]
-                return await mission_sampling.maybe_sample_strategy_revision(
-                    backend=backend_obj,
-                    session=cast("SessionState", session),
-                    iteration=latest,
-                    allowlist=list(session.get("tool_allowlist") or []),
-                    registered_tools=registered_tools,
-                    tool_docstrings=tool_docstrings,
-                    remaining_iterations=remaining_iters,
-                    remaining_wall_clock_secs=_remaining_wall_clock(session),
-                    allow_scripts=bool(session.get("allow_scripted_strategies", False)),
-                    environment_context=env_ctx,
-                )
-
-            sampling_callable = _sampler
-
-        sandbox_runner: SandboxRunner | None = None
-        if session.get("allow_scripted_strategies"):
-            try:
-                from mission.sandbox import MissionSandbox
-
-                sandbox = MissionSandbox(
-                    list(session.get("tool_allowlist") or []),
-                    session,
-                )
-
-                async def _sandbox_runner(
-                    script: str,
-                    ctx_arg: Any,
-                    dispatcher: ToolDispatcher,
-                ) -> tuple[dict[str, Any], list[ToolCallRecord]]:
-                    obs, calls = await sandbox.run(script, ctx_arg, dispatcher)
-                    return obs, cast("list[ToolCallRecord]", calls)
-
-                sandbox_runner = _sandbox_runner
-            except ImportError:
-                sandbox_runner = None
-
-        backend = mission_state.get_backend()
-        return MissionEngine(
-            backend=backend,
-            tool_dispatcher=_dispatch_tool,
-            sampling_callable=sampling_callable,
-            sandbox_runner=sandbox_runner,
-        )
+    # The engine factory itself lives in :mod:`mcp.mission._engine_factory`
+    # so the CLI can reuse the same wiring without crossing the
+    # ``GCO_ENABLE_MISSION`` gate. We keep a thin alias here so call
+    # sites in this module stay readable without having to spell out
+    # the long import path.
+    from mission._engine_factory import build_mission_engine as _build_engine  # noqa: PLC0415
 
     # ------------------------------------------------------------------ #
     # mission_start

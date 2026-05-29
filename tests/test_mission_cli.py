@@ -1187,20 +1187,16 @@ class TestScriptedStrategiesWiring:
         monkeypatch: pytest.MonkeyPatch,
         isolated_backend: Path,
     ) -> None:
-        """The default opt-out keeps ``_maybe_make_sandbox_runner`` cheap."""
+        """The default opt-out keeps ``_build_sandbox_runner`` cheap."""
         _enable_flag(monkeypatch)
-        # ``cli.commands.mission_cmd`` resolves to the Click ``Group``
-        # (re-exported by ``cli/commands/__init__.py``); reach the
-        # underlying module via ``importlib.import_module`` so we hit
-        # the real module namespace.
         import importlib
 
-        mission_cmd_module = importlib.import_module("cli.commands.mission_cmd")
+        engine_factory = importlib.import_module("mission._engine_factory")
         session = {
             "allow_scripted_strategies": False,
             "tool_allowlist": ["any_tool"],
         }
-        assert mission_cmd_module._maybe_make_sandbox_runner(session) is None
+        assert engine_factory._build_sandbox_runner(session) is None
 
     def test_helper_returns_runner_when_flag_on(
         self,
@@ -1211,7 +1207,7 @@ class TestScriptedStrategiesWiring:
         _enable_flag(monkeypatch)
         import importlib
 
-        mission_cmd_module = importlib.import_module("cli.commands.mission_cmd")
+        engine_factory = importlib.import_module("mission._engine_factory")
         session = {
             "allow_scripted_strategies": True,
             "tool_allowlist": ["any_tool"],
@@ -1225,7 +1221,7 @@ class TestScriptedStrategiesWiring:
             "session_id": "smoke",
         }
         try:
-            runner = mission_cmd_module._maybe_make_sandbox_runner(session)
+            runner = engine_factory._build_sandbox_runner(session)
         except (SystemError, ModuleNotFoundError) as exc:
             # MissionSandbox transitively imports fastmcp → pydantic
             # and the Code Mode sandbox provider's pydantic_monty
@@ -1240,7 +1236,7 @@ class TestScriptedStrategiesWiring:
                 pytest.skip(f"local sandbox-runtime env not installed: {exc}")
             raise
         assert runner is not None
-        # The runner is the bound run method on a MissionSandbox instance.
+        # The runner is an async callable that wraps MissionSandbox.run.
         assert callable(runner)
 
     def test_iterate_path_wires_runner_from_persisted_session(
@@ -1253,9 +1249,9 @@ class TestScriptedStrategiesWiring:
 
         Pin the wiring point so a regression that goes back to the
         ``sandbox_runner=None`` shape (silently dropping scripted
-        strategies on the floor) fails here. Spy on
-        :func:`mission_cmd._maybe_make_sandbox_runner` and assert it
-        was called with the loaded session.
+        strategies on the floor) fails here. Spy on the engine
+        factory's ``_build_sandbox_runner`` and assert it was called
+        with the loaded session.
         """
         _enable_flag(monkeypatch)
         criteria = _write_criteria(tmp_path)
@@ -1283,11 +1279,11 @@ class TestScriptedStrategiesWiring:
         assert result.exit_code == 0, result.stderr
         sid = json.loads(result.stdout)["session_id"]
 
-        # Spy on the helper so we can pin the wiring without booting
-        # the sandbox runtime.
+        # Spy on the engine factory's sandbox-runner builder so we can
+        # pin the wiring without booting the sandbox runtime.
         import importlib
 
-        mission_cmd_module = importlib.import_module("cli.commands.mission_cmd")
+        engine_factory = importlib.import_module("mission._engine_factory")
 
         captured: list[Any] = []
 
@@ -1298,9 +1294,15 @@ class TestScriptedStrategiesWiring:
             # correct session shape, not that the sandbox actually ran.
             return None
 
-        monkeypatch.setattr(mission_cmd_module, "_maybe_make_sandbox_runner", _spy)
+        monkeypatch.setattr(engine_factory, "_build_sandbox_runner", _spy)
 
-        result = runner.invoke(cli, ["mission", "iterate", sid, "--max-iterations", "1"])
+        # Iterate in --dry-run mode so the test stays sealed against
+        # the FastMCP tool registry. Dry-run still routes through the
+        # same factory, which still consults the sandbox-runner
+        # builder.
+        result = runner.invoke(
+            cli, ["mission", "iterate", sid, "--max-iterations", "1", "--dry-run"]
+        )
         assert result.exit_code == 0, result.stderr
         # The helper was called exactly once, with the persisted
         # session whose allow_scripted_strategies is True.

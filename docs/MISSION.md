@@ -443,6 +443,15 @@ Useful options:
 | `--allow-scripted-strategies` | off | Permit scripted strategies (the AST-validated Python sandbox). Disabled by default; required only for goals that exceed what `tool_calls` can express. |
 | `--cadence` | `every_iteration` | Checkpoint cadence kind passed through to the engine. |
 | `--stagnation-threshold N` | `3` | Iterations of no progress before the cascade emits `terminate, no_progress`. |
+| `--dry-run` | off | Use a stub tool dispatcher and disable Strategy_Revision sampling during iteration. The criteria scaffolder still runs through Bedrock when sampling is enabled. Useful for smoke-testing the loop bookkeeping without spending live tool credits. |
+
+### Live dispatch vs dry-run
+
+By default, `gco mission run` (and `gco mission iterate`, `gco mission start --run`) wires the **live FastMCP tool dispatcher** — the same one the MCP tool surface uses. Every allowlisted tool actually fires against the real backend (catalog, cluster, queue, etc.) and the engine evaluates criteria against real tool-result content. This is the mode you want for verifying that a directive converges on a goal end-to-end.
+
+Pass `--dry-run` to substitute a canned-stub dispatcher that returns `{"_status": "ok", "_stub": true, ...}` for every call. The engine bookkeeping still runs (iterations, verdicts, Final_Report), but no real tool fires and no Bedrock Strategy_Revision sampling happens between iterations. This is the mode CI uses and the mode you want when you only care about the loop mechanics, not the tool content.
+
+The criteria scaffolder is unaffected by `--dry-run` — it still calls Bedrock (when `--use-sampling` resolves to a real backend) to generate the criteria from the directive. Only the iteration loop's tool dispatch and strategy-revision sampling are stubbed.
 
 When the sampling path fails (transport error, unparseable JSON, validator rejection after the retry budget is exhausted) the command prints a one-line warning to stderr and falls back to the deterministic generator, so a missing or misbehaving sampling backend never blocks the run.
 

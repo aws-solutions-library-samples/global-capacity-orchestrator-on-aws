@@ -1298,40 +1298,28 @@ class TestToolsMissionHelpers:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("GCO_ENABLE_MISSION", "true")
-        import importlib
+        from mission._engine_factory import remaining_wall_clock_seconds
 
-        import tools.mission as tm
-
-        importlib.reload(tm)
-
-        assert tm._remaining_wall_clock({"budget": {}}) is None
+        assert remaining_wall_clock_seconds({"budget": {}}) is None
 
     def test_remaining_wall_clock_full_when_not_started(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("GCO_ENABLE_MISSION", "true")
-        import importlib
+        from mission._engine_factory import remaining_wall_clock_seconds
 
-        import tools.mission as tm
-
-        importlib.reload(tm)
-
-        assert tm._remaining_wall_clock({"budget": {"max_wall_clock_seconds": 600}}) == 600.0
+        assert remaining_wall_clock_seconds({"budget": {"max_wall_clock_seconds": 600}}) == 600.0
 
     def test_remaining_wall_clock_full_for_invalid_started_at(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A malformed ``started_at`` falls back to the full cap."""
         monkeypatch.setenv("GCO_ENABLE_MISSION", "true")
-        import importlib
-
-        import tools.mission as tm
-
-        importlib.reload(tm)
+        from mission._engine_factory import remaining_wall_clock_seconds
 
         # ``started_at`` is not ISO-formatted, so fromisoformat raises
         # and the helper returns the full cap.
-        result = tm._remaining_wall_clock(
+        result = remaining_wall_clock_seconds(
             {"budget": {"max_wall_clock_seconds": 600}, "started_at": "not-a-date"}
         )
         assert result == 600.0
@@ -2551,46 +2539,34 @@ class TestToolsMissionHelpersExtended:
     ) -> None:
         """A pending session reports the full cap as remaining."""
         monkeypatch.setenv("GCO_ENABLE_MISSION", "true")
-        import importlib
-        import sys as _sys
+        from mission._engine_factory import remaining_wall_clock_seconds
 
-        if "tools.mission" in _sys.modules:
-            del _sys.modules["tools.mission"]
-        tools_mission = importlib.import_module("tools.mission")
         session = {"budget": {"max_wall_clock_seconds": 100}}
-        assert tools_mission._remaining_wall_clock(session) == 100.0
+        assert remaining_wall_clock_seconds(session) == 100.0
 
     def test_remaining_wall_clock_returns_none_when_no_cap(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A session with no wall-clock cap returns ``None``."""
         monkeypatch.setenv("GCO_ENABLE_MISSION", "true")
-        import importlib
-        import sys as _sys
+        from mission._engine_factory import remaining_wall_clock_seconds
 
-        if "tools.mission" in _sys.modules:
-            del _sys.modules["tools.mission"]
-        tools_mission = importlib.import_module("tools.mission")
         session = {"budget": {}}
-        assert tools_mission._remaining_wall_clock(session) is None
+        assert remaining_wall_clock_seconds(session) is None
 
     def test_remaining_wall_clock_handles_invalid_started_at(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A malformed started_at string falls back to the full cap."""
         monkeypatch.setenv("GCO_ENABLE_MISSION", "true")
-        import importlib
-        import sys as _sys
+        from mission._engine_factory import remaining_wall_clock_seconds
 
-        if "tools.mission" in _sys.modules:
-            del _sys.modules["tools.mission"]
-        tools_mission = importlib.import_module("tools.mission")
         session = {
             "budget": {"max_wall_clock_seconds": 100},
             "started_at": "not-an-iso-date",
         }
         # Falls back via the (TypeError, ValueError) path.
-        assert tools_mission._remaining_wall_clock(session) == 100.0
+        assert remaining_wall_clock_seconds(session) == 100.0
 
 
 # ---------------------------------------------------------------------------
@@ -3341,3 +3317,698 @@ class TestFilesystemBackendListEdgeCases:
         # Point at a directory that doesn't exist yet.
         backend = FilesystemBackend(root=tmp_path / "nonexistent_root")
         assert backend.delete_session("anything") is False
+
+
+# ---------------------------------------------------------------------------
+# mission._engine_factory — shared engine factory used by the MCP tool + CLI
+# ---------------------------------------------------------------------------
+
+
+class TestEngineFactory:
+    """Direct unit tests on the shared engine factory.
+
+    The factory at ``mcp/mission/_engine_factory.py`` consolidates the
+    dispatcher / sampling-callable / sandbox-runner wiring so the MCP
+    tool surface and the CLI both build their :class:`MissionEngine`
+    through one path. These tests pin the resolution rules without
+    booting a live FastMCP registry or making any network call.
+    """
+
+    def test_make_stub_dispatcher_returns_canned_ok(self) -> None:
+        """The stub dispatcher echoes the call args under a canned ok envelope."""
+        import asyncio
+
+        from mission._engine_factory import make_stub_dispatcher
+
+        dispatcher = make_stub_dispatcher()
+        result = asyncio.run(dispatcher("find_examples", {"query": "gpu"}, None))
+        assert result == {
+            "_status": "ok",
+            "_stub": True,
+            "tool_name": "find_examples",
+            "args": {"query": "gpu"},
+        }
+
+    def test_build_sampling_callable_returns_none_when_sampling_off(self) -> None:
+        """A session with ``use_sampling=False`` skips the sampler wiring."""
+        from mission._engine_factory import _build_sampling_callable
+
+        result = _build_sampling_callable(
+            {"use_sampling": False},
+            ctx=None,
+            registered_tools={},
+            tool_docstrings={},
+        )
+        assert result is None
+
+    def test_build_sampling_callable_returns_none_when_backend_resolved_none(self) -> None:
+        """``sampling_backend_resolved="none"`` short-circuits to no sampler."""
+        from mission._engine_factory import _build_sampling_callable
+
+        result = _build_sampling_callable(
+            {"use_sampling": True, "sampling_backend_resolved": "none"},
+            ctx=None,
+            registered_tools={},
+            tool_docstrings={},
+        )
+        assert result is None
+
+    def test_build_sampling_callable_returns_none_when_backend_select_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A backend selector that returns ``None`` skips sampler wiring."""
+        from mission import _engine_factory
+        from mission import sampling as mission_sampling
+
+        monkeypatch.setattr(
+            mission_sampling,
+            "select_sampling_backend",
+            lambda ctx, model_id, prefs: None,
+        )
+        result = _engine_factory._build_sampling_callable(
+            {"use_sampling": True, "sampling_backend_resolved": "bedrock"},
+            ctx=None,
+            registered_tools={},
+            tool_docstrings={},
+        )
+        assert result is None
+
+    def test_build_sandbox_runner_returns_none_when_flag_off(self) -> None:
+        """Sandbox runner stays ``None`` when ``allow_scripted_strategies`` is off."""
+        from mission._engine_factory import _build_sandbox_runner
+
+        result = _build_sandbox_runner(
+            {"allow_scripted_strategies": False, "tool_allowlist": ["t"]}
+        )
+        assert result is None
+
+    def test_fetch_registered_tool_metadata_handles_empty_registry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``fetch_registered_tool_metadata`` tolerates an empty registry."""
+        import asyncio
+
+        from mission import _engine_factory
+
+        # Patch in a fake mcp object whose _list_tools returns []
+        class _Fake:
+            async def _list_tools(self) -> list[Any]:
+                return []
+
+        # The function lazily imports ``server.mcp``; patch the
+        # underlying server module rather than _engine_factory.
+        import sys as _sys
+
+        # Stash and replace ``server.mcp`` for the call.
+        import server as server_module
+
+        original_mcp = server_module.mcp
+        server_module.mcp = _Fake()  # type: ignore[assignment]
+        try:
+            registered, docstrings = asyncio.run(_engine_factory.fetch_registered_tool_metadata())
+        finally:
+            server_module.mcp = original_mcp
+        assert registered == {}
+        assert docstrings == {}
+        del _sys
+
+    def test_fetch_registered_tool_metadata_handles_listing_exception(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``_list_tools`` that raises is swallowed into ``({}, {})``."""
+        import asyncio
+
+        from mission import _engine_factory
+
+        class _Boom:
+            async def _list_tools(self) -> list[Any]:
+                raise RuntimeError("registry unavailable")
+
+        import server as server_module
+
+        original_mcp = server_module.mcp
+        server_module.mcp = _Boom()  # type: ignore[assignment]
+        try:
+            registered, docstrings = asyncio.run(_engine_factory.fetch_registered_tool_metadata())
+        finally:
+            server_module.mcp = original_mcp
+        assert registered == {}
+        assert docstrings == {}
+
+    def test_build_engine_dependencies_dry_run_uses_stub(self) -> None:
+        """``use_stub_dispatcher=True`` returns the stub + no sampler."""
+        import asyncio
+
+        from mission._engine_factory import build_engine_dependencies
+
+        deps = asyncio.run(
+            build_engine_dependencies(
+                {"use_sampling": True, "sampling_backend_resolved": "bedrock"},
+                ctx=None,
+                use_stub_dispatcher=True,
+            )
+        )
+        # Stub dispatcher and no sampling callable, regardless of the
+        # session's other fields.
+        assert deps.sampling_callable is None
+        # Verify the stub fires.
+        result = asyncio.run(deps.tool_dispatcher("any_tool", {}, None))
+        assert result["_stub"] is True
+
+    def test_build_mission_engine_dry_run_returns_engine_with_stub(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``build_mission_engine`` returns a usable MissionEngine in dry-run mode."""
+        import asyncio
+
+        from mission import state as mission_state
+        from mission._engine_factory import build_mission_engine
+        from mission.engine import MissionEngine
+        from mission.state import FilesystemBackend
+
+        backend = FilesystemBackend(root=tmp_path)
+        original = mission_state._BACKEND_INSTANCE
+        mission_state._BACKEND_INSTANCE = backend
+        try:
+            engine = asyncio.run(
+                build_mission_engine(
+                    {"use_sampling": False, "tool_allowlist": ["any"]},
+                    ctx=None,
+                    use_stub_dispatcher=True,
+                )
+            )
+        finally:
+            mission_state._BACKEND_INSTANCE = original
+        assert isinstance(engine, MissionEngine)
+        assert engine.sampling_callable is None
+
+
+class TestEngineFactoryLiveDispatcher:
+    """Cover the live FastMCP dispatcher path with mocked tool objects.
+
+    The dispatcher's three response shapes (structured_content,
+    text-block JSON parse, text-block raw fallback) plus the unknown-
+    tool error path are covered here without booting a real FastMCP
+    server.
+    """
+
+    def test_live_dispatch_unknown_tool_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unknown tool name raises ``RuntimeError``."""
+        import asyncio
+
+        from mission._engine_factory import _live_dispatch_tool
+
+        class _FakeMCP:
+            async def get_tool(self, name: str) -> Any:
+                return None
+
+        import server as server_module
+
+        original = server_module.mcp
+        server_module.mcp = _FakeMCP()  # type: ignore[assignment]
+        try:
+            with pytest.raises(RuntimeError):
+                asyncio.run(_live_dispatch_tool("nope", {}, None))
+        finally:
+            server_module.mcp = original
+
+    def test_live_dispatch_prefers_structured_content(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ToolResult with structured_content returns it verbatim."""
+        import asyncio
+
+        from mission._engine_factory import _live_dispatch_tool
+
+        class _Result:
+            structured_content = {"hits": ["a", "b"]}
+            content: list[Any] = []
+
+        class _FakeTool:
+            async def run(self, args: dict[str, Any]) -> Any:
+                return _Result()
+
+        class _FakeMCP:
+            async def get_tool(self, name: str) -> Any:
+                return _FakeTool()
+
+        import server as server_module
+
+        original = server_module.mcp
+        server_module.mcp = _FakeMCP()  # type: ignore[assignment]
+        try:
+            result = asyncio.run(_live_dispatch_tool("any", {}, None))
+        finally:
+            server_module.mcp = original
+        assert result == {"hits": ["a", "b"]}
+
+    def test_live_dispatch_parses_text_json_payload(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Falls back to JSON-parsing the first content block's text."""
+        import asyncio
+
+        from mission._engine_factory import _live_dispatch_tool
+
+        class _Block:
+            text = '{"region": "us-east-1"}'
+
+        class _Result:
+            structured_content = None
+            content = [_Block()]
+
+        class _FakeTool:
+            async def run(self, args: dict[str, Any]) -> Any:
+                return _Result()
+
+        class _FakeMCP:
+            async def get_tool(self, name: str) -> Any:
+                return _FakeTool()
+
+        import server as server_module
+
+        original = server_module.mcp
+        server_module.mcp = _FakeMCP()  # type: ignore[assignment]
+        try:
+            result = asyncio.run(_live_dispatch_tool("any", {}, None))
+        finally:
+            server_module.mcp = original
+        assert result == {"region": "us-east-1"}
+
+    def test_live_dispatch_returns_text_when_not_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-JSON text payload comes back verbatim as a string."""
+        import asyncio
+
+        from mission._engine_factory import _live_dispatch_tool
+
+        class _Block:
+            text = "not json at all"
+
+        class _Result:
+            structured_content = None
+            content = [_Block()]
+
+        class _FakeTool:
+            async def run(self, args: dict[str, Any]) -> Any:
+                return _Result()
+
+        class _FakeMCP:
+            async def get_tool(self, name: str) -> Any:
+                return _FakeTool()
+
+        import server as server_module
+
+        original = server_module.mcp
+        server_module.mcp = _FakeMCP()  # type: ignore[assignment]
+        try:
+            result = asyncio.run(_live_dispatch_tool("any", {}, None))
+        finally:
+            server_module.mcp = original
+        assert result == "not json at all"
+
+    def test_live_dispatch_returns_none_when_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Empty content + no structured payload yields None."""
+        import asyncio
+
+        from mission._engine_factory import _live_dispatch_tool
+
+        class _Result:
+            structured_content = None
+            content: list[Any] = []
+
+        class _FakeTool:
+            async def run(self, args: dict[str, Any]) -> Any:
+                return _Result()
+
+        class _FakeMCP:
+            async def get_tool(self, name: str) -> Any:
+                return _FakeTool()
+
+        import server as server_module
+
+        original = server_module.mcp
+        server_module.mcp = _FakeMCP()  # type: ignore[assignment]
+        try:
+            result = asyncio.run(_live_dispatch_tool("any", {}, None))
+        finally:
+            server_module.mcp = original
+        assert result is None
+
+
+class TestEngineFactorySamplerClosure:
+    """Cover the strategy-revision sampler closure body.
+
+    The closure assembles the live-signal env block on first call,
+    computes the remaining-iterations / remaining-wall-clock budget
+    informational values, and forwards everything to
+    ``maybe_sample_strategy_revision``. The tests here mock both the
+    backend selector and ``maybe_sample_strategy_revision`` so the
+    closure body runs end-to-end without any real Bedrock call.
+    """
+
+    def test_sampler_closure_returns_none_when_no_iterations_yet(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On the first iteration there is no ``latest`` to revise from."""
+        import asyncio
+
+        from mission import _engine_factory
+        from mission import sampling as mission_sampling
+
+        # Backend selector returns a sentinel; the sampler closure
+        # should still see ``latest=None`` and return None without
+        # invoking maybe_sample_strategy_revision.
+        monkeypatch.setattr(
+            mission_sampling,
+            "select_sampling_backend",
+            lambda ctx, model_id, prefs: object(),
+        )
+
+        called: list[Any] = []
+
+        async def _fake_sample(**kwargs: Any) -> Any:
+            called.append(kwargs)
+            return None
+
+        monkeypatch.setattr(mission_sampling, "maybe_sample_strategy_revision", _fake_sample)
+
+        sampler = _engine_factory._build_sampling_callable(
+            {"use_sampling": True, "sampling_backend_resolved": "bedrock"},
+            ctx=None,
+            registered_tools={},
+            tool_docstrings={},
+        )
+        assert sampler is not None
+        result = asyncio.run(sampler(session={"iterations": []}, ctx=None))
+        assert result is None
+        # The fake sampler was never invoked because the closure
+        # short-circuited on missing latest iteration.
+        assert called == []
+
+    def test_sampler_closure_forwards_to_maybe_sample(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With a recorded iteration the closure forwards a populated kwargs dict."""
+        import asyncio
+
+        from mission import _engine_factory
+        from mission import sampling as mission_sampling
+
+        monkeypatch.setattr(
+            mission_sampling,
+            "select_sampling_backend",
+            lambda ctx, model_id, prefs: "fake-backend",
+        )
+
+        # Patch the env-block gatherer to a known value so we can
+        # assert it was forwarded.
+        from mission import _environment as env_module
+
+        monkeypatch.setattr(
+            env_module, "gather_session_environment", lambda session: {"region": "us-east-1"}
+        )
+
+        captured: dict[str, Any] = {}
+
+        async def _fake_sample(**kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return "ok-result"
+
+        monkeypatch.setattr(mission_sampling, "maybe_sample_strategy_revision", _fake_sample)
+
+        session_state = {
+            "use_sampling": True,
+            "sampling_backend_resolved": "bedrock",
+            "tool_allowlist": ["find_examples"],
+            "allow_scripted_strategies": False,
+            "budget": {"max_iterations": 5, "max_wall_clock_seconds": 60},
+            "iterations": [{"iteration_index": 0, "verdict": "adjust"}],
+        }
+
+        sampler = _engine_factory._build_sampling_callable(
+            session_state,
+            ctx=None,
+            registered_tools={"find_examples": object()},
+            tool_docstrings={"find_examples": "Find examples."},
+        )
+        assert sampler is not None
+        result = asyncio.run(sampler(session=session_state, ctx=None))
+        assert result == "ok-result"
+        # Remaining-iterations is the cap (5) minus iterations recorded (1).
+        assert captured["remaining_iterations"] == 4
+        # Env block was gathered exactly once and threaded through.
+        assert captured["environment_context"] == {"region": "us-east-1"}
+        # Tool wiring forwarded.
+        assert captured["allowlist"] == ["find_examples"]
+        assert captured["allow_scripts"] is False
+
+    def test_sampler_closure_handles_uncapped_iterations(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``max_iterations=-1`` reports zero remaining iterations to the prompt."""
+        import asyncio
+
+        from mission import _engine_factory
+        from mission import sampling as mission_sampling
+
+        monkeypatch.setattr(
+            mission_sampling,
+            "select_sampling_backend",
+            lambda ctx, model_id, prefs: "fake",
+        )
+
+        from mission import _environment as env_module
+
+        monkeypatch.setattr(env_module, "gather_session_environment", lambda session: None)
+
+        captured: dict[str, Any] = {}
+
+        async def _fake(**kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return None
+
+        monkeypatch.setattr(mission_sampling, "maybe_sample_strategy_revision", _fake)
+
+        session_state = {
+            "use_sampling": True,
+            "sampling_backend_resolved": "bedrock",
+            "tool_allowlist": ["find_examples"],
+            "allow_scripted_strategies": False,
+            "budget": {"max_iterations": -1, "max_wall_clock_seconds": 60},
+            "iterations": [{"iteration_index": 0, "verdict": "adjust"}],
+        }
+        sampler = _engine_factory._build_sampling_callable(
+            session_state,
+            ctx=None,
+            registered_tools={},
+            tool_docstrings={},
+        )
+        assert sampler is not None
+        asyncio.run(sampler(session=session_state, ctx=None))
+        # Uncapped iterations report 0, not a meaningless negative.
+        assert captured["remaining_iterations"] == 0
+
+    def test_sampler_closure_caches_env_block_across_iterations(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The env-block gatherer is called once across multiple sampler runs."""
+        import asyncio
+
+        from mission import _engine_factory
+        from mission import sampling as mission_sampling
+
+        monkeypatch.setattr(
+            mission_sampling,
+            "select_sampling_backend",
+            lambda ctx, model_id, prefs: "fake",
+        )
+
+        from mission import _environment as env_module
+
+        gather_calls: list[Any] = []
+
+        def _fake_gather(session: Any) -> Any:
+            gather_calls.append(session)
+            return {"queue_depth": 7}
+
+        monkeypatch.setattr(env_module, "gather_session_environment", _fake_gather)
+
+        async def _fake(**kwargs: Any) -> Any:
+            return None
+
+        monkeypatch.setattr(mission_sampling, "maybe_sample_strategy_revision", _fake)
+
+        session_state = {
+            "use_sampling": True,
+            "sampling_backend_resolved": "bedrock",
+            "tool_allowlist": ["find_examples"],
+            "allow_scripted_strategies": False,
+            "budget": {"max_iterations": 5, "max_wall_clock_seconds": 60},
+            "iterations": [{"iteration_index": 0, "verdict": "adjust"}],
+        }
+        sampler = _engine_factory._build_sampling_callable(
+            session_state,
+            ctx=None,
+            registered_tools={},
+            tool_docstrings={},
+        )
+        assert sampler is not None
+        # Run the closure three times — the env-block gatherer should
+        # be called only on the first.
+        for _ in range(3):
+            asyncio.run(sampler(session=session_state, ctx=None))
+        assert len(gather_calls) == 1
+
+    def test_sampler_closure_swallows_env_gather_exceptions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising env-block gatherer caches None and continues."""
+        import asyncio
+
+        from mission import _engine_factory
+        from mission import sampling as mission_sampling
+
+        monkeypatch.setattr(
+            mission_sampling,
+            "select_sampling_backend",
+            lambda ctx, model_id, prefs: "fake",
+        )
+
+        from mission import _environment as env_module
+
+        def _boom(session: Any) -> Any:
+            raise RuntimeError("env probe blew up")
+
+        monkeypatch.setattr(env_module, "gather_session_environment", _boom)
+
+        captured: dict[str, Any] = {}
+
+        async def _fake(**kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return None
+
+        monkeypatch.setattr(mission_sampling, "maybe_sample_strategy_revision", _fake)
+
+        session_state = {
+            "use_sampling": True,
+            "sampling_backend_resolved": "bedrock",
+            "tool_allowlist": ["find_examples"],
+            "allow_scripted_strategies": False,
+            "budget": {"max_iterations": 5, "max_wall_clock_seconds": 60},
+            "iterations": [{"iteration_index": 0, "verdict": "adjust"}],
+        }
+        sampler = _engine_factory._build_sampling_callable(
+            session_state,
+            ctx=None,
+            registered_tools={},
+            tool_docstrings={},
+        )
+        assert sampler is not None
+        asyncio.run(sampler(session=session_state, ctx=None))
+        # The exception was swallowed; the sampler still got
+        # ``environment_context=None`` and proceeded.
+        assert captured["environment_context"] is None
+
+
+class TestAnnotateToolResult:
+    """Direct tests for the tool-result annotation helpers.
+
+    The Observation's ``tool_results`` list is the canonical input to
+    predicate criteria and to the ``tool_call_succeeded`` evaluator,
+    both of which consult ``r.get("_status")`` and
+    ``r.get("tool_name")``. The engine and the sandbox both annotate
+    raw dispatcher returns with these markers so evaluators see a
+    uniform shape regardless of what the underlying tool returned.
+    """
+
+    def test_engine_annotate_dict_result_adds_markers(self) -> None:
+        """A dict result_summary gets ``_status`` and ``tool_name`` added."""
+        from mission.engine import MissionEngine
+
+        annotated = MissionEngine._annotate_tool_result(
+            {
+                "tool_name": "find_examples",
+                "args": {},
+                "status": "ok",
+                "result_summary": {"hits": [{"name": "gpu-job"}]},
+            }
+        )
+        assert annotated["_status"] == "ok"
+        assert annotated["tool_name"] == "find_examples"
+        # Original payload preserved.
+        assert annotated["hits"] == [{"name": "gpu-job"}]
+
+    def test_engine_annotate_dict_result_does_not_overwrite_marker(self) -> None:
+        """A tool that synthesised its own ``_status`` keeps it."""
+        from mission.engine import MissionEngine
+
+        annotated = MissionEngine._annotate_tool_result(
+            {
+                "tool_name": "find_examples",
+                "status": "ok",
+                "result_summary": {"_status": "warning", "_stub": True},
+            }
+        )
+        # Caller-supplied marker survives; tool_name still added.
+        assert annotated["_status"] == "warning"
+        assert annotated["tool_name"] == "find_examples"
+
+    def test_engine_annotate_non_dict_result_wraps(self) -> None:
+        """A primitive return wraps in a marker-bearing dict."""
+        from mission.engine import MissionEngine
+
+        annotated = MissionEngine._annotate_tool_result(
+            {
+                "tool_name": "find_docs",
+                "status": "ok",
+                "result_summary": "raw text",
+            }
+        )
+        assert annotated == {
+            "_status": "ok",
+            "tool_name": "find_docs",
+            "result": "raw text",
+        }
+
+    def test_engine_annotate_failed_call(self) -> None:
+        """Failed calls carry ``_status="failed"`` so evaluators can filter."""
+        from mission.engine import MissionEngine
+
+        annotated = MissionEngine._annotate_tool_result(
+            {
+                "tool_name": "find_examples",
+                "status": "failed",
+                "result_summary": None,
+                "error_message": "boom",
+            }
+        )
+        assert annotated["_status"] == "failed"
+        assert annotated["tool_name"] == "find_examples"
+
+    def test_engine_annotate_missing_status_yields_unknown(self) -> None:
+        """A call record without a status falls back to ``unknown``."""
+        from mission.engine import MissionEngine
+
+        annotated = MissionEngine._annotate_tool_result(
+            {"tool_name": "x", "result_summary": {}}
+        )
+        assert annotated["_status"] == "unknown"
+
+    def test_sandbox_annotate_helper_matches_engine_helper(self) -> None:
+        """The sandbox's helper produces the same shape as the engine helper.
+
+        Pin the parity so a future change to one keeps the other in
+        sync — ``_evaluate_tool_call_succeeded`` consumes the same
+        Observation regardless of which path produced it.
+        """
+        from mission.engine import MissionEngine
+        from mission.sandbox import _annotate_call_result
+
+        call = {
+            "tool_name": "find_examples",
+            "status": "ok",
+            "result_summary": {"hits": ["a", "b"]},
+        }
+        engine_out = MissionEngine._annotate_tool_result(call)
+        sandbox_out = _annotate_call_result(call)
+        assert engine_out == sandbox_out

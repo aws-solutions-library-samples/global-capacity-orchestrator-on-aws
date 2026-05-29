@@ -1471,6 +1471,41 @@ def _make_tool_wrapper(
 # ---------------------------------------------------------------------------
 
 
+def _annotate_call_result(call: dict[str, Any]) -> Any:
+    """Wrap a script-call ``result_summary`` with per-call markers.
+
+    Mirrors :meth:`MissionEngine._annotate_tool_result` for the
+    scripted-strategy path so the Observation's ``tool_results`` list
+    always carries the ``_status`` and ``tool_name`` markers the
+    predicate evaluator and the ``tool_call_succeeded`` evaluator
+    rely on, regardless of the underlying tool's return shape.
+
+    Strategy:
+
+    * **Dict result_summary** — augment in place with ``_status`` and
+      ``tool_name`` only when those keys are absent. This keeps any
+      caller-supplied marker visible while ensuring evaluators always
+      find them.
+    * **Non-dict result_summary** — wrap in a fresh dict carrying
+      the call's ``_status`` / ``tool_name`` plus a ``result`` field
+      that holds the original payload so predicates can still walk
+      into it.
+    """
+    result = call.get("result_summary")
+    status = call.get("status") or "unknown"
+    tool_name = call.get("tool_name")
+    if isinstance(result, dict):
+        annotated = dict(result)
+        annotated.setdefault("_status", status)
+        annotated.setdefault("tool_name", tool_name)
+        return annotated
+    return {
+        "_status": status,
+        "tool_name": tool_name,
+        "result": result,
+    }
+
+
 def _build_script_observation(
     *,
     script_call_log: list[dict[str, Any]],
@@ -1512,7 +1547,7 @@ def _build_script_observation(
     errors: list[dict[str, Any]] = []
 
     for call in script_call_log:
-        tool_results.append(call.get("result_summary"))
+        tool_results.append(_annotate_call_result(call))
         if call.get("status") == "ok":
             result = call.get("result_summary")
             if isinstance(result, dict):

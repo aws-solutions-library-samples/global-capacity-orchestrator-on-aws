@@ -879,7 +879,8 @@ class MissionEngine:
                 # the partial doesn't carry.
                 partial_observation: dict[str, Any] = {
                     "tool_results": [
-                        call.get("result_summary") for call in exc.partial_script_call_log
+                        self._annotate_tool_result(call)
+                        for call in exc.partial_script_call_log
                     ],
                     "metrics": {},
                     "events": list(exc.partial_events),
@@ -957,19 +958,68 @@ class MissionEngine:
 
         await self._run_phase(session, record, _OBSERVE, body)
 
+    @staticmethod
+    def _annotate_tool_result(call: ToolCallRecord) -> Any:
+        """Wrap a call's ``result_summary`` with the per-call call markers.
+
+        The Observation's ``tool_results`` list is the canonical input
+        to predicate criteria and to the dedicated ``tool_call_succeeded``
+        evaluator. Both consult ``r.get("_status")`` and
+        ``r.get("tool_name")`` to know which tool produced the entry
+        and whether the call succeeded — markers the engine adds here
+        rather than relying on individual tools to inject. The stub
+        dispatcher used to synthesise these markers in its return,
+        but the live FastMCP dispatcher returns whatever shape the
+        underlying tool produces (often a structured ``{"result": [
+        ... ]}`` dict that doesn't carry call-level metadata).
+
+        Strategy:
+
+        * **Dict result_summary** — augment in place with ``_status``
+          and ``tool_name`` only when those keys are absent. This
+          keeps any caller-supplied marker visible (some tools do
+          synthesise them) while ensuring evaluators always find
+          them.
+        * **Non-dict result_summary** (None, list, primitive) — wrap
+          in a fresh dict carrying the call's ``_status`` /
+          ``tool_name`` plus a ``result`` field that holds the
+          original payload so predicates can still walk into it.
+        """
+        result = call.get("result_summary")
+        status = call.get("status") or "unknown"
+        tool_name = call.get("tool_name")
+        if isinstance(result, dict):
+            annotated = dict(result)
+            annotated.setdefault("_status", status)
+            annotated.setdefault("tool_name", tool_name)
+            return annotated
+        return {
+            "_status": status,
+            "tool_name": tool_name,
+            "result": result,
+        }
+
     def _build_observation(
         self,
         executed_calls: list[ToolCallRecord],
         phase_started: datetime,
     ) -> Observation:
-        """Merge a list of :class:`ToolCallRecord` into an :class:`Observation`."""
+        """Merge a list of :class:`ToolCallRecord` into an :class:`Observation`.
+
+        Each ``executed_calls`` entry contributes one annotated dict
+        to ``observation["tool_results"]`` via
+        :meth:`_annotate_tool_result` so the entry always carries
+        the ``_status`` and ``tool_name`` markers the predicate
+        evaluator and the ``tool_call_succeeded`` evaluator both rely
+        on, regardless of what shape the underlying tool returned.
+        """
         tool_results: list[Any] = []
         metrics: dict[str, Any] = {}
         events: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
 
         for call in executed_calls:
-            tool_results.append(call.get("result_summary"))
+            tool_results.append(self._annotate_tool_result(call))
             if call.get("status") == "ok":
                 result = call.get("result_summary")
                 # Permissive merge: when a tool's result happens to

@@ -130,50 +130,15 @@ def _emit_error(code: str, details: dict[str, Any] | None = None) -> None:
 def _make_stub_dispatcher() -> Any:
     """Return a tool dispatcher that returns canned responses.
 
-    The CLI does not have access to the live FastMCP tool registry, so
-    a real dispatcher would require booting the MCP server in-process.
-    For ``--run`` and ``iterate`` modes we substitute a stub that
-    returns ``{"_status": "ok", "_stub": True, ...}`` for every call.
-    This keeps the CLI useful for smoke-testing the loop's bookkeeping
-    without dragging the MCP transport in; real tool execution still
-    happens through the MCP tools.
+    Thin wrapper around :func:`mcp.mission._engine_factory.make_stub_dispatcher`
+    kept for backward compat with the small set of tests that import
+    this name directly. Production paths now go through
+    :func:`_build_engine` which decides between the live FastMCP
+    dispatcher and this stub based on ``--dry-run`` opt-in.
     """
+    from mission._engine_factory import make_stub_dispatcher  # noqa: PLC0415
 
-    async def _dispatch(tool_name: str, args: dict[str, Any], ctx: Any) -> dict[str, Any]:
-        return {
-            "_status": "ok",
-            "_stub": True,
-            "tool_name": tool_name,
-            "args": dict(args),
-        }
-
-    return _dispatch
-
-
-def _maybe_make_sandbox_runner(session: Any) -> Any | None:
-    """Return a sandbox runner when the session opted into scripted strategies.
-
-    When ``allow_scripted_strategies`` was set at ``mission start``,
-    the persisted session carries the flag and any iterate / run-mode
-    invocation needs to honour it by wiring a real sandbox runner;
-    leaving it ``None`` would silently drop scripted strategies on
-    the floor (the engine's ``_dispatch_script`` raises
-    ``script_rejected`` when no runner is wired). Sessions without
-    the opt-in still get ``None`` so the sandbox is never imported
-    on the default path.
-    """
-    if not session.get("allow_scripted_strategies"):
-        return None
-    # Lazy import: importing ``mission.sandbox`` pulls in the FastMCP
-    # transforms surface for the Code Mode provider, which is heavier
-    # than the rest of the CLI. Operators who never set the flag pay
-    # nothing for the import.
-    from mission.sandbox import make_default_sandbox_runner  # noqa: PLC0415
-
-    return make_default_sandbox_runner(
-        list(session.get("tool_allowlist") or []),
-        session,
-    )
+    return make_stub_dispatcher()
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +246,16 @@ def mission_cmd() -> None:
     help="Iterate to completion synchronously after creating the session.",
 )
 @click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    help=(
+        "Use a stub tool dispatcher and disable Strategy_Revision sampling "
+        "during iteration. Useful for smoke-testing the loop bookkeeping "
+        "without spending Bedrock or AWS credits. Only meaningful with --run."
+    ),
+)
+@click.option(
     "--output",
     type=click.Choice(["json", "table"]),
     default="json",
@@ -303,6 +278,7 @@ def mission_start(
     allow_scripted_strategies: bool,
     with_defaults: bool,
     run_mode: bool,
+    dry_run: bool,
     output: str,
 ) -> None:
     """Start a new Mission session.
@@ -456,39 +432,47 @@ def mission_start(
         return
 
     # --run mode: iterate to completion.
-    _run_to_completion(session_id)
+    _run_to_completion(session_id, dry_run=dry_run)
 
 
-def _run_to_completion(session_id: str) -> None:
+def _run_to_completion(session_id: str, *, dry_run: bool = False) -> None:
     """Drive ``session_id`` through iterations until terminal verdict.
+
+    When ``dry_run`` is False (the default), wires the live FastMCP
+    dispatcher and the Strategy_Revision sampling callable through
+    :func:`mcp.mission._engine_factory.build_mission_engine` so the
+    loop can actually iterate against real tools and let the model
+    revise the strategy between iterations. When ``dry_run`` is True,
+    falls back to the canned-stub dispatcher and disables sampling so
+    the CLI can smoke-test the loop bookkeeping without spending
+    Bedrock or AWS credits.
 
     Writes one JSON line per iteration's verdict to stderr; the final
     stdout is the Final_Report JSON when present, falling back to the
     persisted session JSON otherwise.
     """
     from mission import state as mission_state  # noqa: PLC0415
-    from mission.engine import MissionEngine, MissionEngineError  # noqa: PLC0415
+    from mission._engine_factory import build_mission_engine  # noqa: PLC0415
+    from mission.engine import MissionEngineError  # noqa: PLC0415
     from mission.state import FilesystemBackend  # noqa: PLC0415
 
     backend = mission_state.get_backend()
-    # Honour the per-session ``allow_scripted_strategies`` flag set at
-    # ``mission start``. Sessions that opted out still get the cheap
-    # ``None`` path; sessions that opted in get a real sandbox runner
-    # so scripted strategies actually execute instead of failing with
-    # ``script_rejected``.
     session_for_runner = backend.load_session(session_id)
-    sandbox_runner = (
-        _maybe_make_sandbox_runner(session_for_runner) if session_for_runner is not None else None
-    )
+    if session_for_runner is None:
+        _emit_error("session_not_found", {"session_id": session_id})
+        sys.exit(1)
+
+    # Populate the FastMCP tool registry so the live dispatcher can
+    # find the operator-allowlisted tools. Safe to call repeatedly —
+    # ``register_all_tools`` is idempotent (FastMCP rejects duplicate
+    # registrations after the first call). Skipped on the dry-run path
+    # because the stub dispatcher never consults the registry.
+    if not dry_run:
+        _ensure_tool_registry()
 
     async def _drive() -> None:
-        # Import inside the closure to keep the CLI's --help path
-        # cheap.
-        engine = MissionEngine(
-            backend=backend,
-            tool_dispatcher=_make_stub_dispatcher(),
-            sampling_callable=None,
-            sandbox_runner=sandbox_runner,
+        engine = await build_mission_engine(
+            session_for_runner, ctx=None, use_stub_dispatcher=dry_run
         )
         while True:
             try:
@@ -522,6 +506,23 @@ def _run_to_completion(session_id: str) -> None:
     else:
         _emit_error("session_disappeared", {"session_id": session_id})
         sys.exit(1)
+
+
+def _ensure_tool_registry() -> None:
+    """Register every MCP tool against the shared FastMCP server, once.
+
+    The CLI doesn't normally boot the MCP server, so its FastMCP
+    instance starts empty. The live tool dispatcher in the engine
+    factory looks up tools on that instance, so we eagerly register
+    every tool group up-front when the live path is selected. The
+    underlying ``register_all_tools`` is import-time side-effects on
+    module load; calling it twice is harmless because the per-module
+    decorators only fire on the first import.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "mcp"))
+    from tools import register_all_tools  # noqa: PLC0415
+
+    register_all_tools()
 
 
 # ---------------------------------------------------------------------------
@@ -577,18 +578,34 @@ def mission_status_cmd(session_id: str, output: str) -> None:
     help="How many iterations to run in this call.",
 )
 @click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    help=(
+        "Use a stub tool dispatcher and disable Strategy_Revision sampling. "
+        "Useful for smoke-testing the loop without spending Bedrock or AWS credits."
+    ),
+)
+@click.option(
     "--output",
     type=click.Choice(["json", "table"]),
     default="json",
     show_default=True,
 )
-def mission_iterate_cmd(session_id: str, max_iterations: int, output: str) -> None:
+def mission_iterate_cmd(session_id: str, max_iterations: int, dry_run: bool, output: str) -> None:
     """Run one or more iterations on a Mission session.
 
-    Stops early on a terminal verdict. The engine is wired with the CLI
-    stub dispatcher; real tool execution requires the MCP server.
+    Stops early on a terminal verdict. By default the engine is wired
+    with the live FastMCP tool dispatcher and the Strategy_Revision
+    sampling callable so the loop iterates against real tool results
+    and lets the model revise the strategy between iterations.
+
+    Pass ``--dry-run`` to substitute the canned-stub dispatcher and
+    disable sampling — useful for smoke-testing the bookkeeping
+    without spending Bedrock or AWS credits.
     """
-    from mission.engine import MissionEngine, MissionEngineError  # noqa: PLC0415
+    from mission._engine_factory import build_mission_engine  # noqa: PLC0415
+    from mission.engine import MissionEngineError  # noqa: PLC0415
     from mission.state import get_backend  # noqa: PLC0415
 
     if max_iterations <= 0:
@@ -604,19 +621,17 @@ def mission_iterate_cmd(session_id: str, max_iterations: int, output: str) -> No
         sys.exit(1)
 
     backend = get_backend()
-    # Mirror the run-mode behaviour: honour the per-session
-    # ``allow_scripted_strategies`` flag stamped at ``mission start``.
     session_for_runner = backend.load_session(session_id)
-    sandbox_runner = (
-        _maybe_make_sandbox_runner(session_for_runner) if session_for_runner is not None else None
-    )
+    if session_for_runner is None:
+        _emit_error("session_not_found", {"session_id": session_id})
+        sys.exit(1)
+
+    if not dry_run:
+        _ensure_tool_registry()
 
     async def _drive() -> dict[str, Any]:
-        engine = MissionEngine(
-            backend=backend,
-            tool_dispatcher=_make_stub_dispatcher(),
-            sampling_callable=None,
-            sandbox_runner=sandbox_runner,
+        engine = await build_mission_engine(
+            session_for_runner, ctx=None, use_stub_dispatcher=dry_run
         )
         records: list[dict[str, Any]] = []
         for _ in range(max_iterations):
@@ -1200,6 +1215,17 @@ def mission_scaffold_criteria_cmd(
     show_default=True,
     help="Checkpoint cadence kind.",
 )
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    help=(
+        "Use a stub tool dispatcher and disable Strategy_Revision sampling "
+        "during iteration. The criteria scaffolder still runs through "
+        "Bedrock when sampling is enabled. Useful for smoke-testing the "
+        "loop without spending live tool credits."
+    ),
+)
 def mission_run_cmd(
     directive: str,
     tool_allowlist: tuple[str, ...],
@@ -1213,6 +1239,7 @@ def mission_run_cmd(
     save_criteria: str | None,
     stagnation_threshold: int,
     cadence: str,
+    dry_run: bool,
 ) -> None:
     """Scaffold criteria and run a Mission session to completion in one call.
 
@@ -1371,4 +1398,4 @@ def mission_run_cmd(
     )
 
     # ---- Step 3: iterate to completion. ---------------------------------
-    _run_to_completion(session_id)
+    _run_to_completion(session_id, dry_run=dry_run)
