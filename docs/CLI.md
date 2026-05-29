@@ -23,6 +23,7 @@ Complete command-line interface documentation for GCO (Global Capacity Orchestra
   - [analytics](#analytics-commands)
   - [config-cmd](#config-cmd-commands)
   - [tasks](#tasks-commands)
+  - [mission](#mission-commands)
 - [Configuration](#configuration)
 - [Environment Variables](#environment-variables)
 - [Examples](#examples)
@@ -2861,6 +2862,247 @@ gco tasks prune --keep 10
 
 ---
 
+### Mission Commands
+
+Drive a goal-directed iteration loop with machine-checkable success
+criteria and an optional advisory LLM. Mission is gated by the
+`GCO_ENABLE_MISSION=true` environment variable (or the umbrella
+`GCO_ENABLE_ALL_TOOLS=true`); without the flag every subcommand exits
+2 with a one-line hint.
+
+The full design lives in [Mission Guide](MISSION.md). This section
+covers the CLI surface only.
+
+Sessions persist as JSON under `~/.gco/missions/` (the filesystem
+backend) or in the `<project>-missions` DynamoDB table when
+`GCO_MISSION_STATE_BACKEND=dynamodb`. The sampling backend resolves
+in this order:
+
+1. Explicit `--use-sampling` / `--no-sampling` flag.
+2. MCP host capability (only when running inside an MCP host).
+3. Bedrock credential probe — when `boto3` resolves credentials, the
+   Bedrock backend is selected with the model id from
+   `GCO_MISSION_BEDROCK_MODEL_ID` (or the default).
+4. Otherwise sampling is off and the loop runs deterministically.
+
+#### `gco mission run`
+
+Chained shorthand that scaffolds criteria from a directive, persists
+a new session, and drives it through iterations until a terminal
+verdict — three steps in one call. The most common operator workflow
+when you don't need a saved criteria file or per-step inspection.
+
+```bash
+gco mission run [OPTIONS]
+```
+
+**Options:**
+
+- `--directive TEXT` — Required. Natural-language goal description.
+- `--tool-allowlist NAME` — Required, repeatable. Tools the loop may invoke. The first allowlisted tool also seeds the deterministic strategy when sampling is off.
+- `--max-iterations INTEGER` — Iteration cap (default: 5). Pass `-1` to opt out.
+- `--max-wall-clock INTEGER` — Wall-clock cap in seconds (default: 300). Pass `-1` to opt out.
+- `--max-criteria INTEGER` — Cap on the number of criterion entries the scaffolder emits (default: 5).
+- `--retries INTEGER` — Sampling-path retry budget on validator rejection (default: 3). After exhaustion, falls back to deterministic templates.
+- `--use-sampling` / `--no-sampling` — Force the sampling path on/off for both the scaffolder and the loop's Strategy_Revision sampler. Default auto-detects.
+- `--bedrock-model-id MODEL_ID` — Override the Bedrock model id (CLI sampling backend only).
+- `--allow-scripted-strategies` — Permit scripted strategies (the AST-validated Python sandbox).
+- `--save-criteria PATH` — Also write the scaffolded criteria JSON to `PATH` for inspection or reuse.
+- `--cadence` — Checkpoint cadence kind (default: `every_iteration`).
+- `--stagnation-threshold INTEGER` — Iterations of no progress before terminate (default: 3).
+
+A scaffold-summary JSON line lands on stderr before iteration starts; per-iteration verdicts stream to stderr as JSON lines; the Final_Report lands on stdout when a terminal verdict fires.
+
+```bash
+# No-AWS smoke test against in-memory tools.
+export GCO_ENABLE_MISSION=true
+gco mission run \
+  --directive "Find documentation about inference endpoints." \
+  --tool-allowlist find_examples --tool-allowlist find_docs \
+  --max-iterations 1 --max-wall-clock 30 \
+  --no-sampling
+
+# Bedrock-backed run with a captured criteria file.
+gco mission run \
+  --directive "Drive validation loss below 0.1." \
+  --tool-allowlist find_examples \
+  --max-iterations 10 --max-wall-clock 1800 \
+  --save-criteria /tmp/criteria.json
+```
+
+#### `gco mission start`
+
+Validate inputs, resolve sampling, persist a new session. Use this
+when you want to inspect or modify the criteria file by hand, or when
+you want to drive iterations one at a time.
+
+```bash
+gco mission start [OPTIONS]
+```
+
+**Options:**
+
+- `--directive TEXT` — Required. Natural-language goal description.
+- `--criteria-file PATH` — Required (unless `--with-defaults` is set). JSON file containing the criteria list.
+- `--with-defaults` — Use a basic placeholder predicate criterion when no `--criteria-file` is provided.
+- `--max-iterations INTEGER` — Required. Hard cap on iterations. Pass `-1` to opt out (uncapped).
+- `--max-wall-clock INTEGER` — Required. Hard cap on wall-clock seconds. Pass `-1` to opt out (uncapped).
+- `--tool-allowlist NAME` — Required, repeatable. Tools the loop may invoke.
+- `--cadence` — Checkpoint cadence kind (default: `every_iteration`).
+- `--cadence-n INTEGER` — `n` parameter for `every_n_iterations`.
+- `--cadence-t INTEGER` — `t` parameter (seconds) for `every_t_seconds`.
+- `--cadence-event TEXT` — `event_name` parameter for `on_event`.
+- `--stagnation-threshold INTEGER` — Iterations of no progress before terminate (default: 3).
+- `--use-sampling` / `--no-sampling` — Force sampling on/off (default: auto-detect).
+- `--bedrock-model-id MODEL_ID` — Override the Bedrock model id.
+- `--allow-scripted-strategies` — Permit scripted strategies.
+- `--run` — Iterate to completion synchronously after creating the session.
+- `--output table|json` — Output format (default: `json`).
+
+```bash
+gco mission start \
+  --directive "Drive validation loss below 0.1." \
+  --criteria-file /tmp/criteria.json \
+  --max-iterations 10 --max-wall-clock 3600 \
+  --tool-allowlist find_examples
+```
+
+#### `gco mission scaffold-criteria`
+
+Draft a criteria file from a natural-language directive. Output is
+always validated through `validate_criteria` so the resulting file
+is immediately usable with `gco mission start --criteria-file` or
+`gco mission run --save-criteria` for inspection.
+
+```bash
+gco mission scaffold-criteria [OPTIONS]
+```
+
+**Options:**
+
+- `--directive TEXT` — Required. Natural-language goal description.
+- `--allowlist NAME` — Optional, repeatable. Tools that will be allowlisted on the resulting session. When the directive is search-flavoured *and* an allowlist is supplied, the deterministic generator emits one `tool_call_succeeded` criterion per allowlisted tool — server-evaluated, never goes through the predicate AST sandbox.
+- `--use-sampling` / `--no-sampling` — Force sampling on/off (default: auto-detect).
+- `--bedrock-model-id MODEL_ID` — Override the Bedrock model id.
+- `--max-criteria INTEGER` — Cap on the number of criterion entries (default: 5).
+- `--retries INTEGER` — Sampling-path retry budget (default: 3).
+- `--output-file PATH` — Write the JSON to this file instead of stdout.
+- `--output table|json` — Output format (default: `json`).
+
+```bash
+gco mission scaffold-criteria \
+  --directive "Find documentation about inference endpoints." \
+  --allowlist find_examples --allowlist find_docs \
+  --output-file criteria.json
+```
+
+#### `gco mission iterate SESSION_ID`
+
+Drive one or more iterations of an existing session. Stops early on a
+terminal verdict. The CLI uses a stub tool dispatcher; real tool
+execution requires the MCP server.
+
+```bash
+gco mission iterate SESSION_ID [OPTIONS]
+```
+
+**Options:**
+
+- `--max-iterations INTEGER` — How many iterations to run in this call (default: 1). Distinct from the session-wide budget cap.
+- `--output table|json` — Output format (default: `json`).
+
+```bash
+gco mission iterate mission-abc123 --max-iterations 3
+```
+
+#### `gco mission status SESSION_ID`
+
+Print the full state of a session.
+
+```bash
+gco mission status SESSION_ID [--output table|json]
+```
+
+```bash
+gco mission status mission-abc123 --output table
+```
+
+#### `gco mission checkpoint SESSION_ID`
+
+Re-run the verdict cascade on the latest iteration without producing
+a new one. Useful for inspecting how a paused or stalled session
+would terminate if the cascade fired now.
+
+```bash
+gco mission checkpoint SESSION_ID [--output table|json]
+```
+
+#### `gco mission complete SESSION_ID`
+
+Force a session into `completed` and stamp the final verdict.
+
+```bash
+gco mission complete SESSION_ID [--output table|json]
+```
+
+#### `gco mission abort SESSION_ID`
+
+Pause or terminate a session. With `--pause` the session can be
+resumed later; without `--pause` the session is terminated and the
+final verdict is stamped.
+
+```bash
+gco mission abort SESSION_ID [--pause] [--output table|json]
+```
+
+```bash
+gco mission abort mission-abc123 --pause
+```
+
+#### `gco mission resume SESSION_ID`
+
+Transition a paused session back to `running`.
+
+```bash
+gco mission resume SESSION_ID [--output table|json]
+```
+
+#### `gco mission history SESSION_ID`
+
+Get the iteration history of a session.
+
+```bash
+gco mission history SESSION_ID [OPTIONS]
+```
+
+**Options:**
+
+- `--format full|summary` — Iteration history detail level (default: `summary`).
+- `--output table|json` — Output format (default: `json`).
+
+```bash
+gco mission history mission-abc123 --format full
+```
+
+#### `gco mission list`
+
+List Mission sessions across the configured backend.
+
+```bash
+gco mission list [OPTIONS]
+```
+
+**Options:**
+
+- `--status STATUS` — Filter sessions by status (`pending`, `running`, `paused`, ...).
+- `--output table|json` — Output format (default: `json`).
+
+```bash
+gco mission list --status running --output table
+```
+
+---
+
 ## Configuration
 
 ### Config File
@@ -2919,6 +3161,11 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_CONFIG` | Path to config file |
 | `GCO_REGIONAL_API` | Use regional API endpoints (`true`/`false`) |
 | `CDK_DOCKER` | Docker command (`docker` or `finch`) |
+| `GCO_ENABLE_MISSION` | Gate the `gco mission` subcommand group (`true`/`false`). With the flag unset, every subcommand exits 2 with a hint. |
+| `GCO_ENABLE_ALL_TOOLS` | Umbrella flag that satisfies every per-tool gate including `GCO_ENABLE_MISSION`. |
+| `GCO_MISSION_STATE_BACKEND` | Persistence backend for sessions (`filesystem` or `dynamodb`). Unrecognised values fall back to filesystem with a one-line warning. |
+| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the default Bedrock model id used by the CLI sampling backend. |
+| `GCO_MISSION_BEDROCK_REGION` | Override the default Bedrock region (`us-east-1`). |
 
 ## Examples
 

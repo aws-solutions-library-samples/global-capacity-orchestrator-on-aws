@@ -306,7 +306,7 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 - **Deterministic verdict cascade** with optional advisory LLM sampling (MCP host or Amazon Bedrock). Sampling shapes only the next strategy; it never moves the verdict.
 - **Budget caps** on iterations and wall clock — the engine terminates cleanly when any cap fires. Cost guardrails live out-of-band via AWS Budgets and Cost Anomaly Detection at the account level.
 - **Scripted strategies** opt-in: an AST-validated Python sandbox with bounded duration and memory limits.
-- **CLI + MCP surface**: nine `gco mission` subcommands and matching MCP tools, plus three `mission://sessions/{id}` resource templates.
+- **CLI + MCP surface**: ten `gco mission` subcommands (including the chained `gco mission run` that scaffolds criteria and drives a session to completion in one call) and matching MCP tools, plus three `mission://sessions/{id}` resource templates.
 
 ## Documentation
 

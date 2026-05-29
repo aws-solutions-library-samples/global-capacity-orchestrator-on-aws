@@ -9,15 +9,18 @@ Mission is GCO's goal-directed iteration loop. The operator declares a directive
 - [Criteria File Schema](#criteria-file-schema)
   - [`metric_threshold` criterion](#metric_threshold-criterion)
   - [`event` criterion](#event-criterion)
+  - [`tool_call_succeeded` criterion](#tool_call_succeeded-criterion)
   - [`predicate` criterion](#predicate-criterion)
   - [Required vs optional criteria](#required-vs-optional-criteria)
   - [Validator rejection reasons](#validator-rejection-reasons)
 - [Predicate Permissions](#predicate-permissions)
   - [Allowed names](#allowed-names)
+  - [Allowed method calls](#allowed-method-calls)
   - [Allowed operators and constructs](#allowed-operators-and-constructs)
   - [Rejected outright](#rejected-outright)
   - [Why the eval is safe](#why-the-eval-is-safe)
 - [Quickstart](#quickstart)
+- [One-Command Run](#one-command-run)
 - [The No-AWS Smoke Test](#the-no-aws-smoke-test)
 - [Sampling](#sampling)
 - [Scripted Strategies](#scripted-strategies)
@@ -58,6 +61,8 @@ Two paths produce the file:
   - Anything else → a single placeholder `predicate` with `expression: "True"` and a TODO note in the description.
 
 The deterministic fallback runs without sampling, without AWS credentials, and without an MCP host — it's the path CI takes and the path operators get when they pass `--no-sampling`.
+
+If you want to skip straight from a directive to a finished session in one call, use [`gco mission run`](#one-command-run) instead — it chains the scaffold + start + iterate-to-completion pipeline without intermediate files.
 
 ### Example invocation
 
@@ -391,6 +396,49 @@ gco mission complete mission-abc123
 
 `--run` collapses start + iterate into one synchronous call; verdicts stream to stderr as JSON lines and the Final_Report lands on stdout when the session terminates.
 
+## One-Command Run
+
+For the most common operator workflow — directive → criteria → run — there is a single chained command that handles all three:
+
+```bash
+export GCO_ENABLE_MISSION=true
+
+gco mission run \
+  --directive "Find documentation about inference endpoints." \
+  --tool-allowlist find_examples --tool-allowlist find_docs \
+  --max-iterations 5 --max-wall-clock 300
+```
+
+`gco mission run` does three things in order:
+
+1. **Scaffold criteria from the directive.** Same logic as `gco mission scaffold-criteria` — sampling path with deterministic fallback. When the directive is search-flavoured and you supplied an allowlist, the deterministic path emits one `tool_call_succeeded` criterion per allowlisted tool, so the most common case scaffolds without ever consulting the model.
+2. **Persist a new session** with the same validators `gco mission start` runs. A scaffold-summary JSON line lands on stderr so you can see the criteria shape before tools fire:
+   ```json
+   {"event": "mission.run.scaffolded", "session_id": "mission-abc123",
+    "criteria_count": 2, "sampling_path": false,
+    "sampling_backend_resolved": "none"}
+   ```
+3. **Iterate to completion synchronously**, exactly as `gco mission start --run` does. Per-iteration verdicts stream to stderr as JSON; the Final_Report lands on stdout when a terminal verdict fires.
+
+Useful options:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--directive TEXT` | required | Natural-language goal description. |
+| `--tool-allowlist NAME` | required, repeatable | One per allowlisted tool. The first allowlisted tool also seeds the deterministic strategy when sampling is off. |
+| `--max-iterations N` | `5` | Hard cap on the iteration count. Pass `-1` to opt out. |
+| `--max-wall-clock SECONDS` | `300` | Hard cap on wall-clock seconds. Pass `-1` to opt out. |
+| `--use-sampling` / `--no-sampling` | auto-detect | Force the sampling path on/off for both the scaffolder and the loop's Strategy_Revision sampler. Default precedence: MCP host capability → Bedrock cred probe → off. |
+| `--bedrock-model-id MODEL_ID` | from env / `claude-sonnet-4-5` | Override the Bedrock model id (CLI sampling backend only; MCP sampling uses whichever model the host advertises). |
+| `--save-criteria PATH` | unset | Also write the scaffolded criteria JSON to `PATH` for inspection or reuse. |
+| `--max-criteria N` | `5` | Cap on the number of criterion entries the scaffolder emits. |
+| `--retries N` | `3` | Sampling-path retry budget when the validator rejects the model's response. After exhaustion, falls back to deterministic templates. |
+| `--allow-scripted-strategies` | off | Permit scripted strategies (the AST-validated Python sandbox). Disabled by default; required only for goals that exceed what `tool_calls` can express. |
+| `--cadence` | `every_iteration` | Checkpoint cadence kind passed through to the engine. |
+| `--stagnation-threshold N` | `3` | Iterations of no progress before the cascade emits `terminate, no_progress`. |
+
+When the sampling path fails (transport error, unparseable JSON, validator rejection after the retry budget is exhausted) the command prints a one-line warning to stderr and falls back to the deterministic generator, so a missing or misbehaving sampling backend never blocks the run.
+
 ## The No-AWS Smoke Test
 
 Mission's safe-tier tools (`find_examples`, `find_docs`) hit only in-memory fixtures, so the loop runs end-to-end without AWS credentials.
@@ -619,6 +667,7 @@ All `gco mission` subcommands require `GCO_ENABLE_MISSION=true`. Without the fla
 | Subcommand | Purpose |
 |------------|---------|
 | `gco mission start` | Validate inputs, resolve sampling, persist a new session. With `--run`, iterate to completion synchronously. |
+| `gco mission run` | Scaffold criteria from a directive and drive a session to completion in one call. The chained shorthand for the most common operator workflow — see [One-Command Run](#one-command-run). |
 | `gco mission scaffold-criteria` | Draft a criteria file from a natural-language directive. Validated through `validate_criteria`; writes JSON to stdout (or to `--output-file`). |
 | `gco mission status <id>` | Print the full session JSON (or a table summary with `--output table`). |
 | `gco mission iterate <id> [--max-iterations N]` | Drive one or more iterations of an existing session. |
