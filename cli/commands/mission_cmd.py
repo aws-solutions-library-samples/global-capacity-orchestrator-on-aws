@@ -858,12 +858,22 @@ def mission_resume_cmd(session_id: str, output: str) -> None:
     help="Iteration history detail level.",
 )
 @click.option(
+    "--include-observations",
+    "include_obs",
+    is_flag=True,
+    help=(
+        "Include the observation and strategy dicts in each iteration's "
+        "output. Only meaningful with --format full. Useful for debugging "
+        "what each tool returned and what strategy was proposed."
+    ),
+)
+@click.option(
     "--output",
     type=click.Choice(["json", "table"]),
     default="json",
     show_default=True,
 )
-def mission_history_cmd(session_id: str, fmt: str, output: str) -> None:
+def mission_history_cmd(session_id: str, fmt: str, include_obs: bool, output: str) -> None:
     """Get the iteration history of a Mission session."""
     from mission.state import get_backend  # noqa: PLC0415
 
@@ -876,12 +886,33 @@ def mission_history_cmd(session_id: str, fmt: str, output: str) -> None:
 
     if fmt == "full":
         cleaned = [_strip_iteration(it) for it in iterations]
+        if not include_obs:
+            # Strip observation and strategy from the output to keep it
+            # concise. Operators who need the full shape pass
+            # --include-observations.
+            for it in cleaned:
+                if isinstance(it, dict):
+                    it.pop("observation", None)
+                    it.pop("strategy", None)
         if output == "table":
             for it in cleaned:
-                click.echo(
-                    f"  Iteration {it.get('iteration_index')}: "
-                    f"{it.get('verdict')} ({it.get('verdict_reason')})"
-                )
+                if not isinstance(it, dict):
+                    continue
+                idx = it.get("iteration_index", "?")
+                verdict = it.get("verdict", "?")
+                reason = it.get("verdict_reason", "?")
+                click.echo(f"  Iteration {idx}: {verdict} ({reason})")
+                if include_obs:
+                    obs = it.get("observation", {})
+                    results = obs.get("tool_results", [])
+                    errors = obs.get("errors", [])
+                    strat = it.get("strategy", {})
+                    rationale = strat.get("rationale", "")[:100]
+                    calls = strat.get("tool_calls", [])
+                    tool_names = [c.get("tool_name", "?") for c in calls if isinstance(c, dict)]
+                    click.echo(f"    tools: {tool_names}")
+                    click.echo(f"    rationale: {rationale}")
+                    click.echo(f"    tool_results: {len(results)} entries, errors: {len(errors)}")
         else:
             _emit_json({"session_id": session_id, "iterations": cleaned})
         return
