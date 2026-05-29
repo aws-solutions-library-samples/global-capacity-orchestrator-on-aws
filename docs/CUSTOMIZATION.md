@@ -32,7 +32,7 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [Modify Security Groups](#modify-security-groups)
 - [Adjusting Resource Limits](#adjusting-resource-limits)
   - [Pod Resource Requests/Limits](#pod-resource-requestslimits)
-  - [Nodepool Limits](#nodepool-limits)
+  - [nodepool Limits](#nodepool-limits)
   - [Lambda Configuration](#lambda-configuration)
 - [Enabling Additional Features](#enabling-additional-features)
 - [Helm Chart Configuration](#helm-chart-configuration)
@@ -476,14 +476,14 @@ Global Accelerator uses HTTP health checks to determine if a region is healthy. 
 
 | Setting | Default | Description |
 |---|---|---|
-| `health_check_path` | `/api/v1/health` | HTTP path GA uses to check ALB health. Must be in `UNAUTHENTICATED_PATHS` in `auth_middleware.py` |
+| `health_check_path` | `/api/v1/health` | HTTP path GA uses to check ALB health. Must be in `UNAUTHENTICATED_PATHS` in `gco/services/auth_middleware.py` |
 | `health_check_interval` | `30` | Seconds between health checks |
 | `health_check_grace_period` | `30` | Seconds to wait before first health check |
 | `health_check_timeout` | `5` | Seconds before a health check times out |
 
 The `/api/v1/health` endpoint returns 200 when the cluster is within resource thresholds and 503 when overloaded. This enables intelligent routing — GA automatically routes traffic away from overloaded regions.
 
-The health check path must be listed in `UNAUTHENTICATED_PATHS` in `gco/services/auth_middleware.py` so GA can reach it without the secret header. A CI test (`test_health_check_coverage.py`) validates this automatically.
+The health check path must be listed in `UNAUTHENTICATED_PATHS` in `gco/services/auth_middleware.py` so GA can reach it without the secret header. A CI test (`tests/test_health_check_coverage.py`) validates this automatically.
 
 #### Inference Health Watchdog
 
@@ -683,7 +683,7 @@ See `lambda/kubectl-applier-simple/manifests/README.md` for the full file listin
 
 ### 1. Create Your Manifest
 
-Create `lambda/kubectl-applier-simple/manifests/33-my-service.yaml`:
+Create a new manifest named 33-my-service.yaml in the existing `lambda/kubectl-applier-simple/manifests/` directory:
 
 ```yaml
 apiVersion: apps/v1
@@ -833,7 +833,7 @@ spec:
           memory: "2Gi"    # Increase from 512Mi
 ```
 
-### Nodepool Limits
+### nodepool Limits
 
 Edit nodepool manifests:
 
@@ -1492,7 +1492,7 @@ GCO includes built-in support for AWS Trainium and Inferentia accelerators. Thes
 ### How It Works
 
 - The Neuron device plugin (installed via Helm chart) advertises `aws.amazon.com/neuron` resources on Neuron-capable nodes
-- The Neuron nodepool (`manifests/44-nodepool-neuron.yaml`) provisions trn1, trn2, trn3, and inf2 instances
+- The Neuron nodepool (`lambda/kubectl-applier-simple/manifests/44-nodepool-neuron.yaml`) provisions trn1, trn2, trn3, and inf2 instances
 - A `aws.amazon.com/neuron` taint prevents non-Neuron workloads from scheduling on these nodes
 - Pods must explicitly tolerate the taint and request `aws.amazon.com/neuron` resources
 

@@ -1,6 +1,6 @@
 # Demo Starter Kit
 
-Everything you need to demo GCO (Global Capacity Orchestrator on AWS).
+Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API. Every Accelerator. Any Region.*
 
 <details>
 <summary>🎬 Live demo recording (click to expand)</summary>

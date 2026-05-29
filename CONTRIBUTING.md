@@ -17,6 +17,7 @@ Thank you for contributing to GCO (Global Capacity Orchestrator on AWS)! This gu
   - [Adding New Features](#adding-new-features)
 - [Testing](#testing)
   - [Running Tests Locally](#running-tests-locally)
+  - [Pre-Pull-Request Verification](#pre-pull-request-verification)
   - [CI/CD Pipeline](#cicd-pipeline)
   - [Integration Tests](#integration-tests)
 - [Documentation](#documentation)
@@ -370,6 +371,36 @@ pytest tests/ -m unit
 # Run only integration tests
 pytest tests/ -m integration
 ```
+
+### Pre-Pull-Request Verification
+
+Before you open a pull request, run the same three checks CI runs — the test
+suite (`pytest`), the linter/formatter (`ruff`), and the type checker
+(`mypy`) — so your change is verified locally before it ever reaches the
+pipeline. These are the exact tools invoked by the `unit:pytest:core`,
+`lint:ruff:python`, and `lint:mypy:strict` jobs described under
+[CI/CD Pipeline](#cicd-pipeline), so a clean local run means a clean CI run.
+
+Run all three from your dev-container shell (the recommended path — see
+[Using the Dev Container (Recommended)](#using-the-dev-container-recommended)):
+
+```bash
+ruff format --check gco/ cli/ mcp/ tests/ lambda/ scripts/ diagrams/
+ruff check gco/ cli/ mcp/ tests/ lambda/ scripts/ diagrams/
+mypy gco/ cli/ mcp/ scripts/ --exclude 'gco/stacks/'
+pytest tests/ --cov=gco --cov=cli --cov=mcp --cov-fail-under=90
+```
+
+**Success indicator:** all four commands complete with no reported failures —
+`ruff` reports no formatting diffs and no lint findings, `mypy` reports no type
+errors, and `pytest` reports all tests passing with coverage at or above the
+threshold. When every command exits cleanly, your change is verified and ready
+for a pull request. If any command reports a failure, fix it and re-run the
+full sequence before submitting.
+
+For what to update alongside code changes, see the [Testing](#testing) and
+[Documentation](#documentation) guidance below and the
+[Contributing section of the README](README.md#contributing).
 
 ### CI/CD Pipeline
 

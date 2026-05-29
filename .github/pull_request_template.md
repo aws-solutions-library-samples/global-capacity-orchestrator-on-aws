@@ -1,5 +1,5 @@
 <!--
-Thanks for contributing to GCO! Please fill out the sections below.
+Thanks for contributing to Global Capacity Orchestrator (GCO)! Please fill out the sections below.
 Delete any sections that don't apply.
 -->
 

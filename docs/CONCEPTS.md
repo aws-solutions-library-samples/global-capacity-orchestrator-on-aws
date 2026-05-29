@@ -1,6 +1,6 @@
 # Core Concepts
 
-This guide explains the fundamental concepts behind GCO (Global Capacity Orchestrator on AWS). Read this before diving into the technical documentation.
+This guide explains the fundamental concepts behind Global Capacity Orchestrator (GCO). Read this before diving into the technical documentation.
 
 ## Table of Contents
 
@@ -86,7 +86,7 @@ You don't manage EC2 instances directly - you define what you need (CPU, memory,
 
 Nodepools define what types of nodes can be provisioned. GCO creates several:
 
-| Nodepool | Purpose | Instance Types |
+| nodepool | Purpose | Instance Types |
 |----------|---------|----------------|
 | `system` | Kubernetes system components | Managed by EKS |
 | `general-purpose` | Standard workloads | Various CPU instances |
@@ -188,11 +188,11 @@ GCO works with any containerized inference server. These have example manifests 
 
 | Framework | Use Case | Example |
 |-----------|----------|---------|
-| vLLM | OpenAI-compatible LLM serving | `inference-vllm.yaml` |
-| SGLang | High-throughput serving with RadixAttention | `inference-sglang.yaml` |
-| TGI | HuggingFace optimized inference | `inference-tgi.yaml` |
-| Triton | Multi-framework model serving | `inference-triton.yaml` |
-| TorchServe | PyTorch native serving | `inference-torchserve.yaml` |
+| vLLM | OpenAI-compatible LLM serving | `examples/inference-vllm.yaml` |
+| SGLang | High-throughput serving with RadixAttention | `examples/inference-sglang.yaml` |
+| TGI | HuggingFace optimized inference | `examples/inference-tgi.yaml` |
+| Triton | Multi-framework model serving | `examples/inference-triton.yaml` |
+| TorchServe | PyTorch native serving | `examples/inference-torchserve.yaml` |
 
 See [Inference Guide](INFERENCE.md) for the full deep dive including model weight management, canary deployments, and production EFA setup.
 
@@ -437,7 +437,8 @@ gco files download my-job-outputs ./local-dir -r us-east-1
 
 ### Submit via Global Job Queue
 
-Use the DynamoDB-backed queue when you need centralized tracking and status history:
+Use the DynamoDB-backed queue when you need centralized tracking and status
+history. Replace `<JOB_ID>` with a queue job ID from `gco queue list`:
 
 ```bash
 # Submit to queue targeting a region
@@ -445,7 +446,7 @@ gco queue submit my-job.yaml --region us-east-1
 
 # Track status
 gco queue list --status running
-gco queue get <job-id>
+gco queue get <JOB_ID>
 
 # View queue statistics
 gco queue stats

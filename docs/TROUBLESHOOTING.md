@@ -651,7 +651,7 @@ aws ecr describe-images \
   --region REGION
 
 # 2. Use smaller base images
-# In Dockerfile: FROM python:3.14-slim instead of python:3.14
+# In your image build recipe: FROM python:3.14-slim instead of python:3.14
 
 # 3. Pre-pull images
 kubectl create daemonset image-puller \

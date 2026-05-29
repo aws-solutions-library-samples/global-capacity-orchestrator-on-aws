@@ -95,9 +95,9 @@ The health monitor periodically verifies the ALB hostname stored in SSM matches 
 
 1. State transitions (`deploying` → `running` → `stopped` → `deleted`) are driven by the CLI and reconciled by the monitor
 
-### Inference-Optimized NodePool
+### Inference-Optimized nodepool
 
-Inference workloads use a Karpenter NodePool with `WhenEmpty` consolidation policy. Unlike batch job NodePools that aggressively consolidate underutilized nodes, inference nodes are only removed when completely empty. This prevents disruption to long-running serving pods.
+Inference workloads use a Karpenter nodepool with `WhenEmpty` consolidation policy. Unlike batch job nodepools that aggressively consolidate underutilized nodes, inference nodes are only removed when completely empty. This prevents disruption to long-running serving pods.
 
 ## Model Weight Management
 

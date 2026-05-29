@@ -14,7 +14,7 @@ This directory contains example IAM policies for controlling access to the GCO m
 
 ## Policy Templates
 
-### 1. Full Access Policy (`full-access-policy.json`)
+### 1. Full Access Policy ([full-access-policy.json](full-access-policy.json))
 
 Grants complete access to all manifest operations including:
 
@@ -31,7 +31,7 @@ Grants complete access to all manifest operations including:
 2. Replace `API_ID` with your API Gateway ID (from CloudFormation outputs)
 3. Attach to IAM users or roles that need full manifest management access
 
-### 2. Read-Only Policy (`read-only-policy.json`)
+### 2. Read-Only Policy ([read-only-policy.json](read-only-policy.json))
 
 Grants read-only access to manifest operations:
 
@@ -46,7 +46,7 @@ Grants read-only access to manifest operations:
 2. Replace `API_ID` with your API Gateway ID (from CloudFormation outputs)
 3. Attach to IAM users or roles that only need to query manifest status
 
-### 3. Namespace-Restricted Policy (`namespace-restricted-policy.json`)
+### 3. Namespace-Restricted Policy ([namespace-restricted-policy.json](namespace-restricted-policy.json))
 
 Grants access to manifest operations within a specific namespace only:
 

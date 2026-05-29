@@ -90,7 +90,7 @@ Open <http://localhost:9889> to view queues, applications, and nodes.
 
 ## Queue Configuration
 
-The default queue configuration is set in `lambda/helm-installer/charts.yaml` under `yunikornDefaults.queues.yaml`.
+The default queue configuration is set in `lambda/helm-installer/charts.yaml` under the yunikornDefaults.queues.yaml key.
 
 ### Resource Units
 

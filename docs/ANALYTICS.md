@@ -397,7 +397,12 @@ profile side, use `aws sagemaker delete-user-profile` directly.
 Error path — when `gco-analytics` is not deployed:
 
 ```bash
-$ gco analytics users list
+gco analytics users list
+```
+
+Output:
+
+```text
 ✗ gco-analytics stack not deployed — run `gco analytics enable` then
   `gco stacks deploy gco-analytics`
 ```
@@ -501,13 +506,13 @@ see the note at the top of this guide):
 
 ```bash
 cat >> ~/.bashrc <<'BASHRC_EOF'
-export GCO_API_ENDPOINT=https://<api-id>.execute-api.us-east-2.amazonaws.com
+export GCO_API_ENDPOINT=https://<API_ID>.execute-api.us-east-2.amazonaws.com
 export GCO_DEFAULT_REGION=us-east-1
 BASHRC_EOF
 source ~/.bashrc
 ```
 
-Replace `<api-id>` with the API Gateway ID from
+Replace `<API_ID>` with the API Gateway ID from
 `aws cloudformation describe-stacks --stack-name gco-api-gateway`
 (or from the `ApiGatewayUrl` output in the AWS console). The
 `GCO_DEFAULT_REGION` should point at the regional region you want
@@ -869,10 +874,9 @@ CDK. If Kiro's connection mechanism requires additional setup (for
 example, a public JupyterLab server endpoint), that setup is entirely
 on the Kiro side and is not a GCO feature.
 
-If Kiro eventually needs in-repo configuration (for example a
-`.kiro/workspace.json` file) to connect to Studio, that will be a
-separate feature with its own spec — the current feature explicitly
-scopes itself to documentation only for the Kiro path.
+If Kiro eventually needs an in-repo configuration file to connect to
+Studio, that would be a separate, future change; this documentation
+covers the Kiro path as it works today.
 
 ## (i) Running the example cluster jobs and reading their output from a notebook
 

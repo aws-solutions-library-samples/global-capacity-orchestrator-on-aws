@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Propose a new capability or improvement for GCO
+about: Propose a new capability or improvement for Global Capacity Orchestrator (GCO)
 title: "[feat] "
 labels: ["enhancement"]
 ---

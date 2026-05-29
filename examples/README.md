@@ -88,7 +88,7 @@ Exports rows from the regional Aurora Serverless v2 PostgreSQL cluster (pgvector
 
 **Prerequisites:**
 
-- `aurora_pgvector.enabled = true` in `cdk.json`, then `gco stacks deploy gco-<region>`
+- `aurora_pgvector.enabled = true` in `cdk.json`, then `gco stacks deploy gco-us-east-1`
 - Optional (for the notebook reader): `gco analytics enable` and `gco stacks deploy gco-analytics`
 
 **Usage:**
@@ -111,7 +111,7 @@ Publishes a small dataset snapshot (CSV plus a JSON schema manifest) to the alwa
 
 - `gco analytics enable` — sets `analytics_environment.enabled = true` in `cdk.json`
 - `gco stacks deploy gco-analytics` — provisions the Studio domain, Cognito user pool, and the execution role that can read the shared bucket
-- `gco analytics users add <username>` — creates a Cognito user and Studio user profile
+- `gco analytics users add --username <USERNAME>` — creates a Cognito user and Studio user profile (substitute `<USERNAME>` with the username to create)
 
 **Usage:**
 
@@ -393,7 +393,7 @@ Runs SFT fine-tuning of Qwen2.5-1.5B on a single GPU using [MegaTrain](https://g
 
 ```bash
 gco jobs submit-direct examples/megatrain-sft-job.yaml -r us-east-1
-gco jobs logs megatrain-sft -r us-east-1 -f
+gco jobs logs megatrain-sft -r us-east-1
 ```
 
 **Requirements:** GPU node with large CPU RAM, shared EFS storage.
@@ -784,7 +784,7 @@ Both sections control independent submission paths — `manifest_processor` vali
 Test without actually creating resources:
 
 ```bash
-kubectl apply -f your-manifest.yaml --dry-run=client
+kubectl apply -f <MANIFEST_FILE> --dry-run=client
 ```
 
 ### Validate
@@ -792,8 +792,10 @@ kubectl apply -f your-manifest.yaml --dry-run=client
 Check for syntax errors:
 
 ```bash
-kubectl apply -f your-manifest.yaml --validate=true --dry-run=server
+kubectl apply -f <MANIFEST_FILE> --validate=true --dry-run=server
 ```
+
+Replace `<MANIFEST_FILE>` with the path to the manifest you want to test (for example `examples/simple-job.yaml`).
 
 ### Check Status
 
@@ -807,8 +809,10 @@ kubectl get pods -w
 kubectl get events --sort-by='.lastTimestamp'
 
 # Describe resource
-kubectl describe pod POD-NAME
+kubectl describe pod <POD_NAME>
 ```
+
+Replace `<POD_NAME>` with the name of the pod to inspect (from `kubectl get pods`).
 
 ## Cleaning Up
 

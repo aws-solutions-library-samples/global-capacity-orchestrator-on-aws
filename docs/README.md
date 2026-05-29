@@ -1,6 +1,6 @@
 # Documentation
 
-Comprehensive guides for understanding, deploying, operating, and customizing GCO.
+Comprehensive guides for understanding, deploying, operating, and customizing **Global Capacity Orchestrator (GCO)** — *One API. Every Accelerator. Any Region.*
 
 > **💡 Tip:** Connect the [MCP server](../mcp/) to an agent and explore the codebase through conversation. Ask things like *"What CDK stacks does GCO create?"* or *"How does the manifest processor validate jobs?"* — the agent reads the source code and docs to answer. See [mcp/README.md](../mcp/README.md) for setup.
 
@@ -23,22 +23,22 @@ Comprehensive guides for understanding, deploying, operating, and customizing GC
 | [API Reference](API.md) | Developers | REST API documentation for manifest submission, job management, and webhooks |
 | [Customization](CUSTOMIZATION.md) | Platform teams | Add regions, tune nodepools, enable FSx/Valkey/EFA, configure queue processor |
 | [Analytics Environment](ANALYTICS.md) | Data scientists / ML engineers | Optional SageMaker Studio + EMR Serverless environment for interactive analysis of cluster data |
+| [Mission](MISSION.md) | Operators | GCO's goal-directed iteration loop that runs five-phase iterations against machine-checkable success criteria until a verdict is reached |
 | [Cluster Shared Bucket](CLUSTER_SHARED_BUCKET.md) | Operators | Always-on cross-region S3 bucket shared across all regional clusters and the analytics environment |
-| [Schedulers & Orchestrators](SCHEDULERS.md) | ML/HPC engineers | Overview of all supported schedulers and when to use each one |
 | [Troubleshooting](TROUBLESHOOTING.md) | Operators | Common issues and solutions for deployment, networking, pods, and storage |
 | [Operational Runbooks](RUNBOOKS.md) | Operators | Step-by-step incident response procedures for common failure scenarios |
 
 ## Schedulers & Orchestrators
 
-| Document | Status | Description |
-|----------|--------|-------------|
-| [Schedulers Overview](SCHEDULERS.md) | — | Comparison, decision guide, and how tools combine |
-| [Volcano](VOLCANO.md) | Enabled | Gang scheduling and batch job management for distributed training |
-| [Kueue](KUEUE.md) | Enabled | Job queueing with resource quotas, fair sharing, and priority |
-| [KubeRay](KUBERAY.md) | Enabled | Ray distributed computing for training, tuning, and serving |
-| [KEDA](KEDA.md) | Enabled | Event-driven autoscaling from SQS, Prometheus, CloudWatch, and 60+ sources |
-| [Slurm (Slinky)](SLURM_OPERATOR.md) | Opt-in | HPC-style scheduling with sbatch/srun on Kubernetes |
-| [YuniKorn](YUNIKORN.md) | Opt-in | App-aware scheduler with hierarchical queues and multi-tenant fair sharing |
+| Document | Audience | Description |
+|----------|----------|-------------|
+| [Schedulers Overview](SCHEDULERS.md) | ML/HPC engineers | Comparison, decision guide, and how the scheduling tools combine |
+| [Volcano](VOLCANO.md) | ML/HPC engineers | Gang scheduling and batch job management for distributed training (enabled by default) |
+| [Kueue](KUEUE.md) | ML/HPC engineers | Job queueing with resource quotas, fair sharing, and priority (enabled by default) |
+| [KubeRay](KUBERAY.md) | ML engineers | Ray distributed computing for training, tuning, and serving (enabled by default) |
+| [KEDA](KEDA.md) | Platform teams | Event-driven autoscaling from SQS, Prometheus, CloudWatch, and 60+ sources (enabled by default) |
+| [Slurm (Slinky)](SLURM_OPERATOR.md) | HPC engineers | HPC-style scheduling with sbatch/srun on Kubernetes (opt-in) |
+| [YuniKorn](YUNIKORN.md) | Platform teams | App-aware scheduler with hierarchical queues and multi-tenant fair sharing (opt-in) |
 
 ## Supplementary
 
@@ -63,6 +63,7 @@ If you're customizing or operating:
 2. [Customization](CUSTOMIZATION.md) — tune for your needs
 3. [Cluster Shared Bucket](CLUSTER_SHARED_BUCKET.md) — the always-on shared storage layer
 4. [Analytics Environment](ANALYTICS.md) — optional Studio + EMR for interactive analysis
-5. [Schedulers Overview](SCHEDULERS.md) — configure scheduling tools
-6. [Troubleshooting](TROUBLESHOOTING.md) — fix issues
-7. [Operational Runbooks](RUNBOOKS.md) — incident response procedures
+5. [Mission](MISSION.md) — run goal-directed iteration loops
+6. [Schedulers Overview](SCHEDULERS.md) — configure scheduling tools
+7. [Troubleshooting](TROUBLESHOOTING.md) — fix issues
+8. [Operational Runbooks](RUNBOOKS.md) — incident response procedures

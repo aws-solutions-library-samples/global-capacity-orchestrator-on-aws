@@ -44,10 +44,12 @@ This document describes the REST API for the GCO Manifest Processor service.
 
 ## Base URL
 
-The API is available at the API Gateway endpoint configured during deployment:
+The API is available at the API Gateway endpoint configured during deployment,
+where `<API_GATEWAY_ENDPOINT>` is the host from the `ApiGatewayUrl`
+CloudFormation output:
 
 ```http
-https://<api-gateway-endpoint>/api/v1
+https://<API_GATEWAY_ENDPOINT>/api/v1
 ```
 
 ## Authentication
@@ -58,16 +60,23 @@ All API requests are authenticated using AWS IAM Signature Version 4 (SigV4) at 
 
 ### Using AWS CLI with SigV4
 
+Set `API_GATEWAY_ENDPOINT` to your API Gateway host, then reuse it in each
+request. Replace the `<API_GATEWAY_ENDPOINT>` placeholder with the host from
+the `ApiGatewayUrl` CloudFormation output (for example
+`abc123.execute-api.us-east-1.amazonaws.com`):
+
 ```bash
+export API_GATEWAY_ENDPOINT=<API_GATEWAY_ENDPOINT>
+
 # Using awscurl (recommended)
 pip install awscurl
 
 awscurl --service execute-api \
   --region us-east-1 \
-  "https://<api-gateway-endpoint>/api/v1/jobs"
+  "https://$API_GATEWAY_ENDPOINT/api/v1/jobs"
 
 # Or using curl with AWS credentials
-curl "https://<api-gateway-endpoint>/api/v1/jobs" \
+curl "https://$API_GATEWAY_ENDPOINT/api/v1/jobs" \
   --aws-sigv4 "aws:amz:us-east-1:execute-api" \
   --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY"
 ```
@@ -83,7 +92,7 @@ import boto3
 session = boto3.Session()
 credentials = session.get_credentials()
 
-request = AWSRequest(method='GET', url='https://<api-gateway-endpoint>/api/v1/jobs')
+request = AWSRequest(method='GET', url='https://<API_GATEWAY_ENDPOINT>/api/v1/jobs')
 SigV4Auth(credentials, 'execute-api', 'us-east-1').add_auth(request)
 
 response = requests.get(request.url, headers=dict(request.headers))
@@ -99,7 +108,8 @@ The `gco` CLI is the recommended way to interact with the API. Install it with:
 pip install -e .
 ```
 
-Common commands:
+Common commands (replace `<JOB_ID>` with a queue job ID from `gco queue list`
+and `<WEBHOOK_ID>` with a webhook ID from `gco webhooks list`):
 
 ```bash
 # Job management
@@ -113,8 +123,8 @@ gco jobs delete my-job --region us-east-1
 # Global job queue (DynamoDB-backed)
 gco queue submit job.yaml --region us-east-1
 gco queue list --status queued
-gco queue get <job-id>
-gco queue cancel <job-id>
+gco queue get <JOB_ID>
+gco queue cancel <JOB_ID>
 gco queue stats
 
 # Templates
@@ -125,7 +135,7 @@ gco templates run my-template --name my-job --region us-east-1
 # Webhooks
 gco webhooks list
 gco webhooks create --url https://example.com/hook -e job.completed
-gco webhooks delete <webhook-id>
+gco webhooks delete <WEBHOOK_ID>
 ```
 
 ## API Endpoints
@@ -1279,11 +1289,19 @@ gco jobs bulk-delete --all-regions --status completed --older-than-days 7 --exec
 
 All examples below use `awscurl` for SigV4 authentication. Install with `pip install awscurl`.
 
+Set `API_GATEWAY_ENDPOINT` once and reuse it in every request. Replace the
+`<API_GATEWAY_ENDPOINT>` placeholder with the host from the `ApiGatewayUrl`
+CloudFormation output (for example `abc123.execute-api.us-east-1.amazonaws.com`):
+
+```bash
+export API_GATEWAY_ENDPOINT=<API_GATEWAY_ENDPOINT>
+```
+
 ### Submit a Job
 
 ```bash
 awscurl --service execute-api --region us-east-1 \
-  -X POST "https://<api-gateway-endpoint>/api/v1/manifests" \
+  -X POST "https://$API_GATEWAY_ENDPOINT/api/v1/manifests" \
   -H "Content-Type: application/json" \
   -d '{
     "manifests": [{
@@ -1313,21 +1331,21 @@ awscurl --service execute-api --region us-east-1 \
 
 ```bash
 awscurl --service execute-api --region us-east-1 \
-  "https://<api-gateway-endpoint>/api/v1/jobs?namespace=gco-jobs&limit=10&offset=0&status=running"
+  "https://$API_GATEWAY_ENDPOINT/api/v1/jobs?namespace=gco-jobs&limit=10&offset=0&status=running"
 ```
 
 ### Get Job Logs with Container Selection
 
 ```bash
 awscurl --service execute-api --region us-east-1 \
-  "https://<api-gateway-endpoint>/api/v1/jobs/gco-jobs/my-job/logs?container=main&tail=500&timestamps=true"
+  "https://$API_GATEWAY_ENDPOINT/api/v1/jobs/gco-jobs/my-job/logs?container=main&tail=500&timestamps=true"
 ```
 
 ### Bulk Delete Old Completed Jobs
 
 ```bash
 awscurl --service execute-api --region us-east-1 \
-  -X DELETE "https://<api-gateway-endpoint>/api/v1/jobs" \
+  -X DELETE "https://$API_GATEWAY_ENDPOINT/api/v1/jobs" \
   -H "Content-Type: application/json" \
   -d '{
     "namespace": "gco-jobs",
@@ -1342,7 +1360,7 @@ awscurl --service execute-api --region us-east-1 \
 ```bash
 # Create template
 awscurl --service execute-api --region us-east-1 \
-  -X POST "https://<api-gateway-endpoint>/api/v1/templates" \
+  -X POST "https://$API_GATEWAY_ENDPOINT/api/v1/templates" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "python-job",
@@ -1364,7 +1382,7 @@ awscurl --service execute-api --region us-east-1 \
 
 # Create job from template
 awscurl --service execute-api --region us-east-1 \
-  -X POST "https://<api-gateway-endpoint>/api/v1/jobs/from-template/python-job" \
+  -X POST "https://$API_GATEWAY_ENDPOINT/api/v1/jobs/from-template/python-job" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "my-python-job",

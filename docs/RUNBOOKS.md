@@ -22,11 +22,11 @@ Step-by-step procedures for common operational scenarios. Each runbook includes 
 
 **Symptoms:** `gco capacity status` shows a region as `unhealthy`. Global Accelerator stops routing traffic to the region. Cross-region aggregator returns errors for the affected region.
 
-**Diagnosis:**
+**Diagnosis:** Replace `<REGION>` with the affected AWS region (for example `us-east-1`):
 
 ```bash
 # 1. Check health from the CLI
-gco jobs list -r <region>
+gco jobs list -r <REGION>
 
 # 2. Check the health endpoint directly
 gco capacity status
@@ -35,7 +35,7 @@ gco capacity status
 # Look for: EKS CPU/memory alarms, ALB unhealthy hosts, Lambda errors
 
 # 4. Check EKS cluster status
-aws eks describe-cluster --name gco-<region> --region <region> \
+aws eks describe-cluster --name gco-<REGION> --region <REGION> \
   --query 'cluster.status'
 
 # 5. Check node health (if cluster is reachable)
@@ -53,7 +53,7 @@ kubectl get nodes
    kubectl logs -n gco-system deployment/health-monitor
    ```
 
-3. **If nodes are NotReady:** EKS Auto Mode should replace unhealthy nodes automatically. Check CloudWatch for node group scaling events. If stuck, check the NodePool configuration:
+3. **If nodes are NotReady:** EKS Auto Mode should replace unhealthy nodes automatically. Check CloudWatch for node group scaling events. If stuck, check the nodepool configuration:
 
    ```bash
    kubectl get nodepools
@@ -117,28 +117,31 @@ aws secretsmanager get-secret-value \
 
 **Symptoms:** Traffic is not reaching a specific region even though the EKS cluster is healthy. `gco capacity status` shows the region as healthy but no jobs are landing there.
 
-**Diagnosis:**
+**Diagnosis:** Replace `<LISTENER_ARN>`, `<ENDPOINT_GROUP_ARN>`, and
+`<TARGET_GROUP_ARN>` with the Global Accelerator listener ARN, endpoint-group
+ARN, and ALB target-group ARN respectively, and `<REGION>` with the affected
+AWS region:
 
 ```bash
 # 1. Check GA endpoint group health
 aws globalaccelerator list-endpoint-groups \
-  --listener-arn <listener-arn> \
+  --listener-arn <LISTENER_ARN> \
   --query 'EndpointGroups[].{Region:EndpointGroupRegion,Health:HealthState}'
 
 # 2. Check if the ALB is registered with GA
 aws globalaccelerator list-custom-routing-endpoints \
-  --endpoint-group-arn <endpoint-group-arn>
+  --endpoint-group-arn <ENDPOINT_GROUP_ARN>
 
 # 3. Check ALB health in the region
 aws elbv2 describe-target-health \
-  --target-group-arn <target-group-arn> \
-  --region <region>
+  --target-group-arn <TARGET_GROUP_ARN> \
+  --region <REGION>
 
 # 4. Check the GA registration Lambda logs
 aws logs filter-log-events \
-  --log-group-name /aws/lambda/gco-ga-registration-<region> \
+  --log-group-name /aws/lambda/gco-ga-registration-<REGION> \
   --filter-pattern "ERROR" \
-  --region <region>
+  --region <REGION>
 ```
 
 **Resolution:**
@@ -146,7 +149,7 @@ aws logs filter-log-events \
 1. **If ALB is not registered:** The GA registration Lambda runs during stack deployment. Trigger a stack update to re-register:
 
    ```bash
-   gco stacks deploy -r <region> -y
+   gco stacks deploy gco-<REGION> -y
    ```
 
 2. **If ALB health checks are failing:** GA health checks hit `/api/v1/health` on the ALB. Check that the health monitor pod is running and the ALB target group has healthy targets.
@@ -159,7 +162,8 @@ aws logs filter-log-events \
 
 **Symptoms:** `gco queue stats` shows messages in the DLQ. Jobs submitted via SQS are not being processed. The queue processor logs show repeated failures.
 
-**Diagnosis:**
+**Diagnosis:** Replace `<DLQ_URL>` with the dead-letter queue URL (from
+`gco queue stats` or the SQS console) and `<REGION>` with the affected AWS region:
 
 ```bash
 # 1. Check queue status
@@ -167,15 +171,15 @@ gco queue stats
 
 # 2. Check DLQ message count
 aws sqs get-queue-attributes \
-  --queue-url <dlq-url> \
+  --queue-url <DLQ_URL> \
   --attribute-names ApproximateNumberOfMessages \
-  --region <region>
+  --region <REGION>
 
 # 3. Sample a DLQ message to see the failure reason
 aws sqs receive-message \
-  --queue-url <dlq-url> \
+  --queue-url <DLQ_URL> \
   --max-number-of-messages 1 \
-  --region <region>
+  --region <REGION>
 
 # 4. Check queue processor logs
 kubectl logs -n gco-system deployment/sqs-consumer --tail=100
@@ -194,14 +198,16 @@ kubectl logs -n gco-system deployment/sqs-consumer --tail=100
 
 3. **If messages are valid but failing validation:** Check resource limits in `cdk.json` under `manifest_processor`. The job may exceed CPU/memory/GPU limits.
 
-4. **To replay DLQ messages** (after fixing the root cause):
+4. **To replay DLQ messages** (after fixing the root cause), where
+   `<DLQ_ARN>` is the dead-letter queue ARN and `<MAIN_QUEUE_ARN>` is the main
+   job queue ARN:
 
    ```bash
    # Move messages from DLQ back to main queue
    aws sqs start-message-move-task \
-     --source-arn <dlq-arn> \
-     --destination-arn <main-queue-arn> \
-     --region <region>
+     --source-arn <DLQ_ARN> \
+     --destination-arn <MAIN_QUEUE_ARN> \
+     --region <REGION>
    ```
 
 **Prevention:** The monitoring stack deploys a CloudWatch alarm on `ApproximateNumberOfMessagesVisible` for the DLQ. If the alarm fires, messages are accumulating — follow the diagnosis steps above.
@@ -237,7 +243,7 @@ gco config-cmd show | grep -A5 allowed_namespaces
    }
    ```
 
-   Then: `gco stacks deploy -r <region> -y`
+   Then: `gco stacks deploy gco-<REGION> -y`
 
 2. **Namespace not allowed:** Add the namespace to `allowed_namespaces` in `cdk.json`:
 
@@ -303,58 +309,59 @@ aws logs filter-log-events \
 
 **Symptoms:** `kubectl` commands fail with connection errors. `gco stacks list` shows the cluster but `gco jobs list -r <region>` fails.
 
-**Diagnosis:**
+**Diagnosis:** Replace `<REGION>` with the affected AWS region and `<VPC_ID>`
+with the cluster's VPC ID:
 
 ```bash
 # 1. Check cluster status
-aws eks describe-cluster --name gco-<region> --region <region> \
+aws eks describe-cluster --name gco-<REGION> --region <REGION> \
   --query 'cluster.{Status:status,Endpoint:endpoint,Access:resourcesVpcConfig.endpointPublicAccess}'
 
 # 2. Check if your kubeconfig is current
-gco stacks access -r <region>
+gco stacks access -r <REGION>
 
 # 3. Check VPC connectivity (if endpoint is private)
 aws ec2 describe-vpc-endpoints \
-  --filters Name=vpc-id,Values=<vpc-id> \
-  --region <region>
+  --filters Name=vpc-id,Values=<VPC_ID> \
+  --region <REGION>
 ```
 
 **Resolution:**
 
 1. **If cluster status is not ACTIVE:** Wait for the cluster to finish updating. EKS updates can take 10-20 minutes.
 
-2. **If kubeconfig is stale:** Refresh it:
+2. **If kubeconfig is stale:** Refresh it (replace `<REGION>` with the affected AWS region):
 
    ```bash
-   gco stacks access -r <region>
+   gco stacks access -r <REGION>
    ```
 
 3. **If endpoint access mode is PRIVATE:** You need to be on the VPC or use the regional API Gateway:
 
    ```bash
-   gco jobs list -r <region> --regional-api
+   gco --regional-api jobs list -r <REGION>
    ```
 
 ---
 
 ## Inference Endpoint Not Serving Traffic
 
-**Symptoms:** `gco inference status <name>` shows the endpoint but requests fail. Health checks return errors.
+**Symptoms:** `gco inference status <ENDPOINT_NAME>` shows the endpoint but requests fail. Health checks return errors.
 
-**Diagnosis:**
+**Diagnosis:** Replace `<ENDPOINT_NAME>` with your inference endpoint name (from `gco inference list`):
 
 ```bash
 # 1. Check endpoint status
-gco inference status <name>
+gco inference status <ENDPOINT_NAME>
 
 # 2. Check pod health
-gco inference health <name>
+gco inference health <ENDPOINT_NAME>
 
 # 3. Check pod logs
-kubectl logs -n gco-inference deployment/<name> --tail=50
+kubectl logs -n gco-inference deployment/<ENDPOINT_NAME> --tail=50
 
 # 4. Check if the model loaded successfully
-gco inference models <name>
+gco inference models <ENDPOINT_NAME>
 ```
 
 **Resolution:**
@@ -396,11 +403,12 @@ gco nodepools list -r us-east-1
 
 **Resolution:**
 
-1. **Forgotten inference endpoints:** Stop or delete unused endpoints:
+1. **Forgotten inference endpoints:** Stop or delete unused endpoints (replace
+   `<ENDPOINT_NAME>` with the endpoint name from `gco inference list`):
 
    ```bash
-   gco inference stop <name>
-   gco inference delete <name>
+   gco inference stop <ENDPOINT_NAME>
+   gco inference delete <ENDPOINT_NAME>
    ```
 
 2. **Stuck jobs:** Delete completed/failed jobs that are still holding resources:
@@ -412,11 +420,12 @@ gco nodepools list -r us-east-1
 
 3. **Unexpected node scaling:** EKS Auto Mode scales nodes based on pending pods. Check if there are pods stuck in Pending that are triggering unnecessary scaling.
 
-4. **For ongoing monitoring:** Set up AWS Budgets with alerts:
+4. **For ongoing monitoring:** Set up AWS Budgets with alerts (replace
+   `<ACCOUNT_ID>` with your AWS account ID):
 
    ```bash
    aws budgets create-budget \
-     --account-id <account-id> \
+     --account-id <ACCOUNT_ID> \
      --budget file://budget.json \
      --notifications-with-subscribers file://notifications.json
    ```

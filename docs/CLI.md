@@ -2106,7 +2106,7 @@ gco images build CONTEXT [OPTIONS]
 
 **Arguments:**
 
-- `CONTEXT` - Build context directory (must contain a `Dockerfile`)
+- `CONTEXT` - Build context directory (must contain a Dockerfile)
 
 **Options:**
 
@@ -2313,28 +2313,50 @@ gco images replication sync
 
 Manage file systems and download job outputs.
 
-#### `gco files list` / `gco files ls`
+#### `gco files list`
 
-List files on shared storage.
+List file systems (EFS/FSx) across GCO stacks.
 
 ```bash
 gco files list [OPTIONS]
-gco files ls [OPTIONS]
 ```
 
 **Options:**
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--region` | `-r` | Region |
-| `--type` | `-t` | Storage type: `efs` or `fsx` |
-| `--path` | `-p` | Path to list |
+| `--region` | `-r` | Filter by region |
+
+**Example:**
+
+```bash
+gco files list
+gco files list -r us-east-1
+```
+
+#### `gco files ls`
+
+List the contents of EFS/FSx storage. `REMOTE_PATH` is relative to the storage
+root and defaults to `/`.
+
+```bash
+gco files ls [REMOTE_PATH] [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | AWS region (required) |
+| `--namespace` | `-n` | Kubernetes namespace |
+| `--storage-type` | `-t` | Storage type: `efs` or `fsx` (default: `efs`) |
 
 **Example:**
 
 ```bash
 gco files ls -r us-east-1
-gco files list -r us-east-1 -t fsx -p /scratch
+gco files ls efs-output-example -r us-east-1
+gco files ls -r us-west-2 -t fsx
 ```
 
 #### `gco files download`
@@ -2439,7 +2461,7 @@ gco nodepools describe NODEPOOL_NAME [OPTIONS]
 
 #### `gco nodepools create-odcr`
 
-Generate NodePool manifest for ODCR (On-Demand Capacity Reservation).
+Generate nodepool manifest for ODCR (On-Demand Capacity Reservation).
 
 ```bash
 gco nodepools create-odcr [OPTIONS]
@@ -2449,19 +2471,21 @@ gco nodepools create-odcr [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--name` | `-n` | NodePool name |
-| `--capacity-reservation-id` | | ODCR ID |
-| `--instance-type` | `-i` | Instance type |
-| `--output` | `-o` | Output file path |
+| `--name` | `-n` | NodePool name (required) |
+| `--region` | `-r` | AWS region (required) |
+| `--capacity-reservation-id` | `-c` | EC2 Capacity Reservation ID (`cr-xxx`) or ODCR group ARN (required) |
+| `--instance-type` | `-i` | Instance type (repeatable) |
+| `--output-file` | `-o` | Output manifest to file instead of applying |
 
 **Example:**
 
 ```bash
 gco nodepools create-odcr \
   --name gpu-reserved \
+  --region us-east-1 \
   --capacity-reservation-id cr-0123456789abcdef0 \
-  --instance-type g5.xlarge \
-  --output nodepool.yaml
+  --instance-type p4d.24xlarge \
+  --output-file nodepool.yaml
 ```
 
 ---
@@ -3252,7 +3276,7 @@ gco jobs logs gpu-test-job -r us-east-1 -n gco-jobs
 gco stacks deploy-all -y --parallel --max-workers 4
 
 # Check status across regions
-gco stacks list --all-regions
+gco stacks list
 gco capacity status
 ```
 

@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a reproducible bug in GCO
+about: Report a reproducible bug in Global Capacity Orchestrator (GCO)
 title: "[bug] "
 labels: ["bug"]
 ---

@@ -75,7 +75,7 @@ gco mission scaffold-criteria \
   --output-file criteria.json
 ```
 
-This writes a `criteria.json` file containing a single `metric_threshold` criterion targeting `val_loss <= 0.1`. Without `--output-file` the JSON is printed to stdout instead, ready to pipe.
+This writes a criteria.json file containing a single `metric_threshold` criterion targeting `val_loss <= 0.1`. Without `--output-file` the JSON is printed to stdout instead, ready to pipe.
 
 ### Example outputs
 
@@ -518,7 +518,7 @@ Three top-level keys:
 
 The block is byte-capped at 4 KB. When a section overshoots (e.g. a probe returned an unusually large payload), the largest field is dropped first and the dropped key list is recorded under `_dropped_fields` so the operator can spot the gap. Top-level keys are sorted before emission so two callers with semantically-identical context produce a byte-identical prompt — the same property the determinism tests pin down for Observation summaries.
 
-What deliberately does **not** land in the block: spot prices and on-demand prices (large, AZ-fanout, cheap to fetch on demand from `spot_prices` once the model has picked an instance shape), capacity-block offerings (reachable through `reservation_check`), and anything timestamp-stamped to second precision (a wall-clock leak would break the byte-identical determinism property in `test_mission_sampling.py`).
+What deliberately does **not** land in the block: spot prices and on-demand prices (large, AZ-fanout, cheap to fetch on demand from `spot_prices` once the model has picked an instance shape), capacity-block offerings (reachable through `reservation_check`), and anything timestamp-stamped to second precision (a wall-clock leak would break the byte-identical determinism property in `tests/test_mission_sampling.py`).
 
 Failure semantics: every AWS probe is wrapped. A total credential failure or a missing checker returns `None` so the prompt omits the section entirely — the model just sees the same prompt shape it would have seen pre-environment-context. Per-region partial failures land as zeroed metrics rather than dropping the region, so the regions list is always honest.
 

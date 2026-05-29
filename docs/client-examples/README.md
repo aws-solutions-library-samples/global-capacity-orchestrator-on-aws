@@ -19,7 +19,7 @@ The GCO API Gateway requires AWS IAM authentication using AWS Signature Version 
 
 ## Available Examples
 
-### 1. Python with boto3 (`python_boto3_example.py`)
+### 1. Python with boto3 ([python_boto3_example.py](python_boto3_example.py))
 
 **Recommended for production use**
 
@@ -51,7 +51,7 @@ python python_boto3_example.py
 - Automated workflows
 - When you need programmatic access
 
-### 2. AWS CLI (`aws_cli_examples.sh`)
+### 2. AWS CLI ([aws_cli_examples.sh](aws_cli_examples.sh))
 
 Examples using AWS CLI and curl with manual SigV4 signing.
 
@@ -85,7 +85,7 @@ brew install jq
 - Checking IAM permissions
 - One-off manual operations
 
-### 3. curl with aws-sigv4-proxy (`curl_sigv4_proxy_example.sh`)
+### 3. curl with aws-sigv4-proxy ([curl_sigv4_proxy_example.sh](curl_sigv4_proxy_example.sh))
 
 **Recommended for testing and development**
 

@@ -378,6 +378,6 @@ Deploy order:
    fail fast (before any kubectl apply) if step 1 was skipped,
    because the SSM `GetParameter` call returns `ParameterNotFound`.
 
-No `docs/MIGRATION.md` exists in this repo — no migration is required.
+No migration guide exists in this repo — no migration is required.
 If you find yourself needing migration steps, something unexpected
 happened; open an issue with the deploy logs attached.

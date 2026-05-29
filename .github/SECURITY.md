@@ -48,4 +48,4 @@ This repository runs the following security checks on every push to `main` and e
 - **Secret scanning**: Gitleaks, TruffleHog
 - **Weekly CVE re-scan**: Trivy against the latest vulnerability databases
 
-See [`.github/CI.md`](/.github/CI.md) for workflow-level detail.
+See [`.github/CI.md`](CI.md) for workflow-level detail.

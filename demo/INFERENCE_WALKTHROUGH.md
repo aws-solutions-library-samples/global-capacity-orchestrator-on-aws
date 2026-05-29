@@ -26,16 +26,15 @@ endpoint across multiple regions with GCO.
 ## Prerequisites
 
 - GCO infrastructure deployed (`gco stacks deploy-all -y`)
-- CLI installed (`pip install -e .`)
+- CLI installed (`pipx install -e .`)
 - AWS credentials configured with access to the deployed account
 
 ## Step 1: Verify Infrastructure
 
-```bash
-# List deployed stacks
-gco stacks list
+List the deployed stacks, then confirm the cluster is reachable:
 
-# Confirm the cluster is reachable
+```bash
+gco stacks list
 gco jobs health --all-regions
 ```
 
@@ -74,11 +73,10 @@ gco inference deploy vllm-spot \
 The inference_monitor in each region picks up the DynamoDB record and creates
 the Kubernetes Deployment, Service, and Ingress on the shared ALB.
 
-```bash
-# Watch status until all regions show "running"
-gco inference status vllm-demo
+Watch status until all regions show "running", then list every endpoint:
 
-# List all endpoints
+```bash
+gco inference status vllm-demo
 gco inference list
 ```
 
@@ -124,11 +122,10 @@ gco inference invoke vllm-demo \
 
 ## Step 5: Scale the Endpoint
 
-```bash
-# Scale to 3 replicas across all target regions
-gco inference scale vllm-demo --replicas 3
+Scale to 3 replicas across all target regions, then confirm:
 
-# Confirm
+```bash
+gco inference scale vllm-demo --replicas 3
 gco inference status vllm-demo
 ```
 
@@ -155,24 +152,22 @@ gco inference status vllm-auto
 
 ## Step 7: Rolling Image Update
 
+Update the image, then watch the rollout:
+
 ```bash
 gco inference update-image vllm-demo -i vllm/vllm-openai:v0.20.1
-
-# Watch the rollout
 gco inference status vllm-demo
 ```
 
 ## Step 8: Canary Deployment
 
-Test a new image version with a percentage of traffic before fully rolling out:
+Test a new image version with a percentage of traffic before fully rolling out.
+Send 10% of traffic to the canary, then monitor both primary and canary:
 
 ```bash
-# Send 10% of traffic to the canary
 gco inference canary vllm-demo \
   -i vllm/vllm-openai:v0.20.1 \
   --weight 10
-
-# Monitor both primary and canary
 gco inference status vllm-demo
 ```
 
@@ -190,18 +185,19 @@ gco inference rollback vllm-demo -y
 
 ## Step 9: Stop and Restart
 
+Stop the endpoint (scales to zero, keeps config in DynamoDB) and check status —
+it shows `stopped` with 0/0 replicas:
+
 ```bash
-# Stop (scales to zero, keeps config in DynamoDB)
 gco inference stop vllm-demo -y
-
 gco inference status vllm-demo
-# Shows "stopped", 0/0 replicas
+```
 
-# Restart
+Restart it and check status again — it shows `running` once the pods reschedule:
+
+```bash
 gco inference start vllm-demo
-
 gco inference status vllm-demo
-# Shows "running" after pods reschedule
 ```
 
 ## Step 10: Health Checks and Model Discovery
@@ -224,25 +220,25 @@ loaded model names, context lengths, and other metadata.
 ## Step 11: Model Weight Management
 
 Upload model weights to the central S3 bucket for use with inference
-endpoints across all regions:
+endpoints across all regions.
+
+Upload the weights, list the registered models, then get the S3 URI for use
+with `--model-source`:
 
 ```bash
-# Upload weights
 gco models upload ./my-model-weights/ --name llama3-8b
-
-# List models
 gco models list
-
-# Get S3 URI for use with --model-source
 gco models uri llama3-8b
+```
 
-# Deploy with model weights from S3
+Deploy an endpoint with the model weights from S3, then clean up the registry
+entry when you are done:
+
+```bash
 gco inference deploy llama-endpoint \
   -i vllm/vllm-openai:v0.20.1 \
   --gpu-count 1 \
   --model-source $(gco models uri llama3-8b)
-
-# Clean up
 gco models delete llama3-8b -y
 ```
 
@@ -250,19 +246,15 @@ gco models delete llama3-8b -y
 
 GCO supports AWS Trainium and Inferentia accelerators for cost-optimized inference. Use the `--accelerator neuron` flag to deploy on Neuron instances instead of NVIDIA GPUs.
 
+Deploy on Inferentia (cost-optimized), check status, invoke it the same way as
+a GPU endpoint, then clean up:
+
 ```bash
-# Deploy inference on Inferentia (cost-optimized)
 gco inference deploy neuron-demo \
   -i public.ecr.aws/neuron/your-neuron-image:latest \
   --gpu-count 1 --accelerator neuron
-
-# Check status
 gco inference status neuron-demo
-
-# Invoke (same as GPU endpoints)
 gco inference invoke neuron-demo -p "What is machine learning?"
-
-# Clean up
 gco inference delete neuron-demo -y
 ```
 
@@ -336,11 +328,11 @@ for architecture details and code examples.
 
 ## Step 14: Clean Up
 
+Delete the demo endpoints, then verify they are gone:
+
 ```bash
 gco inference delete vllm-demo -y
 gco inference delete vllm-auto -y
-
-# Verify
 gco inference list
 ```
 

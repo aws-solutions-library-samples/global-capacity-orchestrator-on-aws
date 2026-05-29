@@ -4,7 +4,7 @@
 
 <p><b><i>One API. Every Accelerator. Any Region.</i></b></p>
 
-<p>Multi-region compute orchestration for AWS — NVIDIA GPUs, Trainium, Inferentia, and CPU (amd64 + arm64 / Graviton) — with capacity-aware scheduling, spot fallback, and multi-region autoscaling inference endpoints with automatic failover and latency-aware routing, all from a single REST API and CLI.</p>
+<p>Multi-region accelerated-compute orchestration for AWS — NVIDIA GPUs, AWS Trainium, AWS Inferentia, and CPU (amd64 + arm64 / Graviton) — with capacity-aware scheduling, spot fallback, and multi-region autoscaling inference endpoints with automatic failover and latency-aware routing, all from a single REST API and CLI.</p>
 
 <!-- BEGIN BADGE TABLE -->
 <p>
@@ -45,20 +45,20 @@
 
 </div>
 
+**What it does.** Spins up [EKS Auto Mode](docs/CONCEPTS.md#eks-auto-mode) clusters across AWS regions, wired together with [Global Accelerator](docs/CONCEPTS.md#global-routing) for latency-aware anycast routing and automatic failover. Submit Kubernetes manifests via a single REST API or CLI — GCO handles capacity-aware scheduling, spot fallback, multi-region autoscaling inference endpoints, and output persistence.
+
+**Who it's for.** Teams running accelerated workloads — LLM training and inference, batch ML, HPC, and general CPU jobs — that need multi-region redundancy, automatic capacity discovery, and IAM-based access without per-cluster kubeconfig distribution. Pre-wired [nodepools](docs/CONCEPTS.md#nodepools) for NVIDIA GPUs (g4dn, g5, and ARM64 g5g), AWS Trainium, AWS Inferentia, and general-purpose CPU on both amd64 and arm64 / Graviton.
+
+**Why it's different.** Capacity-aware routing across regions out of the box, full-stack observability (CloudWatch dashboards, alarms, SNS), and a CDK app validated across 20+ config matrix combinations in CI.
+
+---
+
 **Deploy everything and tear it all down with one command each:**
 
 ```bash
 gco stacks deploy-all -y      # stand up every region defined in cdk.json
 gco stacks destroy-all -y     # destroy every stack across every region — no orphaned resources
 ```
-
----
-
-**What it does.** Spins up [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) clusters across AWS regions, wired together with [Global Accelerator](https://aws.amazon.com/global-accelerator/) for latency-aware anycast routing and automatic failover. Submit Kubernetes manifests via a single REST API or CLI — GCO handles capacity-aware scheduling, spot fallback, multi-region autoscaling inference endpoints, and output persistence.
-
-**Who it's for.** Teams running accelerated workloads — LLM training and inference, batch ML, HPC, and general CPU jobs — that need multi-region redundancy, automatic capacity discovery, and IAM-based access without per-cluster kubeconfig distribution. Pre-wired nodepools for NVIDIA GPUs (g4dn, g5, and ARM64 g5g), AWS Trainium, AWS Inferentia, and general-purpose CPU on both amd64 and arm64 / Graviton.
-
-**Why it's different.** Capacity-aware routing across regions out of the box, full-stack observability (CloudWatch dashboards, alarms, SNS), and a CDK app validated across 20+ config matrix combinations in CI.
 
 **Recommended: run everything from the dev container.** GCO pins exact versions of a lot of Python packages (CDK, AWS SDKs, FastAPI, mypy, Ruff, etc.), and installing them on top of an existing Python environment is the most common source of "it doesn't install" reports. The dev container ships a fully resolved environment (Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, all Python deps) so you skip the whole problem.
 
@@ -78,9 +78,9 @@ docker run -it --rm \
 The `docker.sock` mount lets `gco stacks deploy-all` bundle Lambda assets through your host Docker daemon. See [Prerequisites](#prerequisites) for Colima/Finch socket paths and the security note about host-socket pass-through.
 
 <details>
-<summary>Prefer to install on your host? (advanced)</summary>
+<summary>Prefer to install on your host? (advanced — the dev container is recommended)</summary>
 
-This path requires Python 3.14+ and works best in a fresh virtual environment. With a lot of pinned dependencies, mixing GCO into an existing environment will frequently produce resolver conflicts — use a clean venv or pipx.
+Host installs are the advanced, non-recommended path. GCO pins exact versions of many Python packages, so installing on top of an existing Python environment frequently fails with dependency-resolver errors (`ResolutionImpossible`). The dev container shown above is the recommended path — it ships every dependency at the pinned versions — and the [Quick Start Guide](QUICKSTART.md) walks through it end to end. If you still want a host install, use a clean virtual environment or pipx.
 
 ```bash
 git clone git@github.com:awslabs/global-capacity-orchestrator-on-aws.git
@@ -91,7 +91,7 @@ cd global-capacity-orchestrator-on-aws && pipx install -e .
 
 See the [Quick Start](#quick-start) for the full install + first-job walkthrough, or [`docs/CLI.md`](docs/CLI.md) for every CLI command.
 
-> **💡 New to the codebase?** GCO ships with an [MCP server](mcp/) exposing 90 tools by default (up to 111 with feature flags) that index the whole project — docs, examples, source code, K8s manifests, scripts. Connect it to an AI-powered IDE (like [Kiro](https://kiro.dev)) and ask in natural language: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [mcp/README.md](mcp/README.md).
+> **💡 New to the codebase?** GCO ships with the **GCO MCP server** — an [MCP server](mcp/) exposing 92 tools by default (up to 113 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with MCP support (like [Kiro](https://kiro.dev)) and explore GCO conversationally — ask questions about the codebase instead of reading repository files directly: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [mcp/README.md](mcp/README.md).
 
 <details>
 <summary><b>Table of contents</b></summary>
@@ -103,7 +103,9 @@ See the [Quick Start](#quick-start) for the full install + first-job walkthrough
 - [Documentation](#documentation)
 - [Project Structure](#project-structure)
 - [Contributing](#contributing)
+- [License](#license)
 - [Support](#support)
+- [Security](#security)
 
 </details>
 
@@ -135,19 +137,21 @@ Running GPU workloads at scale is hard. You need to find regions with available 
 
 The fastest, most reliable path is the dev container — it sidesteps the dependency-conflict issues that come with installing GCO's pinned Python packages on top of your existing Python environment.
 
-```bash
-# Build the dev container (Python, Node.js, CDK, kubectl, AWS CLI all pinned & pre-installed)
-docker build -f Dockerfile.dev -t gco-dev .
+Build the dev container (Python, Node.js, CDK, kubectl, and the AWS CLI are all pinned and pre-installed), then drop into a shell with the `gco` CLI already on the path:
 
-# Drop into a shell with the gco CLI already installed
+```bash
+docker build -f Dockerfile.dev -t gco-dev .
 docker run -it --rm \
   -v ~/.aws:/root/.aws:ro \
   -v $(pwd):/workspace \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -w /workspace \
   gco-dev
+```
 
-# From inside the container — deploy everything (CDK bootstrap runs automatically)
+From inside the container, deploy everything — CDK bootstrap runs automatically for every region defined in `cdk.json`:
+
+```bash
 gco stacks deploy-all -y
 ```
 
@@ -157,17 +161,24 @@ If you'd rather install on your host, use a clean virtual environment or pipx �
 
 ### Submit Your First Job
 
+Check GPU capacity in a region before you submit:
+
 ```bash
-# Check GPU capacity
 gco capacity check --instance-type g4dn.xlarge --region us-east-1
+```
 
-# Submit a job (pick your preferred method)
-gco jobs submit-sqs examples/simple-job.yaml --region us-east-1    # via SQS (recommended)
-gco queue submit examples/simple-job.yaml --region us-east-1       # via Global DynamoDB queue
-gco jobs submit examples/simple-job.yaml -n gco-jobs               # via API Gateway
-gco jobs submit-direct examples/simple-job.yaml -r us-east-1       # via kubectl
+Submit a job using whichever path fits your setup — via SQS (recommended), via the global DynamoDB queue, via API Gateway, or directly through kubectl:
 
-# Check status and get logs
+```bash
+gco jobs submit-sqs examples/simple-job.yaml --region us-east-1
+gco queue submit examples/simple-job.yaml --region us-east-1
+gco jobs submit examples/simple-job.yaml -n gco-jobs
+gco jobs submit-direct examples/simple-job.yaml -r us-east-1
+```
+
+Check status and pull logs:
+
+```bash
 gco jobs list --all-regions
 gco jobs logs hello-gco -n gco-jobs -r us-east-1
 ```
@@ -317,6 +328,7 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 | Understand what GCO does | [Core Concepts](docs/CONCEPTS.md) |
 | Get running in under 60 minutes | [Quick Start Guide](QUICKSTART.md) |
 | Learn the architecture | [Architecture Details](docs/ARCHITECTURE.md) |
+| Browse every guide in one place | [Documentation Index](docs/README.md) |
 
 **Day-to-day operations:**
 
@@ -411,7 +423,7 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 │   ├── regional-api-proxy/              # Regional API Gateway → internal ALB proxy
 │   └── secret-rotation/                 # Daily secret rotation
 │
-├── mcp/                                 # MCP server for LLM interaction (90 tools default, up to 111 with feature flags)
+├── mcp/                                 # MCP server for LLM interaction (92 tools default, up to 113 with feature flags)
 ├── scripts/                             # Utility scripts (version bump, cluster access setup)
 └── tests/                               # PyTest + BATS test suites (counts tracked via badges)
 ```
@@ -449,6 +461,6 @@ See the [LICENSE](LICENSE) file for details.
 
 ## Security
 
-For security issues, **do not open a public GitHub issue.** See [`SECURITY.md`](.github/SECURITY.md) for the disclosure process.
+For security issues, **do not open a public GitHub issue.** See [`.github/SECURITY.md`](.github/SECURITY.md) for the disclosure process.
 
 ---

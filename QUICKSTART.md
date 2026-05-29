@@ -4,16 +4,17 @@ Get GCO (Global Capacity Orchestrator on AWS) running in under 60 minutes.
 
 > **💡 Tip:** GCO includes an [MCP server](mcp/) you can connect to an agent for guided exploration. Ask questions like *"What do I need to deploy?"* or *"Explain the architecture"* and the agent will pull from the docs and source code. See [mcp/README.md](mcp/README.md) for setup.
 >
-> **🐳 Use the dev container.** GCO pins exact versions of a lot of Python packages so CI is reproducible. That makes installing on top of an existing Python environment a frequent source of `ResolutionImpossible` / dependency-resolver errors. **The supported, fast path is the [dev container](#step-1-clone-and-build-the-dev-container)** — it ships Python, Node.js, CDK, kubectl, AWS CLI, and every Python dep at the exact versions CI uses. The host-install path is kept for contributors who specifically want to develop on their host; if you just want to deploy GCO, skip it.
+> **🐳 Use the dev container (recommended).** GCO pins exact versions of a lot of Python packages so CI is reproducible. That makes installing on top of an existing Python environment a frequent source of `ResolutionImpossible` / dependency-resolver errors. **The recommended path is the [dev container](#step-1-clone-and-build-the-dev-container)** — it ships Python, Node.js, CDK, kubectl, AWS CLI, and every Python dep at the exact versions CI uses. The host-install path is an **advanced, non-recommended** path kept for contributors who specifically want to develop on their host; if you just want to deploy GCO, skip it.
 
 ## Table of Contents
 
 - [Prerequisites Check](#prerequisites-check)
 - [Step 1: Clone and Build the Dev Container](#step-1-clone-and-build-the-dev-container)
 - [Step 2: Run the GCO CLI](#step-2-run-the-gco-cli)
+- [First Success Milestone](#first-success-milestone)
 - [Step 3: Bootstrap CDK](#step-3-bootstrap-cdk-optional)
 - [Step 4: Deploy Infrastructure](#step-4-deploy-infrastructure)
-- [Step 5: Configure Cluster Access](#step-5-configure-cluster-access)
+- [Step 5: Configure Cluster Access](#step-5-configure-cluster-access-optional)
 - [Step 6: Run a Test Job](#step-6-run-a-test-job)
 - [Step 7: Deploy an Inference Endpoint](#step-7-deploy-an-inference-endpoint-optional)
 - [Next Steps](#next-steps)
@@ -35,7 +36,9 @@ docker info         # confirms the daemon is running
 ```
 
 <details>
-<summary>Installing on your host instead? (advanced)</summary>
+<summary>Installing on your host instead? (advanced, non-recommended)</summary>
+
+> **Advanced, non-recommended.** Host installs frequently hit the pinned-version `ResolutionImpossible` / dependency-resolver errors described in the [dev container note](#quick-start-guide) and in [Common Issues](#pip-install-fails-with-resolutionimpossible-or-dependency-conflicts). The recommended path is the [dev container](#step-1-clone-and-build-the-dev-container).
 
 You'll additionally need:
 
@@ -53,9 +56,11 @@ You should install GCO into a **fresh** virtual environment or via pipx. Mixing 
 
 ## Step 1: Clone and Build the Dev Container
 
+> **Recommended path.** This dev-container path is the recommended way to install and run GCO. It avoids the pinned-version `ResolutionImpossible` / dependency-resolver errors described in the [dev container note](#quick-start-guide) above and in [Common Issues](#pip-install-fails-with-resolutionimpossible-or-dependency-conflicts). The [host-install path](#step-2-run-the-gco-cli) is advanced and non-recommended.
+
 ```bash
 # Clone repository
-git clone <repository-url>
+git clone <REPOSITORY_URL>
 cd global-capacity-orchestrator-on-aws
 
 # Build the dev container (cached on subsequent runs; ~2 min the first time)
@@ -110,7 +115,9 @@ gco --version
 > **Security note:** mounting `/var/run/docker.sock` gives the container root-equivalent access to your host's Docker daemon. Only use this on trusted hosts.
 
 <details>
-<summary>Installing the CLI on your host instead (advanced)</summary>
+<summary>Installing the CLI on your host instead (advanced, non-recommended)</summary>
+
+> **Advanced, non-recommended.** This path commonly fails with the pinned-version `ResolutionImpossible` / dependency-resolver errors described in the [dev container note](#quick-start-guide) and in [Common Issues](#pip-install-fails-with-resolutionimpossible-or-dependency-conflicts). The recommended path is the [dev container](#step-1-clone-and-build-the-dev-container).
 
 If you've decided you really want to install on your host (e.g., you're contributing changes to the CLI itself), use a clean isolated environment.
 
@@ -138,6 +145,56 @@ gco --version
 If pip fails with `ResolutionImpossible` or similar resolver errors, this is the pinned-versions issue called out at the top of this guide. Either start from a fresh venv or switch to the dev container — please don't try to relax the pins on your end.
 </details>
 
+## First Success Milestone
+
+**This milestone incurs no AWS charges.** It runs entirely on your machine and confirms the `gco` CLI works inside the dev container before you deploy anything billable.
+
+The recommended **Onboarding_Path** from a fresh clone to this milestone is the following sequentially numbered list. Every command needed is in this guide, so no step requires reading application, CLI, or infrastructure source:
+
+1. Clone the repository and enter it (see [Step 1](#step-1-clone-and-build-the-dev-container)):
+
+   ```bash
+   git clone <REPOSITORY_URL>
+   cd global-capacity-orchestrator-on-aws
+   ```
+
+   Replace `<REPOSITORY_URL>` with the Git URL of this repository (for example the HTTPS or SSH clone URL from your fork or the upstream remote).
+
+2. Build the dev container from `Dockerfile.dev` (see [Step 1](#step-1-clone-and-build-the-dev-container)):
+
+   ```bash
+   docker build -f Dockerfile.dev -t gco-dev .
+   ```
+
+3. Run the `gco` CLI inside the container (see [Step 2](#step-2-run-the-gco-cli)):
+
+   ```bash
+   docker run -it --rm \
+     -v ~/.aws:/root/.aws:ro \
+     -v $(pwd):/workspace \
+     -v /var/run/docker.sock:/var/run/docker.sock \
+     -w /workspace \
+     gco-dev
+   ```
+
+4. Verify the install — this is the milestone. From inside the container, run:
+
+   ```bash
+   gco --version
+   ```
+
+   Success looks like the `gco` CLI printing its version and exiting without error:
+
+   ```text
+   gco, version 2.0.2
+   ```
+
+   When you see a `gco, version …` line and no error, your environment is correctly set up and you have reached the First Success Milestone.
+
+> **Verification failed?** If `gco --version` does not print a `gco, version …` line — for example you see `command not found`, a Python import error, or a `ResolutionImpossible` / dependency-resolver error — go to [Common Issues](#common-issues) for the fix. The most reliable resolution is to use the [dev container](#step-1-clone-and-build-the-dev-container), which ships every dependency at the exact versions CI uses. You never need to read source code to get past this step.
+
+After this milestone, the next checkpoint is the **First Deploy Milestone** in [Step 4](#step-4-deploy-infrastructure). **That step provisions billable AWS resources**, unlike this milestone. Steps labeled *(Optional)* below are not required to reach the First Success Milestone.
+
 ## Step 3: Bootstrap CDK (Optional)
 
 CDK bootstrap runs automatically during `deploy` and `deploy-all` if a region hasn't been bootstrapped yet. You can skip this step entirely.
@@ -150,6 +207,8 @@ gco stacks bootstrap -r us-east-1
 ```
 
 ## Step 4: Deploy Infrastructure
+
+> **First Deploy Milestone — this step provisions billable AWS resources.** Unlike the [First Success Milestone](#first-success-milestone), deploying infrastructure creates AWS resources (EKS, VPC, load balancer, API Gateway, Lambda, and more) that incur charges until you [clean up](#clean-up).
 
 Run this from inside the dev container shell you started in [Step 2](#step-2-run-the-gco-cli) (or non-interactively, e.g. `gco-dev gco stacks deploy-all -y` using the alias from Step 2):
 
@@ -178,7 +237,7 @@ gco stacks deploy gco-us-east-1 -y
 - Lambda function for kubectl operations
 - Health Monitor and Manifest Processor services
 
-## Step 5: Configure Cluster Access
+## Step 5: Configure Cluster Access (Optional)
 
 > **Important:** The default EKS endpoint mode is `PRIVATE`, which means kubectl access from outside the VPC is not available. Most users don't need this — you can submit jobs via SQS (`gco jobs submit-sqs`) or API Gateway (`gco jobs submit`) without kubectl access.
 >
@@ -245,7 +304,7 @@ Your GCO cluster is ready. Here are some things to try:
 gco capacity check --instance-type g4dn.xlarge --region us-east-1
 
 # Get a region recommendation for your workload
-gco capacity recommend --instance-type g5.xlarge --gpu-count 1
+gco capacity recommend --instance-type g5.xlarge --region us-east-1
 
 # View costs by region
 gco costs summary
@@ -291,21 +350,27 @@ The inference_monitor in each target region automatically creates the Kubernetes
 
 ### MCP Server (for Cursor / Kiro / LLM integration)
 
-GCO includes an MCP server with 90 tools by default (up to 111 with feature flags) that wrap the CLI. The dev container already has the `[mcp]` extras installed, so all you need is the client-side config. The most portable form passes an absolute path in `args` (works in Cursor, Kiro, Claude Desktop, etc.):
+GCO includes an MCP server with 92 tools by default (up to 113 with feature flags) that wrap the CLI. The dev container already has the `[mcp]` extras installed, so all you need is the client-side config. The most portable form passes an absolute path in `args` (works in Cursor, Kiro, Claude Desktop, etc.):
 
 ```jsonc
-// ~/.cursor/mcp.json  (or ~/.kiro/settings/mcp.json)
+// MCP client config file (for example, Cursor's ~/.cursor/mcp.json)
 {
   "mcpServers": {
     "gco": {
       "command": "python3",
-      "args": ["/absolute/path/to/global-capacity-orchestrator-on-aws/mcp/run_mcp.py"]
+      "args": ["<ABSOLUTE_REPO_PATH>/mcp/run_mcp.py"]
     }
   }
 }
 ```
 
-After saving, reload the `gco` server in your MCP client's settings UI so the tool descriptors get picked up. If you're running outside the dev container, install the MCP extras into your venv first: `pip install -e ".[mcp]"`. See [`mcp/README.md`](mcp/README.md) for the full setup including a `cwd`-shorthand variant for Kiro.
+Replace `<ABSOLUTE_REPO_PATH>` with the absolute path to your local GCO clone — the `global-capacity-orchestrator-on-aws` directory created by `git clone` — so `args` resolves to that clone's `mcp/run_mcp.py`. Save the snippet in your MCP client's own config file; its location varies by client (Cursor uses `~/.cursor/mcp.json`), so see [`mcp/README.md`](mcp/README.md) for each client's path, including a `cwd`-shorthand variant for Kiro.
+
+After saving, reload the `gco` server in your MCP client's settings UI so the tool descriptors get picked up. If you're running outside the dev container, install the MCP extras into your venv first:
+
+```bash
+pip install -e ".[mcp]"
+```
 
 ## Common Issues
 

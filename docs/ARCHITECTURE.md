@@ -273,7 +273,7 @@ All compliance checks run during `cdk synth` and deployment. Suppressions are do
 **Compute Layer:**
 
 - EKS Auto Mode automatically provisions nodes
-- Nodepool limits configurable per instance type
+- nodepool limits configurable per instance type
 - Supports 1000s of pods per cluster
 
 ### Vertical Scaling
@@ -485,7 +485,7 @@ These are theoretical maximums. Actual limits depend on:
 - **AWS Service Quotas**: Default limits are much lower; requires quota increases
 - **EC2 Capacity**: GPU instance availability varies by region and time
 - **Cost**: Running at full scale would cost millions per hour
-- **Nodepool Limits**: Current config limits GPU pools to 1,000-1,500 vCPUs per region
+- **nodepool Limits**: Current config limits GPU pools to 1,000-1,500 vCPUs per region
 
 **Current nodepool limits (per region):**
 

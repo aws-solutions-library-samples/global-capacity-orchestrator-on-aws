@@ -1,6 +1,6 @@
 # Live Demo Script
 
-Automated feature demonstration for GCO (Global Capacity Orchestrator on AWS). Run `live_demo.sh` in a terminal during presentations to showcase the platform's capabilities in real time.
+Automated feature demonstration for **Global Capacity Orchestrator (GCO)** — *One API. Every Accelerator. Any Region.* Run `live_demo.sh` in a terminal during presentations to showcase the platform's capabilities in real time.
 
 ---
 
@@ -182,8 +182,10 @@ GCO_DEMO_FAST=1 bash demo/live_demo.sh
 | Problem | Fix |
 |---|---|
 | `jq: command not found` | Install jq: `brew install jq` or `apt install jq` |
-| `gco: command not found` | Install GCO CLI: `pipx install -e .` from repo root |
+| `gco: command not found` | Install the GCO CLI. The recommended path is the [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container); a host install (`pipx install -e .` from the repo root) is the advanced, non-recommended path. |
 | Jobs stuck in Pending | Check node provisioning: `kubectl get nodes -w` — GPU nodes take 60-90s |
 | Script skips a scheduler you enabled | Re-run `gco stacks deploy-all -y` after changing cdk.json |
 | Colors not rendering | Ensure your terminal supports ANSI colors. Try `TERM=xterm-256color` |
 | FSx/Valkey section skipped | Verify `fsx_lustre.enabled` / `valkey.enabled` is `true` in cdk.json |
+
+> **Installing the GCO CLI on your host?** GCO pins exact versions of many Python packages, so host installs frequently fail with `ResolutionImpossible` / dependency-resolver errors. Prefer the [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container) — it ships every dependency at the exact versions CI uses. See [Common Issues](../QUICKSTART.md#pip-install-fails-with-resolutionimpossible-or-dependency-conflicts) for the resolver-error fix.

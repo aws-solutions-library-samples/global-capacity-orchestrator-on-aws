@@ -1,4 +1,4 @@
-# GCO (Global Capacity Orchestrator on AWS) — Demo Walkthrough
+# Global Capacity Orchestrator (GCO) — Demo Walkthrough
 
 **One API. Every Accelerator. Any Region.**
 
@@ -26,7 +26,7 @@
 
 ## What You're About to See
 
-GCO (Global Capacity Orchestrator on AWS) is a production-ready platform that lets you submit GPU workloads across any number of AWS regions through a single API. It uses EKS Auto Mode, Global Accelerator, and API Gateway to eliminate the operational complexity of multi-region GPU orchestration.
+Global Capacity Orchestrator (GCO) is a production-ready platform that lets you submit GPU workloads across any number of AWS regions through a single API. It uses EKS Auto Mode, Global Accelerator, and API Gateway to eliminate the operational complexity of multi-region GPU orchestration.
 
 This document walks through the live demo so you can follow along or replicate it in your own account afterward.
 
@@ -53,7 +53,7 @@ Install the GCO CLI:
 
 ```bash
 git clone https://github.com/awslabs/global-capacity-orchestrator-on-aws.git
-cd gco
+cd global-capacity-orchestrator-on-aws
 pipx install -e .
 gco --version
 ```
@@ -150,19 +150,29 @@ gco jobs list --region us-east-1
 
 GCO supports four ways to submit jobs, depending on your use case:
 
-```bash
-# 1. SQS queue (recommended) — async, auto-processed by queue processor
-gco jobs submit-sqs examples/gpu-job.yaml --region us-east-1
+1. SQS queue (recommended) — async, auto-processed by the queue processor:
 
-# 2. API Gateway — synchronous, SigV4 authenticated
-gco jobs submit examples/gpu-job.yaml -n gco-jobs
+   ```bash
+   gco jobs submit-sqs examples/gpu-job.yaml --region us-east-1
+   ```
 
-# 3. Direct kubectl — requires EKS access entry
-gco jobs submit-direct examples/gpu-job.yaml -r us-east-1
+2. API Gateway — synchronous, SigV4 authenticated:
 
-# 4. DynamoDB global queue — centralized tracking with status history
-gco jobs submit-queue examples/gpu-job.yaml --region us-east-1
-```
+   ```bash
+   gco jobs submit examples/gpu-job.yaml -n gco-jobs
+   ```
+
+3. Direct kubectl — requires an EKS access entry:
+
+   ```bash
+   gco jobs submit-direct examples/gpu-job.yaml -r us-east-1
+   ```
+
+4. DynamoDB global queue — centralized tracking with status history:
+
+   ```bash
+   gco jobs submit-queue examples/gpu-job.yaml --region us-east-1
+   ```
 
 ---
 
