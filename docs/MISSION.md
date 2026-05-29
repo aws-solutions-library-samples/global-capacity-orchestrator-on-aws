@@ -395,6 +395,22 @@ Defaults:
 
 Every sampling attempt emits one structured audit event (`sampling_purpose`, `sampling_status`, `sampling_backend`, `sampling_model_id`, `model_output_bytes`, `validation_error`). Sampling rejections (transport errors, malformed JSON, schema mismatch, allowlist or budget violations, AST rejections on proposed scripts) cause an automatic deterministic fallback — the iteration still runs.
 
+### Environment context
+
+When the MCP `mission_*` tools build the strategy-revision sampler they pass an optional `environment_context` field into the prompt — a once-per-session snapshot of slow-moving live signals so the model is not flying blind on iteration 1. The block lands under `=== Environment context (slow-moving live signals) ===` between the budget block and the iteration history.
+
+Three top-level keys:
+
+- `regions` — sorted list of deployed regions discovered through the same `MultiRegionCapacityChecker` used by `ai_recommend`.
+- `cluster_metrics` — per-region snapshot keyed by region. Each entry carries `queue_depth`, `running_jobs`, `pending_jobs`, `gpu_utilization`, `cpu_utilization`, `recommendation_score`. Mirrors the fields `RegionCapacity` exposes; matches the data shape `ai_recommend` already feeds into its own model prompts.
+- `reservations` — `{"active_count": int, "by_region": {region: int}}`. Counts only — the full reservation list is reachable through `list_reservations` if the model wants the detail.
+
+The block is byte-capped at 4 KB. When a section overshoots (e.g. a probe returned an unusually large payload), the largest field is dropped first and the dropped key list is recorded under `_dropped_fields` so the operator can spot the gap. Top-level keys are sorted before emission so two callers with semantically-identical context produce a byte-identical prompt — the same property the determinism tests pin down for Observation summaries.
+
+What deliberately does **not** land in the block: spot prices and on-demand prices (large, AZ-fanout, cheap to fetch on demand from `spot_prices` once the model has picked an instance shape), capacity-block offerings (reachable through `reservation_check`), and anything timestamp-stamped to second precision (a wall-clock leak would break the byte-identical determinism property in `test_mission_sampling.py`).
+
+Failure semantics: every AWS probe is wrapped. A total credential failure or a missing checker returns `None` so the prompt omits the section entirely — the model just sees the same prompt shape it would have seen pre-environment-context. Per-region partial failures land as zeroed metrics rather than dropping the region, so the regions list is always honest.
+
 ## Scripted Strategies
 
 Scripted strategies are opt-in via `--allow-scripted-strategies` on the CLI (or `allow_scripted_strategies=true` on the MCP `mission_start` payload). With the flag set, a Strategy may carry a Python `script` instead of a list of `tool_calls`. Scripts run inside the Mission sandbox with two layers of defence:

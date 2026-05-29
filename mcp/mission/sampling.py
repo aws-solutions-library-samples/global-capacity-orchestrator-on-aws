@@ -70,6 +70,7 @@ __all__ = [
     "DEFAULT_BEDROCK_REGION",
     "ENV_BEDROCK_MODEL_ID",
     "ENV_BEDROCK_REGION",
+    "ENVIRONMENT_CONTEXT_BYTE_CAP",
     "FINAL_LESSONS_SCHEMA",
     "BedrockSamplingBackend",
     "MCPSamplingBackend",
@@ -124,6 +125,66 @@ PROMPT_BYTE_BUDGET: int = 32768
 #: budget is plentiful. The caller is expected to pass at most this
 #: many already; the builder slices defensively.
 RECENT_ITERATIONS_LIMIT: int = 5
+
+#: Per-Environment-context byte cap. The optional environment context
+#: block (``=== Environment context ===``) is its own truncation
+#: domain so the section can never grow without bound and push the
+#: rest of the prompt over :data:`PROMPT_BYTE_BUDGET`. The cap mirrors
+#: :data:`OBSERVATION_FIELD_BYTE_CAP` because both surfaces hold the
+#: same flavour of structured live signal (cluster + queue snapshots
+#: in this case) and the same truncation marker convention applies.
+ENVIRONMENT_CONTEXT_BYTE_CAP: int = 4096
+
+
+# ---------------------------------------------------------------------------
+# Environment context summarisation
+# ---------------------------------------------------------------------------
+
+
+def _summarise_environment_context(env: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a JSON-safe, byte-capped summary of the environment context.
+
+    The block is rendered into the Strategy_Revision prompt under
+    ``=== Environment context ===``. It carries small, slow-moving
+    live signals — per-region queue depths, GPU utilisation, deployed
+    region list, reservation counts — that the model would otherwise
+    have to spend tool calls to discover.
+
+    Two guarantees on the output:
+
+    1. The serialised form fits inside :data:`ENVIRONMENT_CONTEXT_BYTE_CAP`
+       UTF-8 bytes. When the input does not, top-level fields are
+       evaluated in sorted-key order, dropped one at a time from the
+       largest contributor down, and the dropped key list is recorded
+       under ``"_dropped_fields"`` so the operator can spot which
+       inputs got pruned.
+    2. Top-level keys are emitted in sorted order so two callers
+       passing semantically-identical dicts produce a byte-identical
+       block — the same property the determinism tests pin down for
+       Observation summaries.
+    """
+    # Defensive copy + sort so insertion order doesn't leak.
+    ordered: dict[str, Any] = {key: env[key] for key in sorted(env.keys())}
+    serialised = _dumps(ordered)
+    if _utf8_len(serialised) <= ENVIRONMENT_CONTEXT_BYTE_CAP:
+        return ordered
+
+    # Drop largest top-level field first, repeating until under cap.
+    # Records dropped keys so the operator (and the audit pipeline)
+    # can see what got pruned without having to diff against the
+    # gather helper's output.
+    dropped: list[str] = []
+    working = dict(ordered)
+    while _utf8_len(_dumps(working)) > ENVIRONMENT_CONTEXT_BYTE_CAP and working:
+        biggest_key = max(working, key=lambda k: _utf8_len(_dumps(working[k])))
+        dropped.append(biggest_key)
+        del working[biggest_key]
+
+    if dropped:
+        # Sort the dropped list so its position in the prompt is stable
+        # regardless of which key happened to be biggest first.
+        working["_dropped_fields"] = sorted(dropped)
+    return working
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +553,14 @@ class SamplingPrompt:
     remaining_iterations: int
     remaining_wall_clock_secs: float | None
     allow_scripts: bool = field(default=False)
+    #: Optional snapshot of slow-moving live signals (per-region queue
+    #: depth, GPU utilisation, deployed-region list, reservation
+    #: counts, etc.) gathered once at session start and reused on
+    #: every iteration's prompt. ``None`` (the default) suppresses the
+    #: ``=== Environment context ===`` section entirely so the prompt
+    #: stays byte-identical to the pre-environment-context shape —
+    #: that's what every existing determinism test pins down.
+    environment_context: Mapping[str, Any] | None = field(default=None)
 
     # ---- Strategy_Revision rendering --------------------------------------
 
@@ -610,6 +679,15 @@ class SamplingPrompt:
         sections.append("=== Budget context ===")
         sections.append(_dumps(budget_block, indent=2))
         sections.append("")
+        if self.environment_context is not None:
+            # Truncated + key-sorted — see :func:`_summarise_environment_context`.
+            # Emitting a header even for an empty dict means a session
+            # that opted in but had a probe failure still surfaces
+            # "we tried" so the operator can act on the gap.
+            env_summary = _summarise_environment_context(self.environment_context)
+            sections.append("=== Environment context (slow-moving live signals) ===")
+            sections.append(_dumps(env_summary, indent=2))
+            sections.append("")
         sections.append(f"=== {recent_header} ===")
         sections.append(_dumps(list(iterations), indent=2))
         sections.append("")
@@ -1329,6 +1407,7 @@ async def maybe_sample_strategy_revision(
     remaining_iterations: int,
     remaining_wall_clock_secs: float | None,
     allow_scripts: bool,
+    environment_context: Mapping[str, Any] | None = None,
 ) -> SamplingUsed | SamplingFallback:
     """Consult the advisory LLM for a Strategy_Revision, or fall back.
 
@@ -1379,6 +1458,7 @@ async def maybe_sample_strategy_revision(
         remaining_iterations=remaining_iterations,
         remaining_wall_clock_secs=remaining_wall_clock_secs,
         allow_scripts=allow_scripts,
+        environment_context=environment_context,
     )
 
     # ---- Transport: backend.sample. --------------------------------------
@@ -1503,6 +1583,7 @@ async def maybe_sample_final_lessons(
     remaining_wall_clock_secs: float | None = None,
     allow_scripts: bool = False,
     tool_docstrings: dict[str, str] | None = None,
+    environment_context: Mapping[str, Any] | None = None,
 ) -> SamplingUsed | SamplingFallback:
     """Consult the advisory LLM for final lessons, or fall back.
 
@@ -1554,6 +1635,7 @@ async def maybe_sample_final_lessons(
         remaining_iterations=remaining_iterations,
         remaining_wall_clock_secs=remaining_wall_clock_secs,
         allow_scripts=allow_scripts,
+        environment_context=environment_context,
     )
 
     # ---- Transport: backend.sample (uses lessons assembler). -------------

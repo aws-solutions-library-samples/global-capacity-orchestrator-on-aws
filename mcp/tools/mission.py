@@ -249,6 +249,17 @@ if is_enabled(FLAG_MISSION):
                 prefs=session.get("sampling_model_preferences"),
             )
 
+            # Slow-moving live signals (per-region queue depth, GPU
+            # utilisation, deployed-region list, reservation counts).
+            # Cached on the closure so a single ``_build_engine`` call —
+            # one MCP request that may iterate the loop several times —
+            # only pays the AWS round-trip once. Outer-list trick keeps
+            # the cache mutable through the inner closure without a
+            # ``nonlocal`` declaration.
+            from mission._environment import gather_session_environment  # noqa: PLC0415
+
+            env_cache: list[Mapping[str, Any] | None] = []
+
             async def _sampler(*, session: dict[str, Any], ctx: Any | None) -> Any:
                 iterations = session.get("iterations") or []
                 latest = iterations[-1] if iterations else None
@@ -264,6 +275,16 @@ if is_enabled(FLAG_MISSION):
                 # already-recorded iterations and clamp at zero.
                 cap = int(budget.get("max_iterations", 0))
                 remaining_iters = 0 if cap == -1 else max(0, cap - len(iterations))
+                # Gather the env block on first call only. ``None``
+                # (offline / no creds / probe failed) is cached too —
+                # we don't want to retry the AWS probe on every
+                # iteration when it has already declined to respond.
+                if not env_cache:
+                    try:
+                        env_cache.append(gather_session_environment(session))
+                    except Exception:  # noqa: BLE001
+                        env_cache.append(None)
+                env_ctx = env_cache[0]
                 return await mission_sampling.maybe_sample_strategy_revision(
                     backend=backend_obj,
                     session=cast("SessionState", session),
@@ -274,6 +295,7 @@ if is_enabled(FLAG_MISSION):
                     remaining_iterations=remaining_iters,
                     remaining_wall_clock_secs=_remaining_wall_clock(session),
                     allow_scripts=bool(session.get("allow_scripted_strategies", False)),
+                    environment_context=env_ctx,
                 )
 
             sampling_callable = _sampler
