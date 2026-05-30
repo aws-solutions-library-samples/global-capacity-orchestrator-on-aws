@@ -138,15 +138,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install pinned Trivy
-        # Install directly from the upstream script rather than using
-        # aquasecurity/trivy-action — the action transitively depends on
-        # aquasecurity/setup-trivy tags that have been yanked in the past
-        # ("v0.2.2" unresolvable), breaking CI. cve-scan.yml uses the same
-        # install pattern.
-        run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sudo sh -s -- -b /usr/local/bin "${TRIVY_VERSION}"
-          trivy --version
+        uses: ./.github/actions/install-trivy
+        with:
+          version: "${{ env.TRIVY_VERSION }}"
+          github-token: "${{ github.token }}"
       - name: Trivy filesystem scan
         run: |
           set -euo pipefail
@@ -211,10 +206,10 @@ jobs:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v4
       - name: Install pinned Trivy
-        run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sudo sh -s -- -b /usr/local/bin "${TRIVY_VERSION}"
-          trivy --version
+        uses: ./.github/actions/install-trivy
+        with:
+          version: "${{ env.TRIVY_VERSION }}"
+          github-token: "${{ github.token }}"
       - name: Build image
         # Shared GHA layer cache (scope: ${{ matrix.image }}). Same scope
         # is used by the integration:docker:* jobs and the kind E2E build,
