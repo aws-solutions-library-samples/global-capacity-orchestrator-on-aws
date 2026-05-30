@@ -19,6 +19,7 @@ Mission is GCO's goal-directed iteration loop. The operator declares a directive
   - [Allowed operators and constructs](#allowed-operators-and-constructs)
   - [Rejected outright](#rejected-outright)
   - [Why the eval is safe](#why-the-eval-is-safe)
+- [Reading Metrics with Reader Tools](#reading-metrics-with-reader-tools)
 - [Quickstart](#quickstart)
 - [One-Command Run](#one-command-run)
 - [The No-AWS Smoke Test](#the-no-aws-smoke-test)
@@ -362,6 +363,119 @@ The validated AST is compiled and evaluated with `eval(code, globals_, locals_)`
 The double defence (AST allowlist plus empty `__builtins__`) is the same pattern used by the wider script sandbox (`mcp/mission/sandbox.py`). The validator is exercised by a Hypothesis property test (`tests/test_mission_predicate_security.py`) that synthesises forbidden constructs and asserts the evaluator is never reached.
 
 If you need an expression that the allowlist rejects, the right path is to do the work inside an allowlisted tool and surface the result on the Observation under a key the predicate can read. The predicate is intentionally a thin "is the goal hit" check, not a place to put real logic.
+
+## Reading Metrics with Reader Tools
+
+A `metric_threshold` criterion reads a number off the Observation by dot-path — but something has to *put* that number there. The metric-reader tools (registered under `mcp/tools/metrics.py`, all carrying the `safe` tag) are read-only tools that surface a single training-style scalar in the exact shape the Observe phase merges, so a criterion can watch training loss, eval accuracy, throughput, or GPU utilisation with zero scripting.
+
+### The canonical metrics shape
+
+Every reader tool returns a JSON object with a top-level `metrics` key whose value maps metric names to numbers:
+
+```json
+{
+  "metrics": {"loss": 0.42},
+  "source": "file:s3://cluster-shared/run-7/trainer_state.json",
+  "region": "us-east-1",
+  "format": "hf_trainer_state",
+  "aggregation": "min"
+}
+```
+
+This is the **canonical metrics shape**: a dict with a top-level `metrics` key mapping string names to numeric (`int`/`float`) values. When a tool call returns this shape during the Execute phase, the Observe phase merges it into the iteration's Observation via `metrics.update(...)`, so the value lands at `observation["metrics"]["loss"]`. Everything else in the result — `source`, `region`, `format`, `aggregation`, timestamps, raw datapoints — is provenance that lives strictly *outside* the `metrics` object, so the merged `observation["metrics"]` dict only ever contains numbers.
+
+Two consequences follow directly:
+
+- A reader's success result merges cleanly, and a criterion reads the value by dot-path.
+- A reader's *failure* result is a structured error envelope (`{"code": "...", "details": {...}}`) with **no** top-level `metrics` key, so the Observe phase skips it and the criterion is left `inconclusive` rather than failing the loop. A failed read never crashes the session.
+
+### The `metrics.<name>` dot-path convention
+
+A reader emits its value under a single metric name — either the caller-supplied output name or a deterministic default derived from the source (the CloudWatch metric name, the extracted field, the file field). The name is constrained to a single dot-path segment: 1–128 characters, no `.` separator, no whitespace. The resulting dot-path a criterion reads is therefore always exactly `metrics.<name>`.
+
+So a reader that emits `{"metrics": {"loss": 0.42}}` is observed by a criterion whose `metric` field is `"metrics.loss"`:
+
+```json
+{
+  "criterion_id": "loss_target",
+  "kind": "metric_threshold",
+  "required": true,
+  "metric": "metrics.loss",
+  "op": "<",
+  "target": 0.1
+}
+```
+
+Pick the output name on the tool call and the `metrics.<name>` dot-path on the criterion so the two line up.
+
+### Aggregation modes for history-bearing readers
+
+Mission keeps metrics **point-in-time** — the engine accumulates `tool_results` across iterations but deliberately leaves `metrics` per-iteration. Training artifacts and logs, though, frequently carry *history*: a Hugging Face `log_history` array, JSONL step lines, a column of values. A **history-bearing reader** (the job-log reader, and the file readers for sequence-bearing formats) reduces that history to one number itself via an `aggregation` parameter, so a criterion can express goals like "best loss so far" without the engine ever accumulating metrics.
+
+| `aggregation` | Reduces the observed sequence to |
+|---------------|----------------------------------|
+| `last` (default) | The most recent numeric value. |
+| `first` | The earliest numeric value. |
+| `min` | The smallest numeric value. |
+| `max` | The largest numeric value. |
+| `mean` | The arithmetic mean of the numeric values. |
+
+Non-numeric entries in the sequence are ignored before reducing. The applied mode is reported as a diagnostic field outside `metrics`. When the caller supplies no mode, the reader defaults to `last`, so the most recent value is returned. An out-of-set mode, an empty sequence, and a sequence with no numeric values each surface as a distinct error envelope code.
+
+### The four reader tools
+
+| Tool | Source | History-bearing? | Availability |
+|------|--------|------------------|--------------|
+| `metrics_cloudwatch_get` | A single CloudWatch `GetMetricStatistics` datapoint for a named metric/namespace/dimensions/region (most-recent datapoint selected deterministically). | No | default-on |
+| `metrics_from_job_logs` | The tail of a job's logs, extracted by JSON key (dot-path) or regex (first capture group), reduced via the aggregation mode. | Yes | default-on |
+| `metrics_from_shared_storage_file` | A metrics file a job wrote to EFS or the cluster shared bucket, dispatched on a `format` parameter (`json`, `csv`, `hf_trainer_state`, `jsonl`, `yaml`, `parquet`, and optional/stretch `tfevents`). | Yes for sequence-bearing formats | default-on |
+| `metrics_from_local_file` | A metrics file on the **local filesystem**, confined to an allowlisted root. Reuses every piece of the shared-storage reader (same `format` set, aggregation handling, size cap, output shape, error model) and adds only local-path confinement. | Yes for sequence-bearing formats | **gated** by `GCO_ENABLE_LOCAL_METRICS`, default-off |
+
+The three default-on readers are read-only against remote AWS resources, incur only normal API-call-rate charges, and are always present in `mcp.list_tools()` — referenceable from a Mission session's tool allowlist with no flag juggling.
+
+`metrics_from_local_file` is the deliberate exception. Reading the MCP host's local filesystem is a real security concern even for a read-only tool, so it is gated default-off behind `GCO_ENABLE_LOCAL_METRICS` (or the umbrella `GCO_ENABLE_ALL_TOOLS=true`) and confined to the single root configured via `GCO_METRICS_LOCAL_ROOT`. Every read path is fully resolved — collapsing `..` segments and following symlinks — and rejected unless it stays inside that root: a `..` escape returns a `path_traversal_escape` envelope, a symlink whose target jumps out returns `symlink_escape`, and an enabled gate with no configured root returns `local_root_not_configured`. Its docstring begins with the literal prefix `[gated by GCO_ENABLE_LOCAL_METRICS]`.
+
+### Example: observe training loss from an HF Trainer state file
+
+A common case is driving validation/training loss down while a Hugging Face `Trainer` writes `trainer_state.json` (its `log_history` is a list of per-step dicts carrying `loss`, `eval_loss`, and friends). Point the file reader at the artifact, ask for the `loss` field with `format: hf_trainer_state`, and reduce with `aggregation: min` to track the best loss seen so far:
+
+```jsonc
+// tool call the strategy issues during the Execute phase
+{
+  "tool": "metrics_from_shared_storage_file",
+  "args": {
+    "path": "s3://cluster-shared/run-7/trainer_state.json",
+    "region": "us-east-1",
+    "field": "loss",
+    "format": "hf_trainer_state",
+    "aggregation": "min",
+    "output_name": "loss"
+  }
+}
+```
+
+```json
+// the matching metric_threshold criterion
+{
+  "criterion_id": "best_loss",
+  "kind": "metric_threshold",
+  "required": true,
+  "metric": "metrics.loss",
+  "op": "<=",
+  "target": 0.1
+}
+```
+
+The reader collects every `loss` entry from `log_history`, reduces to the minimum, and emits `{"metrics": {"loss": <best>}, "format": "hf_trainer_state", "aggregation": "min", ...}`. The Observe phase merges it, and the criterion compares `metrics.loss <= 0.1`. If the file is missing, malformed, or carries no numeric `loss`, the reader returns an error envelope instead and the criterion reads `inconclusive` — the loop keeps running.
+
+### Future work: cumulative metrics and trend criteria
+
+These readers deliberately do **not** change Mission engine semantics. The engine keeps metrics strictly point-in-time, and history is reduced *inside* the reader via an aggregation mode rather than accumulated across iterations by the engine. Two engine capabilities are explicitly **out of scope** here and called out as future work:
+
+- A **cumulative-metrics view** that would let the engine accumulate `metrics` across iterations the way it already accumulates `tool_results`.
+- A **`metric_trend` criterion** kind that would evaluate the direction or slope of a metric over several iterations (history-aware observation), rather than comparing a single point-in-time value to a fixed target.
+
+Until those land as a separate, deliberate effort, express "best so far" and similar history-shaped goals through a reader `aggregation` mode against a source that already carries the history.
 
 ## Quickstart
 

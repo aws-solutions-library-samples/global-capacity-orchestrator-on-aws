@@ -21,6 +21,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
   - [KEDA Autoscaled Job](#keda-autoscaled-job)
   - [Kueue Job Queueing](#kueue-job-queueing)
   - [MegaTrain SFT Job](#megatrain-sft-job)
+  - [Mission Training-Loss Observation](#mission-training-loss-observation)
   - [Model Download Job](#model-download-job)
   - [Multi-GPU Distributed Training](#multi-gpu-distributed-training)
   - [Ray Cluster](#ray-cluster)
@@ -62,6 +63,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 | [KEDA Scaled](#keda-autoscaled-job) | `keda-scaled-job.yaml` | Scheduler | — | — |
 | [Kueue](#kueue-job-queueing) | `kueue-job.yaml` | Scheduler | Optional | — |
 | [MegaTrain SFT](#megatrain-sft-job) | `megatrain-sft-job.yaml` | Jobs | ✅ | — |
+| [Mission Training-Loss](#mission-training-loss-observation) | `mission-training-loss-criteria.json`, `megatrain-trainer-state.json` | Mission | — | Mission |
 | [Model Download](#model-download-job) | `model-download-job.yaml` | Jobs | — | — |
 | [Multi-GPU Training](#multi-gpu-distributed-training) | `multi-gpu-training.yaml` | Jobs | ✅ | — |
 | [Pipeline DAG](#dag-pipeline) | `pipeline-dag.yaml` | Pipeline | — | — |
@@ -399,6 +401,51 @@ gco jobs logs megatrain-sft -r us-east-1
 **Requirements:** GPU node with large CPU RAM, shared EFS storage.
 
 **When to use:** SFT fine-tuning of large HuggingFace models, full-precision training on a single GPU.
+
+---
+
+### Mission Training-Loss Observation
+
+**Files:** `mission-training-loss-criteria.json`, `megatrain-trainer-state.json`
+
+Ties the [MegaTrain SFT Job](#megatrain-sft-job) to a [Mission](../docs/MISSION.md) `metric_threshold` criterion so the goal-directed loop can watch training loss fall without any scripting. The MegaTrain trainer writes a Hugging Face `trainer_state.json` to shared EFS under its `OUTPUT_DIR` (`/mnt/gco/megatrain-sft/checkpoints`); its `log_history` is a list of per-step records carrying `loss`, `eval_loss`, `step`, and `epoch`. The read-only `metrics_from_shared_storage_file` tool reads that file with `format=hf_trainer_state`, collects the `loss` field across every `log_history` entry, and reduces the sequence to a single number via an aggregation mode — `min` for "best loss so far", or `last` for "current loss". The result lands in the canonical `{"metrics": {"loss": <number>}}` shape that Mission's Observe phase merges, so the `metrics.loss` dot-path in the criterion resolves directly.
+
+- `megatrain-trainer-state.json` is a small representative sample of the artifact MegaTrain produces (five training steps plus one eval record) so you can try the reader against a concrete file.
+- `mission-training-loss-criteria.json` is a one-criterion [Criteria File](../docs/MISSION.md#criteria-file-schema) asserting `metrics.loss <= 1.5`.
+
+**Prerequisites:** `GCO_ENABLE_MISSION=true` (or the umbrella `GCO_ENABLE_ALL_TOOLS=true`). The MegaTrain job must have run and written its `trainer_state.json` to shared storage.
+
+**Usage:**
+
+```bash
+export GCO_ENABLE_MISSION=true
+
+# Run the training job that produces trainer_state.json on shared EFS.
+gco jobs submit-direct examples/megatrain-sft-job.yaml -r us-east-1
+
+# Drive a Mission that observes the best training loss so far.
+gco mission start --run \
+  --directive "Drive MegaTrain SFT training loss to 1.5 or below." \
+  --criteria-file examples/mission-training-loss-criteria.json \
+  --max-iterations 10 --max-wall-clock 3600 \
+  --tool-allowlist metrics_from_shared_storage_file
+```
+
+The Mission loop calls `metrics_from_shared_storage_file` each iteration with these arguments:
+
+```json
+{
+  "path": "/mnt/gco/megatrain-sft/checkpoints/trainer_state.json",
+  "region": "us-east-1",
+  "field": "loss",
+  "format": "hf_trainer_state",
+  "aggregation": "min"
+}
+```
+
+Switch `aggregation` to `last` to track the current step's loss instead of the best-so-far. To observe the held-out metric instead, set `field` to `eval_loss`.
+
+**When to use:** Goal-directed training runs where a `metric_threshold` criterion should observe a metric a HF Trainer persisted (loss, eval loss, perplexity) without writing a custom log-scraping tool.
 
 ---
 

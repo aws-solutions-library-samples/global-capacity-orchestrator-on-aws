@@ -1,0 +1,10 @@
+[
+  {
+    "criterion_id": "best_training_loss",
+    "kind": "metric_threshold",
+    "required": true,
+    "metric": "metrics.loss",
+    "op": "<=",
+    "target": 1.5
+  }
+]

@@ -23,6 +23,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
   - [Cost Tracking](#cost-tracking)
   - [Infrastructure](#infrastructure)
   - [Storage](#storage)
+  - [Metrics](#metrics)
   - [Model Weights](#model-weights)
   - [Templates](#templates)
   - [Webhooks](#webhooks)
@@ -57,7 +58,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server wraps the `gco` CLI, exposing 92 tools by default (up to 113 with all flags enabled) that cover the full lifecycle of GPU workload management:
+The MCP server wraps the `gco` CLI, exposing 95 tools by default (up to 117 with all flags enabled) that cover the full lifecycle of GPU workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -453,6 +454,17 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `list_file_systems` | List EFS and FSx file systems | safe | — |
 | `files_get` | Fetch a single file from shared storage | safe | — |
 | `files_access_points` | List EFS access points | safe | — |
+
+### Metrics
+
+Read-only metric-reader tools that surface a single training-style scalar (loss, accuracy, throughput, GPU utilization) in the canonical `{"metrics": {...}}` shape a Mission `metric_threshold` criterion can observe with zero scripting. The three remote-source readers are registered by default; `metrics_from_local_file` reads the MCP host's local filesystem and is therefore gated default-off behind `GCO_ENABLE_LOCAL_METRICS`.
+
+| Tool | Description | Risk Tier | Gated By |
+|------|-------------|-----------|----------|
+| `metrics_cloudwatch_get` | Read one CloudWatch datapoint as a canonical metric | safe | — |
+| `metrics_from_job_logs` | Extract a scalar from the tail of a job's logs by JSON key or regex | safe | — |
+| `metrics_from_shared_storage_file` | Read a named field from a shared-storage metrics file (JSON, CSV, HF Trainer state, JSONL, YAML, Parquet, tfevents) | safe | — |
+| `metrics_from_local_file` | Read a named field from a local metrics file confined to `GCO_METRICS_LOCAL_ROOT` | safe | `GCO_ENABLE_LOCAL_METRICS` |
 
 ### Model Weights
 

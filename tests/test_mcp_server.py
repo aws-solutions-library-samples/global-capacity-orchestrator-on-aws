@@ -141,13 +141,16 @@ class TestToolRegistration:
 
     def test_tool_count(self):
         tools = asyncio.run(run_mcp.mcp._list_tools())
-        # 92 base tools after delete_job and delete_inference moved under
-        # GCO_ENABLE_DESTRUCTIVE_OPERATIONS. The breakdown:
+        # 95 base tools after delete_job and delete_inference moved under
+        # GCO_ENABLE_DESTRUCTIVE_OPERATIONS and the three default-on metric
+        # readers were added. The breakdown:
         #   * the original 81 (read-only + low-risk + discovery) minus 2
         #     (delete_job + delete_inference) = 79
         #   * 11 unconditional image-registry tools (read-only + administrative)
         #   * 2 unconditional task observability tools (task_status, task_tail)
-        # = 92 total at default registration.
+        #   * 3 unconditional, default-on metric readers (metrics_cloudwatch_get,
+        #     metrics_from_job_logs, metrics_from_shared_storage_file)
+        # = 95 total at default registration.
         # reserve_capacity adds 1 when GCO_ENABLE_CAPACITY_PURCHASE=true.
         # Image-publish-gated tools (images_build, images_push) add 2 when
         # GCO_ENABLE_IMAGE_PUBLISH=true. Destructive-gated tools add 12 when
@@ -161,7 +164,10 @@ class TestToolRegistration:
         # bootstrap_cdk) add 3 when GCO_ENABLE_INFRASTRUCTURE_DEPLOY=true.
         # Infrastructure-destroy gated tools (destroy_stack, destroy_all)
         # add 2 when GCO_ENABLE_INFRASTRUCTURE_DESTROY=true.
-        base_count = 92
+        # The local-file metric reader (metrics_from_local_file) adds 1 when
+        # GCO_ENABLE_LOCAL_METRICS=true. With every flag enabled the ceiling is
+        # 95 + 1 + 2 + 12 + 1 + 3 + 2 + 1 = 117.
+        base_count = 95
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -178,6 +184,8 @@ class TestToolRegistration:
             expected += 3  # deploy_stack + deploy_all + bootstrap_cdk
         if "destroy_stack" in tool_names:
             expected += 2  # destroy_stack + destroy_all
+        if "metrics_from_local_file" in tool_names:
+            expected += 1  # gated by GCO_ENABLE_LOCAL_METRICS
         assert len(tools) == expected
 
     def test_all_tool_names(self):
@@ -238,6 +246,10 @@ class TestToolRegistration:
             # ── Model weights (all read-only) ──
             "list_models",
             "get_model_uri",
+            # ── Metrics (read-only, default-on) ──
+            "metrics_cloudwatch_get",
+            "metrics_from_job_logs",
+            "metrics_from_shared_storage_file",
             #
             # Async tools (all read-only, "safe" risk tier)
             #
@@ -363,6 +375,9 @@ class TestToolRegistration:
         # GCO_ENABLE_INFRASTRUCTURE_DESTROY.
         if "destroy_stack" in names:
             expected.update({"destroy_stack", "destroy_all"})
+        # Local-file metric reader registers under GCO_ENABLE_LOCAL_METRICS.
+        if "metrics_from_local_file" in names:
+            expected.add("metrics_from_local_file")
         assert names == expected
 
     def test_each_tool_has_description(self):
