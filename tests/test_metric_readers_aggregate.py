@@ -139,7 +139,7 @@ def test_reduce_sequence_matches_reference_over_numbers_only(
 
 
 # ===========================================================================
-# Property 5: the reducer's three "nothing to reduce" failures
+# The reducer's three "nothing to reduce" failures
 # ===========================================================================
 #
 # The reducer rejects three distinct degenerate inputs, and it does so in a
@@ -149,9 +149,9 @@ def test_reduce_sequence_matches_reference_over_numbers_only(
 # numbers is refused *after* filtering. Each failure carries its own stable
 # code, and the codes are distinct so a caller can tell the three apart:
 #
-#   * unknown mode                -> INVALID_AGGREGATION_MODE   (R7.8)
-#   * empty sequence              -> EMPTY_SEQUENCE             (R7.12)
-#   * non-empty, all non-numeric  -> NO_NUMERIC_VALUE           (R7.11)
+#   * unknown mode                -> INVALID_AGGREGATION_MODE
+#   * empty sequence              -> EMPTY_SEQUENCE
+#   * non-empty, all non-numeric  -> NO_NUMERIC_VALUE
 #
 # The properties below generate inputs in each category (and combinations
 # that exercise the precedence) and assert exactly one code is raised, never
@@ -187,7 +187,6 @@ def _assert_raises_code(values: Sequence[object], mode: str, code: str) -> None:
     )
 
 
-# Feature: mission-metric-reader-tools, Property 5: Reducer empty-vs-all-non-numeric-vs-invalid-mode split
 @settings(
     max_examples=200,
     deadline=None,
@@ -199,12 +198,11 @@ def test_unknown_mode_is_rejected_before_anything_else(values: list[object], mod
 
     The mode is validated first, so the verdict does not depend on the
     sequence: an unknown mode wins over an empty sequence and over an
-    all-non-numeric sequence alike (R7.8, by reducer precedence).
+    all-non-numeric sequence alike (by reducer precedence).
     """
     _assert_raises_code(values, mode, ErrorCode.INVALID_AGGREGATION_MODE)
 
 
-# Feature: mission-metric-reader-tools, Property 5: Reducer empty-vs-all-non-numeric-vs-invalid-mode split
 @settings(
     max_examples=200,
     deadline=None,
@@ -216,12 +214,11 @@ def test_empty_sequence_under_a_valid_mode_yields_empty_sequence(mode: str) -> N
 
     With a recognized mode the next gate is the empty check, which fires
     before numeric filtering, so an empty input is reported as an empty
-    sequence rather than as "no numeric value" (R7.12).
+    sequence rather than as "no numeric value".
     """
     _assert_raises_code([], mode, ErrorCode.EMPTY_SEQUENCE)
 
 
-# Feature: mission-metric-reader-tools, Property 5: Reducer empty-vs-all-non-numeric-vs-invalid-mode split
 @settings(
     max_examples=200,
     deadline=None,
@@ -235,14 +232,13 @@ def test_all_non_numeric_under_a_valid_mode_yields_no_numeric_value(
 
     The sequence has entries (so it is not empty) but none survive the
     numeric guard, so the reducer reports the distinct "had data, none of it
-    numeric" code rather than the empty-sequence code (R7.11).
+    numeric" code rather than the empty-sequence code.
     """
     # Guard the generator's intent: every entry really is non-numeric.
     assert all(not is_numeric_value(v) for v in values)
     _assert_raises_code(values, mode, ErrorCode.NO_NUMERIC_VALUE)
 
 
-# Feature: mission-metric-reader-tools, Property 5: Reducer empty-vs-all-non-numeric-vs-invalid-mode split
 @settings(
     max_examples=200,
     deadline=None,
@@ -257,8 +253,7 @@ def test_three_failures_are_mutually_exclusive_with_distinct_codes(
     A single draw picks one of the three failure categories, builds a
     matching ``(values, mode)`` input, and asserts the reducer raises exactly
     the code that category owns. Across categories the three codes are
-    pairwise distinct, so the outcomes cannot be confused (R7.8, R7.11,
-    R7.12).
+    pairwise distinct, so the outcomes cannot be confused.
     """
     # The three codes are distinct constants — the contract that makes the
     # outcomes distinguishable in the first place.

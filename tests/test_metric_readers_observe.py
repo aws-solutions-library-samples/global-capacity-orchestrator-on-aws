@@ -13,7 +13,7 @@ two surfaces of it:
 * the private :meth:`MissionEngine._build_observation` /
   :meth:`MissionEngine._evaluate_metric_threshold` pair directly, so the merge
   contract is pinned at the smallest possible scope (the exact
-  ``metrics.update(result_metrics)`` merge the design quotes); and
+  ``metrics.update(result_metrics)`` merge the engine performs); and
 * a full :meth:`MissionEngine.run_iteration` session against a stub dispatcher
   that returns a reader-shaped result, mirroring the existing
   ``test_mission_e2e_*`` modules, so the merge is also confirmed end-to-end
@@ -23,11 +23,11 @@ The reader-shaped inputs are built with the **real** reader helpers
 ``metric_readers.shape.metrics_result`` and ``metric_readers.shape.error_envelope``
 so the test exercises the genuine wire shapes, not hand-rolled look-alikes.
 
-Validates the merge contract from the design's "merge contract" section and
-Requirements 1.6 (the merged Observation resolves ``metrics.<name>`` to the
-emitted Numeric_Value), 14.4 (an error envelope has no top-level ``metrics``
-key, so the criterion is left inconclusive), and 16.4 (the reader result is
-consumable by a ``metric_threshold`` criterion against the engine as-is).
+Validates the merge contract: the merged Observation resolves
+``metrics.<name>`` to the emitted Numeric_Value; an error envelope has no
+top-level ``metrics`` key, so the criterion is left inconclusive; and the
+reader result is consumable by a ``metric_threshold`` criterion against the
+engine as-is.
 """
 
 from __future__ import annotations
@@ -176,7 +176,7 @@ class TestObserveMergeContractDirect:
         ``metrics``; after the engine's permissive
         ``metrics.update(result_metrics)`` merge, the dot-path the criterion
         uses resolves to exactly the emitted Numeric_Value, and the provenance
-        never pollutes the merged ``metrics`` dict. (Requirement 1.6)
+        never pollutes the merged ``metrics`` dict.
         """
         engine = _minimal_engine()
         result = metrics_result(
@@ -203,7 +203,7 @@ class TestObserveMergeContractDirect:
 
         ``metrics.loss < 0.5`` is met and ``metrics.loss < 0.4`` is unmet for
         the emitted 0.42, and the evidence the engine returns is the merged
-        Numeric_Value itself. (Requirements 1.6, 16.4)
+        Numeric_Value itself.
         """
         engine = _minimal_engine()
         observation = engine._build_observation(
@@ -230,7 +230,7 @@ class TestObserveMergeContractDirect:
         so the permissive merge skips it: the merged ``metrics`` dict stays
         empty and the dot-path lookup misses, so the criterion is
         ``inconclusive`` (with ``metric_path_missing`` evidence) rather than
-        failing the loop. (Requirement 14.4)
+        failing the loop.
         """
         engine = _minimal_engine()
         envelope = error_envelope("file_not_found", path="x")
@@ -268,7 +268,6 @@ class TestObserveMergeContractEndToEnd:
         The stub dispatcher returns the canonical reader shape; the unmodified
         engine merges it in Observe_Phase and evaluates the ``metrics.loss <
         0.5`` criterion as met in the iteration's ``criteria_evaluation``.
-        (Requirements 1.6, 16.4)
         """
         backend = FilesystemBackend(root=tmp_path)
         session = _make_session("sess-observe-met", "<", 0.5)
@@ -298,7 +297,7 @@ class TestObserveMergeContractEndToEnd:
         """The same merged value evaluates unmet against a tighter threshold.
 
         ``metrics.loss < 0.4`` is unmet for the emitted 0.42 — the merge is
-        identical; only the target differs. (Requirements 1.6, 16.4)
+        identical; only the target differs.
         """
         backend = FilesystemBackend(root=tmp_path)
         session = _make_session("sess-observe-unmet", "<", 0.4)
@@ -327,7 +326,7 @@ class TestObserveMergeContractEndToEnd:
 
         The dispatcher returns an error envelope (no top-level ``metrics``); the
         unmodified engine merges nothing, so the criterion is ``inconclusive``
-        and the loop is never failed on bad data. (Requirement 14.4)
+        and the loop is never failed on bad data.
         """
         backend = FilesystemBackend(root=tmp_path)
         session = _make_session("sess-observe-inconclusive", "<", 0.5)

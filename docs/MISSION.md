@@ -8,6 +8,7 @@ Mission is GCO's goal-directed iteration loop. The operator declares a directive
 - [Generating a Criteria File](#generating-a-criteria-file)
 - [Criteria File Schema](#criteria-file-schema)
   - [`metric_threshold` criterion](#metric_threshold-criterion)
+  - [`metric_trend` criterion](#metric_trend-criterion)
   - [`event` criterion](#event-criterion)
   - [`tool_call_succeeded` criterion](#tool_call_succeeded-criterion)
   - [`predicate` criterion](#predicate-criterion)
@@ -127,12 +128,12 @@ The `--allowlist` flag (repeatable) is informational for the deterministic path;
 
 The criteria file is a JSON **array** — one or more criterion objects. Every criterion declares what "done" looks like for that dimension of the goal. The Evaluate phase walks the array on every checkpoint and stamps each criterion as `met`, `unmet`, or `inconclusive`. The session reaches a `complete` verdict only when **every required criterion is `met`** and **none are `inconclusive`** — see [Required vs optional criteria](#required-vs-optional-criteria).
 
-Four criterion kinds are supported. Every criterion regardless of kind carries these three required keys:
+Five criterion kinds are supported. Every criterion regardless of kind carries these three required keys:
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `criterion_id` | non-empty string | Stable identifier, unique across the file. Used by the audit log, the Final_Report, and the verdict cascade. |
-| `kind` | string | One of `metric_threshold`, `event`, `predicate`, `tool_call_succeeded`. |
+| `kind` | string | One of `metric_threshold`, `metric_trend`, `event`, `predicate`, `tool_call_succeeded`. |
 | `required` | bool | When `true`, this criterion must be `met` for the session to complete. When `false`, it's tracked but not blocking. |
 
 The kind-specific keys are documented per section below.
@@ -159,6 +160,37 @@ Example:
   "target": 0.1
 }
 ```
+
+### `metric_trend` criterion
+
+Evaluates the *direction* of a metric across iterations rather than comparing a single point-in-time value to a fixed target. Use this for goals like "loss is falling" or "throughput is not regressing" where the shape of the curve matters more than any one reading.
+
+Unlike `metric_threshold`, which reads the latest value off the per-iteration Observation, `metric_trend` reads the metric's **history** — the ordered series of numeric readings the engine accumulates across iterations under `metric_history` (oldest→newest). The engine builds that series in the Evaluate phase; you don't have to make tools emit it. Non-numeric readings are skipped so a stray string can't poison the series.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `metric` | non-empty string | The metric to track. Accepts the same dot-path form as `metric_threshold` (`metrics.loss`) or the bare metric name (`loss`); a leading `metrics.` is stripped before the history lookup. |
+| `direction` | string | One of `decreasing` (last < first), `increasing` (last > first), `non_increasing` (last <= first), `non_decreasing` (last >= first). The strict forms require an actual net change; the `non_` forms allow a flat series. |
+| `window` | positive int | Optional. Consider only the most-recent `window` readings. Default: the entire history. |
+| `min_points` | positive int | Optional. The minimum number of numeric readings required before the criterion decides `met`/`unmet`. With fewer points the criterion is `inconclusive` (a trend is undefined on a single reading, and the loop is never failed for lack of history). Default and floor: `2`. |
+
+The verdict compares the last reading of the windowed series to its first reading per `direction`. Evidence is a structured dict (`direction`, the windowed `points`, `first`, `last`, and net `delta`) so the audit log shows exactly what the verdict was computed from.
+
+Example — "drive validation loss down across the run, looking at the last 5 readings":
+
+```json
+{
+  "criterion_id": "loss_falling",
+  "kind": "metric_trend",
+  "required": true,
+  "metric": "metrics.val_loss",
+  "direction": "decreasing",
+  "window": 5,
+  "min_points": 3
+}
+```
+
+Pair `metric_trend` with `metric_threshold` to express "loss is both below 0.1 **and** still falling" — two criteria over the same metric, one point-in-time and one history-aware.
 
 ### `event` criterion
 
@@ -248,11 +280,14 @@ The `validate_criteria` validator emits structured rejections through `MissionVa
 | `not_a_dict` | One of the entries was not a JSON object. |
 | `criterion_id_missing_or_invalid` | A criterion lacks a non-empty string `criterion_id`. |
 | `duplicate_criterion_id` | Two criteria share the same `criterion_id`. |
-| `kind_invalid` | `kind` was not one of the three supported values. |
+| `kind_invalid` | `kind` was not one of the supported values. |
 | `required_missing_or_not_a_bool` | `required` was missing or not a JSON boolean. |
-| `metric_missing_or_invalid` | `metric_threshold` lacks a non-empty string `metric`. |
+| `metric_missing_or_invalid` | `metric_threshold` or `metric_trend` lacks a non-empty string `metric`. |
 | `op_invalid` | `metric_threshold` `op` was not one of the six comparison operators. |
 | `target_not_a_number` | `metric_threshold` `target` was not a JSON number. |
+| `direction_invalid` | `metric_trend` `direction` was not one of `decreasing`, `increasing`, `non_increasing`, `non_decreasing`. |
+| `window_must_be_positive_int` | `metric_trend` `window` was present but not a positive int. |
+| `min_points_must_be_positive_int` | `metric_trend` `min_points` was present but not a positive int. |
 | `event_name_missing_or_invalid` | `event` criterion lacks a non-empty `event_name`. |
 | `expression_missing_or_invalid` | `predicate` criterion lacks a non-empty `expression`. |
 | `tool_name_missing_or_invalid` | `tool_call_succeeded` lacks a non-empty `tool_name`. |
@@ -410,7 +445,7 @@ Pick the output name on the tool call and the `metrics.<name>` dot-path on the c
 
 ### Aggregation modes for history-bearing readers
 
-Mission keeps metrics **point-in-time** — the engine accumulates `tool_results` across iterations but deliberately leaves `metrics` per-iteration. Training artifacts and logs, though, frequently carry *history*: a Hugging Face `log_history` array, JSONL step lines, a column of values. A **history-bearing reader** (the job-log reader, and the file readers for sequence-bearing formats) reduces that history to one number itself via an `aggregation` parameter, so a criterion can express goals like "best loss so far" without the engine ever accumulating metrics.
+Mission keeps the per-iteration `metrics` dict **point-in-time** — each iteration's Observation carries the latest reading, and a `metric_threshold` criterion compares that single value to a target. Training artifacts and logs, though, frequently carry *history*: a Hugging Face `log_history` array, JSONL step lines, a column of values. A **history-bearing reader** (the job-log reader, and the file readers for sequence-bearing formats) reduces that history to one number itself via an `aggregation` parameter, so a criterion can express goals like "best loss so far" at the source level — independent of, and complementary to, the cross-iteration history the engine accumulates for [`metric_trend`](#metric_trend-criterion).
 
 | `aggregation` | Reduces the observed sequence to |
 |---------------|----------------------------------|
@@ -468,14 +503,14 @@ A common case is driving validation/training loss down while a Hugging Face `Tra
 
 The reader collects every `loss` entry from `log_history`, reduces to the minimum, and emits `{"metrics": {"loss": <best>}, "format": "hf_trainer_state", "aggregation": "min", ...}`. The Observe phase merges it, and the criterion compares `metrics.loss <= 0.1`. If the file is missing, malformed, or carries no numeric `loss`, the reader returns an error envelope instead and the criterion reads `inconclusive` — the loop keeps running.
 
-### Future work: cumulative metrics and trend criteria
+### Cumulative metrics and the `metric_trend` criterion
 
-These readers deliberately do **not** change Mission engine semantics. The engine keeps metrics strictly point-in-time, and history is reduced *inside* the reader via an aggregation mode rather than accumulated across iterations by the engine. Two engine capabilities are explicitly **out of scope** here and called out as future work:
+There are two complementary ways to observe a metric's history, and they operate at different layers:
 
-- A **cumulative-metrics view** that would let the engine accumulate `metrics` across iterations the way it already accumulates `tool_results`.
-- A **`metric_trend` criterion** kind that would evaluate the direction or slope of a metric over several iterations (history-aware observation), rather than comparing a single point-in-time value to a fixed target.
+- **Reader-level reduction (`aggregation`)** collapses history that already exists *inside a single artifact* — a `log_history` array, a JSONL stream, a column — down to one number before it ever reaches the engine. Use it for "best/earliest/mean value within this file or log tail".
+- **Engine-level history (`metric_trend`)** observes how a metric moves *across iterations* of the Mission loop. The engine accumulates a `metric_history` series for every numeric metric it sees (oldest→newest) in the Evaluate phase's cumulative observation — the same place it already accumulates `tool_results`. A [`metric_trend`](#metric_trend-criterion) criterion reads that series and evaluates its direction (`decreasing`, `increasing`, `non_increasing`, `non_decreasing`) over an optional `window`, with a `min_points` floor below which it stays `inconclusive`.
 
-Until those land as a separate, deliberate effort, express "best so far" and similar history-shaped goals through a reader `aggregation` mode against a source that already carries the history.
+So "drive loss down and keep it falling" is expressible as two criteria over the same metric: a `metric_threshold` (`metrics.loss <= 0.1`) for the point-in-time floor, and a `metric_trend` (`direction: decreasing`) for the cross-iteration shape. The per-iteration `metrics` dict stays point-in-time exactly as before — `metric_history` lives alongside it on the cumulative view, so existing `metric_threshold`, `event`, and `predicate` criteria are unaffected, and predicates can read `obs['metric_history']` directly when they need the raw series.
 
 ## Quickstart
 

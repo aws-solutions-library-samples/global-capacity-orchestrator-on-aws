@@ -165,7 +165,7 @@ def test_empty_root_always_reports_not_configured(
 
 
 # ===========================================================================
-# Local-file confinement integration tests (task 8.7)
+# Local-file confinement integration tests
 # ===========================================================================
 #
 # The property tests above pin down the *pure* helper. These integration tests
@@ -176,7 +176,7 @@ def test_empty_root_always_reports_not_configured(
 # ``if is_enabled("GCO_ENABLE_LOCAL_METRICS")`` block, it only exists after the
 # flag is set and the module is (re)imported. The three required cases assert
 # both the correct Tool_Error_Envelope code AND that **no file outside the
-# Local_Root is ever opened** (Requirements 18.8, 18.9, 18.10).
+# Local_Root is ever opened**.
 
 
 @contextlib.contextmanager
@@ -288,7 +288,7 @@ def test_traversal_escape_returns_envelope_and_reads_nothing(tmp_path: Path) -> 
     Using ``tmp_path`` as the Local_Root, a supplied path whose ``..`` segments
     climb out of the root must be refused with the path-traversal-escape code,
     carry the supplied path in the envelope details, return **no** canonical
-    ``metrics`` shape, and read nothing out of root (Requirement 18.8). The
+    ``metrics`` shape, and read nothing out of root. The
     out-of-root target the path resolves to is proven never opened, and the
     reader seam is proven never reached.
     """
@@ -321,7 +321,7 @@ def test_symlink_escape_returns_envelope_and_never_reads_target(tmp_path: Path) 
     *outside* it; the in-root symlink path is supplied. The reader must refuse
     with the symlink-escape code, carry the supplied path in the details,
     return **no** canonical ``metrics`` shape, and — critically — never open
-    the link target file nor reach the reader seam (Requirement 18.9).
+    the link target file nor reach the reader seam.
     """
     # The escape target lives outside the root, in a sibling temp dir that the
     # in-root symlink points at. Writing a real file there lets the spy prove
@@ -363,7 +363,7 @@ def test_unconfigured_root_returns_envelope_and_reads_nothing(tmp_path: Path) ->
 
     With the gate enabled but ``GCO_METRICS_LOCAL_ROOT`` unset, the reader must
     refuse with the not-configured code, return **no** canonical ``metrics``
-    shape, and read no file at all (Requirement 18.10). ``tmp_path`` holds a
+    shape, and read no file at all. ``tmp_path`` holds a
     real metrics file the reader would have read had it not refused first;
     proving that file is never opened and the reader seam is never reached
     shows the refusal happens before any read.

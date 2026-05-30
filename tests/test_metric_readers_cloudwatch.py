@@ -146,8 +146,6 @@ def test_get_datapoint_issues_readonly_call_with_exact_shape() -> None:
     arguments mirror the inputs unchanged: namespace, metric name, dimensions
     (as ``{"Name","Value"}`` pairs), the lookback window, period, and the
     single requested statistic. No mutating CloudWatch API may be touched.
-
-    Validates: Requirements 2.3, 4.7, 16.6
     """
     mock_client = MagicMock()
     mock_client.get_metric_statistics.return_value = {
@@ -190,10 +188,7 @@ def test_get_datapoint_issues_readonly_call_with_exact_shape() -> None:
 
 
 def test_get_datapoint_passes_none_dimensions_as_empty_list() -> None:
-    """``dimensions=None`` is sent to CloudWatch as an empty dimension list.
-
-    Validates: Requirements 4.7, 16.6
-    """
+    """``dimensions=None`` is sent to CloudWatch as an empty dimension list."""
     mock_client = MagicMock()
     mock_client.get_metric_statistics.return_value = {"Datapoints": [{"Timestamp": _END, "Sum": 7}]}
 
@@ -215,10 +210,7 @@ def test_get_datapoint_passes_none_dimensions_as_empty_list() -> None:
 
 
 def test_get_datapoint_zero_datapoints_raises_no_datapoints() -> None:
-    """An empty ``Datapoints`` list maps to ``NO_DATAPOINTS`` (no metrics shape).
-
-    Validates: Requirements 4.7, 16.6
-    """
+    """An empty ``Datapoints`` list maps to ``NO_DATAPOINTS`` (no metrics shape)."""
     mock_client = MagicMock()
     mock_client.get_metric_statistics.return_value = {"Datapoints": []}
 
@@ -245,10 +237,7 @@ def test_get_datapoint_zero_datapoints_raises_no_datapoints() -> None:
 
 
 def test_get_datapoint_client_error_maps_to_aws_unreachable_client_error_kind() -> None:
-    """A generic ``ClientError`` maps to ``AWS_UNREACHABLE`` with ``kind='client_error'``.
-
-    Validates: Requirements 4.8, 16.6
-    """
+    """A generic ``ClientError`` maps to ``AWS_UNREACHABLE`` with ``kind='client_error'``."""
     mock_client = MagicMock()
     mock_client.get_metric_statistics.side_effect = ClientError(
         {"Error": {"Code": "Throttling", "Message": "Rate exceeded"}},
@@ -277,10 +266,7 @@ def test_get_datapoint_client_error_maps_to_aws_unreachable_client_error_kind() 
 
 
 def test_get_datapoint_access_denied_maps_to_unauthorized_kind() -> None:
-    """A credentials/permissions ``ClientError`` maps to ``kind='unauthorized'``.
-
-    Validates: Requirements 4.8, 16.6
-    """
+    """A credentials/permissions ``ClientError`` maps to ``kind='unauthorized'``."""
     mock_client = MagicMock()
     mock_client.get_metric_statistics.side_effect = ClientError(
         {"Error": {"Code": "AccessDenied", "Message": "not authorized"}},
@@ -307,10 +293,7 @@ def test_get_datapoint_access_denied_maps_to_unauthorized_kind() -> None:
 
 
 def test_get_datapoint_endpoint_connection_error_maps_to_unreachable_kind() -> None:
-    """An ``EndpointConnectionError`` maps to ``AWS_UNREACHABLE`` with ``kind='unreachable'``.
-
-    Validates: Requirements 4.8, 16.6
-    """
+    """An ``EndpointConnectionError`` maps to ``AWS_UNREACHABLE`` with ``kind='unreachable'``."""
     mock_client = MagicMock()
     mock_client.get_metric_statistics.side_effect = EndpointConnectionError(
         endpoint_url="https://monitoring.us-east-1.amazonaws.com"
@@ -336,10 +319,7 @@ def test_get_datapoint_endpoint_connection_error_maps_to_unreachable_kind() -> N
 
 
 def test_get_datapoint_botocore_error_maps_to_unreachable_kind() -> None:
-    """A generic ``BotoCoreError`` maps to ``AWS_UNREACHABLE`` with ``kind='unreachable'``.
-
-    Validates: Requirements 4.8, 16.6
-    """
+    """A generic ``BotoCoreError`` maps to ``AWS_UNREACHABLE`` with ``kind='unreachable'``."""
     mock_client = MagicMock()
     mock_client.get_metric_statistics.side_effect = BotoCoreError()
 

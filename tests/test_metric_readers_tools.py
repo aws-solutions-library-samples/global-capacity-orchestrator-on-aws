@@ -2,13 +2,13 @@
 
 The pure ``metric_readers`` package is exercised in isolation by its sibling
 test modules; this file pins down the *tool* surface in ``mcp/tools/metrics.py``
-— the thin ``@mcp.tool`` wrappers a Mission session actually calls. The first
-slice (task 8.4) covers the **success path** for every reader: each tool must
-return the Canonical_Metrics_Shape — a top-level ``metrics`` object mapping the
-chosen key to a single Numeric_Value, with every provenance field placed
-*outside* ``metrics`` — and each History_Bearing_Reader must reduce a known
-sequence to the right scalar under each Aggregation_Mode (``last``, ``first``,
-``min``, ``max``, ``mean``).
+— the thin ``@mcp.tool`` wrappers a Mission session actually calls. The
+success-path tests below cover every reader: each tool must return the
+Canonical_Metrics_Shape — a top-level ``metrics`` object mapping the chosen key
+to a single Numeric_Value, with every provenance field placed *outside*
+``metrics`` — and each History_Bearing_Reader must reduce a known sequence to
+the right scalar under each Aggregation_Mode (``last``, ``first``, ``min``,
+``max``, ``mean``).
 
 The readers are exercised offline. ``metrics_cloudwatch_get`` runs against a
 patched ``boto3`` client (no live AWS); ``metrics_from_job_logs`` and
@@ -16,12 +16,10 @@ patched ``boto3`` client (no live AWS); ``metrics_from_job_logs`` and
 (``cli_runner._run_cli`` / ``_read_shared_storage``) that hand back a known
 artifact, so no network, AWS, or job-log access is touched.
 
-Later tasks extend this file: 8.5 adds flag-gated registration tests, 8.6 the
-tool-registry determinism property, 8.7 the local-file confinement integration
-tests, and 8.8 the Observe_Phase merge-contract test. Shared helpers are kept
-at module scope so those slices can reuse them.
-
-Validates: Requirements 16.1, 16.2
+The rest of the file builds on that success-path slice: flag-gated
+registration tests, the tool-registry determinism property, the local-file
+confinement integration tests, and the Observe_Phase merge-contract test.
+Shared helpers are kept at module scope so those slices can reuse them.
 """
 
 from __future__ import annotations
@@ -49,7 +47,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
 
 from metric_readers.shape import is_numeric_value  # noqa: E402
 
-# Every Aggregation_Mode a History_Bearing_Reader must honour (R16.2).
+# Every Aggregation_Mode a History_Bearing_Reader must honour.
 _MODES = ("last", "first", "min", "max", "mean")
 
 # A known sequence whose five reductions are all distinct, so a mode that is
@@ -108,17 +106,17 @@ def _assert_canonical_shape(
 ) -> None:
     """Assert ``result`` is the Canonical_Metrics_Shape carrying one numeric.
 
-    Pins down every clause of Requirement 1 that a success result must satisfy:
-    a top-level ``metrics`` object mapping exactly ``expected_key`` to a single
-    Numeric_Value equal to ``expected_value`` (R1.1), the value passing the
-    Numeric_Value guard (R1.2), no error-envelope ``code`` key, and every named
-    provenance field present at the top level but **never** inside ``metrics``
-    (R1.5).
+        Pins down every clause a success result must satisfy:
+        a top-level ``metrics`` object mapping exactly ``expected_key`` to a single
+        Numeric_Value equal to ``expected_value``, the value passing the
+        Numeric_Value guard, no error-envelope ``code`` key, and every named
+        provenance field present at the top level but **never** inside ``metrics``
+    .
     """
     # Not an error envelope.
     assert "code" not in result, f"expected success shape, got envelope: {result!r}"
 
-    # Top-level metrics object mapping the key to the numeric value (R1.1).
+    # Top-level metrics object mapping the key to the numeric value.
     assert "metrics" in result, f"missing top-level 'metrics': {result!r}"
     metrics = result["metrics"]
     assert isinstance(metrics, dict)
@@ -126,10 +124,10 @@ def _assert_canonical_shape(
         f"expected metrics {{{expected_key!r}: {expected_value!r}}}, got {metrics!r}"
     )
 
-    # The emitted value is a real, finite number (R1.2).
+    # The emitted value is a real, finite number.
     assert is_numeric_value(metrics[expected_key])
 
-    # Provenance lives outside ``metrics`` (R1.5): present at the top level and
+    # Provenance lives outside ``metrics``: present at the top level and
     # absent from the metrics object, which carries only the numeric entry.
     for prov_key in provenance_keys:
         assert prov_key in result, f"missing provenance field {prov_key!r}: {result!r}"
@@ -146,7 +144,7 @@ def _cloudwatch_client_returning(datapoints: list[dict]) -> MagicMock:
 
     The mock stands in for ``boto3.client("cloudwatch", ...)``; its
     ``get_metric_statistics`` returns the supplied datapoints so no live AWS
-    call is made (R16.6).
+    call is made.
     """
     client = MagicMock()
     client.get_metric_statistics.return_value = {"Datapoints": datapoints}
@@ -155,8 +153,6 @@ def _cloudwatch_client_returning(datapoints: list[dict]) -> MagicMock:
 
 def test_cloudwatch_get_success_returns_canonical_shape() -> None:
     """The CloudWatch reader emits the most-recent datapoint as a canonical metric.
-
-    Validates: Requirements 16.1
 
     With ``boto3`` patched to hand back two datapoints carrying distinct
     timestamps, the tool must select the most recent one deterministically and
@@ -199,10 +195,7 @@ def test_cloudwatch_get_success_returns_canonical_shape() -> None:
 
 
 def test_cloudwatch_get_success_honours_output_name() -> None:
-    """An explicit ``output_name`` becomes the metric key on the success path.
-
-    Validates: Requirements 16.1
-    """
+    """An explicit ``output_name`` becomes the metric key on the success path."""
     metrics_module = _import_metrics_tool_module()
 
     client = _cloudwatch_client_returning(
@@ -253,8 +246,6 @@ def test_job_logs_json_key_reduces_known_sequence(
 ) -> None:
     """The job-log reader reduces a known per-line sequence under each mode.
 
-    Validates: Requirements 16.1, 16.2
-
     Each log line is a JSON object carrying one ``loss`` value from the known
     sequence; the reader extracts the dot-path key, reduces under ``mode``, and
     returns the reference reduction in the Canonical_Metrics_Shape (key defaults
@@ -286,10 +277,7 @@ def test_job_logs_json_key_reduces_known_sequence(
 
 
 def test_job_logs_default_aggregation_is_last(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no aggregation supplied the job-log reader returns the most-recent match.
-
-    Validates: Requirements 16.1, 16.2
-    """
+    """With no aggregation supplied the job-log reader returns the most-recent match."""
     metrics_module = _import_metrics_tool_module()
     lines = [json.dumps({"loss": v}) for v in _KNOWN_SEQUENCE]
     _patch_job_logs(metrics_module, monkeypatch, lines)
@@ -314,8 +302,6 @@ def test_job_logs_default_aggregation_is_last(monkeypatch: pytest.MonkeyPatch) -
 @pytest.mark.parametrize("mode", _MODES)
 def test_job_logs_regex_reduces_known_sequence(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Regex extraction's first capture group reduces under each mode.
-
-    Validates: Requirements 16.1, 16.2
 
     The free-text lines print ``loss=<n>``; the reader captures the first group
     per line, coerces to a number, and reduces under ``mode`` to the reference
@@ -368,8 +354,6 @@ def test_shared_storage_single_value_returns_canonical_shape(
 ) -> None:
     """A single JSON scalar reads back as a canonical metric.
 
-    Validates: Requirements 16.1
-
     The non-history success path: a plain ``json`` document whose field is one
     number returns that number in the Canonical_Metrics_Shape with the
     source / region / format / aggregation provenance outside ``metrics``.
@@ -401,8 +385,6 @@ def test_shared_storage_hf_log_history_reduces_known_sequence(
     mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A Hugging Face ``log_history`` reduces under each mode.
-
-    Validates: Requirements 16.1, 16.2
 
     The ``hf_trainer_state`` format gathers one ``loss`` per ``log_history``
     entry from the known sequence and reduces under ``mode`` to the reference
@@ -439,8 +421,6 @@ def test_shared_storage_jsonl_reduces_known_sequence(
 ) -> None:
     """A JSONL step-log stream reduces under each mode.
 
-    Validates: Requirements 16.1, 16.2
-
     The ``jsonl`` format gathers the named field from each record of the known
     sequence and reduces under ``mode`` to the reference scalar in the
     canonical shape, covering a second sequence-bearing format.
@@ -469,7 +449,7 @@ def test_shared_storage_jsonl_reduces_known_sequence(
 
 
 # ===========================================================================
-# Flag-gated registration (task 8.5)
+# Flag-gated registration
 # ===========================================================================
 #
 # The success-path slice above pins down what each reader *returns*. This slice
@@ -478,15 +458,14 @@ def test_shared_storage_jsonl_reduces_known_sequence(
 #
 #   * the three default-on readers (``metrics_cloudwatch_get``,
 #     ``metrics_from_job_logs``, ``metrics_from_shared_storage_file``) are
-#     always present, independent of any flag (R3.5);
+#     always present, independent of any flag;
 #   * ``metrics_from_local_file`` is default-off — absent when neither
 #     ``GCO_ENABLE_LOCAL_METRICS`` nor the umbrella ``GCO_ENABLE_ALL_TOOLS`` is
-#     set (R18.1), present when ``GCO_ENABLE_LOCAL_METRICS=true`` (R18.1) or the
-#     umbrella ``GCO_ENABLE_ALL_TOOLS=true`` is set with the local flag unset
-#     (R18.3);
+#     set, present when ``GCO_ENABLE_LOCAL_METRICS=true`` or the
+#     umbrella ``GCO_ENABLE_ALL_TOOLS=true`` is set with the local flag unset;
 #   * when present, its description begins with the literal prefix
-#     ``"[gated by GCO_ENABLE_LOCAL_METRICS]"`` (R18.4) and it carries the
-#     ``safe`` Tool_Tag (R18.5 / R3.2).
+#     ``"[gated by GCO_ENABLE_LOCAL_METRICS]"`` and it carries the
+#     ``safe`` Tool_Tag.
 #
 # Registry introspection note: the server (``mcp/server.py``) wires the
 # BM25/Code-Mode catalog-replacement transforms, so the *public*
@@ -570,8 +549,6 @@ def _local_metrics_flag(env: dict[str, str | None]) -> Iterator[dict]:
 def test_local_file_reader_absent_when_flag_unset() -> None:
     """With the gate unset, ``metrics_from_local_file`` is not registered.
 
-    Validates: Requirements 18.1
-
     With neither ``GCO_ENABLE_LOCAL_METRICS`` nor the umbrella
     ``GCO_ENABLE_ALL_TOOLS`` set, the gated decorator never fires and the tool
     is absent from the registry; the three default-on readers remain present.
@@ -589,8 +566,6 @@ def test_local_file_reader_absent_when_flag_unset() -> None:
 def test_local_file_reader_present_when_local_flag_set() -> None:
     """``GCO_ENABLE_LOCAL_METRICS=true`` registers ``metrics_from_local_file``.
 
-    Validates: Requirements 18.1
-
     Setting the per-tool flag fires the gated decorator so the tool appears in
     the registry; the default-on readers stay present alongside it.
     """
@@ -606,8 +581,6 @@ def test_local_file_reader_present_when_local_flag_set() -> None:
 
 def test_local_file_reader_present_under_umbrella_flag() -> None:
     """The umbrella ``GCO_ENABLE_ALL_TOOLS=true`` also registers the gated reader.
-
-    Validates: Requirements 18.3
 
     With the per-tool ``GCO_ENABLE_LOCAL_METRICS`` left unset, setting only the
     umbrella ``GCO_ENABLE_ALL_TOOLS=true`` must still enable the tool, mirroring
@@ -628,11 +601,9 @@ def test_local_file_reader_present_under_umbrella_flag() -> None:
 def test_local_file_reader_docstring_prefix_and_safe_tag() -> None:
     """When registered, the gated reader is prefixed and carries the ``safe`` tag.
 
-    Validates: Requirements 18.4
-
     With the gate on, the tool's description must begin with the literal prefix
-    ``"[gated by GCO_ENABLE_LOCAL_METRICS]"`` (R18.4) and its Tool_Tag set must
-    include ``safe`` (R18.5 / R3.2), marking it read-only like its siblings.
+    ``"[gated by GCO_ENABLE_LOCAL_METRICS]"`` and its Tool_Tag set must
+    include ``safe``, marking it read-only like its siblings.
     """
     _import_metrics_tool_module()
     env = {"GCO_ENABLE_LOCAL_METRICS": "true", "GCO_ENABLE_ALL_TOOLS": None}
@@ -640,21 +611,19 @@ def test_local_file_reader_docstring_prefix_and_safe_tag() -> None:
         tool = registry.get(_LOCAL_FILE_TOOL)
         assert tool is not None, "metrics_from_local_file must register under the flag"
 
-        # The description begins with the literal gating prefix (R18.4).
+        # The description begins with the literal gating prefix.
         assert tool.description is not None
         assert tool.description.startswith(_GATED_DOCSTRING_PREFIX), (
             f"description must begin with {_GATED_DOCSTRING_PREFIX!r}, "
             f"got {tool.description[: len(_GATED_DOCSTRING_PREFIX)]!r}"
         )
 
-        # It carries the read-only ``safe`` Tool_Tag (R18.5 / R3.2).
+        # It carries the read-only ``safe`` Tool_Tag.
         assert "safe" in tool.tags, f"expected 'safe' tag, got {tool.tags!r}"
 
 
 def test_default_on_readers_present_regardless_of_flag() -> None:
     """The three default-on readers register whether the gate is on or off.
-
-    Validates: Requirements 3.5, 18.1
 
     A default-registered Metric_Reader_Tool must appear in the registry
     independent of any flag. Toggling ``GCO_ENABLE_LOCAL_METRICS`` only adds or
@@ -685,7 +654,7 @@ def test_default_on_readers_present_regardless_of_flag() -> None:
 
 
 # ===========================================================================
-# Tool-registry determinism (task 8.6)
+# Tool-registry determinism
 # ===========================================================================
 #
 # The flag-gated slice above pins down individual flag combinations with hand
@@ -694,12 +663,12 @@ def test_default_on_readers_present_regardless_of_flag() -> None:
 # flags that govern the local-file reader, the registry must be a deterministic
 # function of those flags. Concretely, for each generated combination:
 #
-#   1. Determinism (R3.7) — re-running ``_list_tools()`` under the SAME flag
+#   1. Determinism — re-running ``_list_tools()`` under the SAME flag
 #      values yields the IDENTICAL set of tool names. The Tool_Registry must
 #      not depend on call order, time, or any hidden state.
-#   2. Default-on presence (R3.5) — the three default-on readers are ALWAYS in
+#   2. Default-on presence — the three default-on readers are ALWAYS in
 #      the registry, independent of the flags.
-#   3. Gated presence (R18.1, R18.3) — ``metrics_from_local_file`` is present
+#   3. Gated presence — ``metrics_from_local_file`` is present
 #      IFF the gate is enabled, i.e. ``GCO_ENABLE_LOCAL_METRICS=true`` OR the
 #      umbrella ``GCO_ENABLE_ALL_TOOLS=true`` — exactly the
 #      ``feature_flags.is_enabled`` truth rule.
@@ -707,7 +676,8 @@ def test_default_on_readers_present_regardless_of_flag() -> None:
 # Each example flips env vars and re-imports ``tools.metrics`` (slow), so the
 # settings mirror the sibling metric-reader property tests: ``deadline=None``
 # and the ``too_slow``/``data_too_large`` health checks suppressed. The
-# ``_local_metrics_flag`` context manager (defined above for task 8.5) is used
+# ``_local_metrics_flag`` context manager (defined above for the flag-gated
+# registration tests) is used
 # as a context manager *inside* the test body so its force-unregister +
 # environ-restore teardown runs for EVERY example — no gated registration ever
 # leaks into a sibling test's tool-count / tool-name snapshot.
@@ -736,7 +706,6 @@ def _gate_expected_present(env: dict[str, str | None]) -> bool:
     )
 
 
-# Feature: mission-metric-reader-tools, Property 10: Tool-registry determinism
 @settings(
     max_examples=100,
     deadline=None,
@@ -746,14 +715,12 @@ def _gate_expected_present(env: dict[str, str | None]) -> bool:
 def test_tool_registry_determinism(local_flag: str | None, umbrella_flag: str | None) -> None:
     """The Tool_Registry is a deterministic function of the gating flags.
 
-    Validates: Requirements 3.5, 3.7, 18.1, 18.3
-
     For any combination of ``GCO_ENABLE_LOCAL_METRICS`` and the umbrella
     ``GCO_ENABLE_ALL_TOOLS``, re-importing ``tools.metrics`` under those values
     yields a registry whose tool-name set is stable across repeated
-    ``_list_tools()`` calls (R3.7), always contains the three default-on
-    readers (R3.5), and contains ``metrics_from_local_file`` iff the gate is
-    enabled (R18.1, R18.3).
+    ``_list_tools()`` calls, always contains the three default-on
+    readers, and contains ``metrics_from_local_file`` iff the gate is
+    enabled.
     """
     _import_metrics_tool_module()
 
@@ -768,7 +735,7 @@ def test_tool_registry_determinism(local_flag: str | None, umbrella_flag: str | 
     with _local_metrics_flag(env) as registry:
         names_first = set(registry)
 
-        # (1) Determinism (R3.7): a second introspection under the unchanged
+        # (1) Determinism: a second introspection under the unchanged
         # flag values returns the identical set of tool names.
         names_second = set(_registered_tools())
         assert names_first == names_second, (
@@ -776,14 +743,14 @@ def test_tool_registry_determinism(local_flag: str | None, umbrella_flag: str | 
             f"tool-name set; first={names_first ^ names_second} differed"
         )
 
-        # (2) Default-on presence (R3.5): the three readers are always present,
+        # (2) Default-on presence: the three readers are always present,
         # independent of the flags.
         for reader in _DEFAULT_ON_READERS:
             assert reader in names_first, (
                 f"default-on reader {reader!r} must always be registered, flags={env!r}"
             )
 
-        # (3) Gated presence (R18.1, R18.3): the local-file reader is present
+        # (3) Gated presence: the local-file reader is present
         # iff the gate is enabled per the is_enabled truth rule.
         expected_present = _gate_expected_present(env)
         assert (_LOCAL_FILE_TOOL in names_first) == expected_present, (

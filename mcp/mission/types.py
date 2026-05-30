@@ -48,8 +48,24 @@ VerdictReason = Literal[
 StatusLabel = Literal["pending", "running", "paused", "completed", "terminated", "failed"]
 """The lifecycle states of a :class:`SessionState`."""
 
-CriterionKind = Literal["metric_threshold", "event", "predicate", "tool_call_succeeded"]
-"""The four Criterion evaluator kinds."""
+CriterionKind = Literal[
+    "metric_threshold", "event", "predicate", "tool_call_succeeded", "metric_trend"
+]
+"""The five Criterion evaluator kinds.
+
+``metric_trend`` is the history-aware kind: rather than comparing a single
+point-in-time value to a fixed target (``metric_threshold``), it evaluates the
+direction of a metric across iterations using the cumulative metric history the
+engine accumulates in :meth:`MissionEngine._build_cumulative_observation`.
+"""
+
+MetricTrendDirection = Literal["decreasing", "increasing", "non_increasing", "non_decreasing"]
+"""The four trend directions a ``metric_trend`` criterion can require.
+
+``decreasing`` / ``increasing`` require a strict net change across the window
+(last < first / last > first); ``non_increasing`` / ``non_decreasing`` allow a
+flat series (last <= first / last >= first).
+"""
 
 SamplingStatus = Literal["used", "rejected", "fallback", "unavailable", "disabled"]
 """The terminal status of a single sampling attempt on an iteration."""
@@ -89,7 +105,8 @@ class Criterion(TypedDict):
 
     The kind-specific keys (``metric``/``op``/``target`` for
     ``metric_threshold``, ``event_name`` for ``event``, ``expression`` for
-    ``predicate``, ``tool_name``/``min_count`` for ``tool_call_succeeded``)
+    ``predicate``, ``tool_name``/``min_count`` for ``tool_call_succeeded``,
+    ``metric``/``direction``/``window``/``min_points`` for ``metric_trend``)
     are not declared on the base ``TypedDict`` because they are mutually
     exclusive per ``kind``. Validators in ``mcp.mission.validation`` verify
     the right keys are present for each ``kind`` and may attach a private
@@ -107,6 +124,13 @@ class Criterion(TypedDict):
     expression: NotRequired[str]
     tool_name: NotRequired[str]
     min_count: NotRequired[int]
+    # metric_trend keys: ``direction`` is required for the kind; ``window``
+    # bounds how many of the most-recent points are considered (default: all
+    # available); ``min_points`` is the minimum number of numeric points
+    # required before the criterion decides met/unmet rather than inconclusive.
+    direction: NotRequired[MetricTrendDirection]
+    window: NotRequired[int]
+    min_points: NotRequired[int]
     # Cached parsed AST attached by ``validate_criteria`` for predicate entries.
     _parsed_ast: NotRequired[Any]
 
@@ -209,6 +233,14 @@ class Observation(TypedDict):
     metrics: dict[str, Any]
     events: list[dict[str, Any]]
     errors: NotRequired[list[dict[str, Any]]]
+    # Cumulative, history-aware view of every numeric metric seen across the
+    # session, keyed by metric name and ordered oldest→newest. Present only on
+    # the *cumulative* observation the Evaluate_Phase builds (see
+    # :meth:`MissionEngine._build_cumulative_observation`); the per-iteration
+    # Observation written to ``record["observation"]`` keeps ``metrics``
+    # strictly point-in-time and does not carry this key. Consumed by the
+    # ``metric_trend`` criterion and available to predicates.
+    metric_history: NotRequired[dict[str, list[float]]]
     phase_started_at: str
     phase_ended_at: str
 

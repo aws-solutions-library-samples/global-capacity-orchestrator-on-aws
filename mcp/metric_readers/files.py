@@ -285,7 +285,7 @@ def _handle_parquet(content: bytes, field: str, mode: str) -> float:
     analytics extra, so they are imported lazily inside the handler. When
     either is missing the failure is reported as a
     :attr:`~.shape.ErrorCode.FORMAT_DEPENDENCY_UNAVAILABLE` envelope rather
-    than letting the ``ImportError`` escape (R12.4).
+    than letting the ``ImportError`` escape.
 
     Once loaded, the file is parsed into a frame; bytes that do not parse as
     Parquet are a malformed-file error. The named column is gathered as native
@@ -293,7 +293,7 @@ def _handle_parquet(content: bytes, field: str, mode: str) -> float:
     ``float`` so the numeric guard recognises them — and reduced with the
     aggregation mode. A column absent from the schema is a field-not-found
     error. An aggregated result of exactly ``0`` is a valid number and is
-    returned as-is; the reducer never treats it as "missing" (R12.2).
+    returned as-is; the reducer never treats it as "missing".
     """
     try:
         import pandas as pd
@@ -330,14 +330,14 @@ def _handle_tfevents(content: bytes, field: str, mode: str) -> float:
     so it is imported lazily inside the handler. When the parser is not
     installed the failure is reported as a
     :attr:`~.shape.ErrorCode.FORMAT_DEPENDENCY_UNAVAILABLE` envelope rather than
-    an import crash (R13.3), so the baseline reader keeps working without the
-    heavyweight dependency (R13.4).
+    an import crash, so the baseline reader keeps working without the
+    heavyweight dependency.
 
     When the parser is present, the handed-in bytes are staged into a
     short-lived temporary event file (``tbparse`` reads from a path, not a
     buffer), the scalar rows for the requested ``field`` tag are gathered, and
     the sequence is reduced with the aggregation mode — the caller defaults this
-    to ``last``, i.e. the latest scalar for the tag (R13.2). A tag that carries
+    to ``last``, i.e. the latest scalar for the tag. A tag that carries
     no scalar rows is a field-not-found error, and bytes that do not parse as an
     event file are a malformed-file error.
     """

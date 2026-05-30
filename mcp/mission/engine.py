@@ -52,7 +52,7 @@ modules make for tools that take an injected context.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -1155,33 +1155,62 @@ class MissionEngine:
     def _build_cumulative_observation(
         current_obs: dict[str, Any], session: SessionState
     ) -> dict[str, Any]:
-        """Merge prior iterations' tool_results into a cumulative view.
+        """Merge prior iterations' tool_results and metric history into a view.
 
-        The cumulative observation is used by predicate criteria so
-        they can see tool results from all iterations, not just the
-        current one. This enables multi-tool goals where each tool
-        runs in a different iteration to converge on predicates that
-        check for content across tools.
+        Two things are cumulative on the returned view:
 
-        Only ``tool_results`` is cumulative; ``metrics``, ``events``,
-        and ``errors`` stay per-iteration because they represent the
-        current state (metrics can change between iterations; events
-        are per-iteration signals; errors are per-call).
+        * ``tool_results`` — every prior iteration's results concatenated with
+          the current iteration's, so predicate criteria can see results from
+          all iterations. This enables multi-tool goals where each tool runs in
+          a different iteration to converge.
+        * ``metric_history`` — a history-aware map from metric name to the
+          ordered list of its numeric values across the session
+          (oldest→newest, current iteration last). This is what lets the
+          ``metric_trend`` criterion ask "is loss falling across iterations?"
+          even though the engine keeps the per-iteration ``metrics`` dict
+          strictly point-in-time. Non-numeric and boolean metric values are
+          skipped so a stray string reading cannot poison a trend.
+
+        ``metrics``, ``events``, and ``errors`` stay per-iteration on the view
+        because they represent current state: ``metrics`` is the latest
+        point-in-time reading (a ``metric_threshold`` criterion still compares
+        the single current value), events are per-iteration signals, and errors
+        are per-call. The history lives *alongside* them under
+        ``metric_history`` rather than replacing them, so existing criteria are
+        unaffected.
         """
         all_tool_results: list[Any] = []
+        metric_history: dict[str, list[float]] = {}
+
+        def _accumulate_metrics(obs: Mapping[str, Any]) -> None:
+            metrics = obs.get("metrics")
+            if not isinstance(metrics, dict):
+                return
+            for key, value in metrics.items():
+                # Mirror the Numeric_Value guard the readers use: int or float,
+                # never bool. A non-numeric reading contributes no history
+                # point rather than breaking the series.
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                metric_history.setdefault(key, []).append(float(value))
+
         for prior in session.get("iterations") or []:
             prior_obs = prior.get("observation") or {}
             prior_results = prior_obs.get("tool_results")
             if isinstance(prior_results, list):
                 all_tool_results.extend(prior_results)
-        # Append current iteration's results.
+            _accumulate_metrics(prior_obs)
+        # Append current iteration's results and metrics last so the history is
+        # ordered oldest→newest with the current reading at the end.
         current_results = current_obs.get("tool_results")
         if isinstance(current_results, list):
             all_tool_results.extend(current_results)
-        # Build the cumulative view: tool_results is cumulative,
-        # everything else comes from the current observation.
+        _accumulate_metrics(current_obs)
+        # Build the cumulative view: tool_results + metric_history are
+        # cumulative, everything else comes from the current observation.
         cumulative: dict[str, Any] = dict(current_obs)
         cumulative["tool_results"] = all_tool_results
+        cumulative["metric_history"] = metric_history
         return cumulative
 
     def _evaluate_one_criterion(
@@ -1198,6 +1227,10 @@ class MissionEngine:
 
         if kind == "metric_threshold":
             status, evidence = self._evaluate_metric_threshold(criterion, observation)
+        elif kind == "metric_trend":
+            # Trend evaluates against the cumulative observation, where the
+            # engine accumulates ``metric_history`` across iterations.
+            status, evidence = self._evaluate_metric_trend(criterion, cumulative_obs)
         elif kind == "event":
             status, evidence = self._evaluate_event(criterion, observation)
         elif kind == "predicate":
@@ -1242,6 +1275,95 @@ class MissionEngine:
         except ValueError:
             return "inconclusive", value
         return ("met" if met else "unmet"), value
+
+    @staticmethod
+    def _evaluate_metric_trend(
+        criterion: Criterion, cumulative_obs: dict[str, Any]
+    ) -> tuple[str, Any]:
+        """Evaluate a metric's direction across the accumulated history.
+
+        Reads the metric's value series from
+        ``cumulative_obs["metric_history"]`` — the oldest→newest list of
+        numeric readings the engine accumulates in
+        :meth:`_build_cumulative_observation`. The ``metric`` dot-path is
+        resolved against that map: a leading ``metrics.`` segment is stripped
+        so a criterion can reuse the same ``"metrics.loss"`` path it would use
+        for ``metric_threshold`` and still address the ``loss`` history series.
+
+        The series is trimmed to the most-recent ``window`` points (default:
+        all available). With fewer than ``min_points`` numeric points (default
+        2) the criterion is ``inconclusive`` — a trend is undefined on a single
+        reading, and the loop must never be failed for lack of history. The
+        verdict compares the last point to the first point of the windowed
+        series per ``direction``:
+
+        * ``decreasing``     → last <  first
+        * ``increasing``     → last >  first
+        * ``non_increasing`` → last <= first
+        * ``non_decreasing`` → last >= first
+
+        Evidence is a structured dict (direction, the windowed points, first /
+        last, and net delta) so the audit log shows exactly what the verdict
+        was computed from.
+        """
+        path = criterion.get("metric") or ""
+        direction = criterion.get("direction")
+        # Resolve the metric key against the history map. Accept both the bare
+        # key (``"loss"``) and the dot-path form (``"metrics.loss"``) so a
+        # trend criterion lines up with the metric_threshold convention.
+        history = cumulative_obs.get("metric_history")
+        if not isinstance(history, dict):
+            return "inconclusive", "metric_history_missing"
+        key = path.split(".", 1)[1] if path.startswith("metrics.") else path
+        series = history.get(key)
+        if not isinstance(series, list) or not series:
+            return "inconclusive", f"metric_history_empty:{key!r}"
+
+        # Keep only the numeric points (the accumulator already filters, but be
+        # defensive against a hand-built cumulative_obs in tests).
+        points: list[float] = [
+            float(v) for v in series if not isinstance(v, bool) and isinstance(v, (int, float))
+        ]
+
+        window = criterion.get("window")
+        if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+            points = points[-window:]
+
+        min_points = criterion.get("min_points")
+        required_points = (
+            min_points if isinstance(min_points, int) and not isinstance(min_points, bool) else 2
+        )
+        required_points = max(2, required_points)
+        if len(points) < required_points:
+            return "inconclusive", {
+                "reason": "insufficient_history",
+                "points": points,
+                "required_points": required_points,
+            }
+
+        first = points[0]
+        last = points[-1]
+        delta = last - first
+        if direction == "decreasing":
+            met = last < first
+        elif direction == "increasing":
+            met = last > first
+        elif direction == "non_increasing":
+            met = last <= first
+        elif direction == "non_decreasing":
+            met = last >= first
+        else:
+            # Unreachable when the validator has run; surface defensively.
+            return "inconclusive", f"unknown_direction:{direction!r}"
+
+        evidence = {
+            "direction": direction,
+            "points": points,
+            "first": first,
+            "last": last,
+            "delta": delta,
+        }
+        return ("met" if met else "unmet"), evidence
 
     @staticmethod
     def _evaluate_event(criterion: Criterion, observation: dict[str, Any]) -> tuple[str, Any]:

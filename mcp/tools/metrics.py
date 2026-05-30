@@ -62,13 +62,13 @@ from metric_readers.shape import (  # noqa: E402
     validate_metric_name,
 )
 
-# Job-log tail bounds (R5.10): a caller-supplied or default tail size is clamped
+# Job-log tail bounds: a caller-supplied or default tail size is clamped
 # into this inclusive range before any log volume is retrieved.
 _TAIL_MIN = 1
 _TAIL_MAX = 10_000
 _TAIL_DEFAULT = 1000
 
-# File-reader default size cap (R6.8): 10 MiB. The artifact's size is checked
+# File-reader default size cap: 10 MiB. The artifact's size is checked
 # before its full content is read into memory.
 _MAX_BYTES_DEFAULT = 10_485_760
 
@@ -77,8 +77,8 @@ def _resolve_key(output_name: str | None, source_hint: str) -> str:
     """Return a validated metric key from an explicit name or a source hint.
 
     When ``output_name`` is supplied it must satisfy the single-Dot_Path-segment
-    naming constraint (R1.3, R1.7); otherwise a deterministic, well-formed key
-    is derived from ``source_hint`` (R1.4).
+    naming constraint; otherwise a deterministic, well-formed key
+    is derived from ``source_hint``.
     """
     if output_name:
         return validate_metric_name(output_name)
@@ -219,7 +219,7 @@ async def metrics_from_job_logs(
     try:
         has_key = bool(json_key)
         has_regex = bool(regex)
-        # Exactly one extraction mode (R5.4).
+        # Exactly one extraction mode.
         if has_key == has_regex:
             raise MetricReaderError(
                 ErrorCode.INVALID_EXTRACTION_MODE,
@@ -236,7 +236,7 @@ async def metrics_from_job_logs(
         pattern: re.Pattern[str] | None = None
         if has_regex:
             # Compile and reject uncompilable or zero-capture-group patterns
-            # (R5.11).
+            # .
             try:
                 pattern = re.compile(regex)  # type: ignore[arg-type]
             except re.error as exc:
@@ -250,13 +250,13 @@ async def metrics_from_job_logs(
                     {"regex": regex, "reason": "no capture group"},
                 )
 
-        # Resolve the metric key (R1.3, R1.4, R1.7).
+        # Resolve the metric key.
         if has_key:
             key = _resolve_key(output_name, json_key.rsplit(".", 1)[-1])  # type: ignore[union-attr]
         else:
             key = _resolve_key(output_name, "value")
 
-        # Clamp the tail size into [1, 10_000] (R5.10).
+        # Clamp the tail size into [1, 10_000].
         clamped = max(_TAIL_MIN, min(int(tail), _TAIL_MAX))
 
         raw = await asyncio.to_thread(
@@ -273,7 +273,7 @@ async def metrics_from_job_logs(
         )
 
         # Translate an ``{"error": ...}`` CLI payload into a retrieval failure
-        # (R5.12). Plain log text is not JSON and is used as-is.
+        # . Plain log text is not JSON and is used as-is.
         try:
             payload = json.loads(raw)
         except ValueError:
@@ -293,7 +293,7 @@ async def metrics_from_job_logs(
         else:
             candidates = logs.extract_by_json_key(lines, json_key)  # type: ignore[arg-type]
 
-        # No line matched the key/pattern (R5.8).
+        # No line matched the key/pattern.
         if not candidates:
             raise MetricReaderError(
                 ErrorCode.NO_MATCH,
@@ -302,7 +302,7 @@ async def metrics_from_job_logs(
 
         # Coerce each matched value to a Numeric_Value; a value that cannot be
         # parsed surfaces as ``non_numeric_value`` with the offending raw value
-        # (R5.9).
+        # .
         numeric = [logs.coerce_scalar(candidate) for candidate in candidates]
         value = aggregate.reduce_sequence(numeric, aggregation)
 
@@ -336,8 +336,8 @@ def _read_shared_storage(path: str, region: str, max_bytes: int) -> bytes:
     Reuses ``gco files download`` (the existing read-only storage path) to fetch
     the artifact into a short-lived temporary file, then checks its size before
     its full content is read into memory: an artifact larger than ``max_bytes``
-    raises ``FILE_TOO_LARGE`` and **no** content is returned (R6.8, R6.9). A
-    missing or unreadable artifact raises ``FILE_NOT_FOUND`` (R6.4). The reader
+    raises ``FILE_TOO_LARGE`` and **no** content is returned. A
+    missing or unreadable artifact raises ``FILE_NOT_FOUND``. The reader
     never writes to, moves, or deletes the source artifact.
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -409,7 +409,7 @@ async def metrics_from_shared_storage_file(
     ``format_dependency_unavailable``) on failure.
     """
     try:
-        # Reject an unsupported format up front (R6.2, R6.10).
+        # Reject an unsupported format up front.
         if format not in files._HANDLERS:
             raise MetricReaderError(
                 ErrorCode.UNSUPPORTED_FORMAT,
@@ -445,7 +445,7 @@ async def metrics_from_shared_storage_file(
     except MetricReaderError as err:
         return error_envelope(err.code, **(err.details or {}))
     except Exception as exc:  # noqa: BLE001 - no exception may escape the tool boundary
-        # Catch-all for the file reader maps to the unreadable class (R6.4).
+        # Catch-all for the file reader maps to the unreadable class.
         return error_envelope(
             ErrorCode.FILE_NOT_FOUND,
             path=path,
@@ -461,23 +461,23 @@ async def metrics_from_shared_storage_file(
 # MCP host's *local* filesystem, a real security concern even for a read-only
 # tool, so its decorator is wrapped in ``if is_enabled("GCO_ENABLE_LOCAL_METRICS")``
 # (mirroring the module-body gate in ``mcp/tools/mission.py``). With the flag
-# unset the decorator never fires and FastMCP never sees the tool (R18.1). The
+# unset the decorator never fires and FastMCP never sees the tool. The
 # gate is evaluated **only** through ``feature_flags.is_enabled`` — never by
-# reading ``os.environ`` for the flag decision (R18.2) — and inherits the
-# umbrella ``GCO_ENABLE_ALL_TOOLS`` override (R18.3).
+# reading ``os.environ`` for the flag decision — and inherits the
+# umbrella ``GCO_ENABLE_ALL_TOOLS`` override.
 
 
 def _read_local_file(resolved_path: Path, path: str, max_bytes: int) -> bytes:
-    """Read a confined local artifact, enforcing the same size cap (R18.13).
+    """Read a confined local artifact, enforcing the same size cap.
 
     ``resolved_path`` is the Local_Root-confined path produced by
     :func:`localfs.resolve_within_root`; ``path`` is the caller-supplied path,
     carried through only for error provenance. The artifact's size is checked
     via ``stat`` **before** its full content is read into memory: an artifact
     larger than ``max_bytes`` raises ``FILE_TOO_LARGE`` and **no** content is
-    returned (R18.13). A missing or unreadable artifact raises
-    ``FILE_NOT_FOUND`` (R18.15). The reader only reads — it never writes to,
-    moves, or deletes the artifact (R18.5).
+    returned. A missing or unreadable artifact raises
+    ``FILE_NOT_FOUND``. The reader only reads — it never writes to,
+    moves, or deletes the artifact.
     """
     if not resolved_path.is_file():
         raise MetricReaderError(ErrorCode.FILE_NOT_FOUND, {"path": path})
@@ -540,14 +540,14 @@ if is_enabled("GCO_ENABLE_LOCAL_METRICS"):
         ``empty_sequence``, ``format_dependency_unavailable``) on failure.
         """
         try:
-            # Reject an unsupported format up front (R18.11).
+            # Reject an unsupported format up front.
             if format not in files._HANDLERS:
                 raise MetricReaderError(
                     ErrorCode.UNSUPPORTED_FORMAT,
                     {"format": format, "supported": sorted(files._HANDLERS)},
                 )
 
-            # Fail fast on an unknown aggregation mode before any read (R18.12).
+            # Fail fast on an unknown aggregation mode before any read.
             if aggregation not in aggregate.VALID_MODES:
                 raise MetricReaderError(
                     ErrorCode.INVALID_AGGREGATION_MODE,
@@ -561,7 +561,7 @@ if is_enabled("GCO_ENABLE_LOCAL_METRICS"):
             # unset/empty root raises LOCAL_ROOT_NOT_CONFIGURED, a ``..`` escape
             # raises PATH_TRAVERSAL_ESCAPE, and a symlink escape raises
             # SYMLINK_ESCAPE — in every escape case no file is read and the
-            # canonical shape is never returned (R18.6, R18.8, R18.9, R18.10).
+            # canonical shape is never returned.
             root = os.environ.get("GCO_METRICS_LOCAL_ROOT", "")
             resolved_path = localfs.resolve_within_root(path, root)
 
@@ -571,7 +571,7 @@ if is_enabled("GCO_ENABLE_LOCAL_METRICS"):
 
             # Dispatch to the SAME per-format handler the shared-storage reader
             # uses. Handlers raise MALFORMED_FILE / FIELD_NOT_FOUND /
-            # numeric-guard / dependency codes (R18.15).
+            # numeric-guard / dependency codes.
             handler = files._HANDLERS[format]
             value = handler(content, field, aggregation)
 
@@ -586,7 +586,7 @@ if is_enabled("GCO_ENABLE_LOCAL_METRICS"):
             return error_envelope(err.code, **(err.details or {}))
         except Exception as exc:  # noqa: BLE001 - no exception may escape the tool boundary
             # Catch-all for the local-file reader maps to the unreadable class
-            # (R18.15) so the criterion is left inconclusive rather than crashing
+            # so the criterion is left inconclusive rather than crashing
             # the loop.
             return error_envelope(
                 ErrorCode.FILE_NOT_FOUND,

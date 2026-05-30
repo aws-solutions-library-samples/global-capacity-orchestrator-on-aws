@@ -82,12 +82,17 @@ _DIRECTIVE_MAX_LEN: Final[int] = 8192
 """The hard cap on directive_text length, in characters."""
 
 _CRITERION_KINDS: Final[frozenset[str]] = frozenset(
-    {"metric_threshold", "event", "predicate", "tool_call_succeeded"}
+    {"metric_threshold", "event", "predicate", "tool_call_succeeded", "metric_trend"}
 )
-"""The four valid Criterion ``kind`` values."""
+"""The five valid Criterion ``kind`` values."""
 
 _METRIC_OPS: Final[frozenset[str]] = frozenset({"<", "<=", ">", ">=", "==", "!="})
 """The six valid comparison operators on a ``metric_threshold`` criterion."""
+
+_METRIC_TREND_DIRECTIONS: Final[frozenset[str]] = frozenset(
+    {"decreasing", "increasing", "non_increasing", "non_decreasing"}
+)
+"""The four valid trend directions on a ``metric_trend`` criterion."""
 
 _CADENCE_KINDS: Final[frozenset[str]] = frozenset(
     {"every_iteration", "every_n_iterations", "every_t_seconds", "on_event"}
@@ -207,6 +212,64 @@ def _validate_metric_threshold(entry: dict[str, Any], criterion_id: str) -> None
         )
 
 
+def _validate_metric_trend(entry: dict[str, Any], criterion_id: str) -> None:
+    """Check the kind-specific keys for a ``metric_trend`` criterion.
+
+    Required: ``metric`` (non-empty dot-path string) and ``direction`` (one of
+    the four :data:`_METRIC_TREND_DIRECTIONS`). Optional: ``window`` (positive
+    int — how many of the most-recent points to consider) and ``min_points``
+    (positive int — the minimum number of numeric points required before the
+    criterion decides met/unmet rather than inconclusive).
+
+    Unlike ``metric_threshold`` this kind has no ``op``/``target``: the
+    comparison is "where did the metric go over the window?", evaluated by
+    :meth:`MissionEngine._evaluate_metric_trend` against the cumulative metric
+    history the engine accumulates across iterations.
+    """
+    metric = entry.get("metric")
+    if not isinstance(metric, str) or not metric:
+        raise MissionValidationError(
+            "validation_error",
+            details={
+                "field": "criteria",
+                "criterion_id": criterion_id,
+                "reason": "metric_missing_or_invalid",
+            },
+        )
+    direction = entry.get("direction")
+    if direction not in _METRIC_TREND_DIRECTIONS:
+        raise MissionValidationError(
+            "validation_error",
+            details={
+                "field": "criteria",
+                "criterion_id": criterion_id,
+                "reason": "direction_invalid",
+                "allowed": sorted(_METRIC_TREND_DIRECTIONS),
+            },
+        )
+    # ``window`` and ``min_points`` are optional, but when present each must be
+    # a strictly-positive int (bool rejected). A missing value lets the engine
+    # apply its defaults (window = all points; min_points = 2).
+    if "window" in entry and not _is_positive_int(entry.get("window")):
+        raise MissionValidationError(
+            "validation_error",
+            details={
+                "field": "criteria",
+                "criterion_id": criterion_id,
+                "reason": "window_must_be_positive_int",
+            },
+        )
+    if "min_points" in entry and not _is_positive_int(entry.get("min_points")):
+        raise MissionValidationError(
+            "validation_error",
+            details={
+                "field": "criteria",
+                "criterion_id": criterion_id,
+                "reason": "min_points_must_be_positive_int",
+            },
+        )
+
+
 def _validate_event_criterion(entry: dict[str, Any], criterion_id: str) -> None:
     """Check the kind-specific keys for an ``event`` criterion."""
     event_name = entry.get("event_name")
@@ -299,10 +362,12 @@ def validate_criteria(criteria: list[dict[str, Any]]) -> list[Criterion]:
     """Validate a list of criteria and attach cached predicate ASTs.
 
     Required keys on every entry: ``criterion_id`` (non-empty str),
-    ``kind`` (one of the three :class:`CriterionKind` values), and
+    ``kind`` (one of the :class:`CriterionKind` values), and
     ``required`` (bool). Each entry must also provide the kind-specific
     keys: ``metric``/``op``/``target`` for ``metric_threshold``,
-    ``event_name`` for ``event``, ``expression`` for ``predicate``.
+    ``metric``/``direction`` (plus optional ``window``/``min_points``) for
+    ``metric_trend``, ``event_name`` for ``event``, ``tool_name`` for
+    ``tool_call_succeeded``, and ``expression`` for ``predicate``.
 
     The ``criterion_id`` must be unique across the list. For each
     ``predicate`` entry, the expression is parsed via
@@ -379,6 +444,8 @@ def validate_criteria(criteria: list[dict[str, Any]]) -> list[Criterion]:
         normalized_entry: dict[str, Any] = dict(entry)
         if kind == "metric_threshold":
             _validate_metric_threshold(entry, criterion_id)
+        elif kind == "metric_trend":
+            _validate_metric_trend(entry, criterion_id)
         elif kind == "event":
             _validate_event_criterion(entry, criterion_id)
         elif kind == "tool_call_succeeded":

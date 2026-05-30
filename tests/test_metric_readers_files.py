@@ -15,9 +15,9 @@ embedded sequence is numeric and each artifact round-trips its values exactly,
 a divergence points at the handler, not at the artifact.
 
 The ``parquet`` sub-case depends on pandas/pyarrow (the analytics extra) and on
-the columnar handler having been registered (task 5.2). When either is absent
-the parquet sub-case is skipped rather than failing, so the test still runs in
-a minimal environment.
+the columnar handler having been registered. When either is absent the parquet
+sub-case is skipped rather than failing, so the test still runs in a minimal
+environment.
 """
 
 from __future__ import annotations
@@ -147,11 +147,10 @@ _BUILDERS = {
 
 
 # ---------------------------------------------------------------------------
-# Property 7: per-format round-trip recovers the reduced scalar
+# Per-format round-trip recovers the reduced scalar
 # ---------------------------------------------------------------------------
 
 
-# Feature: mission-metric-reader-tools, Property 7: Per-format round-trip recovers the reduced scalar
 @settings(
     max_examples=150,
     deadline=None,
@@ -160,9 +159,6 @@ _BUILDERS = {
 @given(seq=_numeric_sequences)
 def test_per_format_round_trip_recovers_reduced_scalar(seq: list[object]) -> None:
     """Reading a constructed artifact back recovers the reference reduction.
-
-    Validates: Requirements 8.1, 8.2, 8.3, 8.4, 8.5, 9.2, 9.3, 10.1, 10.2,
-    10.3, 11.2, 11.3, 12.1, 12.2, 16.2, 16.5
 
     For every text parsing format (``json``, ``csv``, ``hf_trainer_state``,
     ``jsonl``, ``yaml``) and every Aggregation_Mode, the scalar the handler
@@ -182,11 +178,10 @@ def test_per_format_round_trip_recovers_reduced_scalar(seq: list[object]) -> Non
 
 
 # ---------------------------------------------------------------------------
-# Property 7 (parquet arm): dependency- and handler-guarded round-trip
+# Parquet round-trip: dependency- and handler-guarded
 # ---------------------------------------------------------------------------
 
 
-# Feature: mission-metric-reader-tools, Property 7: Per-format round-trip recovers the reduced scalar
 @settings(
     max_examples=100,
     deadline=None,
@@ -195,8 +190,6 @@ def test_per_format_round_trip_recovers_reduced_scalar(seq: list[object]) -> Non
 @given(seq=_numeric_sequences)
 def test_parquet_round_trip_recovers_reduced_scalar(seq: list[object]) -> None:
     """The columnar reader recovers the reference reduction of a Parquet column.
-
-    Validates: Requirements 12.1, 12.2, 16.2, 16.5
 
     Mirrors the text-format property for ``parquet``: a single-column Parquet
     artifact embedding ``seq`` reads back, under each Aggregation_Mode, to the
@@ -207,7 +200,7 @@ def test_parquet_round_trip_recovers_reduced_scalar(seq: list[object]) -> None:
     pd = pytest.importorskip("pandas")
     pytest.importorskip("pyarrow")
     if "parquet" not in files._HANDLERS:
-        pytest.skip("parquet handler not yet registered (task 5.2)")
+        pytest.skip("parquet handler not registered")
 
     buffer = io.BytesIO()
     pd.DataFrame({"metric": list(seq)}).to_parquet(buffer, index=False)
@@ -223,11 +216,11 @@ def test_parquet_round_trip_recovers_reduced_scalar(seq: list[object]) -> None:
 
 
 # ===========================================================================
-# Task 5.4 — file-reader error-class unit tests
+# File-reader error-class unit tests
 # ===========================================================================
 #
 # Plain (non-property) unit tests pinning down which stable ErrorCode each
-# failure class surfaces, one assertion per documented code (Requirement 16.3).
+# failure class surfaces, one assertion per documented code.
 #
 # Layering note. The per-format *handlers* in ``files.py`` raise the codes that
 # describe the *content* of an artifact:
@@ -240,9 +233,9 @@ def test_parquet_round_trip_recovers_reduced_scalar(seq: list[object]) -> None:
 # The remaining two codes live at the *tool* boundary in ``mcp/tools/metrics.py``,
 # not in any handler:
 #
-#   * ``file_too_large``    — the ``_read_shared_storage`` size cap (R6.9), checked
+#   * ``file_too_large``    — the ``_read_shared_storage`` size cap, checked
 #                             before the artifact's content is read.
-#   * ``unsupported_format`` — the ``format not in files._HANDLERS`` guard (R6.10),
+#   * ``unsupported_format`` — the ``format not in files._HANDLERS`` guard,
 #                             reached when the caller names a format with no handler.
 #
 # These two are tested against the pure mechanisms in the tool module: the
@@ -250,17 +243,17 @@ def test_parquet_round_trip_recovers_reduced_scalar(seq: list[object]) -> None:
 # format guard is exercised by invoking the tool with a bogus format (the guard
 # runs before any storage read, so it stays offline).
 #
-# On ``tfevents`` and ``unsupported_format`` (R13.5). The design *implements*
-# ``tfevents`` rather than deferring it: it is a registered ``_HANDLERS`` entry
-# whose lazy ``tbparse`` import, when the dependency is absent, yields
-# ``format_dependency_unavailable`` (R13.3) — the path exercised below. R13.5's
-# "if deferred entirely -> unsupported_format" branch is therefore the same
+# On ``tfevents`` and ``unsupported_format``. ``tfevents`` is implemented
+# rather than deferred: it is a registered ``_HANDLERS`` entry whose lazy
+# ``tbparse`` import, when the dependency is absent, yields
+# ``format_dependency_unavailable`` — the path exercised below. Were the format
+# ever deferred entirely, a ``tfevents`` request would instead surface the same
 # ``unsupported_format`` code the tool-boundary guard raises for any format with
 # no handler; that code is covered by the unknown-format test below.
 
 
 # ---------------------------------------------------------------------------
-# field_not_found — a named field / column is absent (R6.6, R8.6, R12.3)
+# field_not_found — a named field / column is absent
 # ---------------------------------------------------------------------------
 
 
@@ -274,7 +267,7 @@ def test_json_missing_field_raises_field_not_found() -> None:
 
 
 def test_csv_missing_column_raises_field_not_found() -> None:
-    """A column name absent from the CSV header is a field-not-found error (R8.6)."""
+    """A column name absent from the CSV header is a field-not-found error."""
     content = b"colA,colB\n1,2\n3,4\n"
     with pytest.raises(MetricReaderError) as excinfo:
         files._handle_csv(content, "colC", "last")
@@ -283,7 +276,7 @@ def test_csv_missing_column_raises_field_not_found() -> None:
 
 
 def test_hf_missing_field_raises_field_not_found() -> None:
-    """A field in neither ``log_history`` nor a top-level key is missing (R9.4)."""
+    """A field in neither ``log_history`` nor a top-level key is missing."""
     content = json.dumps({"log_history": [{"loss": 1.0}]}).encode("utf-8")
     with pytest.raises(MetricReaderError) as excinfo:
         files._handle_hf(content, "accuracy", "last")
@@ -292,7 +285,7 @@ def test_hf_missing_field_raises_field_not_found() -> None:
 
 
 # ---------------------------------------------------------------------------
-# malformed_file — bytes do not parse under the requested format (R6.5, R11.4)
+# malformed_file — bytes do not parse under the requested format
 # ---------------------------------------------------------------------------
 
 
@@ -305,7 +298,7 @@ def test_json_unparseable_bytes_raise_malformed_file() -> None:
 
 
 def test_yaml_unparseable_bytes_raise_malformed_file() -> None:
-    """A document the safe loader rejects is a malformed-file error (R11.4)."""
+    """A document the safe loader rejects is a malformed-file error."""
     with pytest.raises(MetricReaderError) as excinfo:
         files._handle_yaml(b":\n  - [unbalanced", "field", "last")
     assert excinfo.value.code == ErrorCode.MALFORMED_FILE
@@ -321,7 +314,7 @@ def test_csv_invalid_utf8_raises_malformed_file() -> None:
 
 
 # ---------------------------------------------------------------------------
-# no_numeric_value — a JSONL stream yields no usable number (R10.5)
+# no_numeric_value — a JSONL stream yields no usable number
 # ---------------------------------------------------------------------------
 
 
@@ -334,7 +327,7 @@ def test_jsonl_all_non_numeric_raises_no_numeric_value() -> None:
 
 
 def test_jsonl_field_never_present_raises_no_numeric_value() -> None:
-    """A stream that never carries the field collapses to the same code (R10.5).
+    """A stream that never carries the field collapses to the same code.
 
     Lines that are valid JSON objects but lack the requested key contribute
     nothing, so the gathered sequence is empty — the reader maps that to the
@@ -348,14 +341,14 @@ def test_jsonl_field_never_present_raises_no_numeric_value() -> None:
 
 
 # ---------------------------------------------------------------------------
-# format_dependency_unavailable — a lazy optional import fails (R12.4, R13.3)
+# format_dependency_unavailable — a lazy optional import fails
 # ---------------------------------------------------------------------------
 
 
 def test_parquet_missing_dependency_raises_format_dependency_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing pandas/pyarrow wheel is a dependency-unavailable envelope (R12.4).
+    """A missing pandas/pyarrow wheel is a dependency-unavailable envelope.
 
     Setting ``sys.modules["pandas"]`` to ``None`` makes ``import pandas`` inside
     the handler raise ``ImportError`` deterministically, regardless of whether
@@ -372,11 +365,11 @@ def test_parquet_missing_dependency_raises_format_dependency_unavailable(
 def test_tfevents_missing_dependency_raises_format_dependency_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing tbparse/tensorboard parser is a dependency-unavailable envelope (R13.3).
+    """A missing tbparse/tensorboard parser is a dependency-unavailable envelope.
 
     ``tfevents`` is implemented (a registered handler), not deferred, so an
     absent parser surfaces as ``format_dependency_unavailable`` and never as an
-    import crash (R13.4). Forcing ``import tbparse`` to fail via ``sys.modules``
+    import crash. Forcing ``import tbparse`` to fail via ``sys.modules``
     exercises that lazy-import guard.
     """
     monkeypatch.setitem(sys.modules, "tbparse", None)
@@ -387,7 +380,7 @@ def test_tfevents_missing_dependency_raises_format_dependency_unavailable(
 
 
 # ---------------------------------------------------------------------------
-# Tool-boundary codes: file_too_large (R6.9) and unsupported_format (R6.10, R13.5)
+# Tool-boundary codes: file_too_large and unsupported_format
 # ---------------------------------------------------------------------------
 
 
@@ -409,7 +402,7 @@ def _import_metrics_tool_module():
 def test_oversize_artifact_raises_file_too_large(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An artifact larger than ``max_bytes`` is a file-too-large error (R6.9).
+    """An artifact larger than ``max_bytes`` is a file-too-large error.
 
     Exercises the tool-boundary size cap in ``_read_shared_storage`` without any
     AWS/network: the ``gco files download`` call is stubbed to drop an oversized
@@ -439,11 +432,11 @@ def test_oversize_artifact_raises_file_too_large(
 
 
 def test_unknown_format_returns_unsupported_format() -> None:
-    """A ``format`` with no handler is an unsupported-format envelope (R6.10, R13.5).
+    """A ``format`` with no handler is an unsupported-format envelope.
 
     The tool's format guard runs before any storage read, so invoking the
     shared-storage reader with a bogus format returns the ``unsupported_format``
-    envelope offline. This is also the code R13.5 reserves for a ``tfevents``
+    envelope offline. This is also the code reserved for a ``tfevents``
     request were the format ever deferred entirely.
     """
     metrics_module = _import_metrics_tool_module()

@@ -320,7 +320,7 @@ def _names_with_whitespace(draw: st.DrawFn) -> str:
     return left + draw(_whitespace_chars) + right
 
 
-# An invalid metric name spanning all four rejection reasons in R1.7: empty,
+# An invalid metric name spanning all four rejection reasons: empty,
 # longer than 128 characters, containing a "." separator, or containing
 # whitespace.
 _invalid_metric_names = st.one_of(
@@ -339,7 +339,6 @@ _classified_metric_names = st.one_of(
 )
 
 
-# Feature: mission-metric-reader-tools, Property 3: Metric-name validator round-trip
 @settings(
     max_examples=200,
     deadline=None,
@@ -348,8 +347,6 @@ _classified_metric_names = st.one_of(
 @given(case=_classified_metric_names)
 def test_metric_name_validator_round_trip(case: tuple[str, bool]) -> None:
     """``validate_metric_name`` echoes valid names and rejects invalid ones.
-
-    Validates: Requirements 1.3, 1.7
 
     For any generated name:
 
@@ -493,7 +490,6 @@ def _details(draw: st.DrawFn) -> dict[str, Any]:
     return payload
 
 
-# Feature: mission-metric-reader-tools, Property 8: Error envelopes never carry top-level metrics
 @settings(
     max_examples=200,
     deadline=None,
@@ -506,18 +502,16 @@ def test_error_envelope_never_carries_top_level_metrics(
 ) -> None:
     """``error_envelope`` always yields ``{"code","details"}`` with no top-level metrics.
 
-    Validates: Requirements 14.1, 14.4, 14.5
-
     For any error code and arbitrary details payload:
 
     * the result is a dict whose top-level keys are exactly ``code`` and
       ``details`` — nothing else;
     * there is no top-level ``metrics`` key, so the Observe_Phase merge skips
       the envelope and a ``metric_threshold`` criterion is left
-      ``inconclusive`` rather than ``met``/``unmet`` (R14.4); and
+      ``inconclusive`` rather than ``met``/``unmet``; and
     * the supplied code and the full details payload (including a field that
       happens to be named ``metrics``) are preserved verbatim — the details
-      provenance survives nested under ``details`` (R14.5).
+      provenance survives nested under ``details``.
     """
     envelope = error_envelope(code, **details)
 
