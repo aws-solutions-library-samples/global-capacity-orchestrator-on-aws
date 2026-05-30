@@ -25,6 +25,7 @@ def register_all_tools() -> None:
         models,
         nodepools,
         queue,
+        semantic_progress,
         stacks,
         storage,
         tasks,

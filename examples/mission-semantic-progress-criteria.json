@@ -1,0 +1,10 @@
+[
+  {
+    "criterion_id": "semantic_progress_target",
+    "kind": "metric_threshold",
+    "required": true,
+    "metric": "metrics.progress_score",
+    "op": ">=",
+    "target": 0.8
+  }
+]

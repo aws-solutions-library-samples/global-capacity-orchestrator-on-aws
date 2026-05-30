@@ -21,6 +21,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
   - [KEDA Autoscaled Job](#keda-autoscaled-job)
   - [Kueue Job Queueing](#kueue-job-queueing)
   - [MegaTrain SFT Job](#megatrain-sft-job)
+  - [Mission Semantic-Progress Judge](#mission-semantic-progress-judge)
   - [Mission Training-Loss Observation](#mission-training-loss-observation)
   - [Model Download Job](#model-download-job)
   - [Multi-GPU Distributed Training](#multi-gpu-distributed-training)
@@ -63,6 +64,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 | [KEDA Scaled](#keda-autoscaled-job) | `keda-scaled-job.yaml` | Scheduler | — | — |
 | [Kueue](#kueue-job-queueing) | `kueue-job.yaml` | Scheduler | Optional | — |
 | [MegaTrain SFT](#megatrain-sft-job) | `megatrain-sft-job.yaml` | Jobs | ✅ | — |
+| [Mission Semantic-Progress](#mission-semantic-progress-judge) | `mission-semantic-progress-criteria.json` | Mission | — | Mission, Semantic-Progress |
 | [Mission Training-Loss](#mission-training-loss-observation) | `mission-training-loss-criteria.json`, `megatrain-trainer-state.json` | Mission | — | Mission |
 | [Model Download](#model-download-job) | `model-download-job.yaml` | Jobs | — | — |
 | [Multi-GPU Training](#multi-gpu-distributed-training) | `multi-gpu-training.yaml` | Jobs | ✅ | — |
@@ -401,6 +403,50 @@ gco jobs logs megatrain-sft -r us-east-1
 **Requirements:** GPU node with large CPU RAM, shared EFS storage.
 
 **When to use:** SFT fine-tuning of large HuggingFace models, full-precision training on a single GPU.
+
+---
+
+### Mission Semantic-Progress Judge
+
+**File:** `mission-semantic-progress-criteria.json`
+
+Drives a [Mission](../docs/MISSION.md) with an **LLM-as-judge** progress signal instead of a metric scraped from a file. The read-only `metrics_semantic_progress` tool scores how close a session is to satisfying its directive against a fixed, versioned rubric, then emits that score in the canonical `{"metrics": {"progress_score": <number>}}` shape Mission's Observe phase merges. A plain `metric_threshold` criterion then reads `metrics.progress_score` by dot-path with no special handling — the comparison is byte-for-byte the same one the engine performs on any numeric metric.
+
+The score is a finite float in the closed range `[0.0, 1.0]` (`0.0` = no progress toward the directive, `1.0` = directive fully satisfied). All non-determinism is confined to the single LLM call inside the tool — exactly like a CloudWatch read varying between calls — while the criterion comparison over the score stays fully deterministic.
+
+- `mission-semantic-progress-criteria.json` is a one-criterion [Criteria File](../docs/MISSION.md#criteria-file-schema) asserting `metrics.progress_score >= 0.8`.
+
+**Prerequisites:**
+
+- `GCO_ENABLE_SEMANTIC_PROGRESS=true` (or the umbrella `GCO_ENABLE_ALL_TOOLS=true`) — the judge tool is **gated default-off** because each invocation incurs an LLM call (a Bedrock cost on the CLI path), so it only appears once an operator deliberately opts in.
+- `GCO_ENABLE_MISSION=true` (or the umbrella `GCO_ENABLE_ALL_TOOLS=true`) to run any Mission CLI subcommand.
+
+**Usage:**
+
+```bash
+export GCO_ENABLE_MISSION=true
+export GCO_ENABLE_SEMANTIC_PROGRESS=true
+
+# Drive a Mission whose completion is judged semantically against the directive.
+gco mission start --run \
+  --directive "Stand up a healthy vLLM inference endpoint serving opt-125m." \
+  --criteria-file examples/mission-semantic-progress-criteria.json \
+  --max-iterations 10 --max-wall-clock 3600 \
+  --tool-allowlist metrics_semantic_progress
+```
+
+The Mission loop calls `metrics_semantic_progress` each iteration with these arguments:
+
+```json
+{
+  "directive": "Stand up a healthy vLLM inference endpoint serving opt-125m.",
+  "recent_context": "Iteration 3: deployment created; 1/1 replicas ready; /health returns 200."
+}
+```
+
+`recent_context` is optional — when omitted the judge scores from the directive alone. Pass a `metric_trend` criterion on the same `metrics.progress_score` dot-path instead to require the score to climb across iterations rather than clear a fixed bar.
+
+**When to use:** Goal-directed runs where "done" is a semantic judgement of the directive rather than a single number a tool can scrape — provisioning workflows, multi-step setups, or any objective where progress is easier to describe than to measure directly.
 
 ---
 

@@ -21,6 +21,7 @@ Mission is GCO's goal-directed iteration loop. The operator declares a directive
   - [Rejected outright](#rejected-outright)
   - [Why the eval is safe](#why-the-eval-is-safe)
 - [Reading Metrics with Reader Tools](#reading-metrics-with-reader-tools)
+- [Scoring Progress with the Semantic-Progress Judge](#scoring-progress-with-the-semantic-progress-judge)
 - [Quickstart](#quickstart)
 - [One-Command Run](#one-command-run)
 - [The No-AWS Smoke Test](#the-no-aws-smoke-test)
@@ -515,6 +516,81 @@ There are two complementary ways to observe a metric's history, and they operate
 - **Engine-level history (`metric_trend`)** observes how a metric moves *across iterations* of the Mission loop. The engine accumulates a `metric_history` series for every numeric metric it sees (oldest→newest) in the Evaluate phase's cumulative observation — the same place it already accumulates `tool_results`. A [`metric_trend`](#metric_trend-criterion) criterion reads that series and evaluates its direction (`decreasing`, `increasing`, `non_increasing`, `non_decreasing`) over an optional `window`, with a `min_points` floor below which it stays `inconclusive`.
 
 So "drive loss down and keep it falling" is expressible as two criteria over the same metric: a `metric_threshold` (`metrics.loss <= 0.1`) for the point-in-time floor, and a `metric_trend` (`direction: decreasing`) for the cross-iteration shape. The per-iteration `metrics` dict stays point-in-time exactly as before — `metric_history` lives alongside it on the cumulative view, so existing `metric_threshold`, `event`, and `predicate` criteria are unaffected, and predicates can read `obs['metric_history']` directly when they need the raw series.
+
+## Scoring Progress with the Semantic-Progress Judge
+
+The reader tools above surface a number that already exists somewhere — a CloudWatch datapoint, a field in a training artifact, a line in a log. But not every goal has a clean scalar to read. "Is the cluster getting closer to a healthy multi-region posture?" or "Is this investigation actually converging on the directive?" are real progress questions with no single number to point a `metric_threshold` at. The `metrics_semantic_progress` tool — the **semantic-progress judge** — fills that gap: it asks an LLM to score how close the Mission is to satisfying its directive, then emits that score in the same canonical metrics shape the reader tools use, so a plain criterion can watch it.
+
+This is the **LLM-as-judge** pattern. The model is used as a scoring function — given the directive and recent progress context, return one number in `[0.0, 1.0]` (`0.0` = no progress toward the directive, `1.0` = directive fully satisfied) against a fixed, versioned rubric. The score then flows through the engine exactly like any other metric.
+
+### Prerequisite: a gated, default-off tool that costs one LLM call
+
+Each invocation makes one LLM call (a Bedrock cost on the CLI path, or a sampling round-trip on an MCP host that advertises sampling capability). Because that cost is real and incurred per call, the tool is **gated default-off** behind `GCO_ENABLE_SEMANTIC_PROGRESS` (or the umbrella `GCO_ENABLE_ALL_TOOLS=true`). With neither flag set the tool is absent from `mcp.list_tools()` and cannot be allowlisted into a session. Its docstring begins with the literal prefix `[gated by GCO_ENABLE_SEMANTIC_PROGRESS]`, and it carries the `safe` tag — it is strictly read-only, mutating nothing; it only reads its inputs and asks the model for a score.
+
+```bash
+export GCO_ENABLE_SEMANTIC_PROGRESS=true   # or GCO_ENABLE_ALL_TOOLS=true
+```
+
+The tool takes the directive plus an optional `recent_context` string (recent observations and/or metric-history the strategy chooses to pass), an optional `output_name` (the metric key, default `progress_score`), and an optional `model_id`. It obtains its model output through Mission's existing sampling seam — the same one [Sampling](#sampling) describes — so it works on both the MCP-context path and the Bedrock CLI path without configuring a backend of its own.
+
+### The canonical shape and the `metrics.progress_score` dot-path
+
+On success the judge returns the **canonical metrics shape** — the very shape the Observe phase merges:
+
+```json
+{
+  "metrics": {"progress_score": 0.72},
+  "rationale": "Two of the three regions report healthy nodepools; the third is still scaling.",
+  "source": "bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+  "backend_name": "bedrock",
+  "model_id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+  "rubric_version": "spj-v1",
+  "raw_score": 0.72
+}
+```
+
+The single number lands under `metrics.progress_score`, so the Observe phase merges it via `metrics.update(...)` and a criterion reads it by the dot-path `metrics.progress_score`. Everything else — `rationale`, `source`, `backend_name`, `model_id`, `rubric_version`, and the pre-clamp `raw_score` — is **provenance that lives strictly outside the `metrics` object**, so the merged `observation["metrics"]` dict only ever holds the one number. That provenance is what makes a non-deterministic datapoint auditable after the fact: a reviewer can see which backend and model produced the score, under which rubric version, and what the model's own rationale was.
+
+The metric key follows the same `metrics.<name>` convention as the reader tools: pass `output_name` to rename it (constrained to a single dot-path segment — 1–128 characters, no `.` separator, no whitespace) and the criterion's `metric` field changes to match. The default is `progress_score`, so the dot-path is `metrics.progress_score` unless you override it.
+
+A *failure* result is a structured error envelope (`{"code": "...", "details": {...}}`) with **no** top-level `metrics` key — exactly like a reader's failure. The Observe phase skips it, the criterion reads `inconclusive` rather than `unmet`, and the loop keeps running. A missing directive, an unavailable sampling backend, a transport error, or an unparseable model score all surface this way; nothing escapes the tool to crash the session.
+
+### The determinism boundary
+
+The judge's whole design rests on one property: **all the non-determinism lives in a single place**. The only non-deterministic step is the one `sample()` call to the model. Prompt construction (around the fixed, versioned rubric), score parsing, clamping into `[0.0, 1.0]`, output-name validation, and the canonical-shape building are every one of them deterministic given their inputs — and so is the downstream criterion comparison the engine performs over the emitted number.
+
+That makes a judge score *exactly analogous to a CloudWatch read*. A CloudWatch datapoint varies between calls because the world changed, not because the comparison is fuzzy; the `metric_threshold` that reads it is still a plain, reproducible `>=`. A judge score varies between calls because the model's answer varies — but once the number is on the Observation, the criterion comparing it is byte-for-byte the same deterministic comparison the engine runs on any numeric metric. There is no judge-specific code path in the engine, and the same score value always yields the same `met`/`unmet`/`inconclusive` result on repeated evaluation. The per-call variability of the score is expected and treated like the variability of any external reading — the loop's *decision* over the score stays reproducible.
+
+### Example: a threshold and a trend over the judge's score
+
+Because the judge emits an ordinary number under `metrics.progress_score`, the two history-aware and point-in-time criterion kinds consume it with no special handling.
+
+A `metric_threshold` criterion completes the session once the judge is confident the directive is essentially satisfied:
+
+```json
+{
+  "criterion_id": "progress_threshold",
+  "kind": "metric_threshold",
+  "required": true,
+  "metric": "metrics.progress_score",
+  "op": ">=",
+  "target": 0.8
+}
+```
+
+A `metric_trend` criterion asserts the run is actually moving toward the goal rather than stalling — the engine accumulates each iteration's `progress_score` into the `metric_history` series and the criterion checks its direction:
+
+```json
+{
+  "criterion_id": "progress_climbing",
+  "kind": "metric_trend",
+  "required": true,
+  "metric": "metrics.progress_score",
+  "direction": "increasing"
+}
+```
+
+Pair the two to express "the judge says we're nearly done **and** progress has been climbing across iterations" — one point-in-time floor, one cross-iteration shape, both reading the same `metrics.progress_score` the judge emits. Allowlist `metrics_semantic_progress` into the session so the strategy can call it during the Execute phase, and remember it only resolves when `GCO_ENABLE_SEMANTIC_PROGRESS` (or `GCO_ENABLE_ALL_TOOLS`) is set.
 
 ## Quickstart
 

@@ -19,7 +19,7 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 | `stacks.py` | 4 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status` |
 | `storage.py` | 2 | `list_storage_contents`, `list_file_systems` |
 | `models.py` | 2 | `list_models`, `get_model_uri` |
-| `metrics.py` | 4 (3 default-on, 1 gated) | All `safe`: `metrics_cloudwatch_get`, `metrics_from_job_logs`, `metrics_from_shared_storage_file` (default-on); `metrics_from_local_file` (gated by `GCO_ENABLE_LOCAL_METRICS`, default-off) |
+| `metrics.py` | 5 (3 default-on, 2 gated) | All `safe`: `metrics_cloudwatch_get`, `metrics_from_job_logs`, `metrics_from_shared_storage_file` (default-on); `metrics_from_local_file` (gated by `GCO_ENABLE_LOCAL_METRICS`, default-off); `metrics_semantic_progress` (gated by `GCO_ENABLE_SEMANTIC_PROGRESS`, default-off) |
 | `tasks.py` | 2 | `task_status`, `task_tail` (read-only observability for long-running tools) |
 
 ## How Tools Work
