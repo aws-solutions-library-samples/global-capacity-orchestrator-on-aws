@@ -36,22 +36,23 @@ steps:
 
 ### `install-trivy`
 
-Installs a pinned Trivy binary from the upstream `contrib/install.sh` script, hardened against the transient failures that have broken CI. The most common is rate limiting: the install script and the release-asset download hit anonymous, shared-IP GitHub endpoints that intermittently throttle GHA runners (and occasionally drop a download mid-stream), surfacing as a hard exit 1 on the bare `curl ... | sh` step. The composite adds three defences:
+Installs a pinned Trivy binary by wrapping the official, SHA-pinned `aquasecurity/setup-trivy` installer. A thin shim so workflows reference one place and the installer version + security pin live here, not duplicated across `security.yml` and `cve-scan.yml`.
 
-1. **Cache** — the binary is cached via `actions/cache` keyed on version + runner OS/arch, so most runs restore it without touching the network.
-2. **Retry** — on a cache miss the download is retried up to 3 times with 15 s / 30 s backoff.
-3. **Token** — `GITHUB_TOKEN` is forwarded to the install script so tag resolution uses the authenticated API limit (5000/hr) rather than the anonymous one (60/hr).
+**Why wrap `setup-trivy` instead of `curl ... contrib/install.sh | sh`:**
 
-Installs from the upstream script rather than `aquasecurity/trivy-action`, which has also broken CI independently by depending on `aquasecurity/setup-trivy` tags that were later yanked ("v0.2.2" unresolvable). This is the single source of truth for the Trivy install pattern; the binary is added to `GITHUB_PATH`, so later steps call `trivy` directly.
+- **Supply chain** — `setup-trivy` is SHA-pinned (not a moving tag), and it in turn SHA-pins the `aquasecurity/trivy` ref it pulls `install.sh` from. A raw `curl | sh` from the upstream `main` branch runs whatever is there at runtime, unpinned; pinning both hops removes that exposure.
+- **Reliability** — the previous raw-curl step intermittently failed when the `raw.githubusercontent.com` fetch was throttled or dropped mid-download (a hard exit 1 right after the version resolved). `setup-trivy` installs via a pinned `actions/checkout` + release download and caches the binary, so most runs restore it without touching that path.
+
+**Why `setup-trivy` (installer), not `trivy-action` (scanner):** our jobs run `trivy fs` / `trivy image` directly with a two-pass JSON+table pattern and flags (`--file-patterns`, dual `--exit-code`, `--skip-version-check`) that don't map onto `trivy-action`'s single-run model. This action only puts the pinned binary on `PATH`; the run steps stay in the workflows.
 
 **Inputs:**
 
 | Name | Default | Description |
 |------|---------|-------------|
 | `version` | (required) | Trivy version tag (e.g. `v0.70.0`). Pin in lockstep across all callers. |
-| `github-token` | `""` | Token for authenticated API tag resolution. Pass `${{ github.token }}`. |
+| `github-token` | `""` | Token forwarded to `setup-trivy` for the install-script checkout (authenticated API limit vs anonymous). Pass `${{ github.token }}`. |
 
-**Used by:** `security:trivy:filesystem`, `security:trivy:container-scan` (`security.yml`), and `cve-scan.yml`. Keep `TRIVY_VERSION` identical across all three.
+**Used by:** `security:trivy:filesystem`, `security:trivy:container-scan` (`security.yml`), and `cve-scan.yml`. Keep `TRIVY_VERSION` identical across all three. Bump the `setup-trivy` SHA + version comment in `action.yml` together after reviewing the diff.
 
 **Usage:**
 

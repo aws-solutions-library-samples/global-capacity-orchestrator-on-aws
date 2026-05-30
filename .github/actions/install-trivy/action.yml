@@ -1,33 +1,28 @@
-name: "Install Trivy (pinned, cached, retried)"
+name: "Install Trivy (pinned, cached)"
 description: |
-  Installs a pinned Trivy binary using the upstream `contrib/install.sh`
-  script, wrapped with three defences against the transient failures we have
-  seen break CI:
+  Installs a pinned Trivy binary by wrapping the official, SHA-pinned
+  `aquasecurity/setup-trivy` installer. This is a thin shim so our workflows
+  reference one place — `uses: ./.github/actions/install-trivy` — and the
+  underlying installer, its version, and its security pin are maintained here
+  rather than duplicated across security.yml and cve-scan.yml.
 
-    1. Cache — the resolved binary is cached (keyed on version + runner OS/arch)
-       via `actions/cache`, so most runs restore it and touch the network not
-       at all.
-    2. Retry — on a cache miss the download is attempted up to 3 times with
-       backoff, so a single flaky GitHub release-asset fetch (the
-       `curl ... | sh` step has historically died mid-download with exit 1)
-       no longer fails the whole job.
-    3. Token — `GITHUB_TOKEN` is passed to the install script so its tag
-       resolution uses the authenticated GitHub API rate limit (5000/hr)
-       rather than the shared-IP anonymous limit (60/hr) that intermittently
-       throttles GHA runners.
+  Why wrap `setup-trivy` rather than `curl ... contrib/install.sh | sh`:
 
-  The most common failure mode this guards against is rate limiting: the
-  install script and the GitHub release-asset fetch hit anonymous,
-  shared-IP GitHub endpoints that intermittently throttle GHA runners (and
-  occasionally drop a download mid-stream), which surfaced as a hard exit 1
-  on the bare `curl ... | sh` step. The cache + retry + token defences above
-  address that directly.
+    - Supply chain — `setup-trivy` is SHA-pinned (not a moving tag), and it in
+      turn SHA-pins the `aquasecurity/trivy` ref it pulls `install.sh` from.
+      A raw `curl | sh` from the upstream `main` branch executes whatever is
+      there at runtime, unpinned; pinning both hops removes that exposure.
+    - Reliability — the previous raw-curl step intermittently failed when the
+      `raw.githubusercontent.com` fetch was throttled or dropped mid-download
+      (a hard exit 1 right after the version resolved). `setup-trivy` installs
+      via a pinned `actions/checkout` + release download and caches the binary,
+      so most runs restore it without touching that path at all.
 
-  Installs directly from the upstream script rather than using
-  `aquasecurity/trivy-action`; that action has also broken CI independently
-  by depending on `aquasecurity/setup-trivy` tags that were later yanked
-  ("v0.2.2" unresolvable). This composite is the single source of truth for
-  the install pattern shared by security.yml and cve-scan.yml.
+  Why `setup-trivy` (the installer) and not `trivy-action` (the scanner): our
+  jobs run `trivy fs` / `trivy image` directly with a two-pass JSON+table
+  pattern and flags (`--file-patterns`, dual `--exit-code`, `--skip-version-check`)
+  that do not map onto `trivy-action`'s single-run model. This action only
+  puts the pinned binary on `PATH`; the run steps stay in the workflows.
 
 inputs:
   version:
@@ -35,55 +30,26 @@ inputs:
     required: true
   github-token:
     description: >
-      Token passed to the install script for authenticated GitHub API tag
-      resolution (avoids anonymous rate limiting). Pass `${{ github.token }}`.
+      Token forwarded to setup-trivy for checking out the Trivy repo when it
+      fetches the install script (uses the authenticated API limit rather than
+      the anonymous, shared-IP one). Pass `${{ github.token }}`.
     required: false
     default: ""
 
 runs:
   using: "composite"
   steps:
-    - name: Cache Trivy binary
-      id: cache
-      uses: actions/cache@v4
+    # SHA-pinned to the same commit the official aquasecurity/trivy-action
+    # trusts (v0.2.6). Bump the SHA and the trailing version comment together
+    # after reviewing the diff. setup-trivy handles the binary cache and adds
+    # it to $GITHUB_PATH itself.
+    - name: Install pinned Trivy
+      uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
       with:
-        path: ${{ runner.temp }}/trivy-bin
-        key: trivy-${{ runner.os }}-${{ runner.arch }}-${{ inputs.version }}
+        version: "${{ inputs.version }}"
+        cache: "true"
+        token: "${{ inputs.github-token }}"
 
-    - name: Install pinned Trivy (on cache miss, with retry)
-      if: steps.cache.outputs.cache-hit != 'true'
+    - name: Verify Trivy
       shell: bash
-      env:
-        TRIVY_VERSION: ${{ inputs.version }}
-        GITHUB_TOKEN: ${{ inputs.github-token }}
-        BIN_DIR: ${{ runner.temp }}/trivy-bin
-      run: |
-        set -euo pipefail
-        mkdir -p "${BIN_DIR}"
-        install_url="https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh"
-        attempt=1
-        max_attempts=3
-        until [ "${attempt}" -gt "${max_attempts}" ]; do
-          echo "Trivy install attempt ${attempt} of ${max_attempts}..."
-          if curl -sfL "${install_url}" | sh -s -- -b "${BIN_DIR}" "${TRIVY_VERSION}"; then
-            echo "Trivy install succeeded."
-            break
-          fi
-          if [ "${attempt}" -eq "${max_attempts}" ]; then
-            echo "Trivy install failed after ${max_attempts} attempts." >&2
-            exit 1
-          fi
-          sleep_seconds=$((attempt * 15))
-          echo "Install failed; retrying in ${sleep_seconds}s..." >&2
-          sleep "${sleep_seconds}"
-          attempt=$((attempt + 1))
-        done
-
-    - name: Add Trivy to PATH and verify
-      shell: bash
-      env:
-        BIN_DIR: ${{ runner.temp }}/trivy-bin
-      run: |
-        set -euo pipefail
-        echo "${BIN_DIR}" >> "${GITHUB_PATH}"
-        "${BIN_DIR}/trivy" --version
+      run: trivy --version
