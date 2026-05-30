@@ -52,7 +52,7 @@ Installs a pinned Trivy binary by wrapping the official, SHA-pinned `aquasecurit
 | `version` | (required) | Trivy version tag (e.g. `v0.70.0`). Pin in lockstep across all callers. |
 | `github-token` | `""` | Token forwarded to `setup-trivy` for the install-script checkout (authenticated API limit vs anonymous). Pass `${{ github.token }}`. |
 
-**Used by:** `security:trivy:filesystem`, `security:trivy:container-scan` (`security.yml`), and `cve-scan.yml`. Keep `TRIVY_VERSION` identical across all three. Bump the `setup-trivy` SHA + version comment in `action.yml` together after reviewing the diff.
+**Used by:** `security:trivy:filesystem`, `security:trivy:container-scan` (`security.yml`), and `cve-scan.yml`. Keep `TRIVY_VERSION` identical across all three. The `setup-trivy` SHA is pinned to what the official `trivy-action` **v0.36.0** release pins (`setup-trivy` v0.2.6); to update, pick a newer tagged `trivy-action` release, read the `setup-trivy` SHA it pins, and bump the SHA + version comment in `action.yml` together after reviewing the diff.
 
 **Usage:**
 

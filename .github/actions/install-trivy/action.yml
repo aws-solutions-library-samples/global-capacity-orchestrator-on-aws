@@ -40,7 +40,11 @@ runs:
   using: "composite"
   steps:
     # SHA-pinned to the same commit the official aquasecurity/trivy-action
-    # trusts (v0.2.6). Bump the SHA and the trailing version comment together
+    # pins at its v0.36.0 release (trivy-action commit ed142fd, dated
+    # 2026-04-22, signature-verified) — i.e. setup-trivy v0.2.6. Anchoring to
+    # a tagged trivy-action release rather than its moving `master` branch.
+    # To update: pick a newer trivy-action release, read the setup-trivy SHA
+    # it pins, and bump both the SHA and the trailing version comment here
     # after reviewing the diff. setup-trivy handles the binary cache and adds
     # it to $GITHUB_PATH itself.
     - name: Install pinned Trivy
