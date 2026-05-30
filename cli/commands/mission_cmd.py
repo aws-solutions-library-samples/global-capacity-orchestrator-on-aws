@@ -189,8 +189,16 @@ def mission_cmd() -> None:
 @click.option(
     "--tool-allowlist",
     multiple=True,
-    required=True,
-    help="Tool name to allowlist; pass multiple times for multiple tools.",
+    help="Tool name to allowlist; pass multiple times. Optional with --allow-all-tools.",
+)
+@click.option(
+    "--allow-all-tools",
+    is_flag=True,
+    help=(
+        "Resolve the session's tool allowlist to every registered MCP tool "
+        "(minus the mission_* control tools). Makes --tool-allowlist optional; "
+        "mutually exclusive with it."
+    ),
 )
 @click.option(
     "--cadence",
@@ -268,6 +276,7 @@ def mission_start(
     max_iterations: int,
     max_wall_clock: int,
     tool_allowlist: tuple[str, ...],
+    allow_all_tools: bool,
     cadence: str,
     cadence_n: int | None,
     cadence_t: int | None,
@@ -351,17 +360,25 @@ def mission_start(
     if cadence_event is not None:
         cadence_dict["event_name"] = cadence_event
 
-    # Validate inputs. The CLI has no live FastMCP tool registry, so the
-    # tool-allowlist validator is skipped and the budget validator gets
-    # an empty tag map — meaning a CLI-started session with a cost-
-    # incurring tool will only be caught at iterate time when the engine
-    # routes through the real tool dispatcher. The MCP tool surface
+    # Resolve the effective allowlist before any persistence. The explicit
+    # path keeps the thin CLI behaviour (no live-registry per-name check); the
+    # all-tools path resolves from the on-demand registry. A rejection here
+    # emits a structured envelope and exits before any session is built.
+    allowlist_resolved = _resolve_cli_allowlist(
+        allow_all_tools=allow_all_tools, tool_allowlist=tool_allowlist
+    )
+
+    # Validate inputs. The CLI has no live FastMCP tool registry on the
+    # explicit path, so the tool-allowlist validator is skipped and the
+    # budget validator gets an empty tag map — meaning a CLI-started session
+    # with a cost-incurring tool will only be caught at iterate time when the
+    # engine routes through the real tool dispatcher. The MCP tool surface
     # performs the full validation; the CLI is intentionally a thin
     # smoke-test path.
     try:
         directive_clean = mission_validation.validate_directive(directive)
         criteria_clean = mission_validation.validate_criteria(criteria)
-        budget_clean = mission_validation.validate_budget(budget, list(tool_allowlist), {})
+        budget_clean = mission_validation.validate_budget(budget, allowlist_resolved, {})
         cadence_clean = mission_validation.validate_cadence(cadence_dict)
     except MissionValidationError as exc:
         _emit_error(exc.code, exc.details)
@@ -389,7 +406,7 @@ def mission_start(
         "directive_text": directive_clean,
         "criteria": criteria_clean,
         "budget": budget_clean,
-        "tool_allowlist": list(tool_allowlist),
+        "tool_allowlist": allowlist_resolved,
         "checkpoint_cadence": cadence_clean,
         "stagnation_threshold": stagnation_threshold,
         "use_sampling": use_sampling_resolved,
@@ -523,6 +540,61 @@ def _ensure_tool_registry() -> None:
     from tools import register_all_tools  # noqa: PLC0415
 
     register_all_tools()
+
+
+def _resolve_registered_tools_for_cli() -> tuple[dict[str, Any], set[str]]:
+    """Register every MCP tool on demand and snapshot the live registry.
+
+    Returns a ``(name -> Tool, control-tool names)`` pair. The control set is
+    derived from the ``"mission"`` tag, so it auto-adapts if a tenth
+    session-management tool is ever added. Calls the idempotent
+    :func:`_ensure_tool_registry` first, then lists tools through
+    ``mcp._list_tools()`` — the same low-level path the engine factory uses.
+    Returns ``({}, set())`` only when the registry genuinely holds no tools,
+    which the resolver then rejects as ``allow_all_tools_empty_registry``.
+    """
+    _ensure_tool_registry()
+    from server import mcp  # noqa: PLC0415 — lazy
+
+    async def _list() -> list[Any]:
+        return list(await mcp._list_tools())
+
+    tools = asyncio.run(_list())
+    registered = {t.name: t for t in tools}
+    control = {t.name for t in tools if "mission" in (getattr(t, "tags", None) or set())}
+    return registered, control
+
+
+def _resolve_cli_allowlist(*, allow_all_tools: bool, tool_allowlist: tuple[str, ...]) -> list[str]:
+    """Resolve a subcommand's effective tool allowlist or exit with code 1.
+
+    The all-tools branch populates the registry on demand and resolves the
+    effective list from it. The explicit branch preserves the thin CLI path
+    (no per-name registry check) but enforces at-least-one, emitting the
+    existing ``empty`` rejection when no name is supplied. On any
+    :class:`MissionValidationError` the structured envelope is emitted and the
+    process exits 1 — before the caller builds or persists a session.
+    """
+    from mission import validation as mission_validation  # noqa: PLC0415
+    from mission.validation import MissionValidationError  # noqa: PLC0415
+
+    if allow_all_tools:
+        registered_tools, control_tools = _resolve_registered_tools_for_cli()
+        try:
+            resolved: list[str] = mission_validation.resolve_effective_allowlist(
+                allow_all_tools=True,
+                explicit_allowlist=list(tool_allowlist),
+                registered_tools=registered_tools,
+                control_tools=control_tools,
+            )
+        except MissionValidationError as exc:
+            _emit_error(exc.code, exc.details)
+            sys.exit(1)
+        return resolved
+    if not tool_allowlist:
+        _emit_error("validation_error", {"field": "tool_allowlist", "reason": "empty"})
+        sys.exit(1)
+    return list(tool_allowlist)
 
 
 # ---------------------------------------------------------------------------
@@ -1174,8 +1246,16 @@ def mission_scaffold_criteria_cmd(
 @click.option(
     "--tool-allowlist",
     multiple=True,
-    required=True,
-    help="Tool name to allowlist; pass multiple times for multiple tools.",
+    help="Tool name to allowlist; pass multiple times. Optional with --allow-all-tools.",
+)
+@click.option(
+    "--allow-all-tools",
+    is_flag=True,
+    help=(
+        "Resolve the session's tool allowlist to every registered MCP tool "
+        "(minus the mission_* control tools). Makes --tool-allowlist optional; "
+        "mutually exclusive with it."
+    ),
 )
 @click.option(
     "--max-iterations",
@@ -1260,6 +1340,7 @@ def mission_scaffold_criteria_cmd(
 def mission_run_cmd(
     directive: str,
     tool_allowlist: tuple[str, ...],
+    allow_all_tools: bool,
     max_iterations: int,
     max_wall_clock: int,
     max_criteria: int,
@@ -1316,6 +1397,16 @@ def mission_run_cmd(
             {"field": "retries", "reason": "must_be_non_negative_int"},
         )
         sys.exit(1)
+
+    # Resolve the effective allowlist up front, before scaffolding or any
+    # persistence. A mutual-exclusivity or empty-registry rejection exits here
+    # with no sampling spend, no criteria file write, and no state write. The
+    # scaffolder below still consults the explicit ``tool_allowlist`` (empty
+    # under --allow-all-tools, which routes it to the directive-only
+    # deterministic path); ``allowlist_resolved`` fills the persisted session.
+    allowlist_resolved = _resolve_cli_allowlist(
+        allow_all_tools=allow_all_tools, tool_allowlist=tool_allowlist
+    )
 
     # ---- Step 1: scaffold criteria. -------------------------------------
     # Resolve the sampling state once; reuse it for both the scaffold
@@ -1376,7 +1467,7 @@ def mission_run_cmd(
     try:
         directive_clean = mission_validation.validate_directive(directive)
         criteria_clean = mission_validation.validate_criteria(criteria)
-        budget_clean = mission_validation.validate_budget(budget, list(tool_allowlist), {})
+        budget_clean = mission_validation.validate_budget(budget, allowlist_resolved, {})
         cadence_clean = mission_validation.validate_cadence(cadence_dict)
     except MissionValidationError as exc:
         _emit_error(exc.code, exc.details)
@@ -1397,7 +1488,7 @@ def mission_run_cmd(
         "directive_text": directive_clean,
         "criteria": criteria_clean,
         "budget": budget_clean,
-        "tool_allowlist": list(tool_allowlist),
+        "tool_allowlist": allowlist_resolved,
         "checkpoint_cadence": cadence_clean,
         "stagnation_threshold": stagnation_threshold,
         "use_sampling": use_sampling_resolved,

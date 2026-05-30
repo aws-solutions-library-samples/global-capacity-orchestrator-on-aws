@@ -24,6 +24,10 @@ Mission is GCO's goal-directed iteration loop. The operator declares a directive
 - [Quickstart](#quickstart)
 - [One-Command Run](#one-command-run)
 - [The No-AWS Smoke Test](#the-no-aws-smoke-test)
+- [Tool Allowlist](#tool-allowlist)
+  - [`--allow-all-tools` / `allow_all_tools`](#--allow-all-tools--allow_all_tools)
+  - [Distinct from `GCO_ENABLE_ALL_TOOLS`](#distinct-from-gco_enable_all_tools)
+  - [Risk-tier scope](#risk-tier-scope)
 - [Sampling](#sampling)
 - [Scripted Strategies](#scripted-strategies)
 - [Loop Limits](#loop-limits)
@@ -581,7 +585,8 @@ Useful options:
 | Flag | Default | Purpose |
 |------|---------|---------|
 | `--directive TEXT` | required | Natural-language goal description. |
-| `--tool-allowlist NAME` | required, repeatable | One per allowlisted tool. The first allowlisted tool also seeds the deterministic strategy when sampling is off. |
+| `--tool-allowlist NAME` | repeatable | One per allowlisted tool. The first allowlisted tool also seeds the deterministic strategy when sampling is off. Required unless `--allow-all-tools` is set; mutually exclusive with it. |
+| `--allow-all-tools` | off | Resolve the allowlist to every registered tool (minus the `mission_*` control tools). Makes `--tool-allowlist` optional; mutually exclusive with it. See [Tool Allowlist](#tool-allowlist). |
 | `--max-iterations N` | `5` | Hard cap on the iteration count. Pass `-1` to opt out. |
 | `--max-wall-clock SECONDS` | `300` | Hard cap on wall-clock seconds. Pass `-1` to opt out. |
 | `--use-sampling` / `--no-sampling` | auto-detect | Force the sampling path on/off for both the scaffolder and the loop's Strategy_Revision sampler. Default precedence: MCP host capability → Bedrock cred probe → off. |
@@ -629,6 +634,80 @@ gco mission start --run \
 ```
 
 The session terminates on `max_iterations` if the predicate is not satisfied within the iteration budget. The Final_Report streams to stdout as JSON. The same flow runs in CI as `tests/test_mission_no_aws.py` — `boto3.Session` is patched to raise on any client construction so the test fails loudly if a Mission code path tries to reach AWS.
+
+## Tool Allowlist
+
+Every Mission session carries a **tool allowlist** — the set of tool names the loop may invoke during its Execute phase and inside scripted strategies. By default you spell that list out tool-by-tool: `--tool-allowlist NAME` (repeatable) on the CLI, or the `tool_allowlist` array on the `mission_start` MCP tool. The allowlist is resolved and persisted on the session at start time, so the iteration loop, the script sandbox, the strategy-revision sampling prompt, and the Final_Report all see exactly the same concrete list.
+
+### `--allow-all-tools` / `allow_all_tools`
+
+Enumerating every tool name is tedious when you simply want the loop to reach for whatever the server exposes. Both surfaces accept an all-tools option that resolves the session's allowlist to **every currently-registered tool** (minus the nine `mission_*` control tools — see [Risk-tier scope](#risk-tier-scope)) without naming each one:
+
+| Surface | Input | Default |
+|---------|-------|---------|
+| `gco mission start` / `gco mission run` | `--allow-all-tools` (boolean flag) | disabled |
+| `mission_start` MCP tool | `allow_all_tools: bool` parameter | `false` |
+
+When the option is set, the effective allowlist is **resolved once at session-start time** to the concrete list of tool names registered with the MCP server at that moment, and that enumerated list is persisted on the session exactly as if you had typed every name. The persisted list does not change if the registered set changes later in the session.
+
+On the CLI, `--allow-all-tools` makes `--tool-allowlist` **optional** — you can omit it entirely:
+
+```bash
+export GCO_ENABLE_MISSION=true
+
+# Start a session against every registered tool, no per-tool enumeration:
+gco mission start \
+  --directive "Investigate why the us-east-1 queue is backing up." \
+  --criteria-file criteria.json \
+  --max-iterations 10 --max-wall-clock 3600 \
+  --allow-all-tools
+
+# Same for the one-command run. With no explicit allowlist, the criteria
+# scaffolder falls back to its directive-only path, then the session's
+# allowlist is filled from the registry:
+gco mission run \
+  --directive "Find documentation about inference endpoints." \
+  --max-iterations 5 --max-wall-clock 300 \
+  --allow-all-tools
+```
+
+The MCP equivalent passes `allow_all_tools: true` and omits `tool_allowlist`:
+
+```jsonc
+{
+  "directive": "Investigate why the us-east-1 queue is backing up.",
+  "criteria": [ /* ... */ ],
+  "budget": {"max_iterations": 10, "max_wall_clock_seconds": 3600},
+  "allow_all_tools": true
+}
+```
+
+**Interaction with `--tool-allowlist` (mutually exclusive).** The all-tools option and an explicit allowlist are mutually exclusive. If you set `--allow-all-tools` (or `allow_all_tools: true`) **and** also supply a non-empty `--tool-allowlist` / `tool_allowlist`, the request is rejected with a `validation_error` whose `details.reason` is `allow_all_and_explicit_allowlist_mutually_exclusive`, and no session is persisted. Supply one or the other, never both.
+
+**Empty registry.** If the all-tools option is set but nothing resolvable is registered (the registry is empty, or only the `mission_*` control tools are registered), the request is rejected with `validation_error` / `allow_all_tools_empty_registry`, and no session is persisted — you never start a session that can invoke no tools.
+
+| `details.reason` | When |
+|------------------|------|
+| `allow_all_and_explicit_allowlist_mutually_exclusive` | `--allow-all-tools` set **and** a non-empty `--tool-allowlist` supplied. |
+| `allow_all_tools_empty_registry` | `--allow-all-tools` set but the resolved set (registered tools minus the `mission_*` control tools) is empty. |
+| `empty` | Neither option set nor any `--tool-allowlist` supplied (the existing empty-allowlist error). |
+
+### Distinct from `GCO_ENABLE_ALL_TOOLS`
+
+The per-session all-tools option is **not** the same thing as the `GCO_ENABLE_ALL_TOOLS` environment variable, even though both mention "all tools". They operate at different layers and never substitute for one another:
+
+| Mechanism | Layer | Controls |
+|-----------|-------|----------|
+| `GCO_ENABLE_ALL_TOOLS` (environment variable) | server startup / **registration** | *which tools get registered* with the MCP server. |
+| `--allow-all-tools` / `allow_all_tools` (per-session option) | a single Mission session | *which already-registered tools that one session may call*. |
+
+The per-session option resolves its allowlist **from whatever is registered** — it never widens reach beyond the registered set. An operator who has not enabled the destructive, infrastructure, or cost-incurring feature flags will never see those tools registered, so they cannot enter a session's resolved allowlist. Setting `GCO_ENABLE_ALL_TOOLS=true` widens what `--allow-all-tools` resolves to *only* by virtue of registering more tools in the first place. See [Feature Flags](../mcp/README.md#feature-flags) for the registration-layer flags.
+
+### Risk-tier scope
+
+Every MCP tool carries a risk-tier tag (`safe`, `low-risk`, `destructive`, `infrastructure`, `cost-incurring`, `data-upload`, `image`). The all-tools option resolves to **all registered tools regardless of risk tier** — it does not stop at read-only `safe` tools. The blast-radius control is the **registration layer**, not this option: a destructive, infrastructure, or cost-incurring tool enters scope only if its gating feature flag was set when the server registered tools, in which case you have already opted into exposing it. Concretely, registering those higher-risk tools via their feature flags (including the `GCO_ENABLE_ALL_TOOLS` umbrella) brings them into scope of the all-tools expansion.
+
+The **only** names excluded from the expansion are the nine `mission_*` control tools (`mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list`), so a Mission session can never recursively invoke the session-management tools that drive it. If you want a session bounded to read-only tools only, use an explicit `--tool-allowlist` of `safe`-tagged tools instead of `--allow-all-tools`.
 
 ## Sampling
 
@@ -843,7 +922,7 @@ All `gco mission` subcommands require `GCO_ENABLE_MISSION=true`. Without the fla
 | `gco mission history <id> [--format full\|summary]` | Print the iteration history. |
 | `gco mission list [--status STATUS]` | List known sessions, optionally filtered by status. |
 
-`gco mission start --help` prints the full option list — directive text, criteria file path, the iteration and wall-clock caps (each accepting `-1` to opt out), the tool allowlist, cadence parameters, stagnation threshold, sampling toggles, and the scripted-strategy opt-in.
+`gco mission start --help` prints the full option list — directive text, criteria file path, the iteration and wall-clock caps (each accepting `-1` to opt out), the tool allowlist, cadence parameters, stagnation threshold, sampling toggles, and the scripted-strategy opt-in. The `--tool-allowlist` option (repeatable) is required unless `--allow-all-tools` is set; the two are mutually exclusive. `--allow-all-tools` (default disabled) resolves the session's allowlist to every registered tool and is available on both `start` and `run` — see [Tool Allowlist](#tool-allowlist).
 
 ## MCP Tool Reference
 
@@ -860,6 +939,8 @@ The MCP surface mirrors the CLI. All gated tools require `GCO_ENABLE_MISSION` (o
 | `mission_resume` | Transition `paused → running`. |
 | `mission_history` | Return iteration history (`full` or `summary` format). |
 | `mission_list` | List known sessions. |
+
+`mission_start` accepts an `allow_all_tools` boolean parameter (default `false`). When `true`, the session's `tool_allowlist` is resolved to every registered tool (minus the `mission_*` control tools) and `tool_allowlist` may be omitted; supplying both a non-empty `tool_allowlist` and `allow_all_tools: true` is rejected as mutually exclusive. See [Tool Allowlist](#tool-allowlist) for the full semantics, the empty-registry error, and the distinction from `GCO_ENABLE_ALL_TOOLS`.
 
 Resource templates expose session state: `mission://sessions/{session_id}` returns the live session JSON; `mission://sessions/{session_id}/report` returns the Final_Report (only after the session terminates); `mission://sessions/{session_id}/audit-replay` reconstructs the in-process audit history described in [Audit Replay](#audit-replay). The four self-indexing resources documented in [MCP Self-Indexing Resources](#mcp-self-indexing-resources) are also reachable as tools through the Resources As Tools transform.
 

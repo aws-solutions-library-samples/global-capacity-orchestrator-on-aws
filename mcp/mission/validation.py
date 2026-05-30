@@ -33,7 +33,7 @@ Design notes:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Final, cast
 
 from . import predicate
@@ -587,6 +587,85 @@ def validate_tool_allowlist(
             raise MissionValidationError("validation_error", details=details)
         normalized.append(name)
     return normalized
+
+
+# The nine session-management tool names. They are excluded from an
+# all-tools expansion so a session can never resolve an allowlist that lets
+# it recursively invoke the tools that start, drive, and tear down sessions.
+# This constant is the default exclusion set for
+# :func:`resolve_effective_allowlist`; callers holding a live tag map may pass
+# their own equivalent set instead.
+MISSION_CONTROL_TOOLS: frozenset[str] = frozenset(
+    {
+        "mission_start",
+        "mission_status",
+        "mission_iterate",
+        "mission_checkpoint",
+        "mission_complete",
+        "mission_abort",
+        "mission_resume",
+        "mission_history",
+        "mission_list",
+    }
+)
+"""The nine control-tool names excluded from an all-tools expansion."""
+
+
+def resolve_effective_allowlist(
+    *,
+    allow_all_tools: bool,
+    explicit_allowlist: list[str] | None,
+    registered_tools: dict[str, Any],
+    control_tools: Collection[str] = MISSION_CONTROL_TOOLS,
+    flag_lookup: dict[str, str] | None = None,
+) -> list[str]:
+    """Resolve a session's effective tool allowlist.
+
+    Pure: no I/O, no clocks, no environment lookups. The caller passes the
+    currently-registered tool names (``registered_tools`` — only the dict keys
+    are read) and the set of control-tool names to exclude from an all-tools
+    expansion (``control_tools``, defaulting to :data:`MISSION_CONTROL_TOOLS`).
+
+    Behaviour:
+
+    * When ``allow_all_tools`` is True and ``explicit_allowlist`` is non-empty,
+      the two inputs conflict, so the function raises
+      :class:`MissionValidationError` with
+      ``details.reason == "allow_all_and_explicit_allowlist_mutually_exclusive"``.
+    * When ``allow_all_tools`` is True and no explicit list is supplied, the
+      candidate is ``sorted(set(registered_tools) - set(control_tools))``. An
+      empty candidate (nothing registered, or only control tools registered)
+      raises ``details.reason == "allow_all_tools_empty_registry"``. Otherwise
+      the candidate is passed through :func:`validate_tool_allowlist` so the
+      resolved list satisfies every invariant an operator-supplied list would.
+    * When ``allow_all_tools`` is False, the call delegates to
+      :func:`validate_tool_allowlist` over ``explicit_allowlist or []``,
+      preserving its existing ``empty`` rejection on an empty/absent list.
+
+    Returns the normalized allowlist. The all-tools path returns a sorted,
+    duplicate-free list; the explicit path returns
+    :func:`validate_tool_allowlist`'s order-preserving output unchanged.
+    """
+    if allow_all_tools:
+        if explicit_allowlist:
+            raise MissionValidationError(
+                "validation_error",
+                details={
+                    "field": "tool_allowlist",
+                    "reason": "allow_all_and_explicit_allowlist_mutually_exclusive",
+                },
+            )
+        candidate = sorted(set(registered_tools) - set(control_tools))
+        if not candidate:
+            raise MissionValidationError(
+                "validation_error",
+                details={
+                    "field": "tool_allowlist",
+                    "reason": "allow_all_tools_empty_registry",
+                },
+            )
+        return validate_tool_allowlist(candidate, registered_tools)
+    return validate_tool_allowlist(explicit_allowlist or [], registered_tools, flag_lookup)
 
 
 # ---------------------------------------------------------------------------

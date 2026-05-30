@@ -149,12 +149,13 @@ if is_enabled(FLAG_MISSION):
         directive: str,
         criteria: list[dict[str, Any]],
         budget: dict[str, Any],
-        tool_allowlist: list[str],
+        tool_allowlist: list[str] | None = None,
         checkpoint_cadence: dict[str, Any] | None = None,
         stagnation_threshold: int = 3,
         use_sampling: bool | None = None,
         allow_scripted_strategies: bool = False,
         sampling_model_preferences: dict[str, Any] | None = None,
+        allow_all_tools: bool = False,
     ) -> str:
         """[gated by GCO_ENABLE_MISSION] Start a new Mission session.
 
@@ -166,6 +167,7 @@ if is_enabled(FLAG_MISSION):
                 ``max_wall_clock_seconds``. Cost guardrails live
                 out-of-band via AWS Budgets and Cost Anomaly Detection.
             tool_allowlist: List of tool names the session may invoke.
+                Optional; omit it when ``allow_all_tools`` is set.
             checkpoint_cadence: Optional cadence dict (default
                 ``{"kind": "every_iteration"}``).
             stagnation_threshold: Iterations of no progress before
@@ -176,6 +178,11 @@ if is_enabled(FLAG_MISSION):
                 scripted strategies (validated via the sandbox AST).
             sampling_model_preferences: Optional FastMCP
                 ``ModelPreferences`` payload forwarded to MCP sampling.
+            allow_all_tools: When True (default ``False``), resolve the
+                session's allowlist to every currently-registered tool
+                minus the ``mission_*`` control tools, instead of an
+                explicit ``tool_allowlist``. Mutually exclusive with a
+                non-empty ``tool_allowlist``.
 
         Returns a JSON string with the new ``session_id`` and the
         resolved sampling state, or an error envelope.
@@ -185,8 +192,12 @@ if is_enabled(FLAG_MISSION):
             criteria_clean = mission_validation.validate_criteria(criteria)
             registered_tools = await _registered_tools_dict()
             registered_tags = await _registered_tool_tags()
-            allowlist_clean = mission_validation.validate_tool_allowlist(
-                tool_allowlist, registered_tools=registered_tools
+            control_tools = {n for n, tags in registered_tags.items() if "mission" in tags}
+            allowlist_clean = mission_validation.resolve_effective_allowlist(
+                allow_all_tools=allow_all_tools,
+                explicit_allowlist=tool_allowlist,
+                registered_tools=registered_tools,
+                control_tools=control_tools,
             )
             budget_clean = mission_validation.validate_budget(
                 budget, allowlist_clean, registered_tags
