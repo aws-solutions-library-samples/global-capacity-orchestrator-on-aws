@@ -288,3 +288,78 @@ def test_parse_score_rejects_non_finite_score(token: str, rationale: str) -> Non
         parse_score(raw)
 
     assert exc_info.value.code == ErrorCode.INVALID_MODEL_SCORE
+
+
+# ---------------------------------------------------------------------------
+# Property: a fenced or prose-wrapped object parses like the bare object
+# ---------------------------------------------------------------------------
+
+# The Markdown-fence wrappers a chat model commonly puts around a JSON answer
+# despite being asked for raw JSON: a tagged ```json fence, a bare ``` fence,
+# and an uppercase language tag, with and without a line of surrounding prose.
+# Each must be peeled so the object inside parses exactly as it would alone.
+_fence_wrappers = st.sampled_from(
+    [
+        "```json\n{body}\n```",
+        "```\n{body}\n```",
+        "```JSON\n{body}\n```",
+        "Here is the score:\n```json\n{body}\n```",
+        "```json\n{body}\n```\nThat is my assessment.",
+    ]
+)
+
+
+@settings(max_examples=200, deadline=None)
+@given(score=_valid_scores, rationale=_rationales, wrapper=_fence_wrappers)
+def test_parse_score_peels_code_fence_around_object(
+    score: float | int, rationale: str, wrapper: str
+) -> None:
+    """A valid object wrapped in a Markdown fence parses like the bare object.
+
+    Models routinely answer with a ```json ... ``` fence even when asked for
+    raw JSON, so the parser peels a whole-response fence (and any one line of
+    prose around it) before decoding. The result must equal what the bare,
+    unfenced object would have produced.
+    """
+    body = json.dumps({"score": score, "rationale": rationale})
+    raw = wrapper.format(body=body)
+
+    raw_score, parsed_rationale = parse_score(raw)
+
+    assert raw_score == float(json.loads(body)["score"])
+    assert math.isfinite(raw_score)
+    assert parsed_rationale == rationale
+
+
+def test_parse_score_peels_realistic_claude_fenced_response() -> None:
+    """A representative fenced Claude response parses to its score and rationale.
+
+    Mirrors the exact wrapping observed from a live model: a ```json fence
+    around a pretty-printed object carrying both fields.
+    """
+    raw = '```json\n{\n  "score": 1.0,\n  "rationale": "The objective is fully satisfied."\n}\n```'
+
+    raw_score, rationale = parse_score(raw)
+
+    assert raw_score == 1.0
+    assert rationale == "The objective is fully satisfied."
+
+
+def test_parse_score_extracts_object_embedded_in_prose() -> None:
+    """A JSON object surrounded by prose (no fence) is carved out and parsed."""
+    raw = 'I judge this run as follows: {"score": 0.5, "rationale": "halfway"} done.'
+
+    raw_score, rationale = parse_score(raw)
+
+    assert raw_score == 0.5
+    assert rationale == "halfway"
+
+
+def test_parse_score_still_rejects_fence_with_no_json_inside() -> None:
+    """A code fence whose body is not JSON is still rejected as non-JSON."""
+    raw = "```json\nnot a json object at all\n```"
+
+    with pytest.raises(JudgeError) as exc_info:
+        parse_score(raw)
+
+    assert exc_info.value.code == ErrorCode.INVALID_MODEL_SCORE
