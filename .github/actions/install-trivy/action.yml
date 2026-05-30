@@ -32,15 +32,13 @@ inputs:
     description: >
       Token forwarded to setup-trivy for checking out the Trivy repo when it
       fetches the install script (uses the authenticated API limit rather than
-      the anonymous, shared-IP one). Pass `${{ github.token }}`.
+      the anonymous, shared-IP one). Pass the workflow's github token.
     required: false
     default: ""
 
 runs:
   using: "composite"
   steps:
-    # Pinned to the v0.2.6 release tag (the current latest setup-trivy
-    # release). To update: bump the tag here after reviewing the release.
     # setup-trivy handles the binary cache and adds it to $GITHUB_PATH itself.
     - name: Install pinned Trivy
       uses: aquasecurity/setup-trivy@v0.2.6
