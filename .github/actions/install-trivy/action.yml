@@ -1,18 +1,18 @@
 name: "Install Trivy (pinned, cached)"
 description: |
-  Installs a pinned Trivy binary by wrapping the official, SHA-pinned
+  Installs a pinned Trivy binary by wrapping the official
   `aquasecurity/setup-trivy` installer. This is a thin shim so our workflows
-  reference one place — `uses: ./.github/actions/install-trivy` — and the
-  underlying installer, its version, and its security pin are maintained here
-  rather than duplicated across security.yml and cve-scan.yml.
+  reference one place - `uses: ./.github/actions/install-trivy` - and the
+  underlying installer, its version, and its pin are maintained here rather
+  than duplicated across security.yml and cve-scan.yml.
 
   Why wrap `setup-trivy` rather than `curl ... contrib/install.sh | sh`:
 
-    - Supply chain — `setup-trivy` is SHA-pinned (not a moving tag), and it in
-      turn SHA-pins the `aquasecurity/trivy` ref it pulls `install.sh` from.
-      A raw `curl | sh` from the upstream `main` branch executes whatever is
-      there at runtime, unpinned; pinning both hops removes that exposure.
-    - Reliability — the previous raw-curl step intermittently failed when the
+    - Supply chain - `setup-trivy` SHA-pins the `aquasecurity/trivy` ref it
+      pulls `install.sh` from, so the install script is itself pinned. A raw
+      `curl | sh` from the upstream `main` branch executes whatever is there
+      at runtime, unpinned.
+    - Reliability - the previous raw-curl step intermittently failed when the
       `raw.githubusercontent.com` fetch was throttled or dropped mid-download
       (a hard exit 1 right after the version resolved). `setup-trivy` installs
       via a pinned `actions/checkout` + release download and caches the binary,
@@ -39,16 +39,11 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # SHA-pinned to the same commit the official aquasecurity/trivy-action
-    # pins at its v0.36.0 release (trivy-action commit ed142fd, dated
-    # 2026-04-22, signature-verified) — i.e. setup-trivy v0.2.6. Anchoring to
-    # a tagged trivy-action release rather than its moving `master` branch.
-    # To update: pick a newer trivy-action release, read the setup-trivy SHA
-    # it pins, and bump both the SHA and the trailing version comment here
-    # after reviewing the diff. setup-trivy handles the binary cache and adds
-    # it to $GITHUB_PATH itself.
+    # Pinned to the v0.2.6 release tag (the current latest setup-trivy
+    # release). To update: bump the tag here after reviewing the release.
+    # setup-trivy handles the binary cache and adds it to $GITHUB_PATH itself.
     - name: Install pinned Trivy
-      uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+      uses: aquasecurity/setup-trivy@v0.2.6
       with:
         version: "${{ inputs.version }}"
         cache: "true"
