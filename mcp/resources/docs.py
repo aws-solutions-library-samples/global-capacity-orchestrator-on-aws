@@ -893,6 +893,123 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Package-doc metadata — used by ``find_docs`` and the
+# ``docs://gco/packages/...`` resources to describe the package-level READMEs
+# that live next to the code (under ``mcp/``) rather than in ``docs/``. These
+# are developer-facing internals guides (how a package is structured and how to
+# customize it), kept in a catalog separate from ``DOC_METADATA`` so the strict
+# 1:1 ``docs/*.md`` invariant stays intact. Each entry is keyed by a stable
+# slug and carries a ``path`` relative to the project root. A ``related`` entry
+# may reference either another package slug or a ``DOC_METADATA`` key.
+# ---------------------------------------------------------------------------
+
+PACKAGE_DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
+    "mcp-server": {
+        "path": "mcp/README.md",
+        "summary": "GCO MCP server guide — setup across MCP clients, feature-flag gating, and the full tool and resource catalog.",
+        "topics": ["mcp", "concepts", "feature-flags", "customization"],
+        "keywords": [
+            "mcp server",
+            "fastmcp",
+            "stdio",
+            "feature flags",
+            "gco_enable",
+            "kiro",
+            "claude desktop",
+            "cursor",
+            "tool search",
+            "available tools",
+            "resources",
+        ],
+        "related": ["mcp-tools", "mcp-resources", "CLI", "MISSION"],
+    },
+    "mcp-tools": {
+        "path": "mcp/tools/README.md",
+        "summary": "How MCP tools are defined — one module per domain, the @mcp.tool + audit_logged pattern, and how to add a new tool.",
+        "topics": ["mcp", "customization"],
+        "keywords": [
+            "tool",
+            "mcp.tool",
+            "audit_logged",
+            "cli_runner",
+            "adding a tool",
+            "tool module",
+            "domain",
+        ],
+        "related": ["mcp-server", "mcp-resources"],
+    },
+    "mcp-resources": {
+        "path": "mcp/resources/README.md",
+        "summary": "MCP resource modules by URI scheme (docs://, source://, k8s://, …) and how to add a new resource group.",
+        "topics": ["mcp", "customization"],
+        "keywords": [
+            "resource",
+            "mcp.resource",
+            "uri scheme",
+            "docs scheme",
+            "source scheme",
+            "resource index",
+            "adding a resource",
+        ],
+        "related": ["mcp-server", "mcp-tools"],
+    },
+    "mcp-mission": {
+        "path": "mcp/mission/README.md",
+        "summary": "Mission package internals — the five-phase goal-directed loop, deterministic verdict cascade, sandboxes, and how to extend each piece.",
+        "topics": ["mcp", "automation", "customization", "concepts"],
+        "keywords": [
+            "mission",
+            "engine",
+            "verdict",
+            "five-phase loop",
+            "sandbox",
+            "predicate",
+            "sampling",
+            "criteria",
+            "customize mission",
+            "module map",
+        ],
+        "related": ["MISSION", "mcp-metric-readers", "mcp-mission-judge", "mcp-server"],
+    },
+    "mcp-metric-readers": {
+        "path": "mcp/metric_readers/README.md",
+        "summary": "Pure helpers behind the read-only metric-reader tools — and how to add an aggregation mode, file format, error code, or whole new reader source.",
+        "topics": ["mcp", "metrics", "customization", "automation"],
+        "keywords": [
+            "metric reader",
+            "cloudwatch",
+            "aggregation mode",
+            "file format",
+            "parquet",
+            "jsonl",
+            "error code",
+            "metrics_result",
+            "customize metrics",
+            "local root",
+        ],
+        "related": ["mcp-mission-judge", "mcp-mission", "MISSION", "mcp-server"],
+    },
+    "mcp-mission-judge": {
+        "path": "mcp/mission_judge/README.md",
+        "summary": "LLM-as-judge progress scoring internals — the versioned rubric, deterministic prompt, score parsing, and how to customize the scoring for your use case.",
+        "topics": ["mcp", "metrics", "customization", "automation"],
+        "keywords": [
+            "semantic progress",
+            "judge",
+            "rubric",
+            "prompt",
+            "score parsing",
+            "progress_score",
+            "gco_enable_semantic_progress",
+            "llm as judge",
+            "customize rubric",
+        ],
+        "related": ["mcp-metric-readers", "mcp-mission", "MISSION", "mcp-server"],
+    },
+}
+
+
 @mcp.resource("docs://gco/index")
 def docs_index() -> str:
     """List all available GCO documentation, examples, and configuration resources."""
@@ -914,6 +1031,14 @@ def docs_index() -> str:
     )
     for f in sorted(DOCS_DIR.glob("*.md")):
         sections.append(f"- `docs://gco/docs/{f.stem}` — {f.stem}")
+
+    sections.append("\n## Package Internals")
+    sections.append(
+        "Developer-facing guides to the code packages under `mcp/` — structure and "
+        "how to customize each. Also searchable via `find_docs`."
+    )
+    for name, meta in PACKAGE_DOC_METADATA.items():
+        sections.append(f"- `docs://gco/packages/{name}` — {meta.get('summary', '')}")
 
     sections.append("\n## Example Manifests")
     sections.append("- `docs://gco/examples/README` — Examples overview and usage guide")
@@ -1029,6 +1154,39 @@ def doc_resource(doc_name: str) -> str:
         return f"Document '{doc_name}' not found. Available: {', '.join(available)}"
     content = path.read_text()
     meta = DOC_METADATA.get(doc_name, {})
+    header_lines = []
+    topics = meta.get("topics", [])
+    if isinstance(topics, list) and topics:
+        header_lines.append(f"<!-- Topics: {', '.join(str(t) for t in topics)} -->")
+    related = meta.get("related", [])
+    if isinstance(related, list) and related:
+        header_lines.append(f"<!-- Related: {', '.join(str(r) for r in related)} -->")
+    if header_lines:
+        return "\n".join(header_lines) + "\n\n" + content
+    return content
+
+
+@mcp.resource("docs://gco/packages/{package_name}")
+def package_doc_resource(package_name: str) -> str:
+    """Read a package-level README by slug (e.g. mcp-mission, mcp-metric-readers).
+
+    Serves the developer-facing internals guides catalogued in
+    ``PACKAGE_DOC_METADATA`` — the README files that live next to the code
+    under ``mcp/`` rather than in ``docs/``. Prepends an HTML-comment header
+    with ``Topics:`` and ``Related:`` lines (mirroring :func:`doc_resource`)
+    so a consuming LLM sees the classification without it bleeding into the
+    rendered markdown. An unknown slug returns the literal ``Package doc 'X'
+    not found. Available: ...`` string so callers can recover.
+    """
+    meta = PACKAGE_DOC_METADATA.get(package_name)
+    if meta is None:
+        available = ", ".join(sorted(PACKAGE_DOC_METADATA.keys()))
+        return f"Package doc '{package_name}' not found. Available: {available}"
+    rel_path = str(meta.get("path", ""))
+    path = PROJECT_ROOT / rel_path
+    if not path.is_file():
+        return f"Package doc '{package_name}' file not found at '{rel_path}'."
+    content = path.read_text()
     header_lines = []
     topics = meta.get("topics", [])
     if isinstance(topics, list) and topics:

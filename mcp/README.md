@@ -58,7 +58,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server wraps the `gco` CLI, exposing 95 tools by default (up to 118 with all flags enabled) that cover the full lifecycle of GPU workload management:
+The MCP server wraps the `gco` CLI, exposing 95 tools by default (up to 127 with all flags enabled) that cover the full lifecycle of GPU workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -465,6 +465,7 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 | `metrics_from_job_logs` | Extract a scalar from the tail of a job's logs by JSON key or regex | safe | — |
 | `metrics_from_shared_storage_file` | Read a named field from a shared-storage metrics file (JSON, CSV, HF Trainer state, JSONL, YAML, Parquet, tfevents) | safe | — |
 | `metrics_from_local_file` | Read a named field from a local metrics file confined to `GCO_METRICS_LOCAL_ROOT` | safe | `GCO_ENABLE_LOCAL_METRICS` |
+| `metrics_semantic_progress` | Score how close a Mission is to its directive against a fixed rubric (LLM-as-judge); returns `{"metrics": {"progress_score": <0.0-1.0>}}` | safe | `GCO_ENABLE_SEMANTIC_PROGRESS` |
 
 ### Model Weights
 
@@ -560,7 +561,30 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
-| `find_docs` | Search documentation pages by query or topic | safe | — |
+| `find_docs` | Search documentation pages and package READMEs by query or topic; each hit carries the `resource_uri` to fetch | safe | — |
+
+### Mission (Goal-Directed Loop)
+
+All nine Mission tools are gated behind `GCO_ENABLE_MISSION` — the loop can call any tool in its allowlist, so it is off by default to prevent unattended autonomous execution. See [`mcp/mission/README.md`](mission/README.md) and [`docs/MISSION.md`](../docs/MISSION.md).
+
+| Tool | Description | Risk Tier | Gated By |
+|------|-------------|-----------|----------|
+| `mission_start` | Start a goal-directed mission from a directive, criteria, allowlist, and budget | low-risk | `GCO_ENABLE_MISSION` |
+| `mission_status` | Read the current state of a mission session | safe | `GCO_ENABLE_MISSION` |
+| `mission_iterate` | Run the next propose→execute→observe→evaluate→decide iteration | low-risk | `GCO_ENABLE_MISSION` |
+| `mission_checkpoint` | Force a verdict checkpoint on the current iteration | low-risk | `GCO_ENABLE_MISSION` |
+| `mission_complete` | Mark a mission complete and write its final report | low-risk | `GCO_ENABLE_MISSION` |
+| `mission_abort` | Abort a running mission and record the terminal verdict | low-risk | `GCO_ENABLE_MISSION` |
+| `mission_resume` | Resume a previously paused or interrupted mission | low-risk | `GCO_ENABLE_MISSION` |
+| `mission_history` | List the iteration history of a mission session | safe | `GCO_ENABLE_MISSION` |
+| `mission_list` | List known mission sessions | safe | `GCO_ENABLE_MISSION` |
+
+### Task Observability
+
+| Tool | Description | Risk Tier | Gated By |
+|------|-------------|-----------|----------|
+| `task_status` | Read the status of a FastMCP background task by ID | safe | — |
+| `task_tail` | Tail the recorded output of a long-running background task | safe | — |
 
 ### Live State
 
@@ -591,6 +615,7 @@ Beyond tools, the MCP server exposes documentation, source code, examples, and o
 | `docs://gco/docs/{name}` | Any doc by name (ARCHITECTURE, CLI, INFERENCE, CONCEPTS, etc.) |
 | `docs://gco/docs/by-topic/{topic}` | Listing of docs whose metadata mentions the given topic |
 | `docs://gco/docs/by-related/{doc_name}` | Listing of docs that reference (or are referenced by) the named doc |
+| `docs://gco/packages/{name}` | Package-level README internals guide (mcp-server, mcp-tools, mcp-resources, mcp-mission, mcp-metric-readers, mcp-mission-judge) — also searchable via `find_docs` |
 | `docs://gco/examples/README` | Examples overview with usage instructions |
 | `docs://gco/examples/guide` | How to create new job manifests — patterns, metadata, submission methods |
 | `docs://gco/examples/{name}` | Example manifests with metadata headers (category, GPU, opt-in, submission) |

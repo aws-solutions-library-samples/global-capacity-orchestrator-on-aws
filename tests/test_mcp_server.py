@@ -165,8 +165,13 @@ class TestToolRegistration:
         # Infrastructure-destroy gated tools (destroy_stack, destroy_all)
         # add 2 when GCO_ENABLE_INFRASTRUCTURE_DESTROY=true.
         # The local-file metric reader (metrics_from_local_file) adds 1 when
-        # GCO_ENABLE_LOCAL_METRICS=true. With every flag enabled the ceiling is
-        # 95 + 1 + 2 + 12 + 1 + 3 + 2 + 1 = 117.
+        # GCO_ENABLE_LOCAL_METRICS=true. The semantic-progress judge
+        # (metrics_semantic_progress) adds 1 when GCO_ENABLE_SEMANTIC_PROGRESS=true.
+        # The nine mission_* tools (mission_start, mission_status, mission_iterate,
+        # mission_checkpoint, mission_complete, mission_abort, mission_resume,
+        # mission_history, mission_list) add 9 when GCO_ENABLE_MISSION=true.
+        # With every flag enabled the ceiling is
+        # 95 + 1 + 2 + 12 + 1 + 3 + 2 + 1 + 1 + 9 = 127.
         base_count = 95
         tool_names = [t.name for t in tools]
         expected = base_count
@@ -186,6 +191,11 @@ class TestToolRegistration:
             expected += 2  # destroy_stack + destroy_all
         if "metrics_from_local_file" in tool_names:
             expected += 1  # gated by GCO_ENABLE_LOCAL_METRICS
+        if "metrics_semantic_progress" in tool_names:
+            expected += 1  # gated by GCO_ENABLE_SEMANTIC_PROGRESS
+        if "mission_start" in tool_names:
+            # The nine mission_* tools register together under GCO_ENABLE_MISSION.
+            expected += 9
         assert len(tools) == expected
 
     def test_all_tool_names(self):
@@ -1025,6 +1035,7 @@ class TestResourceRegistration:
     def test_resource_template_count(self):
         templates = asyncio.run(run_mcp.mcp.list_resource_templates())
         # docs/{doc_name}, docs/by-topic/{topic}, docs/by-related/{doc_name},
+        # docs/packages/{package_name},
         # examples/{example_name}, examples/by-category/{category},
         # examples/by-use-case/{use_case}, config/{filename}, file/{filepath},
         # k8s/manifests/{filename}, iam/policies/{filename}, infra/dockerfiles/{filename},
@@ -1041,12 +1052,13 @@ class TestResourceRegistration:
         # GCO_ENABLE_MISSION (or the umbrella flag) is set; accept either count
         # to avoid coupling this assertion to whichever gating env the rest of
         # the suite happens to leave behind.
-        assert len(templates) in (31, 34)
+        assert len(templates) in (32, 35)
 
     def test_resource_template_uris(self):
         templates = asyncio.run(run_mcp.mcp.list_resource_templates())
         uris = {t.uri_template for t in templates}
         assert "docs://gco/docs/{doc_name}" in uris
+        assert "docs://gco/packages/{package_name}" in uris
         assert "docs://gco/examples/{example_name}" in uris
         assert "source://gco/config/{filename}" in uris
         assert "source://gco/file/{filepath*}" in uris

@@ -20,7 +20,7 @@ from hypothesis import strategies as st
 sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
 
 import run_mcp  # noqa: E402, F401  -- side effect: registers tools and resources
-from resources.docs import DOC_METADATA, DOCS_DIR  # noqa: E402
+from resources.docs import DOC_METADATA, DOCS_DIR, PACKAGE_DOC_METADATA, PROJECT_ROOT  # noqa: E402
 from tools.docs import find_docs  # noqa: E402
 
 # Pull the shared FastMCP instance with everything registered from
@@ -59,6 +59,70 @@ def test_every_doc_related_reference_resolves() -> None:
         assert isinstance(related, list), f"{name!r}.related must be a list"
         for ref in related:
             assert ref in keys, f"{name!r}.related references unknown {ref!r}"
+
+
+# =============================================================================
+# PACKAGE_DOC_METADATA structural invariants
+# =============================================================================
+
+
+@settings(max_examples=100, derandomize=True)
+@given(name=st.sampled_from(sorted(PACKAGE_DOC_METADATA.keys())))
+def test_every_package_doc_has_readme_file_property(name: str) -> None:
+    """Every package-doc entry points at a real README under the project root."""
+    rel_path = PACKAGE_DOC_METADATA[name]["path"]
+    assert isinstance(rel_path, str)
+    assert (PROJECT_ROOT / rel_path).is_file(), f"missing {rel_path}"
+
+
+def test_package_doc_keys_are_disjoint_from_doc_metadata() -> None:
+    """The two catalogs must not share keys, or the merged view would collide."""
+    overlap = set(DOC_METADATA.keys()) & set(PACKAGE_DOC_METADATA.keys())
+    assert not overlap, f"catalog key collision: {overlap}"
+
+
+def test_every_package_doc_related_reference_resolves() -> None:
+    """Each package-doc ``related`` entry resolves in either catalog (the union)."""
+    union = set(DOC_METADATA.keys()) | set(PACKAGE_DOC_METADATA.keys())
+    for name, meta in PACKAGE_DOC_METADATA.items():
+        related = meta.get("related", [])
+        assert isinstance(related, list), f"{name!r}.related must be a list"
+        for ref in related:
+            assert ref in union, f"{name!r}.related references unknown {ref!r}"
+
+
+def test_find_docs_surfaces_package_docs_with_resource_uri() -> None:
+    """A package README is findable and carries its ``docs://gco/packages`` URI."""
+    results = asyncio.run(find_docs(query="metric reader", limit=50))
+    by_name = {r["name"]: r for r in results}
+    assert "mcp-metric-readers" in by_name, "package README not surfaced by find_docs"
+    assert by_name["mcp-metric-readers"]["resource_uri"] == (
+        "docs://gco/packages/mcp-metric-readers"
+    )
+
+
+def test_find_docs_guide_results_carry_docs_resource_uri() -> None:
+    """A ``docs/*.md`` guide result carries its ``docs://gco/docs`` URI."""
+    results = asyncio.run(find_docs(topic="architecture", limit=50))
+    architecture = next((r for r in results if r["name"] == "ARCHITECTURE"), None)
+    assert architecture is not None
+    assert architecture["resource_uri"] == "docs://gco/docs/ARCHITECTURE"
+
+
+def test_package_doc_resource_serves_readme_with_header() -> None:
+    """The packages resource returns README content with a Topics header."""
+    result = asyncio.run(mcp.read_resource("docs://gco/packages/mcp-mission-judge"))
+    content = result.contents[0].content
+    assert "<!-- Topics:" in content
+    assert "Mission Judge" in content
+
+
+def test_package_doc_resource_unknown_returns_available_list() -> None:
+    """Unknown slug returns the literal "Package doc 'X' not found." string."""
+    result = asyncio.run(mcp.read_resource("docs://gco/packages/nonexistent"))
+    content = result.contents[0].content
+    assert "not found" in content
+    assert "Available:" in content
 
 
 # =============================================================================
