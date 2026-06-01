@@ -28,15 +28,15 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "boto3==1.43.3",
-    "click==8.3.3",
-    "requests==2.33.1",
+    "boto3==1.43.18",
+    "click==8.4.1",
+    "requests==2.34.2",
     "pyyaml==6.0.3",
     "constructs==10.6.0",
-    "kubernetes==35.0.0",
-    "fastapi==0.136.1",
-    "uvicorn==0.46.0",
-    "pydantic==2.13.3",
+    "kubernetes==36.0.1",
+    "fastapi==0.136.3",
+    "uvicorn==0.48.0",
+    "pydantic==2.13.4",
     "prometheus-client==0.25.0",
     "httpx==0.28.1",
     "urllib3==2.7.0",
@@ -47,7 +47,7 @@ dependencies = [
     # ``fastmcp.experimental.transforms.code_mode`` dependencies (the
     # MontySandboxProvider runtime + the GetTags/Search/GetSchemas
     # discovery tools) used when GCO_MCP_TOOL_SEARCH=code_mode.
-    "fastmcp[tasks,code-mode]==3.2.4",
+    "fastmcp[tasks,code-mode]==3.3.1",
     # BM25 ranking backend for FastMCP's tool-search transform when
     # GCO_MCP_TOOL_SEARCH=bm25.
     "rank-bm25==0.2.2",
@@ -78,8 +78,8 @@ diagrams = [
     "ruff==0.15.7",
 ]
 inference-monitor = [
-    "boto3==1.43.3",
-    "kubernetes==35.0.0",
+    "boto3==1.43.18",
+    "kubernetes==36.0.1",
     "pyyaml==6.0.3",
 ]
 mcp = [
@@ -87,7 +87,7 @@ mcp = [
     # so the documented ``pip install -e ".[mcp]"`` install path keeps
     # working. Pinned to match the base ``dependencies`` entry exactly to
     # avoid resolver thrash.
-    "fastmcp[tasks,code-mode]==3.2.4",
+    "fastmcp[tasks,code-mode]==3.3.1",
 ]
 lint = [
     "ruff==0.15.7",

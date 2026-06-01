@@ -384,13 +384,13 @@ not obs["errors"]
 #### Rejected predicates
 
 ```python
-__import__("os").system("rm -rf /")            # → call_target_not_allowed
-obs.__class__                                  # → dunder_attribute
-obs.metrics.loss                               # → attribute_target_not_allowed (chained attribute)
-obs["xs"].append(1)                            # → call_target_method_not_allowed
+__import__("os").system("rm -rf /")             # → call_target_not_allowed
+obs.__class__                                   # → dunder_attribute
+obs.metrics.loss                                # → attribute_target_not_allowed (chained attribute)
+obs["xs"].append(1)                             # → call_target_method_not_allowed
 any(k.startswith("v") for k in obs["m"].keys()) # → call_target_method_not_allowed
-[x for x in obs["xs"] for x in [1,2]]          # → comprehension_target_shadows_allowlist
-lambda r: r["score"] > 0.9                 # → forbidden_node
+[x for x in obs["xs"] for x in [1,2]]           # → comprehension_target_shadows_allowlist
+lambda r: r["score"] > 0.9                      # → forbidden_node
 ```
 
 ### Why the eval is safe

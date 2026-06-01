@@ -101,7 +101,7 @@ class TestInferenceLiveResource:
         manager = MagicMock()
         manager.get_endpoint.return_value = {
             "endpoint_name": "my-llm",
-            "spec": {"image": "vllm/vllm-openai:v0.20.1"},
+            "spec": {"image": "vllm/vllm-openai:v0.22.0"},
             "desired_state": "running",
         }
         with patch("cli.inference.InferenceManager", return_value=manager):
@@ -109,7 +109,7 @@ class TestInferenceLiveResource:
         manager.get_endpoint.assert_called_once_with("my-llm")
         parsed = json.loads(content)
         assert parsed["endpoint_name"] == "my-llm"
-        assert parsed["spec"]["image"] == "vllm/vllm-openai:v0.20.1"
+        assert parsed["spec"]["image"] == "vllm/vllm-openai:v0.22.0"
 
     def test_inference_resource_missing_endpoint_returns_error_json(self):
         manager = MagicMock()
@@ -307,7 +307,7 @@ class TestResourcesAsToolsRoundTrip:
         manager = MagicMock()
         manager.get_endpoint.return_value = {
             "endpoint_name": "my-llm",
-            "spec": {"image": "vllm/vllm-openai:v0.20.1"},
+            "spec": {"image": "vllm/vllm-openai:v0.22.0"},
         }
 
         async def _drive() -> tuple[str, object]:

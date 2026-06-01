@@ -304,7 +304,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
-      image: semgrep/semgrep:1.161.0
+      image: semgrep/semgrep:1.164.0
     steps:
       - uses: actions/checkout@v6
       - name: Run semgrep

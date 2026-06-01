@@ -845,7 +845,7 @@ class TestInferenceMonitor:
             "desired_state": "deploying",
             "target_regions": ["us-east-1"],
             "spec": {
-                "image": "vllm/vllm-openai:v0.20.1",
+                "image": "vllm/vllm-openai:v0.22.0",
                 "replicas": 1,
                 "gpu_count": 1,
             },
@@ -1023,7 +1023,7 @@ class TestInferenceManager:
         mock_store_instance.create_endpoint.return_value = {"endpoint_name": "ep1"}
         result = manager.deploy(
             endpoint_name="ep1",
-            image="vllm/vllm-openai:v0.20.1",
+            image="vllm/vllm-openai:v0.22.0",
             target_regions=["us-east-1"],
             extra_args=["--kv-transfer-config", '{"kv_connector":"P2pNcclConnector"}'],
         )
@@ -1038,7 +1038,7 @@ class TestInferenceManager:
         mock_store_instance.create_endpoint.return_value = {"endpoint_name": "ep1"}
         manager.deploy(
             endpoint_name="ep1",
-            image="vllm/vllm-openai:v0.20.1",
+            image="vllm/vllm-openai:v0.22.0",
             target_regions=["us-east-1"],
         )
         call_kwargs = mock_store_instance.create_endpoint.call_args.kwargs
@@ -1062,7 +1062,7 @@ class TestInferenceManager:
         mock_store_instance.create_endpoint.return_value = {"endpoint_name": "ep1"}
         manager.deploy(
             endpoint_name="ep1",
-            image="vllm/vllm-openai:v0.20.1",
+            image="vllm/vllm-openai:v0.22.0",
             target_regions=["us-east-1"],
             accelerator="nvidia",
         )
@@ -1074,7 +1074,7 @@ class TestInferenceManager:
         mock_store_instance.create_endpoint.return_value = {"endpoint_name": "ep1"}
         manager.deploy(
             endpoint_name="ep1",
-            image="vllm/vllm-openai:v0.20.1",
+            image="vllm/vllm-openai:v0.22.0",
             target_regions=["us-east-1"],
         )
         call_kwargs = mock_store_instance.create_endpoint.call_args.kwargs
@@ -1085,7 +1085,7 @@ class TestInferenceManager:
         mock_store_instance.create_endpoint.return_value = {"endpoint_name": "ep1"}
         result = manager.deploy(
             endpoint_name="ep1",
-            image="vllm/vllm-openai:v0.20.1",
+            image="vllm/vllm-openai:v0.22.0",
             target_regions=["us-east-1"],
             node_selector={"eks.amazonaws.com/instance-family": "inf2"},
         )
@@ -1098,7 +1098,7 @@ class TestInferenceManager:
         mock_store_instance.create_endpoint.return_value = {"endpoint_name": "ep1"}
         manager.deploy(
             endpoint_name="ep1",
-            image="vllm/vllm-openai:v0.20.1",
+            image="vllm/vllm-openai:v0.22.0",
             target_regions=["us-east-1"],
         )
         call_kwargs = mock_store_instance.create_endpoint.call_args.kwargs

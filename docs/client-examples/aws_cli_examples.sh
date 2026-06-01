@@ -73,7 +73,7 @@ MANIFEST_PAYLOAD=$(cat <<'EOF'
             "containers": [
               {
                 "name": "example",
-                "image": "busybox:1.37.0",
+                "image": "busybox:1.38.0",
                 "command": ["echo", "Hello from GCO!"]
               }
             ],
@@ -195,7 +195,7 @@ MULTI_MANIFEST_PAYLOAD=$(cat <<'EOF'
             "containers": [
               {
                 "name": "reader",
-                "image": "busybox:1.37.0",
+                "image": "busybox:1.38.0",
                 "command": ["cat", "/config/config.yaml"],
                 "volumeMounts": [
                   {

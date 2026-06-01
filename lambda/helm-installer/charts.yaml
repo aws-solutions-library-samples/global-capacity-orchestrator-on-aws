@@ -9,7 +9,7 @@
 # to enable Slurm, set "helm": { "slurm": { "enabled": true } } in cdk.json.
 # The cdk.json setting always takes precedence over the value here.
 #
-# Last updated: 2026-04-07
+# Last updated: 2026-06-01
 # Version check sources:
 #   - KEDA: https://artifacthub.io/packages/helm/kedacore/keda
 #   - GPU Operator: https://github.com/NVIDIA/gpu-operator/releases
@@ -95,7 +95,7 @@ charts:
     repo_name: nvidia
     repo_url: https://helm.ngc.nvidia.com/nvidia
     chart: gpu-operator
-    version: "v26.3.1"
+    version: "v26.3.2"
     namespace: gpu-operator
     create_namespace: true
     values:
@@ -206,7 +206,7 @@ charts:
     repo_name: eks
     repo_url: https://aws.github.io/eks-charts
     chart: aws-efa-k8s-device-plugin
-    version: "0.5.26"
+    version: "v0.5.27"
     namespace: kube-system
     create_namespace: false
     values:
@@ -229,7 +229,7 @@ charts:
     repo_name: neuron-oci
     repo_url: oci://public.ecr.aws/neuron
     chart: neuron-helm-chart
-    version: "1.7.0"
+    version: "1.8.0"
     namespace: kube-system
     create_namespace: false
     use_oci: true
@@ -255,7 +255,7 @@ charts:
     repo_name: volcano-sh
     repo_url: https://volcano-sh.github.io/helm-charts
     chart: volcano
-    version: "1.14.1"
+    version: "1.15.0"
     namespace: volcano-system
     create_namespace: true
     values:
@@ -566,7 +566,7 @@ charts:
     repo_name: kueue-oci
     repo_url: oci://registry.k8s.io/kueue/charts
     chart: kueue
-    version: "0.17.2"
+    version: "0.18.0"
     namespace: kueue-system
     create_namespace: true
     use_oci: true

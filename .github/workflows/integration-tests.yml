@@ -772,7 +772,7 @@ jobs:
           fi
           # Run a test pod in gco-jobs that tries to reach gco-system
           # Timeout after 5 seconds — if blocked, wget will fail.
-          kubectl run netpol-test --image=busybox:1.37.0 -n gco-jobs \
+          kubectl run netpol-test --image=busybox:1.38.0 -n gco-jobs \
             --restart=Never --rm -i --timeout=30s \
             -- sh -c "wget -q -O- --timeout=5 http://${svc_ip}:8080/health 2>&1 || echo BLOCKED" \
             | tee /tmp/netpol-result.txt || true

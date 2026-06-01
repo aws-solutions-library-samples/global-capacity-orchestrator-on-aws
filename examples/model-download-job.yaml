@@ -13,7 +13,7 @@
 #   kubectl apply -f examples/model-download-job.yaml
 #   # After completion, deploy inference with the cached model:
 #   gco inference deploy my-model \
-#     -i vllm/vllm-openai:v0.20.1 \
+#     -i vllm/vllm-openai:v0.22.0 \
 #     --model-path /models/opt-125m
 #
 # Notes:
@@ -39,7 +39,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: downloader
-        image: python:3.14.4-slim
+        image: python:3.14.5-slim
         command:
         - python
         - -c

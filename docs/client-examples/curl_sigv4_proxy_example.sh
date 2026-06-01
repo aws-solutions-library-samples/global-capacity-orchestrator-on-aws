@@ -125,7 +125,7 @@ cat > /tmp/manifest-payload.json <<'EOF'
           "containers": [
             {
               "name": "example",
-              "image": "busybox:1.37.0",
+              "image": "busybox:1.38.0",
               "command": ["sh", "-c", "echo 'Hello from curl + aws-sigv4-proxy!' && sleep 10"]
             }
           ],

@@ -100,7 +100,7 @@ variables:
 # --- LINTING ---
 lint:python:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - apt-get update && apt-get install -y git
     - pip install --upgrade pip
@@ -118,7 +118,7 @@ lint:python:
 
 lint:typecheck:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - pip install --upgrade pip
     # Install full project + mcp extras so mypy can resolve real types
@@ -143,7 +143,7 @@ lint:typecheck:
 
 lint:typecheck-stacks:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - pip install --upgrade pip
     - pip install -e ".[cdk,typecheck]"
@@ -161,7 +161,7 @@ lint:typecheck-stacks:
 
 lint:typecheck-lambda:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - pip install --upgrade pip
     # Lambda handlers import boto3, kubernetes, urllib3, yaml at module scope
@@ -238,7 +238,7 @@ test:bats:
 # --- TESTING (consolidated into one job) ---
 test:test-dir-pytest:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - apt-get update && apt-get install -y curl
     - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
@@ -270,7 +270,7 @@ test:test-dir-pytest:
 
 test:cli:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - pip install --upgrade pip
     - pip install -e .
@@ -291,7 +291,7 @@ test:cli:
 # --- SECURITY (all run in parallel, all strict) ---
 security:bandit:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - pip install --upgrade pip
     - pip install -e ".[security]"
@@ -305,7 +305,7 @@ security:bandit:
 
 security:safety:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - pip install --upgrade pip
     - pip install -e ".[security]"
@@ -361,7 +361,7 @@ security:gitleaks:
 
 security:semgrep:
   stage: validate
-  image: semgrep/semgrep:1.160.0
+  image: semgrep/semgrep:1.164.0
   script:
     - semgrep scan --config auto --error --json -o semgrep-report.json .
   artifacts:
@@ -400,7 +400,7 @@ security:kics:
 
 security:pip-audit:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - pip install --upgrade pip
     - pip install pip-audit
@@ -423,7 +423,7 @@ security:pip-audit:
 # --- BUILD ---
 build:cdk:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - apt-get update && apt-get install -y nodejs npm
     - pip install --upgrade pip
@@ -444,7 +444,7 @@ build:cdk:
 
 build:package:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - pip install --upgrade pip build wheel
     - pip install -e .
@@ -459,7 +459,7 @@ build:package:
 # --- EKS WORKLOAD SMOKE TESTS ---
 test:workload-imports:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends curl > /dev/null 2>&1
     - pip install --upgrade pip -q
@@ -486,7 +486,7 @@ test:workload-imports:
 # --- CDK CONFIG MATRIX ---
 test:cdk-config-matrix:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends nodejs npm > /dev/null 2>&1
     - npm install --location=global aws-cdk@2 > /dev/null 2>&1
@@ -510,7 +510,7 @@ test:cdk-config-matrix:
 # --- LOCKFILE FRESHNESS CHECK ---
 test:lockfile:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - pip install --upgrade pip
     - pip install pip-tools
@@ -546,7 +546,7 @@ test:lockfile:
 # --- FRESH INSTALL VERIFICATION ---
 test:fresh-install:
   stage: validate
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends nodejs npm > /dev/null 2>&1
   script:
@@ -564,7 +564,7 @@ test:fresh-install:
 
 integration:k8s:
   stage: integration
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   needs: ["build:cdk"]
   before_script:
     - pip install --upgrade pip
@@ -695,7 +695,7 @@ integration:k8s:
 
 integration:lambda:
   stage: integration
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   needs: ["build:cdk"]
   before_script:
     - pip install --upgrade pip
@@ -712,7 +712,7 @@ integration:lambda:
 
 integration:comprehensive:
   stage: integration
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   needs: ["build:cdk"]
   before_script:
     - pip install --upgrade pip
@@ -729,7 +729,7 @@ integration:comprehensive:
 
 integration:mcp:
   stage: integration
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   needs: ["build:cdk"]
   before_script:
     - pip install --upgrade pip
@@ -768,7 +768,7 @@ pages:
 
 .release-base:
   stage: release
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   needs: ["lint:python", "test:test-dir-pytest"]
   allow_failure: true
   before_script:
@@ -1172,7 +1172,7 @@ release:major:
 
 .dependency-scan-base:
   stage: maintenance
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   needs: []
   allow_failure: true
   before_script:
@@ -1222,7 +1222,7 @@ dependency-scan:monthly:
 #   Variable: SECURITY_SCAN = "true"
 security-scan:weekly:
   stage: maintenance
-  image: python:3.14.4-slim
+  image: python:3.14.5-slim
   needs: []
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $SECURITY_SCAN == "true"'

@@ -28,7 +28,7 @@ spec:
         runAsGroup: 1000
       containers:
       - name: hello
-        image: busybox:1.37.0
+        image: busybox:1.38.0
         command: ['sh', '-c', 'echo "Hello from GCO!" && sleep 10 && echo "Job completed!"']
         securityContext:
           allowPrivilegeEscalation: false

@@ -443,7 +443,7 @@ spec:
   restartPolicy: Never
   containers:
   - name: helper
-    image: busybox:1.37.0
+    image: busybox:1.38.0
     command: ["sleep", "300"]
     resources:
       requests:
@@ -642,7 +642,7 @@ spec:
   restartPolicy: Never
   containers:
   - name: helper
-    image: busybox:1.37.0
+    image: busybox:1.38.0
     command: ["sleep", "300"]
     resources:
       requests:

@@ -39,7 +39,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: worker
-        image: python:3.14.4-slim
+        image: python:3.14.5-slim
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

@@ -10,8 +10,8 @@
 # Usage:
 #   kubectl apply -f examples/kueue-job.yaml
 #   # Submit jobs (they will be queued if resources are limited):
-#   kubectl create job test-job-1 --image=python:3.14.4-slim -n gco-jobs -- sleep 60
-#   kubectl create job test-job-2 --image=python:3.14.4-slim -n gco-jobs -- sleep 60
+#   kubectl create job test-job-1 --image=python:3.14.5-slim -n gco-jobs -- sleep 60
+#   kubectl create job test-job-2 --image=python:3.14.5-slim -n gco-jobs -- sleep 60
 #   # Inspect queue state:
 #   kubectl get clusterqueue
 #   kubectl get localqueue -n gco-jobs
@@ -101,7 +101,7 @@ spec:
         runAsGroup: 1000
       containers:
       - name: worker
-        image: python:3.14.4-slim
+        image: python:3.14.5-slim
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

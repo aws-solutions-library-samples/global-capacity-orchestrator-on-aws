@@ -46,7 +46,7 @@ so Global Accelerator routing works consistently.
 
 ```bash
 gco inference deploy vllm-demo \
-  -i vllm/vllm-openai:v0.20.1 \
+  -i vllm/vllm-openai:v0.22.0 \
   --gpu-count 1 \
   --replicas 1 \
   --extra-args '--model' --extra-args 'facebook/opt-125m'
@@ -62,7 +62,7 @@ You can also specify spot instances for cost savings on fault-tolerant workloads
 
 ```bash
 gco inference deploy vllm-spot \
-  -i vllm/vllm-openai:v0.20.1 \
+  -i vllm/vllm-openai:v0.22.0 \
   --gpu-count 1 \
   --capacity-type spot \
   --extra-args '--model' --extra-args 'facebook/opt-125m'
@@ -135,7 +135,7 @@ Deploy a second endpoint with HPA-based autoscaling:
 
 ```bash
 gco inference deploy vllm-auto \
-  -i vllm/vllm-openai:v0.20.1 \
+  -i vllm/vllm-openai:v0.22.0 \
   --gpu-count 1 \
   --replicas 2 \
   --min-replicas 1 --max-replicas 8 \
@@ -155,7 +155,7 @@ gco inference status vllm-auto
 Update the image, then watch the rollout:
 
 ```bash
-gco inference update-image vllm-demo -i vllm/vllm-openai:v0.20.1
+gco inference update-image vllm-demo -i vllm/vllm-openai:v0.22.0
 gco inference status vllm-demo
 ```
 
@@ -166,7 +166,7 @@ Send 10% of traffic to the canary, then monitor both primary and canary:
 
 ```bash
 gco inference canary vllm-demo \
-  -i vllm/vllm-openai:v0.20.1 \
+  -i vllm/vllm-openai:v0.22.0 \
   --weight 10
 gco inference status vllm-demo
 ```
@@ -236,7 +236,7 @@ entry when you are done:
 
 ```bash
 gco inference deploy llama-endpoint \
-  -i vllm/vllm-openai:v0.20.1 \
+  -i vllm/vllm-openai:v0.22.0 \
   --gpu-count 1 \
   --model-source $(gco models uri llama3-8b)
 gco models delete llama3-8b -y

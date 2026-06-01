@@ -259,7 +259,7 @@ GCO isn't just for batch jobs — it also manages multi-region inference endpoin
 
 ```bash
 gco inference deploy vllm-demo \
-  -i vllm/vllm-openai:v0.20.1 \
+  -i vllm/vllm-openai:v0.22.0 \
   --gpu-count 1 \
   --replicas 1 \
   --extra-args '--model' --extra-args 'facebook/opt-125m'

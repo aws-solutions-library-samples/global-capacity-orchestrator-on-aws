@@ -622,7 +622,7 @@ def _job_with_init_container(image, init_privileged=False, init_gpu=0):
                     "containers": [
                         {
                             "name": "worker",
-                            "image": "busybox:1.37.0",
+                            "image": "busybox:1.38.0",
                             "securityContext": {"allowPrivilegeEscalation": False},
                             "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}},
                         }
@@ -641,7 +641,7 @@ class TestImageRegistryAllowlist:
         monkeypatch.setenv("TRUSTED_REGISTRIES", "nvcr.io,public.ecr.aws")
         monkeypatch.setenv("TRUSTED_DOCKERHUB_ORGS", "nvidia,pytorch")
         qp = _reload()
-        ok, err = qp.validate_manifest(_job_with_image("busybox:1.37.0"))
+        ok, err = qp.validate_manifest(_job_with_image("busybox:1.38.0"))
         assert ok, err
 
     def test_trusted_registry_domain_allowed(self, monkeypatch):
@@ -720,7 +720,7 @@ class TestInitContainerSecurityChecks:
         monkeypatch.setenv("TRUSTED_DOCKERHUB_ORGS", "")
         qp = _reload()
         ok, err = qp.validate_manifest(
-            _job_with_init_container("busybox:1.37.0", init_privileged=True)
+            _job_with_init_container("busybox:1.38.0", init_privileged=True)
         )
         assert not ok
         assert "privileged" in err.lower()
@@ -750,7 +750,7 @@ class TestResourceAccountingMatchesManifestProcessor:
                         "initContainers": [
                             {
                                 "name": "setup",
-                                "image": "busybox:1.37.0",
+                                "image": "busybox:1.38.0",
                                 "securityContext": {"allowPrivilegeEscalation": False},
                                 "resources": {"requests": {"cpu": "20"}},  # 20 cores
                             }
@@ -758,7 +758,7 @@ class TestResourceAccountingMatchesManifestProcessor:
                         "containers": [
                             {
                                 "name": "worker",
-                                "image": "busybox:1.37.0",
+                                "image": "busybox:1.38.0",
                                 "securityContext": {"allowPrivilegeEscalation": False},
                                 "resources": {"requests": {"cpu": "100m"}},
                             }
@@ -778,7 +778,7 @@ class TestResourceAccountingMatchesManifestProcessor:
         monkeypatch.setenv("TRUSTED_REGISTRIES", "")
         monkeypatch.setenv("TRUSTED_DOCKERHUB_ORGS", "")
         qp = _reload()
-        ok, err = qp.validate_manifest(_job_with_init_container("busybox:1.37.0", init_gpu=99))
+        ok, err = qp.validate_manifest(_job_with_init_container("busybox:1.38.0", init_gpu=99))
         assert not ok
         assert "GPU" in err
 
@@ -1248,7 +1248,7 @@ class TestSecurityPolicyInitContainerCoverage:
         m["spec"]["initContainers"] = [
             {
                 "name": "setup",
-                "image": "busybox:1.37.0",
+                "image": "busybox:1.38.0",
                 "securityContext": {"privileged": True},
             }
         ]
@@ -1261,7 +1261,7 @@ class TestSecurityPolicyInitContainerCoverage:
         m["spec"]["initContainers"] = [
             {
                 "name": "setup",
-                "image": "busybox:1.37.0",
+                "image": "busybox:1.38.0",
                 "securityContext": {"capabilities": {"add": ["SYS_ADMIN"]}},
             }
         ]
