@@ -6,12 +6,6 @@
 #
 aiofile==3.9.0
     # via py-key-value-aio
-aiohappyeyeballs==2.6.2
-    # via aiohttp
-aiohttp==3.13.5
-    # via kubernetes
-aiosignal==1.4.0
-    # via aiohttp
 annotated-doc==0.0.4
     # via
     #   fastapi
@@ -28,7 +22,6 @@ anyio==4.13.0
     #   watchfiles
 attrs==25.4.0
     # via
-    #   aiohttp
     #   cattrs
     #   cyclopts
     #   hypothesis
@@ -162,10 +155,6 @@ filelock==3.29.0
     # via
     #   python-discovery
     #   virtualenv
-frozenlist==1.8.0
-    # via
-    #   aiohttp
-    #   aiosignal
 greenlet==3.5.0
     # via playwright
 griffelib==2.0.2
@@ -196,7 +185,6 @@ idna==3.15
     #   email-validator
     #   httpx
     #   requests
-    #   yarl
 importlib-metadata==8.7.1
     # via opentelemetry-api
 importlib-resources==7.1.0
@@ -249,7 +237,7 @@ jsonschema-specifications==2025.9.1
     #   openapi-schema-validator
 keyring==25.7.0
     # via py-key-value-aio
-kubernetes==36.0.1
+kubernetes==35.0.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -275,10 +263,6 @@ moto==5.1.22
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-multidict==6.7.1
-    # via
-    #   aiohttp
-    #   yarl
 mypy==1.19.1
     # via
     #   gco-cli
@@ -341,10 +325,6 @@ prometheus-client==0.25.0
     #   gco-cli
     #   gco-cli (pyproject.toml)
     #   pydocket
-propcache==0.5.2
-    # via
-    #   aiohttp
-    #   yarl
 psutil==7.2.2
     # via pytest-xdist
 publication==0.0.3
@@ -608,8 +588,6 @@ yamllint==1.38.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-yarl==1.24.2
-    # via aiohttp
 zipp==3.23.1
     # via importlib-metadata
 

@@ -570,11 +570,52 @@ jobs:
         # the pods haven't been scheduled yet by the apiserver — a race that
         # fires within a second of the apply. rollout status waits for the
         # workload to exist first, then waits for it to become Ready.
+        #
+        # The rollout wait is wrapped in a retry loop because calico-node
+        # readiness is a known CI flake: the DaemonSet pod pulls its image
+        # from quay.io and runs the install-cni / mount-bpffs init containers,
+        # which can exceed a single timeout window under runner image-pull
+        # latency or resource contention. The apply is idempotent, so each
+        # attempt re-applies (a no-op once the objects exist) and re-waits;
+        # transient slowness converges on a later attempt. On the final
+        # failure we dump pod/event diagnostics so a genuine (non-transient)
+        # break is debuggable from the log rather than just "timed out".
+        #
+        # Budget: 3 attempts x (4m node + 2m controllers) = 18m worst case,
+        # inside the job's 30m timeout-minutes.
         run: |
           set -euo pipefail
           kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.31.5/manifests/calico.yaml
-          kubectl -n kube-system rollout status daemonset/calico-node              --timeout=5m
-          kubectl -n kube-system rollout status deployment/calico-kube-controllers --timeout=5m
+
+          attempts=3
+          for i in $(seq 1 "${attempts}"); do
+            echo "::group::Calico rollout attempt ${i}/${attempts}"
+            # Re-apply is idempotent; nudges anything that failed to schedule.
+            kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.31.5/manifests/calico.yaml
+            if kubectl -n kube-system rollout status daemonset/calico-node --timeout=4m \
+               && kubectl -n kube-system rollout status deployment/calico-kube-controllers --timeout=2m; then
+              echo "Calico is ready."
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "Calico not ready on attempt ${i}/${attempts}."
+            echo "::endgroup::"
+            if [ "${i}" -lt "${attempts}" ]; then
+              echo "Retrying in 15s..."
+              sleep 15
+            fi
+          done
+
+          echo "::error::Calico did not become ready after ${attempts} attempts."
+          echo "===== Diagnostics: calico pods ====="
+          kubectl -n kube-system get pods -l k8s-app=calico-node -o wide || true
+          kubectl -n kube-system get pods -l k8s-app=calico-kube-controllers -o wide || true
+          echo "===== Diagnostics: describe calico-node ====="
+          kubectl -n kube-system describe daemonset/calico-node || true
+          kubectl -n kube-system describe pods -l k8s-app=calico-node || true
+          echo "===== Diagnostics: recent kube-system events ====="
+          kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -50 || true
+          exit 1
       - name: Set up Buildx (enables shared GHA layer cache)
         uses: docker/setup-buildx-action@v4
       - name: Build health-monitor image
