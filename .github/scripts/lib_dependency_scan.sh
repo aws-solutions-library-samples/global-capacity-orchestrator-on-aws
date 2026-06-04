@@ -221,10 +221,10 @@ except ImportError:
 
 # extract_k8s_version [cdk_json_path]
 #
-# Reads the kubernetes_version from cdk.json. Falls back to "1.35".
+# Reads the kubernetes_version from cdk.json. Falls back to "1.36".
 extract_k8s_version() {
   local cdk="${1:-cdk.json}"
-  python3 -c "import json; print(json.load(open('$cdk'))['context']['kubernetes_version'])" 2>/dev/null || echo "1.35"
+  python3 -c "import json; print(json.load(open('$cdk'))['context']['kubernetes_version'])" 2>/dev/null || echo "1.36"
 }
 
 # extract_dockerfile_pins <dockerfile>
@@ -244,7 +244,7 @@ extract_k8s_version() {
 #     NODE_MAJOR|24
 #     NPM_VERSION|11.14.1
 #     CDK_VERSION|2.1120.0
-#     KUBECTL_VERSION|v1.35.4
+#     KUBECTL_VERSION|v1.36.1
 #     AWSCLI_VERSION|2.34.42
 #     DOCKER_VERSION|29.4.2
 extract_dockerfile_pins() {

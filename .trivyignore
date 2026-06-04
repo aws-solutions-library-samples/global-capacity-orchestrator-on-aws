@@ -30,12 +30,11 @@
 #
 # Two binaries in the helm-installer Lambda container still match these
 # CVEs and keep these entries alive:
-#   - kubectl v1.35.5 pinned in Dockerfile. Built with Go 1.25.9 per
+#   - kubectl v1.36.1 pinned in Dockerfile. Built with Go 1.26.2 per
 #     `go version kubectl` and build-image/cross/VERSION on the
-#     v1.35.5 tag. v1.36.1 (the current latest k8s patch release,
-#     2026-05-12) is built with Go 1.26.2 — still on the wrong side
-#     of the fix line, so a minor bump does not clear these. Awaiting
-#     a kubectl release rebuilt with Go ≥ 1.25.10 / ≥ 1.26.3.
+#     v1.36.1 tag — still on the wrong side of the fix line, so the
+#     1.35.5 → 1.36.1 bump on this branch does not clear these.
+#     Awaiting a kubectl release rebuilt with Go ≥ 1.25.10 / ≥ 1.26.3.
 #   - aws-lambda-rie bundled in public.ecr.aws/lambda/python:3.14. Latest
 #     RIE release is v1.35 (2026-03-30, Go 1.26.2). AWS-controlled, no
 #     user-serviceable bump path — clears when AWS rebuilds the Lambda
@@ -65,9 +64,8 @@ CVE-2026-42499 exp:2026-08-22
 #   Go 1.26.3 per https://nvd.nist.gov/vuln/detail/CVE-2026-39826.
 #
 # These ride on:
-#   - kubectl v1.35.5 (built with Go 1.25.9): trips all four entries.
-#     v1.36.1 (current latest, 2026-05-12) is built with Go 1.26.2,
-#     which is still vulnerable to all four — kubectl needs a release
+#   - kubectl v1.36.1 (built with Go 1.26.2): trips all four entries.
+#     Go 1.26.2 is still vulnerable to all four — kubectl needs a release
 #     rebuilt with Go ≥ 1.25.10 / ≥ 1.26.3 before this clears.
 #   - aws-lambda-rie bundled in `public.ecr.aws/lambda/python:3.14`:
 #     trips the three Go-stdlib entries. AWS-controlled, no

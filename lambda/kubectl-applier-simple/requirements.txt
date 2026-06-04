@@ -1,4 +1,4 @@
 boto3==1.43.18
-kubernetes==35.0.0
+kubernetes==36.0.2
 PyYAML==6.0.3
 urllib3==2.7.0

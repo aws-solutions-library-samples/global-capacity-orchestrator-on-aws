@@ -40,7 +40,7 @@ class MockConfigLoader:
         return "us-east-2"
 
     def get_kubernetes_version(self):
-        return "1.35"
+        return "1.36"
 
     def get_tags(self):
         return {"Environment": "test", "Project": "gco"}
@@ -56,7 +56,7 @@ class MockConfigLoader:
         return ClusterConfig(
             region=region,
             cluster_name=f"gco-test-{region}",
-            kubernetes_version="1.35",
+            kubernetes_version="1.36",
             addons=["metrics-server"],
             resource_thresholds=self.get_resource_thresholds(),
         )
@@ -443,7 +443,7 @@ class TestConfigLoaderDefaults:
         """Test default Kubernetes version."""
         app = cdk.App()
         config = MockConfigLoader(app)
-        assert config.get_kubernetes_version() == "1.35"
+        assert config.get_kubernetes_version() == "1.36"
 
     def test_get_fsx_lustre_config_disabled(self):
         """Test FSx config when disabled."""
@@ -516,14 +516,14 @@ class TestClusterConfigModel:
         config = ClusterConfig(
             region="us-east-1",
             cluster_name="test-cluster",
-            kubernetes_version="1.35",
+            kubernetes_version="1.36",
             addons=["metrics-server"],
             resource_thresholds=thresholds,
         )
 
         assert config.region == "us-east-1"
         assert config.cluster_name == "test-cluster"
-        assert config.kubernetes_version == "1.35"
+        assert config.kubernetes_version == "1.36"
 
 
 class TestResourceThresholdsModel:

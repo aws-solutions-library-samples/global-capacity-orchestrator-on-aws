@@ -36,7 +36,7 @@ class MockConfigLoader:
         return "us-east-2"
 
     def get_kubernetes_version(self):
-        return "1.35"
+        return "1.36"
 
     def get_tags(self):
         return {"Environment": "test", "Project": "gco"}
@@ -52,7 +52,7 @@ class MockConfigLoader:
         return ClusterConfig(
             region=region,
             cluster_name=f"gco-test-{region}",
-            kubernetes_version="1.35",
+            kubernetes_version="1.36",
             addons=["metrics-server"],
             resource_thresholds=self.get_resource_thresholds(),
         )
@@ -353,7 +353,7 @@ class TestConfigIntegration:
 
         assert config.get_project_name() == "gco-test"
         assert config.get_regions() == ["us-east-1"]
-        assert config.get_kubernetes_version() == "1.35"
+        assert config.get_kubernetes_version() == "1.36"
         assert isinstance(config.get_tags(), dict)
         assert config.get_resource_thresholds() is not None
         assert config.get_cluster_config("us-east-1") is not None

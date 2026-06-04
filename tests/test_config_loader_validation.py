@@ -45,7 +45,7 @@ class TestConfigLoaderValidation:
             context={
                 "project_name": "test",
                 "deployment_regions": {"regional": []},
-                "kubernetes_version": "1.35",
+                "kubernetes_version": "1.36",
                 "resource_thresholds": {
                     "cpu_threshold": 80,
                     "memory_threshold": 85,
@@ -108,7 +108,7 @@ class TestConfigLoaderValidation:
             context={
                 "project_name": "test",
                 "deployment_regions": {"regional": regions},
-                "kubernetes_version": "1.35",
+                "kubernetes_version": "1.36",
                 "resource_thresholds": {
                     "cpu_threshold": 80,
                     "memory_threshold": 85,
@@ -157,7 +157,7 @@ class TestConfigLoaderValidation:
             context={
                 "project_name": "test",
                 "deployment_regions": {"regional": ["invalid-region"]},
-                "kubernetes_version": "1.35",
+                "kubernetes_version": "1.36",
                 "resource_thresholds": {
                     "cpu_threshold": 80,
                     "memory_threshold": 85,
@@ -206,7 +206,7 @@ class TestConfigLoaderValidation:
             context={
                 "project_name": "test",
                 "deployment_regions": {"regional": ["us-east-1", "us-east-1"]},
-                "kubernetes_version": "1.35",
+                "kubernetes_version": "1.36",
                 "resource_thresholds": {
                     "cpu_threshold": 80,
                     "memory_threshold": 85,
@@ -255,7 +255,7 @@ class TestConfigLoaderValidation:
             context={
                 "project_name": "test",
                 "deployment_regions": {"regional": ["us-east-1"]},
-                "kubernetes_version": "1.35",
+                "kubernetes_version": "1.36",
                 "resource_thresholds": {
                     "cpu_threshold": 150,
                     "memory_threshold": 85,
@@ -304,7 +304,7 @@ class TestConfigLoaderValidation:
             context={
                 "project_name": "test",
                 "deployment_regions": {"regional": ["us-east-1"]},
-                "kubernetes_version": "1.35",
+                "kubernetes_version": "1.36",
                 "resource_thresholds": {
                     "cpu_threshold": 80,
                     "memory_threshold": 85,
@@ -352,7 +352,7 @@ class TestConfigLoaderValidation:
             context={
                 "project_name": "test",
                 "deployment_regions": {"regional": ["us-east-1"]},
-                "kubernetes_version": "1.35",
+                "kubernetes_version": "1.36",
                 "resource_thresholds": {
                     "cpu_threshold": 80,
                     "memory_threshold": 85,
@@ -401,7 +401,7 @@ class TestConfigLoaderValidation:
             context={
                 "project_name": "test",
                 "deployment_regions": {"regional": ["us-east-1"]},
-                "kubernetes_version": "1.35",
+                "kubernetes_version": "1.36",
                 "resource_thresholds": {
                     "cpu_threshold": 80,
                     "memory_threshold": 85,
@@ -452,7 +452,7 @@ class TestConfigLoaderValidation:
             context={
                 "project_name": "test",
                 "deployment_regions": {"regional": ["us-east-1"]},
-                "kubernetes_version": "1.35",
+                "kubernetes_version": "1.36",
                 "resource_thresholds": {
                     "cpu_threshold": 80,
                     "memory_threshold": 85,
@@ -501,7 +501,7 @@ class TestConfigLoaderValidation:
             context={
                 "project_name": "test",
                 "deployment_regions": {"regional": ["us-east-1"]},
-                "kubernetes_version": "1.35",
+                "kubernetes_version": "1.36",
                 "resource_thresholds": {
                     "cpu_threshold": 80,
                     "memory_threshold": 85,
@@ -550,7 +550,7 @@ class TestConfigLoaderValidation:
             context={
                 "project_name": "test",
                 "deployment_regions": {"regional": ["us-east-1"]},
-                "kubernetes_version": "1.35",
+                "kubernetes_version": "1.36",
                 "resource_thresholds": {
                     "cpu_threshold": 80,
                     "memory_threshold": 85,

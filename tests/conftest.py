@@ -169,7 +169,7 @@ def sample_cluster_config(sample_thresholds):
     return ClusterConfig(
         region="us-east-1",
         cluster_name="gco-us-east-1",
-        kubernetes_version="1.35",
+        kubernetes_version="1.36",
         addons=["metrics-server"],
         resource_thresholds=sample_thresholds,
     )
@@ -354,7 +354,7 @@ def valid_cdk_context():
             "monitoring": "us-east-2",
             "regional": ["us-east-1", "us-west-2"],
         },
-        "kubernetes_version": "1.35",
+        "kubernetes_version": "1.36",
         "resource_thresholds": {"cpu_threshold": 80, "memory_threshold": 85, "gpu_threshold": 90},
         "global_accelerator": {
             "name": "gco-accelerator",

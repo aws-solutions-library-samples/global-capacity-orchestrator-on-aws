@@ -44,7 +44,7 @@ def valid_context():
             "monitoring": "us-east-2",
             "regional": ["us-east-1", "us-west-2"],
         },
-        "kubernetes_version": "1.35",
+        "kubernetes_version": "1.36",
         "resource_thresholds": {"cpu_threshold": 80, "memory_threshold": 85, "gpu_threshold": 90},
         "global_accelerator": {
             "name": "gco-accelerator",
@@ -257,7 +257,7 @@ class TestConfigLoaderGetters:
 
         assert cluster_config.region == "us-east-1"
         assert cluster_config.cluster_name == "gco-us-east-1"
-        assert cluster_config.kubernetes_version == "1.35"
+        assert cluster_config.kubernetes_version == "1.36"
 
     def test_get_tags(self, valid_context):
         """Test getting tags."""
@@ -301,7 +301,7 @@ class TestDefaultValues:
         """Test default Kubernetes version."""
         app = MockApp({})
         config = ConfigLoader(app)
-        assert config.get_kubernetes_version() == "1.35"
+        assert config.get_kubernetes_version() == "1.36"
 
     def test_default_resource_thresholds(self):
         """Test default resource thresholds."""

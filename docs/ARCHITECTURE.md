@@ -60,7 +60,7 @@ Each region contains:
 
 **EKS Auto Mode Cluster**
 
-- Kubernetes 1.35
+- Kubernetes 1.36
 - Managed control plane
 - Control plane logging enabled (API, Audit, Authenticator, Controller Manager, Scheduler)
 - Auto-scaling compute via nodepools:

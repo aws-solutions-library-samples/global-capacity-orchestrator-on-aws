@@ -237,7 +237,7 @@ jsonschema-specifications==2025.9.1
     #   openapi-schema-validator
 keyring==25.7.0
     # via py-key-value-aio
-kubernetes==35.0.0
+kubernetes==36.0.2
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)

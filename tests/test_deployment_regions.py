@@ -35,7 +35,7 @@ def base_context():
     """Create base configuration context without deployment_regions."""
     return {
         "project_name": "gco",
-        "kubernetes_version": "1.35",
+        "kubernetes_version": "1.36",
         "resource_thresholds": {"cpu_threshold": 80, "memory_threshold": 85, "gpu_threshold": 90},
         "global_accelerator": {
             "name": "gco-accelerator",

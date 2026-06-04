@@ -583,14 +583,14 @@ EOF
 @test "extract_k8s_version: reads version from cdk.json" {
     run extract_k8s_version "cdk.json"
     [ "$status" -eq 0 ]
-    # Should be a version like 1.35
+    # Should be a version like 1.36
     [[ "$output" =~ ^[0-9]+\.[0-9]+$ ]]
 }
 
-@test "extract_k8s_version: falls back to 1.35 for missing file" {
+@test "extract_k8s_version: falls back to 1.36 for missing file" {
     run extract_k8s_version "/nonexistent/cdk.json"
     [ "$status" -eq 0 ]
-    [ "$output" = "1.35" ]
+    [ "$output" = "1.36" ]
 }
 
 # ── extract_direct_python_deps ──────────────────────────────────────────────

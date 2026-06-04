@@ -41,7 +41,7 @@
     "_comment_eks": "EKS cluster version and access posture. GCO runs EKS Auto Mode (https://docs.aws.amazon.com/eks/latest/userguide/automode.html), so node provisioning is managed by AWS — GPU/inference/EFA/Neuron compute is steered via the Karpenter NodePool manifests in lambda/kubectl-applier-simple/manifests/ (40-* through 44-*).",
 
     "_comment_kubernetes_version": "EKS minor version. kubectl in Dockerfile.dev should track this within the ±1 minor skew policy (https://kubernetes.io/releases/version-skew-policy/).",
-    "kubernetes_version": "1.35",
+    "kubernetes_version": "1.36",
 
     "_comment_eks_cluster": "endpoint_access controls who can reach the EKS API server. PRIVATE = inside the VPC only (production posture). Set to PUBLIC_AND_PRIVATE for kubectl access from the internet during dev. See docs/CUSTOMIZATION.md (EKS Endpoint Access).",
     "eks_cluster": {

@@ -1262,7 +1262,7 @@ class TestDependencyVersionConsistency:
         assert kubectl_match, "Could not find kubectl version in helm-installer Dockerfile"
         kubectl_version = kubectl_match.group(1)
 
-        # kubectl version should start with the EKS version (e.g., 1.35.x matches 1.35)
+        # kubectl version should start with the EKS version (e.g., 1.36.x matches 1.36)
         assert kubectl_version.startswith(eks_version), (
             f"kubectl version {kubectl_version} in helm-installer Dockerfile "
             f"doesn't match EKS version {eks_version} in cdk.json"
@@ -1289,7 +1289,7 @@ class TestDependencyVersionConsistency:
         assert k8s_version, "kubernetes not found in pyproject.toml dependencies"
 
         # kubernetes Python client major version maps to K8s minor version
-        # e.g., kubernetes==35.0.0 supports K8s 1.35
+        # e.g., kubernetes==36.0.0 supports K8s 1.36
         k8s_client_major = int(k8s_version.split(".")[0])
         assert k8s_client_major == eks_minor, (
             f"kubernetes Python client {k8s_version} (major={k8s_client_major}) "

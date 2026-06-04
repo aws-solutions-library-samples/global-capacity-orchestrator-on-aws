@@ -390,7 +390,7 @@ jobs:
       - name: Verify helm + kubectl binaries
         # This is a Lambda container, not a server. The meaningful check is
         # that the image's helm and kubectl binaries are invocable at the
-        # pinned versions from the Dockerfile (helm v4.2.0, kubectl v1.35.5).
+        # pinned versions from the Dockerfile (helm v4.2.0, kubectl v1.36.1).
         run: |
           docker run --rm --entrypoint helm helm-installer:ci version --short
           docker run --rm --entrypoint kubectl helm-installer:ci version --client=true
@@ -552,8 +552,8 @@ jobs:
       - name: Create kind cluster (no default CNI)
         uses: helm/kind-action@v1.14.0
         with:
-          version: "v0.31.0"
-          node_image: "kindest/node:v1.35.0"
+          version: "v0.32.0"
+          node_image: "kindest/node:v1.36.1"
           cluster_name: "gco-ci"
           config: ".github/kind/kind-calico.yaml"
           # Default CNI is disabled in the kind config so Calico can take
