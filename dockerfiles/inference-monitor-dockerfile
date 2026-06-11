@@ -1,7 +1,7 @@
 # Inference Monitor Service
 # Reconciliation controller that polls DynamoDB for desired inference
 # endpoint state and creates/updates/deletes K8s resources accordingly.
-FROM python:3.14.5-slim
+FROM python:3.15.0b2-slim
 
 # Apply security upgrades from the Debian security mirror.
 #
