@@ -195,6 +195,38 @@ See the [Quick Start Guide](QUICKSTART.md) for the full step-by-step walkthrough
 
 ## Architecture Overview
 
+<img src="images/gco_ref_architecture_part1.png" alt="GCO Multi-Region Reference Architecture" width="80%">
+
+*Figure 1: Global Capacity Orchestrator — multi-region control plane and regional EKS data planes*
+
+### Multi-Region Reference Architecture workflow
+
+1. **DevOps / Platform engineers** own the deployment. They configure the platform through `cdk.json` and drive everything from the `gco` CLI.
+2. The **AWS CDK app** synthesises and deploys the GCO stacks with a single `gco stacks deploy-all`, provisioning the global control plane and one regional stack per target region.
+3. **Users** submit jobs and inference requests through the `gco` CLI, which signs every call with **AWS SigV4** credentials.
+4. **Amazon API Gateway** (edge-optimized) is the global entry point. It enforces **IAM (SigV4) authentication** on every request before anything reaches the backend.
+5. An **AWS Lambda proxy** injects a rotating secret header sourced from **AWS Secrets Manager**, adding a second authentication factor in front of the regional load balancers.
+6. **AWS Global Accelerator** routes each request over the AWS backbone via anycast IPs to the nearest healthy region, providing automatic cross-region failover.
+7. A regional **AWS Application Load Balancer** receives Global Accelerator traffic and forwards it into the cluster. ALBs accept only Global Accelerator IPs.
+8. Each region runs an **Amazon EKS cluster** (EKS Auto Mode optional) with Karpenter GPU / Trainium / Inferentia / CPU node pools plus the GCO platform services — Health Monitor, Manifest Processor, Queue Processor, and Inference endpoints.
+
+Below is the per-region view showing how a single regional stack is composed.
+
+<img src="images/gco_ref_architecture_part2.png" alt="GCO Regional Architecture" width="80%">
+
+*Figure 2: Regional stack — EKS cluster, Karpenter node pools, platform services, and regional AWS services*
+
+### Regional Architecture workflow
+
+1. A public-subnet **Application Load Balancer** accepts inbound traffic restricted to Global Accelerator IPs only.
+2. The **Amazon EKS cluster** is the heart of the regional stack, hosting both platform services and user workloads.
+3. **Karpenter node pools** provision capacity on demand across `system`, `general-purpose`, `gpu-x86` (g4dn/g5), `gpu-arm` (g5g), `inference`, and `gpu-efa` (p4d/p5/p6) pools.
+4. **Workloads & platform services** run across namespaces: `gco-system` (Health Monitor, Manifest Processor, Queue Processor, Inference Monitor) and `gco-jobs` / `gco-inference` (training and batch jobs, inference endpoints, and job DAG pipelines).
+5. **Storage & data** services back the workloads: Amazon EFS (shared RWX), optional FSx for Lustre (HPC), optional Valkey cache, optional Aurora pgvector (RAG), and Amazon S3 for KMS-encrypted model weights.
+6. An optional **Regional API Gateway** (IAM auth over a VPC Link) provides direct in-VPC access for private clusters without public ALB exposure.
+7. An internal **Network Load Balancer** in private subnets fronts in-cluster services for VPC-internal traffic.
+8. **Regional AWS services** complete the stack: Amazon SQS for the job queue, Amazon DynamoDB for state, and Amazon CloudWatch for metrics and logs.
+
 <details>
 <summary>📊 Full Architecture Diagram (click to expand)</summary>
 
@@ -206,49 +238,11 @@ Regenerate this diagram and every per-stack view on demand with `python diagrams
 
 > The regional stack can be deployed to any AWS region. Add or remove regions by editing the `deployment_regions.regional` array in `cdk.json`.
 
-```text
-┌───────────────────────────────────────────────────┐
-│              User Request                         │
-│        (AWS SigV4 Authentication)                 │
-└────────────────────┬──────────────────────────────┘
-                     │
-                     ▼
-┌───────────────────────────────────────────────────┐
-│      API Gateway (Edge-Optimized, Global)         │
-│      ✓ IAM Authentication Required                │
-│      ✓ CloudFront Edge Caching                    │
-└────────────────────┬──────────────────────────────┘
-                     │
-                     ▼
-┌───────────────────────────────────────────────────┐
-│              AWS Global Accelerator               │
-│         Routes to nearest healthy region          │
-└────────────────────┬──────────────────────────────┘
-                     │
-        ┌────────────┼────────────┬────────────┐
-        │            │            │            │
-   ┌────▼────┐  ┌────▼────┐  ┌────▼────┐  ┌────▼────┐
-   │us-east-1│  │us-west-2│  │eu-west-1│  │  More   │
-   │   ALB   │  │   ALB   │  │   ALB   │  │ Regions │
-   │(GA IPs  │  │(GA IPs  │  │(GA IPs  │  |(GA IPs  │
-   │  only)  │  │  only)  │  │  only)  │  |  only)  │
-   └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘
-        │            │            │            │
-   ┌────▼────────────▼────────────▼────────────▼────┐
-   │    EKS Auto Mode Cluster (per region)          │
-   │  ┌─────────────────────────────────────────┐   │
-   │  │  Nodepools: System, General, GPU (x86   │   │
-   │  │  + ARM), Inference                      │   │
-   │  ├─────────────────────────────────────────┤   │
-   │  │  Services: Health Monitor, Manifest     │   │
-   │  │  Processor, Inference Monitor           │   │
-   │  ├─────────────────────────────────────────┤   │
-   │  │  Storage: EFS (shared) + FSx (optional) │   │
-   │  └─────────────────────────────────────────┘   │
-   └────────────────────────────────────────────────┘
-```
-
 ### Security Model
+
+<img src="images/gco_ref_architecture_part3.png" alt="GCO Security Architecture and Request Flow" width="80%">
+
+*Figure 3: Defense-in-depth — five security layers applied across the request flow*
 
 Five layers protect every request:
 
@@ -256,7 +250,7 @@ Five layers protect every request:
 2. **Secret Header** — Lambda injects a rotating token from Secrets Manager
 3. **IP Restriction** — ALBs only accept Global Accelerator IPs
 4. **Header Validation** — Backend services verify the secret token
-5. **IRSA** — Pods use IAM roles for AWS access (no static credentials)
+5. **IRSA** — Pods assume IAM roles for AWS access (no static credentials)
 
 ```text
 Request flow: User → API Gateway (SigV4) → Lambda (adds secret) → Global Accelerator
