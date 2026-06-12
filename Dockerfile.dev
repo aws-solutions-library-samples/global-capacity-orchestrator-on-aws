@@ -81,11 +81,13 @@ RUN case "${TARGETARCH}" in \
         *)      echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac
 
-# Install system dependencies. ``apt-get upgrade`` pulls security-only
-# patches that landed in ``trixie-security`` after the
-# ``python:3.14.5-slim`` snapshot was cut, so the resulting dev image
-# doesn't ship known-fixed HIGH CVEs in libcap2, libsystemd0, etc.
-RUN apt-get update \
+# Install system dependencies and apply Debian security patches.
+# APT_SECURITY_EPOCH busts the CI layer cache so a freshly-published
+# trixie-security patch isn't masked by a stale cached upgrade layer;
+# bump the date when a new fix needs pulling.
+ARG APT_SECURITY_EPOCH=2026-06-12
+RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
+    && apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         curl \
@@ -136,7 +138,7 @@ RUN npm install -g "aws-cdk@${CDK_VERSION}" \
 # allows ±1 minor, so this pin can lag or lead the cluster by one.
 # kubectl publishes both linux/amd64 and linux/arm64 binaries, so we
 # pass ${TARGETARCH} straight through.
-ARG KUBECTL_VERSION=v1.36.1
+ARG KUBECTL_VERSION=v1.36.2
 ARG TARGETARCH
 RUN curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
     && chmod +x kubectl \
@@ -166,7 +168,7 @@ RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
 # Latest stable at pin time:
 #   https://download.docker.com/linux/static/stable/x86_64/
 #   https://download.docker.com/linux/static/stable/aarch64/
-ARG DOCKER_VERSION=29.5.2
+ARG DOCKER_VERSION=29.5.3
 RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
     && curl -fsSL "https://download.docker.com/linux/static/stable/${GNU_ARCH}/docker-${DOCKER_VERSION}.tgz" \
       -o /tmp/docker.tgz \

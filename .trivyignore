@@ -18,68 +18,19 @@
 #   CVE-XXXX-XXXXX exp:YYYY-MM-DD
 # =============================================================================
 
-# CVE-2026-33811, CVE-2026-33814, CVE-2026-39820, CVE-2026-39836,
-# CVE-2026-42499 — Go stdlib vulnerabilities (net, net/http, net/mail).
-# Fix line: Go ≥ 1.25.10 or ≥ 1.26.3 in the compiled binary
-# (released 2026-05-07: https://groups.google.com/g/golang-announce/c/qcCIEXso47M).
+# CVE-2026-48863, CVE-2026-48864, CVE-2026-9149, CVE-2026-9150 — libsolv
+# buffer overflows in the AL2023 package shipped by the
+# public.ecr.aws/lambda/python:3.14 base image used by the helm-installer
+# Lambda. Installed 0.7.22-1.amzn2023.0.3; fixed in 0.7.22-1.amzn2023.0.4
+# per the Amazon Linux 2023 advisory (https://alas.aws.amazon.com/AL2023/).
 #
-# Helm: RESOLVED. Helm v4.2.0 (released 2026-05-14) ships the fix —
-# `go version helm` reports `go1.26.3`. Bumped from v4.1.4 to v4.2.0 in
-# lambda/helm-installer/Dockerfile, .github/workflows/deps-scan.yml, and
-# .gitlab-ci.yml on this branch.
-#
-# Two binaries in the helm-installer Lambda container still match these
-# CVEs and keep these entries alive:
-#   - kubectl v1.36.1 pinned in Dockerfile. Built with Go 1.26.2 per
-#     `go version kubectl` and build-image/cross/VERSION on the
-#     v1.36.1 tag — still on the wrong side of the fix line, so the
-#     1.35.5 → 1.36.1 bump on this branch does not clear these.
-#     Awaiting a kubectl release rebuilt with Go ≥ 1.25.10 / ≥ 1.26.3.
-#   - aws-lambda-rie bundled in public.ecr.aws/lambda/python:3.14. Latest
-#     RIE release is v1.35 (2026-03-30, Go 1.26.2). AWS-controlled, no
-#     user-serviceable bump path — clears when AWS rebuilds the Lambda
-#     Python base image with a newer RIE.
-#
-# Re-evaluate when kubernetes ships a patch release rebuilt with
-# Go ≥ 1.25.10 / ≥ 1.26.3 (track sig-release/release-engineering/
-# handbooks/go.md) and when AWS refreshes the Lambda Python 3.14 base
-# image with a Go-1.26.3+ RIE.
-CVE-2026-33811 exp:2026-08-22
-CVE-2026-33814 exp:2026-08-22
-CVE-2026-39820 exp:2026-08-22
-CVE-2026-39836 exp:2026-08-22
-CVE-2026-42499 exp:2026-08-22
-
-# CVE-2026-27142, CVE-2026-39823, CVE-2026-39825, CVE-2026-39826 — second
-# wave of Go stdlib advisories disclosed 2026-05-15 / 2026-05-22.
-# CVE-2026-27142 (html/template URL escaping in <meta content>) — fixed
-#   in Go 1.25.10 / 1.26.3
-#   (https://groups.google.com/g/golang-announce/c/qcCIEXso47M).
-# CVE-2026-39823 (re-disclosed companion of CVE-2026-27142) — same fix
-#   line; both clear on the same upstream rebuild.
-# CVE-2026-39825 (net/http/httputil ReverseProxy query-parameter
-#   forwarding) — fixed in Go 1.25.10 / 1.26.3 per
-#   https://github.com/advisories/GHSA-h74g-238j-357m.
-# CVE-2026-39826 (html/template <script type=""> escaping) — fixed in
-#   Go 1.26.3 per https://nvd.nist.gov/vuln/detail/CVE-2026-39826.
-#
-# These ride on:
-#   - kubectl v1.36.1 (built with Go 1.26.2): trips all four entries.
-#     Go 1.26.2 is still vulnerable to all four — kubectl needs a release
-#     rebuilt with Go ≥ 1.25.10 / ≥ 1.26.3 before this clears.
-#   - aws-lambda-rie bundled in `public.ecr.aws/lambda/python:3.14`:
-#     trips the three Go-stdlib entries. AWS-controlled, no
-#     user-serviceable bump path.
-#   - libcap package in `public.ecr.aws/lambda/python:3.14`: trips the
-#     CVE-2026-27142 / CVE-2026-39823 surface from the helm-installer
-#     image scan. Amazon Linux 2023 advisory ALAS2023-2026-1750
-#     (2026-05-26) ships the rebuilt libcap; clears once AWS refreshes
-#     the Lambda Python 3.14 base image with the rebuilt package.
-#
-# Re-evaluate alongside the first batch when kubernetes ships a
-# patch release rebuilt with Go ≥ 1.25.10 / ≥ 1.26.3 and when AWS
-# refreshes the Lambda Python 3.14 base image.
-CVE-2026-27142 exp:2026-08-22
-CVE-2026-39823 exp:2026-08-22
-CVE-2026-39825 exp:2026-08-22
-CVE-2026-39826 exp:2026-08-22
+# The fix is published, but only in an AL2023 releasever newer than the one
+# the base image pins, so it can't be pulled without floating the package.
+# We're waiting for AWS to refresh the Lambda Python 3.14 base image with
+# the rebuilt libsolv rather than patching at build time. Low runtime risk:
+# libsolv is dnf's SAT solver, exercised only at image build, never by the
+# running Lambda. Clears when AWS refreshes the base image.
+CVE-2026-48863 exp:2026-09-12
+CVE-2026-48864 exp:2026-09-12
+CVE-2026-9149 exp:2026-09-12
+CVE-2026-9150 exp:2026-09-12

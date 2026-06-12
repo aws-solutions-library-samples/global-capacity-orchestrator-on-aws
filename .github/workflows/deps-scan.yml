@@ -47,8 +47,8 @@ permissions:
   id-token: write  # Required for OIDC authentication to AWS
 
 env:
-  HELM_VERSION: "v4.2.0"
-  KUBECTL_VERSION: "v1.36.1"
+  HELM_VERSION: "v4.2.1"
+  KUBECTL_VERSION: "v1.36.2"
 
 jobs:
   deps-scan:

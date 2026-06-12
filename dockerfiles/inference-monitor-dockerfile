@@ -3,14 +3,12 @@
 # endpoint state and creates/updates/deletes K8s resources accordingly.
 FROM python:3.14.5-slim
 
-# Apply security upgrades from the Debian security mirror.
-#
-# The ``python:3.14.5-slim`` tag is pinned to a Debian trixie snapshot,
-# but security fixes for CVEs in libcap2, libsystemd0, libudev1, and
-# similar transitive packages are released into ``trixie-security``
-# between snapshots. Running ``apt-get upgrade`` here picks them up at
-# build time so the resulting image doesn't ship known-fixed HIGH CVEs.
-RUN apt-get update \
+# Apply Debian security patches at build time. APT_SECURITY_EPOCH busts
+# the CI layer cache so a freshly-published trixie-security patch isn't
+# masked by a stale cached upgrade layer; bump the date when needed.
+ARG APT_SECURITY_EPOCH=2026-06-12
+RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
+    && apt-get update \
     && apt-get upgrade -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*

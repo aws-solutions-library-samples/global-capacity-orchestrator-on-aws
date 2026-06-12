@@ -73,4 +73,4 @@ Runs as a container Lambda (see `Dockerfile`). The image includes `helm` and `ku
 ## Dependencies
 
 - `boto3`, `pyyaml`, `urllib3` (see `requirements.txt`)
-- Helm v4.2.0, kubectl v1.36.1 (installed in Docker image)
+- Helm v4.2.1, kubectl v1.36.2 (installed in Docker image)
