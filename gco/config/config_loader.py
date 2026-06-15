@@ -200,8 +200,7 @@ class ConfigLoader:
             value = ga_config["client_affinity"]
             if not isinstance(value, str) or value.upper() not in allowed_affinity:
                 raise ConfigValidationError(
-                    "client_affinity must be one of "
-                    f"{sorted(allowed_affinity)}, got {value!r}"
+                    f"client_affinity must be one of {sorted(allowed_affinity)}, got {value!r}"
                 )
 
     def _validate_alb_config(self) -> None:
