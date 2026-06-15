@@ -214,7 +214,9 @@ class GCOGlobalStack(Stack):
         # Use Fn.select and Fn.split to extract the ID at deploy time
         self.accelerator_id = Fn.select(1, Fn.split("/", self.accelerator.accelerator_arn))
 
-        # Create listener for both HTTP (80) and HTTPS (443) traffic
+        # Create listener for both HTTP (80) and HTTPS (443) traffic.
+        # Client affinity controls whether GA pins a client to the same
+        # endpoint across connections (see ``_resolve_client_affinity``).
         self.listener = self.accelerator.add_listener(
             "GCOListener",
             port_ranges=[
@@ -222,7 +224,7 @@ class GCOGlobalStack(Stack):
                 ga.PortRange(from_port=443, to_port=443),
             ],
             protocol=ga.ConnectionProtocol.TCP,
-            client_affinity=ga.ClientAffinity.NONE,
+            client_affinity=self._resolve_client_affinity(ga_config),
         )
 
         # Create endpoint groups for each configured region
@@ -234,6 +236,30 @@ class GCOGlobalStack(Stack):
 
         # Apply cdk-nag suppressions
         self._apply_nag_suppressions()
+
+    @staticmethod
+    def _resolve_client_affinity(ga_config: dict[str, Any]) -> ga.ClientAffinity:
+        """Map the ``client_affinity`` cdk.json knob to a CDK enum.
+
+        Global Accelerator supports two client-affinity modes:
+
+        - ``NONE`` (default): each new connection may be routed to any
+          healthy endpoint, maximising even load distribution.
+        - ``SOURCE_IP``: connections from the same source IP are pinned to
+          the same endpoint, which is useful for workloads that keep
+          per-client state on a single region.
+
+        The value is validated up front by
+        ``ConfigLoader._validate_global_accelerator_config`` so an unknown
+        string never reaches this point; the fallback to ``NONE`` keeps the
+        stack synthesizable even when the key is omitted entirely.
+        """
+        affinity = str(ga_config.get("client_affinity", "NONE")).upper()
+        mapping = {
+            "NONE": ga.ClientAffinity.NONE,
+            "SOURCE_IP": ga.ClientAffinity.SOURCE_IP,
+        }
+        return mapping.get(affinity, ga.ClientAffinity.NONE)
 
     def _create_outputs(self) -> None:
         """Create CloudFormation outputs for cross-stack references."""

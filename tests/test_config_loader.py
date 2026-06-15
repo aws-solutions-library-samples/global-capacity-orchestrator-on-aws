@@ -211,6 +211,40 @@ class TestGlobalAcceleratorValidation:
         ):
             ConfigLoader(app)
 
+    def test_client_affinity_defaults_to_none(self, valid_context):
+        """Test client_affinity defaults to NONE when omitted."""
+        valid_context["global_accelerator"].pop("client_affinity", None)
+        app = MockApp(valid_context)
+        config = ConfigLoader(app)
+        ga_config = config.get_global_accelerator_config()
+        # When the key is present in context it is returned as-is; when the
+        # whole context is absent the loader falls back to a default dict that
+        # pins NONE. Either way, an omitted key is valid and resolves to NONE
+        # at the stack layer.
+        assert ga_config.get("client_affinity", "NONE") == "NONE"
+
+    @pytest.mark.parametrize("affinity", ["NONE", "SOURCE_IP", "source_ip", "none"])
+    def test_valid_client_affinity(self, valid_context, affinity):
+        """Test accepted client_affinity values pass validation."""
+        valid_context["global_accelerator"]["client_affinity"] = affinity
+        app = MockApp(valid_context)
+        config = ConfigLoader(app)
+        assert config.get_global_accelerator_config()["client_affinity"] == affinity
+
+    def test_invalid_client_affinity(self, valid_context):
+        """Test an unknown client_affinity value raises an error."""
+        valid_context["global_accelerator"]["client_affinity"] = "STICKY"
+        app = MockApp(valid_context)
+        with pytest.raises(ConfigValidationError, match="client_affinity must be one of"):
+            ConfigLoader(app)
+
+    def test_non_string_client_affinity(self, valid_context):
+        """Test a non-string client_affinity value raises an error."""
+        valid_context["global_accelerator"]["client_affinity"] = 1
+        app = MockApp(valid_context)
+        with pytest.raises(ConfigValidationError, match="client_affinity must be one of"):
+            ConfigLoader(app)
+
 
 class TestApiGatewayValidation:
     """Tests for API Gateway config validation."""

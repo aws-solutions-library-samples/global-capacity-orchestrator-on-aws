@@ -50,13 +50,14 @@
 
     "_comment_networking": "Networking, security, and ingress",
 
-    "_comment_global_accelerator": "AWS Global Accelerator front door. health_check_grace_period: seconds before a new endpoint starts being probed. health_check_interval: seconds between probes. health_check_timeout: seconds to wait per probe. health_check_path: HTTP path probed on each regional ALB. See https://docs.aws.amazon.com/global-accelerator/latest/dg/about-endpoint-groups-health-check-options.html.",
+    "_comment_global_accelerator": "AWS Global Accelerator front door. health_check_grace_period: seconds before a new endpoint starts being probed. health_check_interval: seconds between probes. health_check_timeout: seconds to wait per probe. health_check_path: HTTP path probed on each regional ALB. client_affinity: 'NONE' (default, spreads connections across endpoints) or 'SOURCE_IP' (pins a client IP to the same endpoint). See https://docs.aws.amazon.com/global-accelerator/latest/dg/about-endpoint-groups-health-check-options.html and https://docs.aws.amazon.com/global-accelerator/latest/dg/about-listeners.html#about-listeners-client-affinity.",
     "global_accelerator": {
       "name": "gco-accelerator",
       "health_check_grace_period": 30,
       "health_check_interval": 30,
       "health_check_timeout": 5,
-      "health_check_path": "/api/v1/health"
+      "health_check_path": "/api/v1/health",
+      "client_affinity": "NONE"
     },
 
     "_comment_alb_config": "Internal ALB target-group health checks for the manifest-processor service. health_check_interval / health_check_timeout in seconds. healthy_threshold / unhealthy_threshold are the consecutive-probe counts before a target flips state. See https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-target-groups.html.",

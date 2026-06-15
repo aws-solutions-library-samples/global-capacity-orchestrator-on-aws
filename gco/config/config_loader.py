@@ -193,6 +193,17 @@ class ConfigLoader:
         if not ga_config["health_check_path"].startswith("/"):
             raise ConfigValidationError("health_check_path must start with '/'")
 
+        # Validate optional client affinity. Omitting the key is allowed and
+        # defaults to "NONE" in get_global_accelerator_config().
+        if "client_affinity" in ga_config:
+            allowed_affinity = {"NONE", "SOURCE_IP"}
+            value = ga_config["client_affinity"]
+            if not isinstance(value, str) or value.upper() not in allowed_affinity:
+                raise ConfigValidationError(
+                    "client_affinity must be one of "
+                    f"{sorted(allowed_affinity)}, got {value!r}"
+                )
+
     def _validate_alb_config(self) -> None:
         """Validate ALB configuration"""
         alb_config = self.app.node.try_get_context("alb_config")
@@ -485,6 +496,7 @@ class ConfigLoader:
             "health_check_interval": 30,
             "health_check_timeout": 5,
             "health_check_path": "/api/v1/health",
+            "client_affinity": "NONE",
         }
 
     def get_alb_config(self) -> dict[str, Any]:

@@ -470,7 +470,8 @@ Global Accelerator uses HTTP health checks to determine if a region is healthy. 
 ```json
 "global_accelerator": {
   "health_check_path": "/api/v1/health",
-  "health_check_interval": 30
+  "health_check_interval": 30,
+  "client_affinity": "NONE"
 }
 ```
 
@@ -480,10 +481,20 @@ Global Accelerator uses HTTP health checks to determine if a region is healthy. 
 | `health_check_interval` | `30` | Seconds between health checks |
 | `health_check_grace_period` | `30` | Seconds to wait before first health check |
 | `health_check_timeout` | `5` | Seconds before a health check times out |
+| `client_affinity` | `NONE` | Listener client affinity. `NONE` spreads connections across endpoints for even load distribution; `SOURCE_IP` pins each client IP to the same endpoint for session stickiness |
 
 The `/api/v1/health` endpoint returns 200 when the cluster is within resource thresholds and 503 when overloaded. This enables intelligent routing — GA automatically routes traffic away from overloaded regions.
 
 The health check path must be listed in `UNAUTHENTICATED_PATHS` in `gco/services/auth_middleware.py` so GA can reach it without the secret header. A CI test (`tests/test_health_check_coverage.py`) validates this automatically.
+
+#### Client Affinity
+
+Global Accelerator listeners support two client-affinity modes, controlled by the `client_affinity` knob under `global_accelerator` in `cdk.json`:
+
+- `NONE` (default): GA may route each new connection to any healthy endpoint. This maximizes even load distribution across regions and is the right choice for stateless request/response traffic.
+- `SOURCE_IP`: GA pins connections from the same source IP to the same endpoint group for as long as it stays healthy. Use this when a workload keeps per-client state on a single region (for example, sticky sessions). Note that affinity is broken when an endpoint becomes unhealthy or the endpoint set changes.
+
+The value is validated at synth time — anything other than `NONE` or `SOURCE_IP` raises a `ConfigValidationError`. See the [AWS Global Accelerator client affinity docs](https://docs.aws.amazon.com/global-accelerator/latest/dg/about-listeners.html#about-listeners-client-affinity) for details.
 
 #### Inference Health Watchdog
 

@@ -141,6 +141,63 @@ class TestGlobalStackSynth:
         template = assertions.Template.from_stack(stack)
         template.resource_count_is("AWS::GlobalAccelerator::Listener", 1)
 
+    def test_listener_default_client_affinity_is_none(self):
+        """Listener defaults to NONE client affinity when knob is omitted."""
+        from gco.stacks.global_stack import GCOGlobalStack
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+
+        stack = GCOGlobalStack(app, "test-global-stack-affinity-default", config=config)
+
+        template = assertions.Template.from_stack(stack)
+        template.has_resource_properties(
+            "AWS::GlobalAccelerator::Listener",
+            {"ClientAffinity": "NONE"},
+        )
+
+    def test_listener_honors_source_ip_client_affinity(self):
+        """SOURCE_IP in the GA config flows through to the listener."""
+        from gco.stacks.global_stack import GCOGlobalStack
+
+        class SourceIpConfig(MockConfigLoader):
+            def get_global_accelerator_config(self):
+                cfg = super().get_global_accelerator_config()
+                cfg["client_affinity"] = "SOURCE_IP"
+                return cfg
+
+        app = cdk.App()
+        config = SourceIpConfig(app)
+
+        stack = GCOGlobalStack(app, "test-global-stack-affinity-source-ip", config=config)
+
+        template = assertions.Template.from_stack(stack)
+        template.has_resource_properties(
+            "AWS::GlobalAccelerator::Listener",
+            {"ClientAffinity": "SOURCE_IP"},
+        )
+
+    def test_listener_client_affinity_is_case_insensitive(self):
+        """Lower-case affinity values are normalized to the GA enum."""
+        from gco.stacks.global_stack import GCOGlobalStack
+
+        class LowerCaseConfig(MockConfigLoader):
+            def get_global_accelerator_config(self):
+                cfg = super().get_global_accelerator_config()
+                cfg["client_affinity"] = "source_ip"
+                return cfg
+
+        app = cdk.App()
+        config = LowerCaseConfig(app)
+
+        stack = GCOGlobalStack(app, "test-global-stack-affinity-lower", config=config)
+
+        template = assertions.Template.from_stack(stack)
+        template.has_resource_properties(
+            "AWS::GlobalAccelerator::Listener",
+            {"ClientAffinity": "SOURCE_IP"},
+        )
+
 
 class TestApiGatewayStackSynth:
     """Tests for API Gateway Stack synthesis."""
