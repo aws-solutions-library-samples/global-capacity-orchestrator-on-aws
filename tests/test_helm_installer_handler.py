@@ -184,9 +184,7 @@ class TestInstallChartPreflight:
                 (1, "", stuck_err),  # first upgrade attempt
                 (0, "ok", ""),  # retry after clearing
             ]
-            ok, message = helm_handler.install_chart(
-                "nvidia-dra-driver", config, "/tmp/kube", None
-            )
+            ok, message = helm_handler.install_chart("nvidia-dra-driver", config, "/tmp/kube", None)
         assert ok is True
         assert "after clearing stuck state" in message
         # Preflight + post-failure recovery = 2 clear calls.
@@ -225,9 +223,7 @@ class TestInstallChartPreflight:
             patch.object(helm_handler, "run_helm") as mock_run,
         ):
             mock_run.return_value = (1, "", "Error: invalid chart values")
-            ok, message = helm_handler.install_chart(
-                "nvidia-dra-driver", config, "/tmp/kube", None
-            )
+            ok, message = helm_handler.install_chart("nvidia-dra-driver", config, "/tmp/kube", None)
         assert ok is False
         assert "invalid chart values" in message
 
