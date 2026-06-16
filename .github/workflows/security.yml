@@ -174,7 +174,7 @@ jobs:
   security-trivy-container-scan:
     name: "security:trivy:container-scan"
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     # Rebuild the service images locally and scan each with Trivy. Fills a
     # gap the AWS GitLab runner couldn't handle (docker builds were flaky).
     # We rebuild here rather than passing images between workflows via
@@ -247,6 +247,13 @@ jobs:
           IMAGE: ${{ matrix.image }}
         run: |
           set -euo pipefail
+          # The mooncake-vllm image contains large precompiled CUDA kernels
+          # (flashinfer .so files) that take trivy >5 minutes to analyze.
+          # Default timeout is 5m; bump to 20m for large images.
+          TIMEOUT="5m0s"
+          if [[ "$IMAGE" == "mooncake-vllm" || "$IMAGE" == "dev" ]]; then
+            TIMEOUT="20m0s"
+          fi
           # Scan twice: once in table format so the failure is human-readable
           # in the job log, once in JSON so the artifact upload captures
           # machine-readable output. --scanners=vuln narrows the scan to
@@ -259,6 +266,7 @@ jobs:
             --scanners vuln \
             --skip-version-check \
             --ignorefile .trivyignore \
+            --timeout "$TIMEOUT" \
             --format json \
             --output "trivy-${IMAGE}-report.json" \
             "${IMAGE}:scan"
@@ -269,6 +277,7 @@ jobs:
             --scanners vuln \
             --skip-version-check \
             --ignorefile .trivyignore \
+            --timeout "$TIMEOUT" \
             "${IMAGE}:scan"
       - name: Upload trivy report
         if: always()
