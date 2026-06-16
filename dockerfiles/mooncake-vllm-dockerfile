@@ -1,0 +1,54 @@
+# Dockerfile for the GCO Mooncake-enabled vLLM image
+#
+# Layers the Mooncake transfer engine onto a vLLM OpenAI server base so
+# disaggregated prefill/decode pods can move KV cache over RDMA/RoCE and share
+# a KV-cache store. This is the first-party image that disaggregated inference
+# deploys default to; it is built in CI, pushed to ECR under the gco/ prefix,
+# and registered alongside the other GCO images.
+#
+# Both upstream dependencies are pinned to explicit versions for reproducible,
+# auditable builds. The vLLM base image tag is pinned by the build ARG below.
+# The extra Python packages layered on top (the Mooncake transfer engine) are
+# pinned in pyproject.toml under the [project.optional-dependencies]
+# "mooncake-image" group, which this Dockerfile reads at build time so the
+# image's extra packages have a single source of truth. Never relax either pin
+# to a mutable or rolling tag (such as `latest`); doing so breaks build
+# reproducibility and image provenance.
+
+# Pinned vLLM OpenAI server base. Bump intentionally when validating a new
+# vLLM release, and keep it an explicit version tag — never `latest`.
+ARG VLLM_BASE_VERSION=v0.11.0
+FROM vllm/vllm-openai:${VLLM_BASE_VERSION}
+
+# Stable block hashing across data-parallel ranks: identical prompts must hash
+# identically so shared prefix-cache hits are not lost between pods.
+ENV PYTHONHASHSEED=0
+
+# Resolve the pinned extra packages from pyproject.toml. The build context is
+# the repository root (see the CI per-image build jobs), so pyproject.toml is
+# available to copy in. The "mooncake-image" optional-dependencies group lists
+# the exact, pinned specs to install; extracting them here keeps the version
+# pins in one place rather than duplicated in this Dockerfile. tomllib is in the
+# Python standard library on the base image's interpreter (3.11+).
+COPY pyproject.toml /tmp/gco-pyproject.toml
+RUN python3 -c "import tomllib; d = tomllib.load(open('/tmp/gco-pyproject.toml', 'rb')); print('\n'.join(d['project']['optional-dependencies']['mooncake-image']))" \
+        > /tmp/mooncake-requirements.txt \
+    && cat /tmp/mooncake-requirements.txt
+
+# Install the pinned extra packages on top of the vLLM base.
+#
+# The pip flags + bash retry loop guard against transient PyPI/CDN drops
+# (IncompleteRead mid-download), matching the pattern used across every image
+# build in this repo (see Dockerfile.dev for the rationale).
+RUN for attempt in 1 2 3; do \
+        pip install --no-cache-dir \
+            --retries 10 --timeout 120 --resume-retries 5 \
+            -r /tmp/mooncake-requirements.txt && break; \
+        echo "pip install attempt ${attempt} failed; retrying in 10s..."; \
+        sleep 10; \
+    done \
+    && rm -f /tmp/gco-pyproject.toml /tmp/mooncake-requirements.txt
+
+# The vLLM OpenAI server entrypoint is inherited from the base image unchanged,
+# so this image serves the same OpenAI-compatible API with Mooncake available
+# to the KV connector backend.

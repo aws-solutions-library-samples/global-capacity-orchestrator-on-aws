@@ -20,7 +20,13 @@ def inference(config: Any) -> None:
 
 @inference.command("deploy")
 @click.argument("endpoint_name")
-@click.option("--image", "-i", required=True, help="Container image (e.g. vllm/vllm-openai:v0.8.0)")
+@click.option(
+    "--image",
+    "-i",
+    default=None,
+    help="Container image (e.g. vllm/vllm-openai:v0.8.0). Optional with "
+    "--mooncake-mode: falls back to the maintained Mooncake-enabled vLLM image.",
+)
 @click.option(
     "--region",
     "-r",
@@ -77,6 +83,26 @@ def inference(config: Any) -> None:
     help="Skip the per-region ECR URI rewrite. The image URI is sent verbatim "
     "to every target region (operator owns cross-region pulls).",
 )
+@click.option(
+    "--mooncake-mode",
+    type=click.Choice(["disaggregated", "store", "both"]),
+    default=None,
+    help="Enable Mooncake serving: 'disaggregated' splits prefill/decode, "
+    "'store' runs a shared KV-cache store, 'both' composes the two. When set "
+    "and -i is omitted, the maintained Mooncake-enabled vLLM image is used.",
+)
+@click.option(
+    "--prefill-replicas",
+    type=int,
+    default=1,
+    help="Prefill instance count (X in an XpYd topology) for split modes.",
+)
+@click.option(
+    "--decode-replicas",
+    type=int,
+    default=1,
+    help="Decode instance count (Y in an XpYd topology) for split modes.",
+)
 @pass_config
 def inference_deploy(
     config: Any,
@@ -101,6 +127,9 @@ def inference_deploy(
     accelerator: Any,
     node_selector: Any,
     no_rewrite_image: Any,
+    mooncake_mode: Any,
+    prefill_replicas: Any,
+    decode_replicas: Any,
 ) -> None:
     """Deploy an inference endpoint to one or more regions.
 
@@ -179,6 +208,9 @@ def inference_deploy(
             accelerator=accelerator,
             node_selector=node_selector_dict if node_selector_dict else None,
             rewrite_image=not no_rewrite_image,
+            mooncake_mode=mooncake_mode,
+            prefill_replicas=prefill_replicas,
+            decode_replicas=decode_replicas,
         )
 
         formatter.print_success(f"Endpoint '{endpoint_name}' registered for deployment")
@@ -932,4 +964,62 @@ def inference_models(config: Any, endpoint_name: Any, region: Any) -> None:
 
     except Exception as e:
         formatter.print_error(f"Failed to list models: {e}")
+        sys.exit(1)
+
+
+@inference.command("set-topology")
+@click.argument("endpoint_name")
+@click.option(
+    "--prefill",
+    required=True,
+    type=int,
+    help="Prefill (X) instance count for the XpYd topology.",
+)
+@click.option(
+    "--decode",
+    required=True,
+    type=int,
+    help="Decode (Y) instance count for the XpYd topology.",
+)
+@pass_config
+def inference_set_topology(
+    config: Any, endpoint_name: Any, prefill: Any, decode: Any
+) -> None:
+    """Resize a disaggregated endpoint's prefill/decode topology.
+
+    Updates the endpoint's prefill (X) and decode (Y) instance counts and
+    re-triggers reconciliation so each region's monitor adjusts the role
+    replica counts. Both counts must be integers in the range 1..1000.
+
+    Examples:
+        gco inference set-topology llama-pd --prefill 3 --decode 2
+    """
+    from ..inference import get_inference_manager
+
+    formatter = get_output_formatter(config)
+
+    try:
+        manager = get_inference_manager(config)
+        result = manager.set_topology(endpoint_name, prefill, decode)
+
+        if result:
+            formatter.print_success(
+                f"Endpoint '{endpoint_name}' topology set to "
+                f"{prefill}p{decode}d"
+            )
+            formatter.print_info(
+                "The inference_monitor will adjust prefill and decode "
+                "replica counts in each region."
+            )
+            if config.output_format != "table":
+                formatter.print(result)
+        else:
+            formatter.print_error(f"Endpoint '{endpoint_name}' not found")
+            sys.exit(1)
+
+    except ValueError as e:
+        formatter.print_error(str(e))
+        sys.exit(1)
+    except Exception as e:
+        formatter.print_error(f"Failed to set topology: {e}")
         sys.exit(1)

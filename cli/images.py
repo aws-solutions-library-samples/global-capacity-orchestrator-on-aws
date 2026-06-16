@@ -76,6 +76,28 @@ _TAG_RE = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_.\-]{0,127}$")
 # rule can target the whole project.
 _REPO_PREFIX = "gco"
 
+# First-party images that GCO builds and ships itself, as opposed to
+# the user images pushed through ``build``/``push``. Each entry pairs
+# the logical image name (which becomes the ``gco/<name>`` ECR
+# repository suffix) with the Dockerfile under ``dockerfiles/`` that
+# produces it. Listing these here lets callers enumerate the shipped
+# images and resolve any one of them to its registry URI by name,
+# the same way the platform services (health-monitor,
+# manifest-processor, queue-processor, inference-monitor) are built
+# from their matching ``dockerfiles/<name>-dockerfile``.
+_MAINTAINED_IMAGES: dict[str, str] = {
+    "health-monitor": "dockerfiles/health-monitor-dockerfile",
+    "manifest-processor": "dockerfiles/manifest-processor-dockerfile",
+    "queue-processor": "dockerfiles/queue-processor-dockerfile",
+    "inference-monitor": "dockerfiles/inference-monitor-dockerfile",
+    "mooncake-vllm": "dockerfiles/mooncake-vllm-dockerfile",
+}
+
+# The Mooncake-enabled vLLM image is the default served by
+# disaggregated prefill/decode deployments when the operator does not
+# supply an image explicitly.
+_DISAGGREGATED_DEFAULT_IMAGE = "mooncake-vllm"
+
 # Default lifecycle policy parameters.
 _DEFAULT_KEEP_TAGGED = 20
 _DEFAULT_EXPIRE_UNTAGGED_DAYS = 7
@@ -581,6 +603,53 @@ class ImageManager:
         validated_tag = self._validate_tag(tag)
         return f"{self._registry_host()}/{_REPO_PREFIX}/{validated_name}:{validated_tag}"
 
+    def list_maintained_images(self, tag: str = "latest") -> list[dict[str, Any]]:
+        """List the first-party images GCO builds and ships.
+
+        Returns one row per shipped image with its logical name, the
+        ``gco/<name>`` repository, the Dockerfile that produces it, and
+        the registry URI for ``tag``. No API call — the catalog is
+        resolved locally from the shipped Dockerfile set.
+        """
+        rows: list[dict[str, Any]] = []
+        for name, dockerfile in _MAINTAINED_IMAGES.items():
+            rows.append(
+                {
+                    "name": name,
+                    "repository": f"{_REPO_PREFIX}/{name}",
+                    "dockerfile": dockerfile,
+                    "uri": self.get_uri(name, tag),
+                }
+            )
+        return rows
+
+    def get_maintained_image(self, name: str, tag: str = "latest") -> dict[str, Any]:
+        """Resolve a single shipped image by name.
+
+        Raises ``ValueError`` for a name that is not one of the shipped
+        images, listing the known names so the caller can correct the
+        lookup.
+        """
+        dockerfile = _MAINTAINED_IMAGES.get(name)
+        if dockerfile is None:
+            known = ", ".join(sorted(_MAINTAINED_IMAGES))
+            raise ValueError(f"Unknown maintained image: {name!r}. Known images: {known}.")
+        return {
+            "name": name,
+            "repository": f"{_REPO_PREFIX}/{name}",
+            "dockerfile": dockerfile,
+            "uri": self.get_uri(name, tag),
+        }
+
+    def default_disaggregated_image_uri(self, tag: str = "latest") -> str:
+        """Return the registry URI of the default disaggregated-serving image.
+
+        Disaggregated prefill/decode deployments serve from the
+        Mooncake-enabled vLLM image unless an image is supplied
+        explicitly; this resolves that default to a concrete URI.
+        """
+        return self.get_uri(_DISAGGREGATED_DEFAULT_IMAGE, tag)
+
     def replication_get(self) -> dict[str, Any]:
         """Return the current ECR replication configuration, or ``{}``."""
         ecr = self._ecr_client()
@@ -1044,3 +1113,17 @@ def _isoformat(value: Any) -> str | None:
 def get_image_manager(config: GCOConfig | None = None, region: str | None = None) -> ImageManager:
     """Factory function for ``ImageManager``."""
     return ImageManager(config=config, region=region)
+
+
+def default_disaggregated_image(
+    config: GCOConfig | None = None,
+    region: str | None = None,
+    tag: str = "latest",
+) -> str:
+    """Resolve the default image URI for disaggregated prefill/decode deploys.
+
+    Convenience wrapper around
+    :meth:`ImageManager.default_disaggregated_image_uri` for callers
+    that only need the URI and do not otherwise hold a manager.
+    """
+    return get_image_manager(config=config, region=region).default_disaggregated_image_uri(tag)

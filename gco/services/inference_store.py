@@ -148,8 +148,16 @@ class InferenceEndpointStore:
         replicas_ready: int = 0,
         replicas_desired: int = 0,
         error: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
-        """Update the sync status for a specific region."""
+        """Update the sync status for a specific region.
+
+        ``extra`` carries optional, additive sub-status that a richer endpoint
+        shape needs — for example a role-keyed breakdown of a split topology
+        (``{"roles": {...}, "store": {...}}``). Its keys are merged into the
+        stored status alongside the flat fields, so a consumer that only reads
+        the flat shape is unaffected.
+        """
         status_value: dict[str, Any] = {
             "state": state,
             "replicas_ready": replicas_ready,
@@ -158,6 +166,8 @@ class InferenceEndpointStore:
         }
         if error:
             status_value["error"] = error
+        if extra:
+            status_value.update(extra)
 
         try:
             self._table.update_item(
@@ -211,7 +221,22 @@ class InferenceEndpointStore:
 
 
 def _serialize_for_dynamo(obj: Any) -> Any:
-    """Convert Python objects to DynamoDB-compatible types."""
+    """Convert Python objects to DynamoDB-compatible types.
+
+    Recurses through nested dicts and lists, so an arbitrarily deep
+    configuration block carried on an endpoint spec (for example a nested
+    topology/store/transfer block, including list-valued sub-fields) is
+    converted in place rather than only at the top level.
+
+    Type handling:
+    - Integers are kept as integers, so whole-number counts are preserved.
+    - Floats are rendered as their decimal-string form, avoiding binary-float
+      rounding on store/reload.
+    - Strings, booleans, and None pass through unchanged. Byte-size values
+      authored as base-10 integer decimal strings therefore stay strings and
+      are never routed through a float, so they reload exactly as written
+      without float-to-Decimal coercion.
+    """
     if isinstance(obj, dict):
         return {k: _serialize_for_dynamo(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -222,7 +247,15 @@ def _serialize_for_dynamo(obj: Any) -> Any:
 
 
 def _deserialize_from_dynamo(item: dict[str, Any]) -> dict[str, Any]:
-    """Convert DynamoDB item back to Python types."""
+    """Convert a DynamoDB item back to plain Python types.
+
+    Recurses through nested dicts and lists to mirror the nested structure
+    produced by :func:`_serialize_for_dynamo`. DynamoDB returns numbers as
+    Decimal: whole values become int (so integer counts survive the
+    round-trip) and fractional values become float. Strings are left
+    untouched, so a byte-size value stored as a decimal string returns as the
+    same string.
+    """
     from decimal import Decimal
 
     def convert(v: Any) -> Any:

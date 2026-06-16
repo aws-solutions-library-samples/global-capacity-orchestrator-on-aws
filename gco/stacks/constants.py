@@ -126,3 +126,29 @@ CLUSTER_SHARED_SSM_PARAMETER_PREFIX = "/gco/cluster-shared-bucket"
 the contract — this prefix is the single place to change if the namespace
 ever moves.
 """
+
+REGIONAL_SHARED_BUCKET_NAME_PREFIX = "gco-regional-shared"
+"""Name prefix for the always-on general-purpose regional bucket.
+
+The full bucket name is ``gco-regional-shared-<account>-<region>``. Each
+``GCORegionalStack`` provisions exactly one such bucket per region,
+unconditionally — there is no ``cdk.json`` toggle and no feature flag
+gating its existence. It is general purpose (usable by any in-region
+workload) and is in addition to the always-on central buckets owned by
+``GCOGlobalStack`` (the model bucket and the cluster-shared bucket). The
+prefix is what IAM policies and cdk-nag allow-list assertions scope
+against, so it must stay stable across refactors even when the region or
+account suffix changes.
+"""
+
+REGIONAL_SHARED_SSM_PARAMETER_PREFIX = "/gco/regional-shared-bucket"
+"""SSM parameter namespace for the regional general-purpose bucket metadata.
+
+Each ``GCORegionalStack`` writes ``<prefix>/name``, ``<prefix>/arn``, and
+``<prefix>/region`` under this path **in its own region's** parameter store,
+exactly as the model bucket and cluster-shared bucket publish theirs. In-region
+workloads (and the regional upload surface) read them back to resolve the
+always-on regional bucket without hardcoding account/region into the name.
+Treat the full paths as the contract — this prefix is the single place to
+change if the namespace ever moves.
+"""

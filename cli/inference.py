@@ -9,7 +9,7 @@ pattern (inference_monitor).
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
@@ -30,6 +30,326 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Mooncake topology — optional endpoint-spec extension
+# ---------------------------------------------------------------------------
+#
+# An endpoint spec may carry an optional ``mooncake`` block describing
+# disaggregated prefill/decode (PD) serving and/or a shared KV-cache store.
+# The block is entirely additive: when it is absent the endpoint reconciles
+# exactly as it does today — a single Deployment, Service, and Ingress.
+#
+# The definitions below describe the shape of that block (the dict written to
+# DynamoDB and read back by the per-region monitor) and the constant
+# vocabularies its enumerated fields draw from. Byte-size fields are authored
+# as base-10 integer decimal strings (see :func:`author_byte_size`) so they
+# round-trip through DynamoDB without being coerced to ``Decimal`` via a float
+# literal.
+
+#: Serving modes a ``mooncake`` block may declare.
+#: ``disaggregated`` splits prefill and decode; ``store`` runs a single
+#: KV-store instance; ``both`` composes the two.
+MOONCAKE_MODES: frozenset[str] = frozenset({"disaggregated", "store", "both"})
+
+#: KV transfer / store transports. ``rdma`` runs over the EFA nodepool; ``tcp``
+#: is the non-RDMA fallback.
+MOONCAKE_TRANSFER_PROTOCOLS: frozenset[str] = frozenset({"rdma", "tcp"})
+
+#: KV-store offload tiers for spilling cache beyond GPU memory.
+MOONCAKE_OFFLOAD_TIERS: frozenset[str] = frozenset({"cpu", "disk", "none"})
+
+#: PD proxy request-scheduling strategies supported today.
+MOONCAKE_PROXY_SCHEDULING: frozenset[str] = frozenset({"round_robin"})
+
+#: Inclusive bounds for per-role replica counts in an XpYd topology.
+MOONCAKE_TOPOLOGY_MIN: int = 1
+MOONCAKE_TOPOLOGY_MAX: int = 1000
+
+#: Inclusive bounds for byte-size fields. The ceiling is the signed 64-bit
+#: maximum; authoring sizes as decimal strings in ``[MIN, MAX]`` keeps them out
+#: of float/Decimal coercion when they round-trip through DynamoDB.
+MOONCAKE_BYTE_SIZE_MIN: int = 0
+MOONCAKE_BYTE_SIZE_MAX: int = 9223372036854775807
+
+#: Transfer-engine defaults mirroring Mooncake's reference configuration.
+MOONCAKE_DEFAULT_BOOTSTRAP_BASE_PORT: int = 8998
+MOONCAKE_DEFAULT_NUM_WORKERS: int = 10
+MOONCAKE_DEFAULT_ABORT_REQUEST_TIMEOUT: int = 480
+
+
+class MooncakeTopology(TypedDict):
+    """An XpYd topology: ``prefill`` (X) and ``decode`` (Y) instance counts."""
+
+    prefill: int
+    decode: int
+
+
+class MooncakeStoreConfig(TypedDict, total=False):
+    """KV-cache store pool configuration.
+
+    ``global_segment_size`` and ``local_buffer_size`` are byte counts authored
+    as base-10 integer decimal strings. ``cold_tier_enabled`` opts this
+    endpoint into the asynchronous, per-region object-store cold tier; the
+    cold-tier bucket is resolved by the monitor from regional configuration and
+    is never a user-typed URI.
+    """
+
+    enabled: bool
+    metadata_server: str
+    master_server_address: str
+    protocol: Literal["rdma", "tcp"]
+    device_name: str
+    global_segment_size: str
+    local_buffer_size: str
+    offload: Literal["cpu", "disk", "none"]
+    cold_tier_enabled: bool
+
+
+class MooncakeTransferConfig(TypedDict, total=False):
+    """RDMA/TCP transfer-engine configuration for KV cache movement."""
+
+    protocol: Literal["rdma", "tcp"]
+    device_name: str
+    num_workers: int
+    bootstrap_base_port: int
+    abort_request_timeout: int
+
+
+class MooncakeProxyConfig(TypedDict, total=False):
+    """PD proxy configuration. ``admin_api_key_secret`` names the Kubernetes
+    Secret holding the proxy admin key; the key value is never carried on the
+    endpoint spec."""
+
+    image: str
+    scheduling: Literal["round_robin"]
+    admin_api_key_secret: str
+
+
+class MooncakeRoleAutoscaling(TypedDict, total=False):
+    """Per-role autoscaling bounds and metrics for one of prefill/decode."""
+
+    min_replicas: int
+    max_replicas: int
+    metrics: list[dict[str, Any]]
+
+
+class MooncakeAutoscalingConfig(TypedDict, total=False):
+    """Optional per-role pod autoscaling. When absent the topology is static."""
+
+    enabled: bool
+    prefill: MooncakeRoleAutoscaling
+    decode: MooncakeRoleAutoscaling
+
+
+class MooncakeSpec(TypedDict, total=False):
+    """The optional ``mooncake`` block carried on an endpoint spec dict."""
+
+    mode: Literal["disaggregated", "store", "both"]
+    topology: MooncakeTopology
+    store: MooncakeStoreConfig
+    transfer: MooncakeTransferConfig
+    proxy: MooncakeProxyConfig
+    autoscaling: MooncakeAutoscalingConfig
+
+
+def author_byte_size(value: int | str) -> str:
+    """Render a byte-size value as a canonical base-10 integer decimal string.
+
+    Mooncake store/transfer sizes (segment size, local buffer) are carried on
+    the endpoint spec as digit-only strings so they survive the DynamoDB
+    round-trip without being coerced to ``Decimal`` through a float literal.
+
+    Accepts a non-negative ``int`` or a string of base-10 ASCII digits and
+    returns the same whole number as ``str``. The value must fall in
+    ``[MOONCAKE_BYTE_SIZE_MIN, MOONCAKE_BYTE_SIZE_MAX]``. Signs, decimal
+    points, exponents, floats, booleans, and any non-digit text are not
+    accepted.
+
+    Raises:
+        ValueError: when ``value`` cannot be authored as an in-range base-10
+            integer.
+    """
+    # ``bool`` is a subclass of ``int``; reject it explicitly so ``True``/``False``
+    # never masquerade as 1/0 byte sizes.
+    if isinstance(value, bool):
+        raise ValueError(f"byte-size value must be an integer, got bool: {value!r}")
+
+    if isinstance(value, int):
+        size = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text or any(ch not in "0123456789" for ch in text):
+            raise ValueError(
+                "byte-size value must be a base-10 integer string "
+                f"(ASCII digits only, no sign, point, or exponent), got {value!r}"
+            )
+        size = int(text)
+    else:
+        raise ValueError(
+            "byte-size value must be an int or a base-10 digit string, "
+            f"got {type(value).__name__}"
+        )
+
+    if not MOONCAKE_BYTE_SIZE_MIN <= size <= MOONCAKE_BYTE_SIZE_MAX:
+        raise ValueError(
+            "byte-size value out of range "
+            f"[{MOONCAKE_BYTE_SIZE_MIN}, {MOONCAKE_BYTE_SIZE_MAX}]: {size}"
+        )
+
+    return str(size)
+
+
+#: Byte-size fields a ``mooncake`` store block may carry. Each is authored as a
+#: base-10 integer decimal string via :func:`author_byte_size`.
+_MOONCAKE_STORE_BYTE_SIZE_FIELDS: tuple[str, ...] = (
+    "global_segment_size",
+    "local_buffer_size",
+)
+
+#: Modes that run a split prefill/decode topology and therefore require a
+#: valid ``topology`` and may carry per-role autoscaling.
+_MOONCAKE_DISAGGREGATED_MODES: frozenset[str] = frozenset({"disaggregated", "both"})
+
+
+def _is_plain_int(value: Any) -> bool:
+    """True when ``value`` is an ``int`` and not a ``bool``.
+
+    ``bool`` is a subclass of ``int``; counts and replica bounds must be real
+    integers, so ``True``/``False`` are not accepted as 1/0.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_role_autoscaling_bounds(role: str, role_block: dict[str, Any]) -> None:
+    """Validate one role's ``min_replicas``/``max_replicas`` bounds.
+
+    Raises :class:`ValueError` naming the violated bound. ``min_replicas`` must
+    be an integer ``>= 1`` and ``max_replicas`` an integer no smaller than the
+    effective minimum (which defaults to 1 when ``min_replicas`` is absent).
+    """
+    min_replicas = role_block.get("min_replicas")
+    max_replicas = role_block.get("max_replicas")
+
+    if min_replicas is not None:
+        if not _is_plain_int(min_replicas):
+            raise ValueError(
+                f"mooncake.autoscaling.{role}.min_replicas must be an integer, "
+                f"got {min_replicas!r}"
+            )
+        if min_replicas < 1:
+            raise ValueError(
+                f"mooncake.autoscaling.{role}.min_replicas must be >= 1, "
+                f"got {min_replicas}"
+            )
+
+    if max_replicas is not None:
+        if not _is_plain_int(max_replicas):
+            raise ValueError(
+                f"mooncake.autoscaling.{role}.max_replicas must be an integer, "
+                f"got {max_replicas!r}"
+            )
+        effective_min = min_replicas if _is_plain_int(min_replicas) else 1
+        if max_replicas < effective_min:
+            raise ValueError(
+                f"mooncake.autoscaling.{role}.max_replicas ({max_replicas}) "
+                f"must be >= min_replicas ({effective_min})"
+            )
+
+
+def validate_mooncake_spec(mooncake: dict[str, Any]) -> None:
+    """Validate a ``mooncake`` endpoint-spec block, failing fast.
+
+    Raises :class:`ValueError` on the first rejected field, naming the
+    offending field so the caller can correct it. The check is pure — it reads
+    nothing and writes nothing — so a caller that validates before persisting
+    leaves any previously stored spec untouched when a block is rejected.
+
+    The rules enforced here are:
+
+    * ``mode`` must be one of the supported serving modes
+      (:data:`MOONCAKE_MODES`).
+    * Store byte-size fields must author as in-range base-10 integers.
+    * ``disaggregated``/``both`` modes require integer ``topology.prefill`` and
+      ``topology.decode`` in
+      ``[MOONCAKE_TOPOLOGY_MIN, MOONCAKE_TOPOLOGY_MAX]``.
+    * ``store.cold_tier_enabled`` may be true only while ``store.enabled`` is
+      true (the cold tier extends the hot store).
+    * Autoscaling may be enabled only for ``disaggregated``/``both`` modes, and
+      each present role's ``min_replicas``/``max_replicas`` must satisfy
+      ``min_replicas >= 1`` and ``max_replicas >= min_replicas``.
+    """
+    if not isinstance(mooncake, dict):
+        raise ValueError("mooncake block must be a mapping")
+
+    mode = mooncake.get("mode")
+    if mode not in MOONCAKE_MODES:
+        allowed = ", ".join(sorted(MOONCAKE_MODES))
+        raise ValueError(f"mooncake.mode must be one of {{{allowed}}}, got {mode!r}")
+
+    store = mooncake.get("store")
+    if store is not None and not isinstance(store, dict):
+        raise ValueError("mooncake.store must be a mapping")
+
+    # Byte-size fields must author cleanly; surface the offending field name.
+    if isinstance(store, dict):
+        for field in _MOONCAKE_STORE_BYTE_SIZE_FIELDS:
+            if field in store:
+                try:
+                    author_byte_size(store[field])
+                except ValueError as exc:
+                    raise ValueError(f"mooncake.store.{field}: {exc}") from exc
+
+    # Split topologies need integer prefill/decode counts in range.
+    if mode in _MOONCAKE_DISAGGREGATED_MODES:
+        topology = mooncake.get("topology")
+        if not isinstance(topology, dict):
+            raise ValueError(
+                f"mooncake.topology is required for mode {mode!r} with integer "
+                "'prefill' and 'decode' counts"
+            )
+        for field in ("prefill", "decode"):
+            count = topology.get(field)
+            if not _is_plain_int(count):
+                raise ValueError(
+                    f"mooncake.topology.{field} must be an integer in "
+                    f"[{MOONCAKE_TOPOLOGY_MIN}, {MOONCAKE_TOPOLOGY_MAX}], "
+                    f"got {count!r}"
+                )
+            if not MOONCAKE_TOPOLOGY_MIN <= count <= MOONCAKE_TOPOLOGY_MAX:
+                raise ValueError(
+                    f"mooncake.topology.{field} out of range "
+                    f"[{MOONCAKE_TOPOLOGY_MIN}, {MOONCAKE_TOPOLOGY_MAX}]: {count}"
+                )
+
+    # The cold tier extends the hot store; it cannot be enabled on its own.
+    if (
+        isinstance(store, dict)
+        and store.get("cold_tier_enabled") is True
+        and store.get("enabled") is not True
+    ):
+        raise ValueError(
+            "mooncake.store.cold_tier_enabled requires "
+            "mooncake.store.enabled to be true"
+        )
+
+    autoscaling = mooncake.get("autoscaling")
+    if autoscaling is not None:
+        if not isinstance(autoscaling, dict):
+            raise ValueError("mooncake.autoscaling must be a mapping")
+        if autoscaling.get("enabled") is True and mode not in _MOONCAKE_DISAGGREGATED_MODES:
+            raise ValueError(
+                "mooncake.autoscaling.enabled requires a 'disaggregated' or "
+                f"'both' mode, got {mode!r}"
+            )
+        for role in ("prefill", "decode"):
+            role_block = autoscaling.get(role)
+            if role_block is None:
+                continue
+            if not isinstance(role_block, dict):
+                raise ValueError(f"mooncake.autoscaling.{role} must be a mapping")
+            _validate_role_autoscaling_bounds(role, role_block)
+
+
 class InferenceManager:
     """Manages inference endpoints via the DynamoDB store."""
 
@@ -45,10 +365,65 @@ class InferenceManager:
         store_region = region or self.config.global_region
         return InferenceEndpointStore(region=store_region)
 
+    def _build_mooncake_block(
+        self,
+        *,
+        mode: str,
+        prefill_replicas: int,
+        decode_replicas: int,
+        store: dict[str, Any] | None,
+        transfer: dict[str, Any] | None,
+        proxy: dict[str, Any] | None,
+        autoscaling: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Assemble and validate an optional ``spec.mooncake`` block.
+
+        Composes the topology and any supplied store/transfer/proxy/autoscaling
+        sub-blocks into a single mapping, authoring store byte-size fields as
+        base-10 integer decimal strings so they round-trip through DynamoDB,
+        then validates the result. Validation is pure and runs before the
+        caller persists anything, so a rejected block leaves any previously
+        stored spec untouched. Raises :class:`ValueError` — naming the offending
+        field — when the mode is unsupported or any field is invalid.
+        """
+        block: dict[str, Any] = {"mode": mode}
+
+        # Split modes carry an XpYd topology; a single-instance store does not.
+        if mode in _MOONCAKE_DISAGGREGATED_MODES:
+            block["topology"] = {
+                "prefill": prefill_replicas,
+                "decode": decode_replicas,
+            }
+
+        if store is not None:
+            store_block = dict(store)
+            # Author byte-size fields as canonical decimal strings up front so
+            # the persisted spec round-trips through DynamoDB without float or
+            # Decimal coercion. Authoring also fails fast on bad inputs.
+            for field in _MOONCAKE_STORE_BYTE_SIZE_FIELDS:
+                if field in store_block:
+                    try:
+                        store_block[field] = author_byte_size(store_block[field])
+                    except ValueError as exc:
+                        raise ValueError(f"mooncake.store.{field}: {exc}") from exc
+            block["store"] = store_block
+
+        if transfer is not None:
+            block["transfer"] = dict(transfer)
+        if proxy is not None:
+            block["proxy"] = dict(proxy)
+        if autoscaling is not None:
+            block["autoscaling"] = dict(autoscaling)
+
+        # Fail fast before persisting: rejects unsupported modes (naming the
+        # allowed values) and every other invalid field.
+        validate_mooncake_spec(block)
+        return block
+
     def deploy(
         self,
         endpoint_name: str,
-        image: str,
+        image: str | None = None,
         target_regions: list[str] | None = None,
         replicas: int = 1,
         gpu_count: int = 1,
@@ -66,6 +441,14 @@ class InferenceManager:
         accelerator: str = "nvidia",
         node_selector: dict[str, str] | None = None,
         rewrite_image: bool = True,
+        *,
+        mooncake_mode: str | None = None,
+        prefill_replicas: int = 1,
+        decode_replicas: int = 1,
+        mooncake_store: dict[str, Any] | None = None,
+        mooncake_transfer: dict[str, Any] | None = None,
+        mooncake_proxy: dict[str, Any] | None = None,
+        mooncake_autoscaling: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Deploy an inference endpoint to one or more regions.
@@ -75,7 +458,10 @@ class InferenceManager:
 
         Args:
             endpoint_name: Unique name for the endpoint
-            image: Container image (e.g. vllm/vllm-openai:v0.8.0)
+            image: Container image (e.g. vllm/vllm-openai:v0.8.0). Optional
+                when ``mooncake_mode`` is set: a disaggregated/store deploy
+                with no image falls back to the maintained Mooncake-enabled
+                vLLM image. A plain deploy still requires an image.
             target_regions: Regions to deploy to (default: all deployed regions)
             replicas: Number of replicas per region
             gpu_count: GPUs per replica
@@ -93,10 +479,55 @@ class InferenceManager:
                 spec — the operator is responsible for cross-region
                 pulls. Per-region rewrites are stored under a
                 ``region_overrides`` map on the spec keyed by region.
+            mooncake_mode: When set to one of ``disaggregated``, ``store``,
+                or ``both``, build and persist a ``spec.mooncake`` block for
+                disaggregated prefill/decode serving and/or a shared KV-cache
+                store. An unsupported value is rejected before anything is
+                persisted.
+            prefill_replicas: X in an XpYd topology — prefill instance count
+                for split (``disaggregated``/``both``) modes.
+            decode_replicas: Y in an XpYd topology — decode instance count for
+                split modes.
+            mooncake_store: Optional KV-store pool configuration merged into
+                ``spec.mooncake.store``. Byte-size fields are authored as
+                base-10 integer decimal strings so they round-trip through
+                DynamoDB.
+            mooncake_transfer: Optional RDMA/TCP transfer-engine configuration
+                merged into ``spec.mooncake.transfer``.
+            mooncake_proxy: Optional PD proxy configuration merged into
+                ``spec.mooncake.proxy``.
+            mooncake_autoscaling: Optional per-role autoscaling configuration
+                merged into ``spec.mooncake.autoscaling``.
 
         Returns:
             Created endpoint record
         """
+        # Build the optional mooncake block first and validate it before any
+        # persistence so a rejected block leaves any stored spec untouched. A
+        # disaggregated/store deploy without an explicit image falls back to
+        # the maintained Mooncake-enabled vLLM image.
+        mooncake_block: dict[str, Any] | None = None
+        if mooncake_mode is not None:
+            mooncake_block = self._build_mooncake_block(
+                mode=mooncake_mode,
+                prefill_replicas=prefill_replicas,
+                decode_replicas=decode_replicas,
+                store=mooncake_store,
+                transfer=mooncake_transfer,
+                proxy=mooncake_proxy,
+                autoscaling=mooncake_autoscaling,
+            )
+            if image is None:
+                from .images import default_disaggregated_image
+
+                image = default_disaggregated_image(config=self.config)
+
+        if image is None:
+            raise ValueError(
+                "an image is required (pass image, or set mooncake_mode to use "
+                "the maintained Mooncake-enabled vLLM image)"
+            )
+
         if not target_regions:
             stacks = self._aws_client.discover_regional_stacks()
             target_regions = list(stacks.keys())
@@ -151,6 +582,8 @@ class InferenceManager:
             spec["accelerator"] = accelerator
         if node_selector:
             spec["node_selector"] = node_selector
+        if mooncake_block is not None:
+            spec["mooncake"] = mooncake_block
 
         store = self._get_store()
         result: dict[str, Any] = store.create_endpoint(
@@ -185,6 +618,125 @@ class InferenceManager:
         """Scale an endpoint to a new replica count."""
         store = self._get_store()
         result: dict[str, Any] | None = store.scale_endpoint(endpoint_name, replicas)
+        return result
+
+    def set_topology(
+        self,
+        endpoint_name: str,
+        prefill: int,
+        decode: int,
+    ) -> dict[str, Any] | None:
+        """Resize a disaggregated endpoint's prefill/decode topology.
+
+        Updates ``spec.mooncake.topology`` to the new XpYd counts and
+        re-triggers reconciliation (via :meth:`InferenceEndpointStore.update_spec`,
+        which flips ``desired_state`` to ``deploying``) so the per-region
+        monitor adjusts the prefill and decode role replica counts.
+
+        Both counts must be integers in the inclusive range
+        ``[MOONCAKE_TOPOLOGY_MIN, MOONCAKE_TOPOLOGY_MAX]``. The counts are
+        validated before anything is read or written, so a rejected request
+        names the offending count and leaves the stored topology and
+        ``desired_state`` untouched.
+
+        Args:
+            endpoint_name: Name of the disaggregated endpoint to resize.
+            prefill: New prefill (X) instance count.
+            decode: New decode (Y) instance count.
+
+        Returns:
+            The updated endpoint record, or ``None`` when no endpoint with
+            ``endpoint_name`` exists.
+
+        Raises:
+            ValueError: when ``prefill`` or ``decode`` is not an integer in
+                ``[MOONCAKE_TOPOLOGY_MIN, MOONCAKE_TOPOLOGY_MAX]``.
+        """
+        # Validate before any read or write so a bad count names the offending
+        # field and leaves the stored topology and desired_state unchanged.
+        for field, count in (("prefill", prefill), ("decode", decode)):
+            if not _is_plain_int(count):
+                raise ValueError(
+                    f"topology {field} count must be an integer in "
+                    f"[{MOONCAKE_TOPOLOGY_MIN}, {MOONCAKE_TOPOLOGY_MAX}], "
+                    f"got {count!r}"
+                )
+            if not MOONCAKE_TOPOLOGY_MIN <= count <= MOONCAKE_TOPOLOGY_MAX:
+                raise ValueError(
+                    f"topology {field} count out of range "
+                    f"[{MOONCAKE_TOPOLOGY_MIN}, {MOONCAKE_TOPOLOGY_MAX}]: {count}"
+                )
+
+        store = self._get_store()
+        endpoint = store.get_endpoint(endpoint_name)
+        if not endpoint:
+            return None
+
+        spec = endpoint.get("spec", {})
+        # Preserve any existing mooncake sub-fields and replace only the
+        # topology counts.
+        mooncake = dict(spec.get("mooncake") or {})
+        mooncake["topology"] = {"prefill": prefill, "decode": decode}
+        spec["mooncake"] = mooncake
+
+        result: dict[str, Any] | None = store.update_spec(endpoint_name, spec)
+        return result
+
+    def configure_store(
+        self,
+        endpoint_name: str,
+        store_config: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Update an endpoint's KV-cache store configuration.
+
+        Merges ``store_config`` into ``spec.mooncake.store`` and re-triggers
+        reconciliation (via :meth:`InferenceEndpointStore.update_spec`, which
+        flips ``desired_state`` to ``deploying``) so the per-region monitor
+        picks up the new store settings.
+
+        Store byte-size fields are authored as base-10 integer decimal strings
+        (so they round-trip through DynamoDB without float/Decimal coercion)
+        and the resulting ``mooncake`` block is validated before anything is
+        written. A rejected configuration names the offending field and leaves
+        the stored spec untouched.
+
+        Args:
+            endpoint_name: Name of the endpoint to reconfigure.
+            store_config: KV-store pool settings merged into
+                ``spec.mooncake.store``.
+
+        Returns:
+            The updated endpoint record, or ``None`` when no endpoint with
+            ``endpoint_name`` exists.
+
+        Raises:
+            ValueError: when the resulting ``mooncake`` block is invalid (for
+                example an out-of-range byte-size field).
+        """
+        store = self._get_store()
+        endpoint = store.get_endpoint(endpoint_name)
+        if not endpoint:
+            return None
+
+        spec = endpoint.get("spec", {})
+        # Preserve any existing mooncake sub-fields and replace only the store
+        # block, authoring byte-size fields as canonical decimal strings.
+        mooncake = dict(spec.get("mooncake") or {})
+        store_block = dict(store_config)
+        for field in _MOONCAKE_STORE_BYTE_SIZE_FIELDS:
+            if field in store_block:
+                try:
+                    store_block[field] = author_byte_size(store_block[field])
+                except ValueError as exc:
+                    raise ValueError(f"mooncake.store.{field}: {exc}") from exc
+        mooncake["store"] = store_block
+        spec["mooncake"] = mooncake
+
+        # Fail fast before persisting so a rejected block leaves the stored
+        # spec untouched.
+        validate_mooncake_spec(mooncake)
+
+        result: dict[str, Any] | None = store.update_spec(endpoint_name, spec)
         return result
 
     def stop(self, endpoint_name: str) -> dict[str, Any] | None:

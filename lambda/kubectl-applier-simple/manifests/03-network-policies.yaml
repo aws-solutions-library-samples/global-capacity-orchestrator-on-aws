@@ -217,3 +217,80 @@ spec:
           port: 8080
         - protocol: TCP
           port: 80
+---
+# Intra-namespace allow rules for disaggregated inference.
+# These sit alongside the default-deny posture above: inference pods reach the
+# shared master RPC and metadata ports, and reach each other on the KV-transfer
+# bootstrap ports. No deny rule is removed — these only widen what is permitted
+# within gco-inference. The monitor re-applies the same rules at materialization
+# time and fails pod creation if any of them cannot be applied.
+---
+# Allow inference pods to reach the shared master RPC port (pod-to-master)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-pod-to-master
+  namespace: gco-inference
+  labels:
+    project: gco
+spec:
+  podSelector:
+    matchLabels:
+      app: mooncake-master
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              gco.io/type: inference
+      ports:
+        - protocol: TCP
+          port: 50051
+---
+# Allow inference pods to reach the shared metadata server (pod-to-metadata)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-pod-to-metadata
+  namespace: gco-inference
+  labels:
+    project: gco
+spec:
+  podSelector:
+    matchLabels:
+      app: mooncake-master
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              gco.io/type: inference
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# Allow KV-transfer bootstrap handshakes between inference pods (bootstrap ports)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-rdma-bootstrap
+  namespace: gco-inference
+  labels:
+    project: gco
+spec:
+  podSelector:
+    matchLabels:
+      gco.io/type: inference
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              gco.io/type: inference
+      ports:
+        - protocol: TCP
+          port: 8998
+          endPort: 9098

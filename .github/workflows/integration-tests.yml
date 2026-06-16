@@ -12,6 +12,7 @@
 #   - integration:docker:helm-installer      — build + `helm version`/`kubectl version`
 #   - integration:docker:inference-monitor   — build + import-based liveness
 #   - integration:docker:manifest-processor  — build + /healthz + /readyz
+#   - integration:docker:mooncake-vllm       — build + pinned-package check
 #   - integration:docker:queue-processor     — build + startup-banner check
 #   - integration:k8s:manifest-schema        — YAML validation + required kinds
 #   - integration:kind:cluster-e2e           — kind + Calico + services + RBAC + NetworkPolicy + ResourceQuota
@@ -370,6 +371,36 @@ jobs:
             -e AWS_REGION=us-east-1 \
             queue-processor:ci \
             python -c "import gco.services.queue_processor as m; print('queue-processor import OK:', m.__name__)"
+
+  integration-docker-mooncake-vllm:
+    name: "integration:docker:mooncake-vllm"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - name: Build image
+        # Shared GHA layer cache (scope: mooncake-vllm), reused by
+        # security:trivy:container-scan which builds the same image from the
+        # same Dockerfile + context. A failed build fails this step with a
+        # non-zero exit; a successful build loads the tagged image locally.
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: dockerfiles/mooncake-vllm-dockerfile
+          tags: mooncake-vllm:ci
+          load: true
+          cache-from: type=gha,scope=mooncake-vllm
+          cache-to: type=gha,mode=max,scope=mooncake-vllm
+      - name: Verify the transfer engine layer is present
+        # This image extends the upstream vLLM OpenAI server, whose runtime
+        # entrypoint expects a GPU that CI runners don't have. The image-level
+        # check is therefore "the build produced the image and the pinned
+        # transfer-engine package landed on top of the base" — confirmed with
+        # `pip show`, which exits non-zero if the package is missing.
+        run: |
+          docker run --rm mooncake-vllm:ci \
+            pip show mooncake-transfer-engine
 
   integration-docker-helm-installer:
     name: "integration:docker:helm-installer"

@@ -28,6 +28,38 @@ async def _ctx_warning(message: str) -> None:
         await ctx.warning(message)
 
 
+#: Serving modes that split an endpoint into separate prefill and decode roles.
+#: These endpoints carry extra Kubernetes resources (per-role Deployments, a
+#: proxy, and a shared store dependency), so removing one is held behind the
+#: destructive-operations flag.
+_DISAGGREGATED_MODES = frozenset({"disaggregated", "both"})
+
+
+def _endpoint_is_disaggregated(name: str) -> bool:
+    """Return True when the named endpoint runs a split prefill/decode topology.
+
+    Reads the endpoint's persisted spec (read-only) and inspects its
+    ``mooncake`` block. A ``mode`` of ``disaggregated`` or ``both`` runs
+    separate prefill and decode roles. Anything else — a plain
+    single-Deployment endpoint, an endpoint without a ``mooncake`` block, or a
+    lookup that cannot be parsed — is treated as not disaggregated.
+    """
+    raw = cli_runner._run_cli("inference", "status", name)
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    spec = data.get("spec")
+    if not isinstance(spec, dict):
+        return False
+    mooncake = spec.get("mooncake")
+    if not isinstance(mooncake, dict):
+        return False
+    return mooncake.get("mode") in _DISAGGREGATED_MODES
+
+
 @mcp.tool(tags={"low-risk", "inference"})
 @audit_logged
 def deploy_inference(
@@ -144,6 +176,101 @@ def start_inference(name: str) -> str:
     return cli_runner._run_cli("inference", "start", name)
 
 
+@mcp.tool(tags={"low-risk", "inference"})
+@audit_logged
+def deploy_disaggregated_inference(
+    name: str,
+    image: str | None = None,
+    prefill: int = 1,
+    decode: int = 1,
+    mooncake_mode: str = "disaggregated",
+    gpu_count: int = 1,
+    port: int = 8000,
+    region: str | None = None,
+    env_vars: list[str] | None = None,
+) -> str:
+    """Deploy a split prefill/decode (XpYd) inference endpoint.
+
+    Registers an endpoint that serves the prefill and decode phases on
+    separate roles backed by a shared KV-cache store. When no image is
+    supplied the deploy falls back to the maintained Mooncake-enabled vLLM
+    image.
+
+    Args:
+        name: Endpoint name (e.g. llama-pd).
+        image: Container image. Omit to use the maintained Mooncake-enabled
+            vLLM image.
+        prefill: Prefill (X) instance count for the topology.
+        decode: Decode (Y) instance count for the topology.
+        mooncake_mode: Serving mode: disaggregated, store, or both.
+        gpu_count: GPUs per replica.
+        port: Container port.
+        region: Target region(s). Omit for all deployed regions.
+        env_vars: Environment variables as KEY=VALUE strings.
+    """
+    args = [
+        "inference",
+        "deploy",
+        name,
+        "--mooncake-mode",
+        mooncake_mode,
+        "--prefill-replicas",
+        str(prefill),
+        "--decode-replicas",
+        str(decode),
+        "--gpu-count",
+        str(gpu_count),
+        "--port",
+        str(port),
+    ]
+    if image:
+        args += ["-i", image]
+    if region:
+        args += ["-r", region]
+    for env in env_vars or []:
+        args += ["-e", env]
+    return cli_runner._run_cli(*args)
+
+
+@mcp.tool(tags={"low-risk", "inference"})
+@audit_logged
+def set_mooncake_topology(name: str, prefill: int, decode: int) -> str:
+    """Resize a disaggregated endpoint's prefill/decode topology.
+
+    Updates the prefill (X) and decode (Y) instance counts and re-triggers
+    reconciliation so each region adjusts its role replica counts. Both
+    counts must be integers in the range 1..1000.
+
+    Args:
+        name: Endpoint name.
+        prefill: New prefill (X) instance count.
+        decode: New decode (Y) instance count.
+    """
+    return cli_runner._run_cli(
+        "inference",
+        "set-topology",
+        name,
+        "--prefill",
+        str(prefill),
+        "--decode",
+        str(decode),
+    )
+
+
+@mcp.tool(tags={"safe", "inference"})
+@audit_logged
+def mooncake_topology_status(name: str) -> str:
+    """Show a disaggregated endpoint's per-role topology status.
+
+    Returns the endpoint record including its role-keyed region status, so
+    the prefill and decode roles can be inspected per region.
+
+    Args:
+        name: Endpoint name.
+    """
+    return cli_runner._run_cli("inference", "status", name)
+
+
 if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
 
     @mcp.tool(tags={"destructive", "inference"})
@@ -154,9 +281,23 @@ if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
         Delete an inference endpoint. Cannot be undone — the endpoint, its
         DynamoDB record, and the underlying Kubernetes resources are removed.
 
+        Deleting a disaggregated (split prefill/decode) endpoint is refused at
+        invocation when GCO_ENABLE_DESTRUCTIVE_OPERATIONS is not enabled: the
+        request is rejected and no endpoint resource is removed.
+
         Args:
             name: Endpoint name.
         """
+        if not is_enabled(FLAG_DESTRUCTIVE_OPERATIONS) and await asyncio.to_thread(
+            _endpoint_is_disaggregated, name
+        ):
+            message = (
+                f"Refusing to delete disaggregated endpoint {name!r}: destructive "
+                "operations are disabled. Set GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true "
+                "to allow this deletion."
+            )
+            await _ctx_warning(message)
+            return json.dumps({"error": message, "destructive_operations_disabled": True})
         await _ctx_warning(f"Deleting inference endpoint {name!r} — this cannot be undone.")
         return await asyncio.to_thread(cli_runner._run_cli, "inference", "delete", name, "-y")
 

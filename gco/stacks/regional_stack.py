@@ -88,6 +88,7 @@ from aws_cdk import aws_iam as iam
 from aws_cdk import aws_kms as kms
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
+from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sns as sns
 from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_ssm as ssm
@@ -104,6 +105,8 @@ from gco.stacks.constants import (
     EKS_ADDON_METRICS_SERVER,
     EKS_ADDON_POD_IDENTITY_AGENT,
     LAMBDA_PYTHON_RUNTIME,
+    REGIONAL_SHARED_BUCKET_NAME_PREFIX,
+    REGIONAL_SHARED_SSM_PARAMETER_PREFIX,
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -335,6 +338,12 @@ class GCORegionalStack(Stack):
         # replacements in the KubectlApplyManifests CustomResource).
         self.cluster_shared_identity = self._resolve_cluster_shared_bucket_from_ssm()
         self._grant_cluster_shared_bucket_to_job_role(self.cluster_shared_identity)
+
+        # Create the always-on general-purpose regional bucket (KMS key +
+        # access-logs bucket + primary bucket). Provisioned unconditionally —
+        # there is no cdk.json toggle and no feature flag gating its existence —
+        # in addition to the central buckets owned by GCOGlobalStack.
+        self._create_regional_shared_bucket()
 
         # Create EFS for shared storage
         self._create_efs()
@@ -1712,6 +1721,338 @@ class GCORegionalStack(Stack):
                     ),
                     "appliesTo": [
                         {"regex": r"/^Resource::<ReadClusterSharedBucketArn.*>\/\*$/"},
+                    ],
+                },
+            ],
+            apply_to_children=True,
+        )
+
+    def _create_regional_shared_bucket(self) -> None:
+        """Create the always-on general-purpose regional bucket for this region.
+
+        Provisioned unconditionally — there is no ``cdk.json`` toggle and no
+        feature flag that can suppress it — in addition to the central buckets
+        owned by ``GCOGlobalStack`` (the model bucket and the cluster-shared
+        bucket). The bucket is general purpose: any in-region workload may use
+        it, and the per-region cold KV tier auto-targets it when cold-tier
+        storage is requested. Its existence is independent of any endpoint's
+        cold-tier choice.
+
+        Three constructs are created, mirroring the cluster-shared bucket
+        pattern in ``GCOGlobalStack``:
+
+        1. ``regional_shared_kms_key`` — a customer-managed KMS key with annual
+           rotation and a 7-day pending window on destroy. The key policy grants
+           the ``s3.amazonaws.com`` and ``logs.<region>.amazonaws.com`` service
+           principals encrypt/decrypt so S3 server-side encryption and access-log
+           delivery work without role-side grants.
+        2. ``regional_shared_access_logs_bucket`` — the dedicated S3 access-logs
+           destination for the primary bucket.
+        3. ``regional_shared_bucket`` — the primary bucket named
+           ``gco-regional-shared-<account>-<region>`` (the prefix
+           ``REGIONAL_SHARED_BUCKET_NAME_PREFIX`` is the stable ARN prefix used
+           by IAM policies and nag assertions). KMS-encrypted with
+           ``regional_shared_kms_key``, block-public-access on, SSL enforced,
+           versioned, destroy-on-teardown.
+
+        An explicit ``Deny`` for ``aws:SecureTransport=false`` is added to the
+        bucket policy independent of ``enforce_ssl=True`` so the deny is
+        verifiable in the synthesized template under a known SID.
+        """
+        # KMS key for the regional bucket. Matches the cluster-shared key
+        # posture: annual rotation, 7-day pending window, destroy-on-teardown.
+        self.regional_shared_kms_key = kms.Key(
+            self,
+            "RegionalSharedKmsKey",
+            description=(
+                "Customer-managed KMS key for the always-on general-purpose "
+                "regional bucket in this region's GCORegionalStack."
+            ),
+            enable_key_rotation=True,
+            pending_window=Duration.days(7),
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        # Key-policy grants for the service principals that encrypt/decrypt on
+        # behalf of the bucket (S3 server-side encryption) and the access-logs
+        # bucket (CloudWatch/S3 log delivery).
+        kms_actions = [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*",
+            "kms:DescribeKey",
+        ]
+
+        self.regional_shared_kms_key.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="AllowS3ServiceEncryptDecrypt",
+                effect=iam.Effect.ALLOW,
+                principals=[iam.ServicePrincipal("s3.amazonaws.com")],
+                actions=kms_actions,
+                resources=["*"],
+            )
+        )
+
+        self.regional_shared_kms_key.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="AllowCloudWatchLogsEncryptDecrypt",
+                effect=iam.Effect.ALLOW,
+                principals=[
+                    iam.ServicePrincipal(f"logs.{self.deployment_region}.amazonaws.com")
+                ],
+                actions=kms_actions,
+                resources=["*"],
+            )
+        )
+
+        # Retention for the access-logs bucket honors the same `s3_access_logs`
+        # context field used by the central buckets (default 90 days).
+        s3_access_logs_ctx = self.node.try_get_context("s3_access_logs") or {}
+        access_logs_retention_days = int(s3_access_logs_ctx.get("retention_days", 90))
+
+        # Dedicated access-logs bucket for the regional bucket, encrypted with
+        # the regional KMS key (its key policy grants the logs service principal
+        # encrypt/decrypt).
+        self.regional_shared_access_logs_bucket = s3.Bucket(
+            self,
+            "RegionalSharedAccessLogsBucket",
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=self.regional_shared_kms_key,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            enforce_ssl=True,
+            versioned=True,
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="ExpireAccessLogs",
+                    enabled=True,
+                    expiration=Duration.days(access_logs_retention_days),
+                )
+            ],
+        )
+
+        # Primary general-purpose regional bucket. The name uses the constant
+        # prefix so IAM allow-list assertions (arn:aws:s3:::gco-regional-shared-*)
+        # stay stable across refactors. `bucket_key_enabled=True` mirrors the
+        # central-bucket pattern to reduce per-object KMS request costs.
+        self.regional_shared_bucket = s3.Bucket(
+            self,
+            "RegionalSharedBucket",
+            bucket_name=(
+                f"{REGIONAL_SHARED_BUCKET_NAME_PREFIX}-{self.account}-{self.deployment_region}"
+            ),
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=self.regional_shared_kms_key,
+            bucket_key_enabled=True,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            enforce_ssl=True,
+            versioned=True,
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+            server_access_logs_bucket=self.regional_shared_access_logs_bucket,
+            server_access_logs_prefix="regional-shared/",
+        )
+
+        # Explicit Deny for insecure transport. `enforce_ssl=True` already adds
+        # an equivalent statement, but duplicating it here makes the deny
+        # verifiable in the synthesized template under a known SID.
+        self.regional_shared_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="DenyInsecureTransport",
+                effect=iam.Effect.DENY,
+                principals=[iam.AnyPrincipal()],
+                actions=["s3:*"],
+                resources=[
+                    self.regional_shared_bucket.bucket_arn,
+                    f"{self.regional_shared_bucket.bucket_arn}/*",
+                ],
+                conditions={"Bool": {"aws:SecureTransport": "false"}},
+            )
+        )
+
+        # Publish the bucket's identity as three SSM parameters in this
+        # region's own parameter store, mirroring how the model bucket and
+        # cluster-shared bucket publish theirs. In-region workloads and the
+        # regional upload surface resolve the always-on regional bucket by
+        # reading these back rather than reconstructing the name. Because the
+        # bucket is unconditional, these parameters are always present once the
+        # region's stack is deployed. The prefix
+        # ``REGIONAL_SHARED_SSM_PARAMETER_PREFIX`` is the single source of truth
+        # for the namespace.
+        ssm.StringParameter(
+            self,
+            "RegionalSharedBucketNameParam",
+            parameter_name=f"{REGIONAL_SHARED_SSM_PARAMETER_PREFIX}/name",
+            string_value=self.regional_shared_bucket.bucket_name,
+            description="Name of the always-on general-purpose regional bucket for this region.",
+        )
+
+        ssm.StringParameter(
+            self,
+            "RegionalSharedBucketArnParam",
+            parameter_name=f"{REGIONAL_SHARED_SSM_PARAMETER_PREFIX}/arn",
+            string_value=self.regional_shared_bucket.bucket_arn,
+            description="ARN of the always-on general-purpose regional bucket for this region.",
+        )
+
+        ssm.StringParameter(
+            self,
+            "RegionalSharedBucketRegionParam",
+            parameter_name=f"{REGIONAL_SHARED_SSM_PARAMETER_PREFIX}/region",
+            string_value=self.deployment_region,
+            description="Home region of the always-on general-purpose regional bucket.",
+        )
+
+        # CDK-nag suppressions scoped per-resource at the construct site,
+        # mirroring the central bucket pattern. Every suppression carries an
+        # explicit reason; no blanket bypasses.
+        from cdk_nag import NagSuppressions
+
+        regional_replication_reason = (
+            "The general-purpose regional bucket is a region-local store; "
+            "in-region workloads publish to their own region's bucket and there "
+            "is no durability requirement that warrants cross-region "
+            "replication. Access logs do not require replication for the same "
+            "reason."
+        )
+
+        NagSuppressions.add_resource_suppressions(
+            self.regional_shared_bucket,
+            [
+                {
+                    "id": "HIPAA.Security-S3BucketReplicationEnabled",
+                    "reason": regional_replication_reason,
+                },
+                {
+                    "id": "NIST.800.53.R5-S3BucketReplicationEnabled",
+                    "reason": regional_replication_reason,
+                },
+                {
+                    "id": "PCI.DSS.321-S3BucketReplicationEnabled",
+                    "reason": regional_replication_reason,
+                },
+            ],
+        )
+
+        access_logs_is_self_target_reason = (
+            "This is the server access logs destination bucket for the "
+            "general-purpose regional bucket."
+        )
+        NagSuppressions.add_resource_suppressions(
+            self.regional_shared_access_logs_bucket,
+            [
+                {
+                    "id": "AwsSolutions-S1",
+                    "reason": access_logs_is_self_target_reason,
+                },
+                {
+                    "id": "HIPAA.Security-S3BucketLoggingEnabled",
+                    "reason": access_logs_is_self_target_reason,
+                },
+                {
+                    "id": "NIST.800.53.R5-S3BucketLoggingEnabled",
+                    "reason": access_logs_is_self_target_reason,
+                },
+                {
+                    "id": "PCI.DSS.321-S3BucketLoggingEnabled",
+                    "reason": access_logs_is_self_target_reason,
+                },
+                {
+                    "id": "HIPAA.Security-S3BucketReplicationEnabled",
+                    "reason": regional_replication_reason,
+                },
+                {
+                    "id": "NIST.800.53.R5-S3BucketReplicationEnabled",
+                    "reason": regional_replication_reason,
+                },
+                {
+                    "id": "PCI.DSS.321-S3BucketReplicationEnabled",
+                    "reason": regional_replication_reason,
+                },
+            ],
+        )
+
+        # Grant the in-region pod role read/write on this bucket and use of its
+        # KMS key — and nothing else. The grant lives next to the bucket it
+        # scopes to, so the role's regional-bucket access stays exactly as wide
+        # as this one bucket and its key.
+        self._grant_regional_shared_bucket_to_service_account()
+
+    def _grant_regional_shared_bucket_to_service_account(self) -> None:
+        """Attach RW + KMS permissions on the regional bucket to the pod role.
+
+        Two ``iam.PolicyStatement``s are added to ``self.service_account_role``
+        (the EKS Pod Identity role used by every pod in ``gco-jobs``,
+        ``gco-system``, and ``gco-inference``):
+
+        1. S3 object + bucket-level actions (``GetObject``, ``PutObject``,
+           ``DeleteObject``, ``ListBucket``, ``GetBucketLocation``) scoped to
+           the literal ``regional_shared_bucket`` ARN and its ``<arn>/*``
+           object-key space — and to no other bucket.
+        2. KMS ``Decrypt`` / ``Encrypt`` / ``GenerateDataKey`` /
+           ``DescribeKey`` scoped to the literal ``regional_shared_kms_key``
+           ARN — and to no other key.
+
+        Because both resources are local constructs in this stack, each ARN is
+        a concrete reference rather than a wildcard, so the role gains access to
+        precisely this bucket and this key. The grant runs unconditionally as
+        part of provisioning the always-on regional bucket.
+        """
+        from cdk_nag import NagSuppressions
+
+        self.service_account_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "s3:GetObject",
+                    "s3:PutObject",
+                    "s3:DeleteObject",
+                    "s3:ListBucket",
+                    "s3:GetBucketLocation",
+                ],
+                resources=[
+                    self.regional_shared_bucket.bucket_arn,
+                    f"{self.regional_shared_bucket.bucket_arn}/*",
+                ],
+            )
+        )
+
+        self.service_account_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "kms:Decrypt",
+                    "kms:Encrypt",
+                    "kms:GenerateDataKey",
+                    "kms:DescribeKey",
+                ],
+                resources=[self.regional_shared_kms_key.key_arn],
+            )
+        )
+
+        # The S3 bucket-ARN resource uses a ``<arn>/*`` object-key wildcard
+        # which cdk-nag flags as a wildcard resource. The ARN itself is the
+        # literal regional bucket ARN created in this stack — the ``/*`` covers
+        # all object keys inside that single bucket, which is the intended
+        # semantic for the RW grant. The KMS statement carries no wildcard.
+        NagSuppressions.add_resource_suppressions(
+            self.service_account_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The regional bucket RW grant uses an <arn>/* "
+                        "object-key wildcard on the literal "
+                        "gco-regional-shared-<account>-<region> bucket ARN "
+                        "created in this stack. The wildcard covers object "
+                        "keys within a single bucket — this is the standard "
+                        "shape for a bucket-scoped RW grant and is what the "
+                        "allow-list assertion is written against."
+                    ),
+                    "appliesTo": [
+                        {"regex": r"/^Resource::<RegionalSharedBucket.*\.Arn>\/\*$/"},
                     ],
                 },
             ],

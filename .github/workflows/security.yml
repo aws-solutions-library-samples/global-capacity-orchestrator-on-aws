@@ -17,8 +17,8 @@
 #   - security:semgrep:sast              — semgrep scan --config auto
 #   - security:trivy:filesystem          — trivy fs on the source tree
 #   - security:trivy:container-scan      — trivy image on each built image
-#                                          (4 service images + helm-installer
-#                                          + Dockerfile.dev)
+#                                          (4 service images + mooncake-vllm
+#                                          + helm-installer + Dockerfile.dev)
 #   - security:trufflehog:secrets        — trufflehog filesystem scan
 #
 # All scans are strict: if a scan finds issues the job fails. Fix the code,
@@ -193,6 +193,13 @@ jobs:
             dockerfile: dockerfiles/inference-monitor-dockerfile
           - image: queue-processor
             dockerfile: dockerfiles/queue-processor-dockerfile
+          # Mooncake-enabled vLLM image — the first-party default for
+          # disaggregated inference. Built here so a CVE in the base or the
+          # pinned transfer-engine layer surfaces on the introducing PR. The
+          # build step also gives us the build-exits-nonzero-on-failure
+          # guarantee for this Dockerfile.
+          - image: mooncake-vllm
+            dockerfile: dockerfiles/mooncake-vllm-dockerfile
           - image: helm-installer
             dockerfile: lambda/helm-installer/Dockerfile
             context: lambda/helm-installer

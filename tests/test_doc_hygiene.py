@@ -53,11 +53,21 @@ class _Feature:
     directory is walked recursively for ``*.py``. ``test_prefix`` restricts
     the scan under ``tests/`` to this feature's own modules so the guard never
     trips on an unrelated feature's test content.
+
+    ``allow_labels`` names shared pattern labels that this feature's own
+    domain vocabulary legitimately uses, so the guard does not flag them. The
+    ``spec-prose`` heuristic ("the spec", "the design"), for instance, is
+    behaviour rather than a breadcrumb for a feature whose core data model is
+    an endpoint ``spec`` dict — code and comments necessarily say "the spec"
+    to mean that structure. The hard breadcrumb patterns (requirement IDs,
+    ``Validates: Requirements``, property/task numbering, planning-doc
+    filenames) are never allowable and cannot be listed here.
     """
 
     feature_id: str
     paths: tuple[Path, ...]
     test_prefix: str
+    allow_labels: frozenset[str] = frozenset()
 
 
 # Every spec-driven feature whose shipped files must stay breadcrumb-free.
@@ -91,6 +101,25 @@ _FEATURES: tuple[_Feature, ...] = (
         ),
         test_prefix="test_semantic_progress_",
     ),
+    _Feature(
+        feature_id="mooncake-distributed-inference",
+        paths=(
+            _REPO_ROOT / "cli" / "inference.py",
+            _REPO_ROOT / "cli" / "models.py",
+            _REPO_ROOT / "cli" / "images.py",
+            _REPO_ROOT / "gco" / "services" / "inference_monitor.py",
+            _REPO_ROOT / "gco" / "services" / "inference_store.py",
+            _REPO_ROOT / "gco" / "stacks" / "regional_stack.py",
+            _REPO_ROOT / "mcp" / "tools" / "inference.py",
+            _REPO_ROOT / "mcp" / "tools" / "storage.py",
+            _TESTS_DIR,
+        ),
+        test_prefix="test_mooncake_",
+        # This feature's data model is an endpoint ``spec`` dict, so code and
+        # comments say "the spec" to name that structure — behaviour, not a
+        # breadcrumb. The hard breadcrumb patterns stay enforced.
+        allow_labels=frozenset({"spec-prose"}),
+    ),
 )
 
 
@@ -115,18 +144,38 @@ _SHARED_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
+# Labels a feature may legitimately allow via ``_Feature.allow_labels`` because
+# the matched phrase can be domain vocabulary rather than a planning breadcrumb.
+# Hard breadcrumb labels (requirement IDs, ``Validates: Requirements``,
+# property/task numbering, planning-doc filenames, the per-feature tag) are
+# absent here and can never be suppressed.
+_ALLOWABLE_LABELS: frozenset[str] = frozenset({"spec-prose"})
+
+
 def _patterns_for(feature: _Feature) -> tuple[tuple[str, re.Pattern[str]], ...]:
     """Return the shared patterns plus this feature's own ``Feature:`` tag.
 
     The feature tag is per-feature so the ``# Feature: <slug>, Property N``
     authoring tag is caught for the feature that owns it, without one feature's
-    guard flagging another's slug.
+    guard flagging another's slug. Labels listed in ``feature.allow_labels``
+    (restricted to :data:`_ALLOWABLE_LABELS`) are dropped, so a feature whose
+    domain vocabulary overlaps a soft heuristic is not flagged for using it.
     """
+    bad_allows = feature.allow_labels - _ALLOWABLE_LABELS
+    assert not bad_allows, (
+        f"Feature '{feature.feature_id}' may not allow hard breadcrumb labels: "
+        f"{sorted(bad_allows)}"
+    )
     feature_tag = (
         "feature-property-tag",
         re.compile(r"Feature:\s*" + re.escape(feature.feature_id)),
     )
-    return (*_SHARED_PATTERNS, feature_tag)
+    shared = tuple(
+        (label, pattern)
+        for label, pattern in _SHARED_PATTERNS
+        if label not in feature.allow_labels
+    )
+    return (*shared, feature_tag)
 
 
 def _iter_feature_files(feature: _Feature) -> list[Path]:

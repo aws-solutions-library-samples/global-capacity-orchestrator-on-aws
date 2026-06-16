@@ -141,16 +141,20 @@ class TestToolRegistration:
 
     def test_tool_count(self):
         tools = asyncio.run(run_mcp.mcp._list_tools())
-        # 95 base tools after delete_job and delete_inference moved under
+        # 99 base tools after delete_job and delete_inference moved under
         # GCO_ENABLE_DESTRUCTIVE_OPERATIONS and the three default-on metric
-        # readers were added. The breakdown:
+        # readers were added, plus four unconditional disaggregated-inference
+        # tools. The breakdown:
         #   * the original 81 (read-only + low-risk + discovery) minus 2
         #     (delete_job + delete_inference) = 79
         #   * 11 unconditional image-registry tools (read-only + administrative)
         #   * 2 unconditional task observability tools (task_status, task_tail)
         #   * 3 unconditional, default-on metric readers (metrics_cloudwatch_get,
         #     metrics_from_job_logs, metrics_from_shared_storage_file)
-        # = 95 total at default registration.
+        #   * 4 unconditional, low-risk disaggregated-inference tools
+        #     (deploy_disaggregated_inference, set_mooncake_topology,
+        #     mooncake_topology_status, upload_to_regional_bucket)
+        # = 99 total at default registration.
         # reserve_capacity adds 1 when GCO_ENABLE_CAPACITY_PURCHASE=true.
         # Image-publish-gated tools (images_build, images_push) add 2 when
         # GCO_ENABLE_IMAGE_PUBLISH=true. Destructive-gated tools add 12 when
@@ -171,8 +175,8 @@ class TestToolRegistration:
         # mission_checkpoint, mission_complete, mission_abort, mission_resume,
         # mission_history, mission_list) add 9 when GCO_ENABLE_MISSION=true.
         # With every flag enabled the ceiling is
-        # 95 + 1 + 2 + 12 + 1 + 3 + 2 + 1 + 1 + 9 = 127.
-        base_count = 95
+        # 99 + 1 + 2 + 12 + 1 + 3 + 2 + 1 + 1 + 9 = 131.
+        base_count = 99
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -238,6 +242,10 @@ class TestToolRegistration:
             "canary_deploy",
             "promote_canary",
             "rollback_canary",
+            # Disaggregated (Mooncake) inference — low-risk
+            "deploy_disaggregated_inference",
+            "set_mooncake_topology",
+            "mooncake_topology_status",
             # ── Cost tracking (all read-only) ──
             "cost_summary",
             "cost_by_region",
@@ -319,6 +327,8 @@ class TestToolRegistration:
             # Storage (read-only)
             "files_get",
             "files_access_points",
+            # Storage (low-risk regional upload)
+            "upload_to_regional_bucket",
             # ── Image registry ──
             # Read-only ("safe" risk tier)
             "images_list",

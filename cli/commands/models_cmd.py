@@ -56,6 +56,58 @@ def models_upload(config: Any, local_path: Any, name: Any) -> None:
         sys.exit(1)
 
 
+@models.command("upload-regional")
+@click.argument("local_path")
+@click.option(
+    "--region",
+    "-r",
+    required=True,
+    help="Target region whose regional bucket receives the objects",
+)
+@click.option(
+    "--prefix",
+    default="uploads",
+    show_default=True,
+    help="S3 prefix for uploaded objects",
+)
+@pass_config
+def models_upload_regional(
+    config: Any, local_path: Any, region: Any, prefix: Any
+) -> None:
+    """Upload local files or a directory to a region's regional bucket.
+
+    Objects are written to that region's general-purpose
+    gco-regional-shared-<account>-<region> bucket, resolved from the target
+    region's own SSM parameter. The bucket is general purpose and usable by
+    any in-region workload.
+
+    Examples:
+        gco models upload-regional ./data/ --region us-east-1
+        gco models upload-regional ./file.bin -r eu-west-1 --prefix datasets
+    """
+    from ..models import get_regional_bucket_manager
+
+    formatter = get_output_formatter(config)
+
+    try:
+        manager = get_regional_bucket_manager(config)
+        formatter.print_info(
+            f"Uploading {local_path} to region '{region}'..."
+        )
+        result = manager.upload(local_path, region, prefix=prefix)
+
+        formatter.print_success(
+            f"Uploaded {result['files_uploaded']} file(s) to {result['s3_uri']}"
+        )
+
+        if config.output_format != "table":
+            formatter.print(result)
+
+    except Exception as e:
+        formatter.print_error(f"Failed to upload to regional bucket: {e}")
+        sys.exit(1)
+
+
 @models.command("list")
 @pass_config
 def models_list(config: Any) -> None:

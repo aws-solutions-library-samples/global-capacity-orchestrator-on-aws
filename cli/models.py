@@ -158,6 +158,118 @@ class ModelManager:
         return deleted
 
 
+class RegionalBucketManager:
+    """Uploads local files to a region's general-purpose regional bucket.
+
+    Mirrors :class:`ModelManager` but targets the per-region
+    ``gco-regional-shared-<account>-<region>`` bucket instead of the central
+    model bucket. The bucket name is always resolved from the *target
+    region's own* SSM parameter store, never the global region's or any other
+    region's, so an upload only ever writes to the bucket that lives in the
+    region the caller named.
+    """
+
+    def __init__(self, config: GCOConfig | None = None):
+        self.config = config or get_config()
+
+    def _get_bucket_name(self, region: str) -> str:
+        """Resolve the regional bucket name from the target region's SSM store.
+
+        Reads ``/gco/regional-shared-bucket/name`` from the parameter store in
+        ``region``. The regional bucket is always provisioned, so this
+        parameter is present once the region's stack is deployed. A missing
+        parameter means the region has not been deployed yet and is treated as
+        a hard "bucket not found" failure.
+        """
+        from gco.services.aws_ssm import get_ssm_parameter_optional
+        from gco.stacks.constants import REGIONAL_SHARED_SSM_PARAMETER_PREFIX
+
+        name = get_ssm_parameter_optional(
+            f"{REGIONAL_SHARED_SSM_PARAMETER_PREFIX}/name",
+            region=region,
+        )
+        if not name:
+            raise RuntimeError(
+                f"Regional bucket not found in region '{region}'. Deploy that "
+                f"region's stack first with 'gco stacks deploy'."
+            )
+        return name
+
+    def _get_s3_client(self, region: str) -> Any:
+        """Get an S3 client scoped to the target region."""
+        return boto3.client("s3", region_name=region)
+
+    def upload(
+        self,
+        local_path: str,
+        region: str,
+        *,
+        prefix: str = "uploads",
+    ) -> dict[str, Any]:
+        """
+        Upload local files or a directory to a region's regional bucket.
+
+        Args:
+            local_path: Local file or directory path
+            region: Target region whose regional bucket receives the objects
+            prefix: S3 prefix for uploaded objects (default: "uploads")
+
+        Returns:
+            Upload result with the region, bucket, S3 URI, and file count
+
+        Raises:
+            RuntimeError: If the target region's bucket cannot be resolved (no
+                objects are written) or if an object fails mid-upload (the
+                upload stops and the offending object is named).
+            FileNotFoundError: If ``local_path`` does not exist.
+        """
+        local = Path(local_path)
+        if not local.exists():
+            raise FileNotFoundError(f"Path not found: {local_path}")
+
+        # Resolve the bucket before writing anything so an undeployed region
+        # fails fast without partial uploads.
+        bucket = self._get_bucket_name(region)
+        s3 = self._get_s3_client(region)
+        uploaded = 0
+
+        if local.is_file():
+            files = [(local, local.name)]
+        else:
+            files = []
+            for root, _dirs, names in os.walk(local):
+                for fname in names:
+                    file_path = Path(root) / fname
+                    relative = file_path.relative_to(local)
+                    files.append((file_path, str(relative)))
+
+        for file_path, relative in files:
+            key = f"{prefix}/{relative}"
+            try:
+                s3.upload_file(str(file_path), bucket, key)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Upload did not complete: failed to write object "
+                    f"'s3://{bucket}/{key}' to region '{region}': {e}"
+                ) from e
+            uploaded += 1
+
+        s3_uri = f"s3://{bucket}/{prefix}"
+        return {
+            "region": region,
+            "bucket": bucket,
+            "s3_uri": s3_uri,
+            "files_uploaded": uploaded,
+        }
+
+
 def get_model_manager(config: GCOConfig | None = None) -> ModelManager:
     """Factory function for ModelManager."""
     return ModelManager(config)
+
+
+def get_regional_bucket_manager(
+    config: GCOConfig | None = None,
+) -> RegionalBucketManager:
+    """Factory function for RegionalBucketManager."""
+    return RegionalBucketManager(config)
