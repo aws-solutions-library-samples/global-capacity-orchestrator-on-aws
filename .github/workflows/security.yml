@@ -214,9 +214,15 @@ jobs:
           # only have ~14 GB free after the pre-installed toolchains. Remove
           # bulky pre-installed software we don't need for a docker build+scan.
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
-            /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+            /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /usr/local/share/powershell /usr/local/graalvm \
+            /opt/hostedtoolcache/go /opt/hostedtoolcache/node \
+            /usr/share/swift /usr/local/julia*
           sudo docker image prune -af
-          df -h /
+          # Reclaim swap space — trivy doesn't need it and it frees ~4 GB
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile || true
+          df -h / /tmp
       - uses: docker/setup-buildx-action@v4
       - name: Install pinned Trivy
         uses: ./.github/actions/install-trivy
