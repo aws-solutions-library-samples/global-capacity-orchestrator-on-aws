@@ -300,23 +300,24 @@ The following estimates are for a single-region deployment with default settings
 | NAT Gateways | 2 (high availability) | ~$65 |
 | Application Load Balancer | 1 (shared by all services) | ~$22 |
 | Global Accelerator | 1 accelerator + data transfer | ~$18 + transfer |
-| Lambda functions | ~8 functions, minimal invocations | ~$1 |
+| Lambda functions | ~8 functions, minimal invocations | < $1 (often $0 within free tier) |
 | Step Functions | ~10 state transitions per deploy | < $1 |
 | DynamoDB | On-demand, low throughput | ~$5 |
 | SQS | Standard queue, low message volume | < $1 |
-| S3 | Model storage (varies with model size) | ~$2 (10 GB stored) |
+| S3 | Model storage (varies with model size) | ~$2 (10 GB + API requests) |
 | EFS | Elastic storage (varies with usage) | ~$3 (10 GB stored) |
 | CloudWatch | Logs, metrics, Container Insights | ~$15 |
 | ECR | Image storage + replication | ~$5 |
 | Secrets Manager | 1 secret with rotation | < $1 |
 | **Subtotal (platform, no GPU workloads)** | | **~$210/month** |
-| GPU instances (example) | 1× g5.xlarge on-demand, 24/7 | ~$760 |
-| GPU instances (spot) | 1× g5.xlarge spot, 24/7 | ~$250 |
+| GPU instances (example) | 1× g5.xlarge on-demand, 24/7 (us-east-1) | ~$734 |
+| GPU instances (spot) | 1× g5.xlarge spot, 24/7 (us-east-1) | ~$250 |
 
 **Notes:**
 
 - Platform costs (~$210/month) are fixed regardless of workload volume.
 - GPU costs dominate and scale with the number of instances and hours run. Use `gco costs summary` to track actual spend.
+- GPU estimates assume an on-demand g5.xlarge in us-east-1 at ~$1.006/hr (~$734/month over 730 hours); rates vary by region and instance type.
 - Optional services (FSx, Valkey, Aurora) add additional cost depending on configuration.
 - The cost table above uses US East (N. Virginia) pricing as of June 2025.
 
