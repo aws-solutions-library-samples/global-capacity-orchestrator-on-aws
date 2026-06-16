@@ -146,13 +146,13 @@ class TestInstallChartPreflight:
 
     def _minimal_config(self):
         return {
-            "repo_name": "nvidia",
-            "repo_url": "https://helm.ngc.nvidia.com/nvidia",
-            "chart": "nvidia-dra-driver",
-            "version": "v26.3.1",
-            "namespace": "nvidia-dra-driver",
+            "repo_name": "volcano-sh",
+            "repo_url": "https://volcano-sh.github.io/helm-charts",
+            "chart": "volcano",
+            "version": "1.15.0",
+            "namespace": "volcano-system",
             "create_namespace": True,
-            "values": {"toolkit": {"enabled": False}},
+            "values": {},
         }
 
     def test_preflight_runs_before_upgrade(self):
@@ -162,9 +162,9 @@ class TestInstallChartPreflight:
             patch.object(helm_handler, "_clear_stuck_release") as mock_clear,
             patch.object(helm_handler, "run_helm", return_value=(0, "ok", "")) as mock_run,
         ):
-            ok, _ = helm_handler.install_chart("nvidia-dra-driver", config, "/tmp/kube", None)
+            ok, _ = helm_handler.install_chart("volcano", config, "/tmp/kube", None)
         assert ok is True
-        mock_clear.assert_called_once_with("nvidia-dra-driver", "nvidia-dra-driver", "/tmp/kube")
+        mock_clear.assert_called_once_with("volcano", "volcano-system", "/tmp/kube")
         # Preflight must be called before run_helm(upgrade).
         assert mock_clear.call_count == 1
         assert mock_run.call_count == 1
@@ -184,7 +184,7 @@ class TestInstallChartPreflight:
                 (1, "", stuck_err),  # first upgrade attempt
                 (0, "ok", ""),  # retry after clearing
             ]
-            ok, message = helm_handler.install_chart("nvidia-dra-driver", config, "/tmp/kube", None)
+            ok, message = helm_handler.install_chart("volcano", config, "/tmp/kube", None)
         assert ok is True
         assert "after clearing stuck state" in message
         # Preflight + post-failure recovery = 2 clear calls.
@@ -210,7 +210,7 @@ class TestInstallChartPreflight:
                 (1, "", stuck_err),
                 (0, "ok", ""),
             ]
-            helm_handler.install_chart("nvidia-dra-driver", config, "/tmp/kube", None)
+            helm_handler.install_chart("volcano", config, "/tmp/kube", None)
         invoked_args = [call.args[0] for call in mock_run.call_args_list]
         assert not any(args and args[0] == "rollback" for args in invoked_args)
 
@@ -223,7 +223,7 @@ class TestInstallChartPreflight:
             patch.object(helm_handler, "run_helm") as mock_run,
         ):
             mock_run.return_value = (1, "", "Error: invalid chart values")
-            ok, message = helm_handler.install_chart("nvidia-dra-driver", config, "/tmp/kube", None)
+            ok, message = helm_handler.install_chart("volcano", config, "/tmp/kube", None)
         assert ok is False
         assert "invalid chart values" in message
 

@@ -273,7 +273,6 @@ CONFIGS.extend(
                     "keda": {"enabled": False},
                     "volcano": {"enabled": False},
                     "kuberay": {"enabled": False},
-                    "nvidia_network_operator": {"enabled": False},
                     "aws_efa_device_plugin": {"enabled": False},
                 }
             },
@@ -287,7 +286,6 @@ CONFIGS.extend(
                     "kuberay": {"enabled": False},
                     "kueue": {"enabled": False},
                     "cert_manager": {"enabled": False},
-                    "nvidia_network_operator": {"enabled": False},
                     "aws_efa_device_plugin": {"enabled": False},
                     "aws_neuron_device_plugin": {"enabled": False},
                 }

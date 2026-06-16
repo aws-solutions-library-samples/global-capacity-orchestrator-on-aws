@@ -3,7 +3,8 @@ Tests for the disaggregated-serving CLI and MCP surface.
 
 Exercises ``cli.inference.InferenceManager`` —
 
-* ``deploy`` falling back to the maintained Mooncake-enabled vLLM image when
+* ``deploy`` falling back to the default upstream Mooncake-enabled vLLM image
+  when
   a split-serving deploy supplies no explicit image, and rejecting an
   unsupported serving mode before anything is persisted;
 * ``set_topology`` accepting integer prefill/decode counts in range and
@@ -68,9 +69,9 @@ def _audit_entries(caplog) -> list[dict]:
 
 
 class TestDeployDefaultImage:
-    def test_split_deploy_without_image_uses_maintained_image(self):
-        """A split-serving deploy with no image falls back to the maintained
-        Mooncake-enabled vLLM image and still persists the topology block."""
+    def test_split_deploy_without_image_uses_default_image(self):
+        """A split-serving deploy with no image falls back to the default
+        upstream Mooncake-enabled vLLM image and still persists the topology block."""
         mock_store = MagicMock()
         mock_store.create_endpoint.return_value = {"endpoint_name": "ep"}
         mgr = _make_manager()

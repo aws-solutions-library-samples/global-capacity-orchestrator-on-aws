@@ -193,13 +193,13 @@ def deploy_disaggregated_inference(
 
     Registers an endpoint that serves the prefill and decode phases on
     separate roles backed by a shared KV-cache store. When no image is
-    supplied the deploy falls back to the maintained Mooncake-enabled vLLM
-    image.
+    supplied the deploy falls back to the default upstream Mooncake-enabled
+    vLLM image.
 
     Args:
         name: Endpoint name (e.g. llama-pd).
-        image: Container image. Omit to use the maintained Mooncake-enabled
-            vLLM image.
+        image: Container image. Omit to use the default upstream
+            Mooncake-enabled vLLM image.
         prefill: Prefill (X) instance count for the topology.
         decode: Decode (Y) instance count for the topology.
         mooncake_mode: Serving mode: disaggregated, store, or both.

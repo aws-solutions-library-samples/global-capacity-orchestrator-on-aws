@@ -502,8 +502,8 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 │   ├── cross-region-aggregator/         # Cross-region job/health aggregation
 │   ├── drift-detection/                 # Scheduled drift checks against deployed CDK stacks
 │   ├── ga-registration/                 # Global Accelerator endpoint registration
-│   ├── helm-installer/                  # Installs Helm charts (schedulers, DRA driver, cert-manager)
-│   │   └── charts.yaml                  # Helm chart configuration (schedulers, DRA driver, cert-manager)
+│   ├── helm-installer/                  # Installs Helm charts (schedulers, cert-manager)
+│   │   └── charts.yaml                  # Helm chart configuration (schedulers, cert-manager)
 │   ├── image-lookup/                    # Adopt-or-create custom resource for the project's gco/* ECR repositories
 │   ├── kubectl-applier-simple/          # Applies K8s manifests during deployment
 │   │   └── manifests/                   # Kubernetes manifests (nodepools, RBAC, services, storage)

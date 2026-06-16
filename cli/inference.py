@@ -455,8 +455,9 @@ class InferenceManager:
             endpoint_name: Unique name for the endpoint
             image: Container image (e.g. vllm/vllm-openai:v0.8.0). Optional
                 when ``mooncake_mode`` is set: a disaggregated/store deploy
-                with no image falls back to the maintained Mooncake-enabled
-                vLLM image. A plain deploy still requires an image.
+                with no image falls back to the default upstream
+                Mooncake-enabled vLLM image. A plain deploy still requires an
+                image.
             target_regions: Regions to deploy to (default: all deployed regions)
             replicas: Number of replicas per region
             gpu_count: GPUs per replica
@@ -500,7 +501,7 @@ class InferenceManager:
         # Build the optional mooncake block first and validate it before any
         # persistence so a rejected block leaves any stored spec untouched. A
         # disaggregated/store deploy without an explicit image falls back to
-        # the maintained Mooncake-enabled vLLM image.
+        # the default upstream Mooncake-enabled vLLM image.
         mooncake_block: dict[str, Any] | None = None
         if mooncake_mode is not None:
             mooncake_block = self._build_mooncake_block(
@@ -520,7 +521,7 @@ class InferenceManager:
         if image is None:
             raise ValueError(
                 "an image is required (pass image, or set mooncake_mode to use "
-                "the maintained Mooncake-enabled vLLM image)"
+                "the default upstream Mooncake-enabled vLLM image)"
             )
 
         if not target_regions:

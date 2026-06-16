@@ -30,7 +30,7 @@ Resources Created:
 
     Lambda Functions:
         - kubectl-applier: applies K8s manifests during deployment
-        - helm-installer: installs Helm charts (KEDA, Volcano, KubeRay, DRA driver, etc.)
+        - helm-installer: installs Helm charts (KEDA, Volcano, KubeRay, etc.)
         - ga-registration: registers ALB with Global Accelerator
         - regional-api-proxy: proxies regional API Gateway to internal ALB
 
@@ -2551,7 +2551,6 @@ class GCORegionalStack(Stack):
                 "ClusterName": self.cluster.cluster_name,
                 "Region": self.deployment_region,
                 # Enable core AI/ML infrastructure charts by default
-                # NVIDIA Network Operator toggled via cdk.json nvidia_network_operator.enabled
                 "EnabledCharts": self._get_enabled_helm_charts(),
                 # Override chart values if needed
                 "Charts": {},
@@ -2794,8 +2793,6 @@ class GCORegionalStack(Stack):
         # Order matters: dependencies first, Kueue last
         chart_map: list[tuple[str, list[str]]] = [
             ("keda", ["keda"]),
-            ("nvidia_dra_driver", ["nvidia-dra-driver"]),
-            ("nvidia_network_operator", ["nvidia-network-operator"]),
             ("aws_efa_device_plugin", ["aws-efa-device-plugin"]),
             ("aws_neuron_device_plugin", ["aws-neuron-device-plugin"]),
             ("volcano", ["volcano"]),
@@ -2830,7 +2827,7 @@ class GCORegionalStack(Stack):
 
         Charts installed:
         - KEDA: Kubernetes Event-Driven Autoscaling (mandatory, always installed)
-        - NVIDIA DRA Driver: Dynamic Resource Allocation for GPUs (disabled by default)
+        - Volcano, KubeRay, Kueue, cert-manager, and other schedulers (toggle via cdk.json)
         """
         project_name = self.config.get_project_name()
 

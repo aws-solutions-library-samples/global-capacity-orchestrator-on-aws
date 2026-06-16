@@ -281,7 +281,7 @@ When `--mooncake-mode disaggregated` is set:
 
 - The inference monitor creates separate Deployments for each role: `{name}-prefill` and `{name}-decode`
 - A shared Mooncake transfer engine enables zero-copy KV cache transfer between roles via RDMA/TCP
-- The `--image` flag is optional; when omitted, the platform's maintained Mooncake-enabled vLLM image is used
+- The `--image` flag is optional; when omitted, the upstream `vllm/vllm-openai` image (which bundles the Mooncake transfer engine) is used by default
 - `--prefill-replicas` and `--decode-replicas` set the initial replica count for each role (both default to 1)
 
 ### Per-Role Autoscaling

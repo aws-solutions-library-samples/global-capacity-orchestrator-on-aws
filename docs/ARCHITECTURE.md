@@ -174,9 +174,9 @@ Each region contains:
 - Per-chart retry (4 attempts, exponential backoff, 5-min max delay)
 - 14-minute timeout per chart task; 2-hour execution timeout overall
 - Async custom-resource provider polls the execution every 60 seconds
-- Eliminates the old single-Lambda 15-minute ceiling — slow operators
-  (cold NVIDIA GPU image pulls) retry independently without failing the deploy
-- Charts installed: KEDA (mandatory), kueue, Volcano, KubeRay, NVIDIA GPU/Network Operators
+- Eliminates the old single-Lambda 15-minute ceiling — slow charts
+  (cold image pulls) retry independently without failing the deploy
+- Charts installed: KEDA (mandatory), kueue, Volcano, KubeRay
 
 **Function Flow:**
 

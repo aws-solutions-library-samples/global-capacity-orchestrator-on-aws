@@ -2,7 +2,7 @@
 Helm Installer Lambda Handler
 
 Installs and manages Helm charts on EKS clusters via CloudFormation Custom Resources.
-Supports KEDA, NVIDIA DRA Driver, and other Helm-based installations.
+Supports KEDA and other Helm-based installations.
 
 Features:
 - Automatic Helm repo management

@@ -1494,8 +1494,6 @@ class TestNewSchedulerChartIntegration:
         helm_config = cdk_config["context"].get("helm", {})
 
         expected_keys = [
-            "nvidia_dra_driver",
-            "nvidia_network_operator",
             "aws_efa_device_plugin",
             "aws_neuron_device_plugin",
             "volcano",
@@ -1525,8 +1523,6 @@ class TestGetEnabledHelmCharts:
         # This mirrors the logic in GCORegionalStack._get_enabled_helm_charts
         chart_map: list[tuple[str, list[str]]] = [
             ("keda", ["keda"]),
-            ("nvidia_dra_driver", ["nvidia-dra-driver"]),
-            ("nvidia_network_operator", ["nvidia-network-operator"]),
             ("aws_efa_device_plugin", ["aws-efa-device-plugin"]),
             ("aws_neuron_device_plugin", ["aws-neuron-device-plugin"]),
             ("volcano", ["volcano"]),
@@ -1622,8 +1618,6 @@ class TestGetEnabledHelmCharts:
         """KEDA survives even when every other chart is explicitly turned off."""
         all_off = {
             "keda": {"enabled": False},
-            "nvidia_dra_driver": {"enabled": False},
-            "nvidia_network_operator": {"enabled": False},
             "aws_efa_device_plugin": {"enabled": False},
             "aws_neuron_device_plugin": {"enabled": False},
             "volcano": {"enabled": False},
@@ -1658,8 +1652,6 @@ class TestGetEnabledHelmCharts:
         # mandatory (always installed regardless of config), so it is omitted
         # from cdk.json and excluded here.
         chart_map_keys = [
-            "nvidia_dra_driver",
-            "nvidia_network_operator",
             "aws_efa_device_plugin",
             "aws_neuron_device_plugin",
             "volcano",
@@ -1679,13 +1671,9 @@ class TestGetEnabledHelmCharts:
         """Disabling all GPU-related charts should produce a list without any NVIDIA charts."""
         charts = self._get_charts_for_config(
             {
-                "nvidia_dra_driver": {"enabled": False},
-                "nvidia_network_operator": {"enabled": False},
                 "aws_efa_device_plugin": {"enabled": False},
             }
         )
-        assert "nvidia-dra-driver" not in charts
-        assert "nvidia-network-operator" not in charts
         assert "aws-efa-device-plugin" not in charts
         # Other charts should still be present
         assert "keda" in charts

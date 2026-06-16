@@ -25,7 +25,7 @@ def inference(config: Any) -> None:
     "-i",
     default=None,
     help="Container image (e.g. vllm/vllm-openai:v0.8.0). Optional with "
-    "--mooncake-mode: falls back to the maintained Mooncake-enabled vLLM image.",
+    "--mooncake-mode: falls back to the default upstream Mooncake-enabled vLLM image.",
 )
 @click.option(
     "--region",
@@ -91,7 +91,7 @@ def inference(config: Any) -> None:
     default=None,
     help="Enable Mooncake serving: 'disaggregated' splits prefill/decode, "
     "'store' runs a shared KV-cache store, 'both' composes the two. When set "
-    "and -i is omitted, the maintained Mooncake-enabled vLLM image is used.",
+    "and -i is omitted, the default upstream Mooncake-enabled vLLM image is used.",
 )
 @click.option(
     "--prefill-replicas",

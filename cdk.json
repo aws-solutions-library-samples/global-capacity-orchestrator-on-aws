@@ -260,14 +260,6 @@
     "_comment_helm": "Helm chart installation toggles. Each key maps to one or more charts in lambda/helm-installer/charts.yaml; flip enabled=false to skip a chart. Charts install in dependency order with kueue last (its mutating webhook intercepts every Job/Deployment). Cross-scheduler coexistence is documented in docs/SCHEDULERS.md.",
     "helm": {
       "_comment_keda": "KEDA — Kubernetes Event-Driven Autoscaling. MANDATORY platform component (no toggle): it backs GCO's built-in SQS queue processor and is the metrics bridge (keda-metrics-apiserver serves external.metrics.k8s.io) that lets autoscalers consume GPU/CloudWatch metrics. KEDA is always installed and is intentionally not listed below — see docs/KEDA.md.",
-      "_comment_nvidia_dra_driver": "NVIDIA Dynamic Resource Allocation driver — fine-grained GPU scheduling via Kubernetes DRA APIs. Upstream: https://github.com/NVIDIA/k8s-dra-driver.",
-      "nvidia_dra_driver": {
-        "enabled": true
-      },
-      "_comment_nvidia_network_operator": "NVIDIA Network Operator — RDMA / GPUDirect over RoCE for multi-node training. Upstream: https://docs.nvidia.com/networking/display/cokan10/network+operator.",
-      "nvidia_network_operator": {
-        "enabled": true
-      },
       "_comment_aws_efa_device_plugin": "AWS EFA device plugin — exposes Elastic Fabric Adapter as a schedulable resource (vpc.amazonaws.com/efa) for HPC/ML jobs that need low-latency multi-node networking. Upstream: https://github.com/aws/eks-charts/tree/master/stable/aws-efa-k8s-device-plugin.",
       "aws_efa_device_plugin": {
         "enabled": true

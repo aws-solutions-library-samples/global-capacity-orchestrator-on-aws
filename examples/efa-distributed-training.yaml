@@ -6,8 +6,8 @@
 #
 # Prerequisites:
 #   - EFA-capable instance type (see list below)
-#   - NVIDIA Network Operator enabled in cdk.json (on by default):
-#       "helm": { "nvidia_network_operator": { "enabled": true } }
+#   - AWS EFA device plugin enabled in cdk.json (on by default):
+#       "helm": { "aws_efa_device_plugin": { "enabled": true } }
 #   - Regional stack deployed: `gco stacks deploy-all -y`
 #
 # Usage:

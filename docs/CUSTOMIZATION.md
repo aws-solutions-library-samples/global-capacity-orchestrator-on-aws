@@ -880,8 +880,6 @@ GCO installs scheduler and infrastructure Helm charts via the `helm` section in 
   "context": {
     "helm": {
       "keda": { "enabled": true },
-      "nvidia_dra_driver": { "enabled": true },
-      "nvidia_network_operator": { "enabled": true },
       "aws_efa_device_plugin": { "enabled": true },
       "aws_neuron_device_plugin": { "enabled": true },
       "volcano": { "enabled": true },
@@ -898,8 +896,6 @@ GCO installs scheduler and infrastructure Helm charts via the `helm` section in 
 | Chart | Default | Description |
 |-------|---------|-------------|
 | `keda` | Enabled | Event-driven autoscaling (SQS, Prometheus, etc.) |
-| `nvidia_dra_driver` | Enabled | Dynamic Resource Allocation for GPUs |
-| `nvidia_network_operator` | Enabled | RDMA and GPUDirect for distributed training |
 | `aws_efa_device_plugin` | Enabled | EFA device management for high-performance networking |
 | `aws_neuron_device_plugin` | Enabled | Trainium/Inferentia device management |
 | `volcano` | Enabled | Gang scheduling for distributed training |
@@ -1422,7 +1418,7 @@ gco stacks deploy-all -y
 
 ## EFA (Elastic Fabric Adapter) Configuration
 
-EFA enables high-performance inter-node communication for distributed training and high-performance LLM inference. GCO installs the EFA device plugin and NVIDIA Network Operator by default, and creates an EFA-optimized nodepool for instances like `p4d.24xlarge`, `p5.48xlarge`, and `p6` (B200/B300).
+EFA enables high-performance inter-node communication for distributed training and high-performance LLM inference. GCO installs the EFA device plugin by default, and creates an EFA-optimized nodepool for instances like `p4d.24xlarge`, `p5.48xlarge`, and `p6` (B200/B300). On EKS Auto Mode the GPU AMI already ships the EFA and NVIDIA kernel drivers, so no separate networking operator is required.
 
 ### Disable EFA
 
@@ -1432,7 +1428,6 @@ EFA is enabled by default. To disable it, edit the `helm` section in `cdk.json`:
 {
   "context": {
     "helm": {
-      "nvidia_network_operator": { "enabled": false },
       "aws_efa_device_plugin": { "enabled": false }
     }
   }
@@ -1447,7 +1442,6 @@ gco stacks deploy-all -y
 
 When enabled, this provides:
 
-- NVIDIA Network Operator (RDMA, GPUDirect)
 - AWS EFA Kubernetes Device Plugin (advertises `vpc.amazonaws.com/efa` resources)
 - EFA-optimized nodepool (`gpu-efa-pool`) for p4d/p5 instances
 

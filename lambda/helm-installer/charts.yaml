@@ -11,8 +11,6 @@
 # Last updated: 2026-06-01
 # Version check sources:
 #   - KEDA: https://artifacthub.io/packages/helm/kedacore/keda
-#   - DRA Driver: https://github.com/NVIDIA/k8s-dra-driver-gpu/releases
-#   - Network Operator: https://github.com/Mellanox/network-operator/releases
 #   - Volcano: https://github.com/volcano-sh/volcano/releases
 #   - KubeRay: https://github.com/ray-project/kuberay/releases
 #   - Kueue: https://github.com/kubernetes-sigs/kueue/releases
@@ -85,74 +83,12 @@ charts:
         webhooks:
           karpenter.sh/do-not-disrupt: "true"
 
-  # NVIDIA DRA Driver - Dynamic Resource Allocation for GPUs
-  # Enables flexible GPU allocation with structured parameters (Kubernetes 1.32+)
-  # https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/dra-intro-install.html
-  nvidia-dra-driver:
-    enabled: true
-    repo_name: nvidia
-    repo_url: https://helm.ngc.nvidia.com/nvidia
-    chart: nvidia-dra-driver-gpu
-    version: "25.12.0"
-    namespace: nvidia-dra-driver
-    create_namespace: true
-    values:
-      # GPU driver root. EKS Auto Mode's NVIDIA AMI pre-installs the driver and
-      # exposes it under /run/nvidia/driver for DRA consumers.
-      nvidiaDriverRoot: /run/nvidia/driver
-      # Enable both GPU and ComputeDomain resources
-      # Note: resources.gpus.enabled=true requires gpuResourcesEnabledOverride=true
-      # until full support is available in the chart
-      gpuResourcesEnabledOverride: true
-      resources:
-        gpus:
-          enabled: true
-        computeDomains:
-          enabled: true
-      # Controller configuration - override default tolerations/affinity
-      # that use restricted labels in EKS Auto Mode (node-role.kubernetes.io/control-plane)
-      controller:
-        # Empty tolerations - removes the default control-plane toleration
-        tolerations: []
-        # Override affinity to run on any Linux node (EKS Auto Mode doesn't have control-plane nodes)
-        affinity:
-          nodeAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              nodeSelectorTerms:
-              - matchExpressions:
-                - key: kubernetes.io/os
-                  operator: In
-                  values:
-                  - linux
-
-  # NVIDIA Network Operator - High-performance networking for GPU workloads
-  # Enables RDMA and GPUDirect for distributed training
-  # https://docs.nvidia.com/networking/display/kubernetes/
-  nvidia-network-operator:
-    enabled: false  # Toggled on by cdk.json nvidia_network_operator.enabled (enabled by default)
-    repo_name: nvidia
-    repo_url: https://helm.ngc.nvidia.com/nvidia
-    chart: network-operator
-    version: "26.1.1"
-    namespace: nvidia-network-operator
-    create_namespace: true
-    values:
-      # RDMA shared device plugin
-      rdmaSharedDevicePlugin:
-        deploy: true
-      # SR-IOV device plugin (for SR-IOV capable NICs)
-      sriovDevicePlugin:
-        deploy: false
-      # Secondary network support
-      secondaryNetwork:
-        deploy: true
-
   # AWS EFA Kubernetes Device Plugin - Manages EFA devices in EKS clusters
   # Enables high-performance inter-node communication for distributed training
   # and high-performance inference (NIXL + EFA for KV-cache transfer)
   # https://github.com/aws/eks-charts/tree/master/stable/aws-efa-k8s-device-plugin
   aws-efa-device-plugin:
-    enabled: false  # Toggled on by cdk.json nvidia_network_operator.enabled (enabled by default)
+    enabled: false  # Toggled on by cdk.json aws_efa_device_plugin.enabled (enabled by default)
     repo_name: eks
     repo_url: https://aws.github.io/eks-charts
     chart: aws-efa-k8s-device-plugin
