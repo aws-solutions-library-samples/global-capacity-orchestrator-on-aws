@@ -2,7 +2,6 @@
 # This file defines the Helm charts to be installed by the helm-installer Lambda
 #
 # Charts are installed in the order they appear below.
-# Dependencies: GPU Operator should be installed before DRA Driver.
 #
 # IMPORTANT: The "enabled" flag in each chart below is the default value.
 # It can be overridden by the "helm" section in cdk.json. For example,
@@ -12,7 +11,6 @@
 # Last updated: 2026-06-01
 # Version check sources:
 #   - KEDA: https://artifacthub.io/packages/helm/kedacore/keda
-#   - GPU Operator: https://github.com/NVIDIA/gpu-operator/releases
 #   - DRA Driver: https://github.com/NVIDIA/k8s-dra-driver-gpu/releases
 #   - Network Operator: https://github.com/Mellanox/network-operator/releases
 #   - Volcano: https://github.com/volcano-sh/volcano/releases
@@ -87,55 +85,6 @@ charts:
         webhooks:
           karpenter.sh/do-not-disrupt: "true"
 
-  # NVIDIA GPU Operator - Automates GPU driver and toolkit management
-  # Required for NVIDIA DRA Driver and provides device plugin, container runtime, etc.
-  # https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/
-  nvidia-gpu-operator:
-    enabled: true
-    repo_name: nvidia
-    repo_url: https://helm.ngc.nvidia.com/nvidia
-    chart: gpu-operator
-    version: "v26.3.2"
-    namespace: gpu-operator
-    create_namespace: true
-    values:
-      # Use pre-installed drivers on EKS GPU AMIs (EKS Auto Mode handles drivers)
-      driver:
-        enabled: false
-      # Disabled: EKS Auto Mode's Bottlerocket (NVIDIA) AMI ships with the
-      # NVIDIA container runtime pre-installed. The gpu-operator's toolkit
-      # DaemonSet tries to write to /usr/local/nvidia on the host, which
-      # fails on Bottlerocket's read-only rootfs with
-      # ``mkdir /usr/local: read-only file system`` → CreateContainerError.
-      # Keep disabled on EKS Auto Mode; re-enable if running on standard
-      # EKS managed node groups that lack the built-in toolkit.
-      toolkit:
-        enabled: false
-      # Disabled: standalone NVIDIA device plugin DaemonSet (manifest 12) handles this.
-      # Enabling both would cause two device plugins to compete for the same GPU resources.
-      devicePlugin:
-        enabled: false
-      # Disabled: amazon-cloudwatch-observability ships its own dcgm-exporter
-      # DaemonSet that handles GPU metrics collection for CloudWatch. The
-      # gpu-operator's dcgm + dcgm-exporter also fail on EKS Auto Mode's
-      # Bottlerocket (NVIDIA) AMI with "third-party Profiling module
-      # returned an unrecoverable error" because the profiling kernel
-      # module isn't exposed on that variant. Keep disabled on EKS Auto
-      # Mode; re-enable for non-cloudwatch environments that need DCGM.
-      dcgm:
-        enabled: false
-      dcgmExporter:
-        enabled: false
-      # Node Feature Discovery for GPU detection
-      nfd:
-        enabled: true
-      # MIG (Multi-Instance GPU) manager
-      migManager:
-        enabled: true
-      # GFD (GPU Feature Discovery)
-      gfd:
-        enabled: true
-
   # NVIDIA DRA Driver - Dynamic Resource Allocation for GPUs
   # Enables flexible GPU allocation with structured parameters (Kubernetes 1.32+)
   # https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/dra-intro-install.html
@@ -148,7 +97,8 @@ charts:
     namespace: nvidia-dra-driver
     create_namespace: true
     values:
-      # For Operator-provided GPU driver (recommended with GPU Operator)
+      # GPU driver root. EKS Auto Mode's NVIDIA AMI pre-installs the driver and
+      # exposes it under /run/nvidia/driver for DRA consumers.
       nvidiaDriverRoot: /run/nvidia/driver
       # Enable both GPU and ComputeDomain resources
       # Note: resources.gpus.enabled=true requires gpuResourcesEnabledOverride=true

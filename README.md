@@ -362,7 +362,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 - **GPU support** for x86_64 (g4dn, g5) and ARM64 (g5g) via Karpenter nodepools
 - **Multiple submission methods**: API Gateway, SQS queues, DynamoDB job queue, or direct kubectl
 - **Job pipelines (DAGs)**: Multi-step ML pipelines with dependency ordering and failure handling
-- **Helm-managed ecosystem**: KEDA, Volcano, KubeRay, Kueue, GPU Operator, DRA, and more — configurable via `cdk.json`
+- **Helm-managed ecosystem**: KEDA, Volcano, KubeRay, Kueue, DRA, and more — configurable via `cdk.json`
 
 ### Inference Serving
 
@@ -501,8 +501,8 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 │   ├── cross-region-aggregator/         # Cross-region job/health aggregation
 │   ├── drift-detection/                 # Scheduled drift checks against deployed CDK stacks
 │   ├── ga-registration/                 # Global Accelerator endpoint registration
-│   ├── helm-installer/                  # Installs Helm charts (schedulers, GPU operators, cert-manager)
-│   │   └── charts.yaml                  # Helm chart configuration (schedulers, GPU operators, cert-manager)
+│   ├── helm-installer/                  # Installs Helm charts (schedulers, DRA driver, cert-manager)
+│   │   └── charts.yaml                  # Helm chart configuration (schedulers, DRA driver, cert-manager)
 │   ├── image-lookup/                    # Adopt-or-create custom resource for the project's gco/* ECR repositories
 │   ├── kubectl-applier-simple/          # Applies K8s manifests during deployment
 │   │   └── manifests/                   # Kubernetes manifests (nodepools, RBAC, services, storage)

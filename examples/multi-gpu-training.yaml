@@ -6,7 +6,7 @@
 #
 # Prerequisites:
 #   - GPU nodes available
-#   - NVIDIA GPU Operator (enabled by default)
+#   - NVIDIA device plugin (installed by default)
 #
 # Usage:
 #   kubectl apply -f examples/multi-gpu-training.yaml

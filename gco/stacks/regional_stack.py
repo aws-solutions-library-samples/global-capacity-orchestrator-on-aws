@@ -30,7 +30,7 @@ Resources Created:
 
     Lambda Functions:
         - kubectl-applier: applies K8s manifests during deployment
-        - helm-installer: installs Helm charts (KEDA, Volcano, KubeRay, GPU Operator, etc.)
+        - helm-installer: installs Helm charts (KEDA, Volcano, KubeRay, DRA driver, etc.)
         - ga-registration: registers ALB with Global Accelerator
         - regional-api-proxy: proxies regional API Gateway to internal ALB
 
@@ -2794,7 +2794,6 @@ class GCORegionalStack(Stack):
         # Order matters: dependencies first, Kueue last
         chart_map: list[tuple[str, list[str]]] = [
             ("keda", ["keda"]),
-            ("nvidia_gpu_operator", ["nvidia-gpu-operator"]),
             ("nvidia_dra_driver", ["nvidia-dra-driver"]),
             ("nvidia_network_operator", ["nvidia-network-operator"]),
             ("aws_efa_device_plugin", ["aws-efa-device-plugin"]),

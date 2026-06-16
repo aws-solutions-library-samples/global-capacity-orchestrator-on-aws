@@ -527,7 +527,7 @@ kubectl get pods -n gco-jobs -l job-name=pytorch-ddp-training
 kubectl logs -f job/pytorch-ddp-training -n gco-jobs
 ```
 
-**Requirements:** GPU nodes available, NVIDIA GPU Operator (enabled by default).
+**Requirements:** GPU nodes available, NVIDIA device plugin (installed by default).
 
 **When to use:** Multi-node distributed training, PyTorch DDP workloads, scaling training across GPUs.
 

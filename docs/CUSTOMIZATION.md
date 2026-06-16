@@ -402,7 +402,7 @@ spec:
 
 ### GPU Time-Slicing (Fractional GPUs)
 
-You can share a single GPU across multiple pods using NVIDIA time-slicing. The NVIDIA device plugin is already installed via the GPU Operator, but time-slicing is not enabled by default. To enable it, apply a ConfigMap that sets the number of replicas per physical GPU (e.g., `replicas: 4` makes one GPU appear as four schedulable units). The kube-scheduler can then place several lightweight workloads onto one GPU node. Note that Karpenter does not currently account for time-slicing replicas when provisioning nodes ([kubernetes-sigs/karpenter#2140](https://github.com/kubernetes-sigs/karpenter/issues/2140)), so it may over-provision initially.
+You can share a single GPU across multiple pods using NVIDIA time-slicing. The NVIDIA device plugin is already installed (as a standalone DaemonSet, with EKS Auto Mode providing the GPU drivers), but time-slicing is not enabled by default. To enable it, apply a ConfigMap that sets the number of replicas per physical GPU (e.g., `replicas: 4` makes one GPU appear as four schedulable units). The kube-scheduler can then place several lightweight workloads onto one GPU node. Note that Karpenter does not currently account for time-slicing replicas when provisioning nodes ([kubernetes-sigs/karpenter#2140](https://github.com/kubernetes-sigs/karpenter/issues/2140)), so it may over-provision initially.
 
 See `examples/gpu-timeslicing-job.yaml` for a complete example with setup instructions.
 
@@ -880,7 +880,6 @@ GCO installs scheduler and infrastructure Helm charts via the `helm` section in 
   "context": {
     "helm": {
       "keda": { "enabled": true },
-      "nvidia_gpu_operator": { "enabled": true },
       "nvidia_dra_driver": { "enabled": true },
       "nvidia_network_operator": { "enabled": true },
       "aws_efa_device_plugin": { "enabled": true },
@@ -899,7 +898,6 @@ GCO installs scheduler and infrastructure Helm charts via the `helm` section in 
 | Chart | Default | Description |
 |-------|---------|-------------|
 | `keda` | Enabled | Event-driven autoscaling (SQS, Prometheus, etc.) |
-| `nvidia_gpu_operator` | Enabled | GPU driver and toolkit management |
 | `nvidia_dra_driver` | Enabled | Dynamic Resource Allocation for GPUs |
 | `nvidia_network_operator` | Enabled | RDMA and GPUDirect for distributed training |
 | `aws_efa_device_plugin` | Enabled | EFA device management for high-performance networking |

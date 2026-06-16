@@ -1,6 +1,6 @@
 # Helm Installer
 
-Installs and manages Helm charts on EKS clusters during CDK deployment. Supports KEDA, NVIDIA GPU Operator, NVIDIA DRA Driver, Volcano, KubeRay, Kueue, and more.
+Installs and manages Helm charts on EKS clusters during CDK deployment. Supports KEDA, NVIDIA DRA Driver, Volcano, KubeRay, Kueue, and more.
 
 ## Table of Contents
 
@@ -39,7 +39,6 @@ Runs as a container Lambda (see `Dockerfile`). The image includes `helm` and `ku
 | Chart | Namespace | Default |
 |-------|-----------|---------|
 | KEDA | `keda` | Enabled |
-| NVIDIA GPU Operator | `gpu-operator` | Enabled |
 | NVIDIA DRA Driver | `nvidia-dra-driver` | Enabled |
 | NVIDIA Network Operator | `nvidia-network-operator` | Enabled |
 | AWS EFA Device Plugin | `kube-system` | Enabled |

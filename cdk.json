@@ -260,10 +260,6 @@
     "_comment_helm": "Helm chart installation toggles. Each key maps to one or more charts in lambda/helm-installer/charts.yaml; flip enabled=false to skip a chart. Charts install in dependency order with kueue last (its mutating webhook intercepts every Job/Deployment). Cross-scheduler coexistence is documented in docs/SCHEDULERS.md.",
     "helm": {
       "_comment_keda": "KEDA — Kubernetes Event-Driven Autoscaling. MANDATORY platform component (no toggle): it backs GCO's built-in SQS queue processor and is the metrics bridge (keda-metrics-apiserver serves external.metrics.k8s.io) that lets autoscalers consume GPU/CloudWatch metrics. KEDA is always installed and is intentionally not listed below — see docs/KEDA.md.",
-      "_comment_nvidia_gpu_operator": "NVIDIA GPU Operator — installs the GPU device plugin, MIG manager, DCGM exporter, and container toolkit so GPUs are schedulable as nvidia.com/gpu. Upstream: https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/.",
-      "nvidia_gpu_operator": {
-        "enabled": true
-      },
       "_comment_nvidia_dra_driver": "NVIDIA Dynamic Resource Allocation driver — fine-grained GPU scheduling (MIG slicing, MPS) via Kubernetes DRA APIs. Upstream: https://github.com/NVIDIA/k8s-dra-driver.",
       "nvidia_dra_driver": {
         "enabled": true

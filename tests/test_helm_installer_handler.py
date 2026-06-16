@@ -148,9 +148,9 @@ class TestInstallChartPreflight:
         return {
             "repo_name": "nvidia",
             "repo_url": "https://helm.ngc.nvidia.com/nvidia",
-            "chart": "gpu-operator",
+            "chart": "nvidia-dra-driver",
             "version": "v26.3.1",
-            "namespace": "gpu-operator",
+            "namespace": "nvidia-dra-driver",
             "create_namespace": True,
             "values": {"toolkit": {"enabled": False}},
         }
@@ -162,9 +162,9 @@ class TestInstallChartPreflight:
             patch.object(helm_handler, "_clear_stuck_release") as mock_clear,
             patch.object(helm_handler, "run_helm", return_value=(0, "ok", "")) as mock_run,
         ):
-            ok, _ = helm_handler.install_chart("nvidia-gpu-operator", config, "/tmp/kube", None)
+            ok, _ = helm_handler.install_chart("nvidia-dra-driver", config, "/tmp/kube", None)
         assert ok is True
-        mock_clear.assert_called_once_with("nvidia-gpu-operator", "gpu-operator", "/tmp/kube")
+        mock_clear.assert_called_once_with("nvidia-dra-driver", "nvidia-dra-driver", "/tmp/kube")
         # Preflight must be called before run_helm(upgrade).
         assert mock_clear.call_count == 1
         assert mock_run.call_count == 1
@@ -185,7 +185,7 @@ class TestInstallChartPreflight:
                 (0, "ok", ""),  # retry after clearing
             ]
             ok, message = helm_handler.install_chart(
-                "nvidia-gpu-operator", config, "/tmp/kube", None
+                "nvidia-dra-driver", config, "/tmp/kube", None
             )
         assert ok is True
         assert "after clearing stuck state" in message
@@ -212,7 +212,7 @@ class TestInstallChartPreflight:
                 (1, "", stuck_err),
                 (0, "ok", ""),
             ]
-            helm_handler.install_chart("nvidia-gpu-operator", config, "/tmp/kube", None)
+            helm_handler.install_chart("nvidia-dra-driver", config, "/tmp/kube", None)
         invoked_args = [call.args[0] for call in mock_run.call_args_list]
         assert not any(args and args[0] == "rollback" for args in invoked_args)
 
@@ -226,7 +226,7 @@ class TestInstallChartPreflight:
         ):
             mock_run.return_value = (1, "", "Error: invalid chart values")
             ok, message = helm_handler.install_chart(
-                "nvidia-gpu-operator", config, "/tmp/kube", None
+                "nvidia-dra-driver", config, "/tmp/kube", None
             )
         assert ok is False
         assert "invalid chart values" in message

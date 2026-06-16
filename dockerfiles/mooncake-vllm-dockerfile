@@ -16,7 +16,7 @@
 
 # Pinned vLLM OpenAI server base. Bump intentionally when validating a new
 # vLLM release, and keep it an explicit version tag — never `latest`.
-ARG VLLM_BASE_VERSION=v0.11.0
+ARG VLLM_BASE_VERSION=v0.23.0
 FROM vllm/vllm-openai:${VLLM_BASE_VERSION}
 
 # Stable block hashing across data-parallel ranks: identical prompts must hash

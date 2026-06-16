@@ -258,10 +258,10 @@ def _clear_stuck_release(chart_name: str, namespace: str, kubeconfig: str) -> bo
     progress`` until the lock is cleared.
 
     ``helm rollback --wait`` would normally clear it, but it can hang
-    indefinitely when the target chart's own operator (e.g. the NVIDIA
-    gpu-operator's ClusterPolicy controller) is stuck reconciling the
-    half-applied state — which is exactly the failure mode that got us
-    here. Deleting the stuck secret is the reliable recovery: Helm's view
+    indefinitely when the target chart's own operator (e.g. a CRD
+    controller) is stuck reconciling the half-applied state — which is
+    exactly the failure mode that got us here. Deleting the stuck secret
+    is the reliable recovery: Helm's view
     of the release reverts to the previous ``deployed`` revision, and the
     next upgrade proceeds normally.
 
