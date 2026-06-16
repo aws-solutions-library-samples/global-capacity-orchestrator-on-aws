@@ -551,12 +551,14 @@ See the [LICENSE](LICENSE) file for details.
 GCO implements defense-in-depth across five layers (see [Security Model](#security-model) above for the diagram):
 
 **Authentication and Authorization:**
+
 - All API requests require AWS IAM (SigV4) authentication at the API Gateway
 - A Lambda-injected rotating secret from AWS Secrets Manager adds a second factor
 - IRSA (IAM Roles for Service Accounts) provides pod-level AWS access with no static credentials
 - EKS access entries with explicit policy bindings (no aws-auth ConfigMap)
 
 **Network Security:**
+
 - ALBs only accept traffic from Global Accelerator IP ranges
 - EKS clusters run in private subnets with configurable endpoint access (PRIVATE or PUBLIC_AND_PRIVATE)
 - VPC endpoints eliminate traffic traversal over the public internet for ECR, S3, STS, SSM, and CloudWatch
@@ -564,11 +566,13 @@ GCO implements defense-in-depth across five layers (see [Security Model](#securi
 - Kubernetes Network Policies enforce default-deny with explicit allow rules
 
 **Encryption:**
+
 - Data at rest: S3 (KMS), EFS (KMS), EBS (KMS), DynamoDB (AWS-managed), Secrets Manager (KMS)
 - Data in transit: TLS 1.2+ for all connections including EFS mounts
 - Kubernetes secrets encrypted in etcd (EKS-managed encryption)
 
 **Compliance Validation:**
+
 - CDK-nag runs automatically during synthesis and deployment, validating against:
   - AWS Solutions best practices
   - HIPAA Security Rule
@@ -578,6 +582,7 @@ GCO implements defense-in-depth across five layers (see [Security Model](#securi
 - All suppressions are documented with justifications in `gco/stacks/nag_suppressions.py`
 
 **Supply Chain Security:**
+
 - Container images scanned with Trivy on every push (CVE detection)
 - Python dependencies audited with pip-audit (GHSA/CVE detection)
 - Dependency versions pinned with exact hashes in `requirements-lock.txt`

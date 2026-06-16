@@ -278,6 +278,7 @@ gco inference deploy my-llm \
 ```
 
 When `--mooncake-mode disaggregated` is set:
+
 - The inference monitor creates separate Deployments for each role: `{name}-prefill` and `{name}-decode`
 - A shared Mooncake transfer engine enables zero-copy KV cache transfer between roles via RDMA/TCP
 - The `--image` flag is optional; when omitted, the platform's maintained Mooncake-enabled vLLM image is used
@@ -297,6 +298,7 @@ gco inference deploy my-llm \
 ```
 
 The `--mooncake-autoscale` format is `ROLE:MIN:MAX[:METRIC:TARGET...]`:
+
 - `ROLE` — `prefill` or `decode`
 - `MIN:MAX` — replica bounds for that role
 - `METRIC:TARGET` pairs (optional, repeatable) — scaling signals (`cpu`, `memory`, `gpu`, `gpu_memory`)
