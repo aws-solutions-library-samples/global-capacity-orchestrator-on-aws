@@ -174,7 +174,7 @@ jobs:
   security-trivy-container-scan:
     name: "security:trivy:container-scan"
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     # Rebuild the service images locally and scan each with Trivy. Fills a
     # gap the AWS GitLab runner couldn't handle (docker builds were flaky).
     # We rebuild here rather than passing images between workflows via
@@ -206,6 +206,17 @@ jobs:
             dockerfile: Dockerfile.dev
     steps:
       - uses: actions/checkout@v6
+      - name: Free disk space (large images)
+        if: matrix.image == 'mooncake-vllm' || matrix.image == 'dev'
+        run: |
+          # The mooncake-vllm CUDA image is ~15 GB uncompressed; trivy needs
+          # to unpack every layer into /tmp. Standard ubuntu-latest runners
+          # only have ~14 GB free after the pre-installed toolchains. Remove
+          # bulky pre-installed software we don't need for a docker build+scan.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+            /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af
+          df -h /
       - uses: docker/setup-buildx-action@v4
       - name: Install pinned Trivy
         uses: ./.github/actions/install-trivy
