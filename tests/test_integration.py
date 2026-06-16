@@ -1482,7 +1482,11 @@ class TestNewSchedulerChartIntegration:
         )
 
     def test_cdk_json_helm_section_has_all_chart_groups(self):
-        """The cdk.json helm section should have entries for all chart groups."""
+        """The cdk.json helm section should have entries for all togglable chart groups.
+
+        KEDA is exempt: it is a mandatory platform component with no toggle, so
+        it is intentionally absent from cdk.json.
+        """
         import json
 
         with open(PROJECT_ROOT / "cdk.json", encoding="utf-8") as f:
@@ -1490,7 +1494,6 @@ class TestNewSchedulerChartIntegration:
         helm_config = cdk_config["context"].get("helm", {})
 
         expected_keys = [
-            "keda",
             "nvidia_gpu_operator",
             "nvidia_dra_driver",
             "nvidia_network_operator",
@@ -1505,6 +1508,9 @@ class TestNewSchedulerChartIntegration:
         ]
         missing = [k for k in expected_keys if k not in helm_config]
         assert not missing, f"cdk.json helm section missing keys: {missing}"
+
+        # KEDA must NOT be present — it is mandatory and not configurable.
+        assert "keda" not in helm_config
 
     # NOTE: test_cdk_json_helm_slurm_and_yunikorn_disabled was removed because
     # it asserted specific config values from the live cdk.json, which breaks
