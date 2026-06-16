@@ -2807,7 +2807,7 @@ class GCORegionalStack(Stack):
         (TLS certificates, CRDs, etc.) that are difficult to manage via raw manifests.
 
         Charts installed:
-        - KEDA: Kubernetes Event-Driven Autoscaling (enabled by default)
+        - KEDA: Kubernetes Event-Driven Autoscaling (mandatory, always installed)
         - NVIDIA DRA Driver: Dynamic Resource Allocation for GPUs (disabled by default)
         """
         project_name = self.config.get_project_name()

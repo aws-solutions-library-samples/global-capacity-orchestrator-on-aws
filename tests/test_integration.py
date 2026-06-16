@@ -1640,16 +1640,21 @@ class TestGetEnabledHelmCharts:
         assert "kuberay" not in charts  # The chart name is kuberay-operator, not kuberay
 
     def test_all_chart_map_keys_present_in_cdk_json(self):
-        """Every key in the _get_enabled_helm_charts chart_map should exist in cdk.json helm section."""
+        """Every togglable chart_map key should exist in cdk.json's helm section.
+
+        KEDA is exempt: it is a mandatory platform component with no toggle, so
+        it is intentionally not listed in cdk.json.
+        """
         import json
 
         with open(PROJECT_ROOT / "cdk.json", encoding="utf-8") as f:
             cdk_config = json.load(f)
         helm_config = cdk_config["context"].get("helm", {})
 
-        # These are the config keys used in _get_enabled_helm_charts
+        # Togglable config keys used in _get_enabled_helm_charts. KEDA is
+        # mandatory (always installed regardless of config), so it is omitted
+        # from cdk.json and excluded here.
         chart_map_keys = [
-            "keda",
             "nvidia_gpu_operator",
             "nvidia_dra_driver",
             "nvidia_network_operator",
@@ -1664,6 +1669,9 @@ class TestGetEnabledHelmCharts:
         ]
         missing = [k for k in chart_map_keys if k not in helm_config]
         assert not missing, f"cdk.json helm section missing keys from chart_map: {missing}"
+
+        # KEDA must NOT be present — it is mandatory and not configurable.
+        assert "keda" not in helm_config
 
     def test_disabling_all_gpu_charts(self):
         """Disabling all GPU-related charts should produce a list without any NVIDIA charts."""
