@@ -444,7 +444,7 @@ python-dotenv==1.2.2
     #   pydantic-settings
 python-json-logger==4.1.0
     # via pydocket
-python-multipart==0.0.27
+python-multipart==0.0.31
     # via
     #   fastmcp-slim
     #   mcp
