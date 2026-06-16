@@ -2145,6 +2145,11 @@ class InferenceMonitor:
         gpu_count = spec.get("gpu_count", 1)
         health_path = spec.get("health_check_path", "/health")
         env_vars = spec.get("env", {})
+        # Stable block hashing across data-parallel ranks: identical prompts
+        # must hash identically so shared prefix-cache hits are not lost
+        # between pods. The disaggregated serving image (upstream vLLM) no
+        # longer bakes this in, so default it here; an explicit spec env wins.
+        env_vars = {"PYTHONHASHSEED": "0", **env_vars}
         resources = spec.get("resources", {})
         model_path = spec.get("model_path")
         command = spec.get("command")

@@ -90,13 +90,16 @@ _MAINTAINED_IMAGES: dict[str, str] = {
     "manifest-processor": "dockerfiles/manifest-processor-dockerfile",
     "queue-processor": "dockerfiles/queue-processor-dockerfile",
     "inference-monitor": "dockerfiles/inference-monitor-dockerfile",
-    "mooncake-vllm": "dockerfiles/mooncake-vllm-dockerfile",
 }
 
-# The Mooncake-enabled vLLM image is the default served by
-# disaggregated prefill/decode deployments when the operator does not
-# supply an image explicitly.
-_DISAGGREGATED_DEFAULT_IMAGE = "mooncake-vllm"
+# Default image served by disaggregated prefill/decode deployments when the
+# operator does not supply one. As of this tag the upstream vLLM OpenAI server
+# image bundles the Mooncake transfer engine as a first-class KV-connector
+# dependency, so GCO no longer builds or maintains its own image — deploys pull
+# this upstream image directly from Docker Hub. Pinned to an explicit version
+# for reproducibility; bump intentionally when validating a new vLLM release
+# and never use a mutable/rolling tag such as ``latest``.
+_DISAGGREGATED_DEFAULT_IMAGE = "vllm/vllm-openai:v0.23.0"
 
 # Default lifecycle policy parameters.
 _DEFAULT_KEEP_TAGGED = 20
@@ -641,14 +644,18 @@ class ImageManager:
             "uri": self.get_uri(name, tag),
         }
 
-    def default_disaggregated_image_uri(self, tag: str = "latest") -> str:
-        """Return the registry URI of the default disaggregated-serving image.
+    def default_disaggregated_image_uri(self, tag: str | None = None) -> str:
+        """Return the image reference disaggregated prefill/decode deploys serve from.
 
-        Disaggregated prefill/decode deployments serve from the
-        Mooncake-enabled vLLM image unless an image is supplied
-        explicitly; this resolves that default to a concrete URI.
+        As of the pinned tag, the upstream ``vllm/vllm-openai`` image bundles
+        the Mooncake transfer engine, so GCO no longer builds its own image —
+        deploys pull this upstream image from Docker Hub directly. Returns the
+        pinned reference; ``tag``, when given, overrides only the version.
         """
-        return self.get_uri(_DISAGGREGATED_DEFAULT_IMAGE, tag)
+        if tag:
+            repo = _DISAGGREGATED_DEFAULT_IMAGE.rsplit(":", 1)[0]
+            return f"{repo}:{tag}"
+        return _DISAGGREGATED_DEFAULT_IMAGE
 
     def replication_get(self) -> dict[str, Any]:
         """Return the current ECR replication configuration, or ``{}``."""
@@ -1118,12 +1125,12 @@ def get_image_manager(config: GCOConfig | None = None, region: str | None = None
 def default_disaggregated_image(
     config: GCOConfig | None = None,
     region: str | None = None,
-    tag: str = "latest",
+    tag: str | None = None,
 ) -> str:
-    """Resolve the default image URI for disaggregated prefill/decode deploys.
+    """Resolve the default image reference for disaggregated prefill/decode deploys.
 
     Convenience wrapper around
     :meth:`ImageManager.default_disaggregated_image_uri` for callers
-    that only need the URI and do not otherwise hold a manager.
+    that only need the reference and do not otherwise hold a manager.
     """
     return get_image_manager(config=config, region=region).default_disaggregated_image_uri(tag)

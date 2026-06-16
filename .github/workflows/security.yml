@@ -17,8 +17,8 @@
 #   - security:semgrep:sast              — semgrep scan --config auto
 #   - security:trivy:filesystem          — trivy fs on the source tree
 #   - security:trivy:container-scan      — trivy image on each built image
-#                                          (4 service images + mooncake-vllm
-#                                          + helm-installer + Dockerfile.dev)
+#                                          (4 service images + helm-installer
+#                                          + Dockerfile.dev)
 #   - security:trufflehog:secrets        — trufflehog filesystem scan
 #
 # All scans are strict: if a scan finds issues the job fails. Fix the code,
@@ -193,8 +193,6 @@ jobs:
             dockerfile: dockerfiles/inference-monitor-dockerfile
           - image: queue-processor
             dockerfile: dockerfiles/queue-processor-dockerfile
-          - image: mooncake-vllm
-            dockerfile: dockerfiles/mooncake-vllm-dockerfile
           - image: helm-installer
             dockerfile: lambda/helm-installer/Dockerfile
             context: lambda/helm-installer
@@ -207,12 +205,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Free disk space (large images)
-        if: matrix.image == 'mooncake-vllm' || matrix.image == 'dev'
+        if: matrix.image == 'dev'
         run: |
-          # The mooncake-vllm CUDA image is ~15 GB uncompressed; trivy needs
-          # to unpack every layer into /tmp. Standard ubuntu-latest runners
-          # only have ~14 GB free after the pre-installed toolchains. Remove
-          # bulky pre-installed software we don't need for a docker build+scan.
+          # The dev image is large; trivy needs to unpack every layer into
+          # /tmp. Standard ubuntu-latest runners only have ~14 GB free after
+          # the pre-installed toolchains. Remove bulky pre-installed software
+          # we don't need for a docker build+scan.
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
             /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
             /usr/local/share/powershell /usr/local/graalvm \
@@ -247,11 +245,11 @@ jobs:
           IMAGE: ${{ matrix.image }}
         run: |
           set -euo pipefail
-          # The mooncake-vllm image contains large precompiled CUDA kernels
-          # (flashinfer .so files) that take trivy >5 minutes to analyze.
-          # Default timeout is 5m; bump to 20m for large images.
+          # The dev image contains large precompiled artifacts that take
+          # trivy >5 minutes to analyze. Default timeout is 5m; bump to 20m
+          # for large images.
           TIMEOUT="5m0s"
-          if [[ "$IMAGE" == "mooncake-vllm" || "$IMAGE" == "dev" ]]; then
+          if [[ "$IMAGE" == "dev" ]]; then
             TIMEOUT="20m0s"
           fi
           # Scan twice: once in table format so the failure is human-readable

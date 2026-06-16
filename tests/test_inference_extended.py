@@ -381,11 +381,14 @@ class TestCreateDeployment:
         deployment = call_args[0][1]
         container = deployment.spec.template.spec.containers[0]
         assert container.env is not None
-        # 2 user env vars
-        assert len(container.env) == 2
+        # 2 user env vars + the injected PYTHONHASHSEED default
+        assert len(container.env) == 3
         env_names = {e.name for e in container.env}
         assert "MODEL" in env_names
         assert "MAX_LEN" in env_names
+        # PYTHONHASHSEED=0 is defaulted for deterministic prefix-cache hashing.
+        env_by_name = {e.name: e.value for e in container.env}
+        assert env_by_name["PYTHONHASHSEED"] == "0"
 
     def test_create_deployment_with_command_and_args(self):
         monitor = _make_monitor()
