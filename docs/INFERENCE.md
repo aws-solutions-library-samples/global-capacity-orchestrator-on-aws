@@ -9,6 +9,7 @@ Deploy and manage multi-region GPU inference endpoints with GCO (Global Capacity
 - [Model Weight Management](#model-weight-management)
 - [Deploying Inference Endpoints](#deploying-inference-endpoints)
 - [Supported Frameworks](#supported-frameworks)
+- [Disaggregated Inference (Mooncake)](#disaggregated-inference-mooncake)
 - [Managing Endpoints](#managing-endpoints)
 - [Invoking Endpoints](#invoking-endpoints)
 - [Multi-Region Deployment](#multi-region-deployment)
@@ -259,6 +260,79 @@ gco inference deploy torchserve-resnet \
   --health-path /ping \
   --gpu-count 1 \
   --model-source s3://your-bucket/models/torchserve-mar
+```
+
+## Disaggregated Inference (Mooncake)
+
+GCO supports Mooncake disaggregated serving, which splits inference into separate prefill and decode roles. This architecture enables independent scaling of compute-bound prefill and memory-bound decode workloads — prefill nodes can saturate GPU compute filling the KV cache while decode nodes stream tokens at lower utilization.
+
+### Deploy a Disaggregated Endpoint
+
+```bash
+gco inference deploy my-llm \
+  --mooncake-mode disaggregated \
+  --gpu-count 1 \
+  --prefill-replicas 2 \
+  --decode-replicas 4 \
+  -e MODEL=meta-llama/Llama-3.1-8B-Instruct
+```
+
+When `--mooncake-mode disaggregated` is set:
+- The inference monitor creates separate Deployments for each role: `{name}-prefill` and `{name}-decode`
+- A shared Mooncake transfer engine enables zero-copy KV cache transfer between roles via RDMA/TCP
+- The `--image` flag is optional; when omitted, the platform's maintained Mooncake-enabled vLLM image is used
+- `--prefill-replicas` and `--decode-replicas` set the initial replica count for each role (both default to 1)
+
+### Per-Role Autoscaling
+
+Each role can autoscale independently based on its own metrics:
+
+```bash
+gco inference deploy my-llm \
+  --mooncake-mode disaggregated \
+  --gpu-count 1 \
+  --prefill-replicas 2 --decode-replicas 4 \
+  --mooncake-autoscale prefill:1:8:gpu:70 \
+  --mooncake-autoscale decode:2:16:cpu:60:gpu:50
+```
+
+The `--mooncake-autoscale` format is `ROLE:MIN:MAX[:METRIC:TARGET...]`:
+- `ROLE` — `prefill` or `decode`
+- `MIN:MAX` — replica bounds for that role
+- `METRIC:TARGET` pairs (optional, repeatable) — scaling signals (`cpu`, `memory`, `gpu`, `gpu_memory`)
+
+Each role gets its own KEDA ScaledObject (for GPU metrics) or HPA (for CPU/memory only), targeting just that role's Deployment.
+
+### Resize Topology
+
+Change the prefill/decode replica counts on a running disaggregated endpoint:
+
+```bash
+gco inference set-topology my-llm --prefill 3 --decode 6
+```
+
+### Mooncake Modes
+
+| Mode | Description |
+|------|-------------|
+| `disaggregated` | Separate prefill and decode Deployments with KV cache transfer |
+| `store` | Shared Mooncake KV-cache store (etcd-backed, cluster-wide) |
+| `both` | Disaggregated roles plus the shared store |
+
+### Architecture
+
+```text
+                 ┌──────────────────────────────────────┐
+                 │        Mooncake Transfer Engine       │
+                 │   (zero-copy KV cache via RDMA/TCP)  │
+                 └────────────┬─────────────┬───────────┘
+                              │             │
+              ┌───────────────▼──┐    ┌─────▼──────────────┐
+              │  Prefill Pods    │    │   Decode Pods       │
+              │  (compute-bound) │    │   (memory-bound)    │
+              │  {name}-prefill  │    │   {name}-decode     │
+              │  GPU-saturated   │    │   Streaming tokens  │
+              └──────────────────┘    └────────────────────┘
 ```
 
 ## Managing Endpoints

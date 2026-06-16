@@ -58,7 +58,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server wraps the `gco` CLI, exposing 95 tools by default (up to 127 with all flags enabled) that cover the full lifecycle of GPU workload management:
+The MCP server wraps the `gco` CLI, exposing 98 tools by default (up to 130 with all flags enabled) that cover the full lifecycle of GPU workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -413,6 +413,9 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `canary_deploy` | A/B test a new image version with weighted traffic | low-risk | — |
 | `promote_canary` | Promote canary to primary (100% traffic) | low-risk | — |
 | `rollback_canary` | Rollback canary (100% traffic to primary) | low-risk | — |
+| `deploy_disaggregated_inference` | Deploy a split prefill/decode (Mooncake) endpoint | low-risk | — |
+| `set_mooncake_topology` | Resize a disaggregated endpoint's prefill/decode replica counts | low-risk | — |
+| `mooncake_topology_status` | Show a disaggregated endpoint's per-role topology status | safe | — |
 | `delete_inference` | Delete an endpoint (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 
 ### Cost Tracking

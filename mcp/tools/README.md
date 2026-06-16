@@ -12,15 +12,15 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 95 tools; with every flag enabled the
-ceiling is 127. See [Feature Flags](../README.md#feature-flags) for the
+default registration the server exposes 98 tools; with every flag enabled the
+ceiling is 130. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
 |------|-------|-------------|
 | `jobs.py` | 9 | `list_jobs`, `submit_job_sqs`, `submit_job_api`, `get_job`, `get_job_logs`, `get_job_events`, `delete_job` (gated), `cluster_health`, `queue_status` |
 | `capacity.py` | 8 | `check_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `reserve_capacity` (gated) |
-| `inference.py` | 15 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models` |
+| `inference.py` | 18 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `mooncake_topology_status` |
 | `costs.py` | 4 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast` |
 | `stacks.py` | 20 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `valkey_status`, `aurora_status`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated) |
 | `storage.py` | 4 | `list_storage_contents`, `list_file_systems`, `files_get`, `files_access_points` |

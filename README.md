@@ -91,7 +91,7 @@ cd global-capacity-orchestrator-on-aws && pipx install -e .
 
 See the [Quick Start](#quick-start) for the full install + first-job walkthrough, or [`docs/CLI.md`](docs/CLI.md) for every CLI command.
 
-> **💡 New to the codebase?** GCO ships with the **GCO MCP server** — an [MCP server](mcp/) exposing 95 tools by default (up to 127 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with MCP support (like [Kiro](https://kiro.dev)) and explore GCO conversationally — ask questions about the codebase instead of reading repository files directly: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [mcp/README.md](mcp/README.md).
+> **💡 New to the codebase?** GCO ships with the **GCO MCP server** — an [MCP server](mcp/) exposing 98 tools by default (up to 130 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with MCP support (like [Kiro](https://kiro.dev)) and explore GCO conversationally — ask questions about the codebase instead of reading repository files directly: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [mcp/README.md](mcp/README.md).
 
 <details>
 <summary><b>Table of contents</b></summary>
@@ -99,6 +99,9 @@ See the [Quick Start](#quick-start) for the full install + first-job walkthrough
 - [Why GCO?](#why-gco)
 - [Quick Start](#quick-start)
 - [Architecture Overview](#architecture-overview)
+- [AWS Services in this Guidance](#aws-services-in-this-guidance)
+- [Sample Cost Table](#sample-cost-table)
+- [Supported AWS Regions](#supported-aws-regions)
 - [Key Features](#key-features)
 - [Documentation](#documentation)
 - [Project Structure](#project-structure)
@@ -261,6 +264,96 @@ For private clusters, [Regional API Gateways](docs/CUSTOMIZATION.md#regional-api
 
 See [Architecture Details](docs/ARCHITECTURE.md) for the full deep dive.
 
+## AWS Services in this Guidance
+
+| AWS Service | Usage |
+|-------------|-------|
+| [Amazon EKS](https://aws.amazon.com/eks/) | Kubernetes control plane and Auto Mode compute (GPU, Trainium, Inferentia, CPU nodepools) |
+| [AWS Global Accelerator](https://aws.amazon.com/global-accelerator/) | Anycast endpoint with health-based cross-region routing and automatic failover |
+| [Amazon API Gateway](https://aws.amazon.com/api-gateway/) | IAM-authenticated (SigV4) REST entry point for job submission and inference |
+| [AWS Lambda](https://aws.amazon.com/lambda/) | Proxy functions (auth header injection, GA registration), manifest application, Helm chart installation orchestration |
+| [AWS Step Functions](https://aws.amazon.com/step-functions/) | Orchestrates Helm chart installs — one state per chart with per-chart retry and backoff |
+| [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) | Inference endpoint desired-state store, job queue state, and template storage |
+| [Amazon SQS](https://aws.amazon.com/sqs/) | Regional job ingestion queue with dead-letter queue and KEDA-driven scale-to-zero consumer |
+| [Amazon S3](https://aws.amazon.com/s3/) | Model weight storage (KMS-encrypted), cluster shared bucket, CDK asset staging |
+| [Amazon EFS](https://aws.amazon.com/efs/) | Shared elastic storage for job outputs, model weights, and inter-pod data sharing |
+| [Amazon FSx for Lustre](https://aws.amazon.com/fsx/lustre/) | Optional high-performance parallel file system for ML training workloads |
+| [Amazon ElastiCache (Valkey)](https://aws.amazon.com/elasticache/) | Optional serverless key-value cache for prompt caching and session state |
+| [Amazon Aurora](https://aws.amazon.com/rds/aurora/) | Optional Serverless v2 PostgreSQL with pgvector for RAG and semantic search |
+| [Amazon ECR](https://aws.amazon.com/ecr/) | Container image registry with cross-region replication for platform and user images |
+| [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/) | Metrics, logs, alarms, dashboards, and Container Insights for GPU utilization |
+| [Amazon SNS](https://aws.amazon.com/sns/) | Alert notifications for drift detection, health issues, and capacity events |
+| [AWS Secrets Manager](https://aws.amazon.com/secrets-manager/) | Rotating auth tokens for ALB header validation |
+| [AWS KMS](https://aws.amazon.com/kms/) | Encryption keys for S3 model buckets, EFS, and secrets |
+| [AWS IAM](https://aws.amazon.com/iam/) | IRSA roles for pod-level AWS access, service roles, and SigV4 authentication |
+| [AWS CDK](https://aws.amazon.com/cdk/) | Infrastructure as code — synthesizes, validates (cdk-nag), and deploys all stacks |
+| [Amazon VPC](https://aws.amazon.com/vpc/) | Network isolation with public/private subnets, NAT Gateways, and VPC endpoints |
+| [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) | Cost tracking by service, region, and workload via the `gco costs` commands |
+
+## Sample Cost Table
+
+The following estimates are for a single-region deployment with default settings. Multi-region deployments scale linearly. Costs vary by region, instance type, and utilization.
+
+| Resource | Configuration | Estimated Monthly Cost (USD) |
+|----------|--------------|------------------------------|
+| EKS cluster | 1 cluster (Auto Mode) | ~$73 |
+| NAT Gateways | 2 (high availability) | ~$65 |
+| Application Load Balancer | 1 (shared by all services) | ~$22 |
+| Global Accelerator | 1 accelerator + data transfer | ~$18 + transfer |
+| Lambda functions | ~8 functions, minimal invocations | ~$1 |
+| Step Functions | ~10 state transitions per deploy | < $1 |
+| DynamoDB | On-demand, low throughput | ~$5 |
+| SQS | Standard queue, low message volume | < $1 |
+| S3 | Model storage (varies with model size) | ~$2 (10 GB stored) |
+| EFS | Elastic storage (varies with usage) | ~$3 (10 GB stored) |
+| CloudWatch | Logs, metrics, Container Insights | ~$15 |
+| ECR | Image storage + replication | ~$5 |
+| Secrets Manager | 1 secret with rotation | < $1 |
+| **Subtotal (platform, no GPU workloads)** | | **~$210/month** |
+| GPU instances (example) | 1× g5.xlarge on-demand, 24/7 | ~$760 |
+| GPU instances (spot) | 1× g5.xlarge spot, 24/7 | ~$250 |
+
+**Notes:**
+
+- Platform costs (~$210/month) are fixed regardless of workload volume.
+- GPU costs dominate and scale with the number of instances and hours run. Use `gco costs summary` to track actual spend.
+- Optional services (FSx, Valkey, Aurora) add additional cost depending on configuration.
+- The cost table above uses US East (N. Virginia) pricing as of June 2025.
+
+## Supported AWS Regions
+
+GCO can be deployed to any AWS region that supports Amazon EKS, AWS Global Accelerator, and the other services listed above. The deployment regions are configured in `cdk.json` under `deployment_regions.regional`.
+
+**Tested and validated regions:**
+
+| Region | Location |
+|--------|----------|
+| us-east-1 | N. Virginia |
+| us-east-2 | Ohio |
+| us-west-2 | Oregon |
+| eu-west-1 | Ireland |
+| eu-west-2 | London |
+| eu-central-1 | Frankfurt |
+| ap-southeast-1 | Singapore |
+| ap-northeast-1 | Tokyo |
+
+**Adding a new region:**
+
+```json
+// cdk.json
+{
+  "context": {
+    "deployment_regions": {
+      "regional": ["us-east-1", "eu-west-1", "ap-northeast-1"]
+    }
+  }
+}
+```
+
+Then redeploy: `gco stacks deploy-all -y`. CDK bootstrap runs automatically for new regions.
+
+GPU instance availability varies by region. Use `gco capacity check -i <instance-type> -r <region>` or `gco capacity recommend-region --gpu` to find regions with available GPU capacity before deploying workloads.
+
 ## Key Features
 
 ### Compute & Orchestration
@@ -417,7 +510,7 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 │   ├── regional-api-proxy/              # Regional API Gateway → internal ALB proxy
 │   └── secret-rotation/                 # Daily secret rotation
 │
-├── mcp/                                 # MCP server for LLM interaction (95 tools default, up to 127 with feature flags)
+├── mcp/                                 # MCP server for LLM interaction (98 tools default, up to 130 with feature flags)
 ├── scripts/                             # Utility scripts (version bump, cluster access setup)
 └── tests/                               # PyTest + BATS test suites (counts tracked via badges)
 ```
@@ -455,6 +548,43 @@ See the [LICENSE](LICENSE) file for details.
 
 ## Security
 
-For security issues, **do not open a public GitHub issue.** See [`.github/SECURITY.md`](.github/SECURITY.md) for the disclosure process.
+GCO implements defense-in-depth across five layers (see [Security Model](#security-model) above for the diagram):
+
+**Authentication and Authorization:**
+- All API requests require AWS IAM (SigV4) authentication at the API Gateway
+- A Lambda-injected rotating secret from AWS Secrets Manager adds a second factor
+- IRSA (IAM Roles for Service Accounts) provides pod-level AWS access with no static credentials
+- EKS access entries with explicit policy bindings (no aws-auth ConfigMap)
+
+**Network Security:**
+- ALBs only accept traffic from Global Accelerator IP ranges
+- EKS clusters run in private subnets with configurable endpoint access (PRIVATE or PUBLIC_AND_PRIVATE)
+- VPC endpoints eliminate traffic traversal over the public internet for ECR, S3, STS, SSM, and CloudWatch
+- VPC Flow Logs (30-day retention) capture all network traffic for audit
+- Kubernetes Network Policies enforce default-deny with explicit allow rules
+
+**Encryption:**
+- Data at rest: S3 (KMS), EFS (KMS), EBS (KMS), DynamoDB (AWS-managed), Secrets Manager (KMS)
+- Data in transit: TLS 1.2+ for all connections including EFS mounts
+- Kubernetes secrets encrypted in etcd (EKS-managed encryption)
+
+**Compliance Validation:**
+- CDK-nag runs automatically during synthesis and deployment, validating against:
+  - AWS Solutions best practices
+  - HIPAA Security Rule
+  - NIST 800-53 Rev 5
+  - PCI DSS 3.2.1
+  - Serverless best practices
+- All suppressions are documented with justifications in `gco/stacks/nag_suppressions.py`
+
+**Supply Chain Security:**
+- Container images scanned with Trivy on every push (CVE detection)
+- Python dependencies audited with pip-audit (GHSA/CVE detection)
+- Dependency versions pinned with exact hashes in `requirements-lock.txt`
+- Dependabot and CodeQL enabled for automated vulnerability alerts
+- SBOM generation via Trivy for all container images
+
+**Vulnerability Disclosure:**
+For security issues, **do not open a public GitHub issue.** See [`.github/SECURITY.md`](.github/SECURITY.md) for the responsible disclosure process.
 
 ---
