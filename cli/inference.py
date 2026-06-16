@@ -9,7 +9,7 @@ pattern (inference_monitor).
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeGuard
 
 from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
@@ -186,8 +186,7 @@ def author_byte_size(value: int | str) -> str:
         size = int(text)
     else:
         raise ValueError(
-            "byte-size value must be an int or a base-10 digit string, "
-            f"got {type(value).__name__}"
+            f"byte-size value must be an int or a base-10 digit string, got {type(value).__name__}"
         )
 
     if not MOONCAKE_BYTE_SIZE_MIN <= size <= MOONCAKE_BYTE_SIZE_MAX:
@@ -211,7 +210,7 @@ _MOONCAKE_STORE_BYTE_SIZE_FIELDS: tuple[str, ...] = (
 _MOONCAKE_DISAGGREGATED_MODES: frozenset[str] = frozenset({"disaggregated", "both"})
 
 
-def _is_plain_int(value: Any) -> bool:
+def _is_plain_int(value: Any) -> TypeGuard[int]:
     """True when ``value`` is an ``int`` and not a ``bool``.
 
     ``bool`` is a subclass of ``int``; counts and replica bounds must be real
@@ -233,20 +232,17 @@ def _validate_role_autoscaling_bounds(role: str, role_block: dict[str, Any]) -> 
     if min_replicas is not None:
         if not _is_plain_int(min_replicas):
             raise ValueError(
-                f"mooncake.autoscaling.{role}.min_replicas must be an integer, "
-                f"got {min_replicas!r}"
+                f"mooncake.autoscaling.{role}.min_replicas must be an integer, got {min_replicas!r}"
             )
         if min_replicas < 1:
             raise ValueError(
-                f"mooncake.autoscaling.{role}.min_replicas must be >= 1, "
-                f"got {min_replicas}"
+                f"mooncake.autoscaling.{role}.min_replicas must be >= 1, got {min_replicas}"
             )
 
     if max_replicas is not None:
         if not _is_plain_int(max_replicas):
             raise ValueError(
-                f"mooncake.autoscaling.{role}.max_replicas must be an integer, "
-                f"got {max_replicas!r}"
+                f"mooncake.autoscaling.{role}.max_replicas must be an integer, got {max_replicas!r}"
             )
         effective_min = min_replicas if _is_plain_int(min_replicas) else 1
         if max_replicas < effective_min:
@@ -328,8 +324,7 @@ def validate_mooncake_spec(mooncake: dict[str, Any]) -> None:
         and store.get("enabled") is not True
     ):
         raise ValueError(
-            "mooncake.store.cold_tier_enabled requires "
-            "mooncake.store.enabled to be true"
+            "mooncake.store.cold_tier_enabled requires mooncake.store.enabled to be true"
         )
 
     autoscaling = mooncake.get("autoscaling")

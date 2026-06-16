@@ -112,12 +112,8 @@ def _reconcile_workers(mode: str, prefill: int, decode: int, protocol: str):
     monitor._resolve_region_services = lambda *_a, **_k: mod.RegionServicesResolution(
         region_services=region_services
     )
-    monitor._resolve_regional_scope = lambda *_a, **_k: mod.RegionalScopeResolution(
-        in_region=True
-    )
-    monitor._gate_on_mooncake_master = lambda *_a, **_k: mod.MasterReadinessGate(
-        proceed=True
-    )
+    monitor._resolve_regional_scope = lambda *_a, **_k: mod.RegionalScopeResolution(in_region=True)
+    monitor._gate_on_mooncake_master = lambda *_a, **_k: mod.MasterReadinessGate(proceed=True)
     monitor._ensure_mooncake_configmap = lambda *_a, **_k: None
     monitor._create_pd_proxy = lambda *_a, **_k: None
     monitor._create_service = lambda *_a, **_k: None

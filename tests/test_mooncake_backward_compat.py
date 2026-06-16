@@ -117,9 +117,7 @@ def test_plain_spec_declines_the_distributed_branch(bundle: dict) -> None:
     monitor = _make_monitor()
 
     result = asyncio.run(
-        monitor._reconcile_mooncake(
-            bundle["name"], NAMESPACE, bundle["spec"], bundle["endpoint"]
-        )
+        monitor._reconcile_mooncake(bundle["name"], NAMESPACE, bundle["spec"], bundle["endpoint"])
     )
 
     assert result is None
@@ -141,9 +139,7 @@ def test_plain_spec_reconciles_to_one_deployment_service_ingress(bundle: dict) -
     """
     monitor = _make_monitor()
 
-    with patch(
-        "gco.services.inference_monitor.client.AutoscalingV2Api"
-    ) as mock_hpa_api:
+    with patch("gco.services.inference_monitor.client.AutoscalingV2Api") as mock_hpa_api:
         result = asyncio.run(
             monitor._reconcile_running(
                 bundle["name"], NAMESPACE, bundle["spec"], bundle["endpoint"]

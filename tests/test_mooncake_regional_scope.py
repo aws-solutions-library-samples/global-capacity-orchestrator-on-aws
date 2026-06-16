@@ -219,9 +219,7 @@ def test_a_single_foreign_master_is_enough_to_refuse(foreign: str) -> None:
         "metadata_server": _metadata_in(OWN_REGION),
     }
 
-    result = monitor._resolve_regional_scope(
-        "endpoint", "gco-inference", spec, region_services
-    )
+    result = monitor._resolve_regional_scope("endpoint", "gco-inference", spec, region_services)
 
     assert result.in_region is False
     assert result.state == "failed"

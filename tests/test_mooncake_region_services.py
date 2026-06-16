@@ -113,15 +113,11 @@ def test_spec_supplied_cold_tier_uri_is_ignored(monitor, monkeypatch):
         result = monitor._resolve_region_services("my-endpoint", mooncake)
 
     resolved_uri = result.region_services["cold_tier_s3_uri"]
-    assert resolved_uri == (
-        "s3://gco-regional-shared-acct-us-east-1/mooncake-kv/my-endpoint/"
-    )
+    assert resolved_uri == ("s3://gco-regional-shared-acct-us-east-1/mooncake-kv/my-endpoint/")
     assert "attacker-bucket" not in resolved_uri
 
 
-def test_store_without_master_address_defers_and_leaves_config_untouched(
-    monitor, monkeypatch
-):
+def test_store_without_master_address_defers_and_leaves_config_untouched(monitor, monkeypatch):
     """An enabled store with no own-region master address defers rendering.
 
     Rendering is skipped, the unresolved-master condition is reported, and no
@@ -133,9 +129,7 @@ def test_store_without_master_address_defers_and_leaves_config_untouched(
     mooncake = {"mode": "store", "store": {"enabled": True}}
 
     # No bucket lookup should be needed; resolution short-circuits.
-    with patch(
-        "gco.services.aws_ssm.get_ssm_parameter_optional"
-    ) as mock_ssm:
+    with patch("gco.services.aws_ssm.get_ssm_parameter_optional") as mock_ssm:
         result = monitor._resolve_region_services("my-endpoint", mooncake)
 
     assert result.render_skipped is True

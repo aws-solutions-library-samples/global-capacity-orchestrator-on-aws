@@ -79,9 +79,7 @@ class TestTargetRegionResolution:
         # Every object lands in the resolved regional bucket only.
         assert result["region"] == "eu-west-1"
         assert result["bucket"] == "gco-regional-shared-111122223333-eu-west-1"
-        assert result["s3_uri"] == (
-            "s3://gco-regional-shared-111122223333-eu-west-1/uploads"
-        )
+        assert result["s3_uri"] == ("s3://gco-regional-shared-111122223333-eu-west-1/uploads")
         assert result["files_uploaded"] == 1
 
         upload_bucket = s3.upload_file.call_args.args[1]
@@ -147,9 +145,9 @@ class TestAbsentParameterRejection:
                 return_value=None,
             ),
             patch("cli.models.boto3.client", return_value=s3),
+            pytest.raises(RuntimeError) as exc,
         ):
-            with pytest.raises(RuntimeError) as exc:
-                mgr.upload(str(f), region="eu-west-1")
+            mgr.upload(str(f), region="eu-west-1")
 
         assert "eu-west-1" in str(exc.value)
         s3.upload_file.assert_not_called()
@@ -166,9 +164,9 @@ class TestAbsentParameterRejection:
                 return_value="",
             ),
             patch("cli.models.boto3.client", return_value=s3),
+            pytest.raises(RuntimeError),
         ):
-            with pytest.raises(RuntimeError):
-                mgr.upload(str(f), region="eu-west-1")
+            mgr.upload(str(f), region="eu-west-1")
 
         s3.upload_file.assert_not_called()
 
@@ -198,9 +196,9 @@ class TestMidUploadFailure:
                 return_value="gco-regional-shared-111122223333-eu-west-1",
             ),
             patch("cli.models.boto3.client", return_value=s3),
+            pytest.raises(RuntimeError) as exc,
         ):
-            with pytest.raises(RuntimeError) as exc:
-                mgr.upload(str(tmp_path), region="eu-west-1")
+            mgr.upload(str(tmp_path), region="eu-west-1")
 
         message = str(exc.value)
         # The error explains the upload did not finish and names the bucket.
@@ -226,9 +224,9 @@ class TestMidUploadFailure:
                 return_value="gco-regional-shared-111122223333-eu-west-1",
             ),
             patch("cli.models.boto3.client", return_value=s3),
+            pytest.raises(RuntimeError),
         ):
-            with pytest.raises(RuntimeError):
-                mgr.upload(str(f), region="eu-west-1")
+            mgr.upload(str(f), region="eu-west-1")
 
 
 # =============================================================================
@@ -243,9 +241,9 @@ def test_missing_local_path_raises_before_resolution(config):
     with (
         patch("gco.services.aws_ssm.get_ssm_parameter_optional") as mock_ssm,
         patch("cli.models.boto3.client") as mock_boto,
+        pytest.raises(FileNotFoundError),
     ):
-        with pytest.raises(FileNotFoundError):
-            mgr.upload("/no/such/path", region="eu-west-1")
+        mgr.upload("/no/such/path", region="eu-west-1")
 
     mock_ssm.assert_not_called()
     mock_boto.assert_not_called()

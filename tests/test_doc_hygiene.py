@@ -163,17 +163,14 @@ def _patterns_for(feature: _Feature) -> tuple[tuple[str, re.Pattern[str]], ...]:
     """
     bad_allows = feature.allow_labels - _ALLOWABLE_LABELS
     assert not bad_allows, (
-        f"Feature '{feature.feature_id}' may not allow hard breadcrumb labels: "
-        f"{sorted(bad_allows)}"
+        f"Feature '{feature.feature_id}' may not allow hard breadcrumb labels: {sorted(bad_allows)}"
     )
     feature_tag = (
         "feature-property-tag",
         re.compile(r"Feature:\s*" + re.escape(feature.feature_id)),
     )
     shared = tuple(
-        (label, pattern)
-        for label, pattern in _SHARED_PATTERNS
-        if label not in feature.allow_labels
+        (label, pattern) for label, pattern in _SHARED_PATTERNS if label not in feature.allow_labels
     )
     return (*shared, feature_tag)
 

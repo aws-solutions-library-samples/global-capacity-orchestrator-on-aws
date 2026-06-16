@@ -31,7 +31,6 @@ import copy
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 from botocore.exceptions import ClientError
 from kubernetes.client.rest import ApiException
 
@@ -106,9 +105,7 @@ class _FakeCoreApi:
         self.config_maps: dict[str, object] = {}
         # The proxy admin key Secret is present with a non-empty value, so the
         # proxy front is allowed to materialize.
-        self._secret = SimpleNamespace(
-            string_data={"ADMIN_API_KEY": "an-admin-key"}, data=None
-        )
+        self._secret = SimpleNamespace(string_data={"ADMIN_API_KEY": "an-admin-key"}, data=None)
 
     def create_namespaced_service(self, namespace, service, **_kw):
         name = _name_of(service)
@@ -182,9 +179,12 @@ class _FakeDynamoTable:
 
     def put_item(self, Item, ConditionExpression=None, **_kw):  # noqa: N803
         key = Item["endpoint_name"]
-        if ConditionExpression and "attribute_not_exists" in ConditionExpression:
-            if key in self.items:
-                raise _conditional_check_error()
+        if (
+            ConditionExpression
+            and "attribute_not_exists" in ConditionExpression
+            and key in self.items
+        ):
+            raise _conditional_check_error()
         self.items[key] = copy.deepcopy(Item)
         return {}
 
@@ -203,9 +203,12 @@ class _FakeDynamoTable:
         **_kw,
     ):
         key = Key["endpoint_name"]
-        if ConditionExpression and "attribute_exists" in ConditionExpression:
-            if key not in self.items:
-                raise _conditional_check_error()
+        if (
+            ConditionExpression
+            and "attribute_exists" in ConditionExpression
+            and key not in self.items
+        ):
+            raise _conditional_check_error()
         item = self.items.setdefault(key, {"endpoint_name": key})
         values = ExpressionAttributeValues or {}
         names = ExpressionAttributeNames or {}
@@ -336,9 +339,7 @@ def test_split_endpoint_materializes_roles_proxy_and_role_keyed_status():
         "namespace": NAMESPACE,
     }
 
-    action = asyncio.run(
-        monitor._reconcile_running("chat", NAMESPACE, spec, endpoint)
-    )
+    action = asyncio.run(monitor._reconcile_running("chat", NAMESPACE, spec, endpoint))
 
     # The distributed branch owned the reconcile.
     assert action is not None
@@ -411,9 +412,7 @@ def test_topology_change_rescales_role_deployments():
         )
 
         first = store.get_endpoint("chat")
-        asyncio.run(
-            monitor._reconcile_running("chat", NAMESPACE, first["spec"], first)
-        )
+        asyncio.run(monitor._reconcile_running("chat", NAMESPACE, first["spec"], first))
 
         assert apps.deployments["chat-prefill"].spec.replicas == 2
         assert apps.deployments["chat-decode"].spec.replicas == 3
@@ -427,9 +426,7 @@ def test_topology_change_rescales_role_deployments():
         reloaded = store.get_endpoint("chat")
         assert reloaded["spec"]["mooncake"]["topology"] == {"prefill": 5, "decode": 1}
 
-        asyncio.run(
-            monitor._reconcile_running("chat", NAMESPACE, reloaded["spec"], reloaded)
-        )
+        asyncio.run(monitor._reconcile_running("chat", NAMESPACE, reloaded["spec"], reloaded))
 
     # The same Deployment objects were rescaled in place to the new counts.
     assert apps.deployments["chat-prefill"].spec.replicas == 5

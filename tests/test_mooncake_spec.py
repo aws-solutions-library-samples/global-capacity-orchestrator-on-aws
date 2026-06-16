@@ -23,16 +23,16 @@ from cli.inference import (
 
 class TestMooncakeConstants:
     def test_modes_are_the_three_known_modes(self):
-        assert MOONCAKE_MODES == {"disaggregated", "store", "both"}
+        assert {"disaggregated", "store", "both"} == MOONCAKE_MODES
 
     def test_transfer_protocols(self):
-        assert MOONCAKE_TRANSFER_PROTOCOLS == {"rdma", "tcp"}
+        assert {"rdma", "tcp"} == MOONCAKE_TRANSFER_PROTOCOLS
 
     def test_offload_tiers(self):
-        assert MOONCAKE_OFFLOAD_TIERS == {"cpu", "disk", "none"}
+        assert {"cpu", "disk", "none"} == MOONCAKE_OFFLOAD_TIERS
 
     def test_proxy_scheduling(self):
-        assert MOONCAKE_PROXY_SCHEDULING == {"round_robin"}
+        assert {"round_robin"} == MOONCAKE_PROXY_SCHEDULING
 
     def test_byte_size_bounds_are_signed_64_bit_range(self):
         assert MOONCAKE_BYTE_SIZE_MIN == 0

@@ -24,7 +24,7 @@ without waiting on real time.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -109,9 +109,7 @@ def test_resumes_when_master_reaches_ready_and_clears_clock(monitor):
     lets creation proceed with no reported state or error, and the deferral
     clock is cleared so a later master restart restarts the window cleanly.
     """
-    monitor._master_deferral_since[ENDPOINT] = datetime.now(timezone.utc) - timedelta(
-        seconds=30
-    )
+    monitor._master_deferral_since[ENDPOINT] = datetime.now(UTC) - timedelta(seconds=30)
     _set_ready_replicas(monitor, 1)
 
     gate = monitor._gate_on_mooncake_master(ENDPOINT, NAMESPACE, STORE_SPEC)
@@ -130,9 +128,7 @@ def test_keeps_deferring_after_wait_window_and_surfaces_not_ready_error(monitor)
     stays in ``creating`` but now carries a not-ready error, and the master is
     neither deleted nor modified.
     """
-    monitor._master_deferral_since[ENDPOINT] = datetime.now(timezone.utc) - timedelta(
-        seconds=601
-    )
+    monitor._master_deferral_since[ENDPOINT] = datetime.now(UTC) - timedelta(seconds=601)
     _set_ready_replicas(monitor, 0)
 
     gate = monitor._gate_on_mooncake_master(ENDPOINT, NAMESPACE, STORE_SPEC)

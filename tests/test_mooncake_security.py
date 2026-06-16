@@ -101,9 +101,7 @@ def test_unnamed_admin_secret_rejects_and_creates_no_proxy(monitor):
     from gco.services.inference_monitor import AdminApiKeySecretError
 
     with pytest.raises(AdminApiKeySecretError) as excinfo:
-        monitor._create_pd_proxy(
-            "endpoint", "gco-inference", _proxy_spec(secret_name=None), {}
-        )
+        monitor._create_pd_proxy("endpoint", "gco-inference", _proxy_spec(secret_name=None), {})
 
     # No Secret was named, so the recorded name is empty.
     assert excinfo.value.secret is None
@@ -123,9 +121,7 @@ def test_absent_admin_secret_rejects_and_creates_no_proxy(monitor):
     monitor.core_v1.read_namespaced_secret.side_effect = ApiException(status=404)
 
     with pytest.raises(AdminApiKeySecretError) as excinfo:
-        monitor._create_pd_proxy(
-            "endpoint", "gco-inference", _proxy_spec("endpoint-admin"), {}
-        )
+        monitor._create_pd_proxy("endpoint", "gco-inference", _proxy_spec("endpoint-admin"), {})
 
     assert excinfo.value.secret == "endpoint-admin"
     monitor.apps_v1.create_namespaced_deployment.assert_not_called()
@@ -147,9 +143,7 @@ def test_empty_admin_key_rejects_and_creates_no_proxy(monitor):
     monitor.core_v1.read_namespaced_secret.return_value = empty
 
     with pytest.raises(AdminApiKeySecretError) as excinfo:
-        monitor._create_pd_proxy(
-            "endpoint", "gco-inference", _proxy_spec("endpoint-admin"), {}
-        )
+        monitor._create_pd_proxy("endpoint", "gco-inference", _proxy_spec("endpoint-admin"), {})
 
     assert excinfo.value.secret == "endpoint-admin"
     monitor.apps_v1.create_namespaced_deployment.assert_not_called()
@@ -169,9 +163,7 @@ def test_verify_admin_secret_reports_each_failure_mode(monitor):
     # Names a Secret that the API cannot find.
     monitor.core_v1.read_namespaced_secret.side_effect = ApiException(status=404)
     with pytest.raises(AdminApiKeySecretError) as absent:
-        monitor._verify_admin_api_key_secret(
-            {"admin_api_key_secret": "missing"}, "gco-inference"
-        )
+        monitor._verify_admin_api_key_secret({"admin_api_key_secret": "missing"}, "gco-inference")
     assert absent.value.secret == "missing"
 
     # Names a Secret whose key value is empty.
@@ -181,9 +173,7 @@ def test_verify_admin_secret_reports_each_failure_mode(monitor):
     blank.data = {"ADMIN_API_KEY": ""}
     monitor.core_v1.read_namespaced_secret.return_value = blank
     with pytest.raises(AdminApiKeySecretError) as empty:
-        monitor._verify_admin_api_key_secret(
-            {"admin_api_key_secret": "blank"}, "gco-inference"
-        )
+        monitor._verify_admin_api_key_secret({"admin_api_key_secret": "blank"}, "gco-inference")
     assert empty.value.secret == "blank"
 
 
@@ -206,14 +196,10 @@ def test_admin_key_injected_only_by_secret_reference(monitor):
 
     # A real key value lives only in the Secret; it is never handed to the spec.
     key_material = "super-secret-admin-key-value"
-    secret = _secret_with_key(
-        value_b64=base64.b64encode(key_material.encode()).decode()
-    )
+    secret = _secret_with_key(value_b64=base64.b64encode(key_material.encode()).decode())
     monitor.core_v1.read_namespaced_secret.return_value = secret
 
-    monitor._create_pd_proxy(
-        "endpoint", "gco-inference", _proxy_spec("endpoint-admin"), {}
-    )
+    monitor._create_pd_proxy("endpoint", "gco-inference", _proxy_spec("endpoint-admin"), {})
 
     deploy_args, _ = monitor.apps_v1.create_namespaced_deployment.call_args
     deployment = deploy_args[1]
@@ -315,9 +301,7 @@ def test_existing_allow_rules_are_left_in_place(monitor):
     Each widening rule that comes back as already-existing (``409``) is left
     untouched, the call succeeds, and no deny policy is read or mutated.
     """
-    monitor.networking_v1.create_namespaced_network_policy.side_effect = ApiException(
-        status=409
-    )
+    monitor.networking_v1.create_namespaced_network_policy.side_effect = ApiException(status=409)
 
     # Already-present widening rules are accepted without error.
     monitor._ensure_intra_namespace_network_policies("gco-inference", {})

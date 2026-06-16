@@ -146,8 +146,7 @@ def test_upload_resolves_and_writes_only_the_target_region(
             f"object written to {bucket!r}, expected {expected_bucket!r}"
         )
         assert write_region == target_region, (
-            f"object written through region {write_region!r}, expected "
-            f"{target_region!r}"
+            f"object written through region {write_region!r}, expected {target_region!r}"
         )
 
     written_buckets = {bucket for _, bucket, _ in writes}

@@ -233,15 +233,16 @@ class RegionalBucketManager:
         s3 = self._get_s3_client(region)
         uploaded = 0
 
+        files: list[tuple[Path, str]]
         if local.is_file():
             files = [(local, local.name)]
         else:
             files = []
             for root, _dirs, names in os.walk(local):
                 for fname in names:
-                    file_path = Path(root) / fname
-                    relative = file_path.relative_to(local)
-                    files.append((file_path, str(relative)))
+                    walk_path = Path(root) / fname
+                    rel = walk_path.relative_to(local)
+                    files.append((walk_path, str(rel)))
 
         for file_path, relative in files:
             key = f"{prefix}/{relative}"

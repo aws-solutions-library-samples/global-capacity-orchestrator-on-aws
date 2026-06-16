@@ -25,7 +25,7 @@ same configuration out of each example's budget.
 
 from __future__ import annotations
 
-from functools import lru_cache
+from functools import cache
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -137,7 +137,7 @@ def _synth_regional_template(
         return assertions.Template.from_stack(stack)
 
 
-@lru_cache(maxsize=None)
+@cache
 def _regional_shared_surface(
     region: str,
     fsx_enabled: bool,
@@ -197,7 +197,9 @@ class TestRegionalSharedBucketAlwaysProvisioned:
             unique=True,
         ),
         fsx_enabled=st.booleans(),
-        toggle_values=st.lists(st.booleans(), min_size=len(_TOGGLE_KEYS), max_size=len(_TOGGLE_KEYS)),
+        toggle_values=st.lists(
+            st.booleans(), min_size=len(_TOGGLE_KEYS), max_size=len(_TOGGLE_KEYS)
+        ),
     )
     def test_bucket_and_parameters_present_for_every_region(
         self,
@@ -208,12 +210,10 @@ class TestRegionalSharedBucketAlwaysProvisioned:
         """Each region's template carries exactly one ``gco-regional-shared-``
         bucket and exactly three discovery parameters, regardless of toggles.
         """
-        toggles = tuple(zip(_TOGGLE_KEYS, toggle_values))
+        toggles = tuple(zip(_TOGGLE_KEYS, toggle_values, strict=False))
 
         for region in regions:
-            bucket_names, parameter_names = _regional_shared_surface(
-                region, fsx_enabled, toggles
-            )
+            bucket_names, parameter_names = _regional_shared_surface(region, fsx_enabled, toggles)
 
             assert len(bucket_names) == 1, (
                 f"Region={region!r}, fsx={fsx_enabled}, toggles={dict(toggles)}: "

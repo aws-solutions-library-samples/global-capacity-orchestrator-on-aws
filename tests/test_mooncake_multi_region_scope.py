@@ -189,9 +189,7 @@ def test_out_of_region_explicit_peer_is_rejected():
     }
     region_services = {"master_server_address": "mooncake-master:50051"}
 
-    result = monitor._resolve_regional_scope(
-        "shared-endpoint", NAMESPACE, spec, region_services
-    )
+    result = monitor._resolve_regional_scope("shared-endpoint", NAMESPACE, spec, region_services)
 
     assert result.in_region is False
     assert result.state == "failed"

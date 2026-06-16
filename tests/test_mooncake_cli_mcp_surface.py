@@ -34,7 +34,6 @@ from cli.inference import InferenceManager
 # Ensure mcp/ is importable, then load the server so every tool is registered.
 sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
 
-import cli_runner  # noqa: E402
 import run_mcp  # noqa: E402  (import for path/registration side effects)
 from tools.inference import (  # noqa: E402
     deploy_disaggregated_inference,
@@ -59,9 +58,7 @@ def _make_manager() -> InferenceManager:
 def _audit_entries(caplog) -> list[dict]:
     """Pull the JSON audit entries out of caplog, in order."""
     return [
-        json.loads(record.message)
-        for record in caplog.records
-        if record.name == "gco.mcp.audit"
+        json.loads(record.message) for record in caplog.records if record.name == "gco.mcp.audit"
     ]
 
 
@@ -128,9 +125,11 @@ class TestDeployDefaultImage:
         mock_store = MagicMock()
         mgr = _make_manager()
 
-        with patch.object(mgr, "_get_store", return_value=mock_store):
-            with pytest.raises(ValueError, match="image is required"):
-                mgr.deploy("ep", image=None, target_regions=["us-east-1"])
+        with (
+            patch.object(mgr, "_get_store", return_value=mock_store),
+            pytest.raises(ValueError, match="image is required"),
+        ):
+            mgr.deploy("ep", image=None, target_regions=["us-east-1"])
 
         mock_store.create_endpoint.assert_not_called()
 
@@ -141,30 +140,34 @@ class TestDeployModeRejection:
         mock_store = MagicMock()
         mgr = _make_manager()
 
-        with patch.object(mgr, "_get_store", return_value=mock_store):
-            with pytest.raises(ValueError, match="mode"):
-                mgr.deploy(
-                    "ep",
-                    image="img:v1",
-                    target_regions=["us-east-1"],
-                    mooncake_mode="turbo",
-                    rewrite_image=False,
-                )
+        with (
+            patch.object(mgr, "_get_store", return_value=mock_store),
+            pytest.raises(ValueError, match="mode"),
+        ):
+            mgr.deploy(
+                "ep",
+                image="img:v1",
+                target_regions=["us-east-1"],
+                mooncake_mode="turbo",
+                rewrite_image=False,
+            )
 
         mock_store.create_endpoint.assert_not_called()
 
     def test_rejection_names_allowed_modes(self):
         """The rejection message lists the allowed mode values."""
         mgr = _make_manager()
-        with patch.object(mgr, "_get_store", return_value=MagicMock()):
-            with pytest.raises(ValueError) as excinfo:
-                mgr.deploy(
-                    "ep",
-                    image="img:v1",
-                    target_regions=["us-east-1"],
-                    mooncake_mode="turbo",
-                    rewrite_image=False,
-                )
+        with (
+            patch.object(mgr, "_get_store", return_value=MagicMock()),
+            pytest.raises(ValueError) as excinfo,
+        ):
+            mgr.deploy(
+                "ep",
+                image="img:v1",
+                target_regions=["us-east-1"],
+                mooncake_mode="turbo",
+                rewrite_image=False,
+            )
         message = str(excinfo.value)
         assert "disaggregated" in message
         assert "store" in message
@@ -204,9 +207,11 @@ class TestSetTopology:
         mock_store = MagicMock()
         mgr = _make_manager()
 
-        with patch.object(mgr, "_get_store", return_value=mock_store):
-            with pytest.raises(ValueError, match="decode"):
-                mgr.set_topology("ep", prefill=2, decode=5000)
+        with (
+            patch.object(mgr, "_get_store", return_value=mock_store),
+            pytest.raises(ValueError, match="decode"),
+        ):
+            mgr.set_topology("ep", prefill=2, decode=5000)
 
         mock_store.get_endpoint.assert_not_called()
         mock_store.update_spec.assert_not_called()
@@ -216,9 +221,11 @@ class TestSetTopology:
         mock_store = MagicMock()
         mgr = _make_manager()
 
-        with patch.object(mgr, "_get_store", return_value=mock_store):
-            with pytest.raises(ValueError, match="prefill"):
-                mgr.set_topology("ep", prefill="two", decode=1)  # type: ignore[arg-type]
+        with (
+            patch.object(mgr, "_get_store", return_value=mock_store),
+            pytest.raises(ValueError, match="prefill"),
+        ):
+            mgr.set_topology("ep", prefill="two", decode=1)  # type: ignore[arg-type]
 
         mock_store.update_spec.assert_not_called()
 
@@ -248,7 +255,10 @@ class TestConfigureStore:
         mock_store = MagicMock()
         mock_store.get_endpoint.return_value = {
             "endpoint_name": "ep",
-            "spec": {"image": "img:v1", "mooncake": {"mode": "both", "topology": {"prefill": 1, "decode": 1}}},
+            "spec": {
+                "image": "img:v1",
+                "mooncake": {"mode": "both", "topology": {"prefill": 1, "decode": 1}},
+            },
         }
         mock_store.update_spec.return_value = {"endpoint_name": "ep", "desired_state": "deploying"}
         mgr = _make_manager()
@@ -292,9 +302,11 @@ class TestConfigureStore:
         }
         mgr = _make_manager()
 
-        with patch.object(mgr, "_get_store", return_value=mock_store):
-            with pytest.raises(ValueError, match="global_segment_size"):
-                mgr.configure_store("ep", {"enabled": True, "global_segment_size": -5})
+        with (
+            patch.object(mgr, "_get_store", return_value=mock_store),
+            pytest.raises(ValueError, match="global_segment_size"),
+        ):
+            mgr.configure_store("ep", {"enabled": True, "global_segment_size": -5})
 
         mock_store.update_spec.assert_not_called()
 
@@ -335,9 +347,7 @@ class TestDeployDisaggregatedInferenceTool:
             caplog.at_level(logging.INFO, logger="gco.mcp.audit"),
             patch("cli_runner.subprocess.run") as mock_run,
         ):
-            mock_run.return_value = MagicMock(
-                returncode=1, stdout="", stderr="boom: no regions"
-            )
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="boom: no regions")
             result = deploy_disaggregated_inference("pd")
 
         payload = json.loads(result)
@@ -384,9 +394,7 @@ class TestSetMooncakeTopologyTool:
             caplog.at_level(logging.INFO, logger="gco.mcp.audit"),
             patch("cli_runner.subprocess.run") as mock_run,
         ):
-            mock_run.return_value = MagicMock(
-                returncode=2, stdout="", stderr="count out of range"
-            )
+            mock_run.return_value = MagicMock(returncode=2, stdout="", stderr="count out of range")
             result = set_mooncake_topology("pd", prefill=1, decode=99999)
 
         payload = json.loads(result)
@@ -424,9 +432,7 @@ class TestMooncakeTopologyStatusTool:
             caplog.at_level(logging.INFO, logger="gco.mcp.audit"),
             patch("cli_runner.subprocess.run") as mock_run,
         ):
-            mock_run.return_value = MagicMock(
-                returncode=1, stdout="", stderr="endpoint not found"
-            )
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="endpoint not found")
             result = mooncake_topology_status("ghost")
 
         payload = json.loads(result)

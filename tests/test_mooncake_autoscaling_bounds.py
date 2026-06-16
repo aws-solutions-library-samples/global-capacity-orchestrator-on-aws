@@ -117,9 +117,7 @@ def test_enabled_autoscaling_creates_bounded_per_role_autoscaler(spec, name):
     endpoint_spec = {"mooncake": spec}
 
     for role in _ROLES:
-        with patch(
-            "gco.services.inference_monitor.client.AutoscalingV2Api"
-        ) as mock_api:
+        with patch("gco.services.inference_monitor.client.AutoscalingV2Api") as mock_api:
             create = mock_api.return_value.create_namespaced_horizontal_pod_autoscaler
             monitor._create_role_hpa(name, "gco-inference", endpoint_spec, role)
 
@@ -153,9 +151,7 @@ def test_without_autoscaling_no_hpa_and_replicas_track_topology(spec, name):
     endpoint_spec = {"mooncake": spec}
 
     for role in _ROLES:
-        with patch(
-            "gco.services.inference_monitor.client.AutoscalingV2Api"
-        ) as mock_api:
+        with patch("gco.services.inference_monitor.client.AutoscalingV2Api") as mock_api:
             create = mock_api.return_value.create_namespaced_horizontal_pod_autoscaler
             monitor._create_role_hpa(name, "gco-inference", endpoint_spec, role)
         create.assert_not_called()

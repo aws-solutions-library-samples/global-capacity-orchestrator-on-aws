@@ -9,11 +9,10 @@
 # Both upstream dependencies are pinned to explicit versions for reproducible,
 # auditable builds. The vLLM base image tag is pinned by the build ARG below.
 # The extra Python packages layered on top (the Mooncake transfer engine) are
-# pinned in pyproject.toml under the [project.optional-dependencies]
-# "mooncake-image" group, which this Dockerfile reads at build time so the
-# image's extra packages have a single source of truth. Never relax either pin
-# to a mutable or rolling tag (such as `latest`); doing so breaks build
-# reproducibility and image provenance.
+# pinned in pyproject.toml under the [tool.gco.mooncake-image] table, which this
+# Dockerfile reads at build time so the image's extra packages have a single
+# source of truth. Never relax either pin to a mutable or rolling tag (such as
+# `latest`); doing so breaks build reproducibility and image provenance.
 
 # Pinned vLLM OpenAI server base. Bump intentionally when validating a new
 # vLLM release, and keep it an explicit version tag — never `latest`.

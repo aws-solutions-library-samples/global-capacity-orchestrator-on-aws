@@ -166,9 +166,7 @@ def _mooncake_blocks(draw: st.DrawFn) -> dict[str, Any]:
     mode = draw(st.sampled_from(_MODES))
     block: dict[str, Any] = {"mode": mode}
 
-    if mode in _DISAGGREGATED:
-        block["topology"] = {"prefill": draw(_counts), "decode": draw(_counts)}
-    elif draw(st.booleans()):
+    if mode in _DISAGGREGATED or draw(st.booleans()):
         block["topology"] = {"prefill": draw(_counts), "decode": draw(_counts)}
 
     if draw(st.booleans()):

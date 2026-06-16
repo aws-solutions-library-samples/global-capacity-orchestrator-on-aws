@@ -357,7 +357,7 @@ def build_kv_transfer_config(mooncake: dict[str, Any], role: str) -> str:
             configuration is emitted in that case.
     """
     mode = mooncake.get("mode")
-    supported_roles = _WORKER_ROLES_BY_MODE.get(mode)
+    supported_roles = _WORKER_ROLES_BY_MODE.get(mode) if isinstance(mode, str) else None
     if supported_roles is None or role not in supported_roles:
         raise ValueError(f"Unsupported (mode, role) pair: ({mode!r}, {role!r})")
 
@@ -384,9 +384,7 @@ def build_kv_transfer_config(mooncake: dict[str, Any], role: str) -> str:
     )
 
 
-def bootstrap_port_for_worker(
-    base_port: int, dp_rank: int, tp_size: int, tp_rank: int
-) -> int:
+def bootstrap_port_for_worker(base_port: int, dp_rank: int, tp_size: int, tp_rank: int) -> int:
     """Compute the bootstrap port for a ``(dp_rank, tp_rank)`` worker.
 
     The port is ``base_port + dp_rank * tp_size + tp_rank``. For a fixed
@@ -1014,7 +1012,7 @@ class InferenceMonitor:
         ``single`` role. The order is fixed so role creation and status
         reporting are deterministic across passes.
         """
-        roles = _WORKER_ROLES_BY_MODE.get(mode, set())
+        roles = _WORKER_ROLES_BY_MODE.get(mode, set()) if isinstance(mode, str) else set()
         return [role for role in ("prefill", "decode", "single") if role in roles]
 
     @staticmethod
@@ -1030,11 +1028,9 @@ class InferenceMonitor:
         if mode in ("store", "both"):
             return True
         transfer = mooncake.get("transfer") or {}
-        return transfer.get("protocol", "rdma") == "rdma"
+        return bool(transfer.get("protocol", "rdma") == "rdma")
 
-    def _ensure_mooncake_configmap(
-        self, name: str, ns: str, cfg: dict[str, Any]
-    ) -> None:
+    def _ensure_mooncake_configmap(self, name: str, ns: str, cfg: dict[str, Any]) -> None:
         """Create or update the shared transport ConfigMap for an endpoint.
 
         The rendered transport settings (the dict produced by
@@ -1240,9 +1236,7 @@ class InferenceMonitor:
         # master is left untouched and reported as still coming up.
         services = self._resolve_region_services(name, mooncake)
         if services.render_skipped:
-            self.store.update_region_status(
-                name, self.region, "creating", error=services.error
-            )
+            self.store.update_region_status(name, self.region, "creating", error=services.error)
             return {
                 "action": "reconcile_mooncake",
                 "endpoint": name,
@@ -1298,12 +1292,8 @@ class InferenceMonitor:
             try:
                 self._create_pd_proxy(name, ns, spec, endpoint)
             except AdminApiKeySecretError as e:
-                logger.error(
-                    "Proxy for endpoint %s in %s not started: %s", name, ns, e
-                )
-                self.store.update_region_status(
-                    name, self.region, "failed", error=str(e)
-                )
+                logger.error("Proxy for endpoint %s in %s not started: %s", name, ns, e)
+                self.store.update_region_status(name, self.region, "failed", error=str(e))
                 return {
                     "action": "reconcile_mooncake",
                     "endpoint": name,
@@ -1602,7 +1592,7 @@ class InferenceMonitor:
         """
         mooncake = spec.get("mooncake") or {}
         mode = mooncake.get("mode")
-        roles = _WORKER_ROLES_BY_MODE.get(mode, set())
+        roles = _WORKER_ROLES_BY_MODE.get(mode, set()) if isinstance(mode, str) else set()
 
         # MooncakeConnector peers are the sibling role Services within this
         # namespace; collect them in a stable order for deterministic reporting.
@@ -1664,10 +1654,7 @@ class InferenceMonitor:
                 in_region=False,
                 peer_addresses=ordered,
                 state="failed",
-                error=(
-                    "cross-region boundary violation: "
-                    f"{detail}; expected region {self.region}"
-                ),
+                error=(f"cross-region boundary violation: {detail}; expected region {self.region}"),
             )
 
         return RegionalScopeResolution(in_region=True, peer_addresses=ordered)
@@ -1696,10 +1683,7 @@ class InferenceMonitor:
         """
         mooncake = spec.get("mooncake", {}) or {}
         store = mooncake.get("store", {}) or {}
-        image = (
-            store.get("master_image")
-            or os.environ.get(MOONCAKE_MASTER_IMAGE_ENV, "").strip()
-        )
+        image = store.get("master_image") or os.environ.get(MOONCAKE_MASTER_IMAGE_ENV, "").strip()
 
         labels = {"app": MOONCAKE_MASTER_SERVICE, "project": "gco"}
 
@@ -1789,9 +1773,7 @@ class InferenceMonitor:
             spec=client.V1StatefulSetSpec(
                 service_name=MOONCAKE_MASTER_SERVICE,
                 replicas=1,
-                selector=client.V1LabelSelector(
-                    match_labels={"app": MOONCAKE_MASTER_SERVICE}
-                ),
+                selector=client.V1LabelSelector(match_labels={"app": MOONCAKE_MASTER_SERVICE}),
                 template=client.V1PodTemplateSpec(
                     metadata=client.V1ObjectMeta(labels=labels),
                     spec=client.V1PodSpec(
@@ -1811,9 +1793,7 @@ class InferenceMonitor:
         # Create-if-absent: a 409 means the shared master already exists, which
         # is the steady state. Leave it untouched and treat it as success.
         try:
-            self.core_v1.create_namespaced_service(
-                ns, service, _request_timeout=self._k8s_timeout
-            )
+            self.core_v1.create_namespaced_service(ns, service, _request_timeout=self._k8s_timeout)
             logger.info("Created shared mooncake master service in %s", ns)
         except ApiException as e:
             if e.status == 409:
@@ -1963,9 +1943,7 @@ class InferenceMonitor:
         )
         return MasterReadinessGate(proceed=False, state="creating", error=None)
 
-    def _ensure_intra_namespace_network_policies(
-        self, ns: str, spec: dict[str, Any]
-    ) -> None:
+    def _ensure_intra_namespace_network_policies(self, ns: str, spec: dict[str, Any]) -> None:
         """Apply the intra-namespace allow rules disaggregated inference needs.
 
         Alongside the default-deny posture in ``gco-inference`` (defined in
@@ -2001,18 +1979,14 @@ class InferenceMonitor:
         base_port = transfer.get("bootstrap_base_port", MOONCAKE_BOOTSTRAP_BASE_PORT)
         try:
             base_port = int(base_port)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             base_port = MOONCAKE_BOOTSTRAP_BASE_PORT
         end_port = min(base_port + MOONCAKE_BOOTSTRAP_PORT_SPAN, MAX_BOOTSTRAP_PORT)
 
         labels = {"project": "gco"}
-        master_selector = client.V1LabelSelector(
-            match_labels={"app": MOONCAKE_MASTER_SERVICE}
-        )
+        master_selector = client.V1LabelSelector(match_labels={"app": MOONCAKE_MASTER_SERVICE})
         inference_selector = client.V1LabelSelector(match_labels=INFERENCE_POD_SELECTOR)
-        inference_peer = [
-            client.V1NetworkPolicyPeer(pod_selector=inference_selector)
-        ]
+        inference_peer = [client.V1NetworkPolicyPeer(pod_selector=inference_selector)]
 
         policies = [
             (
@@ -2368,9 +2342,7 @@ class InferenceMonitor:
         # Single store instance: kv_both runs as one replica.
         return 1
 
-    def _create_role_deployment(
-        self, name: str, ns: str, spec: dict[str, Any], role: str
-    ) -> None:
+    def _create_role_deployment(self, name: str, ns: str, spec: dict[str, Any], role: str) -> None:
         """Materialize one role Deployment for a Mooncake endpoint.
 
         Disaggregated and ``both`` modes split work across ``{name}-prefill``
@@ -2416,9 +2388,7 @@ class InferenceMonitor:
         )
         logger.info("Created role deployment %s/%s (role=%s)", ns, deploy_name, role)
 
-    def _verify_admin_api_key_secret(
-        self, proxy: dict[str, Any], ns: str
-    ) -> str:
+    def _verify_admin_api_key_secret(self, proxy: dict[str, Any], ns: str) -> str:
         """Confirm the proxy admin key Secret exists and carries a key value.
 
         The proxy guards a privileged admin path and must never run without a
@@ -2440,7 +2410,7 @@ class InferenceMonitor:
                 absent, or its ``ADMIN_API_KEY`` value is empty or missing.
         """
         secret_name = proxy.get("admin_api_key_secret")
-        if not secret_name or not isinstance(secret_name, str):
+        if not isinstance(secret_name, str) or not secret_name:
             raise AdminApiKeySecretError(None, "no admin API key Secret was named")
 
         try:
@@ -2479,7 +2449,7 @@ class InferenceMonitor:
             return False
         try:
             return bool(base64.b64decode(encoded))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             # A value that cannot be decoded is unusable as an admin key.
             return False
 
@@ -2536,9 +2506,7 @@ class InferenceMonitor:
         admin_secret_name = self._verify_admin_api_key_secret(proxy, ns)
 
         proxy_env = build_pd_proxy_config(mooncake)
-        container_env = [
-            client.V1EnvVar(name=k, value=v) for k, v in proxy_env.items()
-        ]
+        container_env = [client.V1EnvVar(name=k, value=v) for k, v in proxy_env.items()]
         # Deliver the admin key by Secret reference only — its value is never
         # placed on the spec or a command argument.
         container_env.append(
@@ -2662,9 +2630,7 @@ class InferenceMonitor:
             else:
                 raise
 
-    def _update_proxy_ingress(
-        self, name: str, proxy_name: str, namespace: str
-    ) -> None:
+    def _update_proxy_ingress(self, name: str, proxy_name: str, namespace: str) -> None:
         """Create or update the public Ingress that routes ``/v1/*`` to the proxy.
 
         Only the OpenAI-compatible serving paths are published: the rule routes
@@ -2678,9 +2644,7 @@ class InferenceMonitor:
         # The public Ingress carries only the serving prefix. The proxy's admin
         # path is filtered out here so no future edit to the published set can
         # route it in from outside the namespace.
-        published_paths = [
-            p for p in [PD_PROXY_PUBLIC_PATH_PREFIX] if p != PD_PROXY_ADMIN_PATH
-        ]
+        published_paths = [p for p in [PD_PROXY_PUBLIC_PATH_PREFIX] if p != PD_PROXY_ADMIN_PATH]
         ingress = client.V1Ingress(
             metadata=client.V1ObjectMeta(
                 name=f"inference-{proxy_name}",
@@ -3203,9 +3167,7 @@ class InferenceMonitor:
             if e.status != 404:
                 logger.error("Failed to delete HPA for %s: %s", name, e)
 
-    def _build_hpa_metrics(
-        self, metrics_config: list[dict[str, Any]]
-    ) -> list[Any]:
+    def _build_hpa_metrics(self, metrics_config: list[dict[str, Any]]) -> list[Any]:
         """Translate a metrics config list into autoscaler metric specs.
 
         Each entry names a resource (``cpu`` or ``memory``) and a target
@@ -3312,9 +3274,7 @@ class InferenceMonitor:
             )
         except ApiException as e:
             if e.status == 409:
-                autoscaling_v2.patch_namespaced_horizontal_pod_autoscaler(
-                    hpa_name, namespace, hpa
-                )
+                autoscaling_v2.patch_namespaced_horizontal_pod_autoscaler(hpa_name, namespace, hpa)
                 logger.info("Updated HPA %s", hpa_name)
             else:
                 raise
@@ -3338,9 +3298,7 @@ class InferenceMonitor:
             metrics_config=metrics_config,
         )
 
-    def _create_role_hpa(
-        self, name: str, ns: str, spec: dict[str, Any], role: str
-    ) -> None:
+    def _create_role_hpa(self, name: str, ns: str, spec: dict[str, Any], role: str) -> None:
         """Create or update one autoscaler for a single Mooncake role.
 
         When the endpoint's ``mooncake.autoscaling`` block is enabled and

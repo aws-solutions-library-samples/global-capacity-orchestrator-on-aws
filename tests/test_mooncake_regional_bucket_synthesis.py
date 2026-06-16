@@ -26,7 +26,7 @@ synthesized template is cached so every assertion reuses one synth.
 
 from __future__ import annotations
 
-from functools import lru_cache
+from functools import cache
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -66,7 +66,7 @@ _EXPECTED_KMS_ACTIONS = {
 }
 
 
-@lru_cache(maxsize=None)
+@cache
 def _regional_template_json() -> dict[str, Any]:
     """Synthesize the regional stack once and return its template JSON.
 
@@ -130,8 +130,7 @@ def _regional_key_logical_id(template: dict[str, Any], bucket_logical_id: str) -
     by_default = encryption["ServerSideEncryptionConfiguration"][0]["ServerSideEncryptionByDefault"]
     key_ref = by_default["KMSMasterKeyID"]
     assert isinstance(key_ref, dict) and "Fn::GetAtt" in key_ref, (
-        f"regional bucket must be encrypted with a customer-managed key reference, "
-        f"got {key_ref!r}"
+        f"regional bucket must be encrypted with a customer-managed key reference, got {key_ref!r}"
     )
     return key_ref["Fn::GetAtt"][0]
 
@@ -167,9 +166,7 @@ def _pod_role_statements(template: dict[str, Any]) -> list[dict[str, Any]]:
         if res.get("Type") != "AWS::IAM::Policy":
             continue
         roles = res.get("Properties", {}).get("Roles", [])
-        bound = any(
-            isinstance(ref, dict) and ref.get("Ref") in role_ids for ref in roles
-        )
+        bound = any(isinstance(ref, dict) and ref.get("Ref") in role_ids for ref in roles)
         if not bound:
             continue
         doc = res.get("Properties", {}).get("PolicyDocument", {})
@@ -209,8 +206,7 @@ class TestRegionalSharedBucketSynthesis:
         ]
 
         assert named_regional == [_expected_bucket_name()], (
-            f"expected exactly one bucket named {_expected_bucket_name()!r}, "
-            f"found {named_regional}"
+            f"expected exactly one bucket named {_expected_bucket_name()!r}, found {named_regional}"
         )
 
     def test_regional_bucket_uses_kms_encryption(self) -> None:
@@ -311,8 +307,7 @@ class TestRegionalSharedBucketSynthesis:
         for entry in resource_entries:
             assert entry != "*"
             assert _references_logical_id(entry, bucket_id), (
-                f"regional S3 grant resource {entry!r} must reference only the "
-                f"regional bucket"
+                f"regional S3 grant resource {entry!r} must reference only the regional bucket"
             )
 
     def test_pod_role_kms_grant_targets_only_the_regional_key(self) -> None:

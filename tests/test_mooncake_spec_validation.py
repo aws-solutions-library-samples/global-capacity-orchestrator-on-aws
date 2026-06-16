@@ -230,9 +230,7 @@ class TestAutoscalingRejections:
             "enabled": True,
             role: {"min_replicas": 5, "max_replicas": 2},
         }
-        with pytest.raises(
-            ValueError, match=f"mooncake.autoscaling.{role}.max_replicas"
-        ):
+        with pytest.raises(ValueError, match=f"mooncake.autoscaling.{role}.max_replicas"):
             validate_mooncake_spec(block)
 
     @pytest.mark.parametrize("bound", ["min_replicas", "max_replicas"])
@@ -275,9 +273,7 @@ def manager_with_spy_store():
 
 
 class TestDeployValidateBeforeWrite:
-    def test_invalid_mooncake_mode_is_rejected_and_nothing_is_written(
-        self, manager_with_spy_store
-    ):
+    def test_invalid_mooncake_mode_is_rejected_and_nothing_is_written(self, manager_with_spy_store):
         mgr, store = manager_with_spy_store
         with pytest.raises(ValueError) as exc:
             mgr.deploy(
@@ -292,9 +288,7 @@ class TestDeployValidateBeforeWrite:
         assert "both" in message
         store.create_endpoint.assert_not_called()
 
-    def test_out_of_range_topology_is_rejected_and_nothing_is_written(
-        self, manager_with_spy_store
-    ):
+    def test_out_of_range_topology_is_rejected_and_nothing_is_written(self, manager_with_spy_store):
         mgr, store = manager_with_spy_store
         with pytest.raises(ValueError, match="mooncake.topology.prefill"):
             mgr.deploy(
@@ -306,9 +300,7 @@ class TestDeployValidateBeforeWrite:
             )
         store.create_endpoint.assert_not_called()
 
-    def test_bad_store_byte_size_is_rejected_and_nothing_is_written(
-        self, manager_with_spy_store
-    ):
+    def test_bad_store_byte_size_is_rejected_and_nothing_is_written(self, manager_with_spy_store):
         mgr, store = manager_with_spy_store
         with pytest.raises(ValueError, match="mooncake.store.global_segment_size"):
             mgr.deploy(
@@ -319,9 +311,7 @@ class TestDeployValidateBeforeWrite:
             )
         store.create_endpoint.assert_not_called()
 
-    def test_cold_tier_conflict_is_rejected_and_nothing_is_written(
-        self, manager_with_spy_store
-    ):
+    def test_cold_tier_conflict_is_rejected_and_nothing_is_written(self, manager_with_spy_store):
         mgr, store = manager_with_spy_store
         with pytest.raises(ValueError, match="cold_tier_enabled requires"):
             mgr.deploy(
@@ -364,9 +354,7 @@ class TestDeployValidateBeforeWrite:
             )
         store.create_endpoint.assert_not_called()
 
-    def test_well_formed_disaggregated_deploy_writes_exactly_once(
-        self, manager_with_spy_store
-    ):
+    def test_well_formed_disaggregated_deploy_writes_exactly_once(self, manager_with_spy_store):
         # Positive control: a valid block reaches the store, proving the spy
         # would have caught a write on any of the rejection paths above.
         mgr, store = manager_with_spy_store

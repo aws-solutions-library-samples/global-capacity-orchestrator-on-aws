@@ -155,7 +155,7 @@ Repository = "https://github.com/awslabs/global-capacity-orchestrator-on-aws"
 # prefill/decode KV-cache transfer over RDMA/RoCE.
 [tool.gco.mooncake-image]
 dependencies = [
-    "mooncake-transfer-engine==0.3.5",
+    "mooncake-transfer-engine==0.3.11",
 ]
 
 # Ruff handles both formatting (``ruff format``) and linting, covering

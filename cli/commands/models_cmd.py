@@ -71,9 +71,7 @@ def models_upload(config: Any, local_path: Any, name: Any) -> None:
     help="S3 prefix for uploaded objects",
 )
 @pass_config
-def models_upload_regional(
-    config: Any, local_path: Any, region: Any, prefix: Any
-) -> None:
+def models_upload_regional(config: Any, local_path: Any, region: Any, prefix: Any) -> None:
     """Upload local files or a directory to a region's regional bucket.
 
     Objects are written to that region's general-purpose
@@ -91,9 +89,7 @@ def models_upload_regional(
 
     try:
         manager = get_regional_bucket_manager(config)
-        formatter.print_info(
-            f"Uploading {local_path} to region '{region}'..."
-        )
+        formatter.print_info(f"Uploading {local_path} to region '{region}'...")
         result = manager.upload(local_path, region, prefix=prefix)
 
         formatter.print_success(

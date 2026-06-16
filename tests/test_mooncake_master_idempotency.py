@@ -105,10 +105,7 @@ def test_repeated_calls_converge_on_one_master_and_no_metadata_deployment(
     for _ in range(call_count):
         monitor._ensure_mooncake_store(namespace, spec)
 
-    masters = [
-        body for (_ns, name), body in fake.statefulsets.items()
-        if name == "mooncake-master"
-    ]
+    masters = [body for (_ns, name), body in fake.statefulsets.items() if name == "mooncake-master"]
     assert len(masters) == 1
     assert masters[0].spec.replicas == 1
 

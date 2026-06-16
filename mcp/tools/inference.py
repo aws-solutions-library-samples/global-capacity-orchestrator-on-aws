@@ -47,7 +47,7 @@ def _endpoint_is_disaggregated(name: str) -> bool:
     raw = cli_runner._run_cli("inference", "status", name)
     try:
         data = json.loads(raw)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return False
     if not isinstance(data, dict):
         return False

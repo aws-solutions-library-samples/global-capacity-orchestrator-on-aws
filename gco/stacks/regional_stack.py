@@ -1798,9 +1798,7 @@ class GCORegionalStack(Stack):
             iam.PolicyStatement(
                 sid="AllowCloudWatchLogsEncryptDecrypt",
                 effect=iam.Effect.ALLOW,
-                principals=[
-                    iam.ServicePrincipal(f"logs.{self.deployment_region}.amazonaws.com")
-                ],
+                principals=[iam.ServicePrincipal(f"logs.{self.deployment_region}.amazonaws.com")],
                 actions=kms_actions,
                 resources=["*"],
             )

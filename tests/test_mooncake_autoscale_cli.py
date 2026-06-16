@@ -72,6 +72,36 @@ def test_per_role_tokens_build_the_mooncake_autoscaling_block():
     }
 
 
+def test_a_role_can_scale_on_multiple_metrics():
+    """Trailing METRIC:TARGET pairs accumulate into a role's metrics list.
+
+    A single role token may carry more than one metric so the role's
+    autoscaler scales on several signals at once.
+    """
+    result, manager = _invoke(
+        [
+            "ep",
+            "-i",
+            "img:v1",
+            "--mooncake-mode",
+            "disaggregated",
+            "--mooncake-autoscale",
+            "prefill:1:8:cpu:70:memory:80",
+        ]
+    )
+
+    assert result.exit_code == 0, result.output
+    autoscaling = manager.deploy.call_args.kwargs["mooncake_autoscaling"]
+    assert autoscaling["prefill"] == {
+        "min_replicas": 1,
+        "max_replicas": 8,
+        "metrics": [
+            {"type": "cpu", "target": 70},
+            {"type": "memory", "target": 80},
+        ],
+    }
+
+
 def test_legacy_autoscale_flag_is_kept_separate_from_the_mooncake_block():
     """``--autoscale-metric`` stays in the legacy block, not the mooncake one.
 

@@ -81,9 +81,9 @@ def test_proxy_service_selects_only_proxy_pods(monitor):
     prefill_pod_labels = {"app": "my-endpoint-prefill", "gco.io/role": "prefill"}
     decode_pod_labels = {"app": "my-endpoint-decode", "gco.io/role": "decode"}
     for pod_labels in (prefill_pod_labels, decode_pod_labels):
-        assert any(
-            pod_labels.get(key) != value for key, value in selector.items()
-        ), f"proxy selector must not match {pod_labels}"
+        assert any(pod_labels.get(key) != value for key, value in selector.items()), (
+            f"proxy selector must not match {pod_labels}"
+        )
 
     # The single public port forwards to the proxy container port.
     assert len(service.spec.ports) == 1
@@ -98,20 +98,14 @@ def test_proxy_ingress_routes_only_v1_prefix_to_proxy(monitor):
     from gco.services.inference_monitor import PD_PROXY_PUBLIC_PATH_PREFIX
 
     monitor.networking_v1.create_namespaced_ingress.reset_mock()
-    monitor._update_proxy_ingress(
-        "my-endpoint", "my-endpoint-proxy", "gco-inference"
-    )
+    monitor._update_proxy_ingress("my-endpoint", "my-endpoint-proxy", "gco-inference")
 
     args, _ = monitor.networking_v1.create_namespaced_ingress.call_args
     namespace, ingress = args[0], args[1]
     assert namespace == "gco-inference"
 
     # Gather every routing path across every rule.
-    paths = [
-        path
-        for rule in ingress.spec.rules
-        for path in rule.http.paths
-    ]
+    paths = [path for rule in ingress.spec.rules for path in rule.http.paths]
 
     assert len(paths) == 1
     only_path = paths[0]
@@ -168,8 +162,6 @@ def test_full_proxy_materialization_keeps_service_and_ingress_scoped(monitor):
     # Ingress publishes only the /v1 prefix to the proxy Service.
     ing_args, _ = monitor.networking_v1.create_namespaced_ingress.call_args
     ingress = ing_args[1]
-    paths = [
-        path for rule in ingress.spec.rules for path in rule.http.paths
-    ]
+    paths = [path for rule in ingress.spec.rules for path in rule.http.paths]
     assert [p.path for p in paths] == [PD_PROXY_PUBLIC_PATH_PREFIX]
     assert paths[0].backend.service.name == "my-endpoint-proxy"

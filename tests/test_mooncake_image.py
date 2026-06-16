@@ -132,9 +132,7 @@ def _image_dependency_specs() -> list[str]:
     assert _PYPROJECT.is_file(), f"pyproject.toml not found: {_PYPROJECT}"
     data = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
     table = data.get("tool", {}).get("gco", {}).get(_IMAGE_DEP_GROUP)
-    assert table is not None, (
-        f"expected a [tool.gco.{_IMAGE_DEP_GROUP}] table in pyproject.toml"
-    )
+    assert table is not None, f"expected a [tool.gco.{_IMAGE_DEP_GROUP}] table in pyproject.toml"
     specs = table.get("dependencies")
     assert specs, f"expected dependencies in [tool.gco.{_IMAGE_DEP_GROUP}]"
     return specs
@@ -163,10 +161,10 @@ def test_base_image_tag_is_pinned_to_an_explicit_version() -> None:
 def test_transfer_engine_version_is_pinned_to_an_explicit_release() -> None:
     """The Mooncake transfer engine is pinned to an exact ``==`` release.
 
-    The pin lives in the ``mooncake-image`` optional-dependencies group in
-    pyproject.toml (the image's single source of truth for its extra packages),
-    not hardcoded in the Dockerfile. It must be an exact ``==`` version with no
-    floating spec (no bare name, ``>=``, ``~=``, ``*``, or rolling tag).
+    The pin lives in the ``[tool.gco.mooncake-image]`` table in pyproject.toml
+    (the image's single source of truth for its extra packages), not hardcoded
+    in the Dockerfile. It must be an exact ``==`` version with no floating spec
+    (no bare name, ``>=``, ``~=``, ``*``, or rolling tag).
     """
     specs = _image_dependency_specs()
 

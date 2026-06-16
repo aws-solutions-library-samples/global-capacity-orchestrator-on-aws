@@ -106,10 +106,12 @@ def inference(config: Any) -> None:
 @click.option(
     "--mooncake-autoscale",
     multiple=True,
-    help="Per-role Mooncake autoscaling as ROLE:MIN:MAX[:METRIC:TARGET], e.g. "
-    "'prefill:1:8' or 'decode:2:16:cpu:70'. Repeatable (one per role). Requires "
-    "--mooncake-mode disaggregated|both; populates spec.mooncake.autoscaling "
-    "(distinct from the legacy --autoscale-metric/--min-replicas flags).",
+    help="Per-role Mooncake autoscaling as ROLE:MIN:MAX[:METRIC:TARGET ...], "
+    "e.g. 'prefill:1:8' or 'decode:2:16:cpu:70:memory:80'. Repeatable (one per "
+    "role); append additional METRIC:TARGET pairs to scale a role on multiple "
+    "metrics. Requires --mooncake-mode disaggregated|both; populates "
+    "spec.mooncake.autoscaling (distinct from the legacy "
+    "--autoscale-metric/--min-replicas flags).",
 )
 @pass_config
 def inference_deploy(
@@ -197,9 +199,9 @@ def inference_deploy(
 
     # Build per-role Mooncake autoscaling config (spec.mooncake.autoscaling).
     # This is distinct from the legacy single-Deployment autoscaling above:
-    # each ROLE:MIN:MAX[:METRIC:TARGET] token sets the bounds (and optional
-    # metric) for one of the prefill/decode roles. Bounds are validated
-    # fail-fast in the deploy path before anything is persisted.
+    # each ROLE:MIN:MAX token sets a role's bounds, and any number of trailing
+    # METRIC:TARGET pairs add scaling signals for that role. Bounds and metrics
+    # are validated fail-fast in the deploy path before anything is persisted.
     mooncake_autoscaling_config: dict[str, Any] | None = None
     if mooncake_autoscale:
         if not mooncake_mode:
@@ -210,17 +212,17 @@ def inference_deploy(
         mooncake_autoscaling_config = {"enabled": True}
         for entry in mooncake_autoscale:
             parts = entry.split(":")
-            if len(parts) not in (3, 5):
+            # ROLE:MIN:MAX, then zero or more METRIC:TARGET pairs.
+            if len(parts) < 3 or (len(parts) - 3) % 2 != 0:
                 formatter.print_error(
                     f"Invalid --mooncake-autoscale value '{entry}'. Expected "
-                    "ROLE:MIN:MAX or ROLE:MIN:MAX:METRIC:TARGET."
+                    "ROLE:MIN:MAX optionally followed by METRIC:TARGET pairs."
                 )
                 sys.exit(1)
             role = parts[0]
             if role not in ("prefill", "decode"):
                 formatter.print_error(
-                    f"Invalid --mooncake-autoscale role '{role}'. Expected "
-                    "'prefill' or 'decode'."
+                    f"Invalid --mooncake-autoscale role '{role}'. Expected 'prefill' or 'decode'."
                 )
                 sys.exit(1)
             try:
@@ -228,12 +230,17 @@ def inference_deploy(
                     "min_replicas": int(parts[1]),
                     "max_replicas": int(parts[2]),
                 }
-                if len(parts) == 5:
-                    role_block["metrics"] = [{"type": parts[3], "target": int(parts[4])}]
+                metric_tokens = parts[3:]
+                metrics = [
+                    {"type": metric_tokens[i], "target": int(metric_tokens[i + 1])}
+                    for i in range(0, len(metric_tokens), 2)
+                ]
+                if metrics:
+                    role_block["metrics"] = metrics
             except ValueError:
                 formatter.print_error(
                     f"Invalid --mooncake-autoscale numbers in '{entry}'. MIN, MAX, "
-                    "and TARGET must be integers."
+                    "and each TARGET must be integers."
                 )
                 sys.exit(1)
             mooncake_autoscaling_config[role] = role_block
@@ -1035,9 +1042,7 @@ def inference_models(config: Any, endpoint_name: Any, region: Any) -> None:
     help="Decode (Y) instance count for the XpYd topology.",
 )
 @pass_config
-def inference_set_topology(
-    config: Any, endpoint_name: Any, prefill: Any, decode: Any
-) -> None:
+def inference_set_topology(config: Any, endpoint_name: Any, prefill: Any, decode: Any) -> None:
     """Resize a disaggregated endpoint's prefill/decode topology.
 
     Updates the endpoint's prefill (X) and decode (Y) instance counts and
@@ -1057,8 +1062,7 @@ def inference_set_topology(
 
         if result:
             formatter.print_success(
-                f"Endpoint '{endpoint_name}' topology set to "
-                f"{prefill}p{decode}d"
+                f"Endpoint '{endpoint_name}' topology set to {prefill}p{decode}d"
             )
             formatter.print_info(
                 "The inference_monitor will adjust prefill and decode "

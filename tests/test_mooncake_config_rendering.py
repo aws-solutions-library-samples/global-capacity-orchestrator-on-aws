@@ -71,9 +71,7 @@ def test_both_mode_decode_role_shares_consumer_role_across_chain() -> None:
         ("disaggregated", "worker"),  # unrecognized role
     ],
 )
-def test_unsupported_mode_role_pair_is_rejected_without_config(
-    mode: str, role: str
-) -> None:
+def test_unsupported_mode_role_pair_is_rejected_without_config(mode: str, role: str) -> None:
     """An unsupported ``(mode, role)`` pair raises and emits no configuration."""
     with pytest.raises(ValueError):
         build_kv_transfer_config({"mode": mode}, role)
@@ -119,14 +117,10 @@ def test_transport_defaults_to_rdma_when_unspecified() -> None:
 
 def test_master_address_present_only_when_store_enabled() -> None:
     """The master address appears exactly when the store is enabled."""
-    enabled = render_mooncake_config(
-        {"store": {"enabled": True}}, _region_services()
-    )
+    enabled = render_mooncake_config({"store": {"enabled": True}}, _region_services())
     assert enabled["master_server_address"] == "mooncake-master:50051"
 
-    disabled = render_mooncake_config(
-        {"store": {"enabled": False}}, _region_services()
-    )
+    disabled = render_mooncake_config({"store": {"enabled": False}}, _region_services())
     assert "master_server_address" not in disabled
 
     absent = render_mooncake_config({}, _region_services())
