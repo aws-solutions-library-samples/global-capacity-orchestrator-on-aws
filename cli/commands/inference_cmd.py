@@ -103,6 +103,14 @@ def inference(config: Any) -> None:
     default=1,
     help="Decode instance count (Y in an XpYd topology) for split modes.",
 )
+@click.option(
+    "--mooncake-autoscale",
+    multiple=True,
+    help="Per-role Mooncake autoscaling as ROLE:MIN:MAX[:METRIC:TARGET], e.g. "
+    "'prefill:1:8' or 'decode:2:16:cpu:70'. Repeatable (one per role). Requires "
+    "--mooncake-mode disaggregated|both; populates spec.mooncake.autoscaling "
+    "(distinct from the legacy --autoscale-metric/--min-replicas flags).",
+)
 @pass_config
 def inference_deploy(
     config: Any,
@@ -130,6 +138,7 @@ def inference_deploy(
     mooncake_mode: Any,
     prefill_replicas: Any,
     decode_replicas: Any,
+    mooncake_autoscale: Any,
 ) -> None:
     """Deploy an inference endpoint to one or more regions.
 
@@ -186,6 +195,49 @@ def inference_deploy(
             "metrics": metrics,
         }
 
+    # Build per-role Mooncake autoscaling config (spec.mooncake.autoscaling).
+    # This is distinct from the legacy single-Deployment autoscaling above:
+    # each ROLE:MIN:MAX[:METRIC:TARGET] token sets the bounds (and optional
+    # metric) for one of the prefill/decode roles. Bounds are validated
+    # fail-fast in the deploy path before anything is persisted.
+    mooncake_autoscaling_config: dict[str, Any] | None = None
+    if mooncake_autoscale:
+        if not mooncake_mode:
+            formatter.print_error(
+                "--mooncake-autoscale requires --mooncake-mode (disaggregated or both)."
+            )
+            sys.exit(1)
+        mooncake_autoscaling_config = {"enabled": True}
+        for entry in mooncake_autoscale:
+            parts = entry.split(":")
+            if len(parts) not in (3, 5):
+                formatter.print_error(
+                    f"Invalid --mooncake-autoscale value '{entry}'. Expected "
+                    "ROLE:MIN:MAX or ROLE:MIN:MAX:METRIC:TARGET."
+                )
+                sys.exit(1)
+            role = parts[0]
+            if role not in ("prefill", "decode"):
+                formatter.print_error(
+                    f"Invalid --mooncake-autoscale role '{role}'. Expected "
+                    "'prefill' or 'decode'."
+                )
+                sys.exit(1)
+            try:
+                role_block: dict[str, Any] = {
+                    "min_replicas": int(parts[1]),
+                    "max_replicas": int(parts[2]),
+                }
+                if len(parts) == 5:
+                    role_block["metrics"] = [{"type": parts[3], "target": int(parts[4])}]
+            except ValueError:
+                formatter.print_error(
+                    f"Invalid --mooncake-autoscale numbers in '{entry}'. MIN, MAX, "
+                    "and TARGET must be integers."
+                )
+                sys.exit(1)
+            mooncake_autoscaling_config[role] = role_block
+
     try:
         manager = get_inference_manager(config)
         result = manager.deploy(
@@ -211,6 +263,7 @@ def inference_deploy(
             mooncake_mode=mooncake_mode,
             prefill_replicas=prefill_replicas,
             decode_replicas=decode_replicas,
+            mooncake_autoscaling=mooncake_autoscaling_config,
         )
 
         formatter.print_success(f"Endpoint '{endpoint_name}' registered for deployment")
