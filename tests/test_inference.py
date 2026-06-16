@@ -569,15 +569,24 @@ class TestInferenceMonitor:
         monitor.apps_v1.delete_namespaced_deployment.side_effect = ApiException(status=404)
         monitor.core_v1.delete_namespaced_service.side_effect = ApiException(status=404)
         monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=404)
-        with patch("gco.services.inference_monitor.client.AutoscalingV2Api") as mock_hpa_api:
+        with (
+            patch("gco.services.inference_monitor.client.AutoscalingV2Api") as mock_hpa_api,
+            patch("gco.services.inference_monitor.client.CustomObjectsApi") as mock_custom_api,
+        ):
             mock_hpa_api.return_value.delete_namespaced_horizontal_pod_autoscaler.side_effect = (
                 ApiException(status=404)
+            )
+            mock_custom_api.return_value.delete_namespaced_custom_object.side_effect = ApiException(
+                status=404
             )
             # Should not raise
             monitor._delete_resources("ep", "ns")
 
     def test_delete_resources_calls_all(self, monitor):
-        with patch("gco.services.inference_monitor.client.AutoscalingV2Api"):
+        with (
+            patch("gco.services.inference_monitor.client.AutoscalingV2Api"),
+            patch("gco.services.inference_monitor.client.CustomObjectsApi"),
+        ):
             monitor._delete_resources("ep", "ns")
         # Primary deployment delete (canary cleanup also calls delete for ep-canary)
         monitor.apps_v1.delete_namespaced_deployment.assert_any_call(
@@ -667,7 +676,11 @@ class TestInferenceMonitor:
             "spec": {"image": "img:v1"},
             "namespace": "gco-inference",
         }
-        result = await monitor._reconcile_endpoint(endpoint)
+        with (
+            patch("gco.services.inference_monitor.client.AutoscalingV2Api"),
+            patch("gco.services.inference_monitor.client.CustomObjectsApi"),
+        ):
+            result = await monitor._reconcile_endpoint(endpoint)
         assert result is not None
         assert result["action"] == "cleanup"
         assert result["reason"] == "region_removed"
@@ -703,7 +716,11 @@ class TestInferenceMonitor:
             "spec": {"image": "img:v1"},
             "namespace": "gco-inference",
         }
-        result = await monitor._reconcile_endpoint(endpoint)
+        with (
+            patch("gco.services.inference_monitor.client.AutoscalingV2Api"),
+            patch("gco.services.inference_monitor.client.CustomObjectsApi"),
+        ):
+            result = await monitor._reconcile_endpoint(endpoint)
         assert result is not None
         assert result["action"] == "delete"
 

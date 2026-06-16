@@ -259,7 +259,7 @@
 
     "_comment_helm": "Helm chart installation toggles. Each key maps to one or more charts in lambda/helm-installer/charts.yaml; flip enabled=false to skip a chart. Charts install in dependency order with kueue last (its mutating webhook intercepts every Job/Deployment). Cross-scheduler coexistence is documented in docs/SCHEDULERS.md.",
     "helm": {
-      "_comment_keda": "KEDA — Kubernetes Event-Driven Autoscaling. Powers GCO's built-in SQS queue processor by scaling workloads on external event sources (SQS depth, CloudWatch metrics, etc.). See docs/KEDA.md.",
+      "_comment_keda": "KEDA — Kubernetes Event-Driven Autoscaling. MANDATORY platform component: it backs GCO's built-in SQS queue processor and is the metrics bridge (keda-metrics-apiserver serves external.metrics.k8s.io) that lets autoscalers consume GPU/CloudWatch metrics. This toggle is IGNORED — KEDA is always installed regardless of 'enabled'. See docs/KEDA.md.",
       "keda": {
         "enabled": true
       },

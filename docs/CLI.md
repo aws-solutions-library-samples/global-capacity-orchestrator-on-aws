@@ -1598,7 +1598,7 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | `--label` | `-l` | Label (key=value), repeatable |
 | `--min-replicas` | | Autoscaling: minimum replicas |
 | `--max-replicas` | | Autoscaling: maximum replicas |
-| `--autoscale-metric` | | Autoscaling metric (e.g. `cpu:70`, `memory:80`), repeatable. Enables HPA. |
+| `--autoscale-metric` | | Autoscaling metric (e.g. `cpu:70`, `memory:80`, `gpu:60`), repeatable. CPU/memory use the native HPA; gpu/gpu_memory scale via KEDA + CloudWatch. |
 | `--capacity-type` | | Node capacity type: `on-demand` (default) or `spot` |
 | `--accelerator` | `nvidia` | Accelerator type: `nvidia` for GPU instances, `neuron` for Trainium/Inferentia |
 | `--node-selector` | | Node selector (key=value), repeatable. E.g. `eks.amazonaws.com/instance-family=inf2` |

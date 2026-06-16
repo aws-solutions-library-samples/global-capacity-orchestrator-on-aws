@@ -1,6 +1,6 @@
 # KEDA Integration
 
-GCO includes [KEDA](https://keda.sh/) (Kubernetes Event-Driven Autoscaling) for scaling workloads based on external event sources. KEDA is enabled by default and powers GCO's built-in SQS queue processor.
+GCO includes [KEDA](https://keda.sh/) (Kubernetes Event-Driven Autoscaling) for scaling workloads based on external event sources. KEDA is a mandatory platform component (it cannot be disabled) and powers GCO's built-in SQS queue processor as well as GPU-based inference autoscaling.
 
 ## Overview
 
@@ -119,6 +119,51 @@ kubectl get pods -n gco-jobs -l app=sqs-processor
 
 Note: The example uses `{{JOB_QUEUE_URL}}` and `{{REGION}}` placeholders that are replaced during stack deployment. To use it standalone, replace these with actual values.
 
+## Scale Inference on GPU Utilization
+
+GPU utilization is not a native Kubernetes HPA metric (Resource metrics are limited to CPU and memory). GCO routes GPU-based inference autoscaling through KEDA's `aws-cloudwatch` scaler, which reads the per-pod GPU metrics the `amazon-cloudwatch-observability` agent publishes to CloudWatch ContainerInsights.
+
+When you deploy an endpoint with a GPU autoscaling metric:
+
+```bash
+gco inference deploy my-llm \
+  -i vllm/vllm-openai:v0.22.0 \
+  --replicas 2 --gpu-count 1 \
+  --min-replicas 1 --max-replicas 8 \
+  --autoscale-metric gpu:60
+```
+
+the inference monitor materializes a `ScaledObject` equivalent to:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: my-llm
+  namespace: gco-inference
+spec:
+  scaleTargetRef:
+    name: my-llm
+  minReplicaCount: 1
+  maxReplicaCount: 8
+  triggers:
+  - type: aws-cloudwatch
+    metadata:
+      namespace: ContainerInsights
+      metricName: pod_gpu_utilization
+      dimensionName: ClusterName;Namespace;PodName
+      dimensionValue: <cluster>;gco-inference;my-llm
+      targetMetricValue: "60"
+      minMetricValue: "0"
+      metricStat: Average
+      awsRegion: <region>
+      identityOwner: operator
+```
+
+CPU/memory targets supplied alongside a GPU metric become native `cpu`/`memory` triggers on the same `ScaledObject`, so an endpoint can scale on a mix of signals. The same path backs Mooncake per-role autoscaling (`--mooncake-autoscale`), where each role's `{name}-{role}` Deployment is targeted independently.
+
+The KEDA operator's IRSA role is granted read-only CloudWatch access (`cloudwatch:GetMetricData`, `cloudwatch:GetMetricStatistics`, `cloudwatch:ListMetrics`) so the scaler can read these metrics. CloudWatch metric-read APIs do not support resource-level IAM scoping.
+
 ## Scale Inference to Zero
 
 KEDA can scale inference endpoints to zero when there's no traffic, saving GPU costs:
@@ -163,9 +208,9 @@ rules:
 
 ### IRSA Permissions
 
-The KEDA operator has an IRSA role with permissions to read SQS queue metrics for the GCO job queue. This role is scoped to the specific SQS queue ARN created by the regional stack. The operator does not have broad AWS permissions — it can only read queue attributes for scaling decisions.
+The KEDA operator has an IRSA role with permissions to read SQS queue metrics for the GCO job queue (scoped to the specific queue ARNs) and read-only CloudWatch access (`GetMetricData`, `GetMetricStatistics`, `ListMetrics`) for GPU-based inference autoscaling. The CloudWatch metric-read APIs do not support resource-level scoping, so they are granted account-wide but remain read-only.
 
-If you add custom triggers that access other AWS services (e.g., CloudWatch, Kinesis), you'll need to extend the IRSA role or create a separate `TriggerAuthentication` with its own credentials.
+If you add custom triggers that access other AWS services (e.g., Kinesis, DynamoDB), you'll need to extend the IRSA role or create a separate `TriggerAuthentication` with its own credentials.
 
 ### Namespace Restrictions
 
@@ -185,11 +230,13 @@ Edit `lambda/helm-installer/charts.yaml` under `keda`:
 
 ```yaml
 keda:
-  enabled: true   # Set to false to disable
+  enabled: true   # IGNORED — KEDA is a mandatory platform component
   version: "2.19.0"
   values:
     watchNamespace: ""  # Watch all namespaces
 ```
+
+KEDA cannot be disabled: it backs the built-in SQS queue processor and is the only metrics bridge for GPU/CloudWatch-driven autoscaling. The `enabled` toggle is retained for chart-config uniformity but is ignored for KEDA — the chart always installs.
 
 To disable the built-in SQS consumer while keeping KEDA, edit `cdk.json`:
 

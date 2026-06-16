@@ -285,7 +285,7 @@ gco inference scale my-llm --replicas 4
 
 ### Autoscaling (HPA)
 
-Inference endpoints support Horizontal Pod Autoscaler (HPA) for automatic scaling based on resource utilization. When autoscaling is enabled, the inference_monitor creates a Kubernetes HPA alongside the Deployment.
+Inference endpoints support automatic scaling based on resource utilization. When autoscaling is enabled, the inference_monitor creates a Kubernetes Horizontal Pod Autoscaler (HPA) alongside the Deployment. GPU-based scaling is handled through KEDA instead (see below), since GPU utilization is not a native HPA resource metric.
 
 ```bash
 # Deploy with autoscaling enabled
@@ -294,18 +294,29 @@ gco inference deploy my-llm \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric cpu:70 --autoscale-metric memory:80
+
+# Scale on GPU utilization (routed through KEDA + CloudWatch)
+gco inference deploy my-llm \
+  -i vllm/vllm-openai:v0.22.0 \
+  --replicas 2 --gpu-count 1 \
+  --min-replicas 1 --max-replicas 8 \
+  --autoscale-metric gpu:60
 ```
 
 **Supported metrics:**
 
-| Metric | Description | Example |
-|--------|-------------|---------|
-| `cpu` | CPU utilization percentage | `cpu:70` (scale at 70% CPU) |
-| `memory` | Memory utilization percentage | `memory:80` (scale at 80% memory) |
+| Metric | Description | Example | Backend |
+|--------|-------------|---------|---------|
+| `cpu` | CPU utilization percentage | `cpu:70` (scale at 70% CPU) | Native HPA |
+| `memory` | Memory utilization percentage | `memory:80` (scale at 80% memory) | Native HPA |
+| `gpu` | GPU utilization percentage | `gpu:60` (scale at 60% GPU) | KEDA + CloudWatch |
+| `gpu_memory` | GPU memory utilization percentage | `gpu_memory:80` | KEDA + CloudWatch |
 
 The `--autoscale-metric` flag is repeatable — you can combine multiple metrics. The format is `type:target` where `target` is the utilization percentage threshold. If no target is specified, it defaults to 70%.
 
 The HPA respects `--min-replicas` (default: 1) and `--max-replicas` (default: 10) bounds. The `--replicas` flag sets the initial replica count before the HPA takes over.
+
+**GPU autoscaling.** GPU utilization cannot be read by a native HPA (Kubernetes Resource metrics are limited to CPU and memory). When any `--autoscale-metric gpu:...` (or `gpu_memory:...`) is requested, the endpoint is materialized as a KEDA `ScaledObject` with an `aws-cloudwatch` trigger that reads the `ContainerInsights` per-pod GPU metric (`pod_gpu_utilization` / `pod_gpu_memory_utilization`) for the Deployment. CPU/memory targets supplied alongside a GPU metric ride on the same `ScaledObject` as native KEDA triggers. KEDA is a mandatory cluster component, and the KEDA operator's IAM role is granted read-only CloudWatch access (`GetMetricData`, `GetMetricStatistics`, `ListMetrics`) for this purpose.
 
 ### Update Image (Rolling Update)
 

@@ -1533,10 +1533,15 @@ class TestGetEnabledHelmCharts:
             ("kueue", ["kueue"]),
         ]
 
+        # KEDA is a mandatory platform component: it backs the SQS queue
+        # processor and is the only metrics bridge for GPU/CloudWatch-driven
+        # autoscaling, so its cdk.json toggle is ignored.
+        mandatory_chart_keys = {"keda"}
+
         enabled_charts = []
         for config_key, chart_names in chart_map:
             chart_config = helm_config.get(config_key, {})
-            if chart_config.get("enabled", True):
+            if config_key in mandatory_chart_keys or chart_config.get("enabled", True):
                 enabled_charts.extend(chart_names)
         return enabled_charts
 
@@ -1603,6 +1608,30 @@ class TestGetEnabledHelmCharts:
         assert "volcano" not in charts
         assert "keda" in charts
         assert "kueue" in charts
+
+    def test_keda_cannot_be_disabled(self):
+        """KEDA is mandatory: it stays enabled even when explicitly disabled."""
+        charts = self._get_charts_for_config({"keda": {"enabled": False}})
+        assert "keda" in charts
+
+    def test_keda_present_when_other_charts_disabled(self):
+        """KEDA survives even when every other chart is explicitly turned off."""
+        all_off = {
+            "keda": {"enabled": False},
+            "nvidia_gpu_operator": {"enabled": False},
+            "nvidia_dra_driver": {"enabled": False},
+            "nvidia_network_operator": {"enabled": False},
+            "aws_efa_device_plugin": {"enabled": False},
+            "aws_neuron_device_plugin": {"enabled": False},
+            "volcano": {"enabled": False},
+            "kuberay": {"enabled": False},
+            "cert_manager": {"enabled": False},
+            "slurm": {"enabled": False},
+            "yunikorn": {"enabled": False},
+            "kueue": {"enabled": False},
+        }
+        charts = self._get_charts_for_config(all_off)
+        assert charts == ["keda"]
 
     def test_kuberay_maps_to_kuberay_operator(self):
         """The 'kuberay' config key should map to 'kuberay-operator' chart name."""

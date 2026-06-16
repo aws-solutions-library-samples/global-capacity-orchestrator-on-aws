@@ -52,7 +52,9 @@ def inference(config: Any) -> None:
 @click.option(
     "--autoscale-metric",
     multiple=True,
-    help="Autoscaling metric (cpu:70, memory:80, gpu:60). Repeatable. Enables autoscaling.",
+    help="Autoscaling metric (cpu:70, memory:80, gpu:60). Repeatable. Enables "
+    "autoscaling. CPU/memory scale via the native HPA; gpu (and gpu_memory) "
+    "scale on CloudWatch GPU utilization via KEDA.",
 )
 @click.option(
     "--capacity-type",
@@ -107,11 +109,11 @@ def inference(config: Any) -> None:
     "--mooncake-autoscale",
     multiple=True,
     help="Per-role Mooncake autoscaling as ROLE:MIN:MAX[:METRIC:TARGET ...], "
-    "e.g. 'prefill:1:8' or 'decode:2:16:cpu:70:memory:80'. Repeatable (one per "
+    "e.g. 'prefill:1:8' or 'decode:2:16:cpu:70:gpu:60'. Repeatable (one per "
     "role); append additional METRIC:TARGET pairs to scale a role on multiple "
-    "metrics. Requires --mooncake-mode disaggregated|both; populates "
-    "spec.mooncake.autoscaling (distinct from the legacy "
-    "--autoscale-metric/--min-replicas flags).",
+    "metrics (cpu/memory via HPA, gpu/gpu_memory via KEDA CloudWatch). Requires "
+    "--mooncake-mode disaggregated|both; populates spec.mooncake.autoscaling "
+    "(distinct from the legacy --autoscale-metric/--min-replicas flags).",
 )
 @pass_config
 def inference_deploy(

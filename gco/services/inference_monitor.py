@@ -114,6 +114,30 @@ MOONCAKE_MASTER_RPC_PORT = 50051
 MOONCAKE_METADATA_PORT = 8080
 MOONCAKE_MASTER_SERVICE = "mooncake-master"
 
+# GPU utilization is not a Kubernetes Resource metric, so a native
+# HorizontalPodAutoscaler cannot scale on it (Resource metrics are limited to
+# cpu and memory). The cluster's amazon-cloudwatch-observability agent publishes
+# per-pod GPU utilization to CloudWatch ContainerInsights, so any autoscaler
+# that requests a GPU metric is materialized as a KEDA ScaledObject with an
+# aws-cloudwatch trigger instead. KEDA generates the backing HPA under the hood,
+# and cpu/memory targets ride along as native cpu/memory triggers on the same
+# ScaledObject. KEDA is a mandatory cluster component, so this path is always
+# available.
+KEDA_API_GROUP = "keda.sh"
+KEDA_API_VERSION = "v1alpha1"
+KEDA_SCALEDOBJECT_PLURAL = "scaledobjects"
+
+# Metric types that can only be served via CloudWatch (KEDA), keyed to the
+# ContainerInsights metric the aws-cloudwatch trigger reads. PodName in the
+# ContainerInsights dimension set is the workload (Deployment) name, so the
+# dimension triple ClusterName/Namespace/PodName yields the average across a
+# Deployment's pods — exactly the signal autoscaling needs.
+GPU_METRIC_NAMESPACE = "ContainerInsights"
+_CLOUDWATCH_METRIC_BY_TYPE = {
+    "gpu": "pod_gpu_utilization",
+    "gpu_memory": "pod_gpu_memory_utilization",
+}
+
 # Default base port for the KV-transfer bootstrap handshake (VLLM_MOONCAKE_
 # BOOTSTRAP_PORT) and the span of per-worker ports derived from it. vLLM assigns
 # each worker base_port + dp_rank * tp_size + tp_rank, so the intra-namespace
@@ -3167,6 +3191,23 @@ class InferenceMonitor:
             if e.status != 404:
                 logger.error("Failed to delete HPA for %s: %s", name, e)
 
+        # Delete KEDA ScaledObject (the GPU-autoscaling path materializes one of
+        # these in place of a native HPA). Best-effort: absence is the common
+        # case for cpu/memory-only endpoints.
+        try:
+            client.CustomObjectsApi().delete_namespaced_custom_object(
+                group=KEDA_API_GROUP,
+                version=KEDA_API_VERSION,
+                namespace=namespace,
+                plural=KEDA_SCALEDOBJECT_PLURAL,
+                name=name,
+                _request_timeout=self._k8s_timeout,
+            )
+            logger.info("Deleted KEDA ScaledObject for %s", name)
+        except ApiException as e:
+            if e.status != 404:
+                logger.error("Failed to delete KEDA ScaledObject for %s: %s", name, e)
+
     def _build_hpa_metrics(self, metrics_config: list[dict[str, Any]]) -> list[Any]:
         """Translate a metrics config list into autoscaler metric specs.
 
@@ -3224,6 +3265,145 @@ class InferenceMonitor:
 
         return hpa_metrics
 
+    @staticmethod
+    def _metrics_require_keda(metrics_config: list[dict[str, Any]]) -> bool:
+        """Return True when any metric can only be scaled via KEDA/CloudWatch.
+
+        GPU metrics are not Kubernetes Resource metrics, so a native HPA cannot
+        consume them. Their presence forces the whole autoscaler onto the KEDA
+        ScaledObject path, where cpu/memory targets become native KEDA triggers
+        alongside the aws-cloudwatch GPU trigger.
+        """
+        return any(m.get("type") in _CLOUDWATCH_METRIC_BY_TYPE for m in metrics_config)
+
+    def _build_keda_triggers(
+        self,
+        metrics_config: list[dict[str, Any]],
+        target_name: str,
+        namespace: str,
+    ) -> list[dict[str, Any]]:
+        """Translate a metrics config list into KEDA ScaledObject triggers.
+
+        ``cpu`` and ``memory`` map to KEDA's native resource triggers (the same
+        utilization signal a plain HPA would use). ``gpu``/``gpu_memory`` map to
+        an ``aws-cloudwatch`` trigger reading the matching ContainerInsights
+        metric for this Deployment, identified by the
+        ClusterName/Namespace/PodName dimension triple. Unrecognized entries are
+        skipped; when nothing recognizable remains the autoscaler falls back to
+        CPU at 70% so a Deployment is never left without a scaling signal.
+        """
+        triggers: list[dict[str, Any]] = []
+        for m in metrics_config:
+            metric_type = m.get("type", "cpu")
+            target_value = m.get("target", 70)
+
+            if metric_type in ("cpu", "memory"):
+                triggers.append(
+                    {
+                        "type": metric_type,
+                        "metricType": "Utilization",
+                        "metadata": {"value": str(target_value)},
+                    }
+                )
+            elif metric_type in _CLOUDWATCH_METRIC_BY_TYPE:
+                triggers.append(
+                    {
+                        "type": "aws-cloudwatch",
+                        "metadata": {
+                            "namespace": GPU_METRIC_NAMESPACE,
+                            "metricName": _CLOUDWATCH_METRIC_BY_TYPE[metric_type],
+                            "dimensionName": "ClusterName;Namespace;PodName",
+                            "dimensionValue": f"{self.cluster_id};{namespace};{target_name}",
+                            "targetMetricValue": str(target_value),
+                            "minMetricValue": "0",
+                            "metricStat": "Average",
+                            "awsRegion": self.region,
+                            "identityOwner": "operator",
+                        },
+                    }
+                )
+
+        if not triggers:
+            triggers.append(
+                {
+                    "type": "cpu",
+                    "metricType": "Utilization",
+                    "metadata": {"value": "70"},
+                }
+            )
+
+        return triggers
+
+    def _apply_scaled_object(
+        self,
+        name: str,
+        namespace: str,
+        target_name: str,
+        min_replicas: int,
+        max_replicas: int,
+        metrics_config: list[dict[str, Any]],
+    ) -> None:
+        """Create or patch a KEDA ScaledObject targeting one Deployment.
+
+        Used whenever the metric set includes a GPU signal (see
+        :meth:`_metrics_require_keda`). KEDA owns the backing HPA and reads GPU
+        utilization from CloudWatch via the keda-operator's IRSA role, scaling
+        ``target_name`` between ``min_replicas`` and ``max_replicas``. An
+        already-present ScaledObject of the same name is merge-patched rather
+        than duplicated.
+        """
+        body = {
+            "apiVersion": f"{KEDA_API_GROUP}/{KEDA_API_VERSION}",
+            "kind": "ScaledObject",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "labels": {
+                    "app": name,
+                    "project": "gco",
+                    "gco.io/type": "inference",
+                },
+            },
+            "spec": {
+                "scaleTargetRef": {"name": target_name},
+                "minReplicaCount": min_replicas,
+                "maxReplicaCount": max_replicas,
+                "triggers": self._build_keda_triggers(metrics_config, target_name, namespace),
+            },
+        }
+
+        custom = client.CustomObjectsApi()
+        try:
+            custom.create_namespaced_custom_object(
+                group=KEDA_API_GROUP,
+                version=KEDA_API_VERSION,
+                namespace=namespace,
+                plural=KEDA_SCALEDOBJECT_PLURAL,
+                body=body,
+                _request_timeout=self._k8s_timeout,
+            )
+            logger.info(
+                "Created KEDA ScaledObject %s targeting %s (min=%d, max=%d)",
+                name,
+                target_name,
+                min_replicas,
+                max_replicas,
+            )
+        except ApiException as e:
+            if e.status == 409:
+                custom.patch_namespaced_custom_object(
+                    group=KEDA_API_GROUP,
+                    version=KEDA_API_VERSION,
+                    namespace=namespace,
+                    plural=KEDA_SCALEDOBJECT_PLURAL,
+                    name=name,
+                    body=body,
+                    _request_timeout=self._k8s_timeout,
+                )
+                logger.info("Updated KEDA ScaledObject %s", name)
+            else:
+                raise
+
     def _apply_hpa(
         self,
         hpa_name: str,
@@ -3238,8 +3418,21 @@ class InferenceMonitor:
         Builds a V2 autoscaler that scales ``target_name`` between
         ``min_replicas`` and ``max_replicas`` on the given metrics, then creates
         it. An already-present autoscaler of the same name is patched in place
-        rather than duplicated.
+        rather than duplicated. When the metric set includes a GPU signal the
+        autoscaler is materialized as a KEDA ScaledObject instead (native HPA
+        Resource metrics cannot read GPU utilization).
         """
+        if self._metrics_require_keda(metrics_config):
+            self._apply_scaled_object(
+                name=hpa_name,
+                namespace=namespace,
+                target_name=target_name,
+                min_replicas=min_replicas,
+                max_replicas=max_replicas,
+                metrics_config=metrics_config,
+            )
+            return
+
         hpa = client.V2HorizontalPodAutoscaler(
             metadata=client.V1ObjectMeta(
                 name=hpa_name,

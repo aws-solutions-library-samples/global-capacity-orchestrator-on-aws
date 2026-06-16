@@ -245,7 +245,7 @@ class TestHPACreation:
         spec = {
             "autoscaling": {
                 "enabled": True,
-                "metrics": [{"type": "gpu", "target": 50}],
+                "metrics": [{"type": "disk", "target": 50}],
             }
         }
         with patch(
@@ -773,9 +773,15 @@ class TestDeleteResourcesExtended:
         monitor.core_v1.delete_namespaced_service.side_effect = ApiException(status=500)
         monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=500)
 
-        with patch("gco.services.inference_monitor.client.AutoscalingV2Api") as mock_hpa:
+        with (
+            patch("gco.services.inference_monitor.client.AutoscalingV2Api") as mock_hpa,
+            patch("gco.services.inference_monitor.client.CustomObjectsApi") as mock_custom,
+        ):
             mock_hpa.return_value.delete_namespaced_horizontal_pod_autoscaler.side_effect = (
                 ApiException(status=500)
+            )
+            mock_custom.return_value.delete_namespaced_custom_object.side_effect = ApiException(
+                status=500
             )
             # Should not raise, just log errors
             monitor._delete_resources("ep", "ns")

@@ -1494,6 +1494,46 @@ class GCORegionalStack(Stack):
             )
         )
 
+        # CloudWatch read permissions for GPU-based autoscaling. The KEDA
+        # aws-cloudwatch scaler reads ContainerInsights GPU utilization metrics
+        # to scale inference roles that request GPUs — GPU is not a native HPA
+        # resource metric, so this is the only path that can drive GPU scaling.
+        # The CloudWatch read APIs do not support resource-level IAM scoping, so
+        # they are granted account-wide (read-only).
+        self.keda_operator_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "cloudwatch:GetMetricData",
+                    "cloudwatch:GetMetricStatistics",
+                    "cloudwatch:ListMetrics",
+                ],
+                resources=["*"],
+            )
+        )
+
+        # cdk-nag suppression: the CloudWatch metric-read APIs do not support
+        # resource-level IAM scoping — Resource: * is the only valid form.
+        from cdk_nag import NagSuppressions
+
+        NagSuppressions.add_resource_suppressions(
+            self.keda_operator_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The KEDA operator reads CloudWatch metrics "
+                        "(GetMetricData, GetMetricStatistics, ListMetrics) to "
+                        "drive GPU-based autoscaling. These APIs do not support "
+                        "resource-level IAM scoping — Resource: * is the only "
+                        "valid form. The grant is read-only."
+                    ),
+                    "appliesTo": ["Resource::*"],
+                },
+            ],
+            apply_to_children=True,
+        )
+
     def _create_pod_identity_associations(self) -> None:
         """Create EKS Pod Identity Associations for all service accounts.
 
@@ -2744,10 +2784,18 @@ class GCORegionalStack(Stack):
             ("kueue", ["kueue"]),  # Must be last
         ]
 
+        # Charts that are mandatory platform components and cannot be disabled
+        # via cdk.json. KEDA is always installed: it backs the built-in SQS
+        # queue processor (a ScaledJob) and is the only metrics bridge that lets
+        # autoscalers consume GPU/CloudWatch metrics (the keda-metrics-apiserver
+        # serves external.metrics.k8s.io). Disabling it would silently break
+        # both, so the cdk.json toggle is ignored for KEDA.
+        mandatory_chart_keys = {"keda"}
+
         enabled_charts = []
         for config_key, chart_names in chart_map:
             chart_config = helm_config.get(config_key, {})
-            if chart_config.get("enabled", True):
+            if config_key in mandatory_chart_keys or chart_config.get("enabled", True):
                 enabled_charts.extend(chart_names)
 
         return enabled_charts
