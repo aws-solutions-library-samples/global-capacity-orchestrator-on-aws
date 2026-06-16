@@ -230,3 +230,91 @@ class TestInstallChartPreflight:
             )
         assert ok is False
         assert "invalid chart values" in message
+
+
+class TestHandleTask:
+    """``handle_task`` performs exactly one helm op per call and raises on failure."""
+
+    _BASE_EVENT = {
+        "Action": "install_chart",
+        "Chart": "keda",
+        "ClusterName": "gco-us-east-1",
+        "Region": "us-east-1",
+        "EnabledCharts": ["keda"],
+        "Charts": {},
+        "KedaOperatorRoleArn": "arn:aws:iam::123456789012:role/keda",
+    }
+
+    def test_install_enabled_chart_calls_install(self):
+        with (
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc"),
+            patch.object(
+                helm_handler, "install_chart", return_value=(True, "Successfully installed keda")
+            ) as mock_install,
+            patch.object(helm_handler.os, "remove"),
+        ):
+            result = helm_handler.handle_task(dict(self._BASE_EVENT))
+
+        assert result["status"] == "installed"
+        assert result["chart"] == "keda"
+        mock_install.assert_called_once()
+
+    def test_install_injects_keda_role_annotation(self):
+        captured = {}
+
+        def _capture(chart_name, config, kubeconfig, value_overrides):
+            captured["config"] = config
+            return (True, "Successfully installed keda")
+
+        with (
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc"),
+            patch.object(helm_handler, "install_chart", side_effect=_capture),
+            patch.object(helm_handler.os, "remove"),
+        ):
+            helm_handler.handle_task(dict(self._BASE_EVENT))
+
+        ann = captured["config"]["values"]["serviceAccount"]["operator"]["annotations"]
+        assert ann["eks.amazonaws.com/role-arn"] == self._BASE_EVENT["KedaOperatorRoleArn"]
+
+    def test_disabled_chart_on_install_pass_uninstalls(self):
+        event = dict(self._BASE_EVENT)
+        event["EnabledCharts"] = []  # keda not enabled this pass
+        with (
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc"),
+            patch.object(
+                helm_handler, "uninstall_chart", return_value=(True, "Successfully uninstalled")
+            ) as mock_uninstall,
+            patch.object(helm_handler, "install_chart") as mock_install,
+            patch.object(helm_handler.os, "remove"),
+        ):
+            result = helm_handler.handle_task(event)
+
+        assert result["status"] == "uninstalled"
+        mock_uninstall.assert_called_once()
+        mock_install.assert_not_called()
+
+    def test_install_failure_raises(self):
+        with (
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc"),
+            patch.object(helm_handler, "install_chart", return_value=(False, "boom")),
+            patch.object(helm_handler.os, "remove"),
+            pytest.raises(RuntimeError, match="helm install keda failed"),
+        ):
+            helm_handler.handle_task(dict(self._BASE_EVENT))
+
+    def test_kubeconfig_always_removed(self):
+        with (
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc"),
+            patch.object(helm_handler, "install_chart", return_value=(True, "Successfully ok")),
+            patch.object(helm_handler.os, "remove") as mock_remove,
+        ):
+            helm_handler.handle_task(dict(self._BASE_EVENT))
+        mock_remove.assert_called_once_with("/tmp/kc")
+
+    def test_lambda_handler_dispatches_action_events(self):
+        with patch.object(
+            helm_handler, "handle_task", return_value={"chart": "keda", "status": "installed"}
+        ) as mock_task:
+            out = helm_handler.lambda_handler(dict(self._BASE_EVENT), MagicMock())
+        assert out["status"] == "installed"
+        mock_task.assert_called_once()

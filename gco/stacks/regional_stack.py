@@ -63,9 +63,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import aws_cdk.aws_eks_v2 as eks
+import yaml
 from aws_cdk import (
     CfnJson,
     CfnOutput,
@@ -92,6 +94,8 @@ from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sns as sns
 from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_ssm as ssm
+from aws_cdk import aws_stepfunctions as sfn
+from aws_cdk import aws_stepfunctions_tasks as sfn_tasks
 from aws_cdk import custom_resources as cr
 from constructs import Construct
 
@@ -184,6 +188,25 @@ def _augment_trusted_registries_with_project_ecr(
                 augmented.append(host)
                 seen.add(host)
     return augmented
+
+
+def _load_helm_chart_order() -> list[str]:
+    """Return helm chart names in their canonical install order.
+
+    Reads ``lambda/helm-installer/charts.yaml`` (the source of truth, in file
+    order) so the Step Functions state machine has exactly one task per chart,
+    in the same order every deploy — kueue stays last because its mutating
+    webhook intercepts every Job/Deployment. Falls back to an empty list if the
+    file can't be read (the synth-time tests assert it is non-empty).
+    """
+    charts_path = Path(__file__).resolve().parents[2] / "lambda" / "helm-installer" / "charts.yaml"
+    try:
+        with open(charts_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except OSError:
+        return []
+    charts = data.get("charts", {})
+    return list(charts.keys()) if isinstance(charts, dict) else []
 
 
 class GCORegionalStack(Stack):
@@ -2901,7 +2924,106 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # Create log group for Helm installer provider
+        # ------------------------------------------------------------------
+        # Step Functions state machine: one task per chart, in charts.yaml
+        # order. Each chart gets its own retry + Step Functions console
+        # visibility, and — critically — no single Lambda invocation is bound
+        # by the 15-minute Lambda limit, so a slow operator (e.g. a cold NVIDIA
+        # image pull) just costs extra retries instead of failing the deploy.
+        # ------------------------------------------------------------------
+        chart_order = _load_helm_chart_order()
+
+        def _chart_task(chart_name: str) -> sfn_tasks.LambdaInvoke:
+            task = sfn_tasks.LambdaInvoke(
+                self,
+                f"HelmChart-{chart_name}",
+                lambda_function=self.helm_installer_lambda,
+                payload=sfn.TaskInput.from_object(
+                    {
+                        "Action": "install_chart",
+                        "Chart": chart_name,
+                        "ClusterName": sfn.JsonPath.string_at("$.ClusterName"),
+                        "Region": sfn.JsonPath.string_at("$.Region"),
+                        "EnabledCharts": sfn.JsonPath.list_at("$.EnabledCharts"),
+                        "Charts": sfn.JsonPath.object_at("$.Charts"),
+                        "KedaOperatorRoleArn": sfn.JsonPath.string_at("$.KedaOperatorRoleArn"),
+                    }
+                ),
+                payload_response_only=True,
+                # Keep the execution input intact so the next chart task can
+                # still read $.ClusterName, $.EnabledCharts, etc.
+                result_path="$.lastChart",
+                task_timeout=sfn.Timeout.duration(Duration.minutes(14)),
+            )
+            # Per-chart retry with backoff. A cold image pull or a webhook race
+            # clears on a later attempt; only after exhausting these does the
+            # chart (and the deploy) fail.
+            task.add_retry(
+                errors=["States.ALL"],
+                max_attempts=4,
+                interval=Duration.seconds(30),
+                backoff_rate=2.0,
+                max_delay=Duration.minutes(5),
+            )
+            return task
+
+        chart_tasks = [_chart_task(name) for name in chart_order]
+        if chart_tasks:
+            start_state: sfn.IChainable = chart_tasks[0]
+            cursor: Any = chart_tasks[0]
+            for nxt in chart_tasks[1:]:
+                cursor = cursor.next(nxt)
+        else:  # pragma: no cover - charts.yaml is always present in the repo
+            start_state = sfn.Pass(self, "HelmNoCharts")
+
+        helm_sm_log_group = logs.LogGroup(
+            self,
+            "HelmInstallStateMachineLogGroup",
+            retention=logs.RetentionDays.ONE_WEEK,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        self.helm_install_state_machine = sfn.StateMachine(
+            self,
+            "HelmInstallStateMachine",
+            definition_body=sfn.DefinitionBody.from_chainable(start_state),
+            state_machine_type=sfn.StateMachineType.STANDARD,
+            timeout=Duration.hours(2),
+            tracing_enabled=True,
+            logs=sfn.LogOptions(destination=helm_sm_log_group, level=sfn.LogLevel.ALL),
+        )
+
+        # Thin start/poll provider: onEvent starts the execution, isComplete
+        # polls it. These do no Helm/Kubernetes work, so they never approach the
+        # Lambda timeout — all the heavy lifting lives in the state machine.
+        helm_orchestrator_on_event = lambda_.Function(
+            self,
+            "HelmOrchestratorOnEvent",
+            runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
+            handler="handler.on_event",
+            code=lambda_.Code.from_asset("lambda/helm-orchestrator"),
+            timeout=Duration.minutes(1),
+            memory_size=256,
+            environment={
+                "STATE_MACHINE_ARN": self.helm_install_state_machine.state_machine_arn,
+            },
+        )
+        helm_orchestrator_is_complete = lambda_.Function(
+            self,
+            "HelmOrchestratorIsComplete",
+            runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
+            handler="handler.is_complete",
+            code=lambda_.Code.from_asset("lambda/helm-orchestrator"),
+            timeout=Duration.minutes(1),
+            memory_size=256,
+            environment={
+                "STATE_MACHINE_ARN": self.helm_install_state_machine.state_machine_arn,
+            },
+        )
+        self.helm_install_state_machine.grant_start_execution(helm_orchestrator_on_event)
+        self.helm_install_state_machine.grant_read(helm_orchestrator_is_complete)
+
+        # Create log group for the custom-resource provider framework
         helm_provider_log_group = logs.LogGroup(
             self,
             "HelmInstallerProviderLogGroup",
@@ -2909,16 +3031,20 @@ class GCORegionalStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        # Create custom resource provider
+        # Async custom-resource provider: poll the execution every minute for up
+        # to two hours so CloudFormation waits for — and fails on — the real
+        # install result without any single Lambda owning the whole install.
         self.helm_installer_provider = cr.Provider(
             self,
             "HelmInstallerProvider",
-            on_event_handler=self.helm_installer_lambda,
+            on_event_handler=helm_orchestrator_on_event,
+            is_complete_handler=helm_orchestrator_is_complete,
+            query_interval=Duration.minutes(1),
+            total_timeout=Duration.hours(2),
             log_group=helm_provider_log_group,
         )
 
-        # cdk-nag suppression: the Helm installer Lambda requires broad
-        # EKS and Kubernetes API access to install Helm charts.
+        # cdk-nag suppressions for the install path.
         from cdk_nag import NagSuppressions
 
         NagSuppressions.add_resource_suppressions(
@@ -2938,6 +3064,41 @@ class GCORegionalStack(Stack):
             ],
             apply_to_children=True,
         )
+        # The state machine role (auto-generated) invokes the worker Lambda
+        # across versions, and the isComplete role reads execution status by
+        # execution ARN; both use the AWS-standard ``:*`` qualifier/execution
+        # wildcards that cannot be enumerated at synth time.
+        NagSuppressions.add_resource_suppressions(
+            self.helm_install_state_machine,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The state machine invokes the helm worker Lambda; CDK grants "
+                        "lambda:InvokeFunction with the :* version qualifier, which is the "
+                        "standard form and cannot be narrowed at synth time."
+                    ),
+                    "appliesTo": ["Resource::*"],
+                },
+            ],
+            apply_to_children=True,
+        )
+        for _orch_fn in (helm_orchestrator_on_event, helm_orchestrator_is_complete):
+            NagSuppressions.add_resource_suppressions(
+                _orch_fn,
+                [
+                    {
+                        "id": "AwsSolutions-IAM5",
+                        "reason": (
+                            "Start/Describe on the helm-install state machine require the "
+                            "execution-ARN wildcard (arn:...:execution:<sm>:*) because "
+                            "execution names are generated at runtime."
+                        ),
+                        "appliesTo": ["Resource::*"],
+                    },
+                ],
+                apply_to_children=True,
+            )
 
     def _create_efs(self) -> None:
         """Create EFS file system for shared storage across jobs.

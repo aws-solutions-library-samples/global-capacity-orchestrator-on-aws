@@ -217,13 +217,22 @@ def run_helm(
 
     logger.info(f"Running: {' '.join(cmd)}")
 
+    # Subprocess wall-clock cap. This MUST be >= helm's own ``--timeout`` (10m)
+    # below, otherwise a legitimately-slow install (e.g. a cold NVIDIA operator
+    # image pull) gets SIGKILLed by Python before helm's own deadline and a
+    # would-succeed install is reported as a failure. Each chart now runs in its
+    # own Step Functions task / Lambda invocation, so this can safely approach
+    # the per-invocation Lambda limit; retries are handled at the state-machine
+    # level. Override with HELM_CMD_TIMEOUT_SECONDS.
+    cmd_timeout = int(os.environ.get("HELM_CMD_TIMEOUT_SECONDS", "780"))
+
     try:
         result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - cmd is ["helm"] + static args list; helm_env is a controlled copy of os.environ, no shell=True
             cmd,
             capture_output=True,
             text=True,
             env=helm_env,
-            timeout=300,
+            timeout=cmd_timeout,
         )
     except subprocess.TimeoutExpired as exc:
         logger.warning(f"helm subprocess timed out after {exc.timeout}s: {' '.join(cmd)}")
@@ -553,8 +562,97 @@ def _cleanup_stale_webhooks(kubeconfig: str) -> None:
         logger.warning(f"Webhook cleanup failed (non-fatal): {e}")
 
 
-def lambda_handler(event: dict[str, Any], context: Any) -> None:
-    """Main Lambda handler."""
+def handle_task(event: dict[str, Any]) -> dict[str, Any]:
+    """Step Functions task entrypoint: install or uninstall a single chart.
+
+    Each chart is its own state-machine task, so this performs exactly one
+    helm operation per invocation and raises on failure — retries and ordering
+    are owned by the state machine, not this function. That keeps every
+    invocation comfortably under the Lambda timeout and gives per-chart retry
+    and observability in the Step Functions console.
+
+    Event shape (from the state machine task payload)::
+
+        {
+          "Action": "install_chart" | "uninstall_chart",
+          "Chart": "<chart name as keyed in charts.yaml>",
+          "ClusterName": "...", "Region": "...",
+          "EnabledCharts": ["keda", ...],
+          "KedaOperatorRoleArn": "arn:...",   # optional
+          "Charts": { "<name>": { ...overrides... } }  # optional
+        }
+
+    Returns a small status dict on success; raises on failure so the state
+    machine's Retry/Catch handles it.
+    """
+    action = event["Action"]
+    chart_name = event["Chart"]
+    cluster_name = event.get("ClusterName") or os.environ["CLUSTER_NAME"]
+    region = event.get("Region") or os.environ["REGION"]
+    enabled_charts = event.get("EnabledCharts") or []
+    chart_overrides = event.get("Charts") or {}
+    keda_operator_role_arn = event.get("KedaOperatorRoleArn")
+
+    default_config = load_charts_config().get("charts", {})
+    config = dict(default_config.get(chart_name, {}))
+    if chart_name in chart_overrides:
+        config = deep_merge(config, chart_overrides[chart_name])
+
+    is_enabled = chart_name in enabled_charts
+
+    # Inject the KEDA operator IAM role ARN for IRSA, mirroring the legacy
+    # custom-resource path.
+    if chart_name == "keda" and keda_operator_role_arn:
+        keda_values = config.setdefault("values", {})
+        service_account = keda_values.setdefault("serviceAccount", {})
+        operator = service_account.setdefault("operator", {})
+        annotations = operator.setdefault("annotations", {})
+        annotations["eks.amazonaws.com/role-arn"] = keda_operator_role_arn
+
+    namespace = config.get("namespace", "default")
+    kubeconfig = configure_kubeconfig(cluster_name, region)
+    try:
+        if action == "uninstall_chart" or (action == "install_chart" and not is_enabled):
+            # Disabled chart on an install pass: ensure it's gone (idempotent).
+            success, message = uninstall_chart(chart_name, namespace, kubeconfig)
+            return {
+                "chart": chart_name,
+                "status": "uninstalled" if success else "absent",
+                "message": message,
+            }
+
+        if action == "install_chart":
+            value_overrides = chart_overrides.get(chart_name, {}).get("values", {})
+            success, message = install_chart(chart_name, config, kubeconfig, value_overrides)
+            if not success:
+                # Raise so the state machine retries this single chart with
+                # backoff rather than failing the whole deploy.
+                raise RuntimeError(f"helm install {chart_name} failed: {message}")
+            return {"chart": chart_name, "status": "installed", "message": message}
+
+        raise ValueError(f"Unknown Action: {action!r}")
+    finally:
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            os.remove(kubeconfig)
+
+
+def lambda_handler(event: dict[str, Any], context: Any) -> Any:
+    """Main Lambda handler.
+
+    Two entrypoints share this function:
+
+    - **Step Functions task** (the current install path): the event carries an
+      ``Action`` key and is dispatched to :func:`handle_task`, which operates on
+      a single chart and raises on failure.
+    - **CloudFormation custom resource** (legacy/fallback): the event carries a
+      ``RequestType`` and the whole-chart-set loop below runs.
+    """
+    if event.get("Action"):
+        logger.info(f"Task event: {json.dumps(event)}")
+        return handle_task(event)
+
     logger.info(f"Received event: {json.dumps(event)}")
 
     request_type = event["RequestType"]
