@@ -15,6 +15,7 @@ AWS Lambda functions that power GCO's infrastructure layer. These are deployed a
 |-----------|-------------|
 | `kubectl-applier-simple/` | Applies Kubernetes manifests to EKS clusters during CDK deployment. Contains the nodepool, RBAC, service, and storage manifests in `manifests/`. |
 | `helm-installer/` | Installs Helm charts (KEDA, Volcano, KubeRay, Kueue, DRA driver) into EKS clusters during deployment. |
+| `helm-orchestrator/` | CloudFormation custom-resource provider (async `cr.Provider`) that starts and polls the Helm-install Step Functions state machine. Does no Helm/Kubernetes work itself — the per-chart tasks run in `helm-installer`. |
 | `image-lookup/` | CloudFormation custom resource that adopts-or-creates `gco/<name>` ECR repositories so retained repos from a prior deploy are rebound rather than failing the stack with `RepositoryAlreadyExistsException`. Honors `gco:retain=true` on Delete. |
 | `api-gateway-proxy/` | Proxies requests from the global API Gateway through Global Accelerator to regional ALBs. Injects the secret authentication header. |
 | `regional-api-proxy/` | Proxies requests from regional API Gateways directly to the internal NLB via VPC Link. Used for private cluster access. |
@@ -49,7 +50,7 @@ API Gateway → api-gateway-proxy → Global Accelerator → ALB → EKS
 Regional API → regional-api-proxy → Internal NLB → EKS
 
 CDK Deploy → kubectl-applier-simple → EKS (applies manifests)
-           → helm-installer → EKS (installs Helm charts)
+           → helm-orchestrator → Step Functions → helm-installer → EKS (installs Helm charts)
            → ga-registration → Global Accelerator (registers endpoints)
 
 Scheduled → secret-rotation → Secrets Manager (daily rotation)
