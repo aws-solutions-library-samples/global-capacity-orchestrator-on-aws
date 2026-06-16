@@ -397,10 +397,13 @@ jobs:
         # entrypoint expects a GPU that CI runners don't have. The image-level
         # check is therefore "the build produced the image and the pinned
         # transfer-engine package landed on top of the base" — confirmed with
-        # `pip show`, which exits non-zero if the package is missing.
+        # `pip show`, which exits non-zero if the package is missing. The
+        # entrypoint is overridden (the inherited vLLM server entrypoint would
+        # otherwise consume `pip show ...` as server args and try to boot on a
+        # GPU-less runner).
         run: |
-          docker run --rm mooncake-vllm:ci \
-            pip show mooncake-transfer-engine
+          docker run --rm --entrypoint python3 mooncake-vllm:ci \
+            -m pip show mooncake-transfer-engine
 
   integration-docker-helm-installer:
     name: "integration:docker:helm-installer"
