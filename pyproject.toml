@@ -82,20 +82,6 @@ inference-monitor = [
     "kubernetes==36.0.2",
     "pyyaml==6.0.3",
 ]
-mooncake-image = [
-    # Extra runtime packages layered onto the vLLM OpenAI base image to build
-    # the GCO Mooncake-enabled image (dockerfiles/mooncake-vllm-dockerfile).
-    # The Dockerfile reads exactly this group from pyproject.toml at build time,
-    # so the image's extra packages have a single, auditable source of truth
-    # rather than being hardcoded in the Dockerfile. Pinned to exact versions
-    # for reproducible, provenance-clean image builds — never relax any entry to
-    # a range or a rolling tag.
-    #
-    # mooncake-transfer-engine provides the MooncakeConnector,
-    # MooncakeStoreConnector, and MultiConnector consumed by the vLLM V1 KV
-    # backend for disaggregated prefill/decode KV-cache transfer over RDMA/RoCE.
-    "mooncake-transfer-engine==0.3.5",
-]
 mcp = [
     # Kept as an alias of the base ``fastmcp[tasks,code-mode]`` dependency
     # so the documented ``pip install -e ".[mcp]"`` install path keeps
@@ -150,6 +136,27 @@ Repository = "https://github.com/awslabs/global-capacity-orchestrator-on-aws"
 # =============================================================================
 # Tool Configurations
 # =============================================================================
+
+# Extra runtime packages layered onto the vLLM OpenAI base image to build the
+# GCO Mooncake-enabled image (dockerfiles/mooncake-vllm-dockerfile). The
+# Dockerfile reads this list at build time, so the image's extra packages have
+# a single, auditable source of truth rather than being hardcoded in the
+# Dockerfile. Pinned to exact versions for reproducible, provenance-clean image
+# builds — never relax any entry to a range or a rolling tag.
+#
+# This lives under [tool.gco] rather than [project.optional-dependencies] on
+# purpose: mooncake-transfer-engine ships wheels for the image's Python (3.12
+# on the vLLM base) but not for the newer toolchain that pip-compile / the
+# dependency scan run under, so it must NOT enter the CLI's resolvable
+# dependency graph or lockfile. Keeping it here makes it image-only.
+#
+# mooncake-transfer-engine provides the MooncakeConnector, MooncakeStoreConnector,
+# and MultiConnector consumed by the vLLM V1 KV backend for disaggregated
+# prefill/decode KV-cache transfer over RDMA/RoCE.
+[tool.gco.mooncake-image]
+dependencies = [
+    "mooncake-transfer-engine==0.3.5",
+]
 
 # Ruff handles both formatting (``ruff format``) and linting, covering
 # pycodestyle, Pyflakes, bugbear, comprehensions, pyupgrade, simplify,

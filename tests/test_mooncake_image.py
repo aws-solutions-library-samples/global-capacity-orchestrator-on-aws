@@ -33,10 +33,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DOCKERFILE = _REPO_ROOT / "dockerfiles" / "mooncake-vllm-dockerfile"
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 
-# The optional-dependencies group in pyproject.toml that holds the exact,
-# pinned extra packages this image layers onto the vLLM base. The Dockerfile
-# reads this group at build time, so it is the single source of truth for the
-# transfer-engine pin (rather than a hardcoded version in the Dockerfile).
+# The pyproject table holding the exact, pinned extra packages this image
+# layers onto the vLLM base. The Dockerfile reads this table at build time, so
+# it is the single source of truth for the transfer-engine pin (rather than a
+# hardcoded version in the Dockerfile). It lives under [tool.gco] rather than
+# [project.optional-dependencies] so this image-only dependency stays out of
+# the CLI's resolvable dependency graph.
 _IMAGE_DEP_GROUP = "mooncake-image"
 
 # Names of the other first-party images, used to confirm the new image is
@@ -121,16 +123,21 @@ def _dockerfile_text() -> str:
 def _image_dependency_specs() -> list[str]:
     """Return the pinned extra-package specs the image installs from pyproject.
 
-    These live in the ``mooncake-image`` optional-dependencies group and are the
-    exact specs the Dockerfile pip-installs at build time.
+    These live in the ``[tool.gco.mooncake-image]`` table and are the exact
+    specs the Dockerfile pip-installs at build time. The table is intentionally
+    kept out of ``[project.optional-dependencies]`` so this image-only,
+    GPU/RDMA dependency never enters the CLI's resolvable dependency graph or
+    lockfile.
     """
     assert _PYPROJECT.is_file(), f"pyproject.toml not found: {_PYPROJECT}"
     data = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
-    groups = data["project"]["optional-dependencies"]
-    assert _IMAGE_DEP_GROUP in groups, (
-        f"expected a {_IMAGE_DEP_GROUP!r} optional-dependencies group in pyproject.toml"
+    table = data.get("tool", {}).get("gco", {}).get(_IMAGE_DEP_GROUP)
+    assert table is not None, (
+        f"expected a [tool.gco.{_IMAGE_DEP_GROUP}] table in pyproject.toml"
     )
-    return groups[_IMAGE_DEP_GROUP]
+    specs = table.get("dependencies")
+    assert specs, f"expected dependencies in [tool.gco.{_IMAGE_DEP_GROUP}]"
+    return specs
 
 
 def test_base_image_tag_is_pinned_to_an_explicit_version() -> None:
