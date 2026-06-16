@@ -325,15 +325,15 @@ gco inference set-topology my-llm --prefill 3 --decode 6
 
 ```text
                  ┌──────────────────────────────────────┐
-                 │        Mooncake Transfer Engine       │
+                 │        Mooncake Transfer Engine      │
                  │   (zero-copy KV cache via RDMA/TCP)  │
                  └────────────┬─────────────┬───────────┘
                               │             │
               ┌───────────────▼──┐    ┌─────▼──────────────┐
-              │  Prefill Pods    │    │   Decode Pods       │
-              │  (compute-bound) │    │   (memory-bound)    │
-              │  {name}-prefill  │    │   {name}-decode     │
-              │  GPU-saturated   │    │   Streaming tokens  │
+              │  Prefill Pods    │    │   Decode Pods      │
+              │  (compute-bound) │    │   (memory-bound)   │
+              │  {name}-prefill  │    │   {name}-decode    │
+              │  GPU-saturated   │    │   Streaming tokens │
               └──────────────────┘    └────────────────────┘
 ```
 
