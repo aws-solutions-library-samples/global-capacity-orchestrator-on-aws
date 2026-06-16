@@ -2953,7 +2953,7 @@ class GCORegionalStack(Stack):
                 # Keep the execution input intact so the next chart task can
                 # still read $.ClusterName, $.EnabledCharts, etc.
                 result_path="$.lastChart",
-                task_timeout=sfn.Timeout.duration(Duration.minutes(14)),
+                task_timeout=sfn.Timeout.duration(Duration.minutes(16)),
             )
             # Per-chart retry with backoff. A cold image pull or a webhook race
             # clears on a later attempt; only after exhausting these does the
