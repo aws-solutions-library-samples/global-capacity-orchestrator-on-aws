@@ -6,6 +6,7 @@ Reusable GitHub Actions composite actions shared across multiple CI workflows. I
 
 - [Actions](#actions)
   - [`build-lambda-package`](#build-lambda-package)
+  - [`free-disk-space`](#free-disk-space)
   - [`install-trivy`](#install-trivy)
   - [`upload-artifact-with-retry`](#upload-artifact-with-retry)
 - [Adding a New Action](#adding-a-new-action)
@@ -32,6 +33,30 @@ steps:
     with:
       python-version: "3.14"
   - uses: ./.github/actions/build-lambda-package
+```
+
+### `free-disk-space`
+
+Reclaims disk on GitHub-hosted ubuntu runners before disk-heavy jobs. The default runner image ships with ~14 GB free on the root volume, and a full pip install (CDK + dev + mcp) plus the Lambda build trees, node, and the per-xdist-worker coverage SQLite files can exhaust it. When the disk fills mid-run, coverage.py's `.coverage` flush raises `sqlite3.OperationalError: database or disk is full`, which xdist surfaces as a pytest `INTERNALERROR` / `KeyError: <WorkerController gwN>` — failing the whole job with a false negative.
+
+This action removes large preinstalled toolchains the build never uses (Android SDK, .NET, Haskell/GHC, Swift, PowerShell, Chromium) and prunes cached Docker images, typically reclaiming 20–30 GB. It prints `df -h /` before and after so the reclaimed space is visible in the job log.
+
+**Safe by design:**
+
+- Leaves `/opt/hostedtoolcache` untouched — `actions/setup-python` serves the job's interpreter from there (e.g. `/opt/hostedtoolcache/Python/3.14.x`), so removing it would break the run.
+- Every removal is best-effort (`|| true`), so a missing directory on a future runner-image revision can never fail the job.
+
+**Used by:** `unit:pytest:core`, `unit:cdk:config-matrix`, `unit:cdk:nag-compliance`. Add it as the first step after `actions/checkout` (before the Python/Node setup and install steps) so the headroom exists for the whole job.
+
+**Usage:**
+
+```yaml
+steps:
+  - uses: actions/checkout@v6
+  - uses: ./.github/actions/free-disk-space
+  - uses: actions/setup-python@v6
+    with:
+      python-version: "3.14"
 ```
 
 ### `install-trivy`
