@@ -175,9 +175,7 @@ class TestIsComplete:
         handler, sfn = orchestrator
         sfn.describe_execution.return_value = {"status": bad_status}
 
-        result = handler.is_complete(
-            {"RequestType": "Create", "ExecutionArn": _EXECUTION_ARN}
-        )
+        result = handler.is_complete({"RequestType": "Create", "ExecutionArn": _EXECUTION_ARN})
 
         assert result["IsComplete"] is True
         assert result["Data"]["ExecutionArn"] == _EXECUTION_ARN

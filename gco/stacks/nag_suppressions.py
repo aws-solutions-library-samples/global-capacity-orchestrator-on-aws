@@ -267,6 +267,10 @@ def add_iam_suppressions(
 
     for region in sorted(ssm_regions_set):
         applies_to.append(f"Resource::arn:aws:ssm:{region}:<AWS::AccountId>:parameter/gco/*")
+        # Per-chart add-on status + replay input written by the helm installer
+        # and orchestrator (gco stacks addons status/install). Scoped to the
+        # project's addons subtree in each region.
+        applies_to.append(f"Resource::arn:aws:ssm:{region}:<AWS::AccountId>:parameter/gco/addons/*")
 
     # Add DynamoDB index wildcard patterns for global region
     # Tables are created in global stack, accessed from all regional stacks

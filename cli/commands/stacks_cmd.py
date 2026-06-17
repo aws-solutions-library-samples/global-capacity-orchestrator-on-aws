@@ -5,7 +5,7 @@ from typing import Any
 
 import click
 
-from ..config import GCOConfig
+from ..config import GCOConfig, _load_cdk_json
 from ..output import get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
@@ -1084,18 +1084,6 @@ def aurora_disable(config: Any, yes: Any) -> None:
         sys.exit(1)
 
 
-def _resolve_region(config: Any, region: Any) -> str:
-    """Resolve a target region: explicit flag, else first regional, else default."""
-    if region:
-        return str(region)
-    from ..config import _load_cdk_json
-
-    cdk_regions = _load_cdk_json()
-    if cdk_regions and cdk_regions.get("regional"):
-        return str(cdk_regions["regional"][0])
-    return str(config.default_region or "us-east-1")
-
-
 def _project_name() -> str:
     """Read project_name from cdk.json context (default 'gco')."""
     import json
@@ -1109,21 +1097,25 @@ def _project_name() -> str:
         return "gco"
 
 
-def _all_regions(config: Any) -> list[str]:
-    """All regional deployment regions from cdk.json (fallback: resolved single)."""
-    from ..config import _load_cdk_json
-
-    cdk_regions = _load_cdk_json()
-    if cdk_regions and cdk_regions.get("regional"):
-        return list(cdk_regions["regional"])
-    return [_resolve_region(config, None)]
-
-
 def _target_regions(config: Any, region: Any, all_regions: bool) -> list[str]:
-    """Resolve which regions a command acts on: every regional one, or a single."""
+    """Resolve which regions a command acts on.
+
+    ``--all-regions`` returns every configured regional deployment region;
+    otherwise an explicit ``--region``, else the first regional region, else
+    the configured default.
+    """
+    cdk_regions = _load_cdk_json()
+    regional = (
+        list(cdk_regions["regional"]) if (cdk_regions and cdk_regions.get("regional")) else []
+    )
+
     if all_regions:
-        return _all_regions(config)
-    return [_resolve_region(config, region)]
+        return regional
+    if region:
+        return [str(region)]
+    if regional:
+        return [str(regional[0])]
+    return [str(config.default_region or "us-east-1")]
 
 
 @stacks.group("addons")
