@@ -2556,6 +2556,10 @@ class GCORegionalStack(Stack):
                 "Charts": {},
                 # Pass IAM role ARNs for service account annotations
                 "KedaOperatorRoleArn": self.keda_operator_role.role_arn,
+                # Project name lets the orchestrator persist the execution input
+                # to SSM so `gco stacks addons install` can replay it without
+                # reconstructing chart config in the CLI.
+                "ProjectName": self.config.get_project_name(),
                 # Force re-invocation on every deployment to pick up charts.yaml changes
                 "DeploymentTimestamp": deployment_timestamp,
             },
@@ -2903,8 +2907,22 @@ class GCORegionalStack(Stack):
             environment={
                 "CLUSTER_NAME": self.cluster.cluster_name,
                 "REGION": self.deployment_region,
+                "PROJECT_NAME": project_name,
             },
             tracing=lambda_.Tracing.ACTIVE,
+        )
+
+        # Allow the installer to record per-chart add-on status to SSM so the
+        # add-on layer's health is observable out-of-band (decoupled from the
+        # CloudFormation rollback path). Read back via `gco stacks addons-status`.
+        helm_lambda_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["ssm:PutParameter"],
+                resources=[
+                    f"arn:aws:ssm:{self.deployment_region}:{self.account}:"
+                    f"parameter/{project_name}/addons/*"
+                ],
+            )
         )
 
         # Add EKS access entry for the Lambda role
@@ -2965,10 +2983,24 @@ class GCORegionalStack(Stack):
 
         chart_tasks = [_chart_task(name) for name in chart_order]
         if chart_tasks:
+            # Each chart's success AND its post-retry failure both route to the
+            # next chart, so one slow/broken chart never blocks the rest — the
+            # batch converges as far as it can and the execution ends SUCCEEDED.
+            # Per-chart outcomes are recorded to SSM by the installer tasks; the
+            # custom-resource provider is non-fatal, so a failed chart never
+            # rolls back the cluster.
+            done = sfn.Succeed(self, "HelmInstallComplete")
+            for i, task in enumerate(chart_tasks):
+                next_state: sfn.IChainable = (
+                    chart_tasks[i + 1] if i + 1 < len(chart_tasks) else done
+                )
+                task.add_catch(
+                    next_state,
+                    errors=["States.ALL"],
+                    result_path="$.lastChartError",
+                )
+                task.next(next_state)
             start_state: sfn.IChainable = chart_tasks[0]
-            cursor: Any = chart_tasks[0]
-            for nxt in chart_tasks[1:]:
-                cursor = cursor.next(nxt)
         else:  # pragma: no cover - charts.yaml is always present in the repo
             start_state = sfn.Pass(self, "HelmNoCharts")
 
@@ -3018,6 +3050,19 @@ class GCORegionalStack(Stack):
         )
         self.helm_install_state_machine.grant_start_execution(helm_orchestrator_on_event)
         self.helm_install_state_machine.grant_read(helm_orchestrator_is_complete)
+
+        # Let on_event persist the execution input to SSM so the add-on install
+        # can be replayed out-of-band (gco stacks addons install) without the
+        # CLI reconstructing chart config or the KEDA role ARN.
+        helm_orchestrator_on_event.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ssm:PutParameter"],
+                resources=[
+                    f"arn:aws:ssm:{self.deployment_region}:{self.account}:"
+                    f"parameter/{project_name}/addons/*"
+                ],
+            )
+        )
 
         # Create log group for the custom-resource provider framework
         helm_provider_log_group = logs.LogGroup(

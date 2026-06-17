@@ -165,12 +165,22 @@ class TestIsComplete:
         assert result == {"IsComplete": False}
 
     @pytest.mark.parametrize("bad_status", ["FAILED", "TIMED_OUT", "ABORTED"])
-    def test_terminal_failure_raises(self, orchestrator, bad_status):
+    def test_terminal_failure_is_non_fatal(self, orchestrator, bad_status):
+        """A failed/timed-out/aborted execution must NOT fail the custom
+
+        resource — that would roll back and destroy the EKS cluster over a
+        recoverable add-on problem. The resource reports complete; per-chart
+        detail lives in SSM and is re-converged with `gco stacks addons install`.
+        """
         handler, sfn = orchestrator
         sfn.describe_execution.return_value = {"status": bad_status}
 
-        with pytest.raises(RuntimeError, match=bad_status):
-            handler.is_complete({"RequestType": "Create", "ExecutionArn": _EXECUTION_ARN})
+        result = handler.is_complete(
+            {"RequestType": "Create", "ExecutionArn": _EXECUTION_ARN}
+        )
+
+        assert result["IsComplete"] is True
+        assert result["Data"]["ExecutionArn"] == _EXECUTION_ARN
 
     def test_reads_execution_arn_from_data_fallback(self, orchestrator):
         handler, sfn = orchestrator

@@ -65,6 +65,39 @@ HELM_INSTALL_MAX_RETRIES = 3
 # resource completion beyond its 15-minute timeout.
 HELM_INSTALL_RETRY_DELAY_SECONDS = 30
 
+
+def _record_addon_status(chart_name: str, status: str, message: str) -> None:
+    """Record a single chart's install outcome to SSM (best-effort).
+
+    Writes ``/<project>/addons/<region>/<chart>`` as a small JSON blob so the
+    add-on layer's health is observable out-of-band — decoupled from the
+    CloudFormation rollback path. Read back via ``gco stacks addons-status``.
+    Failures here are swallowed: status reporting must never turn a successful
+    install into a failure (or vice versa).
+    """
+    project = os.environ.get("PROJECT_NAME")
+    region = os.environ.get("REGION")
+    if not project or not region:
+        return
+    import contextlib
+    import time as _time
+
+    with contextlib.suppress(Exception):
+        boto3.client("ssm").put_parameter(
+            Name=f"/{project}/addons/{region}/{chart_name}",
+            Value=json.dumps(
+                {
+                    "chart": chart_name,
+                    "status": status,
+                    "message": message[:1024],
+                    "updated_at": int(_time.time()),
+                }
+            ),
+            Type="String",
+            Overwrite=True,
+        )
+
+
 # Load default chart configurations
 CHARTS_CONFIG_PATH = Path(__file__).parent / "charts.yaml"
 
@@ -615,9 +648,11 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
         if action == "uninstall_chart" or (action == "install_chart" and not is_enabled):
             # Disabled chart on an install pass: ensure it's gone (idempotent).
             success, message = uninstall_chart(chart_name, namespace, kubeconfig)
+            status = "uninstalled" if success else "absent"
+            _record_addon_status(chart_name, status, message)
             return {
                 "chart": chart_name,
-                "status": "uninstalled" if success else "absent",
+                "status": status,
                 "message": message,
             }
 
@@ -625,9 +660,11 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
             value_overrides = chart_overrides.get(chart_name, {}).get("values", {})
             success, message = install_chart(chart_name, config, kubeconfig, value_overrides)
             if not success:
+                _record_addon_status(chart_name, "failed", message)
                 # Raise so the state machine retries this single chart with
                 # backoff rather than failing the whole deploy.
                 raise RuntimeError(f"helm install {chart_name} failed: {message}")
+            _record_addon_status(chart_name, "installed", message)
             return {"chart": chart_name, "status": "installed", "message": message}
 
         raise ValueError(f"Unknown Action: {action!r}")

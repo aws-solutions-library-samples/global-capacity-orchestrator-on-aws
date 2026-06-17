@@ -1082,3 +1082,148 @@ def aurora_disable(config: Any, yes: Any) -> None:
     except Exception as e:
         formatter.print_error(f"Failed to disable Aurora: {e}")
         sys.exit(1)
+
+
+def _resolve_region(config: Any, region: Any) -> str:
+    """Resolve a target region: explicit flag, else first regional, else default."""
+    if region:
+        return str(region)
+    from ..config import _load_cdk_json
+
+    cdk_regions = _load_cdk_json()
+    if cdk_regions and cdk_regions.get("regional"):
+        return str(cdk_regions["regional"][0])
+    return str(config.default_region or "us-east-1")
+
+
+def _project_name() -> str:
+    """Read project_name from cdk.json context (default 'gco')."""
+    import json
+    from pathlib import Path
+
+    try:
+        with open(Path.cwd() / "cdk.json", encoding="utf-8") as f:
+            ctx = (json.load(f) or {}).get("context", {})
+        return str(ctx.get("project_name") or "gco")
+    except OSError, ValueError:
+        return "gco"
+
+
+@stacks.group("addons")
+@pass_config
+def addons_cmd(config: Any) -> None:
+    """Inspect and re-converge cluster add-ons (Helm charts).
+
+    Add-on installation is decoupled from the CloudFormation rollback path: a
+    chart that fails to install never rolls back the cluster. Use these commands
+    to see per-chart status and re-run the installer without a full redeploy.
+    """
+    pass
+
+
+@addons_cmd.command("status")
+@click.option("--region", "-r", help="AWS region (default: first deployment region)")
+@pass_config
+def addons_status(config: Any, region: Any) -> None:
+    """Show per-chart add-on install status (from SSM).
+
+    Examples:
+        gco stacks addons status
+        gco stacks addons status -r us-west-2
+    """
+    import json
+
+    import boto3
+
+    formatter = get_output_formatter(config)
+    region = _resolve_region(config, region)
+    project = _project_name()
+    prefix = f"/{project}/addons/{region}/"
+
+    try:
+        ssm = boto3.client("ssm", region_name=region)
+        params: list[dict[str, Any]] = []
+        paginator = ssm.get_paginator("get_parameters_by_path")
+        for page in paginator.paginate(Path=prefix, Recursive=False):
+            params.extend(page.get("Parameters", []))
+    except Exception as e:
+        formatter.print_error(f"Failed to read add-on status from SSM: {e}")
+        sys.exit(1)
+
+    rows = []
+    for p in params:
+        name = p["Name"].rsplit("/", 1)[-1]
+        if name == "_input":
+            continue
+        try:
+            data = json.loads(p["Value"])
+        except ValueError:
+            data = {"status": "unknown", "message": p.get("Value", "")}
+        rows.append((name, data.get("status", "unknown"), data.get("message", "")[:80]))
+
+    if not rows:
+        formatter.print_info(
+            f"No add-on status recorded under {prefix} yet. "
+            "The installer writes status as charts are processed."
+        )
+        return
+
+    rows.sort()
+    formatter.print_info(f"Add-on status for {project} in {region}:")
+    for name, status, message in rows:
+        line = f"  {name:<28} {status:<12} {message}"
+        if status in ("installed", "uninstalled", "absent"):
+            formatter.print_success(line)
+        else:
+            formatter.print_error(line)
+
+
+@addons_cmd.command("install")
+@click.option("--region", "-r", help="AWS region (default: first deployment region)")
+@pass_config
+def addons_install(config: Any, region: Any) -> None:
+    """Re-run the Helm add-on installer (idempotent; never rolls back the cluster).
+
+    Replays the last execution input persisted by the deploy, so chart config
+    and IAM role wiring stay in one place. Use this to re-converge after a
+    transient failure instead of a full stack redeploy.
+
+    Examples:
+        gco stacks addons install
+        gco stacks addons install -r us-west-2
+    """
+    import boto3
+
+    formatter = get_output_formatter(config)
+    region = _resolve_region(config, region)
+    project = _project_name()
+    input_param = f"/{project}/addons/{region}/_input"
+
+    try:
+        ssm = boto3.client("ssm", region_name=region)
+        execution_input = ssm.get_parameter(Name=input_param)["Parameter"]["Value"]
+    except Exception as e:
+        formatter.print_error(
+            f"Could not read {input_param}: {e}. "
+            f"Deploy the regional stack at least once first (gco stacks deploy gco-{region} -y)."
+        )
+        sys.exit(1)
+
+    try:
+        sfn = boto3.client("stepfunctions", region_name=region)
+        machines = sfn.list_state_machines(maxResults=1000)["stateMachines"]
+        arn = next(
+            (m["stateMachineArn"] for m in machines if "HelmInstall" in m["name"]),
+            None,
+        )
+        if not arn:
+            formatter.print_error(f"No HelmInstall state machine found in {region}.")
+            sys.exit(1)
+        resp = sfn.start_execution(stateMachineArn=arn, input=execution_input)
+    except Exception as e:
+        formatter.print_error(f"Failed to start add-on install: {e}")
+        sys.exit(1)
+
+    formatter.print_success("Started add-on install (idempotent re-converge).")
+    formatter.print_info(f"  execution: {resp['executionArn']}")
+    formatter.print_info(f"  track status with: gco stacks addons status -r {region}")
