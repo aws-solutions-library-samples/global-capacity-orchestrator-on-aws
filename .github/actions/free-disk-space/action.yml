@@ -1,0 +1,44 @@
+name: "Free disk space"
+description: >
+  Reclaims disk on GitHub-hosted ubuntu runners before disk-heavy jobs
+  (pytest with coverage, cdk synth, cdk-nag matrix). The default runner
+  image ships with ~14 GB free on the root volume, and the combination of
+  a full pip install (CDK + dev + mcp), the Lambda build trees, node, and
+  per-xdist-worker coverage SQLite files can exhaust it. When the disk
+  fills mid-run, coverage.py's `.coverage` flush raises
+  `sqlite3.OperationalError: database or disk is full`, which surfaces as a
+  pytest INTERNALERROR / xdist `KeyError: <WorkerController gwN>` and fails
+  the whole job with a false negative.
+
+  This action removes large preinstalled toolchains the build does not use
+  (Android SDK, .NET, Haskell/GHC, Swift) and prunes cached Docker images,
+  typically reclaiming 20-30 GB. It deliberately leaves
+  /opt/hostedtoolcache untouched because actions/setup-python serves the
+  job's Python interpreter from there.
+
+  Every removal is best-effort (`|| true`) so a missing directory on a
+  future runner image revision can never fail the job.
+
+runs:
+  using: "composite"
+  steps:
+    - name: Reclaim disk space
+      shell: bash
+      run: |
+        echo "Disk usage before cleanup:"
+        df -h /
+        # Largest reclaimable toolchains on the ubuntu-latest image. None of
+        # these are used by the Python/CDK/Node build. /opt/hostedtoolcache
+        # is intentionally NOT touched — setup-python's interpreter lives
+        # there (e.g. /opt/hostedtoolcache/Python/3.14.x).
+        sudo rm -rf /usr/local/lib/android || true
+        sudo rm -rf /usr/share/dotnet || true
+        sudo rm -rf /opt/ghc /usr/local/.ghcup || true
+        sudo rm -rf /usr/share/swift || true
+        sudo rm -rf /usr/local/share/powershell || true
+        sudo rm -rf /usr/local/share/chromium /usr/local/share/chrome* || true
+        # Prune the preinstalled Docker images (several GB) — jobs that need
+        # containers build/pull their own.
+        docker image prune --all --force || true
+        echo "Disk usage after cleanup:"
+        df -h /

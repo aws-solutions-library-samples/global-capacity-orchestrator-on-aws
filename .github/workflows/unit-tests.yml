@@ -78,6 +78,11 @@ jobs:
       AWS_REGION: us-east-1
     steps:
       - uses: actions/checkout@v6
+      # Reclaim ~20-30 GB before the coverage run. Without this the runner's
+      # ~14 GB root volume can fill mid-test, and coverage.py's SQLite flush
+      # then raises "database or disk is full", which xdist reports as an
+      # INTERNALERROR / KeyError: <WorkerController gwN> — a false failure.
+      - uses: ./.github/actions/free-disk-space
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -277,6 +282,7 @@ jobs:
       CDK_DEFAULT_REGION: "us-east-1"
     steps:
       - uses: actions/checkout@v6
+      - uses: ./.github/actions/free-disk-space
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -357,6 +363,7 @@ jobs:
       AWS_REGION: us-east-1
     steps:
       - uses: actions/checkout@v6
+      - uses: ./.github/actions/free-disk-space
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
