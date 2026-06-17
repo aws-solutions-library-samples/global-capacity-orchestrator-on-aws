@@ -238,6 +238,19 @@ charts:
       # Install CRDs with the chart
       crds:
         enabled: true
+      # Disable the post-install startupapicheck hook. It runs as a Helm
+      # post-install hook Job that `helm --wait` blocks on (a *separate* wait
+      # from the main resources, each bounded by --timeout). In this
+      # private EKS Auto Mode cluster that hook wait runs past the installer
+      # Lambda's HELM_CMD_TIMEOUT_SECONDS (780s) guard, so helm gets SIGKILLed
+      # and the release is left wedged in `pending-install` even though the
+      # controller/webhook/cainjector Deployments are all healthy in ~2m.
+      # startupapicheck is only a best-effort post-install API probe — cert-manager
+      # is fully functional without it — so disabling it lets `helm --wait`
+      # return as soon as the (healthy) Deployments are Ready. See docs/IMAGE_MIRROR.md
+      # discussion of the 780s wait guard.
+      startupapicheck:
+        enabled: false
       # Prevent Karpenter from evicting cert-manager pods during node consolidation
       podAnnotations:
         karpenter.sh/do-not-disrupt: "true"
