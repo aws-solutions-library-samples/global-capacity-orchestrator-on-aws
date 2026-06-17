@@ -283,7 +283,7 @@ jobs:
           tags: health-monitor:ci
           load: true
           cache-from: type=gha,scope=health-monitor
-          cache-to: type=gha,mode=max,scope=health-monitor
+          cache-to: type=gha,mode=max,scope=health-monitor,ignore-error=true
       - name: Verify image boots the module
         # The FastAPI app's lifespan() calls kubernetes.config.load_incluster_config()
         # / load_kube_config() on startup, both of which (correctly) fail without
@@ -308,7 +308,7 @@ jobs:
           tags: manifest-processor:ci
           load: true
           cache-from: type=gha,scope=manifest-processor
-          cache-to: type=gha,mode=max,scope=manifest-processor
+          cache-to: type=gha,mode=max,scope=manifest-processor,ignore-error=true
       - name: Verify image boots the module
         # Same rationale as integration:docker:health-monitor — the FastAPI
         # app fails fast without a real K8s API, so the image-level test
@@ -333,7 +333,7 @@ jobs:
           tags: inference-monitor:ci
           load: true
           cache-from: type=gha,scope=inference-monitor
-          cache-to: type=gha,mode=max,scope=inference-monitor
+          cache-to: type=gha,mode=max,scope=inference-monitor,ignore-error=true
       - name: Verify image runs and imports
         # inference-monitor needs a real Kubernetes API on startup, so we
         # don't run the reconciliation loop. The Dockerfile's HEALTHCHECK
@@ -359,7 +359,7 @@ jobs:
           tags: queue-processor:ci
           load: true
           cache-from: type=gha,scope=queue-processor
-          cache-to: type=gha,mode=max,scope=queue-processor
+          cache-to: type=gha,mode=max,scope=queue-processor,ignore-error=true
       - name: Verify image boots the module
         # queue-processor is a short-lived KEDA ScaledJob — it has no HTTP
         # endpoint. With no JOB_QUEUE_URL / SQS_QUEUE_URL set, the module
@@ -386,7 +386,7 @@ jobs:
           tags: helm-installer:ci
           load: true
           cache-from: type=gha,scope=helm-installer
-          cache-to: type=gha,mode=max,scope=helm-installer
+          cache-to: type=gha,mode=max,scope=helm-installer,ignore-error=true
       - name: Verify helm + kubectl binaries
         # This is a Lambda container, not a server. The meaningful check is
         # that the image's helm and kubectl binaries are invocable at the
@@ -629,7 +629,7 @@ jobs:
           tags: health-monitor:ci
           load: true
           cache-from: type=gha,scope=health-monitor
-          cache-to: type=gha,mode=max,scope=health-monitor
+          cache-to: type=gha,mode=max,scope=health-monitor,ignore-error=true
       - name: Build manifest-processor image
         uses: docker/build-push-action@v7
         with:
@@ -638,7 +638,7 @@ jobs:
           tags: manifest-processor:ci
           load: true
           cache-from: type=gha,scope=manifest-processor
-          cache-to: type=gha,mode=max,scope=manifest-processor
+          cache-to: type=gha,mode=max,scope=manifest-processor,ignore-error=true
       - name: Build inference-monitor image
         uses: docker/build-push-action@v7
         with:
@@ -647,7 +647,7 @@ jobs:
           tags: inference-monitor:ci
           load: true
           cache-from: type=gha,scope=inference-monitor
-          cache-to: type=gha,mode=max,scope=inference-monitor
+          cache-to: type=gha,mode=max,scope=inference-monitor,ignore-error=true
       - name: Load images into kind
         run: |
           kind load docker-image health-monitor:ci --name gco-ci

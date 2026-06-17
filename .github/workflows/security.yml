@@ -222,7 +222,7 @@ jobs:
           tags: ${{ matrix.image }}:scan
           load: true
           cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }},ignore-error=true
       - name: Trivy image scan
         env:
           IMAGE: ${{ matrix.image }}
