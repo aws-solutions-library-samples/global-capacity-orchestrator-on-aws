@@ -1,14 +1,13 @@
 """Unit tests for the helm-orchestrator custom-resource provider handler.
 
-The handler (``lambda/helm-orchestrator/handler.py``) is a thin async
+The handler (``lambda/helm-orchestrator/handler.py``) is a thin fire-and-forget
 CloudFormation provider over the Helm-install Step Functions state machine. It
-does no Helm/Kubernetes work itself, so these tests exercise exactly its two
-jobs:
+does no Helm/Kubernetes work itself, so these tests exercise exactly its one job:
 
 - ``on_event``: start a state-machine execution on Create/Update (passing the
-  chart config through as the execution input) and no-op on Delete.
-- ``is_complete``: poll the started execution and translate Step Functions
-  terminal states into CloudFormation completion / failure.
+  chart config through as the execution input) and no-op on Delete. The resource
+  completes as soon as the execution is started — there is no isComplete waiter,
+  so the cluster's CloudFormation lifecycle is never bound to the helm batch.
 
 The state machine itself is mocked — we assert on what the handler asks boto3
 to do and how it interprets the responses, never on real AWS calls.
@@ -83,7 +82,7 @@ class TestOnEvent:
             "Charts": {"keda": {"enabled": True}},
             "KedaOperatorRoleArn": "arn:aws:iam::123456789012:role/keda",
         }
-        # ExecutionArn is threaded back for is_complete (top level + Data).
+        # ExecutionArn is returned as an observability attribute (top level + Data).
         assert result["ExecutionArn"] == _EXECUTION_ARN
         assert result["Data"]["ExecutionArn"] == _EXECUTION_ARN
         assert result["PhysicalResourceId"]
@@ -130,71 +129,3 @@ class TestOnEvent:
         assert sent["EnabledCharts"] == []
         assert sent["Charts"] == {}
         assert sent["KedaOperatorRoleArn"] is None
-
-
-# ---------------------------------------------------------------------------
-# is_complete
-# ---------------------------------------------------------------------------
-
-
-class TestIsComplete:
-    def test_delete_is_immediately_complete(self, orchestrator):
-        handler, sfn = orchestrator
-
-        result = handler.is_complete({"RequestType": "Delete"})
-
-        assert result == {"IsComplete": True}
-        sfn.describe_execution.assert_not_called()
-
-    def test_succeeded_reports_complete(self, orchestrator):
-        handler, sfn = orchestrator
-        sfn.describe_execution.return_value = {"status": "SUCCEEDED"}
-
-        result = handler.is_complete({"RequestType": "Create", "ExecutionArn": _EXECUTION_ARN})
-
-        assert result["IsComplete"] is True
-        assert result["Data"]["ExecutionArn"] == _EXECUTION_ARN
-        sfn.describe_execution.assert_called_once_with(executionArn=_EXECUTION_ARN)
-
-    def test_running_reports_not_complete(self, orchestrator):
-        handler, sfn = orchestrator
-        sfn.describe_execution.return_value = {"status": "RUNNING"}
-
-        result = handler.is_complete({"RequestType": "Update", "ExecutionArn": _EXECUTION_ARN})
-
-        assert result == {"IsComplete": False}
-
-    @pytest.mark.parametrize("bad_status", ["FAILED", "TIMED_OUT", "ABORTED"])
-    def test_terminal_failure_is_non_fatal(self, orchestrator, bad_status):
-        """A failed/timed-out/aborted execution must NOT fail the custom
-
-        resource — that would roll back and destroy the EKS cluster over a
-        recoverable add-on problem. The resource reports complete; per-chart
-        detail lives in SSM and is re-converged with `gco stacks addons install`.
-        """
-        handler, sfn = orchestrator
-        sfn.describe_execution.return_value = {"status": bad_status}
-
-        result = handler.is_complete({"RequestType": "Create", "ExecutionArn": _EXECUTION_ARN})
-
-        assert result["IsComplete"] is True
-        assert result["Data"]["ExecutionArn"] == _EXECUTION_ARN
-
-    def test_reads_execution_arn_from_data_fallback(self, orchestrator):
-        handler, sfn = orchestrator
-        sfn.describe_execution.return_value = {"status": "SUCCEEDED"}
-
-        result = handler.is_complete(
-            {"RequestType": "Create", "Data": {"ExecutionArn": _EXECUTION_ARN}}
-        )
-
-        assert result["IsComplete"] is True
-        sfn.describe_execution.assert_called_once_with(executionArn=_EXECUTION_ARN)
-
-    def test_missing_execution_arn_raises(self, orchestrator):
-        handler, sfn = orchestrator
-
-        with pytest.raises(RuntimeError, match="without an ExecutionArn"):
-            handler.is_complete({"RequestType": "Create"})
-
-        sfn.describe_execution.assert_not_called()

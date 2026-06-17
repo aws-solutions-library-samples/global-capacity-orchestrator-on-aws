@@ -3021,9 +3021,10 @@ class GCORegionalStack(Stack):
             logs=sfn.LogOptions(destination=helm_sm_log_group, level=sfn.LogLevel.ALL),
         )
 
-        # Thin start/poll provider: onEvent starts the execution, isComplete
-        # polls it. These do no Helm/Kubernetes work, so they never approach the
-        # Lambda timeout — all the heavy lifting lives in the state machine.
+        # Thin fire-and-forget provider: onEvent starts the execution and
+        # returns immediately. It does no Helm/Kubernetes work, so it never
+        # approaches the Lambda timeout — all the heavy lifting lives in the
+        # state machine, which converges charts in the background.
         helm_orchestrator_on_event = lambda_.Function(
             self,
             "HelmOrchestratorOnEvent",
@@ -3036,20 +3037,7 @@ class GCORegionalStack(Stack):
                 "STATE_MACHINE_ARN": self.helm_install_state_machine.state_machine_arn,
             },
         )
-        helm_orchestrator_is_complete = lambda_.Function(
-            self,
-            "HelmOrchestratorIsComplete",
-            runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
-            handler="handler.is_complete",
-            code=lambda_.Code.from_asset("lambda/helm-orchestrator"),
-            timeout=Duration.minutes(1),
-            memory_size=256,
-            environment={
-                "STATE_MACHINE_ARN": self.helm_install_state_machine.state_machine_arn,
-            },
-        )
         self.helm_install_state_machine.grant_start_execution(helm_orchestrator_on_event)
-        self.helm_install_state_machine.grant_read(helm_orchestrator_is_complete)
 
         # Let on_event persist the execution input to SSM so the add-on install
         # can be replayed out-of-band (gco stacks addons install) without the
@@ -3072,16 +3060,19 @@ class GCORegionalStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        # Async custom-resource provider: poll the execution every minute for up
-        # to two hours so CloudFormation waits for — and fails on — the real
-        # install result without any single Lambda owning the whole install.
+        # Fire-and-forget custom-resource provider: onEvent starts the helm
+        # install state machine and the resource completes immediately. The
+        # cluster's CloudFormation lifecycle is deliberately NOT bound to the
+        # helm batch finishing — a slow chart (e.g. volcano retrying docker.io
+        # pulls) would otherwise keep the execution RUNNING past CloudFormation's
+        # ~1h custom-resource ceiling and trigger a rollback that destroys the
+        # cluster. Charts converge in the background; status lives in SSM and is
+        # surfaced via `gco stacks addons status` / re-converged with
+        # `gco stacks addons install`. No isComplete handler => no waiter.
         self.helm_installer_provider = cr.Provider(
             self,
             "HelmInstallerProvider",
             on_event_handler=helm_orchestrator_on_event,
-            is_complete_handler=helm_orchestrator_is_complete,
-            query_interval=Duration.minutes(1),
-            total_timeout=Duration.hours(2),
             log_group=helm_provider_log_group,
         )
 
@@ -3106,9 +3097,8 @@ class GCORegionalStack(Stack):
             apply_to_children=True,
         )
         # The state machine role (auto-generated) invokes the worker Lambda
-        # across versions, and the isComplete role reads execution status by
-        # execution ARN; both use the AWS-standard ``:*`` qualifier/execution
-        # wildcards that cannot be enumerated at synth time.
+        # across versions using the AWS-standard ``:*`` qualifier that cannot be
+        # enumerated at synth time.
         NagSuppressions.add_resource_suppressions(
             self.helm_install_state_machine,
             [
@@ -3124,33 +3114,33 @@ class GCORegionalStack(Stack):
             ],
             apply_to_children=True,
         )
-        for _orch_fn in (helm_orchestrator_on_event, helm_orchestrator_is_complete):
-            NagSuppressions.add_resource_suppressions(
-                _orch_fn,
-                [
-                    {
-                        "id": "AwsSolutions-IAM5",
-                        "reason": (
-                            "Start/Describe on the helm-install state machine require the "
-                            "execution-ARN wildcard (arn:...:execution:<sm>:*) because "
-                            "execution names are generated at runtime. The finding is a "
-                            "granular execution-ARN wildcard that cannot be enumerated at "
-                            "synth time, so no appliesTo filter is supplied."
-                        ),
-                    },
-                ],
-                apply_to_children=True,
-            )
+        NagSuppressions.add_resource_suppressions(
+            helm_orchestrator_on_event,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "Start on the helm-install state machine requires the "
+                        "execution-ARN wildcard (arn:...:execution:<sm>:*) because "
+                        "execution names are generated at runtime. The finding is a "
+                        "granular execution-ARN wildcard that cannot be enumerated at "
+                        "synth time, so no appliesTo filter is supplied."
+                    ),
+                },
+            ],
+            apply_to_children=True,
+        )
 
-        # The cr.Provider async framework (is_complete_handler set) auto-generates
-        # a waiter state machine plus framework-onEvent / framework-isComplete /
-        # framework-onTimeout Lambdas and their roles. None of these are
-        # configurable by us: the waiter state machine cannot have ALL-logging or
-        # X-Ray enabled through the L2 Provider construct, and the framework roles
-        # invoke our handler Lambdas via the standard ``<lambda-arn>:*`` version
-        # qualifier that cannot be narrowed at synth time. Suppress the relevant
-        # rules across the whole provider subtree; appliesTo is omitted because the
-        # findings are granted on CDK-managed resources we do not author.
+        # The cr.Provider framework auto-generates a framework-onEvent Lambda and
+        # its role (and, were an is_complete_handler set, a waiter state machine —
+        # which this fire-and-forget provider does NOT create). None of these are
+        # configurable by us: the framework role invokes our handler Lambda via
+        # the standard ``<lambda-arn>:*`` version qualifier that cannot be narrowed
+        # at synth time. Suppress the relevant rules across the whole provider
+        # subtree; appliesTo is omitted because the findings are granted on
+        # CDK-managed resources we do not author. The SF1/SF2/X-Ray entries are
+        # retained defensively to cover any helper state machine the framework may
+        # emit across CDK versions; they are harmless no-ops when none exists.
         NagSuppressions.add_resource_suppressions(
             self.helm_installer_provider,
             [

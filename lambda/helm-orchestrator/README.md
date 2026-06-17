@@ -1,10 +1,20 @@
 # Helm Orchestrator
 
-CloudFormation custom-resource provider that drives the Helm-install Step
+CloudFormation custom-resource provider that kicks off the Helm-install Step
 Functions state machine. It does no Helm or Kubernetes work itself — that
 happens in the per-chart state-machine tasks (the `helm-installer` Lambda). The
-orchestrator only starts an execution and reports completion back to
-CloudFormation.
+orchestrator only **starts** an execution and immediately reports the resource
+created back to CloudFormation; it never waits for the charts to finish.
+
+This is deliberately **fire-and-forget**. The cluster's CloudFormation lifecycle
+is decoupled from the helm batch entirely: a slow chart (e.g. volcano retrying
+docker.io image pulls) would otherwise keep the execution `RUNNING` past
+CloudFormation's ~1-hour custom-resource ceiling, at which point CloudFormation
+declares "did not receive a response" and rolls back — destroying the
+freshly-created EKS cluster over a recoverable add-on problem. Charts converge in
+the background; per-chart status is written to SSM (`/<project>/addons/<region>/<chart>`)
+by the installer tasks and surfaced via `gco stacks addons status`, and a
+degraded add-on layer is re-converged with `gco stacks addons install`.
 
 Keeping the heavy lifting in Step Functions (one task per chart, with per-chart
 retry) means no single Lambda invocation is bound by the 15-minute Lambda
@@ -22,9 +32,9 @@ limit — the reliability win over the old single-Lambda installer.
 
 ## Trigger
 
-CloudFormation Custom Resource via a CDK async `cr.Provider` — this Lambda
-supplies both the provider's `onEvent` and `isComplete` handlers. Runs on stack
-Create, Update, and Delete.
+CloudFormation Custom Resource via a CDK `cr.Provider` configured with only an
+`onEvent` handler (no `isComplete` waiter). Runs on stack Create, Update, and
+Delete.
 
 ## How It Works
 
@@ -32,17 +42,15 @@ Create, Update, and Delete.
 
 - **Create/Update**: starts a state-machine execution whose input carries the
   chart configuration (`ClusterName`, `Region`, `EnabledCharts`, `Charts`,
-  `KedaOperatorRoleArn`). Returns a stable `PhysicalResourceId` and stashes the
-  started `ExecutionArn` so the framework passes it through to `is_complete`.
+  `KedaOperatorRoleArn`) and returns immediately. Returns a stable
+  `PhysicalResourceId` and exposes the started `ExecutionArn` as a resource
+  attribute (`Data.ExecutionArn`) purely for observability — it does not gate
+  resource completion.
 - **Delete**: no-op. Charts are torn down with the cluster.
 
-### `is_complete`
-
-- **Create/Update**: polls the started execution via `describe_execution`.
-  Reports complete on `SUCCEEDED`; raises (failing the resource) on `FAILED`,
-  `TIMED_OUT`, or `ABORTED`; returns "not complete" while `RUNNING` so the
-  provider framework keeps polling.
-- **Delete**: returns complete immediately.
+There is no `isComplete` handler: the resource is considered created as soon as
+the execution has been started, so a slow or failing chart can never block (or
+roll back) the cluster.
 
 ## Packaging
 
@@ -60,6 +68,7 @@ Passed through verbatim as the state-machine execution input.
 | `EnabledCharts` | No | List of chart names to install |
 | `Charts` | No | Dict of per-chart config overrides |
 | `KedaOperatorRoleArn` | No | IAM role ARN for KEDA IRSA |
+| `ProjectName` | No | Project prefix used for the SSM replay parameter |
 
 ## Environment Variables
 
@@ -70,7 +79,7 @@ Passed through verbatim as the state-machine execution input.
 ## IAM Permissions
 
 - `states:StartExecution` on the Helm-install state machine (`on_event`)
-- `states:DescribeExecution` on its executions (`is_complete`)
+- `ssm:PutParameter` on `/<project>/addons/*` (best-effort execution-input replay)
 
 ## Dependencies
 
