@@ -1109,6 +1109,23 @@ def _project_name() -> str:
         return "gco"
 
 
+def _all_regions(config: Any) -> list[str]:
+    """All regional deployment regions from cdk.json (fallback: resolved single)."""
+    from ..config import _load_cdk_json
+
+    cdk_regions = _load_cdk_json()
+    if cdk_regions and cdk_regions.get("regional"):
+        return list(cdk_regions["regional"])
+    return [_resolve_region(config, None)]
+
+
+def _target_regions(config: Any, region: Any, all_regions: bool) -> list[str]:
+    """Resolve which regions a command acts on: every regional one, or a single."""
+    if all_regions:
+        return _all_regions(config)
+    return [_resolve_region(config, region)]
+
+
 @stacks.group("addons")
 @pass_config
 def addons_cmd(config: Any) -> None:
@@ -1123,21 +1140,28 @@ def addons_cmd(config: Any) -> None:
 
 @addons_cmd.command("status")
 @click.option("--region", "-r", help="AWS region (default: first deployment region)")
+@click.option("--all-regions", "-A", is_flag=True, help="Show status across all deployment regions")
 @pass_config
-def addons_status(config: Any, region: Any) -> None:
+def addons_status(config: Any, region: Any, all_regions: bool) -> None:
     """Show per-chart add-on install status (from SSM).
 
     Examples:
         gco stacks addons status
         gco stacks addons status -r us-west-2
+        gco stacks addons status --all-regions
     """
+    formatter = get_output_formatter(config)
+    project = _project_name()
+    for target in _target_regions(config, region, all_regions):
+        _addons_status_one(formatter, project, target)
+
+
+def _addons_status_one(formatter: Any, project: str, region: str) -> None:
+    """Print the add-on status table for a single region."""
     import json
 
     import boto3
 
-    formatter = get_output_formatter(config)
-    region = _resolve_region(config, region)
-    project = _project_name()
     prefix = f"/{project}/addons/{region}/"
 
     try:
@@ -1147,8 +1171,8 @@ def addons_status(config: Any, region: Any) -> None:
         for page in paginator.paginate(Path=prefix, Recursive=False):
             params.extend(page.get("Parameters", []))
     except Exception as e:
-        formatter.print_error(f"Failed to read add-on status from SSM: {e}")
-        sys.exit(1)
+        formatter.print_error(f"[{region}] Failed to read add-on status from SSM: {e}")
+        return
 
     rows = []
     for p in params:
@@ -1163,7 +1187,7 @@ def addons_status(config: Any, region: Any) -> None:
 
     if not rows:
         formatter.print_info(
-            f"No add-on status recorded under {prefix} yet. "
+            f"[{region}] No add-on status recorded under {prefix} yet. "
             "The installer writes status as charts are processed."
         )
         return
@@ -1180,8 +1204,11 @@ def addons_status(config: Any, region: Any) -> None:
 
 @addons_cmd.command("install")
 @click.option("--region", "-r", help="AWS region (default: first deployment region)")
+@click.option(
+    "--all-regions", "-A", is_flag=True, help="Re-converge add-ons in all deployment regions"
+)
 @pass_config
-def addons_install(config: Any, region: Any) -> None:
+def addons_install(config: Any, region: Any, all_regions: bool) -> None:
     """Re-run the Helm add-on installer (idempotent; never rolls back the cluster).
 
     Replays the last execution input persisted by the deploy, so chart config
@@ -1191,12 +1218,22 @@ def addons_install(config: Any, region: Any) -> None:
     Examples:
         gco stacks addons install
         gco stacks addons install -r us-west-2
+        gco stacks addons install --all-regions
     """
+    formatter = get_output_formatter(config)
+    project = _project_name()
+    failures = 0
+    for target in _target_regions(config, region, all_regions):
+        if not _addons_install_one(formatter, project, target):
+            failures += 1
+    if failures:
+        sys.exit(1)
+
+
+def _addons_install_one(formatter: Any, project: str, region: str) -> bool:
+    """Start an add-on install for a single region. Returns True on success."""
     import boto3
 
-    formatter = get_output_formatter(config)
-    region = _resolve_region(config, region)
-    project = _project_name()
     input_param = f"/{project}/addons/{region}/_input"
 
     try:
@@ -1204,10 +1241,10 @@ def addons_install(config: Any, region: Any) -> None:
         execution_input = ssm.get_parameter(Name=input_param)["Parameter"]["Value"]
     except Exception as e:
         formatter.print_error(
-            f"Could not read {input_param}: {e}. "
+            f"[{region}] Could not read {input_param}: {e}. "
             f"Deploy the regional stack at least once first (gco stacks deploy gco-{region} -y)."
         )
-        sys.exit(1)
+        return False
 
     try:
         sfn = boto3.client("stepfunctions", region_name=region)
@@ -1217,13 +1254,14 @@ def addons_install(config: Any, region: Any) -> None:
             None,
         )
         if not arn:
-            formatter.print_error(f"No HelmInstall state machine found in {region}.")
-            sys.exit(1)
+            formatter.print_error(f"[{region}] No HelmInstall state machine found.")
+            return False
         resp = sfn.start_execution(stateMachineArn=arn, input=execution_input)
     except Exception as e:
-        formatter.print_error(f"Failed to start add-on install: {e}")
-        sys.exit(1)
+        formatter.print_error(f"[{region}] Failed to start add-on install: {e}")
+        return False
 
-    formatter.print_success("Started add-on install (idempotent re-converge).")
+    formatter.print_success(f"[{region}] Started add-on install (idempotent re-converge).")
     formatter.print_info(f"  execution: {resp['executionArn']}")
     formatter.print_info(f"  track status with: gco stacks addons status -r {region}")
+    return True
