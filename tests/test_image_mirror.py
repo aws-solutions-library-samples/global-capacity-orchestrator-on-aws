@@ -158,7 +158,12 @@ class TestCopyStrategy:
                 "docker.io/volcanosh/vc-scheduler:v1.15.0",
                 "reg/gco/dockerhub/volcanosh/vc-scheduler:v1.15.0",
             ],
-            ["finch", "push", "--all-platforms", "reg/gco/dockerhub/volcanosh/vc-scheduler:v1.15.0"],
+            [
+                "finch",
+                "push",
+                "--all-platforms",
+                "reg/gco/dockerhub/volcanosh/vc-scheduler:v1.15.0",
+            ],
         ]
 
     def test_skopeo_command_uses_copy_all(self):
@@ -212,9 +217,7 @@ class _FakeEcr:
         class RepositoryNotFoundException(Exception):
             pass
 
-        self.client.exceptions.RepositoryAlreadyExistsException = (
-            RepositoryAlreadyExistsException
-        )
+        self.client.exceptions.RepositoryAlreadyExistsException = RepositoryAlreadyExistsException
         self.client.exceptions.ImageNotFoundException = ImageNotFoundException
         self.client.exceptions.RepositoryNotFoundException = RepositoryNotFoundException
 

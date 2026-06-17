@@ -381,9 +381,7 @@ class TestImageMirrorExecuteGating:
                 "skipped": [],
             }
 
-        with patch(
-            "cli._image_mirror.mirror_images", side_effect=_fake_mirror_images
-        ) as mock_mi:
+        with patch("cli._image_mirror.mirror_images", side_effect=_fake_mirror_images) as mock_mi:
             async with Client(run_mcp.mcp) as client:
                 result = await client.call_tool("images_mirror", {"region": "us-east-1"})
 

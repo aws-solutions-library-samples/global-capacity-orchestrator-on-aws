@@ -197,6 +197,5 @@ Via MCP, `images_mirror_status` returns the same presence check (`all_mirrored` 
 **Related docs:**
 
 - [Customization Guide](CUSTOMIZATION.md#get-volcanos-dockerio-images-off-the-rate-limited-path-ecr-mirror) — the enable-and-deploy recipe in context.
-- [Volcano Integration](VOLCANO.md) — the chart that consumes the mirror.
 - [Schedulers & Orchestrators](SCHEDULERS.md) — how add-on charts converge after deploy.
 - [MCP Server](../mcp/README.md#feature-flags) — the feature flag that gates `images_mirror`.

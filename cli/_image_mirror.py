@@ -166,8 +166,7 @@ def _volcano_source_refs(charts_config: dict[str, Any]) -> list[str]:
         refs.append(f"{_VOLCANO_UPSTREAM_REGISTRY}/{image_name}:{tag}")
     if not refs:
         raise ValueError(
-            "No Volcano component image names found under volcano.values.basic "
-            "in charts.yaml."
+            "No Volcano component image names found under volcano.values.basic in charts.yaml."
         )
     return refs
 
@@ -226,7 +225,7 @@ def read_mirror_config(cdk_json_path: Path = _CDK_JSON) -> dict[str, Any]:
     try:
         with open(cdk_json_path, encoding="utf-8") as f:
             ctx = json.load(f).get("context", {}) or {}
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return {"enabled": False, "ecr_namespace": _DEFAULT_NAMESPACE}
     block = ctx.get("volcano_image_mirror") or {}
     namespace = str(block.get("ecr_namespace", _DEFAULT_NAMESPACE)).strip("/") or _DEFAULT_NAMESPACE
@@ -272,7 +271,7 @@ def _runtime_has_buildx(runtime: str) -> bool:
             ).returncode
             == 0
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return False
 
 
@@ -282,7 +281,7 @@ def _runtime_supports_all_platforms(runtime: str) -> bool:
         out = subprocess.run(  # nosec B603 - fixed argv, no shell
             [runtime, "pull", "--help"], capture_output=True, text=True, timeout=15
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return False
     return "--all-platforms" in (out.stdout + out.stderr)
 
@@ -330,9 +329,7 @@ def tag_exists(ecr_client: Any, repo_name: str, tag: str) -> bool:
     mirrors it. Any other error propagates.
     """
     try:
-        resp = ecr_client.describe_images(
-            repositoryName=repo_name, imageIds=[{"imageTag": tag}]
-        )
+        resp = ecr_client.describe_images(repositoryName=repo_name, imageIds=[{"imageTag": tag}])
         return bool(resp.get("imageDetails"))
     except ecr_client.exceptions.ImageNotFoundException:
         return False
@@ -373,7 +370,9 @@ def _copy_commands(item: MirrorItem, runtime: str, strategy: str, password: str)
     any runtime. All strategies preserve the full multi-arch manifest list.
     """
     if strategy == "buildx":
-        return [[runtime, "buildx", "imagetools", "create", "--tag", item.dest_ref, item.source_ref]]
+        return [
+            [runtime, "buildx", "imagetools", "create", "--tag", item.dest_ref, item.source_ref]
+        ]
     if strategy == "all-platforms":
         return [
             [runtime, "pull", "--all-platforms", item.source_ref],
@@ -442,9 +441,7 @@ def plan_mirror(
     """
     ecr_namespace = (ecr_namespace or cdk_default_namespace()).strip("/")
     if source_refs is None:
-        source_refs = collect_source_refs(
-            load_charts_config(charts_path) if charts_path else None
-        )
+        source_refs = collect_source_refs(load_charts_config(charts_path) if charts_path else None)
     registry_host = _registry_host(_account_id(), region)
     plan = plan_from_sources(source_refs, registry_host, ecr_namespace)
     return {
@@ -517,9 +514,7 @@ def mirror_images(
     """
     ecr_namespace = (ecr_namespace or cdk_default_namespace()).strip("/")
     if source_refs is None:
-        source_refs = collect_source_refs(
-            load_charts_config(charts_path) if charts_path else None
-        )
+        source_refs = collect_source_refs(load_charts_config(charts_path) if charts_path else None)
 
     account_id = _account_id()
     registry_host = _registry_host(account_id, region)

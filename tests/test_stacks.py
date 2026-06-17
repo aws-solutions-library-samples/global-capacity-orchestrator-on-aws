@@ -3294,7 +3294,9 @@ class TestAutoMirrorOnDeploy:
         with (
             patch("cli._image_mirror.read_mirror_config", return_value=self._ENABLED),
             patch("cli._image_mirror.mirror_images") as mock_mirror,
-            patch("cli.config._load_cdk_json", return_value={"regional": ["us-east-1", "us-west-2"]}),
+            patch(
+                "cli.config._load_cdk_json", return_value={"regional": ["us-east-1", "us-west-2"]}
+            ),
         ):
             mgr._mirror_images_if_enabled(stack_name=None, all_stacks=True)
         assert [c.args[0] for c in mock_mirror.call_args_list] == ["us-east-1", "us-west-2"]

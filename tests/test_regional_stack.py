@@ -2394,4 +2394,3 @@ class TestRegionalStackVolcanoImageMirror:
         app = self._enabled_app(ecr_namespace="gco/Bad_Seg!")
         with pytest.raises(ValueError, match="ecr_namespace"):
             self._build(app)
-

@@ -1020,7 +1020,7 @@ class StackManager:
         try:
             resp = cfn.describe_stacks(StackName=stack_name)
             status = resp["Stacks"][0]["StackStatus"]
-            return status != "DELETE_COMPLETE"
+            return bool(status != "DELETE_COMPLETE")
         except Exception:
             return False
 

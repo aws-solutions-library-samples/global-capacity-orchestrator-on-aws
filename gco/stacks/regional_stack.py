@@ -2814,9 +2814,7 @@ class GCORegionalStack(Stack):
         """
         raw = self.node.try_get_context("volcano_image_mirror") or {}
         if not isinstance(raw, dict):
-            raise ValueError(
-                f"volcano_image_mirror must be a mapping, got {type(raw).__name__}"
-            )
+            raise ValueError(f"volcano_image_mirror must be a mapping, got {type(raw).__name__}")
 
         enabled = bool(raw.get("enabled", False))
         ecr_namespace = str(raw.get("ecr_namespace", "gco/dockerhub")).strip().strip("/")

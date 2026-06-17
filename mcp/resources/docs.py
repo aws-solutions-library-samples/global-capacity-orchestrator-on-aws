@@ -669,6 +669,24 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "related": ["ARCHITECTURE", "ANALYTICS"],
     },
+    "IMAGE_MIRROR": {
+        "summary": "Mirror third-party container images (chiefly Volcano's docker.io images) into the project's gco/* ECR so the cluster pulls from same-account ECR instead of a rate-limited upstream.",
+        "topics": ["images", "customization", "deployment", "eks", "schedulers"],
+        "keywords": [
+            "ecr",
+            "mirror",
+            "docker hub",
+            "docker.io",
+            "volcano",
+            "pull-through cache",
+            "multi-arch",
+            "image_registry",
+            "rate limit",
+            "skopeo",
+            "buildx",
+        ],
+        "related": ["VOLCANO", "CUSTOMIZATION"],
+    },
     "INFERENCE": {
         "summary": "Deploy and manage multi-region GPU inference endpoints, including model weight management and supported frameworks.",
         "topics": [
