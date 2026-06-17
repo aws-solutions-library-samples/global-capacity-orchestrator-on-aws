@@ -13,7 +13,7 @@ has. See ``docs/CUSTOMIZATION.md``.
 This module is the reusable, **general** mirror core — it copies an arbitrary
 list of images, not just Volcano's. It is shared by two callers:
 
-- ``scripts/mirror_images.py`` — the standalone operator CLI.
+- ``gco images mirror`` (in ``cli/commands/images_cmd.py``) — the operator CLI.
 - ``cli/stacks.py`` (``StackManager.deploy``) — the auto-mirror that runs before
   a regional stack's Helm install, so a fresh ``gco stacks deploy`` with
   ``volcano_image_mirror.enabled`` just works (no separate manual step).

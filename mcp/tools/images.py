@@ -57,7 +57,7 @@ def _get_image_mirror() -> Any:
     """Lazy-import the ``cli._image_mirror`` core so MCP server import stays light.
 
     The mirror tools wrap this general "copy third-party images into gco/* ECR"
-    module (the same core the deploy auto-mirror and ``scripts/mirror_images.py``
+    module (the same core the deploy auto-mirror and ``gco images mirror``
     use) rather than ``ImageManager`` — see ``docs/IMAGE_MIRROR.md``.
     """
     from cli import _image_mirror

@@ -147,6 +147,27 @@ def _neutralize_lambda_build(ensure_lambda_build_dirs):  # noqa: ARG001 — dep 
 
 
 # ============================================================================
+# Function-scoped: never run the real image-mirror hook during unit tests
+# ============================================================================
+#
+# cdk.json ships ``volcano_image_mirror.enabled=true``, so ``StackManager.deploy()``
+# invokes ``_mirror_images_if_enabled`` on every call. Left real, that reaches
+# boto3 STS / a container runtime and fails the many ``test_deploy_*`` cases with
+# ``NoCredentialsError`` (and would attempt real ECR copies) on CI. No-op the hook
+# for every test except ``TestAutoMirrorOnDeploy``, which exercises the hook itself
+# with the mirror core mocked.
+@pytest.fixture(autouse=True)
+def _no_real_image_mirror(request):
+    if request.cls is not None and request.cls.__name__ == "TestAutoMirrorOnDeploy":
+        yield
+        return
+    from cli import stacks as _stacks
+
+    with patch.object(_stacks.StackManager, "_mirror_images_if_enabled", return_value=None):
+        yield
+
+
+# ============================================================================
 # Model Fixtures
 # ============================================================================
 

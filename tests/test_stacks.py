@@ -3306,9 +3306,9 @@ class TestAutoMirrorOnDeploy:
         with (
             patch("cli._image_mirror.read_mirror_config", return_value=self._ENABLED),
             patch("cli._image_mirror.mirror_images", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="Image mirror failed"),
         ):
-            with pytest.raises(RuntimeError, match="Image mirror failed"):
-                mgr._mirror_images_if_enabled(stack_name="gco-us-east-1", all_stacks=False)
+            mgr._mirror_images_if_enabled(stack_name="gco-us-east-1", all_stacks=False)
 
     def test_target_regions_selection(self):
         mgr = self._manager()

@@ -72,9 +72,9 @@ If none is available the mirror fails fast with guidance rather than producing a
 
 ## Enable and Deploy
 
-The mirror is **off by default**. Enable it with one toggle in `cdk.json`, then deploy.
+The mirror is **on by default**, so a fresh `gco stacks deploy` auto-mirrors the images into ECR with no extra step — the `cdk.json` block below is the shipped default. To turn it off, set `enabled` to `false`.
 
-**1. Enable it in `cdk.json`.** The default `ecr_namespace` of `gco/dockerhub` is fine for most setups:
+**1. Default `cdk.json` config** (already on; the default `ecr_namespace` of `gco/dockerhub` is fine for most setups):
 
 ```json
 {
@@ -104,16 +104,16 @@ gco stacks addons status -r us-east-1
 
 ## Mirror Manually
 
-The auto-mirror on deploy covers the common case. Run the standalone tool when you want to pre-seed a region before enabling the toggle, or re-mirror after a version bump, out of band from a deploy:
+The auto-mirror on deploy covers the common case. Run the CLI directly when you want to pre-seed a region before enabling the toggle, or re-mirror after a version bump, out of band from a deploy:
 
 ```bash
-python scripts/mirror_images.py --region us-east-1
-python scripts/mirror_images.py --region us-east-1 --dry-run          # preview the plan only
-python scripts/mirror_images.py --region us-east-1 --ecr-namespace gco/dockerhub
-python scripts/mirror_images.py --region us-east-1 --no-skip-existing  # re-copy even if present
+gco images mirror --region us-east-1
+gco images mirror --region us-east-1 --dry-run          # preview the plan only
+gco images mirror --region us-east-1 --ecr-namespace gco/dockerhub
+gco images mirror --region us-east-1 --no-skip-existing  # re-copy even if present
 ```
 
-The tool is a thin wrapper over the same [`cli/_image_mirror.py`](../cli/_image_mirror.py) core the deploy uses, so it reads the image set and pinned tag from `charts.yaml`, creates the `gco/<...>` repositories if needed, and copies with the same multi-arch strategy. Run it from a machine with a container runtime (Docker Buildx, Finch, or skopeo) and AWS credentials; the upstream pull from Docker Hub is anonymous and one-time.
+The command is a thin wrapper over the same [`cli/_image_mirror.py`](../cli/_image_mirror.py) core the deploy uses, so it reads the image set and pinned tag from `charts.yaml`, creates the `gco/<...>` repositories if needed, and copies with the same multi-arch strategy. Run it from a machine with a container runtime (Docker Buildx, Finch, or skopeo) and AWS credentials; the upstream pull from Docker Hub is anonymous and one-time.
 
 ## MCP Tools
 
@@ -151,7 +151,7 @@ The copy step needs no change — it mirrors whatever `collect_source_refs()` re
 ## Operational Notes
 
 - **Fail-fast on deploy.** If an enabled mirror can't complete during `gco stacks deploy` (no container runtime, no network, missing credentials), the deploy aborts **before** CloudFormation runs — rather than bringing up a cluster whose Volcano images aren't in ECR yet.
-- **Static, version-pinned mirror.** When you bump Volcano's chart `version` / `image_tag_version` in `charts.yaml`, the next `gco stacks deploy` mirrors the new tag automatically (or run `scripts/mirror_images.py` to do it out of band). Old tags are left in place.
+- **Static, version-pinned mirror.** When you bump Volcano's chart `version` / `image_tag_version` in `charts.yaml`, the next `gco stacks deploy` mirrors the new tag automatically (or run `gco images mirror` to do it out of band). Old tags are left in place.
 - **Pull-path only.** The mirror changes only *where* images are pulled from. Volcano's behavior, versions, and configuration are unchanged.
 - **Per-region.** ECR is regional, so the mirror runs once per target region. `deploy-all` mirrors each region in `cdk.json`'s `regional` block; a single-region deploy mirrors just that region.
 - **Idempotent and cheap to repeat.** Already-mirrored tags are skipped (`skip_existing`), so a steady-state deploy adds only a couple of ECR lookups.
@@ -161,7 +161,7 @@ The copy step needs no change — it mirrors whatever `collect_source_refs()` re
 **Volcano is stuck `failed` or `pending` in `gco stacks addons status`.** Confirm the mirror is populated for the region, then re-converge:
 
 ```bash
-python scripts/mirror_images.py --region us-east-1 --dry-run   # what should be mirrored
+gco images mirror --region us-east-1 --dry-run   # what should be mirrored
 gco stacks addons install -r us-east-1                          # re-fire the Helm install
 gco stacks addons status -r us-east-1
 ```
@@ -180,7 +180,7 @@ Via MCP, `images_mirror_status` returns the same presence check (`all_mirrored` 
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `enabled` | `false` | Turn the mirror (and the Volcano `image_registry` override + deploy auto-mirror) on. |
+| `enabled` | `true` | Turns the mirror (and the Volcano `image_registry` override + deploy auto-mirror) on. **On by default**; set to `false` to disable. |
 | `ecr_namespace` | `gco/dockerhub` | Destination namespace under the account's ECR registry. Must start with `gco/`. |
 
 **Source map:**
@@ -188,7 +188,7 @@ Via MCP, `images_mirror_status` returns the same presence check (`all_mirrored` 
 | File | Role |
 |------|------|
 | [`cli/_image_mirror.py`](../cli/_image_mirror.py) | General mirror core — source set, plan, multi-arch copy, status. The extension point. |
-| [`scripts/mirror_images.py`](../scripts/mirror_images.py) | Standalone operator CLI over the core. |
+| [`cli/commands/images_cmd.py`](../cli/commands/images_cmd.py) | The `gco images mirror` operator CLI over the core. |
 | [`cli/stacks.py`](../cli/stacks.py) | `gco stacks deploy` auto-mirror hook (runs before CDK). |
 | [`gco/stacks/regional_stack.py`](../gco/stacks/regional_stack.py) | Reads the toggle and injects Volcano's `image_registry` override. |
 | [`lambda/helm-installer/charts.yaml`](../lambda/helm-installer/charts.yaml) | Volcano image names and the pinned tag the mirror derives from. |

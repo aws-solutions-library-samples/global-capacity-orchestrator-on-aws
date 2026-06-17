@@ -1,6 +1,6 @@
 """
 Tests for the general image-mirror core (cli/_image_mirror.py) and the
-scripts/mirror_images.py CLI wrapper.
+``gco images mirror`` CLI command.
 
 The mirror copies third-party images into the project's ``gco/*`` ECR so the
 cluster pulls them from same-account ECR instead of rate-limited upstreams
@@ -11,8 +11,6 @@ copy strategy, repo creation, skip-if-already-mirrored), with subprocess and the
 ECR client mocked — no Docker daemon or AWS calls.
 """
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -137,9 +135,9 @@ class TestCopyStrategy:
             patch.object(mirror, "_runtime_has_buildx", return_value=False),
             patch.object(mirror, "_runtime_supports_all_platforms", return_value=False),
             patch.object(mirror.shutil, "which", return_value=None),
+            pytest.raises(RuntimeError, match="multi-arch image-copy"),
         ):
-            with pytest.raises(RuntimeError, match="multi-arch image-copy"):
-                mirror.resolve_copy_strategy("docker")
+            mirror.resolve_copy_strategy("docker")
 
     def _item(self):
         return mirror.MirrorItem(
@@ -253,19 +251,20 @@ class TestTagExists:
         assert mirror.tag_exists(ecr, "gco/dockerhub/volcanosh/vc-scheduler", "v1.15.0") is False
 
 
-class TestScriptWrapperDryRun:
+class TestMirrorCliDryRun:
     def test_dry_run_makes_no_aws_or_docker_calls(self):
-        """scripts/mirror_images.py --dry-run prints the plan with no side effects."""
-        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-        import mirror_images  # noqa: E402 - sys.path set above
+        """`gco images mirror --dry-run` prints the plan with no side effects."""
+        from click.testing import CliRunner
+
+        from cli.commands.images_cmd import images
 
         with (
             patch.object(mirror, "_account_id") as mock_acct,
             patch.object(mirror.subprocess, "run") as mock_run,
             patch.object(mirror.boto3, "client") as mock_client,
         ):
-            rc = mirror_images.main(["--region", "us-east-1", "--dry-run"])
-        assert rc == 0
+            result = CliRunner().invoke(images, ["mirror", "--region", "us-east-1", "--dry-run"])
+        assert result.exit_code == 0, result.output
         mock_acct.assert_not_called()
         mock_run.assert_not_called()
         mock_client.assert_not_called()

@@ -1398,7 +1398,7 @@ class StackManager:
                     "volcano_image_mirror is enabled but the images could not be "
                     "mirrored into ECR. Fix the cause (container runtime / network / "
                     "credentials) or run "
-                    f"'python scripts/mirror_images.py --region {region}' manually, "
+                    f"'gco images mirror --region {region}' manually, "
                     "then retry. Aborting before CDK so the deploy never points a "
                     "consumer at images that aren't in ECR."
                 ) from exc

@@ -357,7 +357,7 @@ class GCORegionalStack(Stack):
         # gco/* ECR namespace that Volcano's ``basic.image_registry`` is
         # redirected to, so its docker.io-only images are pulled from the
         # project's own ECR (populated out-of-band by
-        # ``scripts/mirror_images.py``) instead of rate-limited Docker
+        # ``gco images mirror``) instead of rate-limited Docker
         # Hub. Creates no CloudFormation resources; must run before
         # ``_apply_kubernetes_manifests`` builds the ``HelmInstallCharts`` custom
         # resource, which reads the override via ``_helm_chart_value_overrides()``.
@@ -2854,7 +2854,7 @@ class GCORegionalStack(Stack):
         the cluster makes fast, same-account ECR pulls with the pull-only node
         role it already has — no Docker Hub credential, no pull-through cache
         rule, and no registry permissions policy. The mirror itself is populated
-        out-of-band (``scripts/mirror_images.py``) before the add-ons
+        out-of-band (``gco images mirror``) before the add-ons
         converge; this method only computes the registry override and creates no
         CloudFormation resources.
 
@@ -2887,7 +2887,7 @@ class GCORegionalStack(Stack):
         from ``basic.image_registry``) resolves from ECR instead of docker.io.
         The upstream image names (``volcanosh/vc-*``) are preserved, so each
         resolves to ``<mirror_registry>/volcanosh/vc-*`` — matching where
-        ``scripts/mirror_images.py`` pushes them. Returns ``{}`` when
+        ``gco images mirror`` pushes them. Returns ``{}`` when
         the mirror is disabled, preserving the prior behavior.
         """
         if not getattr(self, "volcano_mirror_registry", None):

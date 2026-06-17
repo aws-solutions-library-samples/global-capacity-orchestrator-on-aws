@@ -235,6 +235,100 @@ def images_push(
 
 
 # ---------------------------------------------------------------------------
+# Mirror third-party images into the project ECR
+# ---------------------------------------------------------------------------
+
+
+@images.command("mirror")
+@click.option(
+    "--region",
+    "-r",
+    required=True,
+    help="Target AWS region (must match the regional stack, e.g. us-east-1).",
+)
+@click.option(
+    "--ecr-namespace",
+    default=None,
+    help=(
+        "Destination ECR namespace. Defaults to cdk.json "
+        "volcano_image_mirror.ecr_namespace (gco/dockerhub); must match it so the "
+        "consumer's image override resolves to the mirror."
+    ),
+)
+@click.option(
+    "--no-skip-existing",
+    is_flag=True,
+    default=False,
+    help="Re-copy images even if the tag already exists in ECR.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Print the copy plan without creating repositories or copying images.",
+)
+@pass_config
+def images_mirror(
+    config: Any,
+    region: Any,
+    ecr_namespace: Any,
+    no_skip_existing: Any,
+    dry_run: Any,
+) -> None:
+    """Mirror third-party images (e.g. Volcano's docker.io images) into the ECR.
+
+    This is the same multi-arch copy ``gco stacks deploy`` runs automatically when
+    ``volcano_image_mirror.enabled`` is set. Run it directly to pre-seed a region
+    before enabling the toggle, or to re-mirror after bumping a mirrored image's
+    version. Wraps the shared ``cli._image_mirror`` core (also used by the deploy
+    auto-mirror and the ``images_mirror`` MCP tool).
+
+    Examples:
+        gco images mirror --region us-east-1
+        gco images mirror --region us-east-1 --dry-run
+        gco images mirror --region us-east-1 --ecr-namespace gco/dockerhub
+    """
+    from .. import _image_mirror as mirror
+
+    formatter = get_output_formatter(config)
+    namespace = (ecr_namespace or mirror.cdk_default_namespace()).strip("/")
+    try:
+        if dry_run:
+            # Placeholder host so the plan prints without any AWS calls.
+            registry_host = f"<account>.dkr.ecr.{region}.amazonaws.com"
+            plan = mirror.plan_from_sources(mirror.collect_source_refs(), registry_host, namespace)
+            formatter.print_info(
+                f"[dry-run] would mirror {len(plan)} image(s) into namespace {namespace!r}:"
+            )
+            for item in plan:
+                formatter.print_info(f"  {item.source_ref}  ->  {item.dest_ref}")
+            if config.output_format != "table":
+                formatter.print(
+                    {
+                        "region": region,
+                        "ecr_namespace": namespace,
+                        "images": [
+                            {"source_ref": i.source_ref, "dest_ref": i.dest_ref} for i in plan
+                        ],
+                    }
+                )
+            return
+
+        result = mirror.mirror_images(
+            region, ecr_namespace=namespace, skip_existing=not no_skip_existing
+        )
+        formatter.print_success(
+            f"Mirrored {len(result['mirrored'])}, skipped {len(result['skipped'])} "
+            f"into {result['registry']} (strategy: {result['strategy']})."
+        )
+        if config.output_format != "table":
+            formatter.print(result)
+    except Exception as e:
+        formatter.print_error(f"Failed to mirror images: {e}")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Destructive
 # ---------------------------------------------------------------------------
 

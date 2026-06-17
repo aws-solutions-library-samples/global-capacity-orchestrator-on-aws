@@ -27,7 +27,7 @@ The `gco-jobs` namespace is created automatically by GCO during stack deployment
 
 ## Image Source
 
-Volcano's images (`vc-controller-manager`, `vc-scheduler`, `vc-webhook-manager`) are published only to Docker Hub (`docker.io/volcanosh/*`). On a cold, private cluster those anonymous pulls can be slow or Docker Hub rate-limited, which can stall the Helm install. GCO can mirror the images into the project's own ECR and point Volcano at the mirror, so the cluster pulls from same-account ECR over the node role it already has — off by default, and no Docker Hub credential required. See [Image Mirror](IMAGE_MIRROR.md).
+Volcano's images (`vc-controller-manager`, `vc-scheduler`, `vc-webhook-manager`) are published only to Docker Hub (`docker.io/volcanosh/*`). On a cold, private cluster those anonymous pulls can be slow or Docker Hub rate-limited, which can stall the Helm install. GCO can mirror the images into the project's own ECR and point Volcano at the mirror, so the cluster pulls from same-account ECR over the node role it already has — on by default, and no Docker Hub credential required. See [Image Mirror](IMAGE_MIRROR.md).
 
 ## Key Concepts
 
