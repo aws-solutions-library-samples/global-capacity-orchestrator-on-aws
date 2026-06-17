@@ -932,6 +932,55 @@ A useful subset of charts is enabled by default, but every cluster is different.
 
 See [Schedulers & Orchestrators](SCHEDULERS.md) for detailed guidance on each tool.
 
+### Get Volcano's docker.io images off the rate-limited path (ECR mirror)
+
+A few add-on charts pull their images directly from Docker Hub (`docker.io`) — most notably **Volcano** (`volcanosh/vc-*`). On a cold cluster those anonymous pulls are slow and subject to Docker Hub rate limits, which can make Volcano's install time out and retry. GCO can mirror those images into the project's **own ECR** (under the `gco/*` prefix) and point Volcano at the mirror, so the cluster makes fast, same-account ECR pulls with the pull-only node role it already has. This is **off by default** and needs **no Docker Hub credential** — it's a static mirror you refresh when the chart version changes.
+
+> **Why a mirror and not an ECR pull-through cache?** ECR pull-through cache for Docker Hub *requires* a stored Docker Hub credential (anonymous Docker Hub PTC isn't supported), and on EKS Auto Mode the pull-only, service-managed node role complicates cache-miss imports. Mirroring sidesteps both: no credential, and the images are plain `gco/*` ECR repos the nodes can already pull.
+
+When enabled, the regional stack injects one Volcano value override — `basic.image_registry` → `<account>.dkr.ecr.<region>.amazonaws.com/<ecr_namespace>` — so every Volcano image (controller, scheduler, admission webhook, and the pre-install admission-init hook, which all render from `basic.image_registry`) resolves from ECR. It creates **no** CloudFormation resources; the mirror is populated by `gco stacks deploy` (automatically, see below) or the `scripts/mirror_images.py` tool.
+
+**1. Enable it in `cdk.json`.** Flip `enabled` (the default `ecr_namespace` of `gco/dockerhub` is fine):
+
+```json
+{
+  "context": {
+    "volcano_image_mirror": {
+      "enabled": true,
+      "ecr_namespace": "gco/dockerhub"
+    }
+  }
+}
+```
+
+**2. Deploy.** `gco stacks deploy <stack>` / `deploy-all` **auto-mirrors** the images into ECR (per region) right before the regional stack's Helm install — so a fresh install just works, with no separate step. The copy is idempotent and skips images already present, so repeat deploys cost only a couple of ECR lookups. From a machine with a container runtime (Docker Buildx, Finch, or skopeo) and AWS credentials; the source pull from Docker Hub is anonymous and one-time.
+
+**3. Converge / check.** If Volcano had previously failed, re-converge without touching the cluster:
+
+```bash
+gco stacks addons install -r <region>
+gco stacks addons status -r <region>
+```
+
+**Mirror manually (optional).** To pre-seed a region before enabling, or to re-mirror after a version bump, run the tool directly:
+
+```bash
+python scripts/mirror_images.py --region us-east-1
+python scripts/mirror_images.py --region us-east-1 --dry-run   # preview only
+```
+
+It reads the image set and pinned tag from `lambda/helm-installer/charts.yaml`, creates the `gco/<...>` ECR repositories if needed, and copies each image preserving the **full multi-arch manifest list** (via `docker buildx imagetools create`, Finch `--all-platforms`, or `skopeo copy --all`, whichever the runtime supports) — so both amd64 and arm64 (Graviton) nodes find a matching image. A plain `docker pull`/`push` would drop every architecture except the build host's, so it is never used.
+
+Notes:
+
+- `ecr_namespace` must start with `gco/` so it inherits the project's `gco/*` node-pull access, ECR replication, and trusted-registry allow-list. The toggle is validated at synth time — an `ecr_namespace` outside `gco/` or an invalid ECR path fails fast.
+- If an enabled mirror can't complete during deploy (no container runtime, network, credentials), the deploy aborts **before** CloudFormation rather than bringing up a cluster whose Volcano images aren't in ECR.
+- It's a **static** mirror: when you bump the Volcano chart `version`/`image_tag_version` in `charts.yaml`, the next `gco stacks deploy` re-mirrors the new tag (or run `scripts/mirror_images.py` to do it out-of-band).
+- This only changes where images are *pulled from* — Volcano's behavior and versions are unchanged.
+- The mirror is a **general** tool — to mirror another chart's docker.io-only image down the road, see "HOW TO ADD AN IMAGE TO THE MIRROR" in `cli/_image_mirror.py`.
+
+For the full reference — architecture, the multi-arch copy strategy, the MCP tools (`images_mirror_plan` / `images_mirror_status` / `images_mirror`), troubleshooting, and how to add another chart's image — see [Image Mirror](IMAGE_MIRROR.md).
+
 ## Enabling Additional Features
 
 ### Enable EKS Logging

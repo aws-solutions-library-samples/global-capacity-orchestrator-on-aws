@@ -2295,3 +2295,103 @@ class TestClusterSharedBucketRegionalIntegration:
                 f"stack's IAM grants are always-on and must be independent "
                 f"of the analytics toggle."
             )
+
+
+class TestRegionalStackVolcanoImageMirror:
+    """The optional Volcano image mirror (cdk.json ``volcano_image_mirror``).
+
+    Verifies the feature is off by default (no override, and — regression —
+    no pull-through-cache/registry-policy resources), that enabling it injects
+    the Volcano ``basic.image_registry`` override pointing at the gco/* ECR
+    mirror, and that a misconfigured ``ecr_namespace`` fails fast at synth.
+    """
+
+    @staticmethod
+    def _build(app):
+        """Synthesize the regional stack under the given app (carrying context)."""
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        config = MockConfigLoader(app)
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-regional-mirror",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN, fake account, not a real secret
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+        return stack
+
+    def _enabled_app(self, **overrides):
+        mirror = {"enabled": True, "ecr_namespace": "gco/dockerhub"}
+        mirror.update(overrides)
+        return cdk.App(context={"volcano_image_mirror": mirror})
+
+    def test_disabled_by_default_no_override_no_cache_resources(self):
+        """No context -> no registry override, and (regression) no PTC resources."""
+        stack = self._build(cdk.App())
+        assert stack.volcano_mirror_registry is None
+        assert stack._helm_chart_value_overrides() == {}
+        template = assertions.Template.from_stack(stack)
+        # The mirror approach creates no pull-through cache / registry policy.
+        template.resource_count_is("AWS::ECR::PullThroughCacheRule", 0)
+        template.resource_count_is("AWS::ECR::RegistryPolicy", 0)
+
+    def test_enabled_sets_mirror_registry(self):
+        stack = self._build(self._enabled_app())
+        assert (
+            stack.volcano_mirror_registry
+            == "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco/dockerhub"
+        )
+        # Still creates no pull-through cache / registry policy resources.
+        template = assertions.Template.from_stack(stack)
+        template.resource_count_is("AWS::ECR::PullThroughCacheRule", 0)
+        template.resource_count_is("AWS::ECR::RegistryPolicy", 0)
+
+    def test_enabled_redirects_volcano_image_registry(self):
+        """The HelmInstallCharts custom resource carries the Volcano override."""
+        template = assertions.Template.from_stack(self._build(self._enabled_app()))
+        template.has_resource_properties(
+            "AWS::CloudFormation::CustomResource",
+            {
+                "Charts": {
+                    "volcano": {
+                        "values": {
+                            "basic": {
+                                "image_registry": (
+                                    "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco/dockerhub"
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+        )
+
+    def test_custom_namespace_is_honored(self):
+        stack = self._build(self._enabled_app(ecr_namespace="gco/mirror"))
+        assert stack.volcano_mirror_registry == (
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco/mirror"
+        )
+
+    def test_namespace_outside_gco_prefix_raises(self):
+        app = self._enabled_app(ecr_namespace="dockerhub")
+        with pytest.raises(ValueError, match="gco/"):
+            self._build(app)
+
+    def test_invalid_namespace_path_raises(self):
+        app = self._enabled_app(ecr_namespace="gco/Bad_Seg!")
+        with pytest.raises(ValueError, match="ecr_namespace"):
+            self._build(app)
+

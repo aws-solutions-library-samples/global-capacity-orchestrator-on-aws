@@ -3239,3 +3239,83 @@ class TestEksSgWatchdog:
         # The synchronous final pass should hit gco-us-east-1 once. The
         # watchdog is mocked to a no-op, so this call is the orchestrator's.
         assert "gco-us-east-1" in final_cleanup_calls
+
+
+class TestAutoMirrorOnDeploy:
+    """StackManager auto-mirrors third-party images before a regional deploy.
+
+    Covers the deploy hook (``_mirror_images_if_enabled``) and its region
+    selection (``_mirror_target_regions``) with the mirror core mocked — no AWS,
+    no Docker. The hook must: no-op when disabled, mirror a regional stack's own
+    region, skip the named global/api-gateway/monitoring stacks, cover every
+    regional region on ``--all``, and fail fast (raise) when an enabled mirror
+    errors so the deploy never proceeds with images missing from ECR.
+    """
+
+    def _manager(self):
+        from cli.stacks import StackManager
+
+        return StackManager(MagicMock())
+
+    _ENABLED = {"enabled": True, "ecr_namespace": "gco/dockerhub"}
+    _DISABLED = {"enabled": False, "ecr_namespace": "gco/dockerhub"}
+
+    def test_disabled_is_noop(self):
+        mgr = self._manager()
+        with (
+            patch("cli._image_mirror.read_mirror_config", return_value=self._DISABLED),
+            patch("cli._image_mirror.mirror_images") as mock_mirror,
+        ):
+            mgr._mirror_images_if_enabled(stack_name="gco-us-east-1", all_stacks=False)
+        mock_mirror.assert_not_called()
+
+    def test_regional_stack_mirrors_its_region(self):
+        mgr = self._manager()
+        with (
+            patch("cli._image_mirror.read_mirror_config", return_value=self._ENABLED),
+            patch("cli._image_mirror.mirror_images") as mock_mirror,
+        ):
+            mgr._mirror_images_if_enabled(stack_name="gco-us-east-1", all_stacks=False)
+        mock_mirror.assert_called_once()
+        assert mock_mirror.call_args.args[0] == "us-east-1"
+        assert mock_mirror.call_args.kwargs["ecr_namespace"] == "gco/dockerhub"
+
+    def test_named_global_stack_skipped(self):
+        mgr = self._manager()
+        with (
+            patch("cli._image_mirror.read_mirror_config", return_value=self._ENABLED),
+            patch("cli._image_mirror.mirror_images") as mock_mirror,
+        ):
+            mgr._mirror_images_if_enabled(stack_name="gco-global", all_stacks=False)
+        mock_mirror.assert_not_called()
+
+    def test_all_stacks_mirrors_every_regional_region(self):
+        mgr = self._manager()
+        with (
+            patch("cli._image_mirror.read_mirror_config", return_value=self._ENABLED),
+            patch("cli._image_mirror.mirror_images") as mock_mirror,
+            patch("cli.config._load_cdk_json", return_value={"regional": ["us-east-1", "us-west-2"]}),
+        ):
+            mgr._mirror_images_if_enabled(stack_name=None, all_stacks=True)
+        assert [c.args[0] for c in mock_mirror.call_args_list] == ["us-east-1", "us-west-2"]
+
+    def test_mirror_failure_aborts_before_cdk(self):
+        mgr = self._manager()
+        with (
+            patch("cli._image_mirror.read_mirror_config", return_value=self._ENABLED),
+            patch("cli._image_mirror.mirror_images", side_effect=RuntimeError("boom")),
+        ):
+            with pytest.raises(RuntimeError, match="Image mirror failed"):
+                mgr._mirror_images_if_enabled(stack_name="gco-us-east-1", all_stacks=False)
+
+    def test_target_regions_selection(self):
+        mgr = self._manager()
+        assert mgr._mirror_target_regions("gco-us-east-1", False) == ["us-east-1"]
+        assert mgr._mirror_target_regions("gco-global", False) == []
+        assert mgr._mirror_target_regions("gco-monitoring", False) == []
+        with patch(
+            "cli.config._load_cdk_json",
+            return_value={"regional": ["us-east-1", "eu-west-1", "us-east-1"]},
+        ):
+            # Deduplicated, order-stable.
+            assert mgr._mirror_target_regions(None, True) == ["us-east-1", "eu-west-1"]

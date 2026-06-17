@@ -61,6 +61,7 @@ Modification Guide:
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -350,6 +351,17 @@ class GCORegionalStack(Stack):
 
         # Create EKS cluster
         self._create_eks_cluster(cluster_config)
+
+        # Optional Volcano image mirror (cdk.json ``volcano_image_mirror``).
+        # When enabled this resolves ``self.volcano_mirror_registry`` — the
+        # gco/* ECR namespace that Volcano's ``basic.image_registry`` is
+        # redirected to, so its docker.io-only images are pulled from the
+        # project's own ECR (populated out-of-band by
+        # ``scripts/mirror_images.py``) instead of rate-limited Docker
+        # Hub. Creates no CloudFormation resources; must run before
+        # ``_apply_kubernetes_manifests`` builds the ``HelmInstallCharts`` custom
+        # resource, which reads the override via ``_helm_chart_value_overrides()``.
+        self._configure_volcano_image_mirror()
 
         # Resolve the always-on Cluster_Shared_Bucket identity from SSM
         # (owned by GCOGlobalStack) and attach RW + KMS grants to the
@@ -2552,8 +2564,9 @@ class GCORegionalStack(Stack):
                 "Region": self.deployment_region,
                 # Enable core AI/ML infrastructure charts by default
                 "EnabledCharts": self._get_enabled_helm_charts(),
-                # Override chart values if needed
-                "Charts": {},
+                # Per-chart helm value overrides (e.g. Volcano image_registry
+                # redirected to the Docker Hub pull-through cache when enabled).
+                "Charts": self._helm_chart_value_overrides(),
                 # Pass IAM role ARNs for service account annotations
                 "KedaOperatorRoleArn": self.keda_operator_role.role_arn,
                 # Project name lets the orchestrator persist the execution input
@@ -2783,6 +2796,113 @@ class GCORegionalStack(Stack):
             ],
             apply_to_children=True,
         )
+
+    def _get_volcano_image_mirror_config(self) -> dict[str, Any]:
+        """Parse the ``volcano_image_mirror`` block from cdk.json.
+
+        Returns a normalized dict ``{enabled, ecr_namespace}``. Validation is
+        strict so a misconfiguration fails at synth rather than silently leaving
+        Volcano pointed at docker.io.
+
+        - ``enabled`` (default False) — master toggle.
+        - ``ecr_namespace`` (default ``"gco/dockerhub"``) — the ECR repository
+          namespace the mirrored Volcano images live under. Must start with
+          ``gco/`` so it inherits the project's existing ``gco/*`` machinery
+          (node pull access, replication rule, trusted-registry allow-list)
+          with no extra IAM, and must be a valid (possibly nested) ECR
+          repository path.
+        """
+        raw = self.node.try_get_context("volcano_image_mirror") or {}
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"volcano_image_mirror must be a mapping, got {type(raw).__name__}"
+            )
+
+        enabled = bool(raw.get("enabled", False))
+        ecr_namespace = str(raw.get("ecr_namespace", "gco/dockerhub")).strip().strip("/")
+
+        if not enabled:
+            return {"enabled": False, "ecr_namespace": ecr_namespace}
+
+        # Must live under the project prefix and be a valid nested ECR repo
+        # path (lowercase alphanumerics + . _ - per segment, slash-separated).
+        if not ecr_namespace.startswith("gco/"):
+            raise ValueError(
+                "volcano_image_mirror.ecr_namespace must start with 'gco/' so it "
+                "inherits the project's gco/* ECR access/replication, got "
+                f"{ecr_namespace!r}"
+            )
+        segment = r"[a-z0-9]+(?:[._-][a-z0-9]+)*"
+        if not re.fullmatch(rf"{segment}(?:/{segment})+", ecr_namespace):
+            raise ValueError(
+                "volcano_image_mirror.ecr_namespace must be a valid ECR repository "
+                f"path (lowercase alphanumerics + . _ - per slash-separated segment), "
+                f"got {ecr_namespace!r}"
+            )
+
+        return {"enabled": True, "ecr_namespace": ecr_namespace}
+
+    def _configure_volcano_image_mirror(self) -> None:
+        """Resolve the optional Volcano image-mirror registry (no infra).
+
+        Volcano is the only default chart whose images live exclusively on
+        docker.io (``volcanosh/vc-*``). On a cold EKS Auto Mode cluster those
+        anonymous pulls are slow / rate-limited, so Volcano's blocking
+        ``helm --wait`` could never finish inside the installer Lambda's
+        wall-clock guard and the whole add-on batch looped on it.
+
+        The fix is to mirror Volcano's pinned images into the project's own ECR
+        under ``gco/*`` and point Volcano's ``basic.image_registry`` there, so
+        the cluster makes fast, same-account ECR pulls with the pull-only node
+        role it already has — no Docker Hub credential, no pull-through cache
+        rule, and no registry permissions policy. The mirror itself is populated
+        out-of-band (``scripts/mirror_images.py``) before the add-ons
+        converge; this method only computes the registry override and creates no
+        CloudFormation resources.
+
+        Sets ``self.volcano_mirror_registry`` to
+        ``<account>.dkr.ecr.<region>.amazonaws.com/<ecr_namespace>`` that
+        ``_helm_chart_value_overrides`` feeds into Volcano's
+        ``basic.image_registry``; left ``None`` when disabled.
+        """
+        # Always define the attribute so downstream code can branch on it.
+        self.volcano_mirror_registry: str | None = None
+
+        cfg = self._get_volcano_image_mirror_config()
+        if not cfg["enabled"]:
+            return
+
+        ecr_namespace = cfg["ecr_namespace"]
+        self.volcano_mirror_registry = (
+            f"{self.account}.dkr.ecr.{self.deployment_region}.amazonaws.com/{ecr_namespace}"
+        )
+
+    def _helm_chart_value_overrides(self) -> dict[str, Any]:
+        """Per-chart helm value overrides injected into the install payload.
+
+        Returned dict is forwarded verbatim as the ``Charts`` property of the
+        ``HelmInstallCharts`` custom resource; the installer deep-merges each
+        chart's ``values`` over ``charts.yaml``. Currently used only to point
+        Volcano's ``basic.image_registry`` at the project's ECR image mirror
+        when enabled, so every Volcano image (controller, scheduler, admission
+        webhook, and the pre-install admission-init hook — all of which render
+        from ``basic.image_registry``) resolves from ECR instead of docker.io.
+        The upstream image names (``volcanosh/vc-*``) are preserved, so each
+        resolves to ``<mirror_registry>/volcanosh/vc-*`` — matching where
+        ``scripts/mirror_images.py`` pushes them. Returns ``{}`` when
+        the mirror is disabled, preserving the prior behavior.
+        """
+        if not getattr(self, "volcano_mirror_registry", None):
+            return {}
+        return {
+            "volcano": {
+                "values": {
+                    "basic": {
+                        "image_registry": self.volcano_mirror_registry,
+                    }
+                }
+            }
+        }
 
     def _get_enabled_helm_charts(self) -> list[str]:
         """Return the list of Helm charts to install based on cdk.json helm config.

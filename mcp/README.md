@@ -248,7 +248,7 @@ A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, de
 | `GCO_ENABLE_ALL_TOOLS` | `false` | All flagged tools below | Umbrella switch. Setting this to `true` enables every gated tool at once and overrides any per-flag value (even per-flag values explicitly set to `false`). Use sparingly — prefer per-flag opt-in for production clients. |
 | `GCO_ENABLE_CAPACITY_PURCHASE` | `false` | `reserve_capacity` | Purchases a Capacity Block offering and incurs immediate AWS charges. Once committed the reservation cannot be cancelled. |
 | `GCO_ENABLE_MODEL_UPLOAD` | `false` | `models_upload` | Uploads model weights to S3, which can be many GB per call and takes minutes to finish. Network egress and storage costs apply. |
-| `GCO_ENABLE_IMAGE_PUBLISH` | `false` | `images_build`, `images_push` | Builds and publishes container images to ECR. Each call runs a long-running build (FastMCP background task) and pushes binaries that get replicated across every deployed region. |
+| `GCO_ENABLE_IMAGE_PUBLISH` | `false` | `images_build`, `images_push`, `images_mirror` | Builds, publishes, and mirrors container images to ECR. `images_build` / `images_push` run a long-running build (FastMCP background task) and push binaries that get replicated across every deployed region; `images_mirror` copies third-party images (Volcano's docker.io images) into the project's `gco/*` ECR. |
 | `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` | `false` | `deploy_stack`, `deploy_all`, `bootstrap_cdk` | Creates or updates CloudFormation stacks. A full `deploy_all` runs 30-60 minutes wall-clock and can provision EKS clusters, NodePools, and storage that incur ongoing charges. |
 | `GCO_ENABLE_INFRASTRUCTURE_DESTROY` | `false` | `destroy_stack`, `destroy_all` | Tears down CloudFormation stacks. Cancellation mid-flight can leave partial state behind that has to be cleaned up by hand. |
 | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` | `false` | `delete_job`, `delete_inference`, `delete_template`, `delete_webhook`, `delete_model`, `delete_nodepool`, `analytics_user_remove`, `cancel_queue_job`, `images_cleanup`, `images_prune`, `images_delete_tag`, `images_delete_repo` | Delete operations are irreversible — once data, jobs, models, or images are removed they can't be recovered without a backup. |
@@ -543,12 +543,15 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 | `images_replication_get` | Read the current ECR replication configuration | safe | — |
 | `images_replication_status` | Per-image replication status across project repos | safe | — |
 | `images_orphans` | List `gco/*` tags older than the threshold with no references | safe | — |
+| `images_mirror_plan` | Show which third-party images would be mirrored into ECR (no writes) | safe | — |
+| `images_mirror_status` | Report which managed images are already present in ECR | safe | — |
 | `images_init` | Create the project ECR repo idempotently with default lifecycle | low-risk | — |
 | `images_lifecycle_get` | Read the lifecycle policy on a repository | low-risk | — |
 | `images_lifecycle_set` | Replace the lifecycle policy on a repository | low-risk | — |
 | `images_replication_sync` | Apply the standard `gco/*` replication rule | low-risk | — |
 | `images_build` | Build a container image from a context (long-running, FastMCP background task) | image | `GCO_ENABLE_IMAGE_PUBLISH` |
 | `images_push` | Push an already-built local image to ECR (long-running, data-upload) | image | `GCO_ENABLE_IMAGE_PUBLISH` |
+| `images_mirror` | Mirror third-party images (Volcano's docker.io images) into `gco/*` ECR, multi-arch preserved | image | `GCO_ENABLE_IMAGE_PUBLISH` |
 | `images_cleanup` | Bulk-delete tags matching filters across one or all `gco/*` repos | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 | `images_prune` | Keep only the N most-recent tags in each repo | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 | `images_delete_tag` | Delete one tag from a repo (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |

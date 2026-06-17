@@ -399,6 +399,23 @@ def install_chart(
     values = config.get("values", {})
     use_oci = config.get("use_oci", False)
 
+    # Per-chart readiness gate.
+    #   ``wait`` (default True)        -> ``helm --wait`` (block until the
+    #                                     release's resources report Ready).
+    #   ``wait_timeout`` (default 10m) -> ``helm --timeout``.
+    # A chart whose components converge asynchronously — e.g. one that pulls
+    # large images from a slow/rate-limited registry — can set ``wait: false``
+    # so the install returns as soon as manifests are applied instead of
+    # blocking the whole invocation on readiness. That keeps a single slow
+    # chart from burning the Lambda wall-clock guard (HELM_CMD_TIMEOUT_SECONDS)
+    # and lets the Step Functions state machine move on to the next chart; the
+    # release still converges in the background and its status is recorded to
+    # SSM either way. ``wait_timeout`` must stay below HELM_CMD_TIMEOUT_SECONDS
+    # (default 780s) or the subprocess guard SIGKILLs helm before its own
+    # deadline and a would-succeed install is reported as a failure.
+    wait = config.get("wait", True)
+    wait_timeout = config.get("wait_timeout", "10m")
+
     # Merge value overrides
     if value_overrides:
         values = deep_merge(values, value_overrides)
@@ -421,10 +438,14 @@ def install_chart(
         chart_ref,
         "--namespace",
         namespace,
-        "--wait",
         "--timeout",
-        "10m",
+        wait_timeout,
     ]
+
+    # ``--wait`` blocks until the release's resources are Ready. Opt-out per
+    # chart via ``wait: false`` for asynchronously-converging charts.
+    if wait:
+        args.append("--wait")
 
     if version:
         args.extend(["--version", version])

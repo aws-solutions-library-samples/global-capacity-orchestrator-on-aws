@@ -162,6 +162,8 @@ If you'd rather install on your host, use a clean virtual environment or pipx �
 
 > **Heads up — Helm charts finish installing in the background.** When `deploy-all` reports the cluster `CREATE_COMPLETE`, the scheduler/operator Helm charts (KEDA, Volcano, KubeRay, cert-manager, Kueue, …) have only been *kicked off*; they converge asynchronously and can take **10–30+ minutes** to all become ready. This is intentional — a slow chart never rolls back the cluster. Track progress with `gco stacks addons status -r <region>` and re-converge any failures with `gco stacks addons install -r <region>`. See [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md#helm-chart-configuration).
 
+<!-- -->
+
 > **Optional:** configure kubectl access (requires `PUBLIC_AND_PRIVATE` endpoint mode). The default endpoint mode is `PRIVATE` — see [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md) for details. Most users don't need this; submit jobs via SQS or API Gateway instead.
 
 ### Submit Your First Job
@@ -438,6 +440,7 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 |-----------|-----------|
 | Add regions, tune nodepools, enable FSx | [Customization Guide](docs/CUSTOMIZATION.md) |
 | Choose a scheduler for your workload | [Schedulers & Orchestrators](docs/SCHEDULERS.md) |
+| Mirror Docker Hub images into ECR (Volcano) | [Image Mirror](docs/IMAGE_MIRROR.md) |
 | Configure the SQS queue processor | [Queue Processor Config](docs/CUSTOMIZATION.md#queue-processor-sqs-consumer) |
 | Contribute to the project | [Contributing](CONTRIBUTING.md) |
 | API client examples (Python, curl, AWS CLI) | [Client Examples](docs/client-examples/README.md) |

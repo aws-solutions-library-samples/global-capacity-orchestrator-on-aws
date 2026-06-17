@@ -144,12 +144,32 @@ charts:
     version: "1.15.0"
     namespace: volcano-system
     create_namespace: true
+    # Per-chart readiness gate (honored by handler.install_chart):
+    #   wait:         map to `helm --wait` when true. Default true.
+    #   wait_timeout: map to `helm --timeout`. Default "10m".
+    # Volcano is the only chart that pulls exclusively from docker.io
+    # (volcanosh/vc-*). On a cold cluster those pulls are slow / rate-limited
+    # and a blocking `--wait` cannot finish inside the installer Lambda's
+    # wall-clock guard (HELM_CMD_TIMEOUT_SECONDS, default 780s), which made the
+    # whole add-on batch loop on Volcano. We therefore let Volcano converge
+    # asynchronously: helm returns once the manifests are applied and the
+    # scheduler/controller/admission pods come up in the background. The durable
+    # fix for the pull speed itself is the Docker Hub ECR pull-through cache,
+    # which (when enabled in cdk.json) overrides basic.image_registry below.
+    wait: false
+    wait_timeout: "8m"
     values:
       # Basic configuration - Volcano works well with defaults
       basic:
         controller_image_name: volcanosh/vc-controller-manager
         scheduler_image_name: volcanosh/vc-scheduler
         admission_image_name: volcanosh/vc-webhook-manager
+        # Pin the image tag explicitly (matches the chart's v1.15.0 appVersion)
+        # rather than relying on the chart default. This is the tag
+        # scripts/mirror_images.py mirrors into ECR and the tag helm
+        # requests, so the two can never drift. Bump in lockstep with the chart
+        # `version` above, then re-run the mirror (or just redeploy).
+        image_tag_version: "v1.15.0"
         controller_podAnnotations:
           karpenter.sh/do-not-disrupt: "true"
         scheduler_podAnnotations:

@@ -627,6 +627,14 @@ class StackManager:
                 "  - Podman: https://podman.io/getting-started/installation"
             )
 
+        # Mirror third-party images into ECR before the regional stack's Helm
+        # install runs (see volcano_image_mirror in cdk.json). Runs only for
+        # regional stacks, only when enabled, and skips images already present —
+        # so a fresh deploy seeds the mirror automatically and repeat deploys are
+        # a no-op. Raises before any CDK call if mirroring fails, so we never
+        # deploy a config whose images aren't in place.
+        self._mirror_images_if_enabled(stack_name=stack_name, all_stacks=all_stacks)
+
         # Auto-bootstrap the target region if needed
         if stack_name:
             region = self._get_deploy_region(stack_name)
@@ -1327,6 +1335,61 @@ class StackManager:
             return stack_name[len(prefix) :]
 
         return None
+
+    def _mirror_target_regions(self, stack_name: str | None, all_stacks: bool) -> list[str]:
+        """Regional regions to auto-mirror images for on this deploy.
+
+        Only regional stacks (``gco-<region>``) run a Helm install that needs the
+        mirror; the named global / api-gateway / monitoring / analytics stacks do
+        not. For ``--all`` the regional regions come straight from cdk.json
+        (``deployment_regions.regional``) so no synth is required. Returns a
+        de-duplicated, order-stable list.
+        """
+        named = {"gco-global", "gco-api-gateway", "gco-monitoring", "gco-analytics"}
+        if all_stacks:
+            from .config import _load_cdk_json
+
+            regional = _load_cdk_json().get("regional") or []
+            return list(dict.fromkeys(str(r) for r in regional))
+        if stack_name and stack_name.startswith("gco-") and stack_name not in named:
+            region = self._get_deploy_region(stack_name)
+            return [region] if region else []
+        return []
+
+    def _mirror_images_if_enabled(self, stack_name: str | None, all_stacks: bool) -> None:
+        """Mirror third-party images into ECR before a regional stack deploys.
+
+        No-op unless ``volcano_image_mirror.enabled`` is set in cdk.json. Mirrors
+        every relevant regional region (see :meth:`_mirror_target_regions`); the
+        copy is idempotent and skips images already present, so a fresh deploy
+        seeds the mirror automatically and repeat deploys cost only a few ECR
+        describe calls. Raises **before** any CDK call if an enabled mirror fails,
+        so a deploy never points a consumer (e.g. Volcano's ``image_registry``)
+        at images that aren't in ECR yet.
+        """
+        from . import _image_mirror as image_mirror
+
+        cfg = image_mirror.read_mirror_config()
+        if not cfg["enabled"]:
+            return
+
+        regions = self._mirror_target_regions(stack_name, all_stacks)
+        for region in regions:
+            print(f"Mirroring third-party images into ECR for {region} ...")
+            try:
+                image_mirror.mirror_images(
+                    region, ecr_namespace=cfg["ecr_namespace"], skip_existing=True
+                )
+            except Exception as exc:  # noqa: BLE001 - surface a clear, actionable failure
+                raise RuntimeError(
+                    f"Image mirror failed for region {region}: {exc}\n"
+                    "volcano_image_mirror is enabled but the images could not be "
+                    "mirrored into ECR. Fix the cause (container runtime / network / "
+                    "credentials) or run "
+                    f"'python scripts/mirror_images.py --region {region}' manually, "
+                    "then retry. Aborting before CDK so the deploy never points a "
+                    "consumer at images that aren't in ECR."
+                ) from exc
 
     def get_outputs(self, stack_name: str, region: str) -> dict[str, str]:
         """Get stack outputs from CloudFormation."""

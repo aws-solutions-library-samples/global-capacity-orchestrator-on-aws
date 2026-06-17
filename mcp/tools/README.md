@@ -12,8 +12,8 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 98 tools; with every flag enabled the
-ceiling is 130. See [Feature Flags](../README.md#feature-flags) for the
+default registration the server exposes 101 tools; with every flag enabled the
+ceiling is 134. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
@@ -23,14 +23,14 @@ flag-to-tool mapping.
 | `inference.py` | 18 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `mooncake_topology_status` |
 | `costs.py` | 4 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast` |
 | `stacks.py` | 20 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `valkey_status`, `aurora_status`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated) |
-| `storage.py` | 4 | `list_storage_contents`, `list_file_systems`, `files_get`, `files_access_points` |
+| `storage.py` | 5 | `list_storage_contents`, `list_file_systems`, `files_get`, `files_access_points`, `upload_to_regional_bucket` |
 | `models.py` | 4 | `list_models`, `get_model_uri`, `models_upload` (gated), `delete_model` (gated) |
 | `nodepools.py` | 4 | `nodepools_list`, `nodepools_describe`, `nodepools_create_odcr`, `delete_nodepool` (gated) |
 | `analytics.py` | 7 | `analytics_doctor`, `analytics_login_url`, `analytics_users_list`, `enable_analytics`, `disable_analytics`, `analytics_user_add`, `analytics_user_remove` (gated) |
 | `templates.py` | 5 | `templates_list`, `templates_get`, `templates_create`, `templates_run`, `delete_template` (gated) |
 | `webhooks.py` | 4 | `webhooks_list`, `webhooks_get`, `webhooks_create`, `delete_webhook` (gated) |
 | `queue.py` | 5 | `queue_list`, `queue_get`, `queue_stats`, `queue_submit`, `cancel_queue_job` (gated) |
-| `images.py` | 17 | `images_list`, `images_tags`, `images_describe`, `images_uri`, `images_replication_get`, `images_replication_status`, `images_orphans`, `images_init`, `images_lifecycle_get`, `images_lifecycle_set`, `images_replication_sync`, `images_build` (gated), `images_push` (gated), `images_delete_tag` (gated), `images_delete_repo` (gated), `images_cleanup` (gated), `images_prune` (gated) |
+| `images.py` | 20 | `images_list`, `images_tags`, `images_describe`, `images_uri`, `images_replication_get`, `images_replication_status`, `images_orphans`, `images_mirror_plan`, `images_mirror_status`, `images_init`, `images_lifecycle_get`, `images_lifecycle_set`, `images_replication_sync`, `images_build` (gated), `images_push` (gated), `images_mirror` (gated), `images_delete_tag` (gated), `images_delete_repo` (gated), `images_cleanup` (gated), `images_prune` (gated) |
 | `dag.py` | 2 | `dag_validate`, `dag_run` |
 | `config.py` | 1 | `config_get` |
 | `metrics.py` | 4 | `metrics_cloudwatch_get`, `metrics_from_job_logs`, `metrics_from_shared_storage_file` (default-on); `metrics_from_local_file` (gated by `GCO_ENABLE_LOCAL_METRICS`, default-off) — all `safe` |
@@ -48,6 +48,14 @@ Every tool follows the same pattern:
 2. Builds a CLI argument list from the tool's parameters
 3. Calls `cli_runner._run_cli(*args)` which shells out to `gco --output json ...`
 4. Returns the JSON string result to the LLM
+
+Most tools follow this `_run_cli` shell-out pattern. A few domains — notably the
+image-registry and image-mirror tools in `images.py` — instead wrap their CLI
+manager/core directly via `asyncio.to_thread(...)` (e.g. `cli.images.ImageManager`,
+`cli._image_mirror`), so the MCP layer never re-implements the underlying
+ECR/runtime logic. They still carry `@mcp.tool()` + `@audit_logged` and return a
+JSON string. The image-mirror tools (`images_mirror_plan`, `images_mirror_status`,
+`images_mirror`) are documented in [Image Mirror](../../docs/IMAGE_MIRROR.md#mcp-tools).
 
 ## Adding a New Tool
 

@@ -121,6 +121,8 @@ from tools.images import (  # noqa: E402, F401
     images_lifecycle_get,
     images_lifecycle_set,
     images_list,
+    images_mirror_plan,
+    images_mirror_status,
     images_orphans,
     images_replication_get,
     images_replication_status,
@@ -197,7 +199,7 @@ with _contextlib.suppress(ImportError):
     from tools.capacity import reserve_capacity  # noqa: F401
 
 with _contextlib.suppress(ImportError):
-    from tools.images import images_build, images_push  # noqa: F401
+    from tools.images import images_build, images_mirror, images_push  # noqa: F401
 
 with _contextlib.suppress(ImportError):
     from tools.images import (  # noqa: F401
@@ -272,6 +274,7 @@ if (
     for _name in (
         "images_build",
         "images_push",
+        "images_mirror",
         "images_cleanup",
         "images_prune",
         "images_delete_tag",
@@ -463,6 +466,9 @@ __all__ = [
     "images_lifecycle_get",
     "images_lifecycle_set",
     "images_list",
+    "images_mirror",
+    "images_mirror_plan",
+    "images_mirror_status",
     "images_orphans",
     "images_prune",
     "images_push",

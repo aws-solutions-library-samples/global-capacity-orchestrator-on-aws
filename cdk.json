@@ -197,6 +197,12 @@
       }
     },
 
+    "_comment_volcano_image_mirror": "Optional credential-free fix for Volcano's docker.io-only images (volcanosh/vc-*), which on a cold cluster pull slowly / hit Docker Hub rate limits and can stall Volcano's helm install. When enabled, the regional stack redirects Volcano's basic.image_registry to <account>.dkr.ecr.<region>.amazonaws.com/<ecr_namespace> (which must start with gco/ so it inherits the project's gco/* node-pull access, replication, and trusted-registry allow-list), and 'gco stacks deploy' auto-mirrors the pinned images into that namespace before the regional Helm install (or run 'python scripts/mirror_images.py --region <region>' manually). The copy preserves the full multi-arch manifest list (docker buildx imagetools / Finch --all-platforms / skopeo). Unlike an ECR pull-through cache this needs no Docker Hub secret; it is a static mirror you refresh when the Volcano chart version changes. See docs/IMAGE_MIRROR.md.",
+    "volcano_image_mirror": {
+      "enabled": true,
+      "ecr_namespace": "gco/dockerhub"
+    },
+
     "_comment_storage": "Optional storage backends (disabled by default; flip enabled then 'gco stacks deploy-all').",
 
     "_comment_fsx_lustre": "FSx for Lustre filesystem mounted into job pods. enabled: master toggle. storage_capacity_gib: provisioned size. deployment_type: SCRATCH_1, SCRATCH_2 (recommended), or PERSISTENT_*. file_system_type_version: Lustre version. per_unit_storage_throughput: only relevant for PERSISTENT_* (MB/s/TiB). data_compression_type: NONE or LZ4. import_path / export_path: optional S3 data-repo URIs. auto_import_policy: which S3 events trigger metadata sync (NONE, NEW, NEW_CHANGED, NEW_CHANGED_DELETED). See docs/CUSTOMIZATION.md (Configure FSx Storage) and https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html.",

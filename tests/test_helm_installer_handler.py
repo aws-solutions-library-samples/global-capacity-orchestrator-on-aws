@@ -228,6 +228,73 @@ class TestInstallChartPreflight:
         assert "invalid chart values" in message
 
 
+class TestInstallChartWaitControl:
+    """``install_chart`` honors per-chart ``wait`` / ``wait_timeout`` config."""
+
+    def _config(self, **overrides):
+        config = {
+            "repo_name": "volcano-sh",
+            "repo_url": "https://volcano-sh.github.io/helm-charts",
+            "chart": "volcano",
+            "version": "1.15.0",
+            "namespace": "volcano-system",
+            "create_namespace": True,
+            "values": {},
+        }
+        config.update(overrides)
+        return config
+
+    def _upgrade_args(self, mock_run):
+        """Return the argv of the ``helm upgrade --install`` invocation."""
+        for call in mock_run.call_args_list:
+            args = call.args[0]
+            if args and args[0] == "upgrade":
+                return args
+        raise AssertionError("no `helm upgrade` invocation captured")
+
+    def test_defaults_include_wait_and_10m_timeout(self):
+        """Backward-compatible default: ``--wait --timeout 10m``."""
+        with (
+            patch.object(helm_handler, "add_helm_repo", return_value=True),
+            patch.object(helm_handler, "_clear_stuck_release"),
+            patch.object(helm_handler, "run_helm", return_value=(0, "ok", "")) as mock_run,
+        ):
+            ok, _ = helm_handler.install_chart("volcano", self._config(), "/tmp/kube", None)
+        assert ok is True
+        args = self._upgrade_args(mock_run)
+        assert "--wait" in args
+        assert "--timeout" in args
+        assert args[args.index("--timeout") + 1] == "10m"
+
+    def test_wait_false_omits_wait_flag(self):
+        """``wait: false`` drops ``--wait`` so the install returns after apply."""
+        with (
+            patch.object(helm_handler, "add_helm_repo", return_value=True),
+            patch.object(helm_handler, "_clear_stuck_release"),
+            patch.object(helm_handler, "run_helm", return_value=(0, "ok", "")) as mock_run,
+        ):
+            helm_handler.install_chart(
+                "volcano", self._config(wait=False, wait_timeout="8m"), "/tmp/kube", None
+            )
+        args = self._upgrade_args(mock_run)
+        assert "--wait" not in args
+        # ``--timeout`` is still passed (it also bounds pre-install hook waits).
+        assert args[args.index("--timeout") + 1] == "8m"
+
+    def test_custom_wait_timeout_is_passed_through(self):
+        with (
+            patch.object(helm_handler, "add_helm_repo", return_value=True),
+            patch.object(helm_handler, "_clear_stuck_release"),
+            patch.object(helm_handler, "run_helm", return_value=(0, "ok", "")) as mock_run,
+        ):
+            helm_handler.install_chart(
+                "volcano", self._config(wait_timeout="3m"), "/tmp/kube", None
+            )
+        args = self._upgrade_args(mock_run)
+        assert "--wait" in args  # wait defaults to True
+        assert args[args.index("--timeout") + 1] == "3m"
+
+
 class TestHandleTask:
     """``handle_task`` performs exactly one helm op per call and raises on failure."""
 

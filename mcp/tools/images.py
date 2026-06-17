@@ -53,6 +53,18 @@ def _get_manager() -> Any:
     return get_image_manager()
 
 
+def _get_image_mirror() -> Any:
+    """Lazy-import the ``cli._image_mirror`` core so MCP server import stays light.
+
+    The mirror tools wrap this general "copy third-party images into gco/* ECR"
+    module (the same core the deploy auto-mirror and ``scripts/mirror_images.py``
+    use) rather than ``ImageManager`` — see ``docs/IMAGE_MIRROR.md``.
+    """
+    from cli import _image_mirror
+
+    return _image_mirror
+
+
 # =============================================================================
 # Read-only tools — Risk_Tier "safe"
 # =============================================================================
@@ -129,6 +141,56 @@ async def images_orphans(threshold_days: int = 30) -> str:
     )
 
 
+@mcp.tool(tags={"safe", "images"})
+@audit_logged
+async def images_mirror_plan(region: str, ecr_namespace: str | None = None) -> str:
+    """Image mirror — show which third-party images would be mirrored into ECR.
+
+    Read-only planning view: resolves the destination registry and repository
+    for every image the mirror manages (Volcano's ``docker.io/volcanosh/vc-*``
+    images today, derived from ``charts.yaml``) without creating any repository
+    or copying anything. Use it to preview the mirror before a deploy, or to see
+    where a consumer's ``image_registry`` override should point. The ``enabled``
+    field reflects the cdk.json ``volcano_image_mirror`` toggle that drives the
+    auto-mirror on ``gco stacks deploy``. See ``docs/IMAGE_MIRROR.md``.
+
+    Args:
+        region: AWS region whose ECR registry is the mirror destination.
+        ecr_namespace: Destination namespace under the registry. Defaults to the
+            cdk.json ``volcano_image_mirror.ecr_namespace`` (e.g. ``gco/dockerhub``).
+    """
+
+    def _plan() -> str:
+        mirror = _get_image_mirror()
+        plan = mirror.plan_mirror(region, ecr_namespace)
+        plan["enabled"] = mirror.read_mirror_config()["enabled"]
+        return json.dumps(plan)
+
+    return await asyncio.to_thread(_plan)
+
+
+@mcp.tool(tags={"safe", "images"})
+@audit_logged
+async def images_mirror_status(region: str, ecr_namespace: str | None = None) -> str:
+    """Image mirror — report which managed images are already present in ECR.
+
+    Read-only: for every image the mirror manages, checks whether its tag
+    already exists in the ``gco/*`` ECR namespace (ECR ``DescribeImages``; no
+    writes). The result carries a ``mirrored`` flag per image plus top-level
+    ``all_mirrored`` / ``missing``, so you can confirm a deploy's auto-mirror
+    has populated everything the consuming Helm install (Volcano) needs before
+    it runs, or diagnose a stuck install. See ``docs/IMAGE_MIRROR.md``.
+
+    Args:
+        region: AWS region whose ECR registry is the mirror destination.
+        ecr_namespace: Destination namespace under the registry. Defaults to the
+            cdk.json ``volcano_image_mirror.ecr_namespace`` (e.g. ``gco/dockerhub``).
+    """
+    return await asyncio.to_thread(
+        lambda: json.dumps(_get_image_mirror().mirror_status(region, ecr_namespace))
+    )
+
+
 # =============================================================================
 # Administrative tools — Risk_Tier "low-risk"
 # =============================================================================
@@ -186,6 +248,59 @@ async def images_replication_sync() -> str:
 # FastMCP Progress dependency.
 
 if is_enabled(FLAG_IMAGE_PUBLISH):
+    # images_mirror copies third-party images (Volcano's docker.io images) into
+    # the project's gco/* ECR. Like build/push it uploads image data, so it
+    # shares the GCO_ENABLE_IMAGE_PUBLISH gate. Unlike build/push it wraps the
+    # mirror core directly via asyncio.to_thread (no Progress/Context injection
+    # and no _run_long_task), so it registers here at the top of the flag block
+    # rather than inside the Progress-dependent build/push block below.
+    @mcp.tool(tags={"image", "images"})
+    @audit_logged
+    async def images_mirror(
+        region: str,
+        ecr_namespace: str | None = None,
+        skip_existing: bool = True,
+    ) -> str:
+        """[gated by GCO_ENABLE_IMAGE_PUBLISH] image-upload.
+
+        Mirror third-party images into the project's ``gco/*`` ECR so the
+        cluster pulls them from same-account ECR instead of a rate-limited
+        upstream (chiefly ``docker.io``, which has no credential-free ECR
+        pull-through cache). Today that's Volcano's ``volcanosh/vc-*`` images,
+        derived from ``charts.yaml``; the set is general — see
+        ``docs/IMAGE_MIRROR.md`` for how to add another image.
+
+        Creates each destination repository if needed and copies the image
+        preserving its full multi-arch manifest list (so both amd64 and arm64
+        nodes find a match). Idempotent — already-mirrored tags are skipped when
+        ``skip_existing`` is True, so repeat runs are a fast no-op. This is the
+        same operation ``gco stacks deploy`` runs automatically when the cdk.json
+        ``volcano_image_mirror`` toggle is enabled; invoke it directly to
+        pre-seed or repair the mirror out of band.
+
+        Args:
+            region: AWS region whose ECR registry is the mirror destination.
+            ecr_namespace: Destination namespace under the registry. Defaults to
+                the cdk.json ``volcano_image_mirror.ecr_namespace`` (e.g.
+                ``gco/dockerhub``).
+            skip_existing: When True (default), skip any image whose tag already
+                exists in ECR so repeat runs don't re-copy.
+        """
+
+        def _run() -> str:
+            mirror = _get_image_mirror()
+            lines: list[str] = []
+            result = mirror.mirror_images(
+                region,
+                ecr_namespace=ecr_namespace,
+                skip_existing=skip_existing,
+                log=lines.append,
+            )
+            result["log"] = lines
+            return json.dumps(result)
+
+        return await asyncio.to_thread(_run)
+
     # Build the decorator kwargs dict so we only pass ``task=...`` when
     # TaskConfig was importable on this fastmcp version.
     _publish_decorator_kwargs: dict[str, Any] = {"tags": {"image", "images"}}

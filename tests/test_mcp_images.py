@@ -49,6 +49,7 @@ def _list_tool_names() -> set[str]:
 _GATED_IMAGE_TOOLS = (
     "images_build",
     "images_push",
+    "images_mirror",
     "images_cleanup",
     "images_prune",
     "images_delete_tag",
@@ -88,6 +89,9 @@ class TestImageToolsDefaultEnv:
             "images_replication_get",
             "images_replication_status",
             "images_orphans",
+            # Image-mirror read-only tools (plan + status) are default-on too.
+            "images_mirror_plan",
+            "images_mirror_status",
         ):
             assert n in names, f"expected unconditional tool {n!r} to be registered"
         # Administrative "low-risk" tools.
@@ -101,9 +105,11 @@ class TestImageToolsDefaultEnv:
 
     def test_images_build_absent_by_default(self):
         names = _list_tool_names()
-        # Co-located coverage of the publish-gated pair.
+        # Co-located coverage of the publish-gated pair plus images_mirror,
+        # which shares the GCO_ENABLE_IMAGE_PUBLISH gate.
         assert "images_build" not in names
         assert "images_push" not in names
+        assert "images_mirror" not in names
 
     def test_images_delete_repo_absent_by_default(self):
         names = _list_tool_names()
@@ -129,10 +135,13 @@ class TestImagePublishGating:
         names = _list_tool_names()
         assert "images_build" in names
         assert "images_push" in names
+        # images_mirror shares the GCO_ENABLE_IMAGE_PUBLISH gate.
+        assert "images_mirror" in names
         # The reload block also rebinds the module-level names so callers
         # (and audit-log tests) can reach them through ``run_mcp.``.
         assert hasattr(run_mcp, "images_build")
         assert hasattr(run_mcp, "images_push")
+        assert hasattr(run_mcp, "images_mirror")
 
     @patch.dict(os.environ, {"GCO_ENABLE_IMAGE_PUBLISH": "true"})
     def test_images_build_task_mode_is_optional(self):
@@ -247,3 +256,142 @@ class TestImageDestructiveCtxWarning:
         # The warning text mentions the destructive intent so operators see why
         # the tool flagged the call.
         assert any("cannot be undone" in m.get("message", "") for m in warnings)
+
+
+# =============================================================================
+# Image-mirror tools — read-only plan/status (default-on) and the gated
+# execute tool, each wrapping the cli._image_mirror core (not ImageManager).
+# =============================================================================
+
+
+class TestImageMirrorReadOnlyTools:
+    """images_mirror_plan / images_mirror_status wrap the mirror core; no writes."""
+
+    @pytest.mark.asyncio
+    async def test_images_mirror_plan_returns_plan_with_enabled_flag(self):
+        from fastmcp import Client
+
+        fake_plan = {
+            "region": "us-east-1",
+            "registry": "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco/dockerhub",
+            "ecr_namespace": "gco/dockerhub",
+            "images": [
+                {
+                    "source_ref": "docker.io/volcanosh/vc-scheduler:v1.15.0",
+                    "dest_repo": "gco/dockerhub/volcanosh/vc-scheduler",
+                    "dest_ref": (
+                        "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+                        "/gco/dockerhub/volcanosh/vc-scheduler:v1.15.0"
+                    ),
+                    "tag": "v1.15.0",
+                }
+            ],
+        }
+        with (
+            patch("cli._image_mirror.plan_mirror", return_value=dict(fake_plan)) as mock_plan,
+            patch(
+                "cli._image_mirror.read_mirror_config",
+                return_value={"enabled": True, "ecr_namespace": "gco/dockerhub"},
+            ),
+        ):
+            async with Client(run_mcp.mcp) as client:
+                result = await client.call_tool("images_mirror_plan", {"region": "us-east-1"})
+
+        payload = json.loads(result.content[0].text)
+        # The tool merges the config-level ``enabled`` flag into the plan output.
+        assert payload["enabled"] is True
+        assert payload["images"][0]["dest_repo"] == "gco/dockerhub/volcanosh/vc-scheduler"
+        # Region forwarded; ecr_namespace defaulted (None passed through to the core).
+        mock_plan.assert_called_once_with("us-east-1", None)
+
+    @pytest.mark.asyncio
+    async def test_images_mirror_plan_forwards_namespace(self):
+        from fastmcp import Client
+
+        with (
+            patch("cli._image_mirror.plan_mirror", return_value={"images": []}) as mock_plan,
+            patch(
+                "cli._image_mirror.read_mirror_config",
+                return_value={"enabled": False, "ecr_namespace": "gco/custom"},
+            ),
+        ):
+            async with Client(run_mcp.mcp) as client:
+                await client.call_tool(
+                    "images_mirror_plan",
+                    {"region": "eu-west-1", "ecr_namespace": "gco/custom"},
+                )
+        mock_plan.assert_called_once_with("eu-west-1", "gco/custom")
+
+    @pytest.mark.asyncio
+    async def test_images_mirror_status_reports_presence(self):
+        from fastmcp import Client
+
+        fake_status = {
+            "region": "us-east-1",
+            "registry": "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco/dockerhub",
+            "ecr_namespace": "gco/dockerhub",
+            "images": [
+                {
+                    "dest_ref": (
+                        "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+                        "/gco/dockerhub/volcanosh/vc-scheduler:v1.15.0"
+                    ),
+                    "dest_repo": "gco/dockerhub/volcanosh/vc-scheduler",
+                    "tag": "v1.15.0",
+                    "mirrored": True,
+                }
+            ],
+            "all_mirrored": True,
+            "missing": [],
+        }
+        with patch("cli._image_mirror.mirror_status", return_value=fake_status) as mock_status:
+            async with Client(run_mcp.mcp) as client:
+                result = await client.call_tool("images_mirror_status", {"region": "us-east-1"})
+        payload = json.loads(result.content[0].text)
+        assert payload["all_mirrored"] is True
+        assert payload["missing"] == []
+        mock_status.assert_called_once_with("us-east-1", None)
+
+
+class TestImageMirrorExecuteGating:
+    """images_mirror registers only under GCO_ENABLE_IMAGE_PUBLISH and runs the core."""
+
+    @patch.dict(os.environ, {"GCO_ENABLE_IMAGE_PUBLISH": "true"})
+    def test_images_mirror_present_when_flag_set(self):
+        importlib.reload(run_mcp)
+        names = _list_tool_names()
+        assert "images_mirror" in names
+        assert hasattr(run_mcp, "images_mirror")
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_IMAGE_PUBLISH": "true"})
+    async def test_images_mirror_invokes_core_and_captures_log(self):
+        importlib.reload(run_mcp)
+        from fastmcp import Client
+
+        def _fake_mirror_images(region, ecr_namespace=None, skip_existing=True, log=print):
+            log(f"copying into {region}")
+            return {
+                "registry": "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco/dockerhub",
+                "strategy": "buildx",
+                "mirrored": [
+                    "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+                    "/gco/dockerhub/volcanosh/vc-scheduler:v1.15.0"
+                ],
+                "skipped": [],
+            }
+
+        with patch(
+            "cli._image_mirror.mirror_images", side_effect=_fake_mirror_images
+        ) as mock_mi:
+            async with Client(run_mcp.mcp) as client:
+                result = await client.call_tool("images_mirror", {"region": "us-east-1"})
+
+        payload = json.loads(result.content[0].text)
+        assert payload["strategy"] == "buildx"
+        # Log lines streamed by the core are captured into the result.
+        assert payload["log"] == ["copying into us-east-1"]
+        # kwargs forwarded to the core; ``log`` is the in-tool line collector.
+        _, kwargs = mock_mi.call_args
+        assert kwargs["skip_existing"] is True
+        assert kwargs["ecr_namespace"] is None

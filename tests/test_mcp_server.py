@@ -141,29 +141,30 @@ class TestToolRegistration:
 
     def test_tool_count(self):
         tools = asyncio.run(run_mcp.mcp._list_tools())
-        # 99 base tools after delete_job and delete_inference moved under
+        # 101 base tools after delete_job and delete_inference moved under
         # GCO_ENABLE_DESTRUCTIVE_OPERATIONS and the three default-on metric
         # readers were added, plus four unconditional disaggregated-inference
-        # tools. The breakdown:
+        # tools and the two read-only image-mirror tools. The breakdown:
         #   * the original 81 (read-only + low-risk + discovery) minus 2
         #     (delete_job + delete_inference) = 79
-        #   * 11 unconditional image-registry tools (read-only + administrative)
+        #   * 13 unconditional image-registry tools (read-only + administrative,
+        #     including images_mirror_plan / images_mirror_status)
         #   * 2 unconditional task observability tools (task_status, task_tail)
         #   * 3 unconditional, default-on metric readers (metrics_cloudwatch_get,
         #     metrics_from_job_logs, metrics_from_shared_storage_file)
         #   * 4 unconditional, low-risk disaggregated-inference tools
         #     (deploy_disaggregated_inference, set_mooncake_topology,
         #     mooncake_topology_status, upload_to_regional_bucket)
-        # = 99 total at default registration.
+        # = 101 total at default registration.
         # reserve_capacity adds 1 when GCO_ENABLE_CAPACITY_PURCHASE=true.
-        # Image-publish-gated tools (images_build, images_push) add 2 when
-        # GCO_ENABLE_IMAGE_PUBLISH=true. Destructive-gated tools add 12 when
-        # GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true: delete_job, delete_inference,
-        # delete_template, delete_webhook, delete_model, delete_nodepool,
-        # analytics_user_remove, cancel_queue_job (eight non-image), plus
-        # images_cleanup, images_prune, images_delete_tag, images_delete_repo
-        # (four image variants). Model-upload-gated models_upload adds 1
-        # when GCO_ENABLE_MODEL_UPLOAD=true.
+        # Image-publish-gated tools (images_build, images_push, images_mirror)
+        # add 3 when GCO_ENABLE_IMAGE_PUBLISH=true. Destructive-gated tools add
+        # 12 when GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true: delete_job,
+        # delete_inference, delete_template, delete_webhook, delete_model,
+        # delete_nodepool, analytics_user_remove, cancel_queue_job (eight
+        # non-image), plus images_cleanup, images_prune, images_delete_tag,
+        # images_delete_repo (four image variants). Model-upload-gated
+        # models_upload adds 1 when GCO_ENABLE_MODEL_UPLOAD=true.
         # Infrastructure-deploy gated tools (deploy_stack, deploy_all,
         # bootstrap_cdk) add 3 when GCO_ENABLE_INFRASTRUCTURE_DEPLOY=true.
         # Infrastructure-destroy gated tools (destroy_stack, destroy_all)
@@ -175,14 +176,16 @@ class TestToolRegistration:
         # mission_checkpoint, mission_complete, mission_abort, mission_resume,
         # mission_history, mission_list) add 9 when GCO_ENABLE_MISSION=true.
         # With every flag enabled the ceiling is
-        # 99 + 1 + 2 + 12 + 1 + 3 + 2 + 1 + 1 + 9 = 131.
-        base_count = 99
+        # 101 + 1 + 3 + 12 + 1 + 3 + 2 + 1 + 1 + 9 = 134.
+        base_count = 101
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
             expected += 1
         if "images_build" in tool_names:
             expected += 2  # images_build + images_push register together
+        if "images_mirror" in tool_names:
+            expected += 1  # images_mirror (also GCO_ENABLE_IMAGE_PUBLISH-gated)
         if "delete_job" in tool_names:
             # All eight destructive-gated tools register together with the
             # four destructive image variants — twelve total under the flag.
@@ -338,6 +341,9 @@ class TestToolRegistration:
             "images_replication_get",
             "images_replication_status",
             "images_orphans",
+            # Image mirror (read-only "safe")
+            "images_mirror_plan",
+            "images_mirror_status",
             # Administrative ("low-risk")
             "images_init",
             "images_lifecycle_get",
@@ -355,6 +361,10 @@ class TestToolRegistration:
         if "images_build" in names:
             expected.add("images_build")
             expected.add("images_push")
+        # images_mirror is also GCO_ENABLE_IMAGE_PUBLISH-gated but registers
+        # independently of the Progress-injected build/push pair.
+        if "images_mirror" in names:
+            expected.add("images_mirror")
         # Destructive-gated image tools register under
         # GCO_ENABLE_DESTRUCTIVE_OPERATIONS.
         if "images_delete_tag" in names:
