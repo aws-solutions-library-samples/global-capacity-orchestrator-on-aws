@@ -907,6 +907,29 @@ GCO installs scheduler and infrastructure Helm charts via the `helm` section in 
 
 A useful subset of charts is enabled by default, but every cluster is different. Experiment to find which tools best suit your workloads and disable the ones you don't need — each enabled chart runs controller pods that consume CPU and memory on your system nodes. For example, if you don't use gang scheduling, disable Volcano. If you don't need event-driven autoscaling, disable KEDA. Fewer charts means less system overhead and faster deploys.
 
+> **⚠️ Helm charts install asynchronously — give them time to finish.**
+>
+> Chart installation is **deliberately decoupled from the CloudFormation deploy**. When `gco stacks deploy-all` reports the regional stack as `CREATE_COMPLETE`, that means the install has been *kicked off* — not that every chart is ready. The charts are then installed one at a time by a Step Functions state machine in the background, and full convergence can take **10–30+ minutes** depending on how many charts are enabled and how fast their images pull (some third-party images come from `docker.io` and can be slow, e.g. Volcano).
+>
+> This is intentional: a slow or failing chart must **never** roll back and destroy the freshly-created EKS cluster. Each chart installs independently — one slow or broken chart does not block the rest.
+>
+> Monitor convergence and inspect per-chart results at any time:
+>
+> ```bash
+> # Per-chart status (reads the status each chart task records in SSM)
+> gco stacks addons status -r <region>
+> gco stacks addons status --all-regions
+> ```
+>
+> If a chart shows as failed (for example, a transient image-pull timeout), re-converge the add-on layer without touching the cluster:
+>
+> ```bash
+> gco stacks addons install -r <region>
+> gco stacks addons install --all-regions
+> ```
+>
+> Workloads that depend on a specific scheduler/operator (Volcano, Kueue, KubeRay, etc.) should wait until that chart shows `installed` before they are submitted.
+
 See [Schedulers & Orchestrators](SCHEDULERS.md) for detailed guidance on each tool.
 
 ## Enabling Additional Features
