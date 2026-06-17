@@ -1188,7 +1188,7 @@ def _addons_status_one(formatter: Any, project: str, region: str) -> None:
     formatter.print_info(f"Add-on status for {project} in {region}:")
     for name, status, message in rows:
         line = f"  {name:<28} {status:<12} {message}"
-        if status in ("installed", "uninstalled", "absent"):
+        if status in ("installed", "uninstalled", "absent", "applied"):
             formatter.print_success(line)
         else:
             formatter.print_error(line)

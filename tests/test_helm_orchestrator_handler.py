@@ -72,8 +72,10 @@ class TestOnEvent:
         sfn.start_execution.assert_called_once()
         kwargs = sfn.start_execution.call_args.kwargs
         assert kwargs["stateMachineArn"] == _STATE_MACHINE_ARN
-        # Execution input carries exactly what the per-chart tasks consume.
-
+        # Execution input carries everything the convergence pipeline's tasks
+        # consume: chart config (chart tasks), ImageReplacements (the base and
+        # post-Helm kubectl tasks), and EndpointGroupArn (the GA task). The last
+        # two default to {}/None when the trigger doesn't supply them.
         sent = json.loads(kwargs["input"])
         assert sent == {
             "ClusterName": "gco-us-east-1",
@@ -81,6 +83,8 @@ class TestOnEvent:
             "EnabledCharts": ["keda", "kueue"],
             "Charts": {"keda": {"enabled": True}},
             "KedaOperatorRoleArn": "arn:aws:iam::123456789012:role/keda",
+            "ImageReplacements": {},
+            "EndpointGroupArn": None,
         }
         # ExecutionArn is returned as an observability attribute (top level + Data).
         assert result["ExecutionArn"] == _EXECUTION_ARN
@@ -129,3 +133,5 @@ class TestOnEvent:
         assert sent["EnabledCharts"] == []
         assert sent["Charts"] == {}
         assert sent["KedaOperatorRoleArn"] is None
+        assert sent["ImageReplacements"] == {}
+        assert sent["EndpointGroupArn"] is None

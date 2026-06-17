@@ -2171,6 +2171,19 @@ class GCORegionalStack(Stack):
             iam.PolicyStatement(actions=["sts:AssumeRole"], resources=["*"])
         )
 
+        # Allow the convergence apply tasks to record per-phase status to SSM
+        # (base-manifests / post-helm-manifests), mirroring the helm worker, so
+        # `gco stacks addons status` surfaces the apply passes alongside charts.
+        kubectl_lambda_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["ssm:PutParameter"],
+                resources=[
+                    f"arn:aws:ssm:{self.deployment_region}:{self.account}:"
+                    f"parameter/{project_name}/addons/*"
+                ],
+            )
+        )
+
         # Create security group for kubectl Lambda
         kubectl_lambda_sg = ec2.SecurityGroup(
             self,
@@ -2209,6 +2222,9 @@ class GCORegionalStack(Stack):
             environment={
                 "CLUSTER_NAME": self.cluster.cluster_name,
                 "REGION": self.deployment_region,
+                # Lets the convergence apply tasks record per-phase status to
+                # SSM (/<project>/addons/<region>/{base,post-helm}-manifests).
+                "PROJECT_NAME": project_name,
             },
             tracing=lambda_.Tracing.ACTIVE,
         )

@@ -951,6 +951,39 @@ def apply_manifests(
     }
 
 
+def _record_phase_status(phase: str, status: str, message: str) -> None:
+    """Record a convergence phase's outcome to SSM (best-effort).
+
+    Mirrors the helm worker's per-chart status (``_record_addon_status``) so
+    ``gco stacks addons status`` surfaces the base and post-Helm apply passes
+    alongside the charts. Writes ``/<project>/addons/<region>/<phase>`` as a
+    small JSON blob. Failures are swallowed — status reporting must never turn a
+    successful apply into a failure (or vice versa). Reads PROJECT_NAME / REGION
+    from the Lambda environment; a no-op if either is unset.
+    """
+    project = os.environ.get("PROJECT_NAME")
+    region = os.environ.get("REGION")
+    if not project or not region:
+        return
+    import contextlib
+    import time as _time
+
+    with contextlib.suppress(Exception):
+        boto3.client("ssm").put_parameter(
+            Name=f"/{project}/addons/{region}/{phase}",
+            Value=json.dumps(
+                {
+                    "phase": phase,
+                    "status": status,
+                    "message": message[:1024],
+                    "updated_at": int(_time.time()),
+                }
+            ),
+            Type="String",
+            Overwrite=True,
+        )
+
+
 def handle_task(event: dict[str, Any]) -> dict[str, Any]:
     """Apply manifests for a Step Functions task; raise on any failure.
 
@@ -960,19 +993,31 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
     path below — which reports SUCCESS even when individual manifests fail — this
     RAISES when any manifest fails, so the state machine's Retry/Catch can react:
     the base pass fails the execution, while the post-Helm pass is caught so the
-    pipeline still finishes.
+    pipeline still finishes. The outcome is recorded to SSM (``base-manifests`` /
+    ``post-helm-manifests``) so it shows up in ``gco stacks addons status``.
     """
     cluster_name = event["ClusterName"]
     region = event["Region"]
     replacements = event.get("ImageReplacements", {})
     post_helm = str(event.get("PostHelm", "false")).lower() == "true"
+    phase = "post-helm-manifests" if post_helm else "base-manifests"
     manifests_dir = os.path.join(os.path.dirname(__file__), "manifests")
-    result = apply_manifests(cluster_name, region, manifests_dir, replacements, post_helm)
+    try:
+        result = apply_manifests(cluster_name, region, manifests_dir, replacements, post_helm)
+    except Exception as exc:
+        _record_phase_status(phase, "failed", str(exc))
+        raise
     if result.get("FailedCount", 0):
+        _record_phase_status(phase, "failed", str(result.get("Failed")))
         raise RuntimeError(
             f"kubectl apply failed (post_helm={post_helm}, "
             f"failed={result.get('FailedCount')}): {result.get('Failed')}"
         )
+    _record_phase_status(
+        phase,
+        "applied",
+        f"applied={result.get('AppliedCount')} skipped={result.get('SkippedCount')}",
+    )
     return result
 
 

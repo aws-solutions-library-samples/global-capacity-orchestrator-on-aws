@@ -764,3 +764,42 @@ class TestHandleTask:
             }
             with pytest.raises(RuntimeError, match="kubectl apply failed"):
                 handler_module.handle_task(event)
+
+    def test_records_applied_status_on_success(self, handler_module):
+        """On success the base pass records status 'applied' to SSM."""
+        event = {
+            "Action": "apply_manifests",
+            "ClusterName": "c",
+            "Region": "us-east-1",
+            "PostHelm": "false",
+        }
+        with (
+            patch.object(handler_module, "apply_manifests") as mock_apply,
+            patch.object(handler_module, "_record_phase_status") as mock_status,
+        ):
+            mock_apply.return_value = {"AppliedCount": 5, "FailedCount": 0, "SkippedCount": 1}
+            handler_module.handle_task(event)
+        mock_status.assert_called_once()
+        phase, status = mock_status.call_args[0][0], mock_status.call_args[0][1]
+        assert phase == "base-manifests"
+        assert status == "applied"
+
+    def test_records_failed_status_before_raising(self, handler_module):
+        """On failure the post-Helm pass records status 'failed' before raising."""
+        event = {
+            "Action": "apply_manifests",
+            "ClusterName": "c",
+            "Region": "us-east-1",
+            "PostHelm": "true",
+        }
+        with (
+            patch.object(handler_module, "apply_manifests") as mock_apply,
+            patch.object(handler_module, "_record_phase_status") as mock_status,
+        ):
+            mock_apply.return_value = {"AppliedCount": 1, "FailedCount": 1, "Failed": "x"}
+            with pytest.raises(RuntimeError):
+                handler_module.handle_task(event)
+        mock_status.assert_called_once()
+        phase, status = mock_status.call_args[0][0], mock_status.call_args[0][1]
+        assert phase == "post-helm-manifests"
+        assert status == "failed"
