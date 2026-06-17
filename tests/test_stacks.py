@@ -3319,3 +3319,78 @@ class TestAutoMirrorOnDeploy:
         ):
             # Deduplicated, order-stable.
             assert mgr._mirror_target_regions(None, True) == ["us-east-1", "eu-west-1"]
+
+
+class TestStackExistsInCloudFormation:
+    """Directly exercise the existence check that gates destroy success.
+
+    Regression for the false-success bug: a DELETE_FAILED (or
+    DELETE_IN_PROGRESS) stack still exists and must report present, so a
+    failed ``cdk destroy`` is not reconciled into a "destroyed successfully".
+    Only DELETE_COMPLETE (or a missing stack) counts as gone.
+    """
+
+    def _check(self, status=None, raises=False):
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.api_gateway_region = "us-east-2"
+        manager = StackManager(config)
+        fake_cfn = MagicMock()
+        if raises:
+            fake_cfn.describe_stacks.side_effect = Exception("Stack does not exist")
+        else:
+            fake_cfn.describe_stacks.return_value = {"Stacks": [{"StackStatus": status}]}
+        with (
+            patch.object(StackManager, "_get_destroy_region", return_value="us-east-1"),
+            patch("boto3.client", return_value=fake_cfn),
+        ):
+            return manager._stack_exists_in_cloudformation("gco-us-east-1")
+
+    def test_create_complete_is_present(self):
+        assert self._check("CREATE_COMPLETE") is True
+
+    def test_update_complete_is_present(self):
+        assert self._check("UPDATE_COMPLETE") is True
+
+    def test_delete_failed_is_present(self):
+        # The bug: a stack that failed to delete is still very much present.
+        assert self._check("DELETE_FAILED") is True
+
+    def test_delete_in_progress_is_present(self):
+        assert self._check("DELETE_IN_PROGRESS") is True
+
+    def test_delete_complete_is_absent(self):
+        assert self._check("DELETE_COMPLETE") is False
+
+    def test_missing_stack_is_absent(self):
+        assert self._check(raises=True) is False
+
+
+class TestDestroyReconciliationDeleteFailed:
+    """destroy() must surface failure (not success) when the stack is DELETE_FAILED."""
+
+    def test_destroy_reports_failure_when_stack_delete_failed(self):
+        """cdk exits non-zero and CFN still has the stack in DELETE_FAILED.
+
+        Uses the REAL _stack_exists_in_cloudformation (boto3 mocked) so this
+        would have caught the original false-success bug end to end.
+        """
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.api_gateway_region = "us-east-2"
+        fake_cfn = MagicMock()
+        fake_cfn.describe_stacks.return_value = {"Stacks": [{"StackStatus": "DELETE_FAILED"}]}
+
+        with (
+            patch.object(StackManager, "_run_cdk") as mock_run,
+            patch.object(StackManager, "_get_destroy_region", return_value="us-east-1"),
+            patch("boto3.client", return_value=fake_cfn),
+        ):
+            mock_run.return_value = MagicMock(returncode=1)  # cdk destroy failed
+
+            manager = StackManager(config)
+            result = manager.destroy(stack_name="gco-us-east-1", force=True)
+
+        assert result is False

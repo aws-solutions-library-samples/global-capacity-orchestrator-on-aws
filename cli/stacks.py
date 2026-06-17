@@ -1000,7 +1000,19 @@ class StackManager:
         return True
 
     def _stack_exists_in_cloudformation(self, stack_name: str) -> bool:
-        """Check if a stack exists and is not in a deleted state."""
+        """Check whether a stack still exists in CloudFormation.
+
+        Only ``DELETE_COMPLETE`` — or a missing stack, which
+        ``describe_stacks`` surfaces as an error — counts as "gone". A stack
+        in ``DELETE_FAILED`` or ``DELETE_IN_PROGRESS`` still exists with
+        live/partial resources and must report as present.
+
+        The previous ``"DELETE" not in status`` test was too broad: it also
+        matched ``DELETE_FAILED`` and ``DELETE_IN_PROGRESS``, so a failed
+        ``cdk destroy`` whose stack landed in ``DELETE_FAILED`` was reconciled
+        as a success (the CLI printed "destroyed successfully" for a stack
+        that was still very much present).
+        """
         import boto3
 
         region = self._get_destroy_region(stack_name)
@@ -1008,7 +1020,7 @@ class StackManager:
         try:
             resp = cfn.describe_stacks(StackName=stack_name)
             status = resp["Stacks"][0]["StackStatus"]
-            return "DELETE" not in status
+            return status != "DELETE_COMPLETE"
         except Exception:
             return False
 
