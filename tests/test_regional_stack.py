@@ -1975,7 +1975,7 @@ class TestClusterSharedBucketRegionalIntegration:
 
     1. Populate the three ``{{CLUSTER_SHARED_BUCKET}}``,
        ``{{CLUSTER_SHARED_BUCKET_ARN}}``, and ``{{CLUSTER_SHARED_BUCKET_REGION}}``
-       keys in the ``KubectlApplyManifests`` CustomResource's
+       keys in the ``HelmInstallCharts`` convergence-trigger CustomResource's
        ``ImageReplacements`` property with non-empty values (tokens or strings).
     2. Attach two IAM policy statements to ``service_account_role`` — an
        S3 RW grant scoped to the cluster-shared bucket ARN (resolved via
@@ -1986,7 +1986,7 @@ class TestClusterSharedBucketRegionalIntegration:
        ``analytics_environment.enabled=true`` and ``=false`` cases —
        the regional stack does not read the analytics toggle, so flipping
        it MUST NOT produce any diff in the regional template's
-       ``KubectlApplyManifests`` or ``AWS::IAM::Policy`` resources. Any
+       ``HelmInstallCharts`` or ``AWS::IAM::Policy`` resources. Any
        delta lives in ``gco-analytics``, not the regional stack.
     """
 
@@ -2042,25 +2042,24 @@ class TestClusterSharedBucketRegionalIntegration:
 
     @staticmethod
     def _kubectl_apply_properties(template: assertions.Template) -> dict:
-        """Return the ``ImageReplacements`` property of the
-        ``KubectlApplyManifests`` custom resource.
+        """Return the properties of the ``HelmInstallCharts`` convergence-trigger
+        custom resource.
 
-        The custom resource is synthesized as
-        ``AWS::CloudFormation::CustomResource`` with logical id
-        ``KubectlApplyManifests``. There is a second, sibling custom
-        resource ``KubectlApplyPostHelmManifests`` that re-applies after
-        helm finishes — we assert on the primary one here; the
-        always-present ConfigMap property test covers the post-helm
-        sibling separately via Hypothesis.
+        The manifest ``ImageReplacements`` now live on the single fire-and-forget
+        trigger CustomResource (logical id ``HelmInstallCharts``, type
+        ``AWS::CloudFormation::CustomResource``) that starts the convergence
+        state machine. The base and post-Helm kubectl passes run as tasks inside
+        that state machine rather than as their own custom resources, so there is
+        no longer a ``KubectlApplyManifests`` resource in the template.
         """
         resources = template.to_json().get("Resources", {})
-        primary = resources.get("KubectlApplyManifests")
-        assert primary is not None, (
-            "KubectlApplyManifests CustomResource must be present in the "
+        trigger = resources.get("HelmInstallCharts")
+        assert trigger is not None, (
+            "HelmInstallCharts CustomResource must be present in the "
             "synthesized template. Available logical ids: "
-            f"{sorted(k for k in resources if 'KubectlApply' in k)}"
+            f"{sorted(k for k in resources if 'Helm' in k or 'Kubectl' in k)}"
         )
-        properties: dict = primary.get("Properties", {})
+        properties: dict = trigger.get("Properties", {})
         return properties
 
     def test_configmap_replacements_present_when_analytics_disabled(self):
@@ -2240,7 +2239,7 @@ class TestClusterSharedBucketRegionalIntegration:
 
     def test_regional_template_shape_identical_across_analytics_toggle(self):
         """The ``analytics_environment.enabled`` toggle MUST NOT change
-        the regional stack's ``KubectlApplyManifests`` or
+        the regional stack's ``HelmInstallCharts`` or
         ``AWS::IAM::Policy`` resources beyond synthesis-only artifacts
         (stack-name-embedded logical ids, synth-time deployment
         timestamp).
@@ -2261,16 +2260,19 @@ class TestClusterSharedBucketRegionalIntegration:
         resources_off = template_off.to_json().get("Resources", {})
         resources_on = template_on.to_json().get("Resources", {})
 
-        # Compare KubectlApplyManifests + KubectlApplyPostHelmManifests (both
-        # carry ImageReplacements) and every AWS::IAM::Policy resource. The
-        # logical ids are deterministic because the construct tree is the
-        # same in both synths, so a direct key-by-key dict comparison works.
-        kubectl_logical_ids = sorted(lid for lid in resources_off if "KubectlApply" in lid)
-        assert kubectl_logical_ids, (
-            "Expected at least one KubectlApply* CustomResource in the regional template."
+        # The convergence-trigger CustomResource ("HelmInstallCharts") carries
+        # the manifest ImageReplacements; compare it across the analytics toggle.
+        # The base/post-Helm kubectl passes now run inside the state machine, so
+        # there are no longer KubectlApply* custom resources to compare. The
+        # logical id is deterministic because the construct tree is the same in
+        # both synths, so a direct key-by-key dict comparison works.
+        trigger_logical_ids = sorted(lid for lid in resources_off if lid == "HelmInstallCharts")
+        assert trigger_logical_ids, (
+            "Expected the HelmInstallCharts convergence-trigger CustomResource "
+            "in the regional template."
         )
 
-        for lid in kubectl_logical_ids:
+        for lid in trigger_logical_ids:
             off_json = self._canonicalize_resource(resources_off[lid], off_prefix, on_prefix)
             on_json = self._canonicalize_resource(resources_on.get(lid, {}), off_prefix, on_prefix)
             assert off_json == on_json, (

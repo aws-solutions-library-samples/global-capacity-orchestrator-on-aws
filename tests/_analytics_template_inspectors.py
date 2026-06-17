@@ -207,12 +207,12 @@ def get_kubectl_replacements(
     template: dict[str, Any],
 ) -> dict[str, Any]:
     """Return the ``ImageReplacements`` property from the regional stack's
-    kubectl-applier CustomResource as a flat dict.
+    convergence-trigger CustomResource as a flat dict.
 
-    Handles both ``AWS::CloudFormation::CustomResource`` and any
-    vendor-specific custom-resource type the stack may use in the future
-    (e.g. ``Custom::KubectlApplyManifests``). Returns an empty dict if no
-    matching resource is present in the template.
+    The ``HelmInstallCharts`` trigger CustomResource carries the manifest
+    ``ImageReplacements`` that the convergence state machine's base and
+    post-Helm kubectl tasks consume. Returns an empty dict if no matching
+    resource is present in the template.
 
     Args:
         template: A regional CloudFormation template dict.
@@ -225,19 +225,16 @@ def get_kubectl_replacements(
     resources: dict[str, Any] = template.get("Resources", {}) or {}
 
     # Prefer the well-known logical id first to keep the walk stable.
-    kubectl = resources.get("KubectlApplyManifests")
-    if isinstance(kubectl, dict):
-        return dict(kubectl.get("Properties", {}).get("ImageReplacements") or {})
+    trigger = resources.get("HelmInstallCharts")
+    if isinstance(trigger, dict):
+        return dict(trigger.get("Properties", {}).get("ImageReplacements") or {})
 
-    # Fallback: any resource whose type matches the custom-resource shape
-    # and whose name contains "Kubectl" / "KubectlApply".
-    for lid, res in resources.items():
+    # Fallback: any custom resource exposing an ImageReplacements property.
+    for _lid, res in resources.items():
         if not isinstance(res, dict):
             continue
         rtype = res.get("Type", "")
-        if (
-            rtype == "AWS::CloudFormation::CustomResource" or rtype.startswith("Custom::")
-        ) and "kubectl" in lid.lower():
+        if rtype == "AWS::CloudFormation::CustomResource" or rtype.startswith("Custom::"):
             replacements = res.get("Properties", {}).get("ImageReplacements")
             if isinstance(replacements, dict):
                 return dict(replacements)

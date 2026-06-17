@@ -574,18 +574,23 @@ def handle_delete(
     send_response(event, context, "SUCCESS", {}, physical_id)
 
 
-def handle_create_update(
-    event: dict[str, Any], context: Any, props: dict[str, Any], physical_id: str
-) -> None:
-    """Handle Create or Update request."""
-    cluster_name = props["ClusterName"]
-    region = props["Region"]
-    endpoint_group_arn = props["EndpointGroupArn"]
-    ingress_name = props.get("IngressName", "gco-ingress")
-    namespace = props.get("Namespace", "gco-system")
-    global_region = props.get("GlobalRegion", "us-east-2")
-    project_name = props.get("ProjectName", "gco")
+def register_ga_endpoint(
+    cluster_name: str,
+    region: str,
+    endpoint_group_arn: str,
+    ingress_name: str = "gco-ingress",
+    namespace: str = "gco-system",
+    global_region: str = "us-east-2",
+    project_name: str = "gco",
+) -> dict[str, str]:
+    """Find the active platform ALB and register it with Global Accelerator.
 
+    Shared core for both entrypoints (the Step Functions convergence task and
+    the legacy CloudFormation custom resource). Polls for the active ALB,
+    registers it (idempotent), scrubs stale endpoints, enforces HTTP health
+    checks, and records the ALB hostname in SSM. Raises on timeout so the
+    caller can react. Returns ``{"AlbArn", "AlbHostname"}``.
+    """
     # Initialize clients
     k8s_endpoint, token, ca_path = get_k8s_client(cluster_name, region)
     http = urllib3.PoolManager(cert_reqs="CERT_REQUIRED", ca_certs=ca_path)
@@ -646,23 +651,63 @@ def handle_create_update(
     # Store ALB hostname in SSM for cross-region aggregation
     store_alb_hostname_in_ssm(region, alb_hostname, global_region, project_name)
 
-    # IMPORTANT: Keep PhysicalResourceId stable to avoid CloudFormation treating
-    # updates as replacements (which would trigger a Delete of the old resource)
-    send_response(
-        event,
-        context,
-        "SUCCESS",
-        {"AlbArn": alb_arn, "AlbHostname": alb_hostname},
-        physical_id,
+    return {"AlbArn": alb_arn, "AlbHostname": alb_hostname}
+
+
+def handle_task(event: dict[str, Any]) -> dict[str, Any]:
+    """Register the ALB with Global Accelerator for a Step Functions task.
+
+    The convergence state machine invokes this as its final step, after the Helm
+    charts and post-Helm manifests are applied. Reads the same parameters the
+    custom-resource path takes from ``ResourceProperties`` — but flat on the
+    event — and returns ``{AlbArn, AlbHostname}``. Raises on failure so the state
+    machine can retry (then catch-and-continue, since GA registration must not
+    wedge the rest of the pipeline).
+    """
+    return register_ga_endpoint(
+        cluster_name=event["ClusterName"],
+        region=event["Region"],
+        endpoint_group_arn=event["EndpointGroupArn"],
+        ingress_name=event.get("IngressName", "gco-ingress"),
+        namespace=event.get("Namespace", "gco-system"),
+        global_region=event.get("GlobalRegion", "us-east-2"),
+        project_name=event.get("ProjectName", "gco"),
     )
 
 
-def lambda_handler(event: dict[str, Any], context: Any) -> None:
-    """Lambda handler for GA registration custom resource.
+def handle_create_update(
+    event: dict[str, Any], context: Any, props: dict[str, Any], physical_id: str
+) -> None:
+    """Handle Create or Update request (CloudFormation custom-resource path)."""
+    data = register_ga_endpoint(
+        cluster_name=props["ClusterName"],
+        region=props["Region"],
+        endpoint_group_arn=props["EndpointGroupArn"],
+        ingress_name=props.get("IngressName", "gco-ingress"),
+        namespace=props.get("Namespace", "gco-system"),
+        global_region=props.get("GlobalRegion", "us-east-2"),
+        project_name=props.get("ProjectName", "gco"),
+    )
 
-    This is the entry point for the Lambda function, following the standard
-    naming convention used by other Lambda handlers in this project.
+    # IMPORTANT: Keep PhysicalResourceId stable to avoid CloudFormation treating
+    # updates as replacements (which would trigger a Delete of the old resource)
+    send_response(event, context, "SUCCESS", data, physical_id)
+
+
+def lambda_handler(event: dict[str, Any], context: Any) -> Any:
+    """Lambda handler for GA registration.
+
+    Two entrypoints share this function:
+
+    - **Step Functions task** (the convergence pipeline's final step): the event
+      carries an ``Action`` key and is dispatched to :func:`handle_task`.
+    - **CloudFormation custom resource** (legacy/fallback): the event carries a
+      ``RequestType`` and the result is POSTed back to CloudFormation.
     """
+    if event.get("Action"):
+        logger.info(f"Task event: {json.dumps(event)}")
+        return handle_task(event)
+
     logger.info(f"Event: {json.dumps(event)}")
     request_type = event["RequestType"]
     props = event["ResourceProperties"]

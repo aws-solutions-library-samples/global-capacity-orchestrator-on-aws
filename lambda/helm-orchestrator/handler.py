@@ -73,13 +73,17 @@ def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
     props = event["ResourceProperties"]
     state_machine_arn = os.environ["STATE_MACHINE_ARN"]
 
-    # The execution input is exactly what the per-chart tasks need.
+    # The execution input carries everything the convergence pipeline's tasks
+    # need: chart selection/overrides (chart tasks), ImageReplacements (the base
+    # and post-Helm kubectl tasks), and EndpointGroupArn (the GA task).
     execution_input = {
         "ClusterName": props["ClusterName"],
         "Region": props["Region"],
         "EnabledCharts": props.get("EnabledCharts", []),
         "Charts": props.get("Charts", {}),
         "KedaOperatorRoleArn": props.get("KedaOperatorRoleArn"),
+        "ImageReplacements": props.get("ImageReplacements", {}),
+        "EndpointGroupArn": props.get("EndpointGroupArn"),
     }
 
     resp = _sfn().start_execution(

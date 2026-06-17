@@ -698,3 +698,69 @@ class TestMainPassRestartsAddonControllers:
         mock_restart_ds.assert_not_called()
         # And the response is the minimal shape without restart metadata.
         assert "RestartedDeployments" not in result
+
+
+class TestHandleTask:
+    """Tests for the Step Functions task entrypoint (Action-dispatched).
+
+    The convergence state machine invokes the handler with an ``Action`` key
+    (no CloudFormation ``RequestType``) for both the base and post-Helm apply
+    passes. Unlike the custom-resource path — which reports SUCCESS even when
+    individual manifests fail — the task path RAISES on any manifest failure so
+    the state machine's Retry/Catch can react (the base pass fails the
+    execution; the post-Helm pass is caught and the pipeline continues).
+    """
+
+    def test_action_event_dispatches_to_apply_and_returns_result(self, handler_module):
+        """An ``Action`` event applies manifests and returns the result dict
+        directly (no send_response / CloudFormation round-trip)."""
+        event = {
+            "Action": "apply_manifests",
+            "ClusterName": "test-cluster",
+            "Region": "us-east-1",
+            "ImageReplacements": {"{{X}}": "y"},
+            "PostHelm": "false",
+        }
+        with (
+            patch.object(handler_module, "apply_manifests") as mock_apply,
+            patch.object(handler_module, "send_response") as mock_send,
+        ):
+            mock_apply.return_value = {"AppliedCount": 3, "FailedCount": 0}
+            result = handler_module.lambda_handler(event, MagicMock())
+
+        assert result == {"AppliedCount": 3, "FailedCount": 0}
+        # ImageReplacements forwarded; PostHelm "false" parsed to False.
+        assert mock_apply.call_args[0][3] == {"{{X}}": "y"}
+        assert mock_apply.call_args[0][4] is False
+        # The task path never posts a CloudFormation response.
+        mock_send.assert_not_called()
+
+    def test_post_helm_true_string_parsed(self, handler_module):
+        """``PostHelm`` arrives as the string "true" from the state machine."""
+        event = {
+            "Action": "apply_manifests",
+            "ClusterName": "c",
+            "Region": "us-east-1",
+            "PostHelm": "true",
+        }
+        with patch.object(handler_module, "apply_manifests") as mock_apply:
+            mock_apply.return_value = {"AppliedCount": 1, "FailedCount": 0}
+            handler_module.handle_task(event)
+        assert mock_apply.call_args[0][4] is True
+
+    def test_raises_when_any_manifest_failed(self, handler_module):
+        """A non-zero FailedCount must raise so the state machine can retry/catch."""
+        event = {
+            "Action": "apply_manifests",
+            "ClusterName": "c",
+            "Region": "us-east-1",
+            "PostHelm": "false",
+        }
+        with patch.object(handler_module, "apply_manifests") as mock_apply:
+            mock_apply.return_value = {
+                "AppliedCount": 2,
+                "FailedCount": 1,
+                "Failed": "x.yaml:Foo/bar",
+            }
+            with pytest.raises(RuntimeError, match="kubectl apply failed"):
+                handler_module.handle_task(event)

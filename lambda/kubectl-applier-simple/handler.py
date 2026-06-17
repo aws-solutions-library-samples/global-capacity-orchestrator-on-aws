@@ -951,8 +951,46 @@ def apply_manifests(
     }
 
 
-def lambda_handler(event: dict[str, Any], context: Any) -> None:
-    """Main Lambda handler."""
+def handle_task(event: dict[str, Any]) -> dict[str, Any]:
+    """Apply manifests for a Step Functions task; raise on any failure.
+
+    The convergence state machine drives both passes through here: the base pass
+    (``PostHelm`` falsey) before the Helm charts install, and the post-Helm pass
+    (``PostHelm`` truthy) afterwards. Unlike the CloudFormation custom-resource
+    path below — which reports SUCCESS even when individual manifests fail — this
+    RAISES when any manifest fails, so the state machine's Retry/Catch can react:
+    the base pass fails the execution, while the post-Helm pass is caught so the
+    pipeline still finishes.
+    """
+    cluster_name = event["ClusterName"]
+    region = event["Region"]
+    replacements = event.get("ImageReplacements", {})
+    post_helm = str(event.get("PostHelm", "false")).lower() == "true"
+    manifests_dir = os.path.join(os.path.dirname(__file__), "manifests")
+    result = apply_manifests(cluster_name, region, manifests_dir, replacements, post_helm)
+    if result.get("FailedCount", 0):
+        raise RuntimeError(
+            f"kubectl apply failed (post_helm={post_helm}, "
+            f"failed={result.get('FailedCount')}): {result.get('Failed')}"
+        )
+    return result
+
+
+def lambda_handler(event: dict[str, Any], context: Any) -> Any:
+    """Main Lambda handler.
+
+    Two entrypoints share this function:
+
+    - **Step Functions task** (the convergence pipeline): the event carries an
+      ``Action`` key and is dispatched to :func:`handle_task`, which applies the
+      manifests and raises on any failure.
+    - **CloudFormation custom resource** (legacy/fallback): the event carries a
+      ``RequestType`` and the result is POSTed back to CloudFormation.
+    """
+    if event.get("Action"):
+        logger.info(f"Task event: {json.dumps(event)}")
+        return handle_task(event)
+
     print(f"[HANDLER] Received event type: {event.get('RequestType')}")
     logger.info(f"Received event: {json.dumps(event)}")
 

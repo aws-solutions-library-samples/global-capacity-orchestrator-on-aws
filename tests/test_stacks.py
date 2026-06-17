@@ -831,7 +831,8 @@ class TestStackManagerOrchestrated:
         Phases 2 (regional) and 3 (monitoring) must pass ``exclusively=True``
         to ``deploy()``. Otherwise CDK re-synthesizes and re-evaluates the
         already-deployed global/api-gateway stacks on every phase, re-running
-        their custom resources (notably KubectlApplyManifests) and adding
+        their custom resources (notably the HelmInstallCharts convergence
+        trigger) and adding
         minutes per phase for no actual change.
 
         Phase 1 (pre-regional globals) must NOT use ``exclusively`` so the

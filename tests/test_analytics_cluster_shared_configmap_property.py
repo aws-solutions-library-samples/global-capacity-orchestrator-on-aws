@@ -162,21 +162,22 @@ def _cached_image_replacements(analytics_enabled: bool, region: str) -> tuple[tu
 def _extract_image_replacements(
     template: assertions.Template,
 ) -> dict[str, Any]:
-    """Return the ``KubectlApplyManifests`` CustomResource's
-    ``ImageReplacements`` property as a flat dict.
+    """Return the ``HelmInstallCharts`` CustomResource's ``ImageReplacements``
+    property as a flat dict.
 
-    The custom resource synthesizes with type
+    The convergence-trigger custom resource synthesizes with type
     ``AWS::CloudFormation::CustomResource`` and logical id
-    ``KubectlApplyManifests``.
+    ``HelmInstallCharts``; it carries the manifest ``ImageReplacements`` that
+    the state machine's kubectl tasks consume.
     """
     resources = template.to_json().get("Resources", {})
-    kubectl = resources.get("KubectlApplyManifests")
-    assert kubectl is not None, (
-        "Expected a KubectlApplyManifests CustomResource in the regional "
-        "template. Present logical ids starting with 'KubectlApply': "
-        f"{sorted(k for k in resources if k.startswith('KubectlApply'))}"
+    trigger = resources.get("HelmInstallCharts")
+    assert trigger is not None, (
+        "Expected a HelmInstallCharts CustomResource in the regional "
+        "template. Present logical ids: "
+        f"{sorted(k for k in resources if 'Helm' in k or 'Kubectl' in k)}"
     )
-    replacements: dict[str, Any] = kubectl.get("Properties", {}).get("ImageReplacements", {})
+    replacements: dict[str, Any] = trigger.get("Properties", {}).get("ImageReplacements", {})
     return replacements
 
 

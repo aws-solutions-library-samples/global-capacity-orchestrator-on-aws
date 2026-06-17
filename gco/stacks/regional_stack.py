@@ -62,7 +62,6 @@ Modification Guide:
 from __future__ import annotations
 
 import re
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -2228,21 +2227,9 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # Create log group for kubectl provider
-        kubectl_provider_log_group = logs.LogGroup(
-            self,
-            "KubectlProviderLogGroup",
-            retention=logs.RetentionDays.ONE_WEEK,
-            removal_policy=RemovalPolicy.DESTROY,
-        )
-
-        # Create custom resource provider (stored for use in _apply_kubernetes_manifests)
-        self.kubectl_provider = cr.Provider(
-            self,
-            "KubectlProvider",
-            on_event_handler=self.kubectl_lambda,
-            log_group=kubectl_provider_log_group,
-        )
+        # No custom-resource provider needed: the kubectl-applier Lambda is now
+        # invoked directly by the convergence state machine (the base and
+        # post-Helm apply tasks), not through a CloudFormation custom resource.
 
         # cdk-nag suppression: the kubectl-applier Lambda requires broad
         # EKS and Kubernetes API access to apply arbitrary manifests.
@@ -2505,40 +2492,63 @@ class GCORegionalStack(Stack):
                 self.fsx_security_group.security_group_id
             )
 
-        kubectl_apply = CustomResource(
+        # ── Trigger the convergence pipeline (fire-and-forget) ───────────────
+        # A single custom resource starts the HelmInstallStateMachine, which now
+        # owns the WHOLE cluster convergence: apply base manifests -> install
+        # Helm charts -> apply post-Helm (CRD-dependent) manifests -> register
+        # the Ingress-created ALB with Global Accelerator. The resource returns
+        # as soon as the execution is *started* (no isComplete waiter), so the
+        # cluster's CloudFormation lifecycle is never bound to the multi-minute
+        # add-on convergence — a slow chart can't blow CloudFormation's ~1h
+        # custom-resource ceiling and roll back (destroy) the freshly-created
+        # cluster. Status lives in SSM and is surfaced via `gco stacks addons
+        # status`; re-converge out-of-band with `gco stacks addons install`.
+        #
+        # The execution input carries everything the state-machine tasks need:
+        # chart selection/overrides, the manifest ImageReplacements (for the base
+        # and post-Helm kubectl passes), and the Global Accelerator
+        # EndpointGroupArn (for the final GA-registration task).
+        converge_trigger = CustomResource(
             self,
-            "KubectlApplyManifests",
-            service_token=self.kubectl_provider.service_token,
+            "HelmInstallCharts",
+            service_token=self.helm_installer_provider.service_token,
             properties={
                 "ClusterName": self.cluster.cluster_name,
                 "Region": self.deployment_region,
-                "SkipDeletionOnStackDelete": "true",  # Don't delete resources on stack deletion
+                # Helm chart selection + per-chart value overrides (e.g. Volcano
+                # image_registry redirected to the ECR mirror when enabled).
+                "EnabledCharts": self._get_enabled_helm_charts(),
+                "Charts": self._helm_chart_value_overrides(),
+                "KedaOperatorRoleArn": self.keda_operator_role.role_arn,
+                # Template substitutions for the base + post-Helm kubectl passes.
                 "ImageReplacements": image_replacements,
-                # Include FSx file system ID directly to force update when FSx changes
-                "FsxFileSystemId": self.fsx_file_system.ref if self.fsx_file_system else "none",
-                # Force update on each deployment to trigger pod rollouts
+                # Endpoint group the final task registers the Ingress ALB with.
+                "EndpointGroupArn": self.endpoint_group_arn,
+                # Project name lets the orchestrator persist the execution input
+                # to SSM so `gco stacks addons install` can replay the whole
+                # pipeline without reconstructing chart/manifest config.
+                "ProjectName": self.config.get_project_name(),
+                # Force re-invocation on every deployment (new charts.yaml,
+                # manifest, or image) so convergence re-runs end to end.
                 "DeploymentTimestamp": deployment_timestamp,
             },
         )
 
-        # Ensure manifests are applied after cluster, EFS, and FSx are ready
-        # Note: ALB is created by EKS Auto Mode when Ingress is applied
-        kubectl_apply.node.add_dependency(self.cluster)
-        kubectl_apply.node.add_dependency(self.efs_file_system)
+        # The trigger (and therefore the whole convergence pipeline) must run
+        # after the cluster, shared storage, managed-addon IRSA patches, and Pod
+        # Identity associations exist: the base manifests reference their tokens,
+        # and the rollout-restarts at the end of the base pass need the patched
+        # service accounts (otherwise the mutating webhook can't inject
+        # AWS_ROLE_ARN and the controllers fail with "no EC2 IMDS role found" —
+        # PVCs stuck Pending, missing Container Insights metrics; see the
+        # UpdateEfsCsiAddonRole resource in _create_efs_csi_driver_addon). These
+        # gates previously sat on the synchronous KubectlApplyManifests custom
+        # resource; the base apply now lives in the state machine, so the gate
+        # moves to the trigger.
+        converge_trigger.node.add_dependency(self.cluster)
+        converge_trigger.node.add_dependency(self.efs_file_system)
         if self.fsx_file_system:
-            kubectl_apply.node.add_dependency(self.fsx_file_system)
-
-        # Wait for EKS to have patched the IRSA role ARN onto each managed
-        # addon's service account before the kubectl Lambda rollout-restarts
-        # the controllers at the end of this invocation. Otherwise the
-        # restart sees the old (annotation-less) SA, the mutating webhook
-        # can't inject AWS_ROLE_ARN, and the new pods are just as
-        # credential-less as the ones they replaced. The symptom is
-        # controller pods silently failing with "no EC2 IMDS role found" —
-        # for EFS/FSx that manifests as PVCs stuck Pending forever, for
-        # CloudWatch as missing Container Insights metrics. See the
-        # UpdateEfsCsiAddonRole custom resource in _create_efs_csi_driver_addon
-        # for the full rationale.
+            converge_trigger.node.add_dependency(self.fsx_file_system)
         for attr in (
             "_efs_csi_addon_role_update",
             "_fsx_csi_addon_role_update",
@@ -2546,93 +2556,9 @@ class GCORegionalStack(Stack):
         ):
             update_cr = getattr(self, attr, None)
             if update_cr is not None:
-                kubectl_apply.node.add_dependency(update_cr)
-
-        # Ensure Pod Identity associations exist before workloads start,
-        # so pods get IAM credentials on first launch
+                converge_trigger.node.add_dependency(update_cr)
         for assoc in self._pod_identity_associations:
-            kubectl_apply.node.add_dependency(assoc)
-
-        # Install Helm charts (KEDA, etc.) after base manifests are applied
-        # This ensures namespaces and RBAC are in place before Helm installations
-        helm_install = CustomResource(
-            self,
-            "HelmInstallCharts",
-            service_token=self.helm_installer_provider.service_token,
-            properties={
-                "ClusterName": self.cluster.cluster_name,
-                "Region": self.deployment_region,
-                # Enable core AI/ML infrastructure charts by default
-                "EnabledCharts": self._get_enabled_helm_charts(),
-                # Per-chart helm value overrides (e.g. Volcano image_registry
-                # redirected to the Docker Hub pull-through cache when enabled).
-                "Charts": self._helm_chart_value_overrides(),
-                # Pass IAM role ARNs for service account annotations
-                "KedaOperatorRoleArn": self.keda_operator_role.role_arn,
-                # Project name lets the orchestrator persist the execution input
-                # to SSM so `gco stacks addons install` can replay it without
-                # reconstructing chart config in the CLI.
-                "ProjectName": self.config.get_project_name(),
-                # Force re-invocation on every deployment to pick up charts.yaml changes
-                "DeploymentTimestamp": deployment_timestamp,
-            },
-        )
-
-        # Helm charts depend on kubectl manifests being applied first
-        helm_install.node.add_dependency(kubectl_apply)
-
-        # Apply CRD-dependent manifests after Helm installs the CRDs.
-        # KEDA ScaledJob/ScaledObject require the KEDA CRDs to exist first.
-        # This second kubectl pass runs after Helm and applies only those resources.
-        kubectl_apply_post_helm = CustomResource(
-            self,
-            "KubectlApplyPostHelmManifests",
-            service_token=self.kubectl_provider.service_token,
-            properties={
-                "ClusterName": self.cluster.cluster_name,
-                "Region": self.deployment_region,
-                "SkipDeletionOnStackDelete": "true",
-                "ImageReplacements": image_replacements,
-                "FsxFileSystemId": self.fsx_file_system.ref if self.fsx_file_system else "none",
-                "DeploymentTimestamp": deployment_timestamp,
-                # PostHelm: "true" tells the handler to apply only post-helm-* manifests
-                "PostHelm": "true",
-            },
-        )
-
-        # Must run after Helm has installed the CRDs
-        kubectl_apply_post_helm.node.add_dependency(helm_install)
-
-        # Create GA registration custom resource AFTER manifests are applied
-        # This waits for the Ingress to create the ALB and registers it with GA
-        #
-        # IMPORTANT: We include a deployment timestamp to force CloudFormation to
-        # re-invoke the Lambda on every deployment. This ensures the ALB is always
-        # registered with the Global Accelerator, even if other properties haven't changed.
-        # Without this, CloudFormation may skip the custom resource if it thinks
-        # nothing has changed, leaving the ALB unregistered after GA recreation.
-        deployment_timestamp = str(int(time.time()))
-
-        ga_registration = CustomResource(
-            self,
-            "GaRegistration",
-            service_token=self.ga_registration_provider.service_token,
-            properties={
-                "ClusterName": self.cluster.cluster_name,
-                "Region": self.deployment_region,
-                "EndpointGroupArn": self.endpoint_group_arn,
-                "IngressName": "gco-ingress",
-                "Namespace": "gco-system",
-                # Pass global region and project name for SSM storage
-                "GlobalRegion": self.config.get_global_region(),
-                "ProjectName": self.config.get_project_name(),
-                # Force re-invocation on every deployment
-                "DeploymentTimestamp": deployment_timestamp,
-            },
-        )
-
-        # GA registration must happen after manifests are applied
-        ga_registration.node.add_dependency(kubectl_apply)
+            converge_trigger.node.add_dependency(assoc)
 
     def _create_ga_registration_lambda(self) -> None:
         """Create Lambda function to register Ingress-created ALB with Global Accelerator.
@@ -2756,24 +2682,11 @@ class GCORegionalStack(Stack):
 
         endpoint_group_arn = get_endpoint_group_arn.get_response_field("Parameter.Value")
 
-        # Create log group for GA registration provider
-        ga_provider_log_group = logs.LogGroup(
-            self,
-            "GaRegistrationProviderLogGroup",
-            retention=logs.RetentionDays.ONE_WEEK,
-            removal_policy=RemovalPolicy.DESTROY,
-        )
+        # No custom-resource provider needed: the GA-registration Lambda is now
+        # invoked directly by the convergence state machine's final task.
 
-        # Create provider and custom resource
-        ga_provider = cr.Provider(
-            self,
-            "GaRegistrationProvider",
-            on_event_handler=ga_registration_lambda,
-            log_group=ga_provider_log_group,
-        )
-
-        # Store for use after kubectl apply
-        self.ga_registration_provider = ga_provider
+        # Store for use by the convergence state machine (the GA-registration task).
+        self.ga_registration_lambda = ga_registration_lambda
         self.endpoint_group_arn = endpoint_group_arn
 
         # cdk-nag suppression: the GA registration Lambda needs broad
@@ -3099,18 +3012,105 @@ class GCORegionalStack(Stack):
             )
             return task
 
+        def _kubectl_task(task_id: str, *, post_helm: bool) -> sfn_tasks.LambdaInvoke:
+            """One kubectl-apply pass (base or post-Helm) as a state-machine task.
+
+            Reads ClusterName / Region / ImageReplacements from the execution
+            input; the handler raises on any manifest failure so the task's
+            Retry/Catch can react.
+            """
+            task = sfn_tasks.LambdaInvoke(
+                self,
+                task_id,
+                lambda_function=self.kubectl_lambda,
+                payload=sfn.TaskInput.from_object(
+                    {
+                        "Action": "apply_manifests",
+                        "ClusterName": sfn.JsonPath.string_at("$.ClusterName"),
+                        "Region": sfn.JsonPath.string_at("$.Region"),
+                        "ImageReplacements": sfn.JsonPath.object_at("$.ImageReplacements"),
+                        "PostHelm": "true" if post_helm else "false",
+                    }
+                ),
+                payload_response_only=True,
+                # Keep the execution input intact so later tasks still read
+                # $.ClusterName, $.ImageReplacements, $.EndpointGroupArn, etc.
+                result_path="$.lastApply",
+                task_timeout=sfn.Timeout.duration(Duration.minutes(15)),
+            )
+            task.add_retry(
+                errors=["States.ALL"],
+                max_attempts=3,
+                interval=Duration.seconds(30),
+                backoff_rate=2.0,
+                max_delay=Duration.minutes(3),
+            )
+            return task
+
+        def _ga_task() -> sfn_tasks.LambdaInvoke:
+            """Register the Ingress-created ALB with Global Accelerator (final step).
+
+            The handler polls for the active ALB (up to a 14-minute budget), so
+            this task gets a 16-minute timeout to cover the Lambda's full run.
+            """
+            task = sfn_tasks.LambdaInvoke(
+                self,
+                "RegisterGlobalAccelerator",
+                lambda_function=self.ga_registration_lambda,
+                payload=sfn.TaskInput.from_object(
+                    {
+                        "Action": "register_ga",
+                        "ClusterName": sfn.JsonPath.string_at("$.ClusterName"),
+                        "Region": sfn.JsonPath.string_at("$.Region"),
+                        "EndpointGroupArn": sfn.JsonPath.string_at("$.EndpointGroupArn"),
+                        "IngressName": "gco-ingress",
+                        "Namespace": "gco-system",
+                        "GlobalRegion": self.config.get_global_region(),
+                        "ProjectName": project_name,
+                    }
+                ),
+                payload_response_only=True,
+                result_path="$.gaRegistration",
+                task_timeout=sfn.Timeout.duration(Duration.minutes(16)),
+            )
+            task.add_retry(
+                errors=["States.ALL"],
+                max_attempts=3,
+                interval=Duration.seconds(30),
+                backoff_rate=2.0,
+                max_delay=Duration.minutes(3),
+            )
+            return task
+
         chart_tasks = [_chart_task(name) for name in chart_order]
+
+        # The state machine owns the full convergence pipeline:
+        #   base kubectl apply -> Helm charts -> post-Helm kubectl apply -> GA.
+        # Failure policy:
+        #   * base apply: retry, then NO catch -> a failed base pass (missing
+        #     namespaces / RBAC / storage / nodepools) FAILS the execution;
+        #     nothing downstream should run against a half-applied base.
+        #   * charts: each chart's success AND its post-retry failure both route
+        #     to the next, so one slow/broken chart never blocks the rest.
+        #   * post-Helm apply + GA: retry, then catch-and-continue, so a single
+        #     CRD-dependent manifest or a GA hiccup can't wedge the rest.
+        # Per-task outcomes are recorded to SSM; the trigger is fire-and-forget,
+        # so a degraded add-on layer never rolls back the cluster.
+        done = sfn.Succeed(self, "HelmInstallComplete")
+        base_apply = _kubectl_task("ApplyBaseManifests", post_helm=False)
+        post_apply = _kubectl_task("ApplyPostHelmManifests", post_helm=True)
+        ga_task = _ga_task()
+
+        # post-Helm apply -> GA -> done, both catch-and-continue.
+        post_apply.add_catch(ga_task, errors=["States.ALL"], result_path="$.lastApplyError")
+        post_apply.next(ga_task)
+        ga_task.add_catch(done, errors=["States.ALL"], result_path="$.gaError")
+        ga_task.next(done)
+
         if chart_tasks:
-            # Each chart's success AND its post-retry failure both route to the
-            # next chart, so one slow/broken chart never blocks the rest — the
-            # batch converges as far as it can and the execution ends SUCCEEDED.
-            # Per-chart outcomes are recorded to SSM by the installer tasks; the
-            # custom-resource provider is non-fatal, so a failed chart never
-            # rolls back the cluster.
-            done = sfn.Succeed(self, "HelmInstallComplete")
             for i, task in enumerate(chart_tasks):
                 next_state: sfn.IChainable = (
-                    chart_tasks[i + 1] if i + 1 < len(chart_tasks) else done
+                    chart_tasks[i + 1] if i + 1 < len(chart_tasks) else post_apply
                 )
                 task.add_catch(
                     next_state,
@@ -3118,9 +3118,13 @@ class GCORegionalStack(Stack):
                     result_path="$.lastChartError",
                 )
                 task.next(next_state)
-            start_state: sfn.IChainable = chart_tasks[0]
+            base_apply.next(chart_tasks[0])
         else:  # pragma: no cover - charts.yaml is always present in the repo
-            start_state = sfn.Pass(self, "HelmNoCharts")
+            base_apply.next(post_apply)
+
+        # base apply has NO catch on purpose: a persistent base-manifest failure
+        # fails the execution rather than converging onto an incomplete base.
+        start_state: sfn.IChainable = base_apply
 
         helm_sm_log_group = logs.LogGroup(
             self,
