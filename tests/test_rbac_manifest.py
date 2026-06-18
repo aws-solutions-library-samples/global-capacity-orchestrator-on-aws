@@ -258,6 +258,57 @@ class TestInferenceMonitorRole:
                     f"inference-monitor rule for {rule_resources} must include patch"
                 )
 
+    def test_inference_monitor_covers_mooncake_resources(self, rbac_docs):
+        """Mooncake disaggregated/store endpoints need statefulsets, configmaps, secrets.
+
+        Regression: the role originally granted only deployments/services/
+        ingresses/HPAs/leases, so creating the shared mooncake-master
+        StatefulSet failed with HTTP 403 and disaggregated endpoints were stuck
+        in 'creating'. The monitor also writes the transport ConfigMap and reads
+        the proxy admin-key Secret, so both must be grantable too.
+        """
+        role = _find_doc(rbac_docs, "Role", "gco-inference-monitor-role")
+        resources = _get_all_resources(role)
+        resource_names = {r[1] for r in resources}
+        for needed in (
+            "statefulsets",
+            "statefulsets/status",
+            "configmaps",
+            "secrets",
+            "networkpolicies",
+        ):
+            assert needed in resource_names, (
+                f"inference-monitor Role must grant {needed!r} for Mooncake endpoints"
+            )
+
+    def test_inference_monitor_secrets_are_read_only(self, rbac_docs):
+        """The monitor only reads the proxy admin-key Secret (by reference).
+
+        It never creates or mutates Secrets, so secrets access must be a
+        read-only ``get`` and nothing more — keeping the blast radius minimal.
+        """
+        role = _find_doc(rbac_docs, "Role", "gco-inference-monitor-role")
+        secrets_verbs = set()
+        for rule in role.get("rules", []):
+            if "secrets" in rule.get("resources", []):
+                secrets_verbs.update(rule.get("verbs", []))
+        assert secrets_verbs == {"get"}, (
+            f"inference-monitor secrets access must be read-only {{'get'}}, got {secrets_verbs}"
+        )
+
+    def test_inference_monitor_statefulsets_support_full_lifecycle(self, rbac_docs):
+        """The master StatefulSet is created and its status read each loop, so
+        statefulsets must carry create + get (the full write set shares the rule
+        with deployments)."""
+        role = _find_doc(rbac_docs, "Role", "gco-inference-monitor-role")
+        ss_verbs = set()
+        for rule in role.get("rules", []):
+            if "statefulsets" in rule.get("resources", []):
+                ss_verbs.update(rule.get("verbs", []))
+        assert {"create", "get"}.issubset(ss_verbs), (
+            f"inference-monitor statefulsets must allow at least create+get, got {ss_verbs}"
+        )
+
 
 # ─── Role Bindings ──────────────────────────────────────────────────
 

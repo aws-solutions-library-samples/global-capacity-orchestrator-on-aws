@@ -114,3 +114,43 @@ def test_repeated_calls_converge_on_one_master_and_no_metadata_deployment(
     # The metadata server is the master's built-in HTTP server, so no separate
     # metadata Deployment is ever materialized.
     assert fake.deployments == {}
+
+
+def test_master_runs_as_root_with_writable_root_filesystem() -> None:
+    """The master runs as root with a writable root filesystem, caps dropped.
+
+    The upstream ``mooncake_master`` launcher chmods its bundled, root-owned
+    binary on startup. That needs a writable root filesystem (a read-only root
+    raised ``OSError: Read-only file system``) and root privileges (a non-root
+    uid raised ``PermissionError: Operation not permitted`` chmod-ing a
+    root-owned file). The pod therefore runs as uid/gid 0 with
+    ``readOnlyRootFilesystem=False``, while the container still disallows
+    privilege escalation and drops all Linux capabilities — constrained root.
+    """
+    monitor = _make_monitor()
+    fake = _CreateIfAbsentK8s()
+    monitor.apps_v1 = fake
+    monitor.core_v1 = fake
+
+    spec = {
+        "mooncake": {
+            "mode": "store",
+            "store": {"enabled": True, "master_image": "example/mooncake-master:pinned"},
+        }
+    }
+    monitor._ensure_mooncake_store("gco-inference", spec)
+
+    master = next(
+        body for (_ns, name), body in fake.statefulsets.items() if name == "mooncake-master"
+    )
+    pod = master.spec.template.spec
+    # Runs as root so the startup chmod of the root-owned binary is permitted.
+    assert pod.security_context.run_as_user == 0
+    assert pod.security_context.run_as_group == 0
+    # run_as_non_root must not be True (it would contradict uid 0 and be rejected).
+    assert not getattr(pod.security_context, "run_as_non_root", None)
+
+    sc = pod.containers[0].security_context
+    assert sc.read_only_root_filesystem is False
+    assert sc.allow_privilege_escalation is False
+    assert "ALL" in (sc.capabilities.drop or [])

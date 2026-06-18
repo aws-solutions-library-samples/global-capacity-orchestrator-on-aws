@@ -568,6 +568,7 @@ class TestInferenceMonitor:
 
         monitor.apps_v1.delete_namespaced_deployment.side_effect = ApiException(status=404)
         monitor.core_v1.delete_namespaced_service.side_effect = ApiException(status=404)
+        monitor.core_v1.delete_namespaced_config_map.side_effect = ApiException(status=404)
         monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=404)
         with (
             patch("gco.services.inference_monitor.client.AutoscalingV2Api") as mock_hpa_api,
@@ -593,9 +594,85 @@ class TestInferenceMonitor:
             "ep", "ns", _request_timeout=30
         )
         monitor.core_v1.delete_namespaced_service.assert_any_call("ep", "ns", _request_timeout=30)
-        monitor.networking_v1.delete_namespaced_ingress.assert_called_once_with(
+        # The single-instance Ingress is one of several the cleanup attempts
+        # (the Mooncake PD proxy Ingress is also attempted), so assert presence
+        # rather than an exact single call.
+        monitor.networking_v1.delete_namespaced_ingress.assert_any_call(
             "inference-ep", "ns", _request_timeout=30
         )
+
+    def test_delete_resources_tears_down_mooncake_topology(self, monitor):
+        """A disaggregated endpoint's role/proxy resources are all torn down.
+
+        Regression: _reconcile_deleted/_delete_resources originally only deleted
+        the single Deployment named after the endpoint, so deleting a Mooncake
+        disaggregated endpoint orphaned its prefill/decode/proxy Deployments
+        (and the GPU nodes they held). Deletion must also remove the
+        ``-prefill``/``-decode`` workers, the ``-proxy`` Deployment+Service, the
+        proxy Ingress, the per-role HPAs, and the transport ConfigMap. The
+        shared per-region mooncake-master must NOT be deleted.
+        """
+        with (
+            patch("gco.services.inference_monitor.client.AutoscalingV2Api") as mock_hpa_api,
+            patch("gco.services.inference_monitor.client.CustomObjectsApi"),
+        ):
+            hpa = mock_hpa_api.return_value
+            monitor._delete_resources("ep", "ns")
+
+        deleted_deploys = {
+            c.args[0] for c in monitor.apps_v1.delete_namespaced_deployment.call_args_list
+        }
+        assert {"ep", "ep-prefill", "ep-decode", "ep-proxy"}.issubset(deleted_deploys)
+        # The shared master is region-wide and must survive endpoint deletion.
+        assert "mooncake-master" not in deleted_deploys
+
+        deleted_svcs = {c.args[0] for c in monitor.core_v1.delete_namespaced_service.call_args_list}
+        assert {"ep", "ep-proxy"}.issubset(deleted_svcs)
+
+        deleted_ingresses = {
+            c.args[0] for c in monitor.networking_v1.delete_namespaced_ingress.call_args_list
+        }
+        assert {"inference-ep", "inference-ep-proxy"}.issubset(deleted_ingresses)
+
+        deleted_cms = {
+            c.args[0] for c in monitor.core_v1.delete_namespaced_config_map.call_args_list
+        }
+        assert "ep-mooncake" in deleted_cms
+
+        deleted_hpas = {
+            c.args[0] for c in hpa.delete_namespaced_horizontal_pod_autoscaler.call_args_list
+        }
+        assert {"ep", "ep-prefill", "ep-decode"}.issubset(deleted_hpas)
+
+    def test_reconcile_deleted_detects_disaggregated_role_deployments(self, monitor, mock_store):
+        """A disaggregated endpoint is detected and torn down, not skipped.
+
+        Regression: the deletion gate only checked for a Deployment named after
+        the endpoint. A disaggregated endpoint has no such Deployment (only
+        ``name-prefill``/``-decode``/``-proxy``), so it was marked deleted
+        without its resources ever being removed — orphaning the role
+        Deployments and the GPU nodes they held.
+        """
+        from kubernetes.client.rest import ApiException
+
+        def _read(dep_name, _namespace, **_kw):
+            # No single Deployment named after the endpoint; only a role worker.
+            if dep_name == "disagg-ep-prefill":
+                return MagicMock()
+            raise ApiException(status=404)
+
+        monitor.apps_v1.read_namespaced_deployment.side_effect = _read
+        with (
+            patch("gco.services.inference_monitor.client.AutoscalingV2Api"),
+            patch("gco.services.inference_monitor.client.CustomObjectsApi"),
+        ):
+            result = monitor._reconcile_deleted("disagg-ep", "gco-inference")
+
+        assert result is not None
+        assert result["action"] == "delete"
+        deleted = {c.args[0] for c in monitor.apps_v1.delete_namespaced_deployment.call_args_list}
+        assert "disagg-ep-prefill" in deleted
+        mock_store.update_region_status.assert_any_call("disagg-ep", monitor.region, "deleted")
 
     # -- _reconcile_endpoint: create --
 

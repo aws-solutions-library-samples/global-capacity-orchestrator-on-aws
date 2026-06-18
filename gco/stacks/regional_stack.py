@@ -109,6 +109,7 @@ from gco.stacks.constants import (
     EKS_ADDON_METRICS_SERVER,
     EKS_ADDON_POD_IDENTITY_AGENT,
     LAMBDA_PYTHON_RUNTIME,
+    MOONCAKE_MASTER_DEFAULT_IMAGE,
     REGIONAL_SHARED_BUCKET_NAME_PREFIX,
     REGIONAL_SHARED_SSM_PARAMETER_PREFIX,
 )
@@ -2303,6 +2304,10 @@ class GCORegionalStack(Stack):
             "{{HEALTH_MONITOR_IMAGE}}": self.health_monitor_image.image_uri,
             "{{MANIFEST_PROCESSOR_IMAGE}}": self.manifest_processor_image.image_uri,
             "{{INFERENCE_MONITOR_IMAGE}}": self.inference_monitor_image.image_uri,
+            # External, pinned upstream image for the shared Mooncake master
+            # (bundles the mooncake_master binary). Same default as disaggregated
+            # role pods; per-endpoint spec.mooncake.store.master_image overrides.
+            "{{MOONCAKE_MASTER_IMAGE}}": MOONCAKE_MASTER_DEFAULT_IMAGE,
             "{{CLUSTER_NAME}}": self.cluster.cluster_name,
             "{{REGION}}": self.deployment_region,
             "{{AUTH_SECRET_ARN}}": self.auth_secret_arn,

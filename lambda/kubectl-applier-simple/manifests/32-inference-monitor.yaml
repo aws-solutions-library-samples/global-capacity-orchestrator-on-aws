@@ -46,6 +46,12 @@ spec:
               value: "gco-inference"
             - name: RECONCILE_INTERVAL_SECONDS
               value: "15"
+            # Default image for the shared per-region Mooncake master
+            # StatefulSet. This upstream vLLM image bundles the
+            # mooncake-transfer-engine, so the mooncake_master binary is on
+            # PATH. A per-endpoint spec.mooncake.store.master_image overrides it.
+            - name: MOONCAKE_MASTER_IMAGE
+              value: "{{MOONCAKE_MASTER_IMAGE}}"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

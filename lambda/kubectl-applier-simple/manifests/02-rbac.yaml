@@ -210,20 +210,39 @@ metadata:
     app: inference-monitor
     project: gco
 rules:
-  # Apps resources
+  # Apps resources — Deployments for inference role pods (prefill/decode/single
+  # and the PD proxy); StatefulSet for the shared per-region Mooncake master.
+  # ``statefulsets/status`` is the subresource the monitor reads to gate role
+  # pods on the master's Ready replica count (separate from ``statefulsets``).
   - apiGroups: ["apps"]
-    resources: ["deployments"]
+    resources: ["deployments", "statefulsets", "statefulsets/status"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
 
-  # Core resources
+  # Core resources — Services for endpoints and the master; ConfigMaps carry the
+  # Mooncake transport config (mooncake.json) mounted into each role pod.
   - apiGroups: [""]
-    resources: ["services"]
+    resources: ["services", "configmaps"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+
+  # Core resources — read-only access to the PD proxy admin API key Secret. The
+  # key is delivered to the proxy by Secret reference and never written to the
+  # spec, so the monitor only needs to confirm the Secret exists and is non-empty.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
 
   # Networking resources — Ingress for inference endpoints
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+
+  # Networking resources — NetworkPolicy allow rules that let inference pods
+  # reach the shared Mooncake master RPC/metadata ports and each other on the
+  # RDMA KV-transfer bootstrap port window. Create-if-absent only; the
+  # default-deny policy in 03-network-policies.yaml is never read or modified.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "list"]
 
   # Autoscaling — HPA for inference endpoints (AutoscalingV2 uses "autoscaling" apiGroup)
   - apiGroups: ["autoscaling"]

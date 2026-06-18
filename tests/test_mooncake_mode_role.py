@@ -169,3 +169,79 @@ def test_split_workers_iff_disaggregated_or_both_else_single_combined(
         assert created == {combined}
         assert split.isdisjoint(created)
         assert _kv_role_of(deployments[("gco-inference", combined)]) == "kv_both"
+
+
+def _container_env(deployment) -> dict[str, str]:
+    """Map env name -> value for the worker container (value-style envs only)."""
+    container = deployment.spec.template.spec.containers[0]
+    return {e.name: e.value for e in (container.env or []) if e.value is not None}
+
+
+def test_role_pods_mount_transport_config_and_carry_bootstrap_port() -> None:
+    """Disaggregated role pods mount the transport ConfigMap and learn the ports.
+
+    Each prefill/decode worker must mount the per-endpoint ``{name}-mooncake``
+    ConfigMap read-only at ``/etc/mooncake`` (so vLLM's connector can read the
+    metadata-server address, protocol, and device from ``mooncake.json``), be
+    pointed at it through ``MOONCAKE_CONFIG_PATH``, and receive the KV-transfer
+    bootstrap base port through ``VLLM_MOONCAKE_BOOTSTRAP_PORT``. Without these
+    the connector cannot initialize and prefill/decode cannot hand off KV.
+    """
+    _created, deployments = _reconcile_workers("disaggregated", 1, 1, "rdma")
+
+    for role in ("endpoint-prefill", "endpoint-decode"):
+        dep = deployments[("gco-inference", role)]
+        pod = dep.spec.template.spec
+
+        volumes = {v.name: v for v in (pod.volumes or [])}
+        assert "mooncake-config" in volumes, f"{role} missing mooncake-config volume"
+        assert volumes["mooncake-config"].config_map.name == "endpoint-mooncake"
+
+        mounts = {m.name: m for m in (pod.containers[0].volume_mounts or [])}
+        assert "mooncake-config" in mounts, f"{role} missing mooncake-config mount"
+        assert mounts["mooncake-config"].mount_path == "/etc/mooncake"
+        assert mounts["mooncake-config"].read_only is True
+
+        env = _container_env(dep)
+        assert env["MOONCAKE_CONFIG_PATH"] == "/etc/mooncake/mooncake.json"
+        # Default base port when the spec does not override it.
+        assert env["VLLM_MOONCAKE_BOOTSTRAP_PORT"] == "8998"
+
+
+def test_role_pods_use_spec_bootstrap_base_port_override() -> None:
+    """A spec-provided ``transfer.bootstrap_base_port`` flows to the env."""
+    from gco.services import inference_monitor as mod
+
+    monitor = _make_monitor()
+    fake = _RecordingK8s()
+    monitor.apps_v1 = fake
+    monitor._resolve_region_services = lambda *_a, **_k: mod.RegionServicesResolution(
+        region_services={
+            "metadata_server": "http://mooncake-master:8080/metadata",
+            "master_server_address": "mooncake-master:50051",
+        }
+    )
+    monitor._resolve_regional_scope = lambda *_a, **_k: mod.RegionalScopeResolution(in_region=True)
+    monitor._gate_on_mooncake_master = lambda *_a, **_k: mod.MasterReadinessGate(proceed=True)
+    monitor._ensure_mooncake_configmap = lambda *_a, **_k: None
+    monitor._create_pd_proxy = lambda *_a, **_k: None
+    monitor._create_service = lambda *_a, **_k: None
+    monitor._ensure_ingress = lambda *_a, **_k: None
+    monitor._create_role_hpa = lambda *_a, **_k: None
+    monitor._report_role_status = lambda *_a, **_k: "creating"
+
+    spec = {
+        "image": "example/mooncake-vllm:pinned",
+        "port": 8000,
+        "gpu_count": 1,
+        "mooncake": {
+            "mode": "disaggregated",
+            "topology": {"prefill": 1, "decode": 1},
+            "transfer": {"protocol": "rdma", "bootstrap_base_port": 9100},
+        },
+    }
+    asyncio.run(monitor._reconcile_mooncake("endpoint", "gco-inference", spec, {"spec": spec}))
+
+    dep = fake.deployments[("gco-inference", "endpoint-prefill")]
+    env = _container_env(dep)
+    assert env["VLLM_MOONCAKE_BOOTSTRAP_PORT"] == "9100"

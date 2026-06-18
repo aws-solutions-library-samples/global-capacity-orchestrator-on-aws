@@ -235,13 +235,11 @@ class TestManifestTemplatePlaceholderCoverage:
             "PRIVATE_SUBNET_ID",
             "VALKEY_ENDPOINT",
             "VALKEY_PORT",
-            # Supplied at runtime by the inference monitor (from the endpoint
-            # spec's store.master_image or the MOONCAKE_MASTER_IMAGE env), not
-            # by a CDK replacement. The static 24-mooncake-store.yaml manifest
-            # is feature-gated and skipped at deploy when left unreplaced.
-            "MOONCAKE_MASTER_IMAGE",
         }
     )
+    # Note: MOONCAKE_MASTER_IMAGE has a CDK replacement — it feeds the inference
+    # monitor's env, and the monitor creates the shared Mooncake master on
+    # demand (create-if-absent). There is no static master manifest.
 
     def _iter_placeholders(self):
         """Yield (filename, placeholder_name) for every {{NAME}} in every

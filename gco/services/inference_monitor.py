@@ -146,6 +146,19 @@ _CLOUDWATCH_METRIC_BY_TYPE = {
 MOONCAKE_BOOTSTRAP_BASE_PORT = 8998
 MOONCAKE_BOOTSTRAP_PORT_SPAN = 100
 
+# Environment variable through which each role pod receives the KV-transfer
+# bootstrap base port. vLLM derives per-worker ports (base + dp_rank * tp_size +
+# tp_rank) from it, so prefill and decode agree on the handshake ports.
+VLLM_MOONCAKE_BOOTSTRAP_PORT_ENV = "VLLM_MOONCAKE_BOOTSTRAP_PORT"
+
+# Each role pod reads the shared transport settings (metadata-server address,
+# protocol, device) from the rendered mooncake.json. The per-endpoint
+# ``{name}-mooncake`` ConfigMap is mounted read-only at the directory below, and
+# the connector is pointed at the file through MOONCAKE_CONFIG_PATH.
+MOONCAKE_CONFIG_PATH_ENV = "MOONCAKE_CONFIG_PATH"
+MOONCAKE_CONFIG_MOUNT_DIR = "/etc/mooncake"
+MOONCAKE_CONFIG_FILE_PATH = f"{MOONCAKE_CONFIG_MOUNT_DIR}/mooncake.json"
+
 # Label selector identifying inference workload pods (prefill/decode/proxy and
 # legacy single-Deployment endpoints). Used as both the target and the peer of
 # the intra-namespace allow rules.
@@ -517,20 +530,23 @@ def apply_efa_scheduling(mooncake: dict[str, Any], pod_spec: client.V1PodSpec) -
       containers, leaving every existing resource request and limit — including
       GPU asks — untouched.
 
-    When the transfer protocol is anything other than ``rdma`` the pod is left
-    exactly as it was: no toleration, no node selector, and no device request
-    are added.
+    When the transfer protocol is explicitly set to anything other than
+    ``rdma`` (for example ``tcp``) the pod is left exactly as it was: no
+    toleration, no node selector, and no device request are added. An unset
+    protocol defaults to ``rdma`` — matching the rest of the Mooncake path — so
+    a disaggregated endpoint lands on EFA by default.
 
     Tolerations, selectors, and device requests are applied idempotently, so
     re-running over an already-scheduled pod produces no duplicates.
 
     Args:
-        mooncake: The ``spec["mooncake"]`` block; ``transfer.protocol`` decides
-            whether EFA scheduling applies.
+        mooncake: The ``spec["mooncake"]`` block; ``transfer.protocol``
+            (defaulting to ``rdma`` when unset) decides whether EFA scheduling
+            applies.
         pod_spec: The pod specification to mutate in place.
     """
     transfer = mooncake.get("transfer", {})
-    if transfer.get("protocol") != "rdma":
+    if transfer.get("protocol", "rdma") != "rdma":
         return
 
     # Tolerate the EFA taint without disturbing existing tolerations.
@@ -1366,7 +1382,18 @@ class InferenceMonitor:
         # Clean up the master-readiness deferral tracker
         self._master_deferral_since.pop(name, None)
 
-        if self._deployment_exists(name, namespace):
+        # An endpoint is either a single Deployment named ``name`` or a Mooncake
+        # role-split topology (``name-prefill``/``name-decode``/``name-proxy``).
+        # Check all of them so a disaggregated endpoint is actually torn down
+        # rather than skipped (which would orphan its role Deployments — and the
+        # GPU nodes they hold).
+        deployment_names = (
+            name,
+            f"{name}-prefill",
+            f"{name}-decode",
+            f"{name}-proxy",
+        )
+        if any(self._deployment_exists(d, namespace) for d in deployment_names):
             logger.info("Deleting endpoint %s from %s", name, self.region)
             self._delete_resources(name, namespace)
             self.store.update_region_status(name, self.region, "deleted")
@@ -1763,7 +1790,13 @@ class InferenceMonitor:
             ],
             security_context=client.V1SecurityContext(
                 allow_privilege_escalation=False,
-                read_only_root_filesystem=True,
+                # The upstream mooncake_master launcher chmods its bundled
+                # binary on startup, which needs a writable root filesystem (a
+                # read-only root raised OSError: Read-only file system). The pod
+                # also runs as root so the chmod of the root-owned binary is
+                # permitted. Privilege escalation stays disabled and all
+                # capabilities are dropped, so this is constrained root.
+                read_only_root_filesystem=False,
                 capabilities=client.V1Capabilities(drop=["ALL"]),
             ),
             resources=client.V1ResourceRequirements(
@@ -1782,7 +1815,11 @@ class InferenceMonitor:
                 period_seconds=30,
             ),
             readiness_probe=client.V1Probe(
-                http_get=client.V1HTTPGetAction(path="/metadata", port="metadata"),
+                # The HTTP metadata server returns 400 for a bare GET /metadata
+                # (it expects a ?key=), so an HTTP GET readiness probe never
+                # passes. Confirm readiness by checking the metadata port is
+                # accepting connections instead.
+                tcp_socket=client.V1TCPSocketAction(port="metadata"),
                 initial_delay_seconds=10,
                 period_seconds=15,
             ),
@@ -1799,13 +1836,31 @@ class InferenceMonitor:
                 replicas=1,
                 selector=client.V1LabelSelector(match_labels={"app": MOONCAKE_MASTER_SERVICE}),
                 template=client.V1PodTemplateSpec(
-                    metadata=client.V1ObjectMeta(labels=labels),
+                    metadata=client.V1ObjectMeta(
+                        labels=labels,
+                        # Keep Karpenter from consolidating the node out from
+                        # under the master: it is a single-replica, stateful
+                        # control-plane daemon holding KV metadata for every
+                        # in-region endpoint, so an eviction drops that state and
+                        # disrupts inference. On lightly-loaded clusters
+                        # consolidation otherwise evicts it mid-image-pull before
+                        # it can even start.
+                        annotations={"karpenter.sh/do-not-disrupt": "true"},
+                    ),
                     spec=client.V1PodSpec(
                         service_account_name="gco-service-account",
+                        # The upstream mooncake_master launcher chmods its
+                        # bundled binary (root-owned in the image) on startup, so
+                        # the master must run as root: a non-root uid cannot
+                        # chmod a root-owned file ("Operation not permitted").
+                        # gco-inference does not enforce restricted Pod Security
+                        # and the no-root rule applies only to user-submitted
+                        # jobs, so a root platform daemon is consistent here. The
+                        # container still drops all Linux capabilities and
+                        # disallows privilege escalation (see its securityContext).
                         security_context=client.V1PodSecurityContext(
-                            run_as_non_root=True,
-                            run_as_user=1000,
-                            run_as_group=1000,
+                            run_as_user=0,
+                            run_as_group=0,
                         ),
                         containers=[container],
                         restart_policy="Always",
@@ -2221,6 +2276,40 @@ class InferenceMonitor:
                         claim_name="efs-claim",
                     ),
                 )
+            )
+
+        # Mooncake role pods read the shared transport config (metadata-server
+        # address, protocol, device) from the per-endpoint ``{name}-mooncake``
+        # ConfigMap mounted read-only at MOONCAKE_CONFIG_MOUNT_DIR, pointed at by
+        # MOONCAKE_CONFIG_PATH, and learn the KV-transfer bootstrap base port via
+        # VLLM_MOONCAKE_BOOTSTRAP_PORT. Plain (non-mooncake) endpoints are
+        # untouched: no volume, mount, or env is added.
+        mooncake_block = spec.get("mooncake")
+        if mooncake_block:
+            volume_mounts.append(
+                client.V1VolumeMount(
+                    name="mooncake-config",
+                    mount_path=MOONCAKE_CONFIG_MOUNT_DIR,
+                    read_only=True,
+                )
+            )
+            volumes.append(
+                client.V1Volume(
+                    name="mooncake-config",
+                    config_map=client.V1ConfigMapVolumeSource(name=f"{name}-mooncake"),
+                )
+            )
+            transfer_block = mooncake_block.get("transfer") or {}
+            base_port = transfer_block.get("bootstrap_base_port", MOONCAKE_BOOTSTRAP_BASE_PORT)
+            try:
+                base_port = int(base_port)
+            except TypeError, ValueError:
+                base_port = MOONCAKE_BOOTSTRAP_BASE_PORT
+            container_env.append(
+                client.V1EnvVar(name=MOONCAKE_CONFIG_PATH_ENV, value=MOONCAKE_CONFIG_FILE_PATH)
+            )
+            container_env.append(
+                client.V1EnvVar(name=VLLM_MOONCAKE_BOOTSTRAP_PORT_ENV, value=str(base_port))
             )
 
         # Add init container to sync model from S3 if model_source is set
@@ -3153,48 +3242,76 @@ class InferenceMonitor:
                 logger.error("Failed to delete canary service %s: %s", canary_name, e)
 
     def _delete_resources(self, name: str, namespace: str) -> None:
-        """Delete all Kubernetes resources for an endpoint."""
+        """Delete all Kubernetes resources for an endpoint.
+
+        Covers both the single-Deployment endpoint and the Mooncake role-split
+        topology — the ``name-prefill``/``name-decode`` workers, the
+        ``name-proxy`` PD proxy, the per-role HPAs, and the ``name-mooncake``
+        transport ConfigMap — so deleting a disaggregated endpoint does not
+        leave orphaned Deployments (and the GPU nodes they hold) behind. Each
+        delete is idempotent: a 404 means that object is not used by this
+        endpoint's mode and is ignored. The shared per-region ``mooncake-master``
+        is deliberately NOT deleted here, since it is shared across endpoints.
+        """
         # Delete canary resources first
         self._cleanup_canary(name, namespace)
 
-        # Delete deployment
-        try:
-            self.apps_v1.delete_namespaced_deployment(
-                name, namespace, _request_timeout=self._k8s_timeout
-            )
-            logger.info("Deleted deployment %s/%s", namespace, name)
-        except ApiException as e:
-            if e.status != 404:
-                logger.error("Failed to delete deployment %s: %s", name, e)
+        proxy_name = f"{name}-proxy"
 
-        # Delete service
-        try:
-            self.core_v1.delete_namespaced_service(
-                name, namespace, _request_timeout=self._k8s_timeout
-            )
-            logger.info("Deleted service %s/%s", namespace, name)
-        except ApiException as e:
-            if e.status != 404:
-                logger.error("Failed to delete service %s: %s", name, e)
+        # Deployments: the single-instance endpoint plus the Mooncake prefill/
+        # decode workers and the PD proxy.
+        for deployment_name in (name, f"{name}-prefill", f"{name}-decode", proxy_name):
+            try:
+                self.apps_v1.delete_namespaced_deployment(
+                    deployment_name, namespace, _request_timeout=self._k8s_timeout
+                )
+                logger.info("Deleted deployment %s/%s", namespace, deployment_name)
+            except ApiException as e:
+                if e.status != 404:
+                    logger.error("Failed to delete deployment %s: %s", deployment_name, e)
 
-        # Delete ingress
-        try:
-            self.networking_v1.delete_namespaced_ingress(
-                f"inference-{name}", namespace, _request_timeout=self._k8s_timeout
-            )
-            logger.info("Deleted ingress for %s", name)
-        except ApiException as e:
-            if e.status != 404:
-                logger.error("Failed to delete ingress for %s: %s", name, e)
+        # Services: the single-instance endpoint Service and the PD proxy Service.
+        for service_name in (name, proxy_name):
+            try:
+                self.core_v1.delete_namespaced_service(
+                    service_name, namespace, _request_timeout=self._k8s_timeout
+                )
+                logger.info("Deleted service %s/%s", namespace, service_name)
+            except ApiException as e:
+                if e.status != 404:
+                    logger.error("Failed to delete service %s: %s", service_name, e)
 
-        # Delete HPA
+        # Ingresses: the single-instance endpoint Ingress and the PD proxy Ingress.
+        for ingress_name in (f"inference-{name}", f"inference-{proxy_name}"):
+            try:
+                self.networking_v1.delete_namespaced_ingress(
+                    ingress_name, namespace, _request_timeout=self._k8s_timeout
+                )
+                logger.info("Deleted ingress %s/%s", namespace, ingress_name)
+            except ApiException as e:
+                if e.status != 404:
+                    logger.error("Failed to delete ingress %s: %s", ingress_name, e)
+
+        # HPAs: the single-instance endpoint HPA and the per-role Mooncake HPAs.
+        autoscaling_v2 = client.AutoscalingV2Api()
+        for hpa_name in (name, f"{name}-prefill", f"{name}-decode"):
+            try:
+                autoscaling_v2.delete_namespaced_horizontal_pod_autoscaler(hpa_name, namespace)
+                logger.info("Deleted HPA %s/%s", namespace, hpa_name)
+            except ApiException as e:
+                if e.status != 404:
+                    logger.error("Failed to delete HPA %s: %s", hpa_name, e)
+
+        # Mooncake transport ConfigMap (a no-op 404 for non-Mooncake endpoints).
+        # The shared per-region mooncake-master is intentionally left in place.
         try:
-            autoscaling_v2 = client.AutoscalingV2Api()
-            autoscaling_v2.delete_namespaced_horizontal_pod_autoscaler(name, namespace)
-            logger.info("Deleted HPA for %s", name)
+            self.core_v1.delete_namespaced_config_map(
+                f"{name}-mooncake", namespace, _request_timeout=self._k8s_timeout
+            )
+            logger.info("Deleted configmap %s/%s-mooncake", namespace, name)
         except ApiException as e:
             if e.status != 404:
-                logger.error("Failed to delete HPA for %s: %s", name, e)
+                logger.error("Failed to delete configmap %s-mooncake: %s", name, e)
 
         # Delete KEDA ScaledObject (the GPU-autoscaling path materializes one of
         # these in place of a native HPA). Best-effort: absence is the common

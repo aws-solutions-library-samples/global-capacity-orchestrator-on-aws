@@ -152,3 +152,19 @@ always-on regional bucket without hardcoding account/region into the name.
 Treat the full paths as the contract — this prefix is the single place to
 change if the namespace ever moves.
 """
+
+MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.23.0"
+"""Default container image for the shared per-region Mooncake master.
+
+The master StatefulSet runs the ``mooncake_master`` daemon (RPC + built-in HTTP
+metadata server). That binary ships in the ``mooncake-transfer-engine`` package
+that the upstream vLLM OpenAI server image already bundles, so the same pinned
+image used for disaggregated prefill/decode pods also serves the master without
+a separate build. The inference monitor reads this through the
+``MOONCAKE_MASTER_IMAGE`` environment variable and a per-endpoint
+``spec.mooncake.store.master_image`` overrides it.
+
+Keep this tag in lockstep with ``cli/images.py:_DISAGGREGATED_DEFAULT_IMAGE``
+(the disaggregated role-pod default); bump both together when validating a new
+vLLM release and never use a mutable/rolling tag such as ``latest``.
+"""

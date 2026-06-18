@@ -10,8 +10,11 @@ existing GPU asks untouched.
 This module checks the contract that holds for every RDMA spec: each role pod
 ends up tolerating the EFA taint, selecting ``efa=true``, requesting at least
 one EFA device, and keeping the GPU request and limit it started with. It also
-checks the complementary case — a non-RDMA transfer leaves the pod's
-tolerations, node selector, and resource asks exactly as they were.
+checks the complementary case — a transfer protocol explicitly set to something
+other than RDMA leaves the pod's tolerations, node selector, and resource asks
+exactly as they were — and the default case — a spec that omits the protocol
+(or the whole ``transfer`` block) defaults to RDMA and is placed on EFA like any
+other RDMA spec.
 """
 
 from __future__ import annotations
@@ -203,3 +206,68 @@ def test_non_rdma_pod_gets_no_efa_scheduling(protocol: str, container_count: int
         assert EFA_RESOURCE_NAME not in limits
         assert requests == {"nvidia.com/gpu": "1"}
         assert limits == {"nvidia.com/gpu": "1"}
+
+
+@given(container_count=st.integers(min_value=1, max_value=4))
+def test_absent_protocol_defaults_to_rdma_and_lands_on_efa(container_count: int) -> None:
+    """A spec with no ``transfer`` block defaults to RDMA and lands on EFA.
+
+    This is the common CLI-deployed disaggregated case: the deploy path writes
+    only ``{mode, topology}`` with no ``transfer`` block. The rest of the
+    Mooncake path treats an unset protocol as ``rdma`` (the shared master is
+    still required, and the transport config renders ``rdma``), so EFA placement
+    must match — otherwise role pods schedule onto plain GPU nodes and never
+    reach the EFA fabric the connector needs.
+    """
+    containers = [
+        client.V1Container(
+            name=f"worker-{i}",
+            image="example/vllm:pinned",
+            resources=client.V1ResourceRequirements(
+                requests={"nvidia.com/gpu": "1"},
+                limits={"nvidia.com/gpu": "1"},
+            ),
+        )
+        for i in range(container_count)
+    ]
+    pod_spec = client.V1PodSpec(containers=containers)
+
+    # No "transfer" block at all — the protocol must default to rdma.
+    apply_efa_scheduling({"mode": "disaggregated"}, pod_spec)
+
+    toleration_keys = {t.key for t in (pod_spec.tolerations or [])}
+    assert EFA_RESOURCE_NAME in toleration_keys
+    assert pod_spec.node_selector[EFA_NODE_SELECTOR_KEY] == EFA_NODE_SELECTOR_VALUE
+    for container in pod_spec.containers:
+        requests = container.resources.requests or {}
+        limits = container.resources.limits or {}
+        assert int(requests[EFA_RESOURCE_NAME]) >= 1
+        assert int(limits[EFA_RESOURCE_NAME]) >= 1
+
+
+def test_transfer_block_without_protocol_key_defaults_to_rdma() -> None:
+    """A ``transfer`` block that omits ``protocol`` still defaults to RDMA -> EFA.
+
+    A device name may be supplied without spelling out the protocol; the absent
+    protocol key must still resolve to ``rdma`` and place the pod on EFA.
+    """
+    pod_spec = client.V1PodSpec(
+        containers=[
+            client.V1Container(
+                name="worker-0",
+                image="example/vllm:pinned",
+                resources=client.V1ResourceRequirements(
+                    requests={"nvidia.com/gpu": "1"},
+                    limits={"nvidia.com/gpu": "1"},
+                ),
+            )
+        ]
+    )
+
+    apply_efa_scheduling({"transfer": {"device_name": "mlx5_0"}}, pod_spec)
+
+    assert EFA_RESOURCE_NAME in {t.key for t in (pod_spec.tolerations or [])}
+    assert pod_spec.node_selector[EFA_NODE_SELECTOR_KEY] == EFA_NODE_SELECTOR_VALUE
+    container = pod_spec.containers[0]
+    assert int((container.resources.requests or {})[EFA_RESOURCE_NAME]) >= 1
+    assert int((container.resources.limits or {})[EFA_RESOURCE_NAME]) >= 1
