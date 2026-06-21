@@ -1,7 +1,7 @@
 # Inference Monitor Service
 # Reconciliation controller that polls DynamoDB for desired inference
 # endpoint state and creates/updates/deletes K8s resources accordingly.
-FROM python:3.14.5-slim
+FROM python:3.14.6-slim
 
 # Apply Debian security patches at build time. APT_SECURITY_EPOCH busts
 # the CI layer cache so a freshly-published trixie-security patch isn't
