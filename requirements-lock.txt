@@ -380,7 +380,7 @@ pydantic-core==2.46.4
     # via pydantic
 pydantic-monty==0.0.16
     # via fastmcp-slim
-pydantic-settings==2.14.0
+pydantic-settings==2.14.2
     # via
     #   fastmcp-slim
     #   mcp

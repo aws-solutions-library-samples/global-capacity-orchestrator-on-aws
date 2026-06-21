@@ -34,3 +34,13 @@ CVE-2026-48863 exp:2026-09-12
 CVE-2026-48864 exp:2026-09-12
 CVE-2026-9149 exp:2026-09-12
 CVE-2026-9150 exp:2026-09-12
+
+# CVE-2026-12151 — undici (Node.js) Denial of Service via unbounded memory
+# growth on the WebSocket client. undici is not a tracked or shipped GCO
+# dependency: no package.json is committed in the repo, and it is pulled in
+# transitively only by Node tooling in the CI environment. GCO ships no Node
+# service and uses no undici WebSocket client, so the DoS path is never
+# exercised at runtime. Fixed upstream in undici 6.27.0 / 7.28.0 / 8.5.0;
+# clears when the CI tool that bundles undici refreshes its pin.
+# Advisory: https://avd.aquasec.com/nvd/cve-2026-12151
+CVE-2026-12151 exp:2026-09-21
