@@ -109,6 +109,17 @@ EFA_RESOURCE_NAME = "vpc.amazonaws.com/efa"
 EFA_NODE_SELECTOR_KEY = "efa"
 EFA_NODE_SELECTOR_VALUE = "true"
 
+# Mooncake KV-transfer role pods are pinned to a dedicated EFA NodePool
+# (mooncake-efa-pool, manifest 46-nodepool-mooncake-efa.yaml) that only offers
+# instance families with >=80GB of GPU memory and FP8-capable Hopper/Blackwell
+# GPUs. The shared training EFA pool (43-nodepool-efa.yaml) also offers p4d
+# (A100 40GB, Ampere, no FP8), which is too small for many disaggregated/store
+# models and can be selected by Karpenter whenever a pod asks only for efa=true.
+# Selecting this extra label keeps role pods off p4d without disturbing the
+# training pool. The value must match the label on the dedicated NodePool.
+MOONCAKE_EFA_NODE_SELECTOR_KEY = "mooncake-efa"
+MOONCAKE_EFA_NODE_SELECTOR_VALUE = "true"
+
 # The shared per-region Mooncake master exposes its RPC service and the
 # built-in HTTP metadata server on these fixed ports.
 MOONCAKE_MASTER_RPC_PORT = 50051
@@ -527,11 +538,18 @@ def apply_efa_scheduling(mooncake: dict[str, Any], pod_spec: client.V1PodSpec) -
 
     - add a ``vpc.amazonaws.com/efa`` toleration (in addition to any existing
       tolerations such as the GPU one),
-    - add an ``efa=true`` node selector (merged with any existing selectors),
-      and
+    - add an ``efa=true`` node selector plus a ``mooncake-efa=true`` node
+      selector (merged with any existing selectors), and
     - request at least one ``vpc.amazonaws.com/efa`` device on the pod's
       containers, leaving every existing resource request and limit — including
       GPU asks — untouched.
+
+    The ``mooncake-efa=true`` selector pins the pod to the dedicated
+    ``mooncake-efa-pool`` NodePool, which only offers instance families with
+    >=80GB of GPU memory and FP8-capable Hopper/Blackwell GPUs. This keeps role
+    pods off the A100-40GB ``p4d`` family that the shared training EFA pool
+    still offers — that family OOMs on many models and cannot run FP8 KV-cache
+    configs, so Karpenter selecting it for a mooncake pod is a latent failure.
 
     When the transfer protocol is explicitly set to anything other than
     ``rdma`` (for example ``tcp``) the pod is left exactly as it was: no
@@ -565,9 +583,13 @@ def apply_efa_scheduling(mooncake: dict[str, Any], pod_spec: client.V1PodSpec) -
         )
     pod_spec.tolerations = tolerations
 
-    # Merge the EFA node selector with any selectors already in place.
+    # Merge the EFA node selectors with any selectors already in place. The
+    # generic efa=true selector lands the pod on EFA fabric; mooncake-efa=true
+    # narrows that to the dedicated mooncake-efa-pool, which excludes the
+    # A100-40GB p4d family that the shared training EFA pool still offers.
     node_selector = dict(pod_spec.node_selector or {})
     node_selector[EFA_NODE_SELECTOR_KEY] = EFA_NODE_SELECTOR_VALUE
+    node_selector[MOONCAKE_EFA_NODE_SELECTOR_KEY] = MOONCAKE_EFA_NODE_SELECTOR_VALUE
     pod_spec.node_selector = node_selector
 
     # Request at least one EFA device, preserving existing requests and limits

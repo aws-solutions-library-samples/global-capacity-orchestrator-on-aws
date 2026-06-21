@@ -29,7 +29,7 @@ when adding new CRD-dependent resources, just use the prefix.
 | `10-19` | Networking | IngressClass, Ingress |
 | `20-29` | Storage | EFS, FSx Lustre, Valkey ConfigMap |
 | `30-39` | System services | health-monitor, manifest-processor, inference-monitor |
-| `40-49` | NodePools | GPU (x86, ARM), inference, EFA, Neuron |
+| `40-49` | NodePools | GPU (x86, ARM), inference, EFA (training + mooncake), Neuron, CPU |
 | `50-59` | Device plugins | NVIDIA device plugin |
 | `post-helm-*` | Post-Helm | Resources requiring Helm CRDs (KEDA ScaledJob, etc.) |
 
@@ -74,9 +74,10 @@ when adding new CRD-dependent resources, just use the prefix.
 | `40-nodepool-gpu-x86.yaml` | x86_64 GPU pool (g4dn, g5, g6, g6e, p3) — on-demand + spot |
 | `41-nodepool-gpu-arm.yaml` | ARM64 GPU pool (g5g) — on-demand |
 | `42-nodepool-inference.yaml` | Inference GPU pool — on-demand only, WhenEmpty consolidation |
-| `43-nodepool-efa.yaml` | EFA pool (p4d, p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200) — high-performance distributed training |
+| `43-nodepool-efa.yaml` | EFA pool (p4d, p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200) — high-performance distributed training (keeps p4d) |
 | `44-nodepool-neuron.yaml` | Neuron pool (trn1, trn2, trn3, inf2) — AWS Trainium/Inferentia |
 | `45-nodepool-cpu-general.yaml` | General CPU pool (c/m/r families) — spot-preferred, no GPUs |
+| `46-nodepool-mooncake-efa.yaml` | Mooncake EFA pool (p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200) — disaggregated/store/both inference over RoCE; excludes A100-40GB p4d |
 
 ### Device Plugins (50–59)
 

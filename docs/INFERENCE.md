@@ -397,6 +397,12 @@ Each role pod (prefill, decode, or the single store instance) reaches the KV cac
 
 No client-side wiring is needed to read the cache — workloads simply serve from the role pods, which the connectors back automatically. Clients invoke the endpoint exactly as any other GCO endpoint (see [Invoking Endpoints](#invoking-endpoints)): requests reach the nearest region through Global Accelerator and are routed to the PD proxy at `/inference/{name}/v1/...`.
 
+### GPU Placement for RDMA Role Pods
+
+RDMA KV transfer only runs on EFA-enabled GPU nodes, and not every EFA-capable instance is a good fit for serving. When the transfer protocol is `rdma` (the default), the monitor pins each role pod to a dedicated EFA nodepool, `mooncake-efa-pool` (`46-nodepool-mooncake-efa.yaml`), by adding both an `efa=true` and a `mooncake-efa=true` node selector plus the EFA toleration and a `vpc.amazonaws.com/efa` device request.
+
+That pool is curated to instance families with at least 80GB of GPU memory and FP8-capable Hopper/Blackwell GPUs — `p5`/`p5e`/`p5en` (H100/H200) and `p6-b200`/`p6-b300`/`p6e-gb200` (B200/GB200). It deliberately excludes `p4d` (8× A100 40GB, Ampere): a model plus its KV cache that fits comfortably on an 80GB+ GPU can run out of memory on a 40GB A100, and FP8 KV-cache and quantized configurations do not run on Ampere at all. The shared training EFA pool (`43-nodepool-efa.yaml`) keeps `p4d` for distributed training, where 40GB A100s are a legitimate, cheaper option; the `mooncake-efa=true` label is unique to the inference pool, so serving pods never land on `p4d`.
+
 ## Managing Endpoints
 
 ### List Endpoints

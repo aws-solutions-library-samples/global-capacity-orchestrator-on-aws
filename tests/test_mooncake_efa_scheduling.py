@@ -8,13 +8,14 @@ mutates a pod spec in place to satisfy all three while leaving the pod's
 existing GPU asks untouched.
 
 This module checks the contract that holds for every RDMA spec: each role pod
-ends up tolerating the EFA taint, selecting ``efa=true``, requesting at least
-one EFA device, and keeping the GPU request and limit it started with. It also
-checks the complementary case — a transfer protocol explicitly set to something
-other than RDMA leaves the pod's tolerations, node selector, and resource asks
-exactly as they were — and the default case — a spec that omits the protocol
-(or the whole ``transfer`` block) defaults to RDMA and is placed on EFA like any
-other RDMA spec.
+ends up tolerating the EFA taint, selecting ``efa=true`` and ``mooncake-efa=true``
+(the latter pinning it to the dedicated mooncake EFA pool that excludes the
+A100-40GB p4d family), requesting at least one EFA device, and keeping the GPU
+request and limit it started with. It also checks the complementary case — a
+transfer protocol explicitly set to something other than RDMA leaves the pod's
+tolerations, node selector, and resource asks exactly as they were — and the
+default case — a spec that omits the protocol (or the whole ``transfer`` block)
+defaults to RDMA and is placed on EFA like any other RDMA spec.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ from gco.services.inference_monitor import (
     EFA_NODE_SELECTOR_KEY,
     EFA_NODE_SELECTOR_VALUE,
     EFA_RESOURCE_NAME,
+    MOONCAKE_EFA_NODE_SELECTOR_KEY,
+    MOONCAKE_EFA_NODE_SELECTOR_VALUE,
     apply_efa_scheduling,
 )
 
@@ -155,6 +158,10 @@ def test_rdma_pod_lands_on_efa_fabric_and_keeps_gpu_asks(scenario: dict[str, Any
 
     # Selects EFA-labelled nodes, keeping any selectors it already had.
     assert pod_spec.node_selector[EFA_NODE_SELECTOR_KEY] == EFA_NODE_SELECTOR_VALUE
+    # Also pins to the dedicated mooncake-efa pool (excludes A100-40GB p4d).
+    assert (
+        pod_spec.node_selector[MOONCAKE_EFA_NODE_SELECTOR_KEY] == MOONCAKE_EFA_NODE_SELECTOR_VALUE
+    )
     for key, value in scenario["existing_selector"].items():
         assert pod_spec.node_selector[key] == value
 
@@ -199,6 +206,7 @@ def test_non_rdma_pod_gets_no_efa_scheduling(protocol: str, container_count: int
     toleration_keys = {t.key for t in (pod_spec.tolerations or [])}
     assert EFA_RESOURCE_NAME not in toleration_keys
     assert EFA_NODE_SELECTOR_KEY not in (pod_spec.node_selector or {})
+    assert MOONCAKE_EFA_NODE_SELECTOR_KEY not in (pod_spec.node_selector or {})
     for container in pod_spec.containers:
         requests = container.resources.requests or {}
         limits = container.resources.limits or {}
@@ -238,6 +246,9 @@ def test_absent_protocol_defaults_to_rdma_and_lands_on_efa(container_count: int)
     toleration_keys = {t.key for t in (pod_spec.tolerations or [])}
     assert EFA_RESOURCE_NAME in toleration_keys
     assert pod_spec.node_selector[EFA_NODE_SELECTOR_KEY] == EFA_NODE_SELECTOR_VALUE
+    assert (
+        pod_spec.node_selector[MOONCAKE_EFA_NODE_SELECTOR_KEY] == MOONCAKE_EFA_NODE_SELECTOR_VALUE
+    )
     for container in pod_spec.containers:
         requests = container.resources.requests or {}
         limits = container.resources.limits or {}
@@ -268,6 +279,9 @@ def test_transfer_block_without_protocol_key_defaults_to_rdma() -> None:
 
     assert EFA_RESOURCE_NAME in {t.key for t in (pod_spec.tolerations or [])}
     assert pod_spec.node_selector[EFA_NODE_SELECTOR_KEY] == EFA_NODE_SELECTOR_VALUE
+    assert (
+        pod_spec.node_selector[MOONCAKE_EFA_NODE_SELECTOR_KEY] == MOONCAKE_EFA_NODE_SELECTOR_VALUE
+    )
     container = pod_spec.containers[0]
     assert int((container.resources.requests or {})[EFA_RESOURCE_NAME]) >= 1
     assert int((container.resources.limits or {})[EFA_RESOURCE_NAME]) >= 1

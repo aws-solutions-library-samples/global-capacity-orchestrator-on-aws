@@ -1,0 +1,77 @@
+# Mooncake EFA NodePool — disaggregated / KV-store inference over RoCE
+#
+# Dedicated EFA pool for Mooncake KV-cache-transfer role pods (prefill / decode /
+# store). It is intentionally SEPARATE from 43-nodepool-efa.yaml so the instance
+# list can be curated for inference without changing distributed training, which
+# keeps p4d as a cheaper A100 option.
+#
+# Why p4d is excluded here (and stays in 43):
+#   p4d.24xlarge is 8x A100 40GB (Ampere, no hardware FP8). Every family below is
+#   Hopper or Blackwell with >=80GB of GPU memory and FP8 support:
+#     p5.48xlarge      -> 8x H100 80GB
+#     p5e.48xlarge     -> 8x H200 141GB
+#     p5en.48xlarge    -> 8x H200 141GB
+#     p6-b200.48xlarge -> 8x B200 ~180GB
+#     p6-b300.48xlarge -> 8x B300
+#     p6e-gb200.*      -> GB200 (Grace-Blackwell)
+#   A model plus its KV cache that fits on an 80GB+ GPU can OOM on a 40GB A100,
+#   and FP8 KV-cache / quantized configs do not run on Ampere at all. When a role
+#   pod only asks for efa=true, Karpenter is free to pick the cheapest matching
+#   node (p4d) from the shared pool — that is the intermittent failure this pool
+#   removes. Mooncake role pods also select mooncake-efa=true, a label only this
+#   pool carries, so they never land on p4d.
+#
+# Placement is driven by gco.services.inference_monitor.apply_efa_scheduling,
+# which adds the efa=true + mooncake-efa=true node selectors, the EFA toleration,
+# and a vpc.amazonaws.com/efa device request when transfer.protocol is rdma (the
+# default for Mooncake). Uses WhenEmpty consolidation so in-flight inference is
+# not disrupted; on-demand is recommended for serving, spot is allowed for
+# cost-tolerant workloads.
+#
+# Requires: EFA device plugin (helm.aws_efa_device_plugin.enabled = true in cdk.json).
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: mooncake-efa-pool
+spec:
+  template:
+    metadata:
+      labels:
+        workload-type: gpu-efa-mooncake
+        arch: x86_64
+        project: gco
+        efa: "true"
+        mooncake-efa: "true"
+    spec:
+      nodeClassRef:
+        group: eks.amazonaws.com
+        kind: NodeClass
+        name: default
+      requirements:
+        - key: "eks.amazonaws.com/instance-family"
+          operator: In
+          values: ["p5", "p5e", "p5en", "p6-b200", "p6-b300", "p6e-gb200"]
+        - key: "kubernetes.io/arch"
+          operator: In
+          values: ["amd64"]
+        - key: "karpenter.sh/capacity-type"
+          operator: In
+          values: ["on-demand", "spot"]
+        - key: "eks.amazonaws.com/instance-gpu-manufacturer"
+          operator: In
+          values: ["nvidia"]
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+        - key: vpc.amazonaws.com/efa
+          value: "true"
+          effect: NoSchedule
+  limits:
+    cpu: "2000"
+    memory: 8000Gi
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 300s
+    budgets:
+      - nodes: "10%"

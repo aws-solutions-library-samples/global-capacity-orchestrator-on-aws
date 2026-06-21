@@ -1515,7 +1515,13 @@ gco stacks deploy-all -y
 When enabled, this provides:
 
 - AWS EFA Kubernetes Device Plugin (advertises `vpc.amazonaws.com/efa` resources)
-- EFA-optimized nodepool (`gpu-efa-pool`) for p4d/p5 instances
+- EFA-optimized nodepool (`gpu-efa-pool`) for distributed training on p4d/p5/p6 instances
+- Dedicated Mooncake EFA nodepool (`mooncake-efa-pool`) for disaggregated/store
+  inference. It is curated to GPUs with >=80GB of memory and FP8 support
+  (p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200) and deliberately excludes the
+  A100-40GB `p4d` family, which OOMs on many models and cannot run FP8 KV-cache
+  configs. Mooncake role pods select its `mooncake-efa=true` label automatically,
+  so they never land on `p4d`. See [docs/INFERENCE.md](INFERENCE.md).
 
 ### Using EFA in Jobs
 
