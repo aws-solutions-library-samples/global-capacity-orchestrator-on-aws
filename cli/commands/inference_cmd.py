@@ -132,9 +132,9 @@ def inference(config: Any) -> None:
 @click.option(
     "--mooncake-admin-key-secret",
     default=None,
-    help="Name of the Kubernetes Secret holding the prefill-decode proxy "
-    "ADMIN_API_KEY. The proxy for disaggregated/both endpoints will not "
-    "start without it.",
+    help="Name of an existing Kubernetes Secret holding the prefill-decode "
+    "proxy ADMIN_API_KEY. Optional: when omitted, each region's monitor "
+    "auto-provisions a {name}-admin Secret with a generated key.",
 )
 @pass_config
 def inference_deploy(
@@ -295,14 +295,14 @@ def inference_deploy(
         if mooncake_admin_key_secret:
             mooncake_proxy_config["admin_api_key_secret"] = mooncake_admin_key_secret
 
-    # The proxy will not start without an admin-key Secret, so warn early when a
-    # split mode is deployed without one.
+    # When no admin-key Secret is named, each region's monitor auto-provisions a
+    # {name}-admin Secret with a generated key, so no manual step is needed.
     if mooncake_mode in ("disaggregated", "both") and not mooncake_admin_key_secret:
-        formatter.print_warning(
-            "No --mooncake-admin-key-secret given. The prefill-decode proxy for "
-            "disaggregated/both endpoints needs a Kubernetes Secret holding "
-            "ADMIN_API_KEY and will not start without one. Create the Secret and "
-            "pass its name before the endpoint can serve."
+        formatter.print_info(
+            "No --mooncake-admin-key-secret given; each region's inference "
+            "monitor will auto-provision a '{name}-admin' Secret with a "
+            "generated ADMIN_API_KEY. Pass --mooncake-admin-key-secret to use "
+            "your own Secret instead."
         )
 
     try:

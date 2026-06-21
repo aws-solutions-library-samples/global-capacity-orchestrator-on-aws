@@ -224,12 +224,16 @@ rules:
     resources: ["services", "configmaps"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
 
-  # Core resources — read-only access to the PD proxy admin API key Secret. The
-  # key is delivered to the proxy by Secret reference and never written to the
-  # spec, so the monitor only needs to confirm the Secret exists and is non-empty.
+  # Core resources — the PD proxy admin API key Secret. The monitor reads a
+  # user-supplied Secret by reference (confirming it exists and is non-empty)
+  # and, when an endpoint names none, provisions a per-endpoint {name}-admin
+  # Secret create-if-absent with a generated key. The key reaches the proxy only
+  # by Secret reference and is never written to the spec, so the monitor needs
+  # get + create and nothing more (no update/delete: it never rotates or removes
+  # an existing key).
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get"]
+    verbs: ["get", "create"]
 
   # Networking resources — Ingress for inference endpoints
   - apiGroups: ["networking.k8s.io"]

@@ -281,19 +281,21 @@ class TestInferenceMonitorRole:
                 f"inference-monitor Role must grant {needed!r} for Mooncake endpoints"
             )
 
-    def test_inference_monitor_secrets_are_read_only(self, rbac_docs):
-        """The monitor only reads the proxy admin-key Secret (by reference).
+    def test_inference_monitor_secrets_limited_to_get_and_create(self, rbac_docs):
+        """The monitor reads named admin-key Secrets and creates auto-managed ones.
 
-        It never creates or mutates Secrets, so secrets access must be a
-        read-only ``get`` and nothing more — keeping the blast radius minimal.
+        It reads a user-supplied proxy admin-key Secret by reference and, when an
+        endpoint names none, creates a per-endpoint ``{name}-admin`` Secret with a
+        generated key. It never updates or deletes Secrets, so access is limited
+        to ``get`` + ``create`` — keeping the blast radius minimal.
         """
         role = _find_doc(rbac_docs, "Role", "gco-inference-monitor-role")
         secrets_verbs = set()
         for rule in role.get("rules", []):
             if "secrets" in rule.get("resources", []):
                 secrets_verbs.update(rule.get("verbs", []))
-        assert secrets_verbs == {"get"}, (
-            f"inference-monitor secrets access must be read-only {{'get'}}, got {secrets_verbs}"
+        assert secrets_verbs == {"get", "create"}, (
+            f"inference-monitor secrets access must be {{'get', 'create'}}, got {secrets_verbs}"
         )
 
     def test_inference_monitor_statefulsets_support_full_lifecycle(self, rbac_docs):

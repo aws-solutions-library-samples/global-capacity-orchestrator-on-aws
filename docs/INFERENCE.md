@@ -268,21 +268,12 @@ GCO supports Mooncake disaggregated serving, which splits inference into separat
 
 ### Deploy a Disaggregated Endpoint
 
-Disaggregated and `both` endpoints are fronted by a lightweight prefill-decode (PD) proxy that coordinates the two roles. The proxy guards a privileged admin path, so it reads an `ADMIN_API_KEY` from a Kubernetes Secret you create up front — it will not start without one:
-
 ```bash
-# Create the proxy admin-key Secret in the inference namespace (one per endpoint)
-kubectl create secret generic my-llm-admin \
-  --from-literal=ADMIN_API_KEY="$(openssl rand -hex 32)" \
-  -n gco-inference
-
-# Deploy the disaggregated endpoint, pointing the proxy at that Secret
 gco inference deploy my-llm \
   --mooncake-mode disaggregated \
   --gpu-count 1 \
   --prefill-replicas 2 \
   --decode-replicas 4 \
-  --mooncake-admin-key-secret my-llm-admin \
   -e MODEL=meta-llama/Llama-3.1-8B-Instruct
 ```
 
@@ -292,7 +283,24 @@ When `--mooncake-mode disaggregated` is set:
 - A shared Mooncake transfer engine enables zero-copy KV cache transfer between roles via RDMA/TCP
 - The `--image` flag is optional; when omitted, the upstream `vllm/vllm-openai` image (which bundles the Mooncake transfer engine) is used by default. The PD proxy defaults to that same image — override it with `--mooncake-proxy-image`
 - `--prefill-replicas` and `--decode-replicas` set the initial replica count for each role (both default to 1)
-- `--mooncake-admin-key-secret` names the Kubernetes Secret holding the proxy's `ADMIN_API_KEY`. The public Ingress publishes only the endpoint's `/inference/{name}/v1` serving paths; the proxy's `/instances/add` admin path is never exposed externally
+- The public Ingress publishes only the endpoint's `/inference/{name}/v1` serving paths; the proxy's `/instances/add` admin path is never exposed externally
+
+#### Proxy admin key
+
+The PD proxy guards a privileged admin path with an `ADMIN_API_KEY`. By default you don't manage it: each region's monitor auto-provisions a `{name}-admin` Kubernetes Secret with a generated key and wires it into the proxy by reference (the key never appears in the endpoint spec, a CLI argument, or logs).
+
+To bring your own key instead, create the Secret up front and name it with `--mooncake-admin-key-secret`:
+
+```bash
+kubectl create secret generic my-llm-admin \
+  --from-literal=ADMIN_API_KEY="$(openssl rand -hex 32)" \
+  -n gco-inference
+
+gco inference deploy my-llm --mooncake-mode disaggregated \
+  --mooncake-admin-key-secret my-llm-admin
+```
+
+A Secret named with `--mooncake-admin-key-secret` must already exist and carry a non-empty `ADMIN_API_KEY`, or the deployment is rejected (so a typo fails fast). A key is generated for you only when you name no Secret.
 
 ### Per-Role Autoscaling
 

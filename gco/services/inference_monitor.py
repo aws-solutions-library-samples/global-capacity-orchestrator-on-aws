@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import re
+import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -2573,6 +2574,85 @@ class InferenceMonitor:
             # A value that cannot be decoded is unusable as an admin key.
             return False
 
+    def _ensure_admin_api_key_secret(self, name: str, proxy: dict[str, Any], ns: str) -> str:
+        """Return the proxy admin-key Secret name, provisioning one if needed.
+
+        The prefill-decode proxy guards a privileged admin path and must never
+        run without a usable ``ADMIN_API_KEY``. Two paths satisfy that:
+
+        - **Bring-your-own**: when the proxy block names a Secret, that Secret
+          must already exist and carry a non-empty ``ADMIN_API_KEY``; otherwise
+          the deployment is rejected, so a typo or a missing pre-created Secret
+          fails fast. The named Secret is only read, never created or mutated.
+        - **Auto-managed**: when the proxy names no Secret, a per-endpoint
+          ``{name}-admin`` Secret is provisioned create-if-absent with a
+          generated key, so a split deploy needs no manual Secret. The generated
+          key only ever lives in the cluster — it is never written to the
+          endpoint spec, a command argument, or a log line.
+
+        Args:
+            name: The endpoint name, used to derive the auto-managed Secret name.
+            proxy: The ``spec["mooncake"]["proxy"]`` block.
+            ns: The namespace the Secret lives in.
+
+        Returns:
+            The Secret name to reference from the proxy container.
+
+        Raises:
+            AdminApiKeySecretError: Only on the bring-your-own path, when the
+                named Secret is absent or its ``ADMIN_API_KEY`` is empty. The
+                auto-managed path never raises this.
+        """
+        named = proxy.get("admin_api_key_secret")
+        if isinstance(named, str) and named:
+            return self._verify_admin_api_key_secret(proxy, ns)
+        return self._provision_admin_api_key_secret(f"{name}-admin", ns)
+
+    def _provision_admin_api_key_secret(self, secret_name: str, ns: str) -> str:
+        """Create the auto-managed proxy admin-key Secret if absent.
+
+        Uses create-if-absent semantics so the key stays stable across reconcile
+        passes: an existing Secret (the steady state, or one a prior pass
+        created) is left untouched, and a concurrent create (409) is treated as
+        success. A freshly created Secret carries a cryptographically strong
+        64-character hex ``ADMIN_API_KEY`` from :func:`secrets.token_hex`, which
+        reaches the proxy only through a Secret reference — the value is never
+        logged or written to the spec.
+
+        Args:
+            secret_name: The Secret to ensure exists (``{endpoint}-admin``).
+            ns: The namespace to create it in.
+
+        Returns:
+            The Secret name, ready for a Secret reference.
+        """
+        try:
+            self.core_v1.read_namespaced_secret(secret_name, ns, _request_timeout=self._k8s_timeout)
+            # Already present: keep the existing key so proxy pods need no churn.
+            return secret_name
+        except ApiException as e:
+            if e.status != 404:
+                raise
+
+        secret = client.V1Secret(
+            metadata=client.V1ObjectMeta(
+                name=secret_name,
+                namespace=ns,
+                labels={"app": secret_name, "project": "gco", "gco.io/type": "inference"},
+            ),
+            string_data={ADMIN_API_KEY_SECRET_DATA_KEY: secrets.token_hex(32)},
+            type="Opaque",
+        )
+        try:
+            self.core_v1.create_namespaced_secret(ns, secret, _request_timeout=self._k8s_timeout)
+            logger.info("Provisioned proxy admin-key Secret %s/%s", ns, secret_name)
+        except ApiException as e:
+            if e.status == 409:
+                logger.info("Proxy admin-key Secret %s/%s already exists", ns, secret_name)
+            else:
+                raise
+        return secret_name
+
     def _create_pd_proxy(
         self, name: str, ns: str, spec: dict[str, Any], endpoint: dict[str, Any]
     ) -> None:
@@ -2621,9 +2701,12 @@ class InferenceMonitor:
         proxy_name = f"{name}-proxy"
 
         # The proxy fronts a privileged admin path, so it never starts without a
-        # usable admin key. This rejects the deployment before any proxy
-        # resource is created when the backing Secret is missing or empty.
-        admin_secret_name = self._verify_admin_api_key_secret(proxy, ns)
+        # usable admin key. When the spec names a Secret it must already exist
+        # and be non-empty (the deployment is rejected otherwise); when it names
+        # none, a per-endpoint admin-key Secret is auto-provisioned with a
+        # generated key. Either way the key reaches the container only by Secret
+        # reference.
+        admin_secret_name = self._ensure_admin_api_key_secret(name, proxy, ns)
 
         proxy_env = build_pd_proxy_config(mooncake)
         container_env = [client.V1EnvVar(name=k, value=v) for k, v in proxy_env.items()]

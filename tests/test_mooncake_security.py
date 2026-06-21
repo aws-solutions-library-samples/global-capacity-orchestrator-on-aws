@@ -5,9 +5,10 @@ the surface that has to stay locked down. The examples here pin the four
 guarantees that keep that surface closed:
 
 - The prefill-decode proxy fronts a privileged admin path, so it never starts
-  without a usable admin key. When the backing Kubernetes Secret is missing,
-  unnamed, or carries an empty ``ADMIN_API_KEY``, the proxy is rejected and no
-  proxy Deployment, Service, or Ingress is created.
+  without a usable admin key. A *named* admin Secret that is missing or carries
+  an empty ``ADMIN_API_KEY`` rejects the proxy, and no proxy Deployment,
+  Service, or Ingress is created. When the spec names no Secret, the monitor
+  auto-provisions a ``{name}-admin`` Secret with a generated key instead.
 - On the happy path the admin key reaches the container only through a Secret
   reference — never as an inline environment value or a command argument — and
   the public Ingress publishes only the ``/v1`` serving prefix, leaving the
@@ -92,22 +93,83 @@ def _proxy_spec(secret_name: str | None = "endpoint-admin") -> dict:
 # =============================================================================
 
 
-def test_unnamed_admin_secret_rejects_and_creates_no_proxy(monitor):
-    """A proxy that names no admin Secret is rejected before anything is made.
+def test_unnamed_admin_secret_auto_provisions_and_creates_proxy(monitor):
+    """A proxy that names no admin Secret gets one auto-provisioned.
 
-    With no ``admin_api_key_secret`` on the proxy block, the verification fails
-    and no proxy Deployment, Service, or Ingress is materialized.
+    With no ``admin_api_key_secret`` on the proxy block, the monitor creates a
+    per-endpoint ``{name}-admin`` Secret (create-if-absent) carrying a generated
+    ``ADMIN_API_KEY``, then materializes the proxy referencing it. The generated
+    key only lives in the Secret — never on the spec or a command argument.
     """
-    from gco.services.inference_monitor import AdminApiKeySecretError
+    from gco.services.inference_monitor import (
+        ADMIN_API_KEY_SECRET_DATA_KEY,
+        PD_PROXY_ADMIN_API_KEY_ENV,
+    )
 
-    with pytest.raises(AdminApiKeySecretError) as excinfo:
-        monitor._create_pd_proxy("endpoint", "gco-inference", _proxy_spec(secret_name=None), {})
+    # The {name}-admin Secret does not exist yet, so provisioning creates it.
+    monitor.core_v1.read_namespaced_secret.side_effect = ApiException(status=404)
 
-    # No Secret was named, so the recorded name is empty.
-    assert excinfo.value.secret is None
-    monitor.apps_v1.create_namespaced_deployment.assert_not_called()
-    monitor.core_v1.create_namespaced_service.assert_not_called()
-    monitor.networking_v1.create_namespaced_ingress.assert_not_called()
+    monitor._create_pd_proxy("endpoint", "gco-inference", _proxy_spec(secret_name=None), {})
+
+    # A Secret named {name}-admin was created with a non-empty generated key.
+    monitor.core_v1.create_namespaced_secret.assert_called_once()
+    create_args, _ = monitor.core_v1.create_namespaced_secret.call_args
+    created = create_args[1]
+    assert created.metadata.name == "endpoint-admin"
+    generated = (created.string_data or {})[ADMIN_API_KEY_SECRET_DATA_KEY]
+    assert generated  # non-empty generated key
+    assert len(generated) >= 32
+
+    # The proxy is materialized and references the provisioned Secret by name.
+    monitor.apps_v1.create_namespaced_deployment.assert_called_once()
+    deploy_args, _ = monitor.apps_v1.create_namespaced_deployment.call_args
+    container = deploy_args[1].spec.template.spec.containers[0]
+    admin_entries = [e for e in (container.env or []) if e.name == PD_PROXY_ADMIN_API_KEY_ENV]
+    assert len(admin_entries) == 1
+    assert admin_entries[0].value is None
+    assert admin_entries[0].value_from.secret_key_ref.name == "endpoint-admin"
+
+    # The generated key is never inlined into any other environment value.
+    for entry in container.env or []:
+        if entry.value is not None:
+            assert generated not in entry.value
+
+
+def test_admin_secret_provision_is_idempotent_when_present(monitor):
+    """An already-present {name}-admin Secret is left untouched (key stays stable).
+
+    Create-if-absent means a reconcile pass that finds the Secret already there
+    does not recreate it, so proxy pods never see the key churn underneath them.
+    """
+    monitor.core_v1.read_namespaced_secret.return_value = MagicMock()  # exists
+    name = monitor._provision_admin_api_key_secret("endpoint-admin", "gco-inference")
+    assert name == "endpoint-admin"
+    monitor.core_v1.create_namespaced_secret.assert_not_called()
+
+
+def test_admin_secret_provision_treats_conflict_as_success(monitor):
+    """A concurrent create (409) is treated as success rather than an error."""
+    monitor.core_v1.read_namespaced_secret.side_effect = ApiException(status=404)
+    monitor.core_v1.create_namespaced_secret.side_effect = ApiException(status=409)
+    # A race that loses the create still yields the Secret name without raising.
+    name = monitor._provision_admin_api_key_secret("endpoint-admin", "gco-inference")
+    assert name == "endpoint-admin"
+
+
+def test_ensure_admin_secret_prefers_named_byo_secret(monitor):
+    """When the proxy names a Secret, the named one is verified and used as-is.
+
+    The bring-your-own path reads the named Secret and never auto-provisions a
+    ``{name}-admin`` Secret.
+    """
+    import base64
+
+    valid = _secret_with_key(value_b64=base64.b64encode(b"a-real-key").decode())
+    monitor.core_v1.read_namespaced_secret.return_value = valid
+    proxy = {"admin_api_key_secret": "byo-secret"}
+    name = monitor._ensure_admin_api_key_secret("endpoint", proxy, "gco-inference")
+    assert name == "byo-secret"
+    monitor.core_v1.create_namespaced_secret.assert_not_called()
 
 
 def test_absent_admin_secret_rejects_and_creates_no_proxy(monitor):

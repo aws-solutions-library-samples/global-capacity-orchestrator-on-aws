@@ -1609,7 +1609,7 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | `--mooncake-autoscale` | | Per-role autoscaling as `ROLE:MIN:MAX[:METRIC:TARGET...]`. Repeatable. E.g. `prefill:1:8:gpu:70` |
 | `--mooncake-cold-tier` | | Enable the async per-region S3 cold tier for the shared KV-cache store. Requires `--mooncake-mode store\|both`. Pre-warm with `gco inference populate-kv` |
 | `--mooncake-proxy-image` | | Container image for the prefill-decode proxy (disaggregated/both). Defaults to the endpoint image |
-| `--mooncake-admin-key-secret` | | Name of the Kubernetes Secret holding the prefill-decode proxy `ADMIN_API_KEY`. The proxy for disaggregated/both endpoints will not start without it |
+| `--mooncake-admin-key-secret` | | Name of an existing Kubernetes Secret holding the prefill-decode proxy `ADMIN_API_KEY`. Optional — when omitted, each region's monitor auto-provisions a `{name}-admin` Secret with a generated key |
 | `--no-rewrite-image` | | Disable automatic image rewriting to the regional ECR mirror |
 
 **Example:**
