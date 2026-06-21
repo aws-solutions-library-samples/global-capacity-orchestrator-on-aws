@@ -530,7 +530,13 @@ def render_mooncake_config(
     }
     if store.get("enabled"):
         cfg["master_server_address"] = region_services["master_server_address"]
-        cfg["global_segment_size"] = store.get("global_segment_size", "0")
+        # The store runs embedded in each vLLM pod (every rank contributes
+        # `global_segment_size` to the shared pool; GCO's per-region
+        # mooncake-master is only the metadata/master coordinator, not a
+        # standalone store that owns the pool). Embedded mode rejects a zero
+        # segment, so default to 4 GiB (the upstream default) when the spec
+        # does not set one; an operator can tune it via configure-store.
+        cfg["global_segment_size"] = store.get("global_segment_size", "4294967296")
         cfg["local_buffer_size"] = store.get("local_buffer_size", "2147483648")
         # Only the boolean True enables the cold tier; any other value leaves it
         # off. The URI is resolved by the caller for the monitor's own region —

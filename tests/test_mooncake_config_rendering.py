@@ -127,6 +127,29 @@ def test_master_address_present_only_when_store_enabled() -> None:
     assert "master_server_address" not in absent
 
 
+def test_store_global_segment_size_defaults_nonzero() -> None:
+    """An enabled store with no explicit segment size renders a non-zero one.
+
+    The Mooncake store runs embedded in each vLLM pod, and embedded mode
+    rejects ``global_segment_size == 0``. So when the spec omits it, the
+    rendered config must carry a usable (> 0) default rather than ``"0"``.
+    """
+    cfg = render_mooncake_config({"store": {"enabled": True}}, _region_services())
+
+    assert cfg["global_segment_size"] == "4294967296"
+    assert int(cfg["global_segment_size"]) > 0
+
+
+def test_store_global_segment_size_honors_explicit_value() -> None:
+    """An explicit segment size is rendered verbatim, overriding the default."""
+    cfg = render_mooncake_config(
+        {"store": {"enabled": True, "global_segment_size": "1073741824"}},
+        _region_services(),
+    )
+
+    assert cfg["global_segment_size"] == "1073741824"
+
+
 def test_cold_tier_uri_present_only_when_cold_tier_enabled_is_true() -> None:
     """The cold-tier URI appears only when ``cold_tier_enabled`` is boolean True."""
     on = render_mooncake_config(
