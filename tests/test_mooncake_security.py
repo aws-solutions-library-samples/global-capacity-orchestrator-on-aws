@@ -227,11 +227,11 @@ def test_admin_key_injected_only_by_secret_reference(monitor):
     assert container.args is None
     assert container.command is None
 
-    # The public Ingress still exposes only the serving prefix.
+    # The public Ingress still exposes only the endpoint-scoped serving prefix.
     ing_args, _ = monitor.networking_v1.create_namespaced_ingress.call_args
     ingress = ing_args[1]
     paths = [p for rule in ingress.spec.rules for p in rule.http.paths]
-    assert [p.path for p in paths] == [PD_PROXY_PUBLIC_PATH_PREFIX]
+    assert [p.path for p in paths] == [f"/inference/endpoint{PD_PROXY_PUBLIC_PATH_PREFIX}"]
     rendered = {p.path for p in paths}
     assert PD_PROXY_ADMIN_PATH not in rendered
     assert all("/instances" not in p for p in rendered)

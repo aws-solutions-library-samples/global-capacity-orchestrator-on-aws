@@ -416,6 +416,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `deploy_disaggregated_inference` | Deploy a split prefill/decode (Mooncake) endpoint | low-risk | — |
 | `set_mooncake_topology` | Resize a disaggregated endpoint's prefill/decode replica counts | low-risk | — |
 | `mooncake_topology_status` | Show a disaggregated endpoint's per-role topology status | safe | — |
+| `populate_kv_cache` | Upload data into an endpoint's Mooncake KV-cache cold tier | low-risk | — |
 | `delete_inference` | Delete an endpoint (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 
 ### Cost Tracking

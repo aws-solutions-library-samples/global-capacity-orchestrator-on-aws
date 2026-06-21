@@ -9,8 +9,9 @@ pods. Two pieces of that front door are pinned here:
   never fans traffic out to the prefill or decode role pods that share the
   namespace.
 - The public Ingress must publish only the OpenAI-compatible serving paths. It
-  routes the ``/v1`` prefix to the proxy Service and leaves the proxy's
-  ``/instances/add`` admin path off the public surface entirely.
+  routes the endpoint-scoped ``{ingress_path}/v1`` prefix to the proxy Service
+  and leaves the proxy's ``/instances/add`` admin path off the public surface
+  entirely.
 
 These examples build a monitor with every Kubernetes client mocked, invoke the
 proxy Service and Ingress creation directly, and inspect the objects handed to
@@ -90,15 +91,18 @@ def test_proxy_service_selects_only_proxy_pods(monitor):
 
 
 def test_proxy_ingress_routes_only_v1_prefix_to_proxy(monitor):
-    """The public Ingress publishes the ``/v1`` serving prefix and nothing else.
+    """The public Ingress publishes the endpoint-scoped ``/v1`` prefix only.
 
-    Exactly one routing path is configured: the ``/v1`` prefix pointing at the
-    proxy Service. No rule exposes the proxy's ``/instances/add`` admin path.
+    Exactly one routing path is configured: the endpoint's own
+    ``{ingress_path}/v1`` prefix (``/inference/my-endpoint/v1``) pointing at the
+    proxy Service. Scoping to the endpoint prefix is what lets a client request
+    to ``/inference/my-endpoint/v1/...`` reach the proxy on the shared ALB. No
+    rule exposes the proxy's ``/instances/add`` admin path.
     """
     from gco.services.inference_monitor import PD_PROXY_PUBLIC_PATH_PREFIX
 
     monitor.networking_v1.create_namespaced_ingress.reset_mock()
-    monitor._update_proxy_ingress("my-endpoint", "my-endpoint-proxy", "gco-inference")
+    monitor._update_proxy_ingress("my-endpoint", "my-endpoint-proxy", "gco-inference", {})
 
     args, _ = monitor.networking_v1.create_namespaced_ingress.call_args
     namespace, ingress = args[0], args[1]
@@ -109,8 +113,10 @@ def test_proxy_ingress_routes_only_v1_prefix_to_proxy(monitor):
 
     assert len(paths) == 1
     only_path = paths[0]
-    assert only_path.path == PD_PROXY_PUBLIC_PATH_PREFIX
-    assert only_path.path == "/v1"
+    # The published path is the endpoint's ingress prefix plus the serving
+    # prefix — the same path a client (and `gco inference invoke`) targets.
+    assert only_path.path == f"/inference/my-endpoint{PD_PROXY_PUBLIC_PATH_PREFIX}"
+    assert only_path.path == "/inference/my-endpoint/v1"
     assert only_path.path_type == "Prefix"
     assert only_path.backend.service.name == "my-endpoint-proxy"
 
@@ -159,9 +165,9 @@ def test_full_proxy_materialization_keeps_service_and_ingress_scoped(monitor):
         "gco.io/role": PD_PROXY_ROLE_LABEL,
     }
 
-    # Ingress publishes only the /v1 prefix to the proxy Service.
+    # Ingress publishes only the endpoint-scoped /v1 prefix to the proxy Service.
     ing_args, _ = monitor.networking_v1.create_namespaced_ingress.call_args
     ingress = ing_args[1]
     paths = [path for rule in ingress.spec.rules for path in rule.http.paths]
-    assert [p.path for p in paths] == [PD_PROXY_PUBLIC_PATH_PREFIX]
+    assert [p.path for p in paths] == [f"/inference/my-endpoint{PD_PROXY_PUBLIC_PATH_PREFIX}"]
     assert paths[0].backend.service.name == "my-endpoint-proxy"

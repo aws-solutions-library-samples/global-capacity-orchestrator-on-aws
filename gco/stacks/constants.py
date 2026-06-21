@@ -153,6 +153,18 @@ Treat the full paths as the contract — this prefix is the single place to
 change if the namespace ever moves.
 """
 
+MOONCAKE_COLD_TIER_KEY_PREFIX = "mooncake-kv"
+"""Object-key prefix for Mooncake cold-tier KV objects in the regional bucket.
+
+The per-region inference monitor resolves an endpoint's cold-tier object-store
+URI to ``s3://gco-regional-shared-<account>-<region>/mooncake-kv/<endpoint>/``,
+and the ``gco inference populate-kv`` upload surface writes under the same
+prefix, so operator-supplied warm-up objects land exactly where an endpoint's
+pods read them. This is the shared contract between the two sides; the monitor
+keeps a local copy of this value so it needs no CDK imports at runtime, so keep
+the two in lockstep if the prefix ever changes.
+"""
+
 MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.23.0"
 """Default container image for the shared per-region Mooncake master.
 

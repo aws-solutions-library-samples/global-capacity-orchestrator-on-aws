@@ -192,7 +192,9 @@ MOONCAKE_MASTER_IMAGE_ENV = "MOONCAKE_MASTER_IMAGE"
 MOONCAKE_MASTER_READY_TIMEOUT_SECONDS = 600
 
 # Object-key prefix under which cold-tier KV objects are written in the
-# general-purpose regional bucket.
+# general-purpose regional bucket. Mirrors the value the regional stack and the
+# `gco inference populate-kv` upload surface use; kept local so the monitor
+# needs no infrastructure (CDK) imports at runtime.
 MOONCAKE_COLD_TIER_KEY_PREFIX = "mooncake-kv"
 
 # SSM namespace publishing the always-on general-purpose regional bucket's
@@ -2704,7 +2706,7 @@ class InferenceMonitor:
                 raise
 
         self._create_proxy_service(proxy_name, ns)
-        self._update_proxy_ingress(name, proxy_name, ns)
+        self._update_proxy_ingress(name, proxy_name, ns, endpoint)
 
     def _create_proxy_service(self, proxy_name: str, namespace: str) -> None:
         """Create the Service that fronts only the proxy pods.
@@ -2748,21 +2750,35 @@ class InferenceMonitor:
             else:
                 raise
 
-    def _update_proxy_ingress(self, name: str, proxy_name: str, namespace: str) -> None:
-        """Create or update the public Ingress that routes ``/v1/*`` to the proxy.
+    def _update_proxy_ingress(
+        self, name: str, proxy_name: str, namespace: str, endpoint: dict[str, Any]
+    ) -> None:
+        """Create or update the public Ingress that routes the proxy's serving paths.
 
-        Only the OpenAI-compatible serving paths are published: the rule routes
-        the ``/v1`` prefix to the proxy Service. The proxy's privileged admin
-        path (``/instances/add``) is deliberately not among the published
-        paths, so an admin request arriving from outside the namespace never
-        matches an Ingress rule and is never forwarded to the proxy. The Ingress
-        merges onto the shared ALB through the ``alb`` ingress class, matching
-        the legacy single-Deployment Ingress convention.
+        Only the OpenAI-compatible serving paths are published, and they are
+        scoped to the endpoint's own ingress prefix: the rule routes
+        ``{ingress_path}/v1`` (for example ``/inference/{name}/v1``) to the
+        proxy Service. Scoping to the endpoint prefix is what makes a
+        disaggregated endpoint reachable — every client request arrives at
+        ``/inference/{name}/...`` (through Global Accelerator and the shared
+        ALB), exactly as it does for a single-Deployment endpoint, so a bare
+        ``/v1`` rule would neither match the client URL nor stay isolated from
+        other endpoints sharing the ALB. The proxy's privileged admin path
+        (``{ingress_path}/instances/add``) is deliberately not among the
+        published paths, so an admin request arriving from outside the namespace
+        never matches an Ingress rule and is never forwarded to the proxy. The
+        Ingress merges onto the shared ALB through the ``alb`` ingress class,
+        matching the legacy single-Deployment Ingress convention.
         """
-        # The public Ingress carries only the serving prefix. The proxy's admin
-        # path is filtered out here so no future edit to the published set can
-        # route it in from outside the namespace.
-        published_paths = [p for p in [PD_PROXY_PUBLIC_PATH_PREFIX] if p != PD_PROXY_ADMIN_PATH]
+        # The public Ingress carries only the serving prefix, scoped to this
+        # endpoint's ingress path so it matches the client URL
+        # (``/inference/{name}/v1/...``) and stays isolated from other endpoints
+        # on the shared ALB. The proxy's admin path is filtered out so no future
+        # edit to the published set can route it in from outside the namespace.
+        ingress_path = endpoint.get("ingress_path", f"/inference/{name}")
+        serving_prefix = f"{ingress_path}{PD_PROXY_PUBLIC_PATH_PREFIX}"
+        admin_prefix = f"{ingress_path}{PD_PROXY_ADMIN_PATH}"
+        published_paths = [p for p in [serving_prefix] if p != admin_prefix]
         ingress = client.V1Ingress(
             metadata=client.V1ObjectMeta(
                 name=f"inference-{proxy_name}",
@@ -2774,7 +2790,7 @@ class InferenceMonitor:
                     "gco.io/role": PD_PROXY_ROLE_LABEL,
                 },
                 annotations={
-                    "alb.ingress.kubernetes.io/healthcheck-path": PD_PROXY_PUBLIC_PATH_PREFIX,
+                    "alb.ingress.kubernetes.io/healthcheck-path": serving_prefix,
                     "alb.ingress.kubernetes.io/healthcheck-interval-seconds": "15",
                 },
             ),
@@ -2809,7 +2825,7 @@ class InferenceMonitor:
             logger.info(
                 "Created proxy ingress for %s routing %s to %s",
                 name,
-                PD_PROXY_PUBLIC_PATH_PREFIX,
+                serving_prefix,
                 proxy_name,
             )
         except ApiException as e:

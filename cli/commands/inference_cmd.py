@@ -115,6 +115,27 @@ def inference(config: Any) -> None:
     "--mooncake-mode disaggregated|both; populates spec.mooncake.autoscaling "
     "(distinct from the legacy --autoscale-metric/--min-replicas flags).",
 )
+@click.option(
+    "--mooncake-cold-tier",
+    is_flag=True,
+    default=False,
+    help="Enable the asynchronous per-region S3 cold tier for the shared "
+    "KV-cache store (the cold tier extends the store). Pre-warm it with "
+    "'gco inference populate-kv'. Requires --mooncake-mode store or both.",
+)
+@click.option(
+    "--mooncake-proxy-image",
+    default=None,
+    help="Container image for the prefill-decode proxy (disaggregated/both). "
+    "Defaults to the endpoint image, which bundles the reference proxy.",
+)
+@click.option(
+    "--mooncake-admin-key-secret",
+    default=None,
+    help="Name of the Kubernetes Secret holding the prefill-decode proxy "
+    "ADMIN_API_KEY. The proxy for disaggregated/both endpoints will not "
+    "start without it.",
+)
 @pass_config
 def inference_deploy(
     config: Any,
@@ -143,6 +164,9 @@ def inference_deploy(
     prefill_replicas: Any,
     decode_replicas: Any,
     mooncake_autoscale: Any,
+    mooncake_cold_tier: Any,
+    mooncake_proxy_image: Any,
+    mooncake_admin_key_secret: Any,
 ) -> None:
     """Deploy an inference endpoint to one or more regions.
 
@@ -247,6 +271,40 @@ def inference_deploy(
                 sys.exit(1)
             mooncake_autoscaling_config[role] = role_block
 
+    # --mooncake-cold-tier opts into the async per-region S3 cold tier, which
+    # extends the shared store, so it only applies to store/both modes.
+    if mooncake_cold_tier and mooncake_mode not in ("store", "both"):
+        formatter.print_error(
+            "--mooncake-cold-tier requires --mooncake-mode store or both "
+            "(the cold tier extends the shared KV-cache store)."
+        )
+        sys.exit(1)
+
+    mooncake_store_config: dict[str, Any] | None = None
+    if mooncake_cold_tier:
+        mooncake_store_config = {"enabled": True, "cold_tier_enabled": True}
+
+    # Configure the prefill-decode proxy that fronts split modes: an explicit
+    # image (otherwise it defaults to the endpoint image) and the name of the
+    # Kubernetes Secret holding its ADMIN_API_KEY.
+    mooncake_proxy_config: dict[str, Any] | None = None
+    if mooncake_proxy_image or mooncake_admin_key_secret:
+        mooncake_proxy_config = {}
+        if mooncake_proxy_image:
+            mooncake_proxy_config["image"] = mooncake_proxy_image
+        if mooncake_admin_key_secret:
+            mooncake_proxy_config["admin_api_key_secret"] = mooncake_admin_key_secret
+
+    # The proxy will not start without an admin-key Secret, so warn early when a
+    # split mode is deployed without one.
+    if mooncake_mode in ("disaggregated", "both") and not mooncake_admin_key_secret:
+        formatter.print_warning(
+            "No --mooncake-admin-key-secret given. The prefill-decode proxy for "
+            "disaggregated/both endpoints needs a Kubernetes Secret holding "
+            "ADMIN_API_KEY and will not start without one. Create the Secret and "
+            "pass its name before the endpoint can serve."
+        )
+
     try:
         manager = get_inference_manager(config)
         result = manager.deploy(
@@ -272,6 +330,8 @@ def inference_deploy(
             mooncake_mode=mooncake_mode,
             prefill_replicas=prefill_replicas,
             decode_replicas=decode_replicas,
+            mooncake_store=mooncake_store_config,
+            mooncake_proxy=mooncake_proxy_config,
             mooncake_autoscaling=mooncake_autoscaling_config,
         )
 
@@ -1081,4 +1141,169 @@ def inference_set_topology(config: Any, endpoint_name: Any, prefill: Any, decode
         sys.exit(1)
     except Exception as e:
         formatter.print_error(f"Failed to set topology: {e}")
+        sys.exit(1)
+
+
+@inference.command("configure-store")
+@click.argument("endpoint_name")
+@click.option(
+    "--cold-tier/--no-cold-tier",
+    "cold_tier",
+    default=None,
+    help="Opt the endpoint into (or out of) the asynchronous S3 cold tier. "
+    "Enabling it also enables the shared store it extends.",
+)
+@click.option(
+    "--offload",
+    type=click.Choice(["cpu", "disk", "none"]),
+    default=None,
+    help="KV-store offload tier for spilling cache beyond GPU memory.",
+)
+@click.option(
+    "--global-segment-size",
+    type=int,
+    default=None,
+    help="Global segment size in bytes for the KV-cache store.",
+)
+@click.option(
+    "--local-buffer-size",
+    type=int,
+    default=None,
+    help="Local buffer size in bytes for the KV-cache store.",
+)
+@click.option(
+    "--enable-store/--disable-store",
+    "enabled",
+    default=None,
+    help="Enable or disable the shared KV-cache store.",
+)
+@pass_config
+def inference_configure_store(
+    config: Any,
+    endpoint_name: Any,
+    cold_tier: Any,
+    offload: Any,
+    global_segment_size: Any,
+    local_buffer_size: Any,
+    enabled: Any,
+) -> None:
+    """Update the shared KV-cache store on a Mooncake endpoint.
+
+    Merges the given settings into the endpoint's existing KV-cache store
+    configuration and re-triggers reconciliation so each region's monitor picks
+    up the change. Enabling the cold tier also enables the shared store it
+    extends. Use 'gco inference populate-kv' to pre-warm the cold tier.
+
+    Examples:
+        gco inference configure-store my-llm --cold-tier
+        gco inference configure-store my-llm --offload cpu --local-buffer-size 2147483648
+    """
+    from ..inference import get_inference_manager
+
+    formatter = get_output_formatter(config)
+
+    try:
+        manager = get_inference_manager(config)
+        endpoint = manager.get_endpoint(endpoint_name)
+        if not endpoint:
+            formatter.print_error(f"Endpoint '{endpoint_name}' not found")
+            sys.exit(1)
+
+        # Merge onto the endpoint's current store block so changing one field
+        # does not drop the others.
+        spec = endpoint.get("spec", {}) if isinstance(endpoint, dict) else {}
+        mooncake = spec.get("mooncake", {}) if isinstance(spec, dict) else {}
+        store_config = dict(mooncake.get("store") or {})
+
+        if enabled is not None:
+            store_config["enabled"] = enabled
+        if cold_tier is not None:
+            store_config["cold_tier_enabled"] = cold_tier
+            if cold_tier:
+                # The cold tier extends the shared store, so enabling it enables
+                # the store too.
+                store_config["enabled"] = True
+        if offload is not None:
+            store_config["offload"] = offload
+        if global_segment_size is not None:
+            store_config["global_segment_size"] = global_segment_size
+        if local_buffer_size is not None:
+            store_config["local_buffer_size"] = local_buffer_size
+
+        if not store_config:
+            formatter.print_error(
+                "No store settings given. Pass --cold-tier, --offload, "
+                "--global-segment-size, --local-buffer-size, or --enable-store."
+            )
+            sys.exit(1)
+
+        result = manager.configure_store(endpoint_name, store_config)
+        if result:
+            formatter.print_success(f"Endpoint '{endpoint_name}' store configuration updated")
+            formatter.print_info(
+                "The inference_monitor will re-render the KV-cache store "
+                "configuration in each region."
+            )
+            if config.output_format != "table":
+                formatter.print(result)
+        else:
+            formatter.print_error(f"Endpoint '{endpoint_name}' not found")
+            sys.exit(1)
+
+    except ValueError as e:
+        formatter.print_error(str(e))
+        sys.exit(1)
+    except Exception as e:
+        formatter.print_error(f"Failed to configure store: {e}")
+        sys.exit(1)
+
+
+@inference.command("populate-kv")
+@click.argument("endpoint_name")
+@click.argument("local_path")
+@click.option(
+    "--region",
+    "-r",
+    required=True,
+    help="Region whose general-purpose bucket backs the endpoint's KV-cache cold tier.",
+)
+@pass_config
+def inference_populate_kv(config: Any, endpoint_name: Any, local_path: Any, region: Any) -> None:
+    """Upload data into an endpoint's Mooncake KV-cache cold tier.
+
+    Uploads a local file or directory to the region's general-purpose bucket
+    under the cold-tier key prefix the endpoint reads from
+    (mooncake-kv/<endpoint>/). The endpoint must be deployed with the cold tier
+    enabled (deploy with --mooncake-cold-tier, or run
+    'gco inference configure-store <name> --cold-tier') for its pods to read the
+    uploaded data.
+
+    Examples:
+        gco inference populate-kv my-llm ./kv-warm-set/ --region us-east-1
+    """
+    from ..models import get_regional_bucket_manager
+
+    formatter = get_output_formatter(config)
+
+    try:
+        manager = get_regional_bucket_manager(config)
+        formatter.print_info(
+            f"Uploading {local_path} into the KV-cache cold tier for "
+            f"'{endpoint_name}' in '{region}'..."
+        )
+        result = manager.populate_kv_cache(local_path, region, endpoint_name)
+
+        formatter.print_success(
+            f"Uploaded {result['files_uploaded']} file(s) to {result['s3_uri']}"
+        )
+        formatter.print_info(
+            "Pods for this endpoint read the cold tier when it is enabled "
+            "(deploy with --mooncake-cold-tier or 'gco inference configure-store')."
+        )
+
+        if config.output_format != "table":
+            formatter.print(result)
+
+    except Exception as e:
+        formatter.print_error(f"Failed to populate KV cache: {e}")
         sys.exit(1)

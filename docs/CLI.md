@@ -1607,6 +1607,9 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | `--prefill-replicas` | | Number of prefill replicas (default: 1). Used with `--mooncake-mode disaggregated\|both` |
 | `--decode-replicas` | | Number of decode replicas (default: 1). Used with `--mooncake-mode disaggregated\|both` |
 | `--mooncake-autoscale` | | Per-role autoscaling as `ROLE:MIN:MAX[:METRIC:TARGET...]`. Repeatable. E.g. `prefill:1:8:gpu:70` |
+| `--mooncake-cold-tier` | | Enable the async per-region S3 cold tier for the shared KV-cache store. Requires `--mooncake-mode store\|both`. Pre-warm with `gco inference populate-kv` |
+| `--mooncake-proxy-image` | | Container image for the prefill-decode proxy (disaggregated/both). Defaults to the endpoint image |
+| `--mooncake-admin-key-secret` | | Name of the Kubernetes Secret holding the prefill-decode proxy `ADMIN_API_KEY`. The proxy for disaggregated/both endpoints will not start without it |
 | `--no-rewrite-image` | | Disable automatic image rewriting to the regional ECR mirror |
 
 **Example:**
@@ -1932,13 +1935,58 @@ gco inference set-topology ENDPOINT_NAME [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--prefill` | `-p` | New prefill replica count (required) |
-| `--decode` | `-d` | New decode replica count (required) |
+| `--prefill` | | New prefill replica count (required) |
+| `--decode` | | New decode replica count (required) |
 
 **Example:**
 
 ```bash
 gco inference set-topology my-llm --prefill 3 --decode 6
+```
+
+#### `gco inference configure-store`
+
+Update the shared KV-cache store on a Mooncake `store`/`both` endpoint. Settings merge onto the endpoint's existing store block and re-trigger reconciliation, so changing one field leaves the others intact.
+
+```bash
+gco inference configure-store ENDPOINT_NAME [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--cold-tier` / `--no-cold-tier` | Opt the endpoint into (or out of) the async S3 cold tier. Enabling it also enables the shared store it extends |
+| `--offload` | KV-store offload tier: `cpu`, `disk`, or `none` |
+| `--global-segment-size` | Global segment size in bytes |
+| `--local-buffer-size` | Local buffer size in bytes |
+| `--enable-store` / `--disable-store` | Enable or disable the shared KV-cache store |
+
+**Example:**
+
+```bash
+gco inference configure-store my-llm --cold-tier
+gco inference configure-store my-llm --offload cpu --local-buffer-size 2147483648
+```
+
+#### `gco inference populate-kv`
+
+Upload data into an endpoint's Mooncake KV-cache cold tier. Objects are written to the region's general-purpose bucket under the `mooncake-kv/<endpoint>/` prefix the endpoint reads from, pre-warming its prefix cache. The endpoint must have the cold tier enabled (`--mooncake-cold-tier` at deploy, or `configure-store --cold-tier`) for its pods to consume the data.
+
+```bash
+gco inference populate-kv ENDPOINT_NAME LOCAL_PATH --region REGION
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | Region whose general-purpose bucket backs the endpoint's cold tier (required) |
+
+**Example:**
+
+```bash
+gco inference populate-kv my-llm ./kv-warm-set/ --region us-east-1
 ```
 
 ---
@@ -1972,6 +2020,32 @@ gco models upload LOCAL_PATH [OPTIONS]
 ```bash
 gco models upload ./my-model-weights/ --name llama3-8b
 gco models upload ./weights.safetensors --name my-model
+```
+
+#### `gco models upload-regional`
+
+Upload local files or a directory to a region's general-purpose regional bucket (`gco-regional-shared-<account>-<region>`), resolved from that region's own SSM parameter. The bucket is general purpose and usable by any in-region workload; it also backs the Mooncake cold tier. To warm an endpoint's KV cache specifically, prefer `gco inference populate-kv`, which targets the cold-tier key prefix.
+
+```bash
+gco models upload-regional LOCAL_PATH --region REGION [OPTIONS]
+```
+
+**Arguments:**
+
+- `LOCAL_PATH` - Local file or directory path
+
+**Options:**
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--region` | `-r` | | Target region whose regional bucket receives the objects (required) |
+| `--prefix` | | `uploads` | S3 key prefix for uploaded objects |
+
+**Example:**
+
+```bash
+gco models upload-regional ./data/ --region us-east-1
+gco models upload-regional ./file.bin -r eu-west-1 --prefix datasets
 ```
 
 #### `gco models list`

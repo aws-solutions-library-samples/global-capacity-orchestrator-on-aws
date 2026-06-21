@@ -271,6 +271,33 @@ def mooncake_topology_status(name: str) -> str:
     return cli_runner._run_cli("inference", "status", name)
 
 
+@mcp.tool(tags={"low-risk", "inference"})
+@audit_logged
+async def populate_kv_cache(endpoint_name: str, local_path: str, region: str) -> str:
+    """`gco inference populate-kv` — upload data into an endpoint's KV-cache cold tier.
+
+    Uploads a local file or directory to the region's general-purpose bucket
+    under the cold-tier key prefix the endpoint reads from, pre-warming its
+    Mooncake KV-cache prefix cache. The endpoint must be deployed with the cold
+    tier enabled (deploy with --mooncake-cold-tier, or configure it via
+    configure-store) for its pods to read the uploaded data.
+
+    Args:
+        endpoint_name: Endpoint whose KV-cache cold tier receives the data.
+        local_path: Local file or directory to upload.
+        region: Region whose general-purpose bucket backs the cold tier.
+    """
+    return await asyncio.to_thread(
+        cli_runner._run_cli,
+        "inference",
+        "populate-kv",
+        endpoint_name,
+        local_path,
+        "-r",
+        region,
+    )
+
+
 if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
 
     @mcp.tool(tags={"destructive", "inference"})

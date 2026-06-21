@@ -268,21 +268,31 @@ GCO supports Mooncake disaggregated serving, which splits inference into separat
 
 ### Deploy a Disaggregated Endpoint
 
+Disaggregated and `both` endpoints are fronted by a lightweight prefill-decode (PD) proxy that coordinates the two roles. The proxy guards a privileged admin path, so it reads an `ADMIN_API_KEY` from a Kubernetes Secret you create up front — it will not start without one:
+
 ```bash
+# Create the proxy admin-key Secret in the inference namespace (one per endpoint)
+kubectl create secret generic my-llm-admin \
+  --from-literal=ADMIN_API_KEY="$(openssl rand -hex 32)" \
+  -n gco-inference
+
+# Deploy the disaggregated endpoint, pointing the proxy at that Secret
 gco inference deploy my-llm \
   --mooncake-mode disaggregated \
   --gpu-count 1 \
   --prefill-replicas 2 \
   --decode-replicas 4 \
+  --mooncake-admin-key-secret my-llm-admin \
   -e MODEL=meta-llama/Llama-3.1-8B-Instruct
 ```
 
 When `--mooncake-mode disaggregated` is set:
 
-- The inference monitor creates separate Deployments for each role: `{name}-prefill` and `{name}-decode`
+- The inference monitor creates separate Deployments for each role (`{name}-prefill` and `{name}-decode`), fronted by a `{name}-proxy` Deployment and Service
 - A shared Mooncake transfer engine enables zero-copy KV cache transfer between roles via RDMA/TCP
-- The `--image` flag is optional; when omitted, the upstream `vllm/vllm-openai` image (which bundles the Mooncake transfer engine) is used by default
+- The `--image` flag is optional; when omitted, the upstream `vllm/vllm-openai` image (which bundles the Mooncake transfer engine) is used by default. The PD proxy defaults to that same image — override it with `--mooncake-proxy-image`
 - `--prefill-replicas` and `--decode-replicas` set the initial replica count for each role (both default to 1)
+- `--mooncake-admin-key-secret` names the Kubernetes Secret holding the proxy's `ADMIN_API_KEY`. The public Ingress publishes only the endpoint's `/inference/{name}/v1` serving paths; the proxy's `/instances/add` admin path is never exposed externally
 
 ### Per-Role Autoscaling
 
@@ -317,9 +327,11 @@ gco inference set-topology my-llm --prefill 3 --decode 6
 
 | Mode | Description |
 |------|-------------|
-| `disaggregated` | Separate prefill and decode Deployments with KV cache transfer |
-| `store` | Shared Mooncake KV-cache store (etcd-backed, cluster-wide) |
-| `both` | Disaggregated roles plus the shared store |
+| `disaggregated` | Separate prefill and decode Deployments with RDMA KV cache transfer between them |
+| `store` | Shared per-region KV-cache store: a single `mooncake-master` per region (built-in HTTP metadata server, no etcd) backing hash-based prefix caching |
+| `both` | Disaggregated prefill/decode roles plus the shared store (KV is transferred between roles *and* cached for reuse) |
+
+The `store` and `both` modes enable the shared KV-cache store automatically — there is no separate flag to turn it on. See [Shared KV-Cache Store](#shared-kv-cache-store) for how it is wired and extended with a cold tier.
 
 ### Architecture
 
@@ -336,6 +348,46 @@ gco inference set-topology my-llm --prefill 3 --decode 6
               │  GPU-saturated   │    │   Streaming tokens │
               └──────────────────┘    └────────────────────┘
 ```
+
+### Shared KV-Cache Store
+
+The `store` and `both` modes add a shared Mooncake KV-cache store. The monitor maintains exactly one `mooncake-master` StatefulSet **per region** (not per endpoint), running the master daemon with its built-in HTTP metadata server — RPC on port 50051 and the metadata endpoint on port 8080. There is no etcd dependency. Every vLLM pod in the region reaches this one master, so cached KV blocks are shared across instances through hash-based prefix caching.
+
+The store is enabled automatically for `store` and `both` modes. To extend it with an asynchronous, per-region S3 cold tier, add `--mooncake-cold-tier` at deploy time, or update a running endpoint:
+
+```bash
+# Enable the cold tier on an existing store/both endpoint
+gco inference configure-store my-llm --cold-tier
+
+# Tune the offload tier and buffer sizes (bytes)
+gco inference configure-store my-llm --offload cpu --local-buffer-size 2147483648
+```
+
+`configure-store` merges onto the endpoint's existing store settings and re-triggers reconciliation, so changing one field leaves the others intact.
+
+### Populating the KV Cache (Cold Tier)
+
+The cold tier auto-targets the always-on general-purpose regional bucket (`gco-regional-shared-<account>-<region>`) and reads/writes under the `mooncake-kv/<endpoint>/` key prefix. You can pre-warm it — upload KV blocks or reusable prompt data your workloads will hit — with a single command:
+
+```bash
+# Upload a local file or directory into an endpoint's KV-cache cold tier
+gco inference populate-kv my-llm ./kv-warm-set/ --region us-east-1
+```
+
+This writes the objects to exactly the prefix the endpoint's pods read from, so a `store`/`both` endpoint deployed with the cold tier enabled warm-starts its prefix cache from them. The endpoint must have the cold tier enabled (`--mooncake-cold-tier` at deploy, or `configure-store --cold-tier`) for its pods to consume the data. AI agents can do the same through the audited `populate_kv_cache` MCP tool.
+
+The cold tier is per-region: run `populate-kv` once for each region you want warmed (it resolves and writes to that region's own bucket). Writes never cross a region boundary, and cold-tier reads/writes are asynchronous — they never sit on the RDMA hot path.
+
+### How Workloads Access the KV Cache
+
+Each role pod (prefill, decode, or the single store instance) reaches the KV cache without any application changes — the monitor wires it up declaratively:
+
+- The monitor renders a per-endpoint `mooncake.json` into a ConfigMap and mounts it at `/etc/mooncake/mooncake.json`, pointing the connector at it through the `MOONCAKE_CONFIG_PATH` environment variable. That file carries the metadata-server address, the transport (`rdma`/`tcp`) and device, and — when the store is enabled — the `mooncake-master` address plus (when the cold tier is on) the cold-tier S3 URI.
+- vLLM is launched with a `--kv-transfer-config` selecting the right connector for the role: `MooncakeConnector` for `disaggregated` (RDMA transfer of freshly computed KV from prefill to decode), `MooncakeStoreConnector` for `store` (read/write of the shared, hash-keyed prefix cache), and a `MultiConnector` chaining both for `both`.
+- Prefill and decode share freshly computed KV directly over RDMA/RoCE on the EFA fabric (intra-region only). The shared store additionally lets any instance reuse a previously cached prefix, and the optional cold tier extends that cache to S3 for warm starts.
+- The PD proxy checks whether a prompt's KV blocks already reside in the store before dispatching to a prefill pod, so a cache hit skips recomputation.
+
+No client-side wiring is needed to read the cache — workloads simply serve from the role pods, which the connectors back automatically. Clients invoke the endpoint exactly as any other GCO endpoint (see [Invoking Endpoints](#invoking-endpoints)): requests reach the nearest region through Global Accelerator and are routed to the PD proxy at `/inference/{name}/v1/...`.
 
 ## Managing Endpoints
 

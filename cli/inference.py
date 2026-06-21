@@ -370,6 +370,7 @@ class InferenceManager:
         transfer: dict[str, Any] | None,
         proxy: dict[str, Any] | None,
         autoscaling: dict[str, Any] | None,
+        default_proxy_image: str | None = None,
     ) -> dict[str, Any]:
         """Assemble and validate an optional ``spec.mooncake`` block.
 
@@ -380,6 +381,13 @@ class InferenceManager:
         caller persists anything, so a rejected block leaves any previously
         stored spec untouched. Raises :class:`ValueError` — naming the offending
         field — when the mode is unsupported or any field is invalid.
+
+        The store-bearing modes (``store`` and ``both``) default the store to
+        enabled so the shared master address is wired in (the ``both``-mode
+        MultiConnector's store half depends on it), and split modes
+        (``disaggregated`` and ``both``) default the prefill-decode proxy image
+        to ``default_proxy_image`` when the caller supplies no explicit proxy
+        image.
         """
         block: dict[str, Any] = {"mode": mode}
 
@@ -390,8 +398,17 @@ class InferenceManager:
                 "decode": decode_replicas,
             }
 
-        if store is not None:
-            store_block = dict(store)
+        # The store-bearing modes (store and both) only function with the KV
+        # store enabled: the both-mode MultiConnector's store half is wired to
+        # the shared master address, which the monitor renders only for an
+        # enabled store. So a store block is always present for those modes,
+        # defaulting enabled to True; an explicit store block still tunes
+        # offload, sizes, and the cold tier.
+        store_block = dict(store) if store is not None else None
+        if mode in ("store", "both"):
+            store_block = dict(store_block or {})
+            store_block.setdefault("enabled", True)
+        if store_block is not None:
             # Author byte-size fields as canonical decimal strings up front so
             # the persisted spec round-trips through DynamoDB without float or
             # Decimal coercion. Authoring also fails fast on bad inputs.
@@ -405,8 +422,19 @@ class InferenceManager:
 
         if transfer is not None:
             block["transfer"] = dict(transfer)
-        if proxy is not None:
-            block["proxy"] = dict(proxy)
+
+        # Split modes are fronted by the prefill-decode proxy, which needs a
+        # container image. Default it to the same image the role pods serve from
+        # (the upstream vLLM image bundles the reference proxy) so a split deploy
+        # stands up without a separate proxy image; an explicit proxy image
+        # still wins.
+        proxy_block = dict(proxy) if proxy is not None else None
+        if mode in _MOONCAKE_DISAGGREGATED_MODES and default_proxy_image:
+            proxy_block = dict(proxy_block or {})
+            proxy_block.setdefault("image", default_proxy_image)
+        if proxy_block is not None:
+            block["proxy"] = proxy_block
+
         if autoscaling is not None:
             block["autoscaling"] = dict(autoscaling)
 
@@ -504,6 +532,13 @@ class InferenceManager:
         # the default upstream Mooncake-enabled vLLM image.
         mooncake_block: dict[str, Any] | None = None
         if mooncake_mode is not None:
+            # Resolve the image before building the block so a split mode's
+            # prefill-decode proxy can default to the same image the role pods
+            # serve from (the upstream vLLM image bundles the reference proxy).
+            if image is None:
+                from .images import default_disaggregated_image
+
+                image = default_disaggregated_image(config=self.config)
             mooncake_block = self._build_mooncake_block(
                 mode=mooncake_mode,
                 prefill_replicas=prefill_replicas,
@@ -512,11 +547,8 @@ class InferenceManager:
                 transfer=mooncake_transfer,
                 proxy=mooncake_proxy,
                 autoscaling=mooncake_autoscaling,
+                default_proxy_image=image,
             )
-            if image is None:
-                from .images import default_disaggregated_image
-
-                image = default_disaggregated_image(config=self.config)
 
         if image is None:
             raise ValueError(

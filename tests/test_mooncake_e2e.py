@@ -358,10 +358,11 @@ def test_split_endpoint_materializes_roles_proxy_and_role_keyed_status():
     assert "chat-proxy" in core.services
     assert "inference-chat-proxy" in networking.ingresses
 
-    # The proxy Ingress routes only the /v1 serving prefix to the proxy Service.
+    # The proxy Ingress routes only the endpoint-scoped /v1 serving prefix to
+    # the proxy Service, matching the URL clients send (/inference/{name}/...).
     ingress = networking.ingresses["inference-chat-proxy"]
     routes = [p for rule in ingress.spec.rules for p in rule.http.paths]
-    assert [r.path for r in routes] == ["/v1"]
+    assert [r.path for r in routes] == ["/inference/chat/v1"]
     assert routes[0].backend.service.name == "chat-proxy"
 
     # The shared transport ConfigMap landed before the roles.

@@ -263,6 +263,37 @@ class RegionalBucketManager:
             "files_uploaded": uploaded,
         }
 
+    def populate_kv_cache(
+        self,
+        local_path: str,
+        region: str,
+        endpoint_name: str,
+    ) -> dict[str, Any]:
+        """Upload data into an endpoint's Mooncake KV-cache cold tier.
+
+        Writes ``local_path`` to the region's general-purpose bucket under the
+        cold-tier key prefix the per-region monitor reads from for this endpoint
+        (``mooncake-kv/<endpoint_name>/``), so an endpoint deployed with the
+        cold tier enabled warm-starts its prefix cache from the uploaded
+        objects. Resolution and upload mechanics are exactly those of
+        :meth:`upload`; the returned mapping additionally carries the endpoint
+        name.
+
+        Args:
+            local_path: Local file or directory to upload.
+            region: Region whose general-purpose bucket backs the cold tier.
+            endpoint_name: The endpoint whose cold-tier prefix receives the data.
+
+        Returns:
+            The :meth:`upload` result with an added ``endpoint`` key.
+        """
+        from gco.stacks.constants import MOONCAKE_COLD_TIER_KEY_PREFIX
+
+        prefix = f"{MOONCAKE_COLD_TIER_KEY_PREFIX}/{endpoint_name}"
+        result = self.upload(local_path, region, prefix=prefix)
+        result["endpoint"] = endpoint_name
+        return result
+
 
 def get_model_manager(config: GCOConfig | None = None) -> ModelManager:
     """Factory function for ModelManager."""
