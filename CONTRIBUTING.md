@@ -404,7 +404,7 @@ For what to update alongside code changes, see the [Testing](#testing) and
 
 ### CI/CD Pipeline
 
-The project uses GitHub Actions for automated testing. Every push and pull request runs four primary workflows in parallel, plus three satellites on schedule or manual trigger.
+The project uses GitHub Actions for automated testing. Every push and pull request runs five primary workflows in parallel, plus three satellites on schedule or manual trigger.
 
 #### Primary workflows (run on every push + PR)
 
@@ -414,6 +414,7 @@ The project uses GitHub Actions for automated testing. Every push and pull reque
 | `.github/workflows/integration-tests.yml` | Integration Tests | Per-Dockerfile build + healthcheck, kind cluster E2E (with Calico for NetworkPolicy enforcement), K8s manifest schema, Lambda import validation, cross-module pytest, MCP server pytest |
 | `.github/workflows/security.yml` | Security | bandit, pip-audit, trivy (filesystem + per-image), trufflehog, gitleaks, semgrep, checkov, KICS |
 | `.github/workflows/lint.yml` | Linting | actionlint, hadolint, markdownlint, mypy (strict/stacks/lambda), ruff (format + check, imports included), shellcheck, yamllint |
+| `.github/workflows/mooncake-image.yml` | — (no badge) | Mooncake vLLM image contract: runs the real upstream image GCO defaults to (`cli/images.py::_DISAGGREGATED_DEFAULT_IMAGE`) and asserts the PD proxy starts under `python3` + serves `/healthz`, the rendered store config is accepted by the image's loader, and the connector names GCO emits are registered — so an image-version bump is validated by CI |
 
 Each workflow file has a comment header documenting triggers and per-job purpose — that is the single source of truth. Every job uses `category:tool:test_name` display names (e.g., `unit:pytest:core`, `security:trivy:container-scan`) and `category-tool-test_name` job IDs.
 

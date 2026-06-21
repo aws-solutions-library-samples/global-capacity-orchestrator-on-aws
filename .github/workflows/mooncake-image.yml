@@ -1,0 +1,83 @@
+# =============================================================================
+# mooncake-image.yml — Mooncake vLLM image contract test
+# =============================================================================
+#
+# Runs integration-style tests against the *actual* upstream image GCO
+# defaults Mooncake (disaggregated/store/both) deploys to — pinned in
+# cli/images.py::_DISAGGREGATED_DEFAULT_IMAGE. These catch the class of
+# regressions that only surface against the real image and bit us during live
+# testing, so an image-version bump is validated by CI rather than discovered
+# in production:
+#
+#   1. The prefill-decode proxy starts under the image's python3 and serves
+#      /healthz (the image ships python3 but no `python`; the bundled router
+#      must launch with python3, and fastapi/uvicorn/httpx must be present).
+#   2. The store config GCO renders is accepted by the image's
+#      MooncakeStoreConfig loader (embedded mode rejects global_segment_size=0).
+#   3. The connector names GCO emits (MooncakeConnector / MooncakeStoreConnector
+#      / MultiConnector) are registered in the image's KVConnectorFactory.
+#
+# We do NOT Trivy/CVE-scan this image: it is upstream and we can't patch it, so
+# vulnerability findings aren't actionable here. Version drift (a newer tag is
+# available) is surfaced by the monthly deps-scan workflow instead.
+#
+# Triggers: push:main, pull_request, workflow_dispatch.
+#
+# =============================================================================
+
+name: Mooncake Image Contract
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  mooncake-image-contract:
+    name: "integration:docker:mooncake-image"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Opt the suite in (it is skipped everywhere else, e.g. the unit job).
+      GCO_MOONCAKE_IMAGE_TEST: "1"
+    steps:
+      - uses: actions/checkout@v6
+      # The ~9GB vLLM image needs headroom on the runner's ~14GB root volume.
+      - uses: ./.github/actions/free-disk-space
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install project + inference-monitor + test extras
+        # render_mooncake_config / build_kv_transfer_config live in
+        # gco.services.inference_monitor, which imports the kubernetes client
+        # (the [inference-monitor] extra). [test] brings pytest.
+        run: pip install -e ".[inference-monitor,test]"
+      - name: Resolve + pull the Mooncake image (single source of truth)
+        # The version is read from cli.images so this job always validates the
+        # exact image GCO defaults to — bump the constant and CI re-validates.
+        run: |
+          set -euo pipefail
+          IMAGE="$(python3 -c 'from cli.images import _DISAGGREGATED_DEFAULT_IMAGE; print(_DISAGGREGATED_DEFAULT_IMAGE)')"
+          echo "Mooncake default image: $IMAGE"
+          docker pull "$IMAGE"
+      - name: Run image contract tests
+        run: |
+          pytest tests/test_mooncake_image_contract.py -m mooncake_image -v \
+            --junitxml=test-mooncake-image-report.xml
+      - name: Upload report
+        if: always()
+        uses: ./.github/actions/upload-artifact-with-retry
+        with:
+          name: mooncake-image-contract-report
+          path: test-mooncake-image-report.xml
+          retention-days: 7
