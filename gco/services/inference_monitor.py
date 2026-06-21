@@ -2911,7 +2911,7 @@ class InferenceMonitor:
         The proxy program (``mooncake_pd_proxy.py``) ships in this image
         alongside the monitor; its source is read here and mounted into the
         ``{name}-proxy`` pod, which runs it with ``python`` from
-        ``PD_PROXY_SCRIPT_PATH``. The ConfigMap is replaced on conflict so the
+        ``PD_PROXY_SCRIPT_PATH``. The ConfigMap is patched on conflict so the
         program tracks the running monitor build.
         """
         script = (Path(__file__).resolve().parent / PD_PROXY_SCRIPT_FILENAME).read_text(
@@ -2936,7 +2936,7 @@ class InferenceMonitor:
             logger.info("Created PD proxy ConfigMap %s/%s", ns, cm_name)
         except ApiException as e:
             if e.status == 409:
-                self.core_v1.replace_namespaced_config_map(
+                self.core_v1.patch_namespaced_config_map(
                     cm_name, ns, body, _request_timeout=self._k8s_timeout
                 )
                 logger.info("Updated PD proxy ConfigMap %s/%s", ns, cm_name)
