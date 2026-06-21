@@ -196,6 +196,15 @@ for name, cfg in (data or {}).get('charts', {}).items():
     find_images(cfg.get('values', {}))
 PY
 
+# Mooncake default image — pinned as a Python constant in cli/images.py
+# (_DISAGGREGATED_DEFAULT_IMAGE), so it is invisible to Dependabot (docker
+# ecosystem) and to the manifest/workflow sweeps above. Add it here so a newer
+# upstream vLLM release shows up in the monthly drift report — the cue to
+# validate and bump the pin.
+echo "Checking Mooncake default image (cli/images.py)..."
+MOONCAKE_IMAGE="$(extract_mooncake_default_image cli/images.py)"
+[ -n "$MOONCAKE_IMAGE" ] && echo "$MOONCAKE_IMAGE" >> "$ALL_IMAGES"
+
 sort -u "$ALL_IMAGES" | while read -r img; do
   [ -z "$img" ] && continue
   image="$(echo "$img" | cut -d':' -f1)"

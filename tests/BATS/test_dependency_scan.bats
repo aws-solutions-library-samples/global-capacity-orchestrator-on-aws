@@ -937,3 +937,45 @@ EOF
     [ "$got" = "$expected" ]
     rm -rf "$tmpdir"
 }
+
+# ── extract_mooncake_default_image ───────────────────────────────────────────
+
+@test "extract_mooncake_default_image: reads the pin from cli/images.py" {
+    run extract_mooncake_default_image "cli/images.py"
+    [ "$status" -eq 0 ]
+    # A single concrete repo:tag reference (e.g. vllm/vllm-openai:vX.Y.Z).
+    [[ "$output" =~ ^[^[:space:]:]+:[^[:space:]:]+$ ]]
+}
+
+@test "extract_mooncake_default_image: parses the constant from a fixture" {
+    run bash -c '
+        source .github/scripts/lib_dependency_scan.sh
+        tmpfile="$(mktemp)"
+        cat > "$tmpfile" <<EOF
+# comment line
+_DISAGGREGATED_DEFAULT_IMAGE = "vllm/vllm-openai:v9.9.9"
+EOF
+        extract_mooncake_default_image "$tmpfile"
+        rm -f "$tmpfile"
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "vllm/vllm-openai:v9.9.9" ]
+}
+
+@test "extract_mooncake_default_image: empty when constant absent" {
+    run bash -c '
+        source .github/scripts/lib_dependency_scan.sh
+        tmpfile="$(mktemp)"
+        echo "no image constant here" > "$tmpfile"
+        extract_mooncake_default_image "$tmpfile"
+        rm -f "$tmpfile"
+    '
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_mooncake_default_image: empty when file is missing" {
+    run extract_mooncake_default_image "/nonexistent/cli/images.py"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}

@@ -543,3 +543,32 @@ if candidates:
 " 2>/dev/null
 }
 
+
+# extract_mooncake_default_image [images_py_path]
+#
+# Prints the default upstream Mooncake vLLM image reference (``repo:tag``)
+# pinned in ``cli/images.py`` as ``_DISAGGREGATED_DEFAULT_IMAGE`` — the image
+# GCO's disaggregated/store/both inference deploys pull when the operator
+# passes no ``--image``.
+#
+# This image lives in a Python constant, not a Dockerfile ``FROM`` or a K8s
+# manifest, so neither Dependabot (docker ecosystem) nor the manifest/workflow
+# image sweep in dependency-scan.sh sees it. This extractor feeds it into the
+# Docker-image drift check so a newer vLLM release is surfaced in the monthly
+# report — the cue to validate and bump the pin (the ``mooncake-image``
+# workflow re-runs the image contract tests against the new tag).
+#
+# Prints nothing if the file or constant is absent — the caller treats an
+# empty result as "skip", same as the other extractors here.
+extract_mooncake_default_image() {
+  local file="${1:-cli/images.py}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+with open(sys.argv[1]) as f:
+    text = f.read()
+m = re.search(r'^_DISAGGREGATED_DEFAULT_IMAGE\s*=\s*\"([^\"]+)\"', text, re.MULTILINE)
+if m:
+    print(m.group(1))
+" "$file" 2>/dev/null
+}
