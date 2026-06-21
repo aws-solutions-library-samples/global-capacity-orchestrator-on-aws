@@ -31,6 +31,7 @@ import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from kubernetes import client, config
@@ -292,6 +293,18 @@ PD_PROXY_ADMIN_PATH = "/instances/add"
 # endpoint spec or passed as a command-line argument.
 PD_PROXY_ADMIN_API_KEY_ENV = "ADMIN_API_KEY"
 ADMIN_API_KEY_SECRET_DATA_KEY = "ADMIN_API_KEY"
+
+# The proxy program (gco/services/mooncake_pd_proxy.py) is shipped to the proxy
+# pod as a ConfigMap and run from this mount path. The prefill/decode backend
+# URLs and the listen port are passed to it through these env vars; it routes to
+# the role pods through their in-cluster Services so kube-proxy load-balances
+# across only the Ready endpoints of each role.
+PD_PROXY_SCRIPT_FILENAME = "mooncake_pd_proxy.py"
+PD_PROXY_CONFIG_MOUNT_DIR = "/etc/pd-proxy"
+PD_PROXY_SCRIPT_PATH = f"{PD_PROXY_CONFIG_MOUNT_DIR}/{PD_PROXY_SCRIPT_FILENAME}"
+PD_PROXY_PORT_ENV = "PD_PROXY_PORT"
+PD_PROXY_PREFILL_URL_ENV = "PD_PROXY_PREFILL_URL"
+PD_PROXY_DECODE_URL_ENV = "PD_PROXY_DECODE_URL"
 
 
 @dataclass
@@ -1354,6 +1367,13 @@ class InferenceMonitor:
         # Step 7: front-end. Disaggregated and both run behind the proxy; store
         # exposes its single Deployment directly.
         if mode in ("disaggregated", "both"):
+            # Per-role Services so the proxy can address prefill and decode by
+            # stable in-cluster DNS. Routing through a Service means kube-proxy
+            # load-balances across only the Ready pods of each role, which is
+            # what gives the proxy ready-only decode routing for free.
+            role_port = spec.get("port", 8000)
+            for role in desired_roles:
+                self._create_role_service(name, ns, role, role_port)
             try:
                 self._create_pd_proxy(name, ns, spec, endpoint)
             except AdminApiKeySecretError as e:
@@ -1525,17 +1545,13 @@ class InferenceMonitor:
 
         master_address = os.environ.get(MOONCAKE_MASTER_ADDRESS_ENV, "").strip()
 
-        # The store needs an own-region master. Without one, leave the endpoint
-        # untouched and surface the unresolved-master condition.
+        # The store needs an own-region master. It is a fixed in-cluster Service
+        # the monitor itself provisions per region (mooncake-master:50051), so
+        # when no override is set in the environment, default to that Service
+        # rather than deferring — the address is known by construction. An
+        # operator may still override it via MOONCAKE_MASTER_ADDRESS.
         if store_enabled and not master_address:
-            return RegionServicesResolution(
-                render_skipped=True,
-                store_master_unresolved=True,
-                error=(
-                    "shared store master address is not configured for region "
-                    f"{self.region}; deferring store configuration"
-                ),
-            )
+            master_address = f"{MOONCAKE_MASTER_SERVICE}:{MOONCAKE_MASTER_RPC_PORT}"
 
         region_services: dict[str, Any] = {
             "metadata_server": self._metadata_server_url(master_address),
@@ -2762,15 +2778,41 @@ class InferenceMonitor:
             "gco.io/role": PD_PROXY_ROLE_LABEL,
         }
 
+        # The proxy reaches prefill and decode through their per-role Services
+        # and listens on PD_PROXY_PORT for the public serving paths. Routing via
+        # the Services means only Ready role pods receive traffic.
+        port = spec.get("port", 8000)
+        container_env.extend(
+            [
+                client.V1EnvVar(name=PD_PROXY_PORT_ENV, value=str(PD_PROXY_PORT)),
+                client.V1EnvVar(
+                    name=PD_PROXY_PREFILL_URL_ENV, value=f"http://{name}-prefill:{port}"
+                ),
+                client.V1EnvVar(name=PD_PROXY_DECODE_URL_ENV, value=f"http://{name}-decode:{port}"),
+            ]
+        )
+
+        # Ship the proxy program to the pod as a ConfigMap and run it from there.
+        self._ensure_pd_proxy_configmap(name, ns)
+        proxy_volume_name = "pd-proxy-script"
+
         container = client.V1Container(
             name="proxy",
             image=proxy.get("image"),
+            command=["python", PD_PROXY_SCRIPT_PATH],
             ports=[client.V1ContainerPort(container_port=PD_PROXY_PORT)],
             env=container_env if container_env else None,
             resources=client.V1ResourceRequirements(
                 requests={"cpu": "250m", "memory": "256Mi"},
                 limits={"cpu": "1", "memory": "1Gi"},
             ),
+            volume_mounts=[
+                client.V1VolumeMount(
+                    name=proxy_volume_name,
+                    mount_path=PD_PROXY_CONFIG_MOUNT_DIR,
+                    read_only=True,
+                )
+            ],
             readiness_probe=client.V1Probe(
                 tcp_socket=client.V1TCPSocketAction(port=PD_PROXY_PORT),
                 initial_delay_seconds=10,
@@ -2798,6 +2840,15 @@ class InferenceMonitor:
                     spec=client.V1PodSpec(
                         service_account_name="gco-service-account",
                         containers=[container],
+                        volumes=[
+                            client.V1Volume(
+                                name=proxy_volume_name,
+                                config_map=client.V1ConfigMapVolumeSource(
+                                    name=f"{name}-pd-proxy",
+                                    default_mode=0o555,
+                                ),
+                            )
+                        ],
                     ),
                 ),
             ),
@@ -2816,6 +2867,81 @@ class InferenceMonitor:
 
         self._create_proxy_service(proxy_name, ns)
         self._update_proxy_ingress(name, proxy_name, ns, endpoint)
+
+    def _create_role_service(self, name: str, ns: str, role: str, port: int = 8000) -> None:
+        """Create the ClusterIP Service that fronts one role's pods.
+
+        Named ``{name}-{role}`` and selecting that role Deployment's app label,
+        so the PD proxy can address prefill or decode by stable in-cluster DNS.
+        Routing through a Service means kube-proxy load-balances across only the
+        role's Ready pods, which is what gives the proxy ready-only decode
+        routing without watching the Kubernetes API. Idempotent at the API
+        boundary: an already-present Service is left in place.
+        """
+        deploy_name = f"{name}-{role}"
+        service = client.V1Service(
+            metadata=client.V1ObjectMeta(
+                name=deploy_name,
+                namespace=ns,
+                labels={
+                    "app": deploy_name,
+                    "project": "gco",
+                    "gco.io/type": "inference",
+                    "gco.io/role": role,
+                },
+            ),
+            spec=client.V1ServiceSpec(
+                selector={"app": deploy_name},
+                ports=[client.V1ServicePort(port=port, target_port=port, protocol="TCP")],
+                type="ClusterIP",
+            ),
+        )
+        try:
+            self.core_v1.create_namespaced_service(ns, service, _request_timeout=self._k8s_timeout)
+            logger.info("Created role service %s/%s", ns, deploy_name)
+        except ApiException as e:
+            if e.status == 409:
+                logger.info("Role service %s/%s already exists", ns, deploy_name)
+            else:
+                raise
+
+    def _ensure_pd_proxy_configmap(self, name: str, ns: str) -> None:
+        """Publish the PD proxy program to the pod as a ConfigMap.
+
+        The proxy program (``mooncake_pd_proxy.py``) ships in this image
+        alongside the monitor; its source is read here and mounted into the
+        ``{name}-proxy`` pod, which runs it with ``python`` from
+        ``PD_PROXY_SCRIPT_PATH``. The ConfigMap is replaced on conflict so the
+        program tracks the running monitor build.
+        """
+        script = (Path(__file__).resolve().parent / PD_PROXY_SCRIPT_FILENAME).read_text(
+            encoding="utf-8"
+        )
+        cm_name = f"{name}-pd-proxy"
+        body = client.V1ConfigMap(
+            metadata=client.V1ObjectMeta(
+                name=cm_name,
+                namespace=ns,
+                labels={
+                    "app": f"{name}-proxy",
+                    "project": "gco",
+                    "gco.io/type": "inference",
+                    "gco.io/role": PD_PROXY_ROLE_LABEL,
+                },
+            ),
+            data={PD_PROXY_SCRIPT_FILENAME: script},
+        )
+        try:
+            self.core_v1.create_namespaced_config_map(ns, body, _request_timeout=self._k8s_timeout)
+            logger.info("Created PD proxy ConfigMap %s/%s", ns, cm_name)
+        except ApiException as e:
+            if e.status == 409:
+                self.core_v1.replace_namespaced_config_map(
+                    cm_name, ns, body, _request_timeout=self._k8s_timeout
+                )
+                logger.info("Updated PD proxy ConfigMap %s/%s", ns, cm_name)
+            else:
+                raise
 
     def _create_proxy_service(self, proxy_name: str, namespace: str) -> None:
         """Create the Service that fronts only the proxy pods.

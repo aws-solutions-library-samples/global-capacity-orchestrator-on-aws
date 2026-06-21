@@ -108,6 +108,7 @@ _FEATURES: tuple[_Feature, ...] = (
             _REPO_ROOT / "cli" / "models.py",
             _REPO_ROOT / "cli" / "images.py",
             _REPO_ROOT / "gco" / "services" / "inference_monitor.py",
+            _REPO_ROOT / "gco" / "services" / "mooncake_pd_proxy.py",
             _REPO_ROOT / "gco" / "services" / "inference_store.py",
             _REPO_ROOT / "gco" / "stacks" / "regional_stack.py",
             _REPO_ROOT / "mcp" / "tools" / "inference.py",

@@ -254,6 +254,7 @@ def test_admin_key_injected_only_by_secret_reference(monitor):
         PD_PROXY_ADMIN_API_KEY_ENV,
         PD_PROXY_ADMIN_PATH,
         PD_PROXY_PUBLIC_PATH_PREFIX,
+        PD_PROXY_SCRIPT_PATH,
     )
 
     # A real key value lives only in the Secret; it is never handed to the spec.
@@ -284,10 +285,13 @@ def test_admin_key_injected_only_by_secret_reference(monitor):
         if entry.value is not None:
             assert key_material not in entry.value
 
-    # The proxy is driven entirely by environment; no command argument exists
-    # to smuggle the key through.
+    # The proxy is launched by a fixed command (the bundled router script); the
+    # admin key arrives only by Secret reference and is never smuggled through a
+    # command-line argument.
     assert container.args is None
-    assert container.command is None
+    assert container.command == ["python", PD_PROXY_SCRIPT_PATH]
+    for token in container.command:
+        assert key_material not in token
 
     # The public Ingress still exposes only the endpoint-scoped serving prefix.
     ing_args, _ = monitor.networking_v1.create_namespaced_ingress.call_args

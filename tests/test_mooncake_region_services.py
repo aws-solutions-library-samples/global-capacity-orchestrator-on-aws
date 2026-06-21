@@ -12,9 +12,9 @@ single place that resolution happens:
   caller put in the spec.
 
 These examples pin own-region resolution, the spec URI being ignored, the
-deferral when no master address is configured, and the cold tier dropping out
-while the hot-path store keeps operating when the regional bucket is not
-resolvable yet.
+default to the in-region master Service when no override is configured, and the
+cold tier dropping out while the hot-path store keeps operating when the regional
+bucket is not resolvable yet.
 """
 
 from __future__ import annotations
@@ -117,40 +117,37 @@ def test_spec_supplied_cold_tier_uri_is_ignored(monitor, monkeypatch):
     assert "attacker-bucket" not in resolved_uri
 
 
-def test_store_without_master_address_defers_and_leaves_config_untouched(monitor, monkeypatch):
-    """An enabled store with no own-region master address defers rendering.
+def test_store_without_master_address_defaults_to_in_region_service(monitor, monkeypatch):
+    """An enabled store with no master-address override defaults to the Service.
 
-    Rendering is skipped, the unresolved-master condition is reported, and no
-    ``region_services`` dict is produced so the existing endpoint configuration
-    is left unchanged.
+    The shared master is a fixed in-cluster Service the monitor provisions per
+    region, so when ``MOONCAKE_MASTER_ADDRESS`` is unset the store resolves to
+    ``mooncake-master:50051`` rather than deferring.
     """
     monkeypatch.delenv("MOONCAKE_MASTER_ADDRESS", raising=False)
 
     mooncake = {"mode": "store", "store": {"enabled": True}}
 
-    # No bucket lookup should be needed; resolution short-circuits.
-    with patch("gco.services.aws_ssm.get_ssm_parameter_optional") as mock_ssm:
-        result = monitor._resolve_region_services("my-endpoint", mooncake)
+    result = monitor._resolve_region_services("my-endpoint", mooncake)
 
-    assert result.render_skipped is True
-    assert result.store_master_unresolved is True
-    assert result.region_services is None
-    assert result.error is not None
-    assert "us-east-1" in result.error
-    mock_ssm.assert_not_called()
+    assert result.render_skipped is False
+    assert result.store_master_unresolved is False
+    assert result.region_services is not None
+    assert result.region_services["master_server_address"] == "mooncake-master:50051"
+    assert result.region_services["metadata_server"] == "http://mooncake-master:8080/metadata"
 
 
-def test_blank_master_address_is_treated_as_unresolved(monitor, monkeypatch):
-    """A whitespace-only master address counts as no master address."""
+def test_blank_master_address_defaults_to_in_region_service(monitor, monkeypatch):
+    """A whitespace-only override is ignored in favour of the in-region Service."""
     monkeypatch.setenv("MOONCAKE_MASTER_ADDRESS", "   ")
 
     result = monitor._resolve_region_services(
         "my-endpoint", {"mode": "store", "store": {"enabled": True}}
     )
 
-    assert result.render_skipped is True
-    assert result.store_master_unresolved is True
-    assert result.region_services is None
+    assert result.render_skipped is False
+    assert result.store_master_unresolved is False
+    assert result.region_services["master_server_address"] == "mooncake-master:50051"
 
 
 def test_unresolved_bucket_drops_cold_tier_but_keeps_hot_store(monitor, monkeypatch):
