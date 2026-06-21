@@ -2643,12 +2643,16 @@ class InferenceMonitor:
             string_data={ADMIN_API_KEY_SECRET_DATA_KEY: secrets.token_hex(32)},
             type="Opaque",
         )
+        # The two logger.info calls below carry a bare `# nosemgrep`: the
+        # logger-credential-disclosure rule matches the literal word "Secret" in
+        # the message, but only the Secret's name and namespace (%s/%s) are
+        # logged here — never the generated key value set above in string_data.
         try:
             self.core_v1.create_namespaced_secret(ns, secret, _request_timeout=self._k8s_timeout)
-            logger.info("Provisioned proxy admin-key Secret %s/%s", ns, secret_name)
+            logger.info("Provisioned proxy admin-key Secret %s/%s", ns, secret_name)  # nosemgrep
         except ApiException as e:
             if e.status == 409:
-                logger.info("Proxy admin-key Secret %s/%s already exists", ns, secret_name)
+                logger.info("Proxy admin-key Secret %s/%s exists", ns, secret_name)  # nosemgrep
             else:
                 raise
         return secret_name

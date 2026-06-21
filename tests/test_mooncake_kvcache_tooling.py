@@ -251,7 +251,12 @@ class TestDeployFlagThreading:
             "target_regions": ["us-east-1"],
             "ingress_path": "/inference/pd",
         }
-        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+        mock_aws = MagicMock()
+        mock_aws.discover_regional_stacks.return_value = {"us-east-1": {}}
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_aws),
+        ):
             result = runner.invoke(
                 cli,
                 [
@@ -299,7 +304,12 @@ class TestDeployFlagThreading:
             "target_regions": ["us-east-1"],
             "ingress_path": "/inference/pd",
         }
-        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+        mock_aws = MagicMock()
+        mock_aws.discover_regional_stacks.return_value = {"us-east-1": {}}
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_aws),
+        ):
             result = runner.invoke(
                 cli,
                 ["inference", "deploy", "pd", "--mooncake-mode", "both", "-r", "us-east-1"],
