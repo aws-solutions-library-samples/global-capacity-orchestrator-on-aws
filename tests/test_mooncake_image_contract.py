@@ -45,13 +45,12 @@ Running these:
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import socket
 import subprocess
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 import pytest
@@ -220,12 +219,20 @@ def test_proxy_starts_and_serves_health(image: str) -> None:
                     "proxy container exited before serving /healthz "
                     f"(python3 launch failed?):\n{logs.stdout}\n{logs.stderr}"
                 )
+            # HTTP-only health probe (http.client, not urllib): the URL is a
+            # fixed localhost path on a locally-allocated port, and http.client
+            # can't be coerced into a file:// read the way urllib can.
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=5) as resp:
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                try:
+                    conn.request("GET", "/healthz")
+                    resp = conn.getresponse()
                     if resp.status == 200:
                         body = resp.read().decode()
                         break
-            except (urllib.error.URLError, ConnectionError, OSError) as exc:
+                finally:
+                    conn.close()
+            except (http.client.HTTPException, ConnectionError, OSError) as exc:
                 last_err = str(exc)
             time.sleep(2)
 
