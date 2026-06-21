@@ -289,7 +289,7 @@ def test_admin_key_injected_only_by_secret_reference(monitor):
     # admin key arrives only by Secret reference and is never smuggled through a
     # command-line argument.
     assert container.args is None
-    assert container.command == ["python", PD_PROXY_SCRIPT_PATH]
+    assert container.command == ["python3", PD_PROXY_SCRIPT_PATH]
     for token in container.command:
         assert key_material not in token
 

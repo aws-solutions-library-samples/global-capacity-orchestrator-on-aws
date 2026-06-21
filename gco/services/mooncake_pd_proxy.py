@@ -3,7 +3,7 @@
 This is the program the ``{name}-proxy`` pod runs. It is shipped to the pod as a
 ConfigMap (the monitor reads this file's own source and mounts it at
 ``/etc/pd-proxy/mooncake_pd_proxy.py``), and the proxy container runs it with
-``python /etc/pd-proxy/mooncake_pd_proxy.py``. It therefore must depend only on
+``python3 /etc/pd-proxy/mooncake_pd_proxy.py``. It therefore must depend only on
 what the upstream ``vllm/vllm-openai`` image already ships — ``fastapi``,
 ``uvicorn`` and ``httpx`` — and must not import anything from the ``gco``
 package.

@@ -216,7 +216,7 @@ def test_proxy_runs_the_router_script_against_role_services(monitor):
     dep_args, _ = monitor.apps_v1.create_namespaced_deployment.call_args
     pod_spec = dep_args[1].spec.template.spec
     container = pod_spec.containers[0]
-    assert container.command == ["python", PD_PROXY_SCRIPT_PATH]
+    assert container.command == ["python3", PD_PROXY_SCRIPT_PATH]
 
     env = {e.name: e.value for e in (container.env or []) if e.value is not None}
     assert env["PD_PROXY_PREFILL_URL"] == "http://ep-prefill:8000"

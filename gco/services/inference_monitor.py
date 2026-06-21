@@ -2799,7 +2799,7 @@ class InferenceMonitor:
         container = client.V1Container(
             name="proxy",
             image=proxy.get("image"),
-            command=["python", PD_PROXY_SCRIPT_PATH],
+            command=["python3", PD_PROXY_SCRIPT_PATH],
             ports=[client.V1ContainerPort(container_port=PD_PROXY_PORT)],
             env=container_env if container_env else None,
             resources=client.V1ResourceRequirements(
@@ -2910,7 +2910,7 @@ class InferenceMonitor:
 
         The proxy program (``mooncake_pd_proxy.py``) ships in this image
         alongside the monitor; its source is read here and mounted into the
-        ``{name}-proxy`` pod, which runs it with ``python`` from
+        ``{name}-proxy`` pod, which runs it with ``python3`` from
         ``PD_PROXY_SCRIPT_PATH``. The ConfigMap is patched on conflict so the
         program tracks the running monitor build.
         """
