@@ -84,3 +84,28 @@ CVE-2026-33814 exp:2026-09-22
 CVE-2026-39821 exp:2026-09-22
 CVE-2026-42502 exp:2026-09-22
 CVE-2026-42506 exp:2026-09-22
+
+# CVE-2026-53488, CVE-2026-53489, CVE-2026-53492 (github.com/containerd/containerd/v2
+# v2.2.4) and CVE-2026-34040 (github.com/docker/docker v28.5.2 — Moby authorization
+# bypass) — Go modules statically linked into the docker-buildx CLI plugin that
+# Dockerfile.dev installs (ARG BUILDX_VERSION). Surfaced by security:trivy:container-scan
+# on the GCO dev image — the only scanned image that carries the Buildx plugin. Fixed
+# in containerd 2.2.5 / 2.3.2 and docker/docker 29.3.1.
+#
+# Not yet clearable by a pin bump: v0.35.0 is the latest buildx release and even buildx
+# master still pins containerd v2.2.4 and docker/docker v28.5.2, so no released or
+# pre-release buildx carries the fixed modules yet.
+#
+# Low runtime risk: buildx is a build-time CLI plugin, not a running containerd or moby
+# daemon, so the containerd runtime CVEs and the Moby daemon authorization-bypass CVE are
+# off the path buildx exercises (registry-to-registry image copy and BuildKit builds).
+# The dev image is a contributor/CI tool that is never deployed to a cluster.
+#
+# Clears when a buildx release ships rebuilt against containerd >= 2.2.5 and docker/docker
+# >= 29.3.1: bump BUILDX_VERSION in Dockerfile.dev (the monthly deps-scan now tracks it)
+# and drop these entries. Advisory: https://avd.aquasec.com/nvd/cve-2026-53488 (and the
+# matching nvd/cve-2026-XXXXX page for each ID above).
+CVE-2026-53488 exp:2026-09-22
+CVE-2026-53489 exp:2026-09-22
+CVE-2026-53492 exp:2026-09-22
+CVE-2026-34040 exp:2026-09-22
