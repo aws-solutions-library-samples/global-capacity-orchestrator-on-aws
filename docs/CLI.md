@@ -1099,6 +1099,34 @@ gco stacks aurora enable --min-acu 2 --max-acu 32 --deletion-protection -y
 gco stacks aurora disable -y
 ```
 
+#### `gco stacks addons`
+
+Inspect and re-converge cluster add-ons (Helm charts). Add-on installation is decoupled from the CloudFormation rollback path, so a chart that fails to install never rolls back the cluster.
+
+```bash
+gco stacks addons COMMAND [OPTIONS]
+```
+
+**Subcommands:**
+
+- `status` - Show per-chart add-on install status (read from SSM)
+- `install` - Re-run the Helm add-on installer (idempotent; never rolls back the cluster)
+
+**Options (both subcommands):**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | AWS region (default: first deployment region) |
+| `--all-regions` | `-A` | Apply across all deployment regions |
+
+**Example:**
+
+```bash
+gco stacks addons status
+gco stacks addons status --all-regions
+gco stacks addons install -r us-west-2
+```
+
 #### `gco stacks synth`
 
 Synthesize CloudFormation templates without deploying.
@@ -2567,6 +2595,31 @@ gco images lifecycle COMMAND [OPTIONS]
 ```bash
 gco images lifecycle get my-app
 gco images lifecycle set my-app --file lifecycle.json
+```
+
+#### `gco images mirror`
+
+Mirror third-party images (e.g. the Volcano `docker.io` images) into the project ECR. This is the same multi-arch copy `gco stacks deploy` runs automatically when `volcano_image_mirror.enabled` is set; run it directly to pre-seed a region before enabling the toggle, or to re-mirror after bumping a mirrored image version. Wraps the shared `cli._image_mirror` core (also used by the `images_mirror` MCP tool).
+
+```bash
+gco images mirror [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | Target AWS region; must match the regional stack (required) |
+| `--ecr-namespace` | | Destination ECR namespace (default: cdk.json `volcano_image_mirror.ecr_namespace`) |
+| `--no-skip-existing` | | Re-copy images even if the tag already exists in ECR |
+| `--dry-run` | | Print the copy plan without creating repos or copying images |
+
+**Example:**
+
+```bash
+gco images mirror --region us-east-1
+gco images mirror --region us-east-1 --dry-run
+gco images mirror --region us-east-1 --ecr-namespace gco/dockerhub
 ```
 
 #### `gco images replication`

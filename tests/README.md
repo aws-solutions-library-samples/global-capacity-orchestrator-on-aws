@@ -432,6 +432,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_doc_hygiene.py` | Per-feature companion to `test_no_spec_references.py` for the *aggressive* spec-breadcrumb patterns (requirement IDs like `R12.6`, bare `Property N`, `Requirement N`, `task N`, `Validates:`, planning-doc filenames, and "the design" / "the spec" prose) that would false-positive if run repo-wide. One parametrized case per spec-driven feature (currently `mission-metric-reader-tools`, `mission-allow-all-tools`, `mission-semantic-progress-judge`), each scanning only that feature's explicit source files and its own `tests/test_<feature>_*.py` modules; documentation, examples, and a feature's functional flag names / `[gated by ...]` prefixes are out of scope. Adding a feature means appending one `_Feature` row, not a new test file. |
 | `test_pip_audit_ignore_validator.py` | Pins the contract of `.github/scripts/check_pip_audit_ignore.py`, which gates the pip-audit job in `.github/workflows/security.yml`. Every entry in `.pip-audit-ignore` must carry an `exp:YYYY-MM-DD` marker; the validator fails the workflow when any entry is on-or-before today (inclusive — no bonus day) or is missing the marker entirely. Tests cover happy paths (single, multi, blank-line / comment skipping, missing-file-is-clean), expired-date detection (past dates, equal-to-today, ±1 day boundary), missing or malformed markers, `main()` exit codes / stdout, and a live-file check that runs the committed suppression file through the validator with today's date. |
 | `test_ci_config_paths.py` | Guards CI config against stale path references left by a package rename (the `mcp` to `gco_mcp` move broke the CodeQL autobuilder with FileNotFoundError). Asserts every `paths:` entry in `.github/codeql/codeql-config.yml` is a real directory, every `--cov=<pkg>` target across `.github/workflows/*.yml` and `.gitlab-ci.yml` resolves to an existing top-level directory, and every `[tool.coverage.run] source` dir in `pyproject.toml` exists. Catches the silent failure mode where a renamed package leaves coverage recording nothing and CodeQL crashing at scan time. |
+| `test_docs_coverage.py` | Documentation-coverage guard with three cases: every `tests/test_*.py` module appears in `tests/README.md`; every `gco` Click command (the full command tree, walked recursively) is documented in `docs/CLI.md` (matched as a `gco <command>` entry); and every registered MCP tool — enumerated in a subprocess with `GCO_ENABLE_ALL_TOOLS` so the full catalog is visible — appears in `gco_mcp/tools/README.md`. Each case fails with the list of undocumented items so the fix is to add the missing described entry. |
 
 ### Infrastructure Tests
 
@@ -449,6 +450,121 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `_cdk_config_matrix.py` | The canonical list of `cdk.json` configuration overlays (default, multi-region, feature toggles, thresholds, helm matrix, analytics fixtures). Imported by both `tests/test_cdk_synthesis_matrix.py` and `tests/test_nag_compliance.py` so the two iterate over the same set. See the [CDK Configuration Matrix](#cdk-stack-tests) section. |
 | `_cdk_nag_logger.py` | `CapturingCdkNagLogger` — a custom `INagLogger` implementation that routes every cdk-nag finding into a Python list instead of CDK's annotation system. Used by `test_nag_compliance.py` and `scripts/dump_nag_findings.py` to assert on findings programmatically. |
 | `__init__.py` | Package initialization |
+
+> The category tables above are curated by area. The tables below complete the per-file index so that **every** test module in this directory is documented; new clusters get their own subsection and everything else is listed alphabetically under Additional Tests.
+
+### Mooncake / Disaggregated Inference Tests
+
+| File | Description |
+|------|-------------|
+| `test_mooncake_autoscale_cli.py` | The deploy command routes per-role autoscaling into the mooncake block. |
+| `test_mooncake_autoscaling_bounds.py` | Per-role autoscaler bounds and the static replica fallback. |
+| `test_mooncake_backward_compat.py` | Endpoints without a ``mooncake`` block keep their classic single-instance shape. |
+| `test_mooncake_bootstrap_port.py` | Bootstrap-port assignment for KV-transfer workers is collision-free. |
+| `test_mooncake_cli_mcp_surface.py` | Tests for the disaggregated-serving CLI and MCP surface. |
+| `test_mooncake_config_rendering.py` | Connector chaining and runtime config rendering for mooncake endpoints. |
+| `test_mooncake_connector_config.py` | KV connector configuration emitted for each worker role. |
+| `test_mooncake_e2e.py` | End-to-end reconciliation of a distributed inference endpoint. |
+| `test_mooncake_efa_scheduling.py` | EFA fabric placement for RDMA KV-transfer role pods. |
+| `test_mooncake_image_contract.py` | Contract tests that exercise the *actual* Mooncake vLLM image. |
+| `test_mooncake_kvcache_tooling.py` | KV-cache tooling and split-serving deployability for Mooncake endpoints. |
+| `test_mooncake_master_idempotency.py` | Idempotent maintenance of the shared per-region Mooncake master. |
+| `test_mooncake_master_image.py` | Default image wiring for the shared per-region Mooncake master. |
+| `test_mooncake_master_readiness_gating.py` | Gating dependent role-pod creation on the shared master's readiness. |
+| `test_mooncake_mode_role.py` | Which worker Deployments a reconcile materializes for each serving mode. |
+| `test_mooncake_multi_region_scope.py` | Region-boundary checks for disaggregated mooncake topologies. |
+| `test_mooncake_nodepool_manifest.py` | Dedicated Mooncake EFA NodePool: only GPUs that can serve KV-transfer. |
+| `test_mooncake_pd_proxy_program.py` | Request-shaping contract of the Mooncake PD proxy program. |
+| `test_mooncake_pd_proxy_routing.py` | Front-door routing for disaggregated prefill-decode endpoints. |
+| `test_mooncake_region_services.py` | In-region service resolution for mooncake endpoints. |
+| `test_mooncake_regional_bucket_provisioning.py` | Property-based test — the general-purpose regional bucket is always-on. |
+| `test_mooncake_regional_bucket_synthesis.py` | Synthesis checks for the always-on general-purpose regional bucket. |
+| `test_mooncake_regional_bucket_targeting.py` | Property-based test — a regional upload only ever touches its own region. |
+| `test_mooncake_regional_scope.py` | Regional confinement of disaggregated KV-transfer wiring. |
+| `test_mooncake_regional_upload.py` | Tests for ``RegionalBucketManager`` bucket resolution and upload error paths. |
+| `test_mooncake_security.py` | Access-control guarantees for disaggregated inference. |
+| `test_mooncake_serialization.py` | Round-trip behavior of a ``mooncake`` endpoint-spec block through the store. |
+| `test_mooncake_spec.py` | Tests for the Mooncake endpoint-spec shape, constants, and byte-size helper. |
+| `test_mooncake_spec_validation.py` | Fail-fast validation of a ``mooncake`` endpoint-spec block. |
+| `test_mooncake_topology_fidelity.py` | Materialized role replica counts mirror the requested topology. |
+
+### Metric Reader Tests
+
+| File | Description |
+|------|-------------|
+| `test_metric_readers_aggregate.py` | Tests for the sequence reducer that collapses history to one number. |
+| `test_metric_readers_cloudwatch.py` | Tests for the CloudWatch datapoint reader. |
+| `test_metric_readers_files.py` | Round-trip tests for the file-format metric reader. |
+| `test_metric_readers_localfs.py` | Tests for confining a supplied path to an allowlisted root directory. |
+| `test_metric_readers_logs.py` | Tests for pulling a scalar out of a job's log lines. |
+| `test_metric_readers_observe.py` | Observe_Phase merge-contract integration test. |
+| `test_metric_readers_shape.py` | Tests for the canonical metric-result builder. |
+| `test_metric_readers_tools.py` | Success-path tests for the metric-reader MCP tool wrappers. |
+
+### Additional Mission Tests
+
+| File | Description |
+|------|-------------|
+| `test_mission_allow_all_tools_cli.py` | CLI tests for the ``--allow-all-tools`` flag on ``gco mission``. |
+| `test_mission_allow_all_tools_integration.py` | Integration checks that an all-tools-resolved session behaves like an explicit one. |
+| `test_mission_allow_all_tools_mcp.py` | MCP-tool tests for the ``mission_start`` all-tools resolution path. |
+| `test_mission_allow_all_tools_validation.py` | Property-based checks for the Mission all-tools allowlist resolver. |
+| `test_mission_metric_trend.py` | Tests for the cumulative-metrics view and the ``metric_trend`` criterion. |
+
+### Additional Tests
+
+| File | Description |
+|------|-------------|
+| `test_addons_cli.py` | Tests for ``gco stacks addons`` (status / install) and the ``--all-regions`` flag. |
+| `test_analytics_cleanup_lambda.py` | Tests for the analytics-cleanup Lambda (lambda/analytics-cleanup/handler.py). |
+| `test_api_shared.py` | Tests for shared API helpers in gco/services/api_shared.py. |
+| `test_bug_fixes.py` | Regression tests for a handful of bug fixes across the GCO codebase. |
+| `test_canary.py` | Tests for A/B (canary) inference endpoint deployments. |
+| `test_capacity.py` | Tests for cli/capacity/ — the GPU capacity checker and recommender. |
+| `test_capacity_cmd_coverage.py` | Tests for the capacity CLI subcommands in cli/commands/capacity_cmd.py. |
+| `test_capacity_reservations.py` | Tests for On-Demand Capacity Reservations and EC2 Capacity Blocks. |
+| `test_cli_config.py` | Tests for cli/config.py. |
+| `test_cli_inference_models.py` | Tests for the inference and models CLI subgroups in cli/main.py. |
+| `test_cloudwatch_logs_fallback.py` | Tests for JobManager.get_job_logs CloudWatch Logs fallback. |
+| `test_costs.py` | Tests for the cost-visibility feature in cli/costs.py. |
+| `test_costs_cmd_extended.py` | Extended tests for cli/commands/costs_cmd.py. |
+| `test_cross_region_aggregator_extended.py` | Extended coverage tests for the cross-region aggregator Lambda. |
+| `test_dag.py` | Tests for the job-DAG pipeline feature in cli/dag.py. |
+| `test_drift_detection.py` | Tests for the CloudFormation drift-detection resources on the regional stack. |
+| `test_ga_registration.py` | Tests for the Global Accelerator registration Lambda (lambda/ga-registration/handler.py). |
+| `test_health_check_coverage.py` | Consistency tests between ALB Ingress health-check paths and the auth middleware allowlist. |
+| `test_helm_orchestrator_handler.py` | Unit tests for the helm-orchestrator custom-resource provider handler. |
+| `test_inference_gpu_autoscaling.py` | GPU-aware autoscaling routes through a KEDA ScaledObject. |
+| `test_inference_manager_extended.py` | Extended tests for cli/inference.InferenceManager. |
+| `test_inference_store.py` | Tests for gco/services/inference_store.InferenceEndpointStore. |
+| `test_jobs_dag_extended.py` | Extended tests for cli/jobs.py and cli/dag.py. |
+| `test_kubectl_applier.py` | Tests for the kubectl-applier Lambda (lambda/kubectl-applier-simple/handler.py). |
+| `test_kubectl_helpers.py` | Tests for cli/kubectl_helpers.update_kubeconfig. |
+| `test_kubectl_helpers_extended.py` | Extended tests for cli/kubectl_helpers.update_kubeconfig. |
+| `test_lambda_handlers.py` | Tests for the secret-rotation and alb-header-validator Lambda handlers. |
+| `test_lambda_handlers_extended.py` | Extended tests for secret-rotation and alb-header-validator Lambdas. |
+| `test_lambda_proxy.py` | Tests for the Lambda proxy handlers and shared proxy_utils. |
+| `test_manifest_property.py` | Property-based tests for manifest validation and YAML parsing. |
+| `test_mcp_iam_role.py` | CDK assertion tests for the dedicated MCP server IAM role on the regional stack. |
+| `test_mcp_self_resources.py` | Tests for the self-indexing MCP resources (``mcp://gco/...``). |
+| `test_mcp_task_tools.py` | Tests for the read-only MCP observability tools (``task_status`` and ``task_tail``) and the matching ``gco tasks`` CLI surface. |
+| `test_model_bucket_access_logs.py` | Tests for S3 server access logging on the model weights bucket. |
+| `test_models_cli.py` | Tests for cli/models.ModelManager — S3 model weight management. |
+| `test_network_policies_manifest.py` | Tests for the NetworkPolicy manifest at lambda/kubectl-applier-simple/manifests/03-network-policies.yaml. |
+| `test_nodepools_extended.py` | Extended tests for cli/nodepools.py. |
+| `test_proxy_utils_extended.py` | Extended tests for lambda/proxy-shared/proxy_utils.py. |
+| `test_python_base_image_consistency.py` | Python base-image pins stay consistent across services and CI. |
+| `test_regional_api_gateway_stack.py` | Tests for gco/stacks/regional_api_gateway_stack.GCORegionalApiGatewayStack. |
+| `test_request_size_limit.py` | Tests for the RequestSizeLimitMiddleware on the Manifest API. |
+| `test_resource_quota_config.py` | End-to-end tests that cdk.json resource quota values flow into the Kubernetes manifests applied on the cluster. |
+| `test_resource_quota_manifest.py` | Tests for the ResourceQuota + LimitRange manifest (lambda/kubectl-applier-simple/manifests/06-resource-quotas.yaml). |
+| `test_stacks_access.py` | Tests for `gco stacks access` — the kubectl bootstrap command in cli/commands/stacks_cmd.py. |
+| `test_stacks_ordering_fsx.py` | Tests for stack ordering helpers and FSx configuration in cli/stacks.py. |
+| `test_task_status.py` | Tests for the disk-backed task status writer. |
+| `test_trusted_registries_augmentation.py` | Tests for ``_augment_trusted_registries_with_project_ecr``. |
+| `test_waf_rate_limit.py` | Tests for the WAF PerIPRateLimit rule on GCOApiGatewayGlobalStack. |
+| `test_webhook_dispatcher.py` | Tests for gco/services/webhook_dispatcher.WebhookDispatcher. |
+| `test_yaml_parsing_limits.py` | Tests for YAML parsing limits on the manifest processor. |
 
 ## Writing New Tests
 
@@ -481,14 +597,12 @@ Brief description of what this test file covers.
 from unittest.mock import MagicMock, patch, AsyncMock
 import pytest
 
-
 @pytest.fixture
 def mock_dependency():
     """Fixture description."""
     mock = MagicMock()
     mock.some_method.return_value = "expected_value"
     return mock
-
 
 class TestFeatureName:
     """Tests for [feature name]."""
@@ -521,7 +635,6 @@ When testing FastAPI endpoints, you need to mock both the factory functions AND 
 ```python
 from unittest.mock import MagicMock, patch, AsyncMock
 from fastapi.testclient import TestClient
-
 
 def test_api_endpoint(mock_manifest_processor):
     """Test an API endpoint with proper mocking."""
