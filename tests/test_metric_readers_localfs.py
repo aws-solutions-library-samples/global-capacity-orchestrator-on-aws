@@ -30,10 +30,10 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-# ``mcp/run_mcp.py`` puts ``mcp/`` on ``sys.path`` at runtime; mirror that
+# ``gco_mcp/run_mcp.py`` puts ``gco_mcp/`` on ``sys.path`` at runtime; mirror that
 # here so the pure ``metric_readers`` package imports the same way it does
 # in production, matching the convention used by the sibling tests.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from metric_readers.localfs import resolve_within_root  # noqa: E402
 from metric_readers.shape import ErrorCode, MetricReaderError  # noqa: E402
@@ -170,7 +170,7 @@ def test_empty_root_always_reports_not_configured(
 #
 # The property tests above pin down the *pure* helper. These integration tests
 # drive confinement through the gated reader tool itself —
-# ``mcp/tools/metrics.py::metrics_from_local_file`` — which reads
+# ``gco_mcp/tools/metrics.py::metrics_from_local_file`` — which reads
 # ``GCO_METRICS_LOCAL_ROOT`` from ``os.environ`` once at the boundary and calls
 # ``localfs.resolve_within_root``. Because the tool is defined inside an
 # ``if is_enabled("GCO_ENABLE_LOCAL_METRICS")`` block, it only exists after the
@@ -193,7 +193,7 @@ def _local_file_tool(local_root: str | None) -> Iterator:
     mirroring the cleanup the destructive-gating tests use — so this gated
     registration never leaks into a sibling test's tool-registry snapshot.
     """
-    # ``tools.metrics`` injects ``mcp/`` onto sys.path at import time, but the
+    # ``tools.metrics`` injects ``gco_mcp/`` onto sys.path at import time, but the
     # property tests above already put it there; importing run-time deps below
     # resolves against that same entry.
     import os

@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "mcp"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gco_mcp"))
 
 from tools._task_status import (  # noqa: E402  (sys.path append above)
     TaskStatusWriter,

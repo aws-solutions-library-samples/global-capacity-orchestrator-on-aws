@@ -41,7 +41,7 @@ The container itself ships Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, and e
 
 **Host development path additionally needs:**
 
-- Python 3.14+ (required for the un-parenthesized except-tuple syntax in `mcp/resources/config.py`)
+- Python 3.14+ (required for the un-parenthesized except-tuple syntax in `gco_mcp/resources/config.py`)
 - Node.js 24+ (for CDK)
 - kubectl
 - A clean virtualenv (or pipx) for the GCO Python deps — see the warning under [Local Development Environment (Advanced)](#local-development-environment-advanced).
@@ -385,9 +385,9 @@ Run all three from your dev-container shell (the recommended path — see
 [Using the Dev Container (Recommended)](#using-the-dev-container-recommended)):
 
 ```bash
-ruff format --check gco/ cli/ mcp/ tests/ lambda/ scripts/ diagrams/
-ruff check gco/ cli/ mcp/ tests/ lambda/ scripts/ diagrams/
-mypy gco/ cli/ mcp/ scripts/ --exclude 'gco/stacks/'
+ruff format --check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
+ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
+mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
 pytest tests/ --cov=gco --cov=cli --cov=mcp --cov-fail-under=90
 ```
 
@@ -445,8 +445,8 @@ You can simulate the CI pipeline locally:
 pip install -e ".[dev]"
 
 # Run linters (matches lint.yml jobs)
-ruff format --check gco/ cli/ mcp/ tests/ lambda/ scripts/ diagrams/
-ruff check gco/ cli/ mcp/ tests/ lambda/ scripts/ diagrams/
+ruff format --check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
+ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 yamllint --strict .
 
 # Run markdownlint (requires Node; no Python install needed).
@@ -454,7 +454,7 @@ yamllint --strict .
 npx markdownlint-cli2
 
 # Run type checks (everything except stacks — fast, no CDK needed)
-mypy gco/ cli/ mcp/ scripts/ --exclude 'gco/stacks/'
+mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
 
 # Run type checks on stacks (requires CDK)
 pip install -e ".[cdk,typecheck]"

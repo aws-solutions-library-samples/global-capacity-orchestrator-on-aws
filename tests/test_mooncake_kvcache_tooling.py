@@ -34,8 +34,8 @@ from cli.inference import InferenceManager
 from cli.main import cli
 from cli.models import RegionalBucketManager
 
-# Ensure mcp/ is importable, then load the server so every tool is registered.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable, then load the server so every tool is registered.
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp  # noqa: E402  (import for path/registration side effects)
 from tools.inference import populate_kv_cache  # noqa: E402

@@ -3,27 +3,27 @@ Extended unit coverage for the MCP server modules.
 
 Targets the uncovered branches in:
 
-* ``mcp/iam.py`` — role assumption with ``GCO_MCP_ROLE_ARN`` set,
+* ``gco_mcp/iam.py`` — role assumption with ``GCO_MCP_ROLE_ARN`` set,
   failure paths, and the no-op path when the env var is unset.
-* ``mcp/resources/tasks.py`` — task-id validation, the ``get_task``
+* ``gco_mcp/resources/tasks.py`` — task-id validation, the ``get_task``
   accessor, the docket fallback chain, and the ``_coerce_to_dict``
   helper.
-* ``mcp/resources/cluster.py`` — region validation, the kubectl
+* ``gco_mcp/resources/cluster.py`` — region validation, the kubectl
   invocation success/failure/timeout branches, and the JSON parse
   failure branch.
-* ``mcp/resources/k8s.py`` — name/kind/namespace validation, kubectl
+* ``gco_mcp/resources/k8s.py`` — name/kind/namespace validation, kubectl
   success/failure/timeout/missing-binary branches.
-* ``mcp/resources/iam_policies.py`` — index emission and missing-file
+* ``gco_mcp/resources/iam_policies.py`` — index emission and missing-file
   fallback.
-* ``mcp/resources/ci.py`` — index emission against the live ``.github``
+* ``gco_mcp/resources/ci.py`` — index emission against the live ``.github``
   tree and the per-resource read paths (workflows, actions, scripts,
   templates, codeql, kind, config) including their not-found branches.
-* ``mcp/tools/docs.py`` — query-only and topic-only branches.
-* ``mcp/tools/images.py`` — every read-only and administrative tool
+* ``gco_mcp/tools/docs.py`` — query-only and topic-only branches.
+* ``gco_mcp/tools/images.py`` — every read-only and administrative tool
   body, including the lazy ``_get_manager`` indirection.
-* ``mcp/audit_middleware.py`` — capture-buffer activation and the
+* ``gco_mcp/audit_middleware.py`` — capture-buffer activation and the
   reset-on-exception path.
-* ``mcp/cli_runner.py`` — error stub when the CLI exits non-zero.
+* ``gco_mcp/cli_runner.py`` — error stub when the CLI exits non-zero.
 """
 
 from __future__ import annotations
@@ -37,9 +37,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Ensure ``mcp/`` is on the path so internal modules import without
+# Ensure ``gco_mcp/`` is on the path so internal modules import without
 # the ``mcp.`` prefix that fastmcp's PyPI namespace would shadow.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp  # noqa: E402, F401  -- side-effect registers tools/resources
 
@@ -58,7 +58,7 @@ def _read_resource(uri: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# mcp/iam.py
+# gco_mcp/iam.py
 # ---------------------------------------------------------------------------
 
 
@@ -156,7 +156,7 @@ class TestIam:
 
 
 # ---------------------------------------------------------------------------
-# mcp/resources/tasks.py
+# gco_mcp/resources/tasks.py
 # ---------------------------------------------------------------------------
 
 
@@ -246,7 +246,7 @@ class TestTaskResource:
 
 
 # ---------------------------------------------------------------------------
-# mcp/resources/cluster.py — gco://cluster/{region}/topology
+# gco_mcp/resources/cluster.py — gco://cluster/{region}/topology
 # ---------------------------------------------------------------------------
 
 
@@ -367,7 +367,7 @@ class TestClusterTopology:
 
 
 # ---------------------------------------------------------------------------
-# mcp/resources/k8s.py — gco://k8s/{namespace}/{kind}/{name}
+# gco_mcp/resources/k8s.py — gco://k8s/{namespace}/{kind}/{name}
 # ---------------------------------------------------------------------------
 
 
@@ -464,7 +464,7 @@ class TestK8sManifestStaticResource:
 
 
 # ---------------------------------------------------------------------------
-# mcp/resources/iam_policies.py
+# gco_mcp/resources/iam_policies.py
 # ---------------------------------------------------------------------------
 
 
@@ -481,7 +481,7 @@ class TestIamPolicies:
 
 
 # ---------------------------------------------------------------------------
-# mcp/resources/ci.py
+# gco_mcp/resources/ci.py
 # ---------------------------------------------------------------------------
 
 
@@ -540,7 +540,7 @@ class TestCiIndex:
 
 
 # ---------------------------------------------------------------------------
-# mcp/tools/docs.py — find_docs branch coverage
+# gco_mcp/tools/docs.py — find_docs branch coverage
 # ---------------------------------------------------------------------------
 
 
@@ -574,7 +574,7 @@ class TestFindDocsBranches:
 
 
 # ---------------------------------------------------------------------------
-# mcp/tools/images.py — read-only and admin tool bodies
+# gco_mcp/tools/images.py — read-only and admin tool bodies
 # ---------------------------------------------------------------------------
 
 
@@ -683,7 +683,7 @@ class TestImagesTools:
 
 
 # ---------------------------------------------------------------------------
-# mcp/audit_middleware.py — capture activation around tool calls
+# gco_mcp/audit_middleware.py — capture activation around tool calls
 # ---------------------------------------------------------------------------
 
 
@@ -730,7 +730,7 @@ class TestAuditCaptureMiddleware:
 
 
 # ---------------------------------------------------------------------------
-# mcp/cli_runner.py — error stub when subprocess fails
+# gco_mcp/cli_runner.py — error stub when subprocess fails
 # ---------------------------------------------------------------------------
 
 
@@ -842,7 +842,7 @@ class TestImagesCtxWarning:
 
 
 # ---------------------------------------------------------------------------
-# mcp/resources/tasks.py — fallback chain branches
+# gco_mcp/resources/tasks.py — fallback chain branches
 # ---------------------------------------------------------------------------
 #
 # The earlier ``TestTasksResource`` class covers the happy ``get_task``
@@ -982,12 +982,12 @@ class TestTasksResourceFallbacks:
 
 
 # ---------------------------------------------------------------------------
-# mcp/resources/docs.py — by-category, by-use-case, by-topic, by-related
+# gco_mcp/resources/docs.py — by-category, by-use-case, by-topic, by-related
 # ---------------------------------------------------------------------------
 
 
 class TestDocsCategoryAndUseCaseResources:
-    """Per-bucket resource handlers in ``mcp/resources/docs.py``."""
+    """Per-bucket resource handlers in ``gco_mcp/resources/docs.py``."""
 
     def test_examples_by_category_lists_matches(self) -> None:
         # ``Jobs & Training`` is the largest bucket — matches case-insensitive.

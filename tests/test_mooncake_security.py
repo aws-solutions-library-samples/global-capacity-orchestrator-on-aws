@@ -40,7 +40,7 @@ import pytest
 from kubernetes.client.rest import ApiException
 
 # Mirror the other MCP test modules so the tool surface is importable.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 
 def _make_monitor(region: str = "us-east-1"):

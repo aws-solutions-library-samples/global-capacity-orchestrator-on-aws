@@ -59,7 +59,7 @@ Entries below are grouped by top-level directory and listed in source
 order. Each source file may contribute more than one flowchart if it
 has multiple charted entry points.
 
-### `mcp/`
+### `gco_mcp/`
 
-- **`mcp/mission/`**
-  - Mission engine factory (live vs stub dispatcher, sampling, sandbox wiring) &mdash; `mcp/mission/_engine_factory.py::build_engine_dependencies` &mdash; [HTML](./mcp/mission/_engine_factory.build_engine_dependencies.html) · [PNG](./mcp/mission/_engine_factory.build_engine_dependencies.png)
+- **`gco_mcp/mission/`**
+  - Mission engine factory (live vs stub dispatcher, sampling, sandbox wiring) &mdash; `gco_mcp/mission/_engine_factory.py::build_engine_dependencies` &mdash; [HTML](./gco_mcp/mission/_engine_factory.build_engine_dependencies.html) · [PNG](./gco_mcp/mission/_engine_factory.build_engine_dependencies.png)

@@ -24,7 +24,7 @@ config from disk (Advanced Setup).
 
 Only hand-authored Python runtime code:
 
-- `gco/`, `cli/`, `mcp/`, `lambda/`, `scripts/`
+- `gco/`, `cli/`, `gco_mcp/`, `lambda/`, `scripts/`
 
 Excluded: `cdk.out/`, `lambda/*-build/` staging dirs, caches, tests, demo
 scripts. The top-level `app.py` (CDK composition entry point) is out of

@@ -2,7 +2,7 @@
 
 Get GCO (Global Capacity Orchestrator on AWS) running in under 60 minutes.
 
-> **💡 Tip:** GCO includes an [MCP server](mcp/) you can connect to an agent for guided exploration. Ask questions like *"What do I need to deploy?"* or *"Explain the architecture"* and the agent will pull from the docs and source code. See [mcp/README.md](mcp/README.md) for setup.
+> **💡 Tip:** GCO includes an [MCP server](gco_mcp/) you can connect to an agent for guided exploration. Ask questions like *"What do I need to deploy?"* or *"Explain the architecture"* and the agent will pull from the docs and source code. See [gco_mcp/README.md](gco_mcp/README.md) for setup.
 >
 > **🐳 Use the dev container (recommended).** GCO pins exact versions of a lot of Python packages so CI is reproducible. That makes installing on top of an existing Python environment a frequent source of `ResolutionImpossible` / dependency-resolver errors. **The recommended path is the [dev container](#step-1-clone-and-build-the-dev-container)** — it ships Python, Node.js, CDK, kubectl, AWS CLI, and every Python dep at the exact versions CI uses. The host-install path is an **advanced, non-recommended** path kept for contributors who specifically want to develop on their host; if you just want to deploy GCO, skip it.
 
@@ -358,13 +358,13 @@ GCO includes an MCP server with 95 tools by default (up to 127 with feature flag
   "mcpServers": {
     "gco": {
       "command": "python3",
-      "args": ["<ABSOLUTE_REPO_PATH>/mcp/run_mcp.py"]
+      "args": ["<ABSOLUTE_REPO_PATH>/gco_mcp/run_mcp.py"]
     }
   }
 }
 ```
 
-Replace `<ABSOLUTE_REPO_PATH>` with the absolute path to your local GCO clone — the `global-capacity-orchestrator-on-aws` directory created by `git clone` — so `args` resolves to that clone's `mcp/run_mcp.py`. Save the snippet in your MCP client's own config file; its location varies by client (Cursor uses `~/.cursor/mcp.json`), so see [`mcp/README.md`](mcp/README.md) for each client's path, including a `cwd`-shorthand variant for Kiro.
+Replace `<ABSOLUTE_REPO_PATH>` with the absolute path to your local GCO clone — the `global-capacity-orchestrator-on-aws` directory created by `git clone` — so `args` resolves to that clone's `gco_mcp/run_mcp.py`. Save the snippet in your MCP client's own config file; its location varies by client (Cursor uses `~/.cursor/mcp.json`), so see [`gco_mcp/README.md`](gco_mcp/README.md) for each client's path, including a `cwd`-shorthand variant for Kiro.
 
 After saving, reload the `gco` server in your MCP client's settings UI so the tool descriptors get picked up. If you're running outside the dev container, install the MCP extras into your venv first:
 

@@ -40,9 +40,9 @@ from typing import Any
 import pytest
 
 # Mirror the import pattern used by every other ``test_mission_*`` module:
-# ``mcp/run_mcp.py`` adds ``mcp/`` to ``sys.path`` at runtime, but pytest
+# ``gco_mcp/run_mcp.py`` adds ``gco_mcp/`` to ``sys.path`` at runtime, but pytest
 # has to do it itself before the imports below resolve.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission import SCHEMA_VERSION  # noqa: E402
 from mission import engine as mission_engine  # noqa: E402
@@ -840,7 +840,7 @@ async def test_run_iteration_translates_script_rejected_from_runner(
     """``ScriptRejected`` raised inside the sandbox runner becomes ``script_rejected``."""
 
     # Lazy import — same pattern the engine itself uses.
-    sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+    sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
     from mission.sandbox import ScriptRejected  # noqa: E402
 
     async def fake_sandbox_runner(
@@ -897,7 +897,7 @@ async def test_run_iteration_translates_sandbox_terminated_from_runner(
     "max_wall_clock")``.
     """
 
-    sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+    sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
     from mission.sandbox import SandboxTerminated  # noqa: E402
 
     async def fake_sandbox_runner(
@@ -976,7 +976,7 @@ def test_make_default_sandbox_runner_returns_bound_run_method() -> None:
     and returns its bound ``run`` method so callers do not need to
     know about the sandbox class.
     """
-    sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+    sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
     from mission.sandbox import (  # noqa: E402
         MissionSandbox,
         make_default_sandbox_runner,
@@ -1012,7 +1012,7 @@ async def test_engine_uses_sampling_used_strategy_when_sampling_callable_returns
     ``parsed["revision_rationale"]`` on the iteration record so the
     audit verdict event carries the model-derived text.
     """
-    sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+    sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
     from mission.sampling import SamplingUsed  # noqa: E402
 
     sampler_calls: list[dict[str, Any]] = []
@@ -1114,7 +1114,7 @@ async def test_engine_falls_back_when_sampling_callable_returns_sampling_fallbac
     :class:`mcp.mission.sampling.SamplingFallback`; the engine maps it
     to ``None`` and runs the deterministic strategy instead.
     """
-    sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+    sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
     from mission.sampling import SamplingFallback  # noqa: E402
 
     sampler_calls: list[dict[str, Any]] = []
@@ -1291,7 +1291,7 @@ async def test_engine_final_lessons_callable_overlays_lessons(
     Final_Report's ``lessons`` field includes the joined lesson text;
     ``recommended_followups`` mirrors the sampler's list.
     """
-    sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+    sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
     from mission.sampling import SamplingUsed  # noqa: E402
 
     final_calls: list[dict[str, Any]] = []

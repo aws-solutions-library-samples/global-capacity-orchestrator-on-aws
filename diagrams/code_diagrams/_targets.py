@@ -233,12 +233,12 @@ TARGETS: list[Target] = [
         title="gco images cleanup — bulk tag delete with filter branches",
     ),
     Target(
-        source="mcp/audit.py",
+        source="gco_mcp/audit.py",
         function="audit_logged",
         title="MCP audit_logged decorator (sync + async dispatch, Context capture)",
     ),
     Target(
-        source="mcp/tools/_long_task.py",
+        source="gco_mcp/tools/_long_task.py",
         function="_run_long_task",
         title="MCP long-task runner (drain, progress, cancel + SIGTERM/SIGKILL)",
     ),
@@ -249,32 +249,32 @@ TARGETS: list[Target] = [
     ),
     # --- Mission goal-directed iteration loop ----------------------------
     Target(
-        source="mcp/mission/engine.py",
+        source="gco_mcp/mission/engine.py",
         function="MissionEngine.run_iteration",
         title="Mission iteration loop (propose -> execute -> observe -> evaluate -> decide)",
     ),
     Target(
-        source="mcp/mission/decide.py",
+        source="gco_mcp/mission/decide.py",
         function="decide_verdict",
         title="Mission verdict cascade (budget caps, completion, cadence-skip, heuristic)",
     ),
     Target(
-        source="mcp/mission/sampling.py",
+        source="gco_mcp/mission/sampling.py",
         function="maybe_sample_strategy_revision",
         title="Mission strategy-revision sampling (orchestrator + deterministic fallback)",
     ),
     Target(
-        source="mcp/mission/sandbox.py",
+        source="gco_mcp/mission/sandbox.py",
         function="validate_script_ast",
         title="Mission script AST validator (parse-time allowlist enforcement)",
     ),
     Target(
-        source="mcp/mission/criteria_scaffold.py",
+        source="gco_mcp/mission/criteria_scaffold.py",
         function="generate_sampled_criteria",
         title="Mission criteria scaffolder (Bedrock sampling + retry + autofix pipeline)",
     ),
     Target(
-        source="mcp/mission/_engine_factory.py",
+        source="gco_mcp/mission/_engine_factory.py",
         function="build_engine_dependencies",
         title="Mission engine factory (live vs stub dispatcher, sampling, sandbox wiring)",
     ),

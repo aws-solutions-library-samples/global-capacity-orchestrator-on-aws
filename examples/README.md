@@ -934,4 +934,4 @@ kubectl delete all --all -n default
 
 ---
 
-**Need help?** Check the [Troubleshooting Guide](../docs/TROUBLESHOOTING.md) or connect the [MCP server](../mcp/) to your IDE and ask in natural language.
+**Need help?** Check the [Troubleshooting Guide](../docs/TROUBLESHOOTING.md) or connect the [MCP server](../gco_mcp/) to your IDE and ask in natural language.

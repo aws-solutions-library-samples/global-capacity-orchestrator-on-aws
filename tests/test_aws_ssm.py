@@ -2,7 +2,7 @@
 
 The SSM helpers are the single source of truth for every callsite
 in the tree (``cli/models.py``, ``cli/analytics_user_mgmt.py``,
-``gco/services/health_monitor.py``, ``mcp/mission/state.py``). This
+``gco/services/health_monitor.py``, ``gco_mcp/mission/state.py``). This
 file pins their contract so a regression in any of those callsites
 fails here first.
 

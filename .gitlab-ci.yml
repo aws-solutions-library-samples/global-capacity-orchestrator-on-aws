@@ -106,10 +106,10 @@ lint:python:
     - pip install --upgrade pip
     - pip install -e ".[lint]"
   script:
-    - black --check --diff --exclude '/(\.venv|cdk\.out|lambda/kubectl-applier-simple-build|lambda/helm-installer-build)/' gco/ cli/ mcp/ tests/ lambda/ scripts/
-    - isort --check-only --diff --skip-glob 'cdk.out*' --skip-glob 'lambda/kubectl-applier-simple-build*' --skip-glob 'lambda/helm-installer-build*' gco/ cli/ mcp/ tests/ lambda/ scripts/
-    - ruff check gco/ cli/ mcp/ tests/ --exclude lambda/kubectl-applier-simple-build --exclude lambda/helm-installer-build
-    - flake8 gco/ cli/ mcp/ tests/ lambda/ scripts/ --exclude lambda/kubectl-applier-simple-build,lambda/helm-installer-build
+    - black --check --diff --exclude '/(\.venv|cdk\.out|lambda/kubectl-applier-simple-build|lambda/helm-installer-build)/' gco/ cli/ gco_mcp/ tests/ lambda/ scripts/
+    - isort --check-only --diff --skip-glob 'cdk.out*' --skip-glob 'lambda/kubectl-applier-simple-build*' --skip-glob 'lambda/helm-installer-build*' gco/ cli/ gco_mcp/ tests/ lambda/ scripts/
+    - ruff check gco/ cli/ gco_mcp/ tests/ --exclude lambda/kubectl-applier-simple-build --exclude lambda/helm-installer-build
+    - flake8 gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ --exclude lambda/kubectl-applier-simple-build,lambda/helm-installer-build
     - yamllint .
   cache:
     key: lint-${CI_COMMIT_REF_SLUG}
@@ -134,7 +134,7 @@ lint:typecheck:
     # mypy's --exclude only skips checking, not following imports; without
     # aws_cdk installed, mypy resolves `Stack` as Any and flags every
     # subclass. lint:typecheck-stacks handles that path with CDK installed.
-    - mypy gco/ cli/ mcp/ scripts/ --exclude 'gco/stacks/'
+    - mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
   cache:
     key: typecheck-${CI_COMMIT_REF_SLUG}
     paths:

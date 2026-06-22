@@ -53,11 +53,11 @@ from typing import Any
 
 import pytest
 
-# The Mission package lives under ``mcp/mission`` and is imported as
+# The Mission package lives under ``gco_mcp/mission`` and is imported as
 # ``mission.*``. Mirror the path-injection pattern used throughout the
 # rest of the ``test_mission_*`` files so the imports below resolve
 # regardless of how pytest is invoked.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp  # noqa: E402
 
@@ -85,7 +85,7 @@ _MISSION_TOOL_NAMES = (
 def _force_unregister_mission_tools() -> None:
     """Strip every ``mission_*`` registration off the live FastMCP singleton.
 
-    The FastMCP ``mcp`` instance is module-level in ``mcp/server.py``
+    The FastMCP ``mcp`` instance is module-level in ``gco_mcp/server.py``
     and survives ``importlib.reload(run_mcp)``. Once a flag-set test
     registers the nine ``mission_*`` tools, those registrations
     persist on the live singleton — which would leak into flag-unset
@@ -103,7 +103,7 @@ def _force_unregister_mission_tools() -> None:
 def _reload_with_mission_flag(flag_value: bool) -> None:
     """Reload run_mcp so the mission-tools gating re-evaluates.
 
-    The gate ``if is_enabled(FLAG_MISSION):`` in ``mcp/tools/mission.py``
+    The gate ``if is_enabled(FLAG_MISSION):`` in ``gco_mcp/tools/mission.py``
     fires at module import time, not on every reload of the parent.
     Once ``tools.mission`` is in ``sys.modules`` (which it will be
     after the first call to ``register_all_tools``), a plain

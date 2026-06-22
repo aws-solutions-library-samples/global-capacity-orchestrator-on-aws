@@ -7,15 +7,15 @@ the missing branches with the lightest possible setup.
 
 Files exercised here:
 
-* ``mcp/mission/predicate.py`` — comprehension target shadows, dunder
+* ``gco_mcp/mission/predicate.py`` — comprehension target shadows, dunder
   name rejections, dict ``**`` unpacking, slices with steps.
-* ``mcp/mission/sandbox.py`` — ``_rewrite_mission_helpers``,
+* ``gco_mcp/mission/sandbox.py`` — ``_rewrite_mission_helpers``,
   ``validate_script_ast`` rejection cases.
-* ``mcp/mission/audit.py`` — ``replay_audit_entries`` shape
+* ``gco_mcp/mission/audit.py`` — ``replay_audit_entries`` shape
   reconstruction.
-* ``mcp/resources/mission.py`` — non-filesystem report fallback,
+* ``gco_mcp/resources/mission.py`` — non-filesystem report fallback,
   ``_make_not_found`` exception chain.
-* ``mcp/tools/mission.py`` — ``_strip_private_fields`` /
+* ``gco_mcp/tools/mission.py`` — ``_strip_private_fields`` /
   ``_strip_private_fields_iterations`` direct.
 
 These are pure unit tests; no live MCP server, no AWS, no LLM.
@@ -31,7 +31,7 @@ from typing import Any
 import pytest
 
 # Match the import pattern used by every other Mission test module.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 
 # ---------------------------------------------------------------------------
@@ -1260,7 +1260,7 @@ class TestGetBackendResolution:
 
 
 class TestToolsMissionHelpers:
-    """Direct unit tests for helpers in mcp/tools/mission.py."""
+    """Direct unit tests for helpers in gco_mcp/tools/mission.py."""
 
     def test_strip_private_fields_iterations_drops_parsed_ast(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2485,7 +2485,7 @@ class TestFinalReportTemplates:
 
 
 class TestToolsMissionHelpersExtended:
-    """Direct unit tests on the ``mcp/tools/mission.py`` private helpers.
+    """Direct unit tests on the ``gco_mcp/tools/mission.py`` private helpers.
 
     The MCP tool surface lives behind a feature-flag gate; with the flag
     enabled the module-level helpers are reachable as module attributes.
@@ -3127,7 +3127,7 @@ class TestFinalReportBranches:
 # ---------------------------------------------------------------------------
 #
 # The dispatcher is a closure inside ``_build_engine`` — but the unwrap
-# logic at lines 268-301 of mcp/tools/mission.py is reachable through a
+# logic at lines 268-301 of gco_mcp/tools/mission.py is reachable through a
 # lighter test that directly exercises the ToolResult-unwrapping shape.
 # We mock a FastMCP-style result object with each of the three possible
 # payload shapes (structured_content dict, content[0].text JSON,
@@ -3327,7 +3327,7 @@ class TestFilesystemBackendListEdgeCases:
 class TestEngineFactory:
     """Direct unit tests on the shared engine factory.
 
-    The factory at ``mcp/mission/_engine_factory.py`` consolidates the
+    The factory at ``gco_mcp/mission/_engine_factory.py`` consolidates the
     dispatcher / sampling-callable / sandbox-runner wiring so the MCP
     tool surface and the CLI both build their :class:`MissionEngine`
     through one path. These tests pin the resolution rules without

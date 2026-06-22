@@ -1,7 +1,7 @@
 """Success-path tests for the metric-reader MCP tool wrappers.
 
 The pure ``metric_readers`` package is exercised in isolation by its sibling
-test modules; this file pins down the *tool* surface in ``mcp/tools/metrics.py``
+test modules; this file pins down the *tool* surface in ``gco_mcp/tools/metrics.py``
 — the thin ``@mcp.tool`` wrappers a Mission session actually calls. The
 success-path tests below cover every reader: each tool must return the
 Canonical_Metrics_Shape — a top-level ``metrics`` object mapping the chosen key
@@ -39,11 +39,11 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-# ``mcp/run_mcp.py`` puts ``mcp/`` on ``sys.path`` at runtime; mirror that here
+# ``gco_mcp/run_mcp.py`` puts ``gco_mcp/`` on ``sys.path`` at runtime; mirror that here
 # so the pure ``metric_readers`` package — and the ``tools.metrics`` wrappers
 # that sit beside it — import the same way they do in production, matching the
 # convention used by the sibling metric-reader tests.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from metric_readers.shape import is_numeric_value  # noqa: E402
 
@@ -467,7 +467,7 @@ def test_shared_storage_jsonl_reduces_known_sequence(
 #     ``"[gated by GCO_ENABLE_LOCAL_METRICS]"`` and it carries the
 #     ``safe`` Tool_Tag.
 #
-# Registry introspection note: the server (``mcp/server.py``) wires the
+# Registry introspection note: the server (``gco_mcp/server.py``) wires the
 # BM25/Code-Mode catalog-replacement transforms, so the *public*
 # ``mcp.list_tools()`` only exposes ~5 synthetic tools. To assert *real*
 # registration we go through the underlying registry via the private

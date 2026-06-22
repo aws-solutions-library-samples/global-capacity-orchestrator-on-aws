@@ -1,5 +1,5 @@
 """
-Tests for the GCO MCP server (mcp/run_mcp.py).
+Tests for the GCO MCP server (gco_mcp/run_mcp.py).
 
 Drives the thin _run_cli wrapper that subprocesses the `gco` CLI with
 --output json, covering success, empty-stdout → {"status":"ok"}, non-zero
@@ -21,8 +21,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Ensure mcp/ is importable
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import cli_runner
 import run_mcp
@@ -38,7 +38,7 @@ class TestRunCli:
             assert result == '{"jobs": []}'
             mock_run.assert_called_once()
             cmd = mock_run.call_args[0][0]
-            assert cmd[0] == "gco"
+            assert os.path.basename(cmd[0]) == "gco"
             assert "--output" in cmd
             assert "json" in cmd
 
@@ -131,7 +131,7 @@ class TestToolRegistration:
     """Verify tools are registered with correct signatures.
 
     Uses ``mcp._list_tools()`` to bypass the BM25/Code-Mode catalog-replacement
-    transforms wired in ``mcp/server.py``. The public ``list_tools()`` is what
+    transforms wired in ``gco_mcp/server.py``. The public ``list_tools()`` is what
     clients see — the BM25 transform replaces it with a synthetic
     ``search_tools``/``call_tool`` pair plus the always-visible entry-points,
     so testing registration against it would only ever see ~5 tools regardless
@@ -1444,7 +1444,7 @@ class TestInfraResources:
         """Reading ``infra://gco/dockerfiles/<missing>`` returns the available list.
 
         Pins the file-not-found branch in
-        ``mcp/resources/infra.py::dockerfile_resource``: the resource
+        ``gco_mcp/resources/infra.py::dockerfile_resource``: the resource
         returns ``"File 'X' not found. Available:\\n..."`` rather than
         raising, so a tool-only client gets a guiding string body
         rather than an opaque transport error.
@@ -1580,7 +1580,7 @@ class TestStacksReadOnlyTools:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
             await run_mcp.stack_diff()
             cmd = mock.call_args[0][0]
-            assert cmd[0] == "gco"
+            assert os.path.basename(cmd[0]) == "gco"
             assert "stacks" in cmd
             assert "diff" in cmd
             # No stack name positional supplied.
@@ -1732,7 +1732,7 @@ class TestQueueTools:
             mock.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
             await run_mcp.queue_list()
             cmd = mock.call_args[0][0]
-            assert cmd[0] == "gco"
+            assert os.path.basename(cmd[0]) == "gco"
             assert "queue" in cmd
             assert "list" in cmd
             # The default limit=50 is always appended.

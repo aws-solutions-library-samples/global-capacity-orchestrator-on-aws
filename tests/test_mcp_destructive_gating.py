@@ -27,8 +27,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Ensure mcp/ is importable, mirroring the other test modules.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable, mirroring the other test modules.
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp  # noqa: E402
 
@@ -65,7 +65,7 @@ UMBRELLA_FLAG_TOOLS = (
 def _force_unregister_gated_tools() -> None:
     """Strip every gated tool from the live ``mcp`` singleton.
 
-    The ``FastMCP`` instance is module-level in ``mcp/server.py`` and
+    The ``FastMCP`` instance is module-level in ``gco_mcp/server.py`` and
     survives ``importlib.reload(run_mcp)``. Once a flag-set test registers
     a gated tool, that registration leaks into every subsequent test —
     including default-env "absent by default" assertions in this file and

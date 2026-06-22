@@ -125,7 +125,7 @@ The mirror is exposed through three MCP tools in the `images` group so an agent 
 | `images_mirror_status` | safe | (default-on) | Reports, per managed image, whether its tag already exists in ECR, plus top-level `all_mirrored` / `missing`. Confirms a deploy's auto-mirror populated everything before the Helm install runs. |
 | `images_mirror` | image-upload | `GCO_ENABLE_IMAGE_PUBLISH` | Creates the destination repos and copies each image (multi-arch preserved, idempotent). The same operation the deploy runs automatically; invoke it to pre-seed or repair the mirror out of band. |
 
-`images_mirror` shares the `GCO_ENABLE_IMAGE_PUBLISH` flag with `images_build` / `images_push` because, like them, it uploads image data to ECR. The two read-only tools are always registered. See [MCP Feature Flags](../mcp/README.md#feature-flags).
+`images_mirror` shares the `GCO_ENABLE_IMAGE_PUBLISH` flag with `images_build` / `images_push` because, like them, it uploads image data to ECR. The two read-only tools are always registered. See [MCP Feature Flags](../gco_mcp/README.md#feature-flags).
 
 Typical agent flow: call `images_mirror_status` to see whether the mirror is populated; if `all_mirrored` is false and the publish flag is set, call `images_mirror` to fill it in.
 
@@ -192,10 +192,10 @@ Via MCP, `images_mirror_status` returns the same presence check (`all_mirrored` 
 | [`cli/stacks.py`](../cli/stacks.py) | `gco stacks deploy` auto-mirror hook (runs before CDK). |
 | [`gco/stacks/regional_stack.py`](../gco/stacks/regional_stack.py) | Reads the toggle and injects Volcano's `image_registry` override. |
 | [`lambda/helm-installer/charts.yaml`](../lambda/helm-installer/charts.yaml) | Volcano image names and the pinned tag the mirror derives from. |
-| [`mcp/tools/images.py`](../mcp/tools/images.py) | `images_mirror_plan` / `images_mirror_status` / `images_mirror` MCP tools. |
+| [`gco_mcp/tools/images.py`](../gco_mcp/tools/images.py) | `images_mirror_plan` / `images_mirror_status` / `images_mirror` MCP tools. |
 
 **Related docs:**
 
 - [Customization Guide](CUSTOMIZATION.md#get-volcanos-dockerio-images-off-the-rate-limited-path-ecr-mirror) — the enable-and-deploy recipe in context.
 - [Schedulers & Orchestrators](SCHEDULERS.md) — how add-on charts converge after deploy.
-- [MCP Server](../mcp/README.md#feature-flags) — the feature flag that gates `images_mirror`.
+- [MCP Server](../gco_mcp/README.md#feature-flags) — the feature flag that gates `images_mirror`.

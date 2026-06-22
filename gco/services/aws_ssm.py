@@ -1,5 +1,5 @@
 """
-SSM Parameter Store helpers shared across ``cli/``, ``mcp/`` and ``gco/services/``.
+SSM Parameter Store helpers shared across ``cli/``, ``gco_mcp/`` and ``gco/services/``.
 
 Four free functions cover every shape callers in the tree currently
 reach for:
@@ -24,9 +24,9 @@ reach for:
   in ``gco/services/health_monitor.py``) where the CLI / monitor needs
   to write back to SSM.
 
-Architectural rationale. ``mcp/`` is forbidden from importing ``cli/``
+Architectural rationale. ``gco_mcp/`` is forbidden from importing ``cli/``
 directly (the runtime tool surface shells out via subprocess instead),
-but ``mcp/`` already imports ``gco/services/...`` for shared service
+but ``gco_mcp/`` already imports ``gco/services/...`` for shared service
 helpers. Putting these helpers under ``gco/services/`` lets every
 concrete callsite — the CLI's :class:`cli.models.ModelManager`, the
 analytics helpers in :mod:`cli.analytics_user_mgmt`, the

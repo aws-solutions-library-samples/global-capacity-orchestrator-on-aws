@@ -24,10 +24,10 @@ from pathlib import Path
 
 import pytest
 
-# ``mcp/run_mcp.py`` puts ``mcp/`` on ``sys.path`` at runtime; mirror that
+# ``gco_mcp/run_mcp.py`` puts ``gco_mcp/`` on ``sys.path`` at runtime; mirror that
 # here so the pure ``metric_readers`` package imports the same way it does
 # in production, matching the convention used by the sibling tests.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from metric_readers.logs import (  # noqa: E402
     coerce_scalar,

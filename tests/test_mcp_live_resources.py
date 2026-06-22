@@ -1,5 +1,5 @@
 """
-Tests for the live-state resources under mcp/resources/.
+Tests for the live-state resources under gco_mcp/resources/.
 
 Covers the six live-state resource paths:
 
@@ -25,8 +25,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-# Ensure mcp/ is importable, mirroring the other test modules.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable, mirroring the other test modules.
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp  # noqa: E402
 
@@ -131,7 +131,7 @@ class TestInferenceLiveResource:
         """``InferenceManager.get_endpoint`` raising returns a structured error.
 
         Pins the broad ``except Exception`` branch in
-        ``mcp/resources/inference.py``: any unexpected error from
+        ``gco_mcp/resources/inference.py``: any unexpected error from
         the manager (network blip, malformed DynamoDB record, etc.)
         surfaces as ``{"error": str(e), "endpoint_name": ...}``
         rather than propagating to the resource layer where it would

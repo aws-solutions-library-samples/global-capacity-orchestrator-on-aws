@@ -39,9 +39,9 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 # Mirror the import pattern used by the other Mission tests:
-# ``mcp/run_mcp.py`` adds ``mcp/`` to ``sys.path`` at runtime, but pytest
+# ``gco_mcp/run_mcp.py`` adds ``gco_mcp/`` to ``sys.path`` at runtime, but pytest
 # has to do it itself before the import resolves.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission import predicate as predicate_module  # noqa: E402
 from mission.predicate import (  # noqa: E402

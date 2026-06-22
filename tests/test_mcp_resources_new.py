@@ -10,8 +10,8 @@ import asyncio
 import sys
 from pathlib import Path
 
-# Ensure mcp/ is importable
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp
 
@@ -172,7 +172,7 @@ class TestEnhancedExampleResources:
         examples_dir = Path(__file__).parent.parent / "examples"
         for f in examples_dir.glob("*.yaml"):
             assert f.stem in EXAMPLE_METADATA, (
-                f"Example {f.stem} missing from EXAMPLE_METADATA in mcp/resources/docs.py"
+                f"Example {f.stem} missing from EXAMPLE_METADATA in gco_mcp/resources/docs.py"
             )
 
 

@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 # Match the import pattern used by every other Mission test module.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission import validation  # noqa: E402
 from mission.engine import MissionEngine  # noqa: E402

@@ -3,7 +3,7 @@
 Two checks:
 
 1. ``test_feature_toggles_resource_compiles_and_runs`` imports
-   ``mcp/resources/config.py`` and calls ``feature_toggles_resource()``. The
+   ``gco_mcp/resources/config.py`` and calls ``feature_toggles_resource()``. The
    module contains an un-parenthesized except-tuple
    (``except json.JSONDecodeError, KeyError:``) that only parses on Python
    3.14+. Importing the module is therefore an executable proof that the
@@ -23,10 +23,10 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-# Mirror tests/test_mcp_audit.py's path-prep pattern: mcp/ is a sibling package
+# Mirror tests/test_mcp_audit.py's path-prep pattern: gco_mcp/ is a sibling package
 # whose modules use bare imports (``from server import mcp``). Putting the
 # directory on sys.path makes those imports resolve when this test runs.
-_MCP_DIR = str(PROJECT_ROOT / "mcp")
+_MCP_DIR = str(PROJECT_ROOT / "gco_mcp")
 if _MCP_DIR not in sys.path:
     sys.path.insert(0, _MCP_DIR)
 
@@ -43,7 +43,7 @@ def test_feature_toggles_resource_compiles_and_runs() -> None:
 # Doc files whose Python-version language was bumped to 3.14+.
 DOC_FILES = (
     "README.md",
-    "mcp/README.md",
+    "gco_mcp/README.md",
     "CONTRIBUTING.md",
     "QUICKSTART.md",
     ".github/oidc_provider/README.md",

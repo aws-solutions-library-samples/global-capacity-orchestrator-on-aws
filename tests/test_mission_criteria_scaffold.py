@@ -1,4 +1,4 @@
-"""Unit tests for ``mcp/mission/criteria_scaffold.py``.
+"""Unit tests for ``gco_mcp/mission/criteria_scaffold.py``.
 
 Three groups of tests:
 
@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "gco_mcp"))
 
 from mission import criteria_scaffold  # noqa: E402
 from mission import validation as mission_validation  # noqa: E402

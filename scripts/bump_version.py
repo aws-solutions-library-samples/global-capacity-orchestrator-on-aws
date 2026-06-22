@@ -16,7 +16,7 @@ match ``VERSION`` on a clean checkout.
 Other components that follow the same version automatically (no script
 changes needed):
 
-- ``mcp/run_mcp.py``            imports ``gco._version.__version__`` for its
+- ``gco_mcp/run_mcp.py``            imports ``gco._version.__version__`` for its
                                 ``_MCP_SERVER_VERSION`` and reports it in the
                                 startup audit log.
 - ``pyproject.toml``            uses ``dynamic = ["version"]`` with

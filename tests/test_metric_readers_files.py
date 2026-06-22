@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import math
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -34,10 +35,10 @@ import yaml
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-# ``mcp/run_mcp.py`` puts ``mcp/`` on ``sys.path`` at runtime; mirror that here
+# ``gco_mcp/run_mcp.py`` puts ``gco_mcp/`` on ``sys.path`` at runtime; mirror that here
 # so the pure ``metric_readers`` package imports the same way it does in
 # production, matching the convention used by the sibling metric-reader tests.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from metric_readers import files  # noqa: E402
 from metric_readers.shape import ErrorCode, MetricReaderError, is_numeric_value  # noqa: E402
@@ -97,6 +98,19 @@ def _reference_reduce(values: Sequence[object], mode: str) -> float:
         return max(numbers)
     # mode == "mean"
     return sum(numbers) / len(numbers)
+
+
+def _recovered_ok(actual: float, expected: float, mode: str) -> bool:
+    """Whether a recovered scalar matches the reference reduction.
+
+    Selection modes (last/first/min/max) return an exact stored value and must
+    match bit-for-bit. ``mean`` performs floating-point arithmetic whose last ULP
+    depends on summation order (the reference left-fold vs the columnar reader
+    pairwise/NumPy sum), so it is compared with a tight relative+absolute tolerance.
+    """
+    if mode == "mean":
+        return math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-9)
+    return actual == expected
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +186,7 @@ def test_per_format_round_trip_recovers_reduced_scalar(seq: list[object]) -> Non
         for mode in _MODES:
             expected = _reference_reduce(seq, mode)
             actual = handler(content, field, mode)
-            assert actual == expected, (
+            assert _recovered_ok(actual, expected, mode), (
                 f"format={fmt!r} mode={mode!r} seq={seq!r} expected={expected!r} actual={actual!r}"
             )
 
@@ -210,7 +224,7 @@ def test_parquet_round_trip_recovers_reduced_scalar(seq: list[object]) -> None:
     for mode in _MODES:
         expected = _reference_reduce(seq, mode)
         actual = handler(content, "metric", mode)
-        assert actual == expected, (
+        assert _recovered_ok(actual, expected, mode), (
             f"format='parquet' mode={mode!r} seq={seq!r} expected={expected!r} actual={actual!r}"
         )
 
@@ -230,7 +244,7 @@ def test_parquet_round_trip_recovers_reduced_scalar(seq: list[object]) -> None:
 #   * ``no_numeric_value``               — a JSONL stream yields no usable number
 #   * ``format_dependency_unavailable``  — a parquet/tfevents lazy import fails
 #
-# The remaining two codes live at the *tool* boundary in ``mcp/tools/metrics.py``,
+# The remaining two codes live at the *tool* boundary in ``gco_mcp/tools/metrics.py``,
 # not in any handler:
 #
 #   * ``file_too_large``    — the ``_read_shared_storage`` size cap, checked

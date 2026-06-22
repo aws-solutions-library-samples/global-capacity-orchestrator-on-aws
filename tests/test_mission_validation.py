@@ -2,7 +2,7 @@
 
 The Mission entry points (the MCP tools, the CLI subcommands, the engine's
 session loader) all funnel operator-supplied JSON through
-``mcp/mission/validation.py`` before any state is created. The validators
+``gco_mcp/mission/validation.py`` before any state is created. The validators
 are pure: they either return a normalized value or raise
 ``MissionValidationError`` with a stable short ``code`` and a structured
 ``details`` dict whose ``field``/``reason`` keys identify the rejection.
@@ -33,10 +33,10 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-# Mirror the import pattern the other Mission tests use: ``mcp/run_mcp.py``
-# adds ``mcp/`` to ``sys.path`` at runtime, but pytest has to do it itself
+# Mirror the import pattern the other Mission tests use: ``gco_mcp/run_mcp.py``
+# adds ``gco_mcp/`` to ``sys.path`` at runtime, but pytest has to do it itself
 # before the import below resolves.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission import validation  # noqa: E402
 from mission.validation import MissionValidationError  # noqa: E402
@@ -963,8 +963,8 @@ class TestStripPrivateFields:
 
     Three places in the tree previously had their own near-duplicate
     implementations (``cli/commands/mission_cmd.py::_strip_private_criteria``,
-    ``mcp/tools/mission.py::_strip_private_fields`` plus its iterations
-    variant, ``mcp/resources/mission.py::_strip_private_fields``). They
+    ``gco_mcp/tools/mission.py::_strip_private_fields`` plus its iterations
+    variant, ``gco_mcp/resources/mission.py::_strip_private_fields``). They
     now delegate to the canonical helpers under
     :mod:`mcp.mission.validation` so a single source of truth governs
     the JSON-safety contract. These tests pin that contract.

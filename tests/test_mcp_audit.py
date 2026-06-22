@@ -1,7 +1,7 @@
 """
 Tests for the MCP server's audit logging and argument sanitization.
 
-Exercises mcp/run_mcp.py's _sanitize_arguments helper that scrubs
+Exercises gco_mcp/run_mcp.py's _sanitize_arguments helper that scrubs
 incoming tool arguments before they hit the audit log: case-insensitive
 redaction of keys containing token/secret/password/key, truncation of
 string values larger than 1024 bytes with a [truncated] suffix, and
@@ -22,8 +22,8 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-# Ensure mcp/ is importable
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp  # noqa: E402
 
@@ -812,7 +812,7 @@ class TestStartupLogNewFields:
         # all_tools_enabled is omitted when the umbrella flag is unset.
         assert "all_tools_enabled" not in entry
         # tool_search is ALWAYS emitted — the resolver falls back to "bm25"
-        # when the env var is unset, mirroring mcp/server.py's wiring.
+        # when the env var is unset, mirroring gco_mcp/server.py's wiring.
         assert entry["tool_search"] == "bm25"
         assert "code_mode_experimental" not in entry
 

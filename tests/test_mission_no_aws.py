@@ -50,10 +50,10 @@ from typing import Any
 
 import pytest
 
-# ``mcp/run_mcp.py`` adds ``mcp/`` to ``sys.path`` at runtime; pytest has
+# ``gco_mcp/run_mcp.py`` adds ``gco_mcp/`` to ``sys.path`` at runtime; pytest has
 # to mirror that before any ``mission.*`` import resolves. Same idiom
 # used by every other ``test_mission_*`` module.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission import SCHEMA_VERSION  # noqa: E402
 from mission.engine import MissionEngine  # noqa: E402
@@ -80,7 +80,7 @@ _PREDICATE_EXPR = 'len(obs["tool_results"]) > 0'
 
 # The two safe-tier tools the brief calls out. Both are real,
 # registered MCP tools (``find_examples`` lives in
-# ``mcp/tools/examples.py`` and ``find_docs`` in ``mcp/tools/docs.py``)
+# ``gco_mcp/tools/examples.py`` and ``find_docs`` in ``gco_mcp/tools/docs.py``)
 # and both are tagged ``safe`` — they read static, in-process catalogs
 # and never reach for AWS or the network.
 _ALLOWLIST: list[str] = ["find_examples", "find_docs"]

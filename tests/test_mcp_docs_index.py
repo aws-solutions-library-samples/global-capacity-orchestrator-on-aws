@@ -16,8 +16,8 @@ from pathlib import Path
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-# Ensure mcp/ is importable
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp  # noqa: E402, F401  -- side effect: registers tools and resources
 from resources.docs import DOC_METADATA, DOCS_DIR, PACKAGE_DOC_METADATA, PROJECT_ROOT  # noqa: E402

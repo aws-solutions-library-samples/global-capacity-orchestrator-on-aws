@@ -38,11 +38,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 import click
 
-# The Mission package lives under ``mcp/mission/`` and is imported as
+# The Mission package lives under ``gco_mcp/mission/`` and is imported as
 # ``mission.*``. Match the path-injection pattern used throughout the
 # MCP module surface and the ``test_mission_*`` test files so the
 # imports below resolve regardless of how this module is loaded.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "gco_mcp"))
 
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
@@ -536,7 +536,7 @@ def _ensure_tool_registry() -> None:
     module load; calling it twice is harmless because the per-module
     decorators only fire on the first import.
     """
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "mcp"))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "gco_mcp"))
     from tools import register_all_tools  # noqa: PLC0415
 
     register_all_tools()

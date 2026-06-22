@@ -64,7 +64,7 @@ Each file maps to one row in the README badge table.
 
 | File | README row | What it covers |
 |------|------------|----------------|
-| `workflows/unit-tests.yml` | Unit Tests | pytest with coverage (fail under 85%), BATS, CLI smoke, CDK synth + config matrix, lockfile freshness, fresh install, workload import checks |
+| `workflows/unit-tests.yml` | Unit Tests | pytest with coverage (fail under 85%), BATS, CLI smoke, CDK synth + config matrix, lockfile freshness, fresh install, MCP install + launch smoke, workload import checks |
 | `workflows/integration-tests.yml` | Integration Tests | Per-Dockerfile build + module-import smoke, dev-container smoke, kind E2E with Calico (NetworkPolicy enforcement, RBAC verification, ResourceQuota/LimitRange, PDB validation, cross-namespace traffic blocking, all 3 service deployments), K8s manifest validation, Lambda import validation, cross-module pytest, MCP server pytest |
 | `workflows/security.yml` | Security | bandit, pip-audit, trivy (filesystem + per-image matrix), trufflehog, gitleaks, semgrep, checkov, KICS, CodeQL (Python) |
 | `workflows/lint.yml` | Linting | actionlint, hadolint, markdownlint, mypy (strict / stacks / lambda), ruff (format + check, imports included), shellcheck, yamllint |
@@ -103,7 +103,7 @@ Shared logic used by multiple jobs. Invoked with `uses: ./.github/actions/<name>
 
 [`codeql/codeql-config.yml`](codeql/codeql-config.yml) is read by the Advanced Setup CodeQL job (`security:codeql:python-code-analysis`) in [`workflows/security.yml`](workflows/security.yml), via the `config-file:` input on `github/codeql-action/init@v3`. It does three things:
 
-- **Scopes the scan** to hand-authored Python runtime code (`gco/`, `cli/`, `mcp/`, `lambda/`, `scripts/`). Generated output (`cdk.out/`, `lambda/*-build/`), virtualenvs, caches, tests, and the demo folder are excluded. `app.py` (the CDK app entry point) is not in scope — it's composition-only glue with no runtime/security surface.
+- **Scopes the scan** to hand-authored Python runtime code (`gco/`, `cli/`, `gco_mcp/`, `lambda/`, `scripts/`). Generated output (`cdk.out/`, `lambda/*-build/`), virtualenvs, caches, tests, and the demo folder are excluded. `app.py` (the CDK app entry point) is not in scope — it's composition-only glue with no runtime/security surface.
 - **Pins the query pack** to `security-and-quality` so the additional maintainability queries still surface alongside the default security suite.
 - **Filters three rules** that have been reviewed and classified as false positives against this codebase: `py/clear-text-logging-sensitive-data` (we log operational identifiers like ARNs and registry hostnames, not credential values), `py/incomplete-url-substring-sanitization` (only ever hit by test-file assertions, not access-control code paths), and `py/weak-sensitive-data-hashing` (SRP protocol digest in `cli/analytics_user_mgmt.py`, not a password storage hash — RFC 5054 mandates SHA-256 for the protocol primitive). Each exclusion carries an inline comment in the config naming the exact call sites and the reason — audit them when the codebase shape changes.
 
@@ -379,13 +379,13 @@ Most jobs map to a single command you can run locally. Quick reference:
 
 ```bash
 # Lint (matches jobs in workflows/lint.yml)
-ruff format --check gco/ cli/ mcp/ tests/ lambda/ scripts/ diagrams/
-ruff check gco/ cli/ mcp/ tests/ lambda/ scripts/ diagrams/
+ruff format --check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
+ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 yamllint --strict .
 npx markdownlint-cli2                 # uses .markdownlint-cli2.yaml config
 
 # Type check (matches lint:mypy:strict and lint:mypy:stacks)
-mypy gco/ cli/ mcp/ scripts/ --exclude 'gco/stacks/'
+mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
 mypy gco/stacks/ app.py          # requires ".[cdk,typecheck]"
 
 # Unit tests (matches unit:pytest:core)

@@ -10,7 +10,7 @@ absent.
 Test isolation
 ==============
 
-The FastMCP ``mcp`` instance is module-level in ``mcp/server.py`` and
+The FastMCP ``mcp`` instance is module-level in ``gco_mcp/server.py`` and
 survives ``importlib.reload(run_mcp)``. Once a flag-set test registers
 the nine ``mission_*`` tools, those registrations persist on the live
 singleton. To keep tests independent of execution order:
@@ -44,12 +44,12 @@ from unittest.mock import patch
 
 import pytest
 
-# Ensure mcp/ is importable, mirroring every other test module.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable, mirroring every other test module.
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp  # noqa: E402
 
-# Canonical roster of the nine tools surfaced by ``mcp/tools/mission.py``.
+# Canonical roster of the nine tools surfaced by ``gco_mcp/tools/mission.py``.
 # Frozen so accidental in-test mutation is impossible.
 _MISSION_TOOL_NAMES: frozenset[str] = frozenset(
     {
@@ -86,7 +86,7 @@ def _force_unregister_mission_tools() -> None:
     fine, we want the post-state regardless. The
     ``contextlib.suppress`` is the same idiom used by
     ``test_mcp_destructive_gating.py`` and ``test_mcp_images.py``.
-    Resource templates registered by ``mcp/resources/mission.py`` are
+    Resource templates registered by ``gco_mcp/resources/mission.py`` are
     cleared too so neighbouring tests (notably
     ``test_mcp_server.py::test_resource_template_count``) don't see
     leaked entries when this file runs ahead of them.
@@ -108,7 +108,7 @@ def _reload_run_mcp_fresh() -> None:
     re-runs ``register_all_tools()`` but the ``from`` statement
     short-circuits when the attribute already exists, so the gated
     ``if is_enabled(FLAG_MISSION):`` block at the top of
-    ``mcp/tools/mission.py`` never re-evaluates against the new env.
+    ``gco_mcp/tools/mission.py`` never re-evaluates against the new env.
 
     Drop both caches before the reload so the ``from`` statement
     triggers a fresh module body execution under the patched env.
@@ -628,7 +628,7 @@ class TestMissionToolErrors:
 # Resource template tests — ``mission://sessions/{session_id}`` and ``.../report``
 # =============================================================================
 #
-# The two Mission resource templates registered by ``mcp/resources/mission.py``
+# The two Mission resource templates registered by ``gco_mcp/resources/mission.py``
 # expose live session JSON and the durable Final_Report artifact. Both are
 # gated by ``GCO_ENABLE_MISSION``; the template registrations are stripped
 # by ``_force_unregister_mission_tools`` between tests so each case starts
@@ -941,7 +941,7 @@ class TestMissionToolErrorEnvelopes:
 # Resource handler edge cases
 # ---------------------------------------------------------------------------
 #
-# These hit the fallback paths in ``mcp/resources/mission.py``:
+# These hit the fallback paths in ``gco_mcp/resources/mission.py``:
 #
 # * ``_session_resource`` returning the ``session_not_found`` envelope when
 #   the backend has no record of the requested id (line block 74-82).

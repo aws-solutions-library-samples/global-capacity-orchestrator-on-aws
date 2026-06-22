@@ -31,8 +31,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-# Ensure mcp/ is importable, mirroring every other test module.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable, mirroring every other test module.
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import mission.state as mission_state  # noqa: E402
 import run_mcp  # noqa: E402

@@ -39,11 +39,11 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
-# The Mission package lives under ``mcp/mission`` and is imported as
+# The Mission package lives under ``gco_mcp/mission`` and is imported as
 # ``mission.*``. Mirror the path-injection pattern used throughout the
 # rest of the ``test_mission_*`` files so the imports below resolve
 # regardless of how pytest is invoked.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from cli.main import cli  # noqa: E402
 
@@ -918,7 +918,7 @@ class TestMissionScaffoldCriteriaCli:
         assert isinstance(loaded, list)
 
         # Validator runs without raising.
-        sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+        sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
         from mission import validation  # noqa: PLC0415
 
         validation.validate_criteria(loaded)
@@ -937,7 +937,7 @@ class TestMissionScaffoldCriteriaCli:
     ) -> None:
         """A mocked sampling backend's response becomes the scaffolded output."""
         _enable_flag(monkeypatch)
-        sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+        sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
         from mission import sampling as mission_sampling  # noqa: PLC0415
 
         canned = (
@@ -999,7 +999,7 @@ class TestMissionScaffoldCriteriaCli:
         to stderr and falls back to the keyword-template generator.
         """
         _enable_flag(monkeypatch)
-        sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+        sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
         from mission import sampling as mission_sampling  # noqa: PLC0415
 
         class _BrokenBackend:

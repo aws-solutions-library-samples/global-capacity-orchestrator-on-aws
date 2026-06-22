@@ -1,6 +1,6 @@
 """Determinism property tests for the Mission verdict cascade.
 
-The verdict cascade in ``mcp/mission/decide.py`` is the **control path**
+The verdict cascade in ``gco_mcp/mission/decide.py`` is the **control path**
 of the loop: given the persisted ``SessionState``, the in-progress
 ``IterationRecord``, and a wall-clock value, it returns a
 ``(VerdictLabel, VerdictReason)`` tuple. Two universal properties must
@@ -45,9 +45,9 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 # Mirror the import pattern used by every other Mission test:
-# ``mcp/run_mcp.py`` adds ``mcp/`` to ``sys.path`` at runtime, but
+# ``gco_mcp/run_mcp.py`` adds ``gco_mcp/`` to ``sys.path`` at runtime, but
 # pytest has to do it itself before the import below resolves.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "gco_mcp"))
 
 from mission.decide import decide_verdict  # noqa: E402
 

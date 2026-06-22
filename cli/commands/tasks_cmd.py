@@ -15,7 +15,7 @@ Long-running MCP tools (``deploy_all``, ``destroy_all``,
 ``~/.gco/tasks/{task_id}.json`` and the raw subprocess output to
 ``~/.gco/tasks/{task_id}.log`` on every line. This module reads
 those artifacts and never writes them — the writer lives in
-``mcp/tools/_task_status.py``.
+``gco_mcp/tools/_task_status.py``.
 """
 
 import contextlib
@@ -33,7 +33,7 @@ def _status_dir() -> Path:
 
     Mirrors ``mcp.tools._task_status.status_dir`` so the CLI and the MCP
     server always read from the same place. We don't import the MCP
-    helper directly because ``cli/`` and ``mcp/`` are separate top-level
+    helper directly because ``cli/`` and ``gco_mcp/`` are separate top-level
     packages and we want this command to work without the MCP install.
     """
     import os
@@ -74,7 +74,7 @@ def _read_status(path: Path) -> dict[str, Any] | None:
     Identical semantics to ``mcp.tools._task_status._read_status_file``:
     re-checks the PID and rewrites ``state=running`` to ``orphaned``
     when the recorded process is dead. Kept as a local copy so the
-    CLI doesn't need ``mcp/`` on the import path.
+    CLI doesn't need ``gco_mcp/`` on the import path.
     """
     try:
         record = json.loads(path.read_text(encoding="utf-8"))

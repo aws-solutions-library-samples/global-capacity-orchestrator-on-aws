@@ -105,7 +105,7 @@ one of three things:
    metric-path normaliser, the autofix, or the validator no longer
    accepts a shape some model emits. Fix forward by either
    broadening the validator (when the shape is genuinely safe — see
-   `mcp/mission/predicate.py::_ALLOWED_CALLABLES` and
+   `gco_mcp/mission/predicate.py::_ALLOWED_CALLABLES` and
    `_ALLOWED_METHOD_CALLS` for the precedent), adding an autofix in
    `criteria_scaffold._autofix_predicate`, or tightening the prompt
    so future captures emit a shape the validator already handles.

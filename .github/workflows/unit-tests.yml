@@ -14,6 +14,7 @@
 #   - unit:cli:smoke               — gco --help and all subcommand help pages
 #   - unit:fresh-install           — pip install from scratch, verify imports
 #   - unit:lockfile:freshness      — requirements-lock.txt matches pyproject.toml
+#   - unit:mcp:install             — uv-installs gco-mcp from source, then launches the server
 #   - unit:pages:deploy            — publish htmlcov/ (coverage report + badge) to Pages
 #   - unit:pytest:core             — pytest (coverage target 85%) + upload Pages artifact
 #   - unit:workload:imports        — K8s service import + circular-import detection
@@ -519,3 +520,38 @@ jobs:
           python -c "import importlib; importlib.import_module('gco.services.health_api'); print('health-api full import OK')"
           python -c "import importlib; importlib.import_module('gco.services.inference_monitor'); print('inference-monitor full import OK')"
           python -c "from gco.services.api_routes import jobs, manifests, queue, templates, webhooks; print('all api_routes OK')"
+
+
+  # ----------------------------------------------------------------------
+  # unit:mcp:install -- the GCO MCP server installs via uv and launches.
+  # Mirrors the documented uvx / uv tool install path: the gco and gco-mcp
+  # console scripts both ship from the one gco-cli package, the gco_mcp
+  # namespace package keeps the PyPI mcp SDK unshadowed, and the server
+  # resolves its OWN bundled gco CLI (fully self-contained).
+  # ----------------------------------------------------------------------
+  unit-mcp-install:
+    name: "unit:mcp:install"
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install uv
+        run: pip install uv
+      - name: Install GCO (gco + gco-mcp) into an isolated environment via uv
+        run: |
+          uv venv "$RUNNER_TEMP/mcpvenv" --python 3.14
+          uv pip install --python "$RUNNER_TEMP/mcpvenv" .
+      - name: Both gco and gco-mcp console scripts are exposed
+        run: |
+          test -x "$RUNNER_TEMP/mcpvenv/bin/gco"
+          test -x "$RUNNER_TEMP/mcpvenv/bin/gco-mcp"
+      - name: Installed package imports and resolves its bundled gco
+        run: |
+          "$RUNNER_TEMP/mcpvenv/bin/python" "$GITHUB_WORKSPACE/scripts/mcp_install_smoke.py"
+      - name: gco-mcp launches the MCP server over stdio
+        run: |
+          timeout 30 "$RUNNER_TEMP/mcpvenv/bin/gco-mcp" </dev/null >"$RUNNER_TEMP/mcp.log" 2>&1 || true
+          grep -q "Starting MCP server" "$RUNNER_TEMP/mcp.log"

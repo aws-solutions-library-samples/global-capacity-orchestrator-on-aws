@@ -7,7 +7,7 @@ that invariant: for every well-formed ``SessionState`` shape Hypothesis
 can generate, ``json.loads(json.dumps(s)) == s`` must hold.
 
 The strategy uses ``st.fixed_dictionaries`` for every required key set
-defined in ``mcp/mission/types.py`` and draws Literal-typed labels via
+defined in ``gco_mcp/mission/types.py`` and draws Literal-typed labels via
 ``st.sampled_from`` against the literal arguments. ``NotRequired`` fields
 are intentionally omitted: the round-trip invariant is the central thing
 under test, not the validator surface — well-formed-by-validators data
@@ -25,9 +25,9 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 # Mirror the import pattern used by every other test module that touches
-# the MCP package: mcp/run_mcp.py adds mcp/ to sys.path at runtime, but
+# the MCP package: gco_mcp/run_mcp.py adds gco_mcp/ to sys.path at runtime, but
 # tests have to do it themselves before the import.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission import types  # noqa: E402
 

@@ -1,5 +1,5 @@
 """
-Tests for the GCO MCP server's FastMCP transforms (mcp/server.py).
+Tests for the GCO MCP server's FastMCP transforms (gco_mcp/server.py).
 
 Covers the always-on Resources As Tools transform — the tool-only
 clients (Cursor, etc.) reach resources through synthetic
@@ -25,8 +25,8 @@ import pytest
 from fastmcp import FastMCP
 from fastmcp.server.transforms import ResourcesAsTools
 
-# Ensure mcp/ is importable, mirroring tests/test_mcp_feature_flags.py.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable, mirroring tests/test_mcp_feature_flags.py.
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 
 @pytest.mark.asyncio
@@ -40,7 +40,7 @@ async def test_resources_as_tools_round_trip() -> None:
     and asserts the text payload matches the handler's direct return.
 
     Using a fresh instance (rather than the production ``mcp`` singleton
-    from ``mcp/server.py``) keeps this test hermetic: nothing it
+    from ``gco_mcp/server.py``) keeps this test hermetic: nothing it
     registers leaks into other tests that count tools or resources on
     the live server.
     """
@@ -70,7 +70,7 @@ async def test_resources_as_tools_round_trip() -> None:
 # Tool Search filtering tests
 # =============================================================================
 #
-# These tests reload ``mcp/server.py`` under different ``GCO_MCP_TOOL_SEARCH``
+# These tests reload ``gco_mcp/server.py`` under different ``GCO_MCP_TOOL_SEARCH``
 # values and assert the resulting ``list_tools()`` matches the configured
 # transform mode. Reloading the server module is what triggers the transform
 # wiring at import time, which is why every test patches ``os.environ`` first

@@ -38,9 +38,9 @@ from typing import Any
 import pytest
 
 # Mirror the import pattern used by every other ``test_mission_*`` module:
-# ``mcp/run_mcp.py`` adds ``mcp/`` to ``sys.path`` at runtime, but tests
+# ``gco_mcp/run_mcp.py`` adds ``gco_mcp/`` to ``sys.path`` at runtime, but tests
 # have to do the same before importing ``mission.*``.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission import SCHEMA_VERSION  # noqa: E402
 from mission.state import FilesystemBackend  # noqa: E402
@@ -64,7 +64,7 @@ def _make_session(session_id: str = "sess-001", status: str = "running") -> dict
     """Return a minimally-populated ``SessionState`` dict for round-trip tests.
 
     The dict includes the required keys from
-    ``mcp/mission/types.py::SessionState`` plus a sprinkling of nested
+    ``gco_mcp/mission/types.py::SessionState`` plus a sprinkling of nested
     structures (criteria, iterations) so the round-trip assertion
     actually exercises non-trivial JSON paths rather than a flat
     payload.
@@ -293,7 +293,7 @@ def test_save_session_strips_parsed_ast_defensively(backend: FilesystemBackend) 
     """``save_session`` must succeed on a session that still carries cached AST.
 
     Pin the persistence-layer's defense-in-depth strip. The validators
-    in ``mcp/mission/validation.py`` attach a cached
+    in ``gco_mcp/mission/validation.py`` attach a cached
     :class:`ast.Expression` under ``_parsed_ast`` on every
     ``predicate`` criterion. Earlier slices required every caller to
     strip those keys before hand-off; a single missed callsite caused

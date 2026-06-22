@@ -28,10 +28,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Mirror the import pattern every other Mission test uses: ``mcp/run_mcp.py``
-# adds ``mcp/`` to ``sys.path`` at runtime, but pytest has to do it itself
+# Mirror the import pattern every other Mission test uses: ``gco_mcp/run_mcp.py``
+# adds ``gco_mcp/`` to ``sys.path`` at runtime, but pytest has to do it itself
 # before the imports below resolve.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission import (
     SCHEMA_VERSION,  # noqa: E402

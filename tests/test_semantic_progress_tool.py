@@ -2,7 +2,7 @@
 
 The pure ``mission_judge`` package is exercised in isolation by its sibling
 test modules; this file pins down the *tool* surface in
-``mcp/tools/semantic_progress.py`` — the thin ``@mcp.tool`` wrapper a Mission
+``gco_mcp/tools/semantic_progress.py`` — the thin ``@mcp.tool`` wrapper a Mission
 session actually calls. Every test here runs against a stubbed sampling
 backend, so no live LLM or Bedrock call is ever made: the single
 non-deterministic step in the whole flow is replaced by a backend whose
@@ -39,10 +39,10 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-# ``mcp/run_mcp.py`` puts ``mcp/`` on ``sys.path`` at runtime; mirror that here
+# ``gco_mcp/run_mcp.py`` puts ``gco_mcp/`` on ``sys.path`` at runtime; mirror that here
 # so the tool wrapper and the pure ``mission_judge`` package import the same way
 # they do in production, matching the convention used by the sibling tests.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission.sampling import SamplingTransportError  # noqa: E402
 from mission_judge.shape import ErrorCode, is_finite_float  # noqa: E402

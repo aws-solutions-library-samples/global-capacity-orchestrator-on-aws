@@ -13,7 +13,7 @@
 #   - lint:actionlint:workflows   — validates .github/workflows/*.yml
 #   - lint:hadolint:dockerfile    — hadolint on every Dockerfile
 #   - lint:markdownlint:md        — markdownlint-cli2 across all Markdown files
-#   - lint:mypy:strict            — mypy on gco/ (excluding stacks), cli/, mcp/, scripts/
+#   - lint:mypy:strict            — mypy on gco/ (excluding stacks), cli/, gco_mcp/, scripts/
 #   - lint:mypy:stacks            — mypy on gco/stacks/ + app.py (requires CDK)
 #   - lint:mypy:lambda            — mypy on each lambda/ subdir independently
 #   - lint:ruff:python            — ruff format --check + ruff check (via astral-sh/ruff-action)
@@ -95,7 +95,7 @@ jobs:
           src: >-
             gco/
             cli/
-            mcp/
+            gco_mcp/
             tests/
             lambda/
             scripts/
@@ -113,7 +113,7 @@ jobs:
           src: >-
             gco/
             cli/
-            mcp/
+            gco_mcp/
             tests/
             lambda/
             scripts/
@@ -223,7 +223,7 @@ jobs:
           path: .mypy_cache
           key: mypy-strict-${{ hashFiles('pyproject.toml', 'requirements-lock.txt') }}
       - name: Run mypy
-        run: mypy gco/ cli/ mcp/ scripts/ --exclude 'gco/stacks/'
+        run: mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
 
   lint-mypy-stacks:
     name: "lint:mypy:stacks"

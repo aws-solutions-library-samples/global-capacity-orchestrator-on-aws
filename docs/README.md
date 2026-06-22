@@ -2,7 +2,7 @@
 
 Comprehensive guides for understanding, deploying, operating, and customizing **Global Capacity Orchestrator (GCO)** — *One API. Every Accelerator. Any Region.*
 
-> **💡 Tip:** Connect the [MCP server](../mcp/) to an agent and explore the codebase through conversation. Ask things like *"What CDK stacks does GCO create?"* or *"How does the manifest processor validate jobs?"* — the agent reads the source code and docs to answer. See [mcp/README.md](../mcp/README.md) for setup.
+> **💡 Tip:** Connect the [MCP server](../gco_mcp/) to an agent and explore the codebase through conversation. Ask things like *"What CDK stacks does GCO create?"* or *"How does the manifest processor validate jobs?"* — the agent reads the source code and docs to answer. See [gco_mcp/README.md](../gco_mcp/README.md) for setup.
 
 ## Table of Contents
 

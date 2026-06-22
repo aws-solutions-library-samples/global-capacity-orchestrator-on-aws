@@ -52,7 +52,7 @@ A Mission session is a structured loop the operator drives through the CLI or th
 
 The control path is fully deterministic. Sampling, when enabled, only shapes the next strategy and the closing notes in the Final_Report — it never changes the verdict, the loop-limit arithmetic, or the criterion evaluation. Sessions persist as JSON under `~/.gco/missions/` (filesystem backend) or in the `<project>-missions` DynamoDB table when `GCO_MISSION_STATE_BACKEND=dynamodb`.
 
-The whole feature is gated. Set `GCO_ENABLE_MISSION=true` (or the umbrella `GCO_ENABLE_ALL_TOOLS=true`) before any Mission CLI subcommand or MCP tool resolves. See [Feature Flags](../mcp/README.md#feature-flags) for the table.
+The whole feature is gated. Set `GCO_ENABLE_MISSION=true` (or the umbrella `GCO_ENABLE_ALL_TOOLS=true`) before any Mission CLI subcommand or MCP tool resolves. See [Feature Flags](../gco_mcp/README.md#feature-flags) for the table.
 
 ## Generating a Criteria File
 
@@ -301,7 +301,7 @@ The `validate_criteria` validator emits structured rejections through `MissionVa
 
 ## Predicate Permissions
 
-Predicate expressions run inside a tight sandbox with two layers of defence: a **parse-time AST allowlist** and an **eval-time isolated namespace**. The full source lives at `mcp/mission/predicate.py`; this section is the operator-facing summary.
+Predicate expressions run inside a tight sandbox with two layers of defence: a **parse-time AST allowlist** and an **eval-time isolated namespace**. The full source lives at `gco_mcp/mission/predicate.py`; this section is the operator-facing summary.
 
 ### Allowed names
 
@@ -400,13 +400,13 @@ The validated AST is compiled and evaluated with `eval(code, globals_, locals_)`
 - `globals_` is `{"__builtins__": {}}` — the empty mapping is the standard Python sandbox idiom for stripping the builtin namespace. Without `__builtins__`, even a tree that smuggled past the validator could not look up `__import__`, `open`, `compile`, `exec`, etc.
 - `locals_` exposes only `obs` plus the eight whitelisted callables.
 
-The double defence (AST allowlist plus empty `__builtins__`) is the same pattern used by the wider script sandbox (`mcp/mission/sandbox.py`). The validator is exercised by a Hypothesis property test (`tests/test_mission_predicate_security.py`) that synthesises forbidden constructs and asserts the evaluator is never reached.
+The double defence (AST allowlist plus empty `__builtins__`) is the same pattern used by the wider script sandbox (`gco_mcp/mission/sandbox.py`). The validator is exercised by a Hypothesis property test (`tests/test_mission_predicate_security.py`) that synthesises forbidden constructs and asserts the evaluator is never reached.
 
 If you need an expression that the allowlist rejects, the right path is to do the work inside an allowlisted tool and surface the result on the Observation under a key the predicate can read. The predicate is intentionally a thin "is the goal hit" check, not a place to put real logic.
 
 ## Reading Metrics with Reader Tools
 
-A `metric_threshold` criterion reads a number off the Observation by dot-path — but something has to *put* that number there. The metric-reader tools (registered under `mcp/tools/metrics.py`, all carrying the `safe` tag) are read-only tools that surface a single training-style scalar in the exact shape the Observe phase merges, so a criterion can watch training loss, eval accuracy, throughput, or GPU utilisation with zero scripting.
+A `metric_threshold` criterion reads a number off the Observation by dot-path — but something has to *put* that number there. The metric-reader tools (registered under `gco_mcp/tools/metrics.py`, all carrying the `safe` tag) are read-only tools that surface a single training-style scalar in the exact shape the Observe phase merges, so a criterion can watch training loss, eval accuracy, throughput, or GPU utilisation with zero scripting.
 
 ### The canonical metrics shape
 
@@ -777,7 +777,7 @@ The per-session all-tools option is **not** the same thing as the `GCO_ENABLE_AL
 | `GCO_ENABLE_ALL_TOOLS` (environment variable) | server startup / **registration** | *which tools get registered* with the MCP server. |
 | `--allow-all-tools` / `allow_all_tools` (per-session option) | a single Mission session | *which already-registered tools that one session may call*. |
 
-The per-session option resolves its allowlist **from whatever is registered** — it never widens reach beyond the registered set. An operator who has not enabled the destructive, infrastructure, or cost-incurring feature flags will never see those tools registered, so they cannot enter a session's resolved allowlist. Setting `GCO_ENABLE_ALL_TOOLS=true` widens what `--allow-all-tools` resolves to *only* by virtue of registering more tools in the first place. See [Feature Flags](../mcp/README.md#feature-flags) for the registration-layer flags.
+The per-session option resolves its allowlist **from whatever is registered** — it never widens reach beyond the registered set. An operator who has not enabled the destructive, infrastructure, or cost-incurring feature flags will never see those tools registered, so they cannot enter a session's resolved allowlist. Setting `GCO_ENABLE_ALL_TOOLS=true` widens what `--allow-all-tools` resolves to *only* by virtue of registering more tools in the first place. See [Feature Flags](../gco_mcp/README.md#feature-flags) for the registration-layer flags.
 
 ### Risk-tier scope
 
@@ -1036,4 +1036,4 @@ Resource templates expose session state: `mission://sessions/{session_id}` retur
 | `session_paused` | The session was paused via `gco mission abort --pause`. | Run `gco mission resume <id>` first. |
 | `Tool '<name>' is not in the allowlist` (script audit event) | A script called a tool that is not in the session's allowlist. | Add the tool to `--tool-allowlist`, or remove the call from the script. |
 
-For a list of every gated tool and the flag that controls it, see [Feature Flags](../mcp/README.md#feature-flags).
+For a list of every gated tool and the flag that controls it, see [Feature Flags](../gco_mcp/README.md#feature-flags).

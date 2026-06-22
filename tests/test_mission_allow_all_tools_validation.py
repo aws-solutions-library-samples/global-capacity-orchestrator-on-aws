@@ -26,10 +26,10 @@ import pytest
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
-# Mirror the import pattern the other Mission tests use: ``mcp/run_mcp.py``
-# adds ``mcp/`` to ``sys.path`` at runtime, but pytest has to do it itself
+# Mirror the import pattern the other Mission tests use: ``gco_mcp/run_mcp.py``
+# adds ``gco_mcp/`` to ``sys.path`` at runtime, but pytest has to do it itself
 # before the import below resolves.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission import validation  # noqa: E402
 

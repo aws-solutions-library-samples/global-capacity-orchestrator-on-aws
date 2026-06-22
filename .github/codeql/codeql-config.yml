@@ -7,7 +7,7 @@ name: "GCO CodeQL config"
 
 # --- Paths to scan ---------------------------------------------------------
 # Scope the scan to the Python packages that carry security-sensitive
-# runtime code: ``gco/``, ``cli/``, ``mcp/``, ``lambda/``, ``scripts/``.
+# runtime code: ``gco/``, ``cli/``, ``gco_mcp/``, ``lambda/``, ``scripts/``.
 # Anything else (tests, demos, CDK synthesis output, caches) is either
 # already excluded via ``paths-ignore`` below or falls outside these
 # directories.

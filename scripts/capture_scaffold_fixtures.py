@@ -46,9 +46,9 @@ from typing import Any, cast
 # Mirror the path-injection pattern used throughout the Mission tree
 # so ``mission.*`` resolves regardless of how the script is launched.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "mcp"))
+sys.path.insert(0, str(_REPO_ROOT / "gco_mcp"))
 
-from mission import criteria_scaffold  # noqa: E402
+import mission.criteria_scaffold as criteria_scaffold  # noqa: E402
 from mission.sampling import (  # noqa: E402
     BedrockSamplingBackend,
     SamplingPrompt,

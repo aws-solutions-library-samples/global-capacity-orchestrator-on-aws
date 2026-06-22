@@ -16,8 +16,8 @@ from pathlib import Path
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-# Ensure mcp/ is importable
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp  # noqa: E402, F401  -- side effect: registers tools and resources
 from resources.docs import EXAMPLE_METADATA, EXAMPLES_DIR  # noqa: E402
@@ -127,7 +127,7 @@ def test_examples_by_use_case_no_match_suggests_find_examples() -> None:
 
 
 # =============================================================================
-# Helper coverage — the small filter primitives in mcp/tools/examples.py
+# Helper coverage — the small filter primitives in gco_mcp/tools/examples.py
 # =============================================================================
 
 

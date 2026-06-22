@@ -1,5 +1,5 @@
 """
-Tests for the GCO MCP server's feature-flag evaluation (mcp/feature_flags.py).
+Tests for the GCO MCP server's feature-flag evaluation (gco_mcp/feature_flags.py).
 
 Covers the truth-table strictness of `is_enabled` against arbitrary
 environment-variable values: the function must return True if and only
@@ -18,8 +18,8 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-# Ensure mcp/ is importable
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import feature_flags  # noqa: E402
 

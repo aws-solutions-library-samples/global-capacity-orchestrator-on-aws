@@ -6,7 +6,7 @@ lands where a ``metric_threshold`` or ``metric_trend`` criterion can read it —
 and an error envelope flows through the same path and leaves the criterion
 ``inconclusive`` rather than failing the loop.
 
-Nothing here patches, subclasses, or otherwise alters ``mcp/mission/engine.py``.
+Nothing here patches, subclasses, or otherwise alters ``gco_mcp/mission/engine.py``.
 The test imports ``MissionEngine`` as-is and drives four of its surfaces
 directly:
 
@@ -41,11 +41,11 @@ from typing import Any
 
 import pytest
 
-# ``mcp/run_mcp.py`` puts ``mcp/`` on ``sys.path`` at runtime; pytest mirrors
+# ``gco_mcp/run_mcp.py`` puts ``gco_mcp/`` on ``sys.path`` at runtime; pytest mirrors
 # that before any ``mission.*`` / ``mission_judge.*`` import resolves. Same
 # idiom used by every other ``test_mission_*`` and ``test_semantic_progress_*``
 # module.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission import SCHEMA_VERSION  # noqa: E402
 from mission.engine import MissionEngine  # noqa: E402

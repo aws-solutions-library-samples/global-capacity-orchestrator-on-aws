@@ -1,7 +1,7 @@
 """Reusable Hypothesis strategies for Mission domain objects.
 
 The strategies here build well-formed dicts shaped like the Mission
-``TypedDict``s in ``mcp/mission/types.py``. They are deliberately
+``TypedDict``s in ``gco_mcp/mission/types.py``. They are deliberately
 minimal: every required key is populated with a JSON-serializable
 value drawn from a constrained leaf strategy, and the optional keys
 are populated only when a test composes them in. The ``IterationRecord``
@@ -44,9 +44,9 @@ from typing import Any
 from hypothesis import strategies as st
 
 # Mirror the import pattern used by every other Mission test:
-# ``mcp/run_mcp.py`` adds ``mcp/`` to ``sys.path`` at runtime, but
+# ``gco_mcp/run_mcp.py`` adds ``gco_mcp/`` to ``sys.path`` at runtime, but
 # pytest has to do it itself before the import below resolves.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "mcp"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "gco_mcp"))
 
 from mission.types import SCHEMA_VERSION  # noqa: E402
 
@@ -97,7 +97,7 @@ datetimes_utc = st.datetimes(
 def cadences(draw: st.DrawFn) -> dict[str, Any]:
     """Draw any of the four supported Cadence shapes.
 
-    The validators in ``mcp/mission/validation.py`` allow only the
+    The validators in ``gco_mcp/mission/validation.py`` allow only the
     keys this strategy emits: ``every_iteration`` carries no extras,
     ``every_n_iterations`` carries a positive int ``n``,
     ``every_t_seconds`` carries a positive int ``t``, ``on_event``

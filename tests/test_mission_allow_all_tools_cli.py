@@ -38,11 +38,11 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
-# The Mission package lives under ``mcp/mission`` and is imported as
+# The Mission package lives under ``gco_mcp/mission`` and is imported as
 # ``mission.*``. Mirror the path-injection pattern used throughout the
 # rest of the ``test_mission_*`` files so the imports below resolve
 # regardless of how pytest is invoked.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from cli.main import cli  # noqa: E402
 

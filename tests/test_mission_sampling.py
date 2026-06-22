@@ -38,9 +38,9 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 # Mirror the path-injection pattern used by every other Mission test:
-# ``mcp/run_mcp.py`` adds ``mcp/`` to ``sys.path`` at runtime, so test
+# ``gco_mcp/run_mcp.py`` adds ``gco_mcp/`` to ``sys.path`` at runtime, so test
 # files have to do the same before the imports below resolve.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission import sampling  # noqa: E402
 from mission.sampling import (  # noqa: E402

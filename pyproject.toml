@@ -5,7 +5,12 @@ requires = ["setuptools>=77.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["cli", "cli.*", "gco", "gco.*"]
+include = ["cli", "cli.*", "gco", "gco.*", "gco_mcp", "gco_mcp.*"]
+# gco_mcp ships as a PEP 420 namespace package (no root __init__.py) so its
+# modules import each other bare (e.g. `from server import mcp`) off sys.path,
+# exactly as they did under the old mcp/ name; namespaces=true lets find()
+# still discover and package it.
+namespaces = true
 
 [tool.setuptools.dynamic]
 version = {attr = "gco._version.__version__"}
@@ -40,7 +45,7 @@ dependencies = [
     "prometheus-client==0.25.0",
     "httpx==0.28.1",
     "urllib3==2.7.0",
-    # FastMCP powers the in-tree MCP server (mcp/run_mcp.py). The ``tasks``
+    # FastMCP powers the in-tree MCP server (gco_mcp/run_mcp.py). The ``tasks``
     # extra pulls in the protocol-native background task support
     # (SEP-1686) used by the long-running stack lifecycle and image
     # build/push tools. The ``code-mode`` extra pulls in the
@@ -128,6 +133,9 @@ dev = [
 
 [project.scripts]
 gco = "cli.main:main"
+# MCP server entry point (launches the in-tree gco_mcp/run_mcp.py, shipped as gco_mcp)
+# so the server can be installed straight from a Git tag with uv/uvx.
+gco-mcp = "gco_mcp.run_mcp:main"
 
 [project.urls]
 Documentation = "https://github.com/awslabs/global-capacity-orchestrator-on-aws/blob/main/docs/CLI.md"
@@ -256,7 +264,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["gco", "cli", "mcp"]
+source = ["gco", "cli", "gco_mcp"]
 branch = true
 omit = [
     "*/tests/*",

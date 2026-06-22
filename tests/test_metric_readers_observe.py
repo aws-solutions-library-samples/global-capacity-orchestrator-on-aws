@@ -7,7 +7,7 @@ envelope flows through the same path and leaves the criterion ``inconclusive``
 rather than failing the loop.
 
 Nothing here patches, subclasses, or otherwise alters
-``mcp/mission/engine.py``. The test imports ``MissionEngine`` as-is and drives
+``gco_mcp/mission/engine.py``. The test imports ``MissionEngine`` as-is and drives
 two surfaces of it:
 
 * the private :meth:`MissionEngine._build_observation` /
@@ -39,11 +39,11 @@ from typing import Any
 
 import pytest
 
-# ``mcp/run_mcp.py`` puts ``mcp/`` on ``sys.path`` at runtime; pytest mirrors
+# ``gco_mcp/run_mcp.py`` puts ``gco_mcp/`` on ``sys.path`` at runtime; pytest mirrors
 # that before any ``mission.*`` / ``metric_readers.*`` import resolves. Same
 # idiom used by every other ``test_mission_*`` and ``test_metric_readers_*``
 # module.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from metric_readers.shape import error_envelope, metrics_result  # noqa: E402
 from mission import SCHEMA_VERSION  # noqa: E402

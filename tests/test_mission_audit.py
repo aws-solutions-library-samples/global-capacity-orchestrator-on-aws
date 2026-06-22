@@ -37,10 +37,10 @@ from typing import Any
 
 import pytest
 
-# ``mcp/run_mcp.py`` adds ``mcp/`` to ``sys.path`` at runtime; pytest has
+# ``gco_mcp/run_mcp.py`` adds ``gco_mcp/`` to ``sys.path`` at runtime; pytest has
 # to do the same before any ``mission.*`` import resolves. Mirrors the
 # pattern used by every other ``test_mission_*`` module.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission import SCHEMA_VERSION  # noqa: E402
 from mission.audit import EVENT_TYPE_PHASE, EVENT_TYPE_VERDICT  # noqa: E402

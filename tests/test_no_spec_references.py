@@ -48,13 +48,13 @@ SCANNED_DIRS = (
 )
 
 # Standalone files outside the SCANNED_DIRS that should also be checked. The
-# ``mcp/README.md`` and ``examples/README.md`` entries overlap with the
+# ``gco_mcp/README.md`` and ``examples/README.md`` entries overlap with the
 # directory walks above; ``_iter_target_files`` deduplicates by resolved path.
 EXTRA_FILES = (
     "README.md",
     "CONTRIBUTING.md",
     "QUICKSTART.md",
-    "mcp/README.md",
+    "gco_mcp/README.md",
     "examples/README.md",
 )
 

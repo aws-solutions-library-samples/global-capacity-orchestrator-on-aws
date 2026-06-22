@@ -1,6 +1,6 @@
 """
 Tests for the shared async subprocess runner used by long-running MCP tools
-(`mcp/tools/_long_task.py::_run_long_task`).
+(`gco_mcp/tools/_long_task.py::_run_long_task`).
 
 Covers four behaviours of the helper:
 
@@ -29,9 +29,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# Ensure mcp/ is importable, mirroring tests/test_mcp_audit.py and
+# Ensure gco_mcp/ is importable, mirroring tests/test_mcp_audit.py and
 # tests/test_mcp_feature_flags.py.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from tools._long_task import _run_long_task  # noqa: E402
 

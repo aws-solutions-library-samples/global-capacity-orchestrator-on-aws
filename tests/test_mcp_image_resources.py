@@ -1,5 +1,5 @@
 """
-Tests for the container image registry resources (mcp/resources/images.py).
+Tests for the container image registry resources (gco_mcp/resources/images.py).
 
 Covers the four resource paths:
 
@@ -21,8 +21,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-# Ensure mcp/ is importable, mirroring the other test modules.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable, mirroring the other test modules.
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp  # noqa: E402
 

@@ -306,7 +306,7 @@
       "unhealthy_threshold_seconds": 300
     },
 
-    "_comment_mcp_server": "MCP (Model Context Protocol) server IAM role provisioning. enabled: when true, the regional stack creates a least-privilege role and exports its ARN as the McpServerRoleArn CFN output. Operators set GCO_MCP_ROLE_ARN to that exported value when launching the MCP server. See mcp/README.md and https://modelcontextprotocol.io/.",
+    "_comment_mcp_server": "MCP (Model Context Protocol) server IAM role provisioning. enabled: when true, the regional stack creates a least-privilege role and exports its ARN as the McpServerRoleArn CFN output. Operators set GCO_MCP_ROLE_ARN to that exported value when launching the MCP server. See gco_mcp/README.md and https://modelcontextprotocol.io/.",
     "mcp_server": {
       "enabled": true
     },

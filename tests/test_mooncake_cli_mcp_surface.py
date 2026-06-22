@@ -32,8 +32,8 @@ import pytest
 
 from cli.inference import InferenceManager
 
-# Ensure mcp/ is importable, then load the server so every tool is registered.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable, then load the server so every tool is registered.
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp  # noqa: E402  (import for path/registration side effects)
 from tools.inference import (  # noqa: E402

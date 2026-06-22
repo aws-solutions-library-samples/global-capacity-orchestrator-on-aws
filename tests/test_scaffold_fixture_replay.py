@@ -46,7 +46,7 @@ import pytest
 # Mirror the path-injection pattern used throughout the Mission
 # tests so ``mission.*`` resolves regardless of how pytest is
 # invoked.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission import criteria_scaffold  # noqa: E402
 

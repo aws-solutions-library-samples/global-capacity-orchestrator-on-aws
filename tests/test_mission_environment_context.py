@@ -3,7 +3,7 @@ sampling-prompt section it feeds.
 
 Two surfaces under test:
 
-1. ``mcp/mission/_environment.py::gather_session_environment`` — the
+1. ``gco_mcp/mission/_environment.py::gather_session_environment`` — the
    slow-moving live signals helper. Probes the multi-region capacity
    checker for per-region snapshots and the capacity reservation
    service for an active-count summary. The helper is intentionally
@@ -12,7 +12,7 @@ Two surfaces under test:
    :class:`RegionCapacity` shapes so the output is always
    JSON-serialisable.
 
-2. ``mcp/mission/sampling.py::SamplingPrompt.environment_context`` — the
+2. ``gco_mcp/mission/sampling.py::SamplingPrompt.environment_context`` — the
    optional field that injects the gathered dict into the
    Strategy_Revision prompt's ``=== Environment context ===`` block.
    The block is byte-capped, key-sorted, and omitted entirely when
@@ -27,9 +27,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
-# Ensure mcp/ is importable so ``from mission import _environment`` works
+# Ensure gco_mcp/ is importable so ``from mission import _environment`` works
 # without the ``mcp.`` package prefix that fastmcp would shadow.
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from mission import _environment  # noqa: E402
 from mission.sampling import (  # noqa: E402

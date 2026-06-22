@@ -3,7 +3,7 @@ Tests for the read-only MCP observability tools (``task_status`` and
 ``task_tail``) and the matching ``gco tasks`` CLI surface.
 
 These tools never spawn subprocesses or touch AWS — they only read the
-disk records written by ``mcp/tools/_task_status.py`` during a long-
+disk records written by ``gco_mcp/tools/_task_status.py`` during a long-
 running tool invocation. The tests stage records directly so they
 don't depend on a live ``deploy_all`` subprocess.
 """
@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "mcp"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gco_mcp"))
 
 
 @pytest.fixture

@@ -16,8 +16,8 @@ from unittest.mock import patch
 
 import pytest
 
-# Ensure mcp/ is importable
-sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+# Ensure gco_mcp/ is importable
+sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp
 
@@ -541,7 +541,7 @@ class TestMCPStdioProtocol:
 
         transport = StdioTransport(
             command=sys.executable,
-            args=[str(PROJECT_ROOT / "mcp" / "run_mcp.py")],
+            args=[str(PROJECT_ROOT / "gco_mcp" / "run_mcp.py")],
             cwd=str(PROJECT_ROOT),
         )
         async with Client(transport) as client:
@@ -559,7 +559,7 @@ class TestMCPStdioProtocol:
 
         transport = StdioTransport(
             command=sys.executable,
-            args=[str(PROJECT_ROOT / "mcp" / "run_mcp.py")],
+            args=[str(PROJECT_ROOT / "gco_mcp" / "run_mcp.py")],
             cwd=str(PROJECT_ROOT),
         )
         async with Client(transport) as client:
@@ -576,7 +576,7 @@ class TestMCPStdioProtocol:
 
         transport = StdioTransport(
             command=sys.executable,
-            args=[str(PROJECT_ROOT / "mcp" / "run_mcp.py")],
+            args=[str(PROJECT_ROOT / "gco_mcp" / "run_mcp.py")],
             cwd=str(PROJECT_ROOT),
         )
         async with Client(transport) as client:
@@ -592,7 +592,7 @@ class TestMCPStdioProtocol:
 
         transport = StdioTransport(
             command=sys.executable,
-            args=[str(PROJECT_ROOT / "mcp" / "run_mcp.py")],
+            args=[str(PROJECT_ROOT / "gco_mcp" / "run_mcp.py")],
             cwd=str(PROJECT_ROOT),
         )
         async with Client(transport) as client:

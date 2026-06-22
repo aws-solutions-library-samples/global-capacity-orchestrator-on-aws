@@ -76,8 +76,8 @@ _FEATURES: tuple[_Feature, ...] = (
     _Feature(
         feature_id="mission-metric-reader-tools",
         paths=(
-            _REPO_ROOT / "mcp" / "metric_readers",
-            _REPO_ROOT / "mcp" / "tools" / "metrics.py",
+            _REPO_ROOT / "gco_mcp" / "metric_readers",
+            _REPO_ROOT / "gco_mcp" / "tools" / "metrics.py",
             _TESTS_DIR,
         ),
         test_prefix="test_metric_readers_",
@@ -85,8 +85,8 @@ _FEATURES: tuple[_Feature, ...] = (
     _Feature(
         feature_id="mission-allow-all-tools",
         paths=(
-            _REPO_ROOT / "mcp" / "mission" / "validation.py",
-            _REPO_ROOT / "mcp" / "tools" / "mission.py",
+            _REPO_ROOT / "gco_mcp" / "mission" / "validation.py",
+            _REPO_ROOT / "gco_mcp" / "tools" / "mission.py",
             _REPO_ROOT / "cli" / "commands" / "mission_cmd.py",
             _TESTS_DIR,
         ),
@@ -95,8 +95,8 @@ _FEATURES: tuple[_Feature, ...] = (
     _Feature(
         feature_id="mission-semantic-progress-judge",
         paths=(
-            _REPO_ROOT / "mcp" / "mission_judge",
-            _REPO_ROOT / "mcp" / "tools" / "semantic_progress.py",
+            _REPO_ROOT / "gco_mcp" / "mission_judge",
+            _REPO_ROOT / "gco_mcp" / "tools" / "semantic_progress.py",
             _TESTS_DIR,
         ),
         test_prefix="test_semantic_progress_",
@@ -111,8 +111,8 @@ _FEATURES: tuple[_Feature, ...] = (
             _REPO_ROOT / "gco" / "services" / "mooncake_pd_proxy.py",
             _REPO_ROOT / "gco" / "services" / "inference_store.py",
             _REPO_ROOT / "gco" / "stacks" / "regional_stack.py",
-            _REPO_ROOT / "mcp" / "tools" / "inference.py",
-            _REPO_ROOT / "mcp" / "tools" / "storage.py",
+            _REPO_ROOT / "gco_mcp" / "tools" / "inference.py",
+            _REPO_ROOT / "gco_mcp" / "tools" / "storage.py",
             _TESTS_DIR,
         ),
         test_prefix="test_mooncake_",
