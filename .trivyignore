@@ -49,3 +49,38 @@ CVE-2026-9150 exp:2026-09-12
 # >= 6.27.0 — bump ARG NPM_VERSION in Dockerfile.dev and drop this entry then.
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-12151
 CVE-2026-12151 exp:2026-09-21
+
+# CVE-2026-25680, CVE-2026-25681, CVE-2026-27136, CVE-2026-33814,
+# CVE-2026-39821, CVE-2026-42502, CVE-2026-42506 — golang.org/x/net v0.49.0,
+# statically linked into the pinned kubectl binary (ARG KUBECTL_VERSION in
+# Dockerfile.dev; the identical v1.36.2 is fetched by
+# lambda/helm-installer/Dockerfile). Surfaced by security:trivy:container-scan
+# on the GCO dev image and the helm-installer Lambda image — the only two
+# scanned images that carry kubectl. Fixed in x/net 0.53.0 (CVE-2026-33814)
+# and 0.55.0 (the other six).
+#
+# Not yet clearable by a pin bump: v1.36.2 is the latest stable kubectl
+# (https://dl.k8s.io/release/stable-1.36.txt) and the whole release-1.36
+# branch still pins x/net v0.49.0. The bump to x/net >= 0.55.0 currently lives
+# only on kubernetes master, so it lands in a future kubectl patch, not a
+# release we can pull today.
+#
+# Low runtime risk: the flagged surfaces are not reached by kubectl acting as
+# an HTTP/2 client against a trusted EKS API server — x/net/html.Render
+# (CVE-2026-25680 / -25681 / -27136 / -42502 / -42506) renders HTML the client
+# never produces, x/net/idna punycode (CVE-2026-39821) is off the API path,
+# and the HTTP/2 SETTINGS-frame DoS (CVE-2026-33814) is a server-side parse
+# while kubectl is the client. The dev image is a contributor/CI tool that is
+# never deployed.
+#
+# Clears when a kubectl release ships with x/net >= 0.55.0: bump KUBECTL_VERSION
+# in Dockerfile.dev and the pin in lambda/helm-installer/Dockerfile, then drop
+# these entries. Advisory: https://avd.aquasec.com/nvd/cve-2026-25680 (and the
+# matching nvd/cve-2026-XXXXX page for each ID above).
+CVE-2026-25680 exp:2026-09-22
+CVE-2026-25681 exp:2026-09-22
+CVE-2026-27136 exp:2026-09-22
+CVE-2026-33814 exp:2026-09-22
+CVE-2026-39821 exp:2026-09-22
+CVE-2026-42502 exp:2026-09-22
+CVE-2026-42506 exp:2026-09-22
