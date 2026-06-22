@@ -67,7 +67,7 @@ cd global-capacity-orchestrator-on-aws
 docker build -f Dockerfile.dev -t gco-dev .
 ```
 
-The image bundles Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, and all GCO Python dependencies at the exact versions CI uses. The Dockerfile is multi-arch — it builds natively on both `linux/amd64` (Intel/x86_64 hosts and CI) and `linux/arm64` (Apple Silicon Macs, Graviton Linux, etc.) by selecting the right kubectl / AWS CLI / Docker CLI binary via `$TARGETARCH`. No `--platform` flag needed.
+The image bundles Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, Docker CLI + Buildx, and all GCO Python dependencies at the exact versions CI uses. The Dockerfile is multi-arch — it builds natively on both `linux/amd64` (Intel/x86_64 hosts and CI) and `linux/arm64` (Apple Silicon Macs, Graviton Linux, etc.) by selecting the right kubectl / AWS CLI / Docker CLI / Buildx binary via `$TARGETARCH`. No `--platform` flag needed. Buildx ships in the image so the multi-arch image mirror and the `linux/amd64` asset builds that `gco stacks deploy-all` runs succeed on Apple Silicon (arm64) as well as x86_64.
 
 ## Step 2: Run the GCO CLI
 

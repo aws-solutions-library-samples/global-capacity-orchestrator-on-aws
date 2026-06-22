@@ -5,7 +5,10 @@
 # Docker Desktop on Intel Macs / Linux) and linux/arm64 (Apple Silicon
 # Macs running Docker Desktop, Finch, Colima, or any arm64 Linux host).
 # kubectl, the AWS CLI v2, and the Docker static client all publish both
-# arch builds; we pick the right one via BuildKit's $TARGETARCH.
+# arch builds; we pick the right one via BuildKit's $TARGETARCH. The
+# Docker Buildx plugin is installed alongside the client so the multi-arch
+# image mirror and the linux/amd64 asset builds that `gco stacks deploy-all`
+# performs work out of the box on Apple Silicon (arm64) as well as x86_64.
 #
 # Build:
 #   docker build -f Dockerfile.dev -t gco-dev .
@@ -176,6 +179,31 @@ RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
     && mv /tmp/docker/docker /usr/local/bin/ \
     && rm -rf /tmp/docker /tmp/docker.tgz /tmp/gnu_arch \
     && docker --version
+
+# Install the Docker Buildx CLI plugin.
+#
+# `gco stacks deploy-all` needs a multi-arch image-copy tool for two
+# steps, and on an arm64 host (Apple Silicon) both fail without Buildx:
+#   1. The Volcano ECR image mirror — cli/_image_mirror.py prefers
+#      `docker buildx imagetools create` (a registry-to-registry copy
+#      that preserves the full multi-arch manifest list). Without a
+#      multi-arch copy method it aborts before CloudFormation with
+#      "No multi-arch image-copy method available".
+#   2. The linux/amd64 Lambda/service asset images that CDK bundles —
+#      the legacy builder cannot cross-build, failing with "image ...
+#      does not provide the specified platform (linux/amd64)".
+# The Docker static tarball above ships only the client binary (no
+# cli-plugins/), so the plugin is installed separately here. Buildx
+# publishes per-arch release binaries selected by ${TARGETARCH}; the
+# plugin lives in a system cli-plugins path so the root user's docker
+# CLI discovers it. Pinned for reproducibility — bump in lockstep with
+# the deps-scan report. https://github.com/docker/buildx/releases
+ARG BUILDX_VERSION=v0.35.0
+RUN mkdir -p /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-${TARGETARCH}" \
+      -o /usr/local/lib/docker/cli-plugins/docker-buildx \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx \
+    && docker buildx version
 
 # Set working directory
 WORKDIR /workspace
