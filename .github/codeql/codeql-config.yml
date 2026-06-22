@@ -23,7 +23,7 @@ name: "GCO CodeQL config"
 paths:
   - gco
   - cli
-  - mcp
+  - gco_mcp
   - lambda
   - scripts
 

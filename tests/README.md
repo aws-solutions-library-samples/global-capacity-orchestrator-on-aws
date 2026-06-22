@@ -25,7 +25,7 @@ This directory contains the test suite for GCO (Global Capacity Orchestrator on 
 python -m pytest
 
 # Run with coverage report
-python -m pytest --cov=gco --cov=cli --cov=mcp --cov-report=term-missing
+python -m pytest --cov=gco --cov=cli --cov=gco_mcp --cov-report=term-missing
 
 # Run specific test file
 python -m pytest tests/test_manifest_api.py -v
@@ -620,13 +620,13 @@ The project enforces a minimum of 90% test coverage across `gco/`, `cli/`, and `
 To check coverage:
 
 ```bash
-python -m pytest --cov=gco --cov=cli --cov=mcp --cov-report=term-missing
+python -m pytest --cov=gco --cov=cli --cov=gco_mcp --cov-report=term-missing
 ```
 
 To generate an HTML coverage report:
 
 ```bash
-python -m pytest --cov=gco --cov=cli --cov=mcp --cov-report=html
+python -m pytest --cov=gco --cov=cli --cov=gco_mcp --cov-report=html
 open htmlcov/index.html
 ```
 

@@ -248,7 +248,7 @@ test:test-dir-pytest:
     # Build Lambda package for CDK tests
     - *build-lambda-package
   script:
-    - pytest tests/ -v --ignore=tests/test_integration.py --cov=gco --cov=cli --cov=mcp --cov-report=xml --cov-report=html --cov-report=json --cov-report=term-missing --cov-fail-under=90 --junitxml=report.xml -x
+    - pytest tests/ -v --ignore=tests/test_integration.py --cov=gco --cov=cli --cov=gco_mcp --cov-report=xml --cov-report=html --cov-report=json --cov-report=term-missing --cov-fail-under=90 --junitxml=report.xml -x
   coverage: '/^TOTAL\s+.*\s+(\d+)%/'
   cache:
     key: test-${CI_COMMIT_REF_SLUG}

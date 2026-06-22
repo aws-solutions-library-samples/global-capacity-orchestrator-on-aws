@@ -222,6 +222,7 @@ exclude = [
     "build",
     "lambda/kubectl-applier-simple-build",
     "lambda/helm-installer-build",
+    "scripts/mcp_install_smoke\\.py",
 ]
 
 # gco/stacks/ is type-checked separately by lint:mypy:stacks (with CDK

@@ -2119,6 +2119,9 @@ class TestStackManagerDestroyAnalyticsFallback:
             patch.object(
                 StackManager, "_cloudformation_delete_stack", return_value=True
             ) as mock_cfn_delete,
+            patch.object(
+                StackManager, "_remove_api_gateway_analytics_dependency", return_value=True
+            ),
         ):
             mock_run.return_value = MagicMock(returncode=0)
             # Stack still exists after CDK destroy

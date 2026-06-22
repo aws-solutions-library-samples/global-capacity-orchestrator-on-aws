@@ -360,7 +360,7 @@ pytest tests/
 pytest tests/test_integration.py
 
 # Run with coverage
-pytest --cov=gco --cov=cli --cov=mcp tests/
+pytest --cov=gco --cov=cli --cov=gco_mcp tests/
 
 # Run with verbose output
 pytest tests/ -v
@@ -388,7 +388,7 @@ Run all three from your dev-container shell (the recommended path — see
 ruff format --check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
-pytest tests/ --cov=gco --cov=cli --cov=mcp --cov-fail-under=90
+pytest tests/ --cov=gco --cov=cli --cov=gco_mcp --cov-fail-under=90
 ```
 
 **Success indicator:** all four commands complete with no reported failures —
@@ -464,7 +464,7 @@ mypy gco/stacks/ app.py
 bandit -r gco/ cli/ -c pyproject.toml --severity-level medium
 
 # Run tests with coverage (matches unit:pytest:core)
-pytest tests/ --cov=gco --cov=cli --cov=mcp --cov-report=html --cov-fail-under=90 \
+pytest tests/ --cov=gco --cov=cli --cov=gco_mcp --cov-report=html --cov-fail-under=90 \
     --ignore=tests/test_nag_compliance.py
 
 # Run cdk-nag compliance matrix (matches unit:cdk:nag-compliance)

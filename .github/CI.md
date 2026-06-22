@@ -389,7 +389,7 @@ mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
 mypy gco/stacks/ app.py          # requires ".[cdk,typecheck]"
 
 # Unit tests (matches unit:pytest:core)
-pytest tests/ --cov=gco --cov=cli --cov=mcp --cov-fail-under=90 \
+pytest tests/ --cov=gco --cov=cli --cov=gco_mcp --cov-fail-under=90 \
     --ignore=tests/test_integration.py \
     --ignore=tests/test_nag_compliance.py
 

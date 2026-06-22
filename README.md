@@ -529,7 +529,7 @@ Quick start for contributors (dev container — recommended):
 
 ```bash
 docker build -f Dockerfile.dev -t gco-dev .
-docker run --rm -v $(pwd):/workspace -w /workspace gco-dev pytest tests/ -v --cov=gco --cov=cli --cov=mcp
+docker run --rm -v $(pwd):/workspace -w /workspace gco-dev pytest tests/ -v --cov=gco --cov=cli --cov=gco_mcp
 ```
 
 Or, in a clean virtual environment on your host:
@@ -537,7 +537,7 @@ Or, in a clean virtual environment on your host:
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest tests/ -v --cov=gco --cov=cli --cov=mcp
+pytest tests/ -v --cov=gco --cov=cli --cov=gco_mcp
 ```
 
 > If `pip install -e ".[dev]"` fails with dependency-resolver errors, that's the pinned-versions issue mentioned in [Prerequisites](#prerequisites). Use the dev container instead — it ships everything at the exact versions CI uses.
