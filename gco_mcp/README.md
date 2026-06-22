@@ -10,8 +10,10 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
   - [Screenshots](#screenshots)
 - [Prerequisites](#prerequisites)
 - [Setup](#setup)
+  - [Install with uv (recommended)](#install-with-uv-recommended)
   - [Kiro](#kiro)
   - [Claude Desktop](#claude-desktop)
+  - [Claude Code](#claude-code)
   - [Cursor](#cursor)
   - [Other MCP Clients](#other-mcp-clients)
 - [Feature Flags](#feature-flags)
@@ -113,11 +115,11 @@ The MCP server wraps the `gco` CLI, exposing 98 tools by default (up to 130 with
 
 ## Prerequisites
 
-The simplest setup is to use GCO's [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container) — it has the `gco` CLI and the `[mcp]` extras (including `fastmcp`) pre-installed at the right versions, so you only need to point your MCP client at `python3 gco_mcp/run_mcp.py` running inside the container. This avoids the dependency-resolver issues that often hit users installing GCO's many pinned packages on top of an existing Python environment.
+The quickest way to *run* the server — no clone, no manual dependency install — is [`uv`](https://docs.astral.sh/uv/). Install it once with the [official uv installation guide](https://docs.astral.sh/uv/getting-started/installation/) (`uvx` ships with `uv`), then jump to [Install with `uv` (recommended)](#install-with-uv-recommended) below; `uv` resolves the pinned GCO dependencies into an isolated environment for you.
 
-Even simpler if you only want to run the server (no development): install it straight from a release tag with [`uv`](https://docs.astral.sh/uv/) — no clone and no manual dependency install. See [Install from a tagged release with `uv`](#install-from-a-tagged-release-with-uv-no-clone) below.
+For **development** — or when you need the local-clone-only resources (`docs://`, `source://`, `k8s://`, `infra://`, …) and CDK/stack lifecycle operations — work from a checkout instead. The GCO [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container) is the smoothest path here: it ships the `gco` CLI and the `[mcp]` extras (including `fastmcp`) pre-installed at the right versions, so you only point your MCP client at `python3 gco_mcp/run_mcp.py` running inside the container. This sidesteps the dependency-resolver issues that often hit users layering the many pinned GCO packages onto an existing Python environment.
 
-If you'd rather install on your host:
+To set up that clone on your host instead:
 
 - Python 3.14+
 - GCO CLI installed (`pipx install -e .` from the project root)
@@ -128,18 +130,23 @@ If you'd rather install on your host:
 
 ## Setup
 
-The most portable config — works across Kiro, Claude Desktop, Cursor, and anything else that speaks stdio MCP — passes the **absolute path** to `run_mcp.py` directly in `args`. This avoids relying on any client-specific `cwd` handling.
+> **Version note:** the GCO MCP server (`gco-mcp`) first shipped in **v3.2.0** — earlier release tags do not include it. Use `v3.2.0` or any newer release tag that fits your needs; browse the [releases page](https://github.com/awslabs/global-capacity-orchestrator-on-aws/releases) to pick one.
 
-### Install from a tagged release with `uv` (no clone)
+The **recommended** way to run the server is [`uv`](https://docs.astral.sh/uv/), straight from a release tag — no clone and no manual dependency install (see [Install with `uv` (recommended)](#install-with-uv-recommended) just below). The **clone-based** per-client configs further down are the secondary path: reach for them when you are developing GCO or need the local-clone-only resources (`docs://`, `source://`, `k8s://`, `infra://`) and CDK/stack lifecycle operations.
+
+### Install with `uv` (recommended)
 
 If you have [`uv`](https://docs.astral.sh/uv/) installed, you can run the GCO MCP server straight from a tagged GitHub release — no clone, no manual dependency install. `uv` resolves the pinned GCO dependencies into an isolated environment and exposes the `gco-mcp` console script:
 
 ```bash
+# v3.2.0 is the first release that ships gco-mcp; v3.2.0 or newer works — see the releases page.
+GCO_REF=v3.2.0
+
 # Run it ad hoc — uvx builds a cached, throwaway environment:
-uvx --from git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0 gco-mcp
+uvx --from "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@${GCO_REF}" gco-mcp
 
 # …or install the gco + gco-mcp console scripts onto your PATH:
-uv tool install git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0
+uv tool install "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@${GCO_REF}"
 ```
 
 Then point any stdio MCP client at that same command. For Kiro (`~/.kiro/settings/mcp.json`):
@@ -162,18 +169,59 @@ Then point any stdio MCP client at that same command. For Kiro (`~/.kiro/setting
 }
 ```
 
-The identical `command`/`args` pair works in Claude Desktop and Cursor — drop the `env` block if you do not need any [feature flags](#feature-flags). Pin `@v3.2.0` to whichever release tag you want, or use `@main` to track the latest; `uv` caches the build so subsequent launches start quickly.
+> The `@v3.2.0` pin in JSON is a floor, not a ceiling — any release `>= v3.2.0` works, so bump the tag as newer ones ship. (Shell snippets can interpolate `${GCO_REF}`; JSON cannot, so the tag is written inline.)
+
+The identical `command` / `args` pair works in Claude Desktop, Claude Code, and Cursor — drop the `env` block if you do not need any [feature flags](#feature-flags), or use `@main` to track the latest. `uv` caches the build so subsequent launches start quickly.
 
 What this install covers, and what still needs a checkout:
 
 - **Works out of the box, no separate CLI setup** — `uv` installs the `gco` CLI and the `gco-mcp` server together (both are console scripts of the single `gco-cli` package), and the server shells out to its own bundled, version-matched `gco` — so there is nothing extra to install and no dev container needed. Every AWS-facing tool (jobs, capacity, costs, inference, images, queues, nodepools, …) works once your AWS credentials are configured.
 - **Needs a local clone** — resources that read the project tree (`docs://`, `source://`, `k8s://`, `infra://`, `ci://`, …) and CDK/stack lifecycle operations. For those, use a clone-based setup (below) or the [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container).
 
-The per-client sections below configure the server **from a local clone** — handy for development or when you want the full resource and CDK surface.
+The per-client sections below also include a **secondary, clone-based** config (`python3 gco_mcp/run_mcp.py`) for development or when you want the full resource and CDK surface.
 
 ### Kiro
 
-Add to your MCP config at `~/.kiro/settings/mcp.json`. Kiro additionally honors a `cwd` field, so you can either use the absolute-path form below or the `cwd` shorthand:
+Add to your MCP config at `~/.kiro/settings/mcp.json`. The recommended `uvx` form needs no clone:
+
+```json
+{
+  "mcpServers": {
+    "gco": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
+        "gco-mcp"
+      ]
+    }
+  }
+}
+```
+
+To enable a feature flag, add an `env` block alongside `args`:
+
+```json
+{
+  "mcpServers": {
+    "gco": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
+        "gco-mcp"
+      ],
+      "env": {
+        "GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "true"
+      }
+    }
+  }
+}
+```
+
+Any release `>= v3.2.0` works — bump the `@v3.2.0` tag as needed.
+
+**From a local clone (development).** When you need the clone-only resources or CDK/stack operations, point Kiro at `run_mcp.py` instead. Kiro additionally honors a `cwd` field, so you can use the absolute-path form or the `cwd` shorthand:
 
 ```json
 {
@@ -187,48 +235,22 @@ Add to your MCP config at `~/.kiro/settings/mcp.json`. Kiro additionally honors 
 }
 ```
 
-To enable a feature flag, add an `env` block alongside `cwd`:
-
-```json
-{
-  "mcpServers": {
-    "gco": {
-      "command": "python3",
-      "args": ["gco_mcp/run_mcp.py"],
-      "cwd": "/path/to/global-capacity-orchestrator-on-aws",
-      "env": {
-        "GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "true"
-      }
-    }
-  }
-}
-```
-
 If the server fails to start in Kiro, switch to the absolute-path form — `cwd` handling differs between clients.
 
 ### Claude Desktop
 
-Add to your MCP config at `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+Add to your MCP config at `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows). The recommended `uvx` form:
 
 ```json
 {
   "mcpServers": {
     "gco": {
-      "command": "python3",
-      "args": ["/path/to/global-capacity-orchestrator-on-aws/gco_mcp/run_mcp.py"]
-    }
-  }
-}
-```
-
-To enable a feature flag, add an `env` block:
-
-```json
-{
-  "mcpServers": {
-    "gco": {
-      "command": "python3",
-      "args": ["/path/to/global-capacity-orchestrator-on-aws/gco_mcp/run_mcp.py"],
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
+        "gco-mcp"
+      ],
       "env": {
         "GCO_ENABLE_DESTRUCTIVE_OPERATIONS": "true"
       }
@@ -237,11 +259,9 @@ To enable a feature flag, add an `env` block:
 }
 ```
 
-Replace `/path/to/global-capacity-orchestrator-on-aws` with the absolute path to your GCO clone, then fully quit and reopen Claude Desktop for the new server to be picked up.
+Drop the `env` block if you do not need a [feature flag](#feature-flags). Any release `>= v3.2.0` works — bump the `@v3.2.0` tag as needed.
 
-### Cursor
-
-Add to your MCP config at `~/.cursor/mcp.json`:
+**From a local clone (development).** For the clone-only resources or CDK/stack operations, point Claude Desktop at the absolute path to `run_mcp.py` instead:
 
 ```json
 {
@@ -254,17 +274,76 @@ Add to your MCP config at `~/.cursor/mcp.json`:
 }
 ```
 
-To enable a feature flag, add an `env` block:
+Replace `/path/to/global-capacity-orchestrator-on-aws` with the absolute path to your GCO clone, then fully quit and reopen Claude Desktop for the new server to be picked up.
+
+### Claude Code
+
+[Claude Code](https://code.claude.com/docs/en/mcp) registers stdio servers with the `claude mcp add` CLI. The recommended `uvx` form needs no clone — everything after `--` is the launch command:
+
+```bash
+claude mcp add gco -- uvx --from "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0" gco-mcp
+```
+
+Add a feature flag with `--env`:
+
+```bash
+claude mcp add --env GCO_ENABLE_INFRASTRUCTURE_DEPLOY=true gco -- uvx --from "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0" gco-mcp
+```
+
+Pass `--scope project` to write a shareable `.mcp.json` at the project root (checked into version control) instead of your personal config. That file uses the same `mcpServers` schema as the other clients:
+
+```json
+{
+  "mcpServers": {
+    "gco": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
+        "gco-mcp"
+      ],
+      "env": {
+        "GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "true"
+      }
+    }
+  }
+}
+```
+
+Any release `>= v3.2.0` works — bump the `@v3.2.0` tag as needed. For a local clone (development), swap the launch command for `python3 /absolute/path/to/global-capacity-orchestrator-on-aws/gco_mcp/run_mcp.py`.
+
+### Cursor
+
+Add to your MCP config at `~/.cursor/mcp.json`. The recommended `uvx` form:
+
+```json
+{
+  "mcpServers": {
+    "gco": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
+        "gco-mcp"
+      ],
+      "env": {
+        "GCO_ENABLE_CAPACITY_PURCHASE": "true"
+      }
+    }
+  }
+}
+```
+
+Drop the `env` block if you do not need a [feature flag](#feature-flags). Any release `>= v3.2.0` works — bump the `@v3.2.0` tag as needed.
+
+**From a local clone (development).** For the clone-only resources or CDK/stack operations, point Cursor at the absolute path to `run_mcp.py` instead:
 
 ```json
 {
   "mcpServers": {
     "gco": {
       "command": "python3",
-      "args": ["/path/to/global-capacity-orchestrator-on-aws/gco_mcp/run_mcp.py"],
-      "env": {
-        "GCO_ENABLE_CAPACITY_PURCHASE": "true"
-      }
+      "args": ["/path/to/global-capacity-orchestrator-on-aws/gco_mcp/run_mcp.py"]
     }
   }
 }
@@ -274,7 +353,14 @@ Replace `/path/to/global-capacity-orchestrator-on-aws` with the absolute path to
 
 ### Other MCP Clients
 
-The server uses stdio transport (the MCP default). Any MCP client that supports stdio can launch it with:
+The server uses stdio transport (the MCP default). Any MCP client that supports stdio can launch the `gco-mcp` console script — the recommended `uvx` form needs no clone:
+
+```bash
+GCO_REF=v3.2.0 # v3.2.0 or newer — see the releases page
+uvx --from "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@${GCO_REF}" gco-mcp
+```
+
+Any release `>= v3.2.0` works. From a local clone (development), run the entrypoint directly instead:
 
 ```bash
 python3 /absolute/path/to/global-capacity-orchestrator-on-aws/gco_mcp/run_mcp.py
@@ -299,7 +385,7 @@ A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, de
 
 ### Enabling a Flag
 
-Set the flag in your MCP client's `env` block. The same JSON pattern works across Kiro, Claude Desktop, and Cursor:
+Set the flag in the MCP client `env` block. The same `env` block works whether you launch via `uvx` (recommended) or a local clone — only `command` / `args` differ. The recommended `uvx` form:
 
 #### Kiro (`~/.kiro/settings/mcp.json`)
 
@@ -307,9 +393,12 @@ Set the flag in your MCP client's `env` block. The same JSON pattern works acros
 {
   "mcpServers": {
     "gco": {
-      "command": "python3",
-      "args": ["gco_mcp/run_mcp.py"],
-      "cwd": "/path/to/global-capacity-orchestrator-on-aws",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
+        "gco-mcp"
+      ],
       "env": {
         "GCO_ENABLE_CAPACITY_PURCHASE": "true"
       }
@@ -324,8 +413,12 @@ Set the flag in your MCP client's `env` block. The same JSON pattern works acros
 {
   "mcpServers": {
     "gco": {
-      "command": "python3",
-      "args": ["/path/to/global-capacity-orchestrator-on-aws/gco_mcp/run_mcp.py"],
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
+        "gco-mcp"
+      ],
       "env": {
         "GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "true"
       }
@@ -340,8 +433,12 @@ Set the flag in your MCP client's `env` block. The same JSON pattern works acros
 {
   "mcpServers": {
     "gco": {
-      "command": "python3",
-      "args": ["/path/to/global-capacity-orchestrator-on-aws/gco_mcp/run_mcp.py"],
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
+        "gco-mcp"
+      ],
       "env": {
         "GCO_ENABLE_DESTRUCTIVE_OPERATIONS": "true"
       }
@@ -349,6 +446,8 @@ Set the flag in your MCP client's `env` block. The same JSON pattern works acros
   }
 }
 ```
+
+Each `@v3.2.0` above is a floor — any release `>= v3.2.0` works, so bump the tag as needed. For a clone-based client, swap `command` / `args` for the `python3 gco_mcp/run_mcp.py` form (plus `cwd` on Kiro) shown in [Setup](#setup); the `env` block is identical.
 
 To enable everything for a development client, set the umbrella flag instead of every individual flag:
 
@@ -384,9 +483,12 @@ If your client relied on them, restore them by adding the flag to your `env` blo
 {
   "mcpServers": {
     "gco": {
-      "command": "python3",
-      "args": ["gco_mcp/run_mcp.py"],
-      "cwd": "/path/to/global-capacity-orchestrator-on-aws",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
+        "gco-mcp"
+      ],
       "env": {
         "GCO_ENABLE_DESTRUCTIVE_OPERATIONS": "true"
       }
@@ -394,6 +496,8 @@ If your client relied on them, restore them by adding the flag to your `env` blo
   }
 }
 ```
+
+Any release `>= v3.2.0` works — bump the `@v3.2.0` tag as needed.
 
 Setting the umbrella `GCO_ENABLE_ALL_TOOLS=true` also restores both tools alongside every other gated tool.
 
@@ -911,9 +1015,9 @@ The most natural companions, since GCO is an AWS-native platform.
 
 | Server | Package | Why it pairs with GCO |
 |--------|---------|----------------------|
-| **AWS Documentation** | [`awslabs.aws-documentation-mcp-server`](https://awslabs.github.io/gco_mcp/servers/aws-documentation-mcp-server/) | Look up AWS service docs (EKS, EC2 spot, FSx for Lustre, CDK, Bedrock) without leaving the chat. Helpful when an agent needs to verify an API option, a service quota, or a recently-released feature that isn't in its training data. |
-| **AWS Pricing** | [`awslabs.aws-pricing-mcp-server`](https://awslabs.github.io/gco_mcp/servers/aws-pricing-mcp-server/) | Cross-check the output of `cost_summary` / `cost_forecast` against the published rate cards. Also useful for "what does running 12× `p5.48xlarge` for 6 hours cost across `us-east-1` vs `us-west-2`?" style planning questions before you submit a job. |
-| **EKS** | [`awslabs.eks-mcp-server`](https://awslabs.github.io/gco_mcp/servers/eks-mcp-server/) | Drop down a layer when GCO's higher-level tools aren't enough — describe pods directly, tail logs from `kube-system`, inspect events on a NodePool, or apply a one-off manifest. Complements GCO's job/inference abstractions rather than replacing them. |
+| **AWS Documentation** | [`awslabs.aws-documentation-mcp-server`](https://awslabs.github.io/mcp/servers/aws-documentation-mcp-server/) | Look up AWS service docs (EKS, EC2 spot, FSx for Lustre, CDK, Bedrock) without leaving the chat. Helpful when an agent needs to verify an API option, a service quota, or a recently-released feature that isn't in its training data. |
+| **AWS Pricing** | [`awslabs.aws-pricing-mcp-server`](https://awslabs.github.io/mcp/servers/aws-pricing-mcp-server/) | Cross-check the output of `cost_summary` / `cost_forecast` against the published rate cards. Also useful for "what does running 12× `p5.48xlarge` for 6 hours cost across `us-east-1` vs `us-west-2`?" style planning questions before you submit a job. |
+| **EKS** | [`awslabs.eks-mcp-server`](https://awslabs.github.io/mcp/servers/eks-mcp-server/) | Drop down a layer when GCO's higher-level tools aren't enough — describe pods directly, tail logs from `kube-system`, inspect events on a NodePool, or apply a one-off manifest. Complements GCO's job/inference abstractions rather than replacing them. |
 
 ### Development & docs
 
@@ -950,15 +1054,18 @@ Small helpers that round out the toolbox.
 
 ### Example combined config
 
-Here's a `~/.kiro/settings/mcp.json` that wires up the GCO MCP server alongside the companions above. Drop in only the ones you want and update the GCO path. The `gco` entry uses Kiro's `cwd` shorthand; the other clients (Claude Desktop, Cursor, etc.) need the absolute-path form shown earlier in [Setup](#setup) — everything else carries over as-is.
+Here's a `~/.kiro/settings/mcp.json` that wires up the GCO MCP server alongside the companions above. Drop in only the ones you want. The `gco` entry uses the recommended `uvx` form (no clone, no path to set); see [Setup](#setup) for the clone-based alternative and the feature-flag `env` blocks — everything else carries over as-is.
 
 ```json
 {
   "mcpServers": {
     "gco": {
-      "command": "python3",
-      "args": ["gco_mcp/run_mcp.py"],
-      "cwd": "/path/to/global-capacity-orchestrator-on-aws"
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
+        "gco-mcp"
+      ]
     },
     "aws-docs": {
       "command": "uvx",
