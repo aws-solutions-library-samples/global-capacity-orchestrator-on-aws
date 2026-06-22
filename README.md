@@ -60,7 +60,7 @@ gco stacks deploy-all -y      # stand up every region defined in cdk.json
 gco stacks destroy-all -y     # destroy every stack across every region — no orphaned resources
 ```
 
-**Recommended: run everything from the dev container.** GCO pins exact versions of a lot of Python packages (CDK, AWS SDKs, FastAPI, mypy, Ruff, etc.), and installing them on top of an existing Python environment is the most common source of "it doesn't install" reports. The dev container ships a fully resolved environment (Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, all Python deps) so you skip the whole problem.
+**Recommended: run everything from the dev container.** GCO pins exact versions of a lot of Python packages (CDK, AWS SDKs, FastAPI, mypy, Ruff, etc.), and installing them on top of an existing Python environment is the most common source of "it doesn't install" reports. The dev container ships a fully resolved environment (Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, Docker CLI + Buildx, all Python deps) so you skip the whole problem. Buildx is included so the multi-arch image mirror and `linux/amd64` asset builds that `gco stacks deploy-all` performs work out of the box on Apple Silicon (arm64).
 
 ```bash
 git clone git@github.com:awslabs/global-capacity-orchestrator-on-aws.git
@@ -452,7 +452,7 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 **Recommended path — dev container only:**
 
 - AWS CLI configured with appropriate credentials (or `~/.aws` to mount in)
-- Docker (or Finch / Colima) — that's it. The container ships Python 3.14, Node.js 24, CDK, kubectl, and AWS CLI at pinned versions.
+- Docker (or Finch / Colima) — that's it. The container ships Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, and Docker CLI + Buildx at pinned versions.
 
 ```bash
 docker build -f Dockerfile.dev -t gco-dev .

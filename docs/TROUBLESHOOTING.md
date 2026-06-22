@@ -9,6 +9,7 @@ Common issues and their solutions.
   - [`gco: command not found`](#gco-command-not-found)
 - [Deployment Issues](#deployment-issues)
   - [Stack Creation Fails](#stack-creation-fails)
+  - [Deploy Fails on Image Mirror or linux/amd64 Asset Build (Apple Silicon)](#deploy-fails-on-image-mirror-or-linuxamd64-asset-build-apple-silicon)
   - [Stack Stuck in DELETE_FAILED](#stack-stuck-in-delete_failed)
   - [Lambda Custom Resource Timeout](#lambda-custom-resource-timeout)
 - [kubectl Access Issues](#kubectl-access-issues)
@@ -170,6 +171,24 @@ aws cloudformation describe-stack-resources \
 gco stacks destroy-all -y
 gco stacks deploy-all -y
 ```
+
+### Deploy Fails on Image Mirror or `linux/amd64` Asset Build (Apple Silicon)
+
+**Symptom**: `gco stacks deploy-all` aborts with one of:
+
+- `No multi-arch image-copy method available. Need one of: 'docker buildx' ... 'docker pull --all-platforms' ... or skopeo on PATH.`
+- `failed to ... build ... --platform linux/amd64 ... image ... does not provide the specified platform (linux/amd64)`
+
+**Cause**: The deploy needs a multi-arch image-copy tool for two steps — the Volcano ECR image mirror (`docker buildx imagetools create`) and the cross-architecture build of the `linux/amd64` Lambda/service asset images. On an arm64 host (Apple Silicon) the legacy Docker builder cannot satisfy either. This happens when the deploy runs from an environment without Docker Buildx (Finch/nerdctl or skopeo also work).
+
+**Solution**: Run the deploy from the [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container), which ships Docker Buildx for exactly this. If you built the image before Buildx was added, rebuild it:
+
+```bash
+docker build -f Dockerfile.dev -t gco-dev .
+docker run --rm gco-dev docker buildx version   # confirm Buildx is present
+```
+
+If you deploy from your host instead, ensure one of `docker buildx`, Finch (`docker pull --all-platforms`), or `skopeo` is on `PATH`.
 
 ### Stack Stuck in REVIEW_IN_PROGRESS
 
