@@ -16,7 +16,7 @@
 #   - Aurora PostgreSQL engine versions (AWS creds)
 #   - EMR Serverless release labels (AWS creds)
 #   - Dockerfile.dev ARG pins (Node LTS major, npm, CDK CLI, kubectl,
-#     AWS CLI v2, Docker CLI) — public endpoints, no AWS creds needed
+#     AWS CLI v2, Docker CLI, Docker Buildx) — public endpoints, no AWS creds needed
 #   - Pre-commit hook revisions in .pre-commit-config.yaml compared
 #     against the latest tag published upstream (GitHub API)
 #   - CDK enum constants from gco/stacks/constants.py compared against the
@@ -492,7 +492,7 @@ EMR_COUNT="$(wc -l < "$EMR_RESULTS" 2>/dev/null | tr -d ' ')"
 # Dockerfile.dev ARG pins
 #
 # Checks the tooling versions pinned in ``Dockerfile.dev`` (Node.js LTS
-# major, AWS CDK CLI, kubectl, AWS CLI v2, Docker CLI). These ARGs sit
+# major, AWS CDK CLI, kubectl, AWS CLI v2, Docker CLI, Docker Buildx). These ARGs sit
 # outside the main dependency surfaces above — Dependabot watches the
 # ``FROM python:…`` base image but not the ARG pins — so drift here has
 # historically gone undetected until someone rebuilt the image.
@@ -506,6 +506,7 @@ EMR_COUNT="$(wc -l < "$EMR_RESULTS" 2>/dev/null | tr -d ' ')"
 #                  (minor from cdk.json::kubernetes_version)
 #   AWSCLI_VERSION github://aws/aws-cli/tags (v2.x.y semver, no GitHub Releases)
 #   DOCKER_VERSION github://moby/moby/releases/latest (``docker-v<ver>``)
+#   BUILDX_VERSION github://docker/buildx/releases/latest (v<ver>)
 #
 # All endpoints are public — no AWS credentials needed.
 # ---------------------------------------------------------------------------
@@ -585,6 +586,15 @@ if candidates:
         "https://api.github.com/repos/moby/moby/releases/latest" 2>/dev/null \
         | jq -r '.tag_name // empty' 2>/dev/null \
         | sed -E 's/^(docker-)?v//')" || true
+      ;;
+    BUILDX_VERSION)
+      # docker/buildx publishes GitHub Releases tagged v<semver>
+      # (e.g. v0.35.0). The release tag is the canonical source;
+      # compare_semver strips the leading v on both sides. The
+      # Dockerfile installs the plugin binary buildx-<tag>.linux-<arch>.
+      latest="$(curl -fsSL --max-time 15 \
+        "https://api.github.com/repos/docker/buildx/releases/latest" 2>/dev/null \
+        | jq -r '.tag_name // empty' 2>/dev/null)" || true
       ;;
     *)
       return

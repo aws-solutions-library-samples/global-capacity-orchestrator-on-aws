@@ -436,8 +436,8 @@ jobs:
           docker run --rm -v "$PWD":/workspace -w /workspace gco-dev gco capacity --help
           docker run --rm -v "$PWD":/workspace -w /workspace gco-dev gco stacks --help
       - name: Verify pinned toolchain versions
-        # The Dockerfile pins Node, kubectl, AWS CLI v2, CDK, and the Docker
-        # CLI to specific releases. Confirm each tool reports a non-empty
+        # The Dockerfile pins Node, kubectl, AWS CLI v2, CDK, the Docker
+        # CLI, and Docker Buildx, to specific releases. Confirm each tool reports a non-empty
         # version — catches pin drift, broken downloads, and PATH issues.
         run: |
           docker run --rm gco-dev bash -c '
@@ -447,6 +447,7 @@ jobs:
             kubectl version --client=true
             aws --version
             docker --version
+            docker buildx version
           '
       - name: Verify image contains native ${{ matrix.arch }} binaries
         # Two layers of verification:

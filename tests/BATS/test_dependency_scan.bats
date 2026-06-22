@@ -360,16 +360,17 @@ for m in re.finditer(r\"addon_name=\\\"([^\\\"]+)\\\".*?addon_version=\\\"([^\\\
 
 # ── extract_dockerfile_pins ──────────────────────────────────────────────────
 
-@test "extract_dockerfile_pins: finds all six pins in Dockerfile.dev" {
+@test "extract_dockerfile_pins: finds all seven pins in Dockerfile.dev" {
     run extract_dockerfile_pins "Dockerfile.dev"
     [ "$status" -eq 0 ]
-    # All six allowlisted pins should be present.
+    # All seven allowlisted pins should be present.
     [[ "$output" == *"NODE_MAJOR|"* ]]
     [[ "$output" == *"NPM_VERSION|"* ]]
     [[ "$output" == *"CDK_VERSION|"* ]]
     [[ "$output" == *"KUBECTL_VERSION|"* ]]
     [[ "$output" == *"AWSCLI_VERSION|"* ]]
     [[ "$output" == *"DOCKER_VERSION|"* ]]
+    [[ "$output" == *"BUILDX_VERSION|"* ]]
 }
 
 @test "extract_dockerfile_pins: emits pipe-delimited NAME|VALUE pairs" {
@@ -401,6 +402,17 @@ for m in re.finditer(r\"addon_name=\\\"([^\\\"]+)\\\".*?addon_version=\\\"([^\\\
     [ "$status" -eq 0 ]
     k_line="$(echo "$output" | grep '^KUBECTL_VERSION|')"
     value="${k_line#KUBECTL_VERSION|}"
+    [[ "$value" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+@test "extract_dockerfile_pins: BUILDX_VERSION keeps the v prefix" {
+    # Docker Buildx is pinned with the leading v (the GitHub release tag
+    # and the buildx-<tag>.linux-<arch> asset name both use it), so the
+    # deps-scan release-tag compare lines up. Assert it is preserved.
+    run extract_dockerfile_pins "Dockerfile.dev"
+    [ "$status" -eq 0 ]
+    b_line="$(echo "$output" | grep '^BUILDX_VERSION|')"
+    value="${b_line#BUILDX_VERSION|}"
     [[ "$value" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
