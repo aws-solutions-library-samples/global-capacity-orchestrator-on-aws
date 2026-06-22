@@ -93,6 +93,30 @@ gco jobs list --region us-east-1
 
 Manage jobs across GCO clusters.
 
+<details>
+<summary>All <code>gco jobs</code> commands (16) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco jobs submit`](#gco-jobs-submit) | Submit a job via API Gateway (SigV4 authenticated). |
+| [`gco jobs submit-sqs`](#gco-jobs-submit-sqs) | Submit a job via SQS queue (recommended for production). |
+| [`gco jobs submit-direct`](#gco-jobs-submit-direct) | Submit a job directly via kubectl (requires EKS access). |
+| [`gco jobs submit-queue`](#gco-jobs-submit-queue) | Submit a job to the global DynamoDB queue for regional pickup. |
+| [`gco jobs list`](#gco-jobs-list) | List jobs in GCO clusters. |
+| [`gco jobs get`](#gco-jobs-get) | Get details of a specific job. |
+| [`gco jobs logs`](#gco-jobs-logs) | Get logs from a job. |
+| [`gco jobs pod-logs`](#gco-jobs-pod-logs) | Get logs from a specific pod of a job. |
+| [`gco jobs delete`](#gco-jobs-delete) | Delete a job. |
+| [`gco jobs events`](#gco-jobs-events) | Get Kubernetes events for a job. |
+| [`gco jobs pods`](#gco-jobs-pods) | Get pod details for a job. |
+| [`gco jobs metrics`](#gco-jobs-metrics) | Get resource usage metrics for a job. |
+| [`gco jobs retry`](#gco-jobs-retry) | Retry a failed job. |
+| [`gco jobs bulk-delete`](#gco-jobs-bulk-delete) | Bulk delete jobs based on filters. |
+| [`gco jobs health`](#gco-jobs-health) | Get health status of GCO clusters. |
+| [`gco jobs queue-status`](#gco-jobs-queue-status) | View SQS queue status across regions. |
+
+</details>
+
 #### `gco jobs submit`
 
 Submit a job via API Gateway (SigV4 authenticated).
@@ -494,6 +518,19 @@ gco jobs queue-status -r us-east-1
 
 Manage the global job queue (DynamoDB-backed). The job queue provides centralized job submission and tracking across all regions.
 
+<details>
+<summary>All <code>gco queue</code> commands (5) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco queue submit`](#gco-queue-submit) | Submit a job to the global queue for regional pickup. |
+| [`gco queue list`](#gco-queue-list) | List jobs in the global queue. |
+| [`gco queue get`](#gco-queue-get) | Get details of a queued job including status history. |
+| [`gco queue cancel`](#gco-queue-cancel) | Cancel a queued job (only works for jobs not yet running). |
+| [`gco queue stats`](#gco-queue-stats) | Get job queue statistics by region and status. |
+
+</details>
+
 #### `gco queue submit`
 
 Submit a job to the global queue for regional pickup.
@@ -614,6 +651,19 @@ gco queue stats
 
 Manage job templates. Templates are reusable job configurations stored in DynamoDB with parameter substitution support.
 
+<details>
+<summary>All <code>gco templates</code> commands (5) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco templates list`](#gco-templates-list) | List all job templates. |
+| [`gco templates get`](#gco-templates-get) | Get details of a specific template. |
+| [`gco templates create`](#gco-templates-create) | Create a new job template from a manifest file. |
+| [`gco templates delete`](#gco-templates-delete) | Delete a job template. |
+| [`gco templates run`](#gco-templates-run) | Create and run a job from a template. |
+
+</details>
+
 #### `gco templates list`
 
 List all job templates.
@@ -729,6 +779,17 @@ gco templates run gpu-template -n my-job -r us-east-1 -p image=custom:v1 -p gpus
 
 Manage webhooks for job event notifications. Webhooks receive HTTP POST notifications when job events occur.
 
+<details>
+<summary>All <code>gco webhooks</code> commands (3) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco webhooks list`](#gco-webhooks-list) | List all registered webhooks. |
+| [`gco webhooks create`](#gco-webhooks-create) | Register a new webhook for job events. |
+| [`gco webhooks delete`](#gco-webhooks-delete) | Delete a webhook. |
+
+</details>
+
 #### `gco webhooks list`
 
 List all registered webhooks.
@@ -802,6 +863,28 @@ gco webhooks delete abc12345 -y
 ### Stacks Commands
 
 Manage CDK infrastructure stacks.
+
+<details>
+<summary>All <code>gco stacks</code> commands (14) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco stacks list`](#gco-stacks-list) | List all GCO stacks. |
+| [`gco stacks status`](#gco-stacks-status) | Get detailed status of a stack. |
+| [`gco stacks deploy`](#gco-stacks-deploy) | Deploy a single stack. |
+| [`gco stacks deploy-all`](#gco-stacks-deploy-all) | Deploy all stacks in correct order. |
+| [`gco stacks destroy`](#gco-stacks-destroy) | Destroy a single stack. |
+| [`gco stacks destroy-all`](#gco-stacks-destroy-all) | Destroy all stacks in correct order. |
+| [`gco stacks bootstrap`](#gco-stacks-bootstrap) | Bootstrap CDK in a region. |
+| [`gco stacks access`](#gco-stacks-access) | Configure kubectl access to a GCO EKS cluster. |
+| [`gco stacks fsx`](#gco-stacks-fsx) | Manage FSx for Lustre storage. |
+| [`gco stacks valkey`](#gco-stacks-valkey) | Manage Valkey Serverless cache. |
+| [`gco stacks aurora`](#gco-stacks-aurora) | Manage Aurora PostgreSQL (pgvector) database. |
+| [`gco stacks synth`](#gco-stacks-synth) | Synthesize CloudFormation templates without deploying. |
+| [`gco stacks diff`](#gco-stacks-diff) | Show differences between deployed and local stacks. |
+| [`gco stacks outputs`](#gco-stacks-outputs) | Get CloudFormation outputs from a deployed stack (e.g. API URLs, ARNs, secret references that the stack exposes). |
+
+</details>
 
 #### `gco stacks list`
 
@@ -1089,6 +1172,16 @@ gco stacks outputs gco-global -r us-east-2
 
 Run multi-step job pipelines with dependencies. Define a DAG in YAML, and GCO runs steps in dependency order, skipping downstream steps if a dependency fails.
 
+<details>
+<summary>All <code>gco dag</code> commands (2) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco dag run`](#gco-dag-run) | Execute a DAG pipeline. |
+| [`gco dag validate`](#gco-dag-validate) | Validate a DAG definition without running it. |
+
+</details>
+
 #### `gco dag run`
 
 Execute a DAG pipeline.
@@ -1173,6 +1266,19 @@ gco costs summary --all
 ```
 
 You can also activate the `Environment` and `Owner` tags for more granular filtering in the AWS Cost Explorer console.
+
+<details>
+<summary>All <code>gco costs</code> commands (5) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco costs summary`](#gco-costs-summary) | Show total GCO spend broken down by AWS service. |
+| [`gco costs regions`](#gco-costs-regions) | Show cost breakdown by AWS region. |
+| [`gco costs trend`](#gco-costs-trend) | Show daily cost trend with a visual bar chart. |
+| [`gco costs workloads`](#gco-costs-workloads) | Estimate costs for currently running workloads (jobs and inference endpoints) based on instance pricing and runtime. |
+| [`gco costs forecast`](#gco-costs-forecast) | Forecast GCO costs for the next N days based on historical spending patterns. |
+
+</details>
 
 #### `gco costs summary`
 
@@ -1301,6 +1407,24 @@ gco costs forecast --days 60
 ### Capacity Commands
 
 Check and manage cluster capacity.
+
+<details>
+<summary>All <code>gco capacity</code> commands (10) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco capacity check`](#gco-capacity-check) | Check capacity for a specific instance type. |
+| [`gco capacity status`](#gco-capacity-status) | View capacity status across regions. |
+| [`gco capacity recommend`](#gco-capacity-recommend) | Get capacity recommendation for an instance type. |
+| [`gco capacity recommend-region`](#gco-capacity-recommend-region) | Get optimal region recommendation. |
+| [`gco capacity ai-recommend`](#gco-capacity-ai-recommend) | Get AI-powered capacity recommendation using Amazon Bedrock. |
+| [`gco capacity reservations`](#gco-capacity-reservations) | List On-Demand Capacity Reservations (ODCRs) across deployed regions. |
+| [`gco capacity reservation-check`](#gco-capacity-reservation-check) | Check reservation availability and Capacity Block offerings for ML workloads. |
+| [`gco capacity reserve`](#gco-capacity-reserve) | Purchase a Capacity Block offering by ID. |
+| [`gco capacity instance-info`](#gco-capacity-instance-info) | Print AWS-published metadata for an instance type — vCPUs, memory, GPU count, network performance, and supported architectures. |
+| [`gco capacity spot-prices`](#gco-capacity-spot-prices) | Get spot price history for an instance type in a region. |
+
+</details>
 
 #### `gco capacity check`
 
@@ -1567,6 +1691,31 @@ gco capacity spot-prices -i p4d.24xlarge -r us-west-2 -d 30
 Manage multi-region inference endpoints. Endpoints are stored in DynamoDB and reconciled by the `inference_monitor` in each target region.
 
 See [Inference Guide](INFERENCE.md) for architecture details and workflows.
+
+<details>
+<summary>All <code>gco inference</code> commands (17) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco inference deploy`](#gco-inference-deploy) | Deploy an inference endpoint to one or more regions. |
+| [`gco inference list`](#gco-inference-list) | List inference endpoints. |
+| [`gco inference status`](#gco-inference-status) | Show detailed status of an inference endpoint including per-region sync state. |
+| [`gco inference scale`](#gco-inference-scale) | Scale an inference endpoint to a new replica count (applied across all target regions). |
+| [`gco inference stop`](#gco-inference-stop) | Stop an inference endpoint (scales to zero, keeps configuration). |
+| [`gco inference start`](#gco-inference-start) | Start a stopped inference endpoint. |
+| [`gco inference delete`](#gco-inference-delete) | Delete an inference endpoint from all regions. |
+| [`gco inference update-image`](#gco-inference-update-image) | Update the container image for an endpoint. |
+| [`gco inference invoke`](#gco-inference-invoke) | Send a request to an inference endpoint via the API Gateway. |
+| [`gco inference health`](#gco-inference-health) | Check if an inference endpoint is healthy and ready to serve requests. |
+| [`gco inference models`](#gco-inference-models) | List models loaded on an inference endpoint. |
+| [`gco inference canary`](#gco-inference-canary) | Start a canary deployment with a new image. |
+| [`gco inference promote`](#gco-inference-promote) | Promote the canary to primary. |
+| [`gco inference rollback`](#gco-inference-rollback) | Remove the canary deployment, keeping the primary unchanged. |
+| [`gco inference set-topology`](#gco-inference-set-topology) | Resize a disaggregated endpoint's prefill/decode replica counts without redeploying. |
+| [`gco inference configure-store`](#gco-inference-configure-store) | Update the shared KV-cache store on a Mooncake `store`/`both` endpoint. |
+| [`gco inference populate-kv`](#gco-inference-populate-kv) | Upload data into an endpoint's Mooncake KV-cache cold tier. |
+
+</details>
 
 #### `gco inference deploy`
 
@@ -1997,6 +2146,19 @@ Manage model weights in the central S3 bucket. Models uploaded here are automati
 
 See [Inference Guide](INFERENCE.md) for details on model weight management.
 
+<details>
+<summary>All <code>gco models</code> commands (5) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco models upload`](#gco-models-upload) | Upload model weights to the central S3 bucket. |
+| [`gco models upload-regional`](#gco-models-upload-regional) | Upload local files or a directory to a region's general-purpose regional bucket (`gco-regional-shared-<account>-<region>`), resolved from that region's own SSM parameter. |
+| [`gco models list`](#gco-models-list) | List models in the central S3 bucket. |
+| [`gco models delete`](#gco-models-delete) | Delete a model and all its files from the S3 bucket. |
+| [`gco models uri`](#gco-models-uri) | Get the S3 URI for a model (for use with `--model-source` in inference deploy). |
+
+</details>
+
 #### `gco models upload`
 
 Upload model weights to the central S3 bucket.
@@ -2109,6 +2271,28 @@ CLI.
 
 See [Customization Guide](CUSTOMIZATION.md) for the full registry
 architecture and lifecycle policy options.
+
+<details>
+<summary>All <code>gco images</code> commands (14) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco images init`](#gco-images-init) | Create a project repository with the default lifecycle policy applied (keep 20 tagged images, expire untagged after 7 days). |
+| [`gco images list`](#gco-images-list) | List every repository under the project's `gco/` prefix. |
+| [`gco images tags`](#gco-images-tags) | List every tag in a repository (one row per tag, plus an "untagged" row aggregating untagged images). |
+| [`gco images describe`](#gco-images-describe) | Print the full ECR details for a single image tag — digest, push time, size, scan findings. |
+| [`gco images uri`](#gco-images-uri) | Print the registry URI for an image without making any AWS calls. |
+| [`gco images build`](#gco-images-build) | Build a container image and push it to the project's ECR repo. |
+| [`gco images push`](#gco-images-push) | Push an already-built local image to the project's ECR repo. |
+| [`gco images delete-tag`](#gco-images-delete-tag) | Delete a single tag from a repository. |
+| [`gco images delete-repo`](#gco-images-delete-repo) | Delete a whole repository. |
+| [`gco images cleanup`](#gco-images-cleanup) | Remove untagged images across one or all project repos. |
+| [`gco images prune`](#gco-images-prune) | Remove untagged images older than 30 days. |
+| [`gco images orphans`](#gco-images-orphans) | List tags older than `threshold_days` that are not referenced by any deployed inference endpoint or recent job. |
+| [`gco images lifecycle`](#gco-images-lifecycle) | Lifecycle policy management. |
+| [`gco images replication`](#gco-images-replication) | Replication management for the project's ECR registry. |
+
+</details>
 
 #### `gco images init`
 
@@ -2413,6 +2597,19 @@ gco images replication sync
 
 Manage file systems and download job outputs.
 
+<details>
+<summary>All <code>gco files</code> commands (5) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco files list`](#gco-files-list) | List file systems (EFS/FSx) across GCO stacks. |
+| [`gco files ls`](#gco-files-ls) | List the contents of EFS/FSx storage. |
+| [`gco files download`](#gco-files-download) | Download files from shared storage. |
+| [`gco files get`](#gco-files-get) | Get details for the file system in a region (file system ID, lifecycle state, throughput mode, encryption flags, mount targets). |
+| [`gco files access-points`](#gco-files-access-points) | List EFS access points for a file system. |
+
+</details>
+
 #### `gco files list`
 
 List file systems (EFS/FSx) across GCO stacks.
@@ -2531,6 +2728,17 @@ gco files access-points fs-0123456789abcdef0 -r us-east-1
 
 Manage Karpenter NodePools.
 
+<details>
+<summary>All <code>gco nodepools</code> commands (3) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco nodepools list`](#gco-nodepools-list) | List NodePools in a cluster. |
+| [`gco nodepools describe`](#gco-nodepools-describe) | Describe a specific NodePool. |
+| [`gco nodepools create-odcr`](#gco-nodepools-create-odcr) | Generate nodepool manifest for ODCR (On-Demand Capacity Reservation). |
+
+</details>
+
 #### `gco nodepools list`
 
 List NodePools in a cluster.
@@ -2600,6 +2808,23 @@ when you want interactive notebook analytics. See the
 All `gco analytics *` commands auto-discover the Cognito user-pool ID
 and API Gateway endpoint from the `gco-analytics` and `gco-api-gateway`
 CloudFormation outputs, so no manual ID wiring is needed.
+
+<details>
+<summary>All <code>gco analytics</code> commands (9) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco analytics enable`](#gco-analytics-enable) | Flip `analytics_environment.enabled` to `true` in `cdk.json`. |
+| [`gco analytics disable`](#gco-analytics-disable) | Flip `analytics_environment.enabled` to `false` in `cdk.json`. |
+| [`gco analytics status`](#gco-analytics-status) | Show the current `analytics_environment.*` toggle state from `cdk.json` plus the deployment state of `gco-analytics`. |
+| [`gco analytics users add`](#gco-analytics-users-add) | Create a Cognito user in the analytics user pool. |
+| [`gco analytics users list`](#gco-analytics-users-list) | List Cognito users in the analytics user pool. |
+| [`gco analytics users remove`](#gco-analytics-users-remove) | Delete a Cognito user from the analytics user pool. |
+| [`gco analytics users set-password`](#gco-analytics-users-set-password) | Change a Cognito user's password via ``AdminSetUserPassword``. |
+| [`gco analytics studio login`](#gco-analytics-studio-login) | Sign in to SageMaker Studio via Cognito SRP and print a presigned Studio URL on its own line on stdout (pipe-friendly). |
+| [`gco analytics doctor`](#gco-analytics-doctor) | Run pre-flight checks before `gco stacks deploy gco-analytics`. |
+
+</details>
 
 #### `gco analytics enable`
 
@@ -2863,6 +3088,16 @@ config file lets you set per-machine defaults (default region, output
 format, verbose flag) so you don't have to repeat them on every
 invocation.
 
+<details>
+<summary>All <code>gco config-cmd</code> commands (2) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco config-cmd init`](#gco-config-cmd-init) | Initialize the config file with a starter template. |
+| [`gco config-cmd show`](#gco-config-cmd-show) | Print the current resolved configuration (file values plus any environment-variable overrides). |
+
+</details>
+
 #### `gco config-cmd init`
 
 Initialize the config file with a starter template.
@@ -2908,6 +3143,18 @@ drops or buries notifications.
 The directory is configurable via `GCO_TASK_STATUS_DIR`. Set
 `GCO_DISABLE_TASK_STATUS=1` to skip disk emission for sandboxed
 environments where `~/.gco` isn't writable.
+
+<details>
+<summary>All <code>gco tasks</code> commands (4) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco tasks list`](#gco-tasks-list) | List recent tasks, newest first. |
+| [`gco tasks show TASK_ID`](#gco-tasks-show-task_id) | Print the full JSON status record for a single task. |
+| [`gco tasks tail TASK_ID`](#gco-tasks-tail-task_id) | Print the last N lines of a task's raw output log. |
+| [`gco tasks prune`](#gco-tasks-prune) | Remove all but the most-recent N task files. |
+
+</details>
 
 #### `gco tasks list`
 
@@ -3008,6 +3255,25 @@ in this order:
    Bedrock backend is selected with the model id from
    `GCO_MISSION_BEDROCK_MODEL_ID` (or the default).
 4. Otherwise sampling is off and the loop runs deterministically.
+
+<details>
+<summary>All <code>gco mission</code> commands (11) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco mission run`](#gco-mission-run) | Chained shorthand that scaffolds criteria from a directive, persists a new session, and drives it through iterations until a terminal verdict — three steps in one call. |
+| [`gco mission start`](#gco-mission-start) | Validate inputs, resolve sampling, persist a new session. |
+| [`gco mission scaffold-criteria`](#gco-mission-scaffold-criteria) | Draft a criteria file from a natural-language directive. |
+| [`gco mission iterate SESSION_ID`](#gco-mission-iterate-session_id) | Drive one or more iterations of an existing session. |
+| [`gco mission status SESSION_ID`](#gco-mission-status-session_id) | Print the full state of a session. |
+| [`gco mission checkpoint SESSION_ID`](#gco-mission-checkpoint-session_id) | Re-run the verdict cascade on the latest iteration without producing a new one. |
+| [`gco mission complete SESSION_ID`](#gco-mission-complete-session_id) | Force a session into `completed` and stamp the final verdict. |
+| [`gco mission abort SESSION_ID`](#gco-mission-abort-session_id) | Pause or terminate a session. |
+| [`gco mission resume SESSION_ID`](#gco-mission-resume-session_id) | Transition a paused session back to `running`. |
+| [`gco mission history SESSION_ID`](#gco-mission-history-session_id) | Get the iteration history of a session. |
+| [`gco mission list`](#gco-mission-list) | List Mission sessions across the configured backend. |
+
+</details>
 
 #### `gco mission run`
 
