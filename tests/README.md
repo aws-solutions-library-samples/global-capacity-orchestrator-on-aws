@@ -476,6 +476,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_mooncake_nodepool_manifest.py` | Dedicated Mooncake EFA NodePool: only GPUs that can serve KV-transfer. |
 | `test_mooncake_pd_proxy_program.py` | Request-shaping contract of the Mooncake PD proxy program. |
 | `test_mooncake_pd_proxy_routing.py` | Front-door routing for disaggregated prefill-decode endpoints. |
+| `test_mooncake_pd_proxy_coverage.py` | Handler coverage for the Mooncake PD proxy program (`gco/services/mooncake_pd_proxy.py`): prefill priming, decode streaming, the admin path, request dispatch, and the health endpoints. |
 | `test_mooncake_region_services.py` | In-region service resolution for mooncake endpoints. |
 | `test_mooncake_regional_bucket_provisioning.py` | Property-based test — the general-purpose regional bucket is always-on. |
 | `test_mooncake_regional_bucket_synthesis.py` | Synthesis checks for the always-on general-purpose regional bucket. |
@@ -495,11 +496,13 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_metric_readers_aggregate.py` | Tests for the sequence reducer that collapses history to one number. |
 | `test_metric_readers_cloudwatch.py` | Tests for the CloudWatch datapoint reader. |
 | `test_metric_readers_files.py` | Round-trip tests for the file-format metric reader. |
+| `test_metric_readers_files_coverage.py` | Edge and error-path coverage for the file-format metric reader (`gco_mcp/metric_readers/files.py`): value description, non-numeric and malformed-file errors, JSONL skip rules, Hugging Face trainer-state paths, and the Parquet and tfevents handlers. |
 | `test_metric_readers_localfs.py` | Tests for confining a supplied path to an allowlisted root directory. |
 | `test_metric_readers_logs.py` | Tests for pulling a scalar out of a job's log lines. |
 | `test_metric_readers_observe.py` | Observe_Phase merge-contract integration test. |
 | `test_metric_readers_shape.py` | Tests for the canonical metric-result builder. |
 | `test_metric_readers_tools.py` | Success-path tests for the metric-reader MCP tool wrappers. |
+| `test_tool_metrics_coverage.py` | Validation and error-envelope coverage for the metric-reader MCP tools (`gco_mcp/tools/metrics.py`): invalid extraction and aggregation modes, bad regex, and the CloudWatch, job-log, and shared-storage failure paths. |
 
 ### Additional Mission Tests
 
@@ -521,7 +524,9 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_bug_fixes.py` | Regression tests for a handful of bug fixes across the GCO codebase. |
 | `test_canary.py` | Tests for A/B (canary) inference endpoint deployments. |
 | `test_capacity.py` | Tests for cli/capacity/ — the GPU capacity checker and recommender. |
+| `test_capacity_advisor_coverage.py` | Coverage for the capacity advisor prompt builder (`cli/capacity/advisor.py`) and the multi-region aggregator (`cli/capacity/multi_region.py`): recommendation tie-breaks and SQS and CloudWatch error handling. |
 | `test_capacity_advisor_historical.py` | Tests for the Bedrock capacity-advisor historical-context enrichment in cli/capacity/advisor.py. |
+| `test_capacity_checker_coverage.py` | Error, empty-result, and scarcity-assessment coverage for the capacity checker (`cli/capacity/checker.py`): boto3 ClientError paths, availability bands, and reservation and capacity-block discovery. |
 | `test_capacity_cmd_coverage.py` | Tests for the capacity CLI subcommands in cli/commands/capacity_cmd.py. |
 | `test_capacity_history.py` | Tests for cli/capacity/history.CapacityHistoryStore (time-series store, statistics, and temporal patterns). |
 | `test_capacity_history_cli.py` | Tests for the `gco capacity history` show/stats/patterns subcommands and the `--enrich-historical` flag. |
@@ -567,6 +572,8 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_stacks_access.py` | Tests for `gco stacks access` — the kubectl bootstrap command in cli/commands/stacks_cmd.py. |
 | `test_stacks_ordering_fsx.py` | Tests for stack ordering helpers and FSx configuration in cli/stacks.py. |
 | `test_task_status.py` | Tests for the disk-backed task status writer. |
+| `test_task_status_coverage.py` | Branch coverage for the disk-backed task-status reader and writer (`gco_mcp/tools/_task_status.py`): orphaned-PID rewrite, prune edge cases, and malformed-record guards. |
+| `test_tasks_cmd_coverage.py` | Coverage for the `gco tasks` command helpers and subcommands (`cli/commands/tasks_cmd.py`): PID liveness, state colorization, duration formatting, and the list, show, tail, and prune paths. |
 | `test_trusted_registries_augmentation.py` | Tests for ``_augment_trusted_registries_with_project_ecr``. |
 | `test_waf_rate_limit.py` | Tests for the WAF PerIPRateLimit rule on GCOApiGatewayGlobalStack. |
 | `test_webhook_dispatcher.py` | Tests for gco/services/webhook_dispatcher.WebhookDispatcher. |
