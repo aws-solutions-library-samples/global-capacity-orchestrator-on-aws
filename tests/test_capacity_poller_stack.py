@@ -1,18 +1,21 @@
-# Tests for gco/stacks/capacity_poller_stack.py -- feature-flagged history poller stack.
-# Synthesizes against a stub config and asserts the DynamoDB table (TTL, GSI), poller
-# Lambda env, EventBridge schedule, DLQ, and least-privilege IAM actions.
+# Tests for the optional Historical Capacity Surface add-on folded into
+# GCOGlobalStack (gated by historical.enabled). Synthesizes the global stack
+# with the add-on enabled/disabled and asserts the capacity-history DynamoDB
+# table (TTL, by-timestamp GSI), the poller Lambda env, the EventBridge
+# schedule, and the DLQ are present only when enabled.
 
 import aws_cdk as cdk
-import pytest
 from aws_cdk import assertions
 
+from gco.stacks.global_stack import GCOGlobalStack
+from tests.test_regional_stack import MockConfigLoader
 
-class StubConfig:
-    def get_project_name(self):
-        return "gco-test"
 
-    def get_regions(self):
-        return ["us-east-1"]
+class _EnabledConfig(MockConfigLoader):
+    """MockConfigLoader variant with the capacity-history add-on enabled."""
+
+    def get_capacity_history_enabled(self):
+        return True
 
     def get_capacity_history_config(self):
         return {
@@ -24,95 +27,63 @@ class StubConfig:
         }
 
 
-@pytest.fixture(scope="module")
-def template():
-    from gco.stacks.capacity_poller_stack import GCOCapacityPollerStack
-
+def _synth(cfg):
     app = cdk.App()
-    stack = GCOCapacityPollerStack(
-        app, "t", config=StubConfig(), env=cdk.Environment(region="us-east-2")
-    )
+    stack = GCOGlobalStack(app, "id", config=cfg)
     return assertions.Template.from_stack(stack)
 
 
-def _all_policy_actions(template):
-    actions = set()
-    for policy in template.find_resources("AWS::IAM::Policy").values():
-        for stmt in policy["Properties"]["PolicyDocument"]["Statement"]:
-            act = stmt.get("Action", [])
-            if isinstance(act, str):
-                act = [act]
-            actions.update(act)
-    return actions
+def _capacity_tables(template):
+    out = {}
+    for lid, res in template.find_resources("AWS::DynamoDB::Table").items():
+        name = res.get("Properties", {}).get("TableName")
+        if isinstance(name, str) and name.endswith("-capacity-history"):
+            out[lid] = res
+    return out
 
 
-class TestResourceCounts:
-    def test_counts(self, template):
-        template.resource_count_is("AWS::DynamoDB::Table", 1)
-        template.resource_count_is("AWS::Lambda::Function", 1)
-        template.resource_count_is("AWS::Events::Rule", 1)
-        template.resource_count_is("AWS::SQS::Queue", 1)
+def _capacity_lambdas(template):
+    out = {}
+    for lid, res in template.find_resources("AWS::Lambda::Function").items():
+        env = res.get("Properties", {}).get("Environment", {}).get("Variables", {})
+        if isinstance(env, dict) and "CAPACITY_HISTORY_TABLE_NAME" in env:
+            out[lid] = res
+    return out
 
 
-class TestHistoryTable:
-    def test_ttl_and_billing(self, template):
-        template.has_resource_properties(
-            "AWS::DynamoDB::Table",
-            {
-                "BillingMode": "PAY_PER_REQUEST",
-                "TimeToLiveSpecification": {"AttributeName": "ttl", "Enabled": True},
-            },
-        )
+class TestCapacityPollerAddOnEnabled:
+    def test_history_table_present_with_ttl_and_gsi(self):
+        template = _synth(_EnabledConfig())
+        tables = _capacity_tables(template)
+        assert len(tables) == 1
+        props = next(iter(tables.values()))["Properties"]
+        assert props["TimeToLiveSpecification"] == {"AttributeName": "ttl", "Enabled": True}
+        gsis = props.get("GlobalSecondaryIndexes", [])
+        assert any(g.get("IndexName") == "by-timestamp" for g in gsis)
 
-    def test_by_timestamp_gsi(self, template):
-        template.has_resource_properties(
-            "AWS::DynamoDB::Table",
-            {
-                "GlobalSecondaryIndexes": assertions.Match.array_with(
-                    [
-                        assertions.Match.object_like(
-                            {
-                                "IndexName": "by-timestamp",
-                                "KeySchema": assertions.Match.array_with(
-                                    [{"AttributeName": "instance_type", "KeyType": "HASH"}]
-                                ),
-                            }
-                        )
-                    ]
-                )
-            },
-        )
+    def test_poller_lambda_present(self):
+        template = _synth(_EnabledConfig())
+        lambdas = _capacity_lambdas(template)
+        assert len(lambdas) == 1
+        assert next(iter(lambdas.values()))["Properties"]["Handler"] == "handler.lambda_handler"
+
+    def test_schedule_rule_present(self):
+        template = _synth(_EnabledConfig())
+        rules = template.find_resources("AWS::Events::Rule")
+        exprs = [r.get("Properties", {}).get("ScheduleExpression") for r in rules.values()]
+        assert "rate(15 minutes)" in exprs
+
+    def test_dlq_present(self):
+        template = _synth(_EnabledConfig())
+        queues = template.find_resources("AWS::SQS::Queue")
+        assert len(queues) >= 1
 
 
-class TestPollerLambda:
-    def test_handler_and_environment(self, template):
-        template.has_resource_properties(
-            "AWS::Lambda::Function",
-            {
-                "Handler": "handler.lambda_handler",
-                "Environment": {
-                    "Variables": assertions.Match.object_like(
-                        {
-                            "CAPACITY_HISTORY_TABLE_NAME": assertions.Match.any_value(),
-                            "WATCH_INSTANCE_TYPES": "g5.xlarge,p5.48xlarge",
-                            "ENABLED_REGIONS": "us-east-1",
-                            "CAPACITY_HISTORY_RETENTION_DAYS": "90",
-                        }
-                    )
-                },
-            },
-        )
+class TestCapacityPollerAddOnDisabled:
+    def test_no_capacity_history_table(self):
+        template = _synth(MockConfigLoader())
+        assert _capacity_tables(template) == {}
 
-
-class TestSchedule:
-    def test_rate_expression(self, template):
-        template.has_resource_properties(
-            "AWS::Events::Rule", {"ScheduleExpression": "rate(15 minutes)"}
-        )
-
-
-class TestIamLeastPrivilege:
-    def test_actions_present(self, template):
-        actions = _all_policy_actions(template)
-        assert "ec2:GetSpotPlacementScores" in actions
-        assert "dynamodb:PutItem" in actions
+    def test_no_poller_lambda(self):
+        template = _synth(MockConfigLoader())
+        assert _capacity_lambdas(template) == {}

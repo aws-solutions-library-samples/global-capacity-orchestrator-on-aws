@@ -174,6 +174,73 @@ def reservation_check(
     return cli_runner._run_cli(*args)
 
 
+@mcp.tool(tags={"safe", "capacity"})
+@audit_logged
+def capacity_history_show(instance_type: str, region: str, hours: int = 168) -> str:
+    """Show the recorded capacity time-series for an instance type in a region.
+
+    Requires the historical capacity surface (an optional add-on to the global
+    stack, enabled by default). Returns spot score, spot price, AZ coverage,
+    queue depth, and capacity-block availability over the window.
+
+    Args:
+        instance_type: EC2 instance type (e.g. g5.xlarge, p5.48xlarge).
+        region: AWS region.
+        hours: Hours of history to show (default 168 = 7 days).
+    """
+    return cli_runner._run_cli(
+        "capacity", "history", "show", "-i", instance_type, "-r", region, "-H", str(hours)
+    )
+
+
+@mcp.tool(tags={"safe", "capacity"})
+@audit_logged
+def capacity_history_stats(instance_type: str, region: str, hours: int = 168) -> str:
+    """Show p25/p50/p75/min/max/stddev per capacity metric over a time window.
+
+    Args:
+        instance_type: EC2 instance type.
+        region: AWS region.
+        hours: Hours of history to summarize (default 168 = 7 days).
+    """
+    return cli_runner._run_cli(
+        "capacity", "history", "stats", "-i", instance_type, "-r", region, "-H", str(hours)
+    )
+
+
+@mcp.tool(tags={"safe", "capacity"})
+@audit_logged
+def capacity_history_patterns(instance_type: str, region: str, hours: int = 168) -> str:
+    """Show a day-of-week by hour heatmap of average spot placement scores.
+
+    Args:
+        instance_type: EC2 instance type.
+        region: AWS region.
+        hours: Hours of history to analyze (default 168 = 7 days).
+    """
+    return cli_runner._run_cli(
+        "capacity", "history", "patterns", "-i", instance_type, "-r", region, "-H", str(hours)
+    )
+
+
+@mcp.tool(tags={"safe", "capacity"})
+@audit_logged
+def capacity_predict(instance_type: str, region: str, hours: int = 168) -> str:
+    """Predict the best time to acquire capacity from historical patterns (Bedrock).
+
+    Uses the historical capacity surface plus Amazon Bedrock to recommend the
+    day/hour windows with the best spot availability and pricing.
+
+    Args:
+        instance_type: EC2 instance type.
+        region: AWS region.
+        hours: Hours of history to analyze (default 168 = 7 days).
+    """
+    return cli_runner._run_cli(
+        "capacity", "predict", "-i", instance_type, "-r", region, "-H", str(hours)
+    )
+
+
 # Capacity Block purchasing — disabled by default.
 # Set GCO_ENABLE_CAPACITY_PURCHASE=true to enable.
 if is_enabled(FLAG_CAPACITY_PURCHASE):

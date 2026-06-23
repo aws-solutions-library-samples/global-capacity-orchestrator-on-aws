@@ -5,8 +5,9 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
-from cli.capacity.advisor import BedrockCapacityAdvisor
+from cli.capacity.advisor import BedrockCapacityAdvisor, CapacityPredictionResult
 
 BASE_DATA = {"timestamp": "t", "regions_analyzed": [], "instance_types_analyzed": []}
 
@@ -76,3 +77,98 @@ class TestGatherHistoricalContext:
             "spot_data": {"g5.xlarge": {"us-east-1": {"placement_scores": {"regional": 3}}}}
         }
         assert _advisor()._gather_historical_context(capacity_data) == {}
+
+
+def _predict_advisor(client):
+    adv = BedrockCapacityAdvisor.__new__(BedrockCapacityAdvisor)
+    adv.model_id = "test-model"
+    adv._get_bedrock_client = MagicMock(return_value=client)
+    return adv
+
+
+def _converse(text):
+    return {"output": {"message": {"content": [{"text": text}]}}}
+
+
+_PREDICT_STATS = {
+    "instance_type": "g5.xlarge",
+    "region": "us-east-1",
+    "hours_back": 168,
+    "sample_count": 12,
+    "metrics": {
+        "spot_score": {"p25": 5, "p50": 6, "p75": 7, "min": 3, "max": 9},
+        "spot_price": {"p25": 1.1, "p50": 1.2, "p75": 1.3},
+    },
+}
+_PREDICT_PATTERNS = {"best_windows": [{"day": "Monday", "hour": 14, "avg": 8.1, "count": 3}]}
+
+
+class TestBuildPredictPrompt:
+    def test_prompt_includes_metrics_and_windows(self):
+        prompt = _advisor()._build_predict_prompt(
+            "g5.xlarge", "us-east-1", _PREDICT_STATS, _PREDICT_PATTERNS
+        )
+        assert "g5.xlarge" in prompt
+        assert "us-east-1" in prompt
+        assert "p25=5" in prompt
+        assert "Monday 14:00 UTC" in prompt
+        assert '"best_windows"' in prompt
+
+    def test_prompt_handles_missing_metrics(self):
+        prompt = _advisor()._build_predict_prompt("g5.xlarge", "us-east-1", {}, {})
+        assert "g5.xlarge" in prompt
+        assert '"confidence": "high|medium|low"' in prompt
+
+
+class TestPredictCapacityWindow:
+    @patch("cli.capacity.history.get_capacity_history_store")
+    def test_parses_json_response(self, mock_get_store):
+        store = MagicMock()
+        store.get_statistics.return_value = _PREDICT_STATS
+        store.get_temporal_patterns.return_value = _PREDICT_PATTERNS
+        mock_get_store.return_value = store
+        client = MagicMock()
+        client.converse.return_value = _converse(
+            '{"best_windows": [{"day": "Monday", "hour_range": "13:00-16:00 UTC", '
+            '"why": "peak availability"}], "avoid_windows": [{"day": "Friday", '
+            '"hour_range": "18:00-22:00 UTC", "why": "contention"}], '
+            '"reasoning": "Mondays score highest.", "confidence": "high"}'
+        )
+        result = _predict_advisor(client).predict_capacity_window("g5.xlarge", "us-east-1")
+        assert isinstance(result, CapacityPredictionResult)
+        assert result.confidence == "high"
+        assert result.best_windows[0]["day"] == "Monday"
+        assert result.avoid_windows[0]["day"] == "Friday"
+        assert "Mondays" in result.reasoning
+
+    @patch("cli.capacity.history.get_capacity_history_store")
+    def test_raises_when_no_samples(self, mock_get_store):
+        store = MagicMock()
+        store.get_statistics.return_value = {"sample_count": 0, "metrics": {}}
+        mock_get_store.return_value = store
+        with pytest.raises(ValueError, match="No historical capacity samples"):
+            _predict_advisor(MagicMock()).predict_capacity_window("g5.xlarge", "us-east-1")
+
+    @patch("cli.capacity.history.get_capacity_history_store")
+    def test_propagates_table_missing(self, mock_get_store):
+        store = MagicMock()
+        store.get_statistics.side_effect = ClientError(
+            {"Error": {"Code": "ResourceNotFoundException", "Message": "no table"}},
+            "GetItem",
+        )
+        mock_get_store.return_value = store
+        with pytest.raises(ClientError):
+            _predict_advisor(MagicMock()).predict_capacity_window("g5.xlarge", "us-east-1")
+
+    @patch("cli.capacity.history.get_capacity_history_store")
+    def test_tolerates_non_json_response(self, mock_get_store):
+        store = MagicMock()
+        store.get_statistics.return_value = _PREDICT_STATS
+        store.get_temporal_patterns.return_value = _PREDICT_PATTERNS
+        mock_get_store.return_value = store
+        client = MagicMock()
+        client.converse.return_value = _converse("the model rambled without json")
+        result = _predict_advisor(client).predict_capacity_window("g5.xlarge", "us-east-1")
+        assert result.best_windows == []
+        assert result.confidence == "low"
+        assert "rambled" in result.raw_response

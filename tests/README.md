@@ -521,7 +521,13 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_bug_fixes.py` | Regression tests for a handful of bug fixes across the GCO codebase. |
 | `test_canary.py` | Tests for A/B (canary) inference endpoint deployments. |
 | `test_capacity.py` | Tests for cli/capacity/ — the GPU capacity checker and recommender. |
+| `test_capacity_advisor_historical.py` | Tests for the Bedrock capacity-advisor historical-context enrichment in cli/capacity/advisor.py. |
 | `test_capacity_cmd_coverage.py` | Tests for the capacity CLI subcommands in cli/commands/capacity_cmd.py. |
+| `test_capacity_history.py` | Tests for cli/capacity/history.CapacityHistoryStore (time-series store, statistics, and temporal patterns). |
+| `test_capacity_history_cli.py` | Tests for the `gco capacity history` show/stats/patterns subcommands and the `--enrich-historical` flag. |
+| `test_capacity_history_config.py` | Tests for the `historical.*` config getters and validation in gco/config/config_loader.py. |
+| `test_capacity_poller_handler.py` | Tests for the capacity-poller Lambda (lambda/capacity-poller/handler.py). |
+| `test_capacity_poller_stack.py` | CDK synthesis tests for the capacity-poller add-on folded into gco/stacks/global_stack.GCOGlobalStack (present when historical.enabled, absent otherwise). |
 | `test_capacity_reservations.py` | Tests for On-Demand Capacity Reservations and EC2 Capacity Blocks. |
 | `test_cli_config.py` | Tests for cli/config.py. |
 | `test_cli_inference_models.py` | Tests for the inference and models CLI subgroups in cli/main.py. |

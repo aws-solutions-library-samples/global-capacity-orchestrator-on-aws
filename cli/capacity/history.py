@@ -8,7 +8,7 @@ block availability -- for a watched set of instance types across regions and
 writes them here. The CLI (gco capacity history ...) and the Bedrock capacity
 advisor read them back for temporal querying and prompt enrichment.
 
-Table schema (a single global table; see gco/stacks/capacity_poller_stack):
+Table schema (a single global table; see GCOGlobalStack._create_capacity_poller):
 
     pk (partition) = "{instance_type}#{region}"
     sk (sort) = ISO-8601 UTC timestamp of the snapshot
@@ -250,7 +250,8 @@ class CapacityHistoryStore:
                 item[field] = value
 
         self._table.put_item(Item=_to_dynamo(item))
-        return _from_dynamo(item)
+        stored: dict[str, Any] = _from_dynamo(item)
+        return stored
 
     def record(self, capacity_data: dict[str, Any], *, now: datetime | None = None) -> int:
         """Flatten gather_capacity_data() output and persist one item per

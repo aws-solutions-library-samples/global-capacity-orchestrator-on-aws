@@ -1,6 +1,6 @@
 """Capacity poller Lambda for the Historical Capacity Surface.
 
-Invoked on a schedule by an EventBridge rule (see gco/stacks/capacity_poller_stack).
+Invoked on a schedule by an EventBridge rule (see GCOGlobalStack._create_capacity_poller in gco/stacks/global_stack.py).
 For each configured (instance_type, region) pair it snapshots capacity signals via
 read-only EC2 APIs and writes one item per pair into the capacity-history DynamoDB
 table.

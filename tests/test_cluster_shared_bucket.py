@@ -64,6 +64,18 @@ class MockConfigLoader:
             "health_check_path": "/api/v1/health",
         }
 
+    def get_capacity_history_enabled(self):
+        return False
+
+    def get_capacity_history_config(self):
+        return {
+            "enabled": False,
+            "retention_days": 90,
+            "poll_interval_minutes": 15,
+            "watch_instance_types": ["g5.xlarge", "p5.48xlarge"],
+            "enabled_regions": [],
+        }
+
 
 def _synth(app: cdk.App, construct_id: str = "test-global-stack") -> assertions.Template:
     stack = GCOGlobalStack(app, construct_id, config=cast(ConfigLoader, MockConfigLoader(app)))

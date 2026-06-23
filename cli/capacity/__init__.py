@@ -18,6 +18,7 @@ from cli.config import get_config as get_config  # noqa: F401
 from .advisor import (
     BedrockCapacityAdvisor,
     BedrockCapacityRecommendation,
+    CapacityPredictionResult,
     get_bedrock_capacity_advisor,
 )
 from .checker import CapacityChecker, get_capacity_checker
@@ -47,6 +48,7 @@ __all__ = [
     "CapacityChecker",
     "CapacityEstimate",
     "CapacityHistoryStore",
+    "CapacityPredictionResult",
     "InstanceTypeInfo",
     "MultiRegionCapacityChecker",
     "RegionCapacity",

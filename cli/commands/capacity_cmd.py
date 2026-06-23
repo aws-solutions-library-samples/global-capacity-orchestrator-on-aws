@@ -4,6 +4,7 @@ import sys
 from typing import Any
 
 import click
+from botocore.exceptions import ClientError
 
 from ..capacity import get_capacity_checker
 from ..config import GCOConfig
@@ -682,19 +683,39 @@ def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any) -
         sys.exit(1)
 
 
+_HISTORY_DISABLED_HINT = (
+    "The historical capacity surface is not enabled. It is an optional add-on to "
+    "the global stack: set historical.enabled to true in cdk.json and run "
+    "'gco stacks deploy gco-global'. See lambda/capacity-poller/README.md."
+)
+
+
+def _history_disabled(exc: Exception) -> bool:
+    """True if exc is a 'table does not exist' error (feature not deployed)."""
+    return (
+        isinstance(exc, ClientError)
+        and exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException"
+    )
+
+
 def _print_historical_enrichment(formatter: Any, instance_type: str, region: str) -> None:
     """Append a historical capacity summary to ``gco capacity check`` output."""
     from ..capacity.history import get_capacity_history_store
 
-    store = get_capacity_history_store()
-    stats = store.get_statistics(instance_type, region)
+    try:
+        stats = get_capacity_history_store().get_statistics(instance_type, region)
+    except Exception as e:  # supplementary to check; never fail the command
+        if _history_disabled(e):
+            formatter.print_warning(_HISTORY_DISABLED_HINT)
+        else:
+            formatter.print_warning(f"Historical enrichment unavailable: {e}")
+        return
     if stats["sample_count"] == 0:
         formatter.print_warning(
-            f"No historical data for {instance_type} in {region}. "
-            "Enable historical.enabled and let the poller collect samples."
+            f"No historical samples for {instance_type} in {region} yet "
+            "(the poller records one about every 15 minutes)."
         )
         return
-
     formatter.print_info(f"Historical context (last 7 days, {stats['sample_count']} samples):")
     spot_stats = stats["metrics"].get("spot_score")
     if spot_stats:
@@ -759,7 +780,7 @@ def history_show(config: Any, instance_type: Any, region: Any, hours: Any) -> No
         trend = get_capacity_history_store().get_trend(instance_type, region, hours)
         if not trend:
             formatter.print_warning(
-                f"No historical data for {instance_type} in {region} (last {hours}h)."
+                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes)."
             )
             return
         formatter.print(
@@ -775,6 +796,9 @@ def history_show(config: Any, instance_type: Any, region: Any, hours: Any) -> No
             ],
         )
     except Exception as e:
+        if _history_disabled(e):
+            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            return
         formatter.print_error(f"Failed to load capacity history: {e}")
         sys.exit(1)
 
@@ -793,7 +817,7 @@ def history_stats(config: Any, instance_type: Any, region: Any, hours: Any) -> N
         stats = get_capacity_history_store().get_statistics(instance_type, region, hours)
         if stats["sample_count"] == 0:
             formatter.print_warning(
-                f"No historical data for {instance_type} in {region} (last {hours}h)."
+                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes)."
             )
             return
         if config.output_format == "table":
@@ -817,6 +841,9 @@ def history_stats(config: Any, instance_type: Any, region: Any, hours: Any) -> N
         else:
             formatter.print(stats)
     except Exception as e:
+        if _history_disabled(e):
+            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            return
         formatter.print_error(f"Failed to compute capacity statistics: {e}")
         sys.exit(1)
 
@@ -835,7 +862,7 @@ def history_patterns(config: Any, instance_type: Any, region: Any, hours: Any) -
         patterns = get_capacity_history_store().get_temporal_patterns(instance_type, region, hours)
         if not patterns["patterns"]:
             formatter.print_warning(
-                f"No historical data for {instance_type} in {region} (last {hours}h)."
+                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes)."
             )
             return
         if config.output_format == "table":
@@ -843,5 +870,99 @@ def history_patterns(config: Any, instance_type: Any, region: Any, hours: Any) -
         else:
             formatter.print(patterns)
     except Exception as e:
+        if _history_disabled(e):
+            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            return
         formatter.print_error(f"Failed to compute capacity patterns: {e}")
         sys.exit(1)
+
+
+@capacity.command("predict")
+@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option("--region", "-r", required=True, help="AWS region")
+@click.option(
+    "--hours", "-H", default=168, help="Hours of history to analyze (default 168 = 7 days)"
+)
+@click.option(
+    "--model",
+    "-m",
+    default="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    help="Bedrock model ID to use",
+)
+@click.option("--raw", is_flag=True, help="Show the raw AI response")
+@pass_config
+def predict_capacity(
+    config: Any,
+    instance_type: Any,
+    region: Any,
+    hours: Any,
+    model: Any,
+    raw: Any,
+) -> None:
+    """Predict the best time to acquire capacity from historical patterns (Bedrock).
+
+    Combines the historical capacity surface (an optional add-on to the global
+    stack) with Amazon Bedrock to recommend the day/hour windows with the best
+    spot availability and pricing. Requires historical.enabled and collected
+    samples.
+    """
+    from ..capacity import get_bedrock_capacity_advisor
+
+    formatter = get_output_formatter(config)
+    try:
+        advisor = get_bedrock_capacity_advisor(config, model_id=model)
+        prediction = advisor.predict_capacity_window(instance_type, region, hours_back=hours)
+    except ValueError as e:
+        formatter.print_warning(str(e))
+        return
+    except Exception as e:
+        if _history_disabled(e):
+            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            return
+        formatter.print_error(f"Failed to predict capacity window: {e}")
+        sys.exit(1)
+
+    if config.output_format != "table":
+        formatter.print(
+            {
+                "instance_type": prediction.instance_type,
+                "region": prediction.region,
+                "confidence": prediction.confidence,
+                "best_windows": prediction.best_windows,
+                "avoid_windows": prediction.avoid_windows,
+                "reasoning": prediction.reasoning,
+            }
+        )
+        return
+
+    print()
+    print(
+        f"  Best time to acquire {instance_type} in {region} "
+        f"(confidence: {prediction.confidence.upper()})"
+    )
+    print("  " + "-" * 68)
+    if prediction.best_windows:
+        for window in prediction.best_windows[:5]:
+            print(
+                f"  + {window.get('day', '?')} {window.get('hour_range', '?')}: "
+                f"{window.get('why', '')}"
+            )
+    else:
+        print("  (no clear best window identified)")
+    if prediction.avoid_windows:
+        print()
+        print("  Windows to avoid:")
+        for window in prediction.avoid_windows[:5]:
+            print(
+                f"  - {window.get('day', '?')} {window.get('hour_range', '?')}: "
+                f"{window.get('why', '')}"
+            )
+    if prediction.reasoning:
+        print()
+        print("  Reasoning:")
+        for line in prediction.reasoning.split(". "):
+            if line.strip():
+                print(f"    {line.strip()}")
+    if raw:
+        print()
+        print(prediction.raw_response)

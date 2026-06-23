@@ -203,6 +203,12 @@ class GCOGlobalStack(Stack):
         self._create_image_replication_rule()
         self._create_image_lookup_lambda()
 
+        # Optional Historical Capacity Surface add-on (gated by historical.enabled
+        # in cdk.json). Folded into the global stack rather than a separate stack
+        # so it reuses the global DynamoDB/encryption conventions.
+        if self.config.get_capacity_history_enabled():
+            self._create_capacity_poller()
+
         # Create Global Accelerator with TCP protocol for HTTP/HTTPS traffic
         self.accelerator = ga.Accelerator(
             self, "GCOAccelerator", accelerator_name=self.accelerator_name, enabled=True
@@ -260,6 +266,222 @@ class GCOGlobalStack(Stack):
             "SOURCE_IP": ga.ClientAffinity.SOURCE_IP,
         }
         return mapping.get(affinity, ga.ClientAffinity.NONE)
+
+    def _create_capacity_poller(self) -> None:
+        """Create the optional Historical Capacity Surface add-on.
+
+        This is an optional add-on to the global stack (not a separate stack),
+        gated by ``historical.enabled`` in cdk.json. It provisions a DynamoDB
+        time-series table plus an EventBridge-scheduled Lambda that snapshots
+        capacity signals (spot score, spot price, AZ coverage, capacity-block
+        availability) for the watched instance types across the enabled regions,
+        reusing this stack's DynamoDB/encryption conventions.
+        """
+        from aws_cdk import aws_events_targets as events_targets
+        from aws_cdk import aws_sqs as sqs
+        from cdk_nag import NagSuppressions
+
+        project_name = self.config.get_project_name()
+        historical = self.config.get_capacity_history_config()
+        retention_days = int(historical["retention_days"])
+        poll_interval_minutes = int(historical["poll_interval_minutes"])
+        watch_instance_types = list(historical["watch_instance_types"])
+        enabled_regions = list(historical["enabled_regions"]) or self.config.get_regions()
+
+        self.capacity_history_table = dynamodb.Table(
+            self,
+            "CapacityHistoryTable",
+            table_name=f"{project_name}-capacity-history",
+            partition_key=dynamodb.Attribute(name="pk", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="sk", type=dynamodb.AttributeType.STRING),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True
+            ),
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            time_to_live_attribute="ttl",
+        )
+        self.capacity_history_table.add_global_secondary_index(
+            index_name="by-timestamp",
+            partition_key=dynamodb.Attribute(
+                name="instance_type", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(name="sk", type=dynamodb.AttributeType.STRING),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
+        poller_role = iam.Role(
+            self,
+            "CapacityPollerRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                )
+            ],
+        )
+        poller_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["dynamodb:PutItem", "dynamodb:BatchWriteItem"],
+                resources=[
+                    self.capacity_history_table.table_arn,
+                    f"{self.capacity_history_table.table_arn}/index/*",
+                ],
+            )
+        )
+        poller_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "ec2:DescribeSpotPriceHistory",
+                    "ec2:GetSpotPlacementScores",
+                    "ec2:DescribeCapacityBlockOfferings",
+                    "ec2:DescribeCapacityReservations",
+                    "ec2:DescribeAvailabilityZones",
+                ],
+                resources=["*"],
+            )
+        )
+
+        self.capacity_poller_lambda = lambda_.Function(
+            self,
+            "CapacityPollerFunction",
+            runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
+            handler="handler.lambda_handler",
+            code=lambda_.Code.from_asset("lambda/capacity-poller"),
+            timeout=Duration.minutes(14),
+            memory_size=256,
+            role=poller_role,
+            environment={
+                "CAPACITY_HISTORY_TABLE_NAME": self.capacity_history_table.table_name,
+                "WATCH_INSTANCE_TYPES": ",".join(watch_instance_types),
+                "ENABLED_REGIONS": ",".join(enabled_regions),
+                "CAPACITY_HISTORY_RETENTION_DAYS": str(retention_days),
+            },
+            tracing=lambda_.Tracing.ACTIVE,
+            description=(
+                "Historical Capacity Surface poller (optional global-stack add-on): "
+                "snapshots capacity signals into the capacity-history table."
+            ),
+        )
+
+        poller_dlq = sqs.Queue(
+            self,
+            "CapacityPollerRuleDlq",
+            retention_period=Duration.days(14),
+            enforce_ssl=True,
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        events.Rule(
+            self,
+            "CapacityPollerSchedule",
+            description=(
+                f"Capacity poller for {project_name} history surface "
+                f"(every {poll_interval_minutes} min)"
+            ),
+            schedule=events.Schedule.rate(Duration.minutes(poll_interval_minutes)),
+            targets=[
+                events_targets.LambdaFunction(
+                    self.capacity_poller_lambda, dead_letter_queue=poller_dlq, retry_attempts=2
+                )
+            ],
+        )
+
+        ssm.StringParameter(
+            self,
+            "CapacityHistoryTableNameParam",
+            parameter_name=f"/{project_name}/capacity-history-table-name",
+            string_value=self.capacity_history_table.table_name,
+            description="DynamoDB table name for historical capacity snapshots",
+        )
+        CfnOutput(
+            self,
+            "CapacityHistoryTableName",
+            value=self.capacity_history_table.table_name,
+            description="DynamoDB table name for historical capacity snapshots",
+            export_name=f"{project_name}-capacity-history-table-name",
+        )
+        CfnOutput(
+            self,
+            "CapacityHistoryTableArn",
+            value=self.capacity_history_table.table_arn,
+            description="DynamoDB table ARN for historical capacity snapshots",
+            export_name=f"{project_name}-capacity-history-table-arn",
+        )
+
+        NagSuppressions.add_resource_suppressions(
+            poller_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM4",
+                    "reason": (
+                        "AWSLambdaBasicExecutionRole provides the standard CloudWatch "
+                        "Logs permissions every Lambda needs."
+                    ),
+                },
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The EC2 capacity describe/get APIs (DescribeSpotPriceHistory, "
+                        "GetSpotPlacementScores, DescribeCapacityBlockOfferings, "
+                        "DescribeCapacityReservations, DescribeAvailabilityZones) do not "
+                        "support resource-level permissions and require a wildcard "
+                        "resource. The DynamoDB index wildcard is scoped to this table's "
+                        "own indexes."
+                    ),
+                },
+            ],
+            apply_to_children=True,
+        )
+        NagSuppressions.add_resource_suppressions(
+            poller_dlq,
+            [
+                {
+                    "id": "AwsSolutions-SQS3",
+                    "reason": (
+                        "This queue is the dead-letter queue for the "
+                        "CapacityPollerSchedule EventBridge rule; a DLQ for a DLQ is "
+                        "circular."
+                    ),
+                },
+                {
+                    "id": "Serverless-SQSRedrivePolicy",
+                    "reason": (
+                        "This queue is itself the dead-letter queue for the "
+                        "CapacityPollerSchedule EventBridge rule, so it does not need "
+                        "its own redrive policy; a DLQ for a DLQ is circular."
+                    ),
+                },
+            ],
+        )
+        NagSuppressions.add_resource_suppressions(
+            self.capacity_history_table,
+            [
+                {
+                    "id": "HIPAA.Security-DynamoDBInBackupPlan",
+                    "reason": (
+                        "The capacity-history table holds ephemeral, reconstructable "
+                        "telemetry snapshots with a TTL (default 90 days) and "
+                        "point-in-time recovery enabled. The poller re-collects this "
+                        "data continuously, so an AWS Backup plan is unnecessary for "
+                        "this optional add-on."
+                    ),
+                },
+                {
+                    "id": "NIST.800.53.R5-DynamoDBInBackupPlan",
+                    "reason": (
+                        "The capacity-history table holds ephemeral, reconstructable "
+                        "telemetry snapshots with a TTL (default 90 days) and "
+                        "point-in-time recovery enabled. The poller re-collects this "
+                        "data continuously, so an AWS Backup plan is unnecessary for "
+                        "this optional add-on."
+                    ),
+                },
+            ],
+        )
 
     def _create_outputs(self) -> None:
         """Create CloudFormation outputs for cross-stack references."""

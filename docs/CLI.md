@@ -1437,7 +1437,7 @@ gco costs forecast --days 60
 Check and manage cluster capacity.
 
 <details>
-<summary>All <code>gco capacity</code> commands (10) — click to expand</summary>
+<summary>All <code>gco capacity</code> commands (15) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -1451,6 +1451,11 @@ Check and manage cluster capacity.
 | [`gco capacity reserve`](#gco-capacity-reserve) | Purchase a Capacity Block offering by ID. |
 | [`gco capacity instance-info`](#gco-capacity-instance-info) | Print AWS-published metadata for an instance type — vCPUs, memory, GPU count, network performance, and supported architectures. |
 | [`gco capacity spot-prices`](#gco-capacity-spot-prices) | Get spot price history for an instance type in a region. |
+| [`gco capacity history`](#gco-capacity-history) | Query the historical capacity surface (optional global-stack add-on, on by default). |
+| [`gco capacity history show`](#gco-capacity-history-show) | Show the recorded capacity time-series for an instance type in a region. |
+| [`gco capacity history stats`](#gco-capacity-history-stats) | Show p25/p50/p75/min/max/stddev per metric over a time window. |
+| [`gco capacity history patterns`](#gco-capacity-history-patterns) | Show a day-of-week by hour heatmap of average spot scores. |
+| [`gco capacity predict`](#gco-capacity-predict) | Predict the best time to acquire capacity from historical patterns (Bedrock). |
 
 </details>
 
@@ -1469,6 +1474,7 @@ gco capacity check [OPTIONS]
 | `--instance-type` | `-i` | Instance type to check |
 | `--region` | `-r` | Region to check |
 | `--type` | `-t` | Capacity type: `spot`, `on-demand`, or `both` |
+| `--enrich-historical` | | Append historical capacity context to the output (requires historical.enabled) |
 
 **Example:**
 
@@ -1710,6 +1716,106 @@ gco capacity spot-prices [OPTIONS]
 ```bash
 gco capacity spot-prices -i g5.xlarge -r us-east-1
 gco capacity spot-prices -i p4d.24xlarge -r us-west-2 -d 30
+```
+
+#### `gco capacity history`
+
+Query the historical capacity surface, an optional add-on to the global stack (not a separate stack) that is enabled by default. Set `historical.enabled` to `false` in cdk.json to opt out. The poller writes time-series snapshots to DynamoDB; when none are available yet the subcommands print a clear notice.
+
+#### `gco capacity history show`
+
+Show the recorded capacity time-series (spot score, spot price, AZ coverage, queue depth, capacity-block availability) for an instance type in a region.
+
+```bash
+gco capacity history show [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--instance-type` | `-i` | EC2 instance type (required) |
+| `--region` | `-r` | AWS region (required) |
+| `--hours` | `-H` | Hours of history to show (default 168 = 7 days) |
+
+**Example:**
+
+```bash
+gco capacity history show -i g5.xlarge -r us-east-1
+gco capacity history show -i p5.48xlarge -r us-east-1 -H 72
+```
+
+#### `gco capacity history stats`
+
+Show a statistical summary (p25/p50/p75, min, max, mean, stddev) for each metric over the window.
+
+```bash
+gco capacity history stats [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--instance-type` | `-i` | EC2 instance type (required) |
+| `--region` | `-r` | AWS region (required) |
+| `--hours` | `-H` | Hours of history to summarize (default 168 = 7 days) |
+
+**Example:**
+
+```bash
+gco capacity history stats -i g5.xlarge -r us-east-1
+```
+
+#### `gco capacity history patterns`
+
+Show a day-of-week by hour heatmap grid of average spot placement scores, plus the best historical windows.
+
+```bash
+gco capacity history patterns [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--instance-type` | `-i` | EC2 instance type (required) |
+| `--region` | `-r` | AWS region (required) |
+| `--hours` | `-H` | Hours of history to analyze (default 168 = 7 days) |
+
+**Example:**
+
+```bash
+gco capacity history patterns -i g5.xlarge -r us-east-1
+```
+
+#### `gco capacity predict`
+
+Predict the best time to acquire capacity from historical patterns using Amazon
+Bedrock. Combines the historical capacity surface (an optional add-on to the
+global stack, enabled by default) with an LLM to recommend the day/hour windows
+with the best spot availability and pricing, and which windows to avoid.
+Requires collected history.
+
+```bash
+gco capacity predict [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--instance-type` | `-i` | EC2 instance type (required) |
+| `--region` | `-r` | AWS region (required) |
+| `--hours` | `-H` | Hours of history to analyze (default 168 = 7 days) |
+| `--model` | `-m` | Bedrock model ID to use |
+| `--raw` | | Show the raw AI response |
+
+**Example:**
+
+```bash
+gco capacity predict -i p5.48xlarge -r us-east-1
+gco capacity predict -i g5.xlarge -r us-west-2 -H 336
 ```
 
 ---

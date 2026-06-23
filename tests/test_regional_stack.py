@@ -128,6 +128,18 @@ class MockConfigLoader:
     def get_aurora_pgvector_config(self):
         return {"enabled": False}
 
+    def get_capacity_history_enabled(self):
+        return False
+
+    def get_capacity_history_config(self):
+        return {
+            "enabled": False,
+            "retention_days": 90,
+            "poll_interval_minutes": 15,
+            "watch_instance_types": ["g5.xlarge", "p5.48xlarge"],
+            "enabled_regions": [],
+        }
+
 
 class TestRegionalStackImports:
     """Tests for regional stack imports and class structure."""

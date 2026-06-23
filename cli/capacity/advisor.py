@@ -34,6 +34,19 @@ class BedrockCapacityRecommendation:
     raw_response: str = ""
 
 
+@dataclass
+class CapacityPredictionResult:
+    """Bedrock prediction of the best time(s) to acquire capacity."""
+
+    instance_type: str
+    region: str
+    best_windows: list[dict[str, Any]] = field(default_factory=list)
+    avoid_windows: list[dict[str, Any]] = field(default_factory=list)
+    reasoning: str = ""
+    confidence: str = "low"
+    raw_response: str = ""
+
+
 class BedrockCapacityAdvisor:
     """
     AI-powered capacity advisor using Amazon Bedrock.
@@ -561,6 +574,113 @@ Respond ONLY with the JSON object, no additional text."""
             raise RuntimeError(f"Failed to parse AI response as JSON: {e}") from e
         except Exception as e:
             raise RuntimeError(f"Failed to get AI recommendation: {e}") from e
+
+    def _build_predict_prompt(
+        self,
+        instance_type: str,
+        region: str,
+        stats: dict[str, Any],
+        patterns: dict[str, Any],
+    ) -> str:
+        """Build a Bedrock prompt focused on the best time to acquire capacity."""
+        metrics = stats.get("metrics", {})
+        spot = metrics.get("spot_score", {})
+        price = metrics.get("spot_price", {})
+        lines = [
+            "You are an expert AWS GPU capacity-timing advisor.",
+            "",
+            (
+                f"Based ONLY on the historical capacity patterns below for "
+                f"{instance_type} in {region}, recommend the best time window(s) to "
+                f"acquire this capacity (spot or capacity blocks), and which windows to avoid."
+            ),
+            "",
+            (
+                f"## Historical window: last {stats.get('hours_back')} hours, "
+                f"{stats.get('sample_count')} samples"
+            ),
+        ]
+        if spot:
+            lines.append(
+                f"Spot placement score (1-10, higher = better availability): "
+                f"p25={spot.get('p25')} p50={spot.get('p50')} p75={spot.get('p75')} "
+                f"min={spot.get('min')} max={spot.get('max')}"
+            )
+        if price:
+            lines.append(
+                f"Spot price USD/hr (lower = cheaper): "
+                f"p25={price.get('p25')} p50={price.get('p50')} p75={price.get('p75')}"
+            )
+        best = patterns.get("best_windows", [])[:10]
+        if best:
+            lines.append("")
+            lines.append(
+                "Top observed windows by average spot score (day, hour UTC, avg, samples):"
+            )
+            for window in best:
+                lines.append(
+                    f"- {window['day']} {window['hour']:02d}:00 UTC: "
+                    f"avg {window['avg']} (n={window['count']})"
+                )
+        lines.append("")
+        lines.append("Respond ONLY with a JSON object of this exact shape:")
+        lines.append(
+            '{"best_windows": [{"day": "Monday", "hour_range": "13:00-16:00 UTC", '
+            '"why": "..."}], "avoid_windows": [{"day": "...", "hour_range": "...", '
+            '"why": "..."}], "reasoning": "...", "confidence": "high|medium|low"}'
+        )
+        return "\n".join(lines)
+
+    def predict_capacity_window(
+        self,
+        instance_type: str,
+        region: str,
+        hours_back: int = 168,
+    ) -> CapacityPredictionResult:
+        """Predict the best acquisition window for an instance type in a region.
+
+        Reads the historical capacity surface, builds a timing-focused prompt,
+        and asks Bedrock. Raises ``ValueError`` when there are no samples yet;
+        propagates the underlying ``ClientError`` (e.g. ResourceNotFoundException)
+        when the history table does not exist so callers can surface a hint.
+        """
+        from cli.capacity.history import get_capacity_history_store
+
+        store = get_capacity_history_store()
+        stats = store.get_statistics(instance_type, region, hours_back)
+        if stats.get("sample_count", 0) == 0:
+            raise ValueError(
+                f"No historical capacity samples for {instance_type} in {region} yet. "
+                "The poller records one about every 15 minutes once enabled."
+            )
+        patterns = store.get_temporal_patterns(instance_type, region, hours_back)
+        prompt = self._build_predict_prompt(instance_type, region, stats, patterns)
+
+        bedrock = self._get_bedrock_client()
+        response = bedrock.converse(
+            modelId=self.model_id,
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            inferenceConfig={"maxTokens": 2048, "temperature": 0.2},
+        )
+        text = response["output"]["message"]["content"][0]["text"]
+
+        parsed: dict[str, Any] = {}
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            try:
+                parsed = json.loads(text[start:end])
+            except json.JSONDecodeError:
+                parsed = {}
+        return CapacityPredictionResult(
+            instance_type=instance_type,
+            region=region,
+            best_windows=parsed.get("best_windows", []),
+            avoid_windows=parsed.get("avoid_windows", []),
+            reasoning=parsed.get("reasoning", ""),
+            confidence=parsed.get("confidence", "low"),
+            raw_response=text,
+        )
 
 
 def get_bedrock_capacity_advisor(

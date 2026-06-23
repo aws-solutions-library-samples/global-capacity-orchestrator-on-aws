@@ -177,8 +177,8 @@ class TestToolRegistration:
         # mission_checkpoint, mission_complete, mission_abort, mission_resume,
         # mission_history, mission_list) add 9 when GCO_ENABLE_MISSION=true.
         # With every flag enabled the ceiling is
-        # 102 + 1 + 3 + 12 + 1 + 3 + 2 + 1 + 1 + 9 = 135.
-        base_count = 102
+        # 106 + 1 + 3 + 12 + 1 + 3 + 2 + 1 + 1 + 9 = 139.
+        base_count = 106
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -229,6 +229,10 @@ class TestToolRegistration:
             "ai_recommend",
             "list_reservations",
             "reservation_check",
+            "capacity_history_show",
+            "capacity_history_stats",
+            "capacity_history_patterns",
+            "capacity_predict",
             # ── Inference endpoints ──
             # Read-only
             "list_inference_endpoints",

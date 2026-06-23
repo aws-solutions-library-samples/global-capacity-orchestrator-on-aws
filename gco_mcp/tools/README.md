@@ -20,7 +20,7 @@ flag-to-tool mapping.
 | File | Tools | Description |
 |------|-------|-------------|
 | `jobs.py` | 9 | `list_jobs`, `submit_job_sqs`, `submit_job_api`, `get_job`, `get_job_logs`, `get_job_events`, `delete_job` (gated), `cluster_health`, `queue_status` |
-| `capacity.py` | 8 | `check_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `reserve_capacity` (gated) |
+| `capacity.py` | 12 | `check_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `capacity_history_show`, `capacity_history_stats`, `capacity_history_patterns`, `capacity_predict`, `reserve_capacity` (gated) |
 | `inference.py` | 19 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `mooncake_topology_status`, `populate_kv_cache` |
 | `costs.py` | 4 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast` |
 | `stacks.py` | 20 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `valkey_status`, `aurora_status`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated) |
@@ -64,6 +64,10 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | Tool | Description |
 |------|-------------|
 | `ai_recommend` | Get AI-powered capacity recommendation using Amazon Bedrock. |
+| `capacity_history_patterns` | Show a day-of-week by hour heatmap of average spot placement scores. |
+| `capacity_history_show` | Show the recorded capacity time-series for an instance type in a region. |
+| `capacity_history_stats` | Show p25/p50/p75/min/max/stddev per capacity metric over a time window. |
+| `capacity_predict` | Predict the best time to acquire capacity from historical patterns (Bedrock). |
 | `capacity_status` | View capacity status across all deployed regions. |
 | `check_capacity` | Check spot and on-demand capacity for a specific instance type. |
 | `list_reservations` | List On-Demand Capacity Reservations (ODCRs) across regions. |
