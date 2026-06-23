@@ -1,4 +1,12 @@
-"""New unit tests that raise branch/line coverage for cli.capacity.checker."""
+"""Coverage-focused unit tests for ``cli/capacity/checker.py``.
+
+The capacity checker wraps several EC2 APIs (instance-type metadata, instance-type offerings, spot-price history, on-demand pricing, and the On-Demand Capacity Reservation / Capacity Block surfaces) and folds the results into an availability assessment. The happy paths run under ``test_capacity.py`` and ``test_capacity_reservations.py``; this module fills in the error and edge branches they leave uncovered:
+
+* ``ClientError`` and empty-result handling for each underlying EC2 call (instance info, offerings, availability zones, spot price, on-demand pricing), plus the spot-score re-raise path.
+* The availability-zone coverage fraction (including the empty-AZ case) and the price-fallback availability bands.
+* The full live-signal scarcity matrix in ``_assess_on_demand_availability`` -- every spot-score, price-ratio, stability, and AZ-coverage band -- and the ``recommend_capacity_type`` tie-breaks.
+* Reservation discovery with no filters, capacity-block trend bucketing (skip, error, and empty branches), and the cross-region reservation and multi-region delegation paths.
+"""
 
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch

@@ -1,4 +1,11 @@
-"""New unit tests that raise coverage for cli.capacity.advisor and multi_region."""
+"""Coverage-focused unit tests for ``cli/capacity/advisor.py`` and ``cli/capacity/multi_region.py``.
+
+These modules back the Bedrock-assisted capacity advisor and the multi-region capacity aggregator. Their happy paths run under ``test_capacity.py``; this module covers the prompt-construction and aggregation branches left untested:
+
+* ``advisor._build_prompt`` requirement rendering: the optional ``min_memory`` / ``fault_tolerance`` / ``max_cost`` fields and the On-Demand Capacity Reservation and Capacity Block prompt sections.
+* ``multi_region`` data gathering: the no-stack and no-queue-URL paths, empty-metrics handling, and the SQS / CloudWatch ``ClientError`` and unexpected-error handlers, plus ``get_all_regions_capacity`` continue-on-error.
+* Recommendation tie-breaks (simple and weighted), capacity-block trend up/down signals, the ``compute_price_trend`` zero-mean guard, and the module factory function.
+"""
 
 from unittest.mock import MagicMock, patch
 
