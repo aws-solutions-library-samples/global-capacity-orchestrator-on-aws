@@ -566,6 +566,20 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_webhook_dispatcher.py` | Tests for gco/services/webhook_dispatcher.WebhookDispatcher. |
 | `test_yaml_parsing_limits.py` | Tests for YAML parsing limits on the manifest processor. |
 
+### Coverage Supplement Tests
+
+Companion suites that exercise previously-uncovered error and edge paths to keep branch coverage above the CI gate. Each targets one module.
+
+| File | Description |
+|------|-------------|
+| `test_metric_readers_files_coverage.py` | Edge and error-path coverage for the file-format metric reader (`gco_mcp/metric_readers/files.py`): value description, non-numeric and malformed-file errors, JSONL skip rules, Hugging Face trainer-state paths, and the Parquet and tfevents handlers. |
+| `test_tool_metrics_coverage.py` | Validation and error-envelope coverage for the metric-reader MCP tools (`gco_mcp/tools/metrics.py`): invalid extraction and aggregation modes, bad regex, and the CloudWatch, job-log, and shared-storage failure paths. |
+| `test_tasks_cmd_coverage.py` | Coverage for the `gco tasks` command helpers and subcommands (`cli/commands/tasks_cmd.py`): PID liveness, state colorization, duration formatting, and the list, show, tail, and prune paths. |
+| `test_task_status_coverage.py` | Branch coverage for the disk-backed task-status reader and writer (`gco_mcp/tools/_task_status.py`): orphaned-PID rewrite, prune edge cases, and malformed-record guards. |
+| `test_mooncake_pd_proxy_coverage.py` | Handler coverage for the Mooncake PD proxy program (`gco/services/mooncake_pd_proxy.py`): prefill priming, decode streaming, the admin path, request dispatch, and the health endpoints. |
+| `test_capacity_checker_coverage.py` | Error, empty-result, and scarcity-assessment coverage for the capacity checker (`cli/capacity/checker.py`): boto3 ClientError paths, availability bands, and reservation and capacity-block discovery. |
+| `test_capacity_advisor_coverage.py` | Coverage for the capacity advisor prompt builder (`cli/capacity/advisor.py`) and the multi-region aggregator (`cli/capacity/multi_region.py`): recommendation tie-breaks and SQS and CloudWatch error handling. |
+
 ## Writing New Tests
 
 ### General Guidelines
