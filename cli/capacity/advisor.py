@@ -277,11 +277,59 @@ class BedrockCapacityAdvisor:
 
         return data
 
+    def _gather_historical_context(self, capacity_data: dict[str, Any]) -> dict[str, Any]:
+        """Best-effort historical enrichment for the Bedrock prompt.
+
+        For each (instance_type, region) with a current spot score, look up the
+        7-day statistics and temporal patterns from the capacity history store.
+        Returns an empty dict if the history surface is unavailable (table
+        missing, no access, or feature disabled) so the advisor still works
+        without it.
+        """
+        try:
+            from cli.capacity.history import get_capacity_history_store
+
+            store = get_capacity_history_store()
+        except Exception as e:
+            logger.debug("Capacity history store unavailable: %s", e)
+            return {}
+
+        context: dict[str, Any] = {}
+        for instance_type, regions_data in capacity_data.get("spot_data", {}).items():
+            for region, spot_info in (regions_data or {}).items():
+                current = (spot_info.get("placement_scores") or {}).get("regional")
+                if current is None:
+                    continue
+                try:
+                    stats = store.get_statistics(instance_type, region)
+                except Exception as e:
+                    logger.debug("Historical stats lookup failed: %s", e)
+                    return context
+                spot_stats = stats.get("metrics", {}).get("spot_score")
+                if not spot_stats:
+                    continue
+                try:
+                    patterns = store.get_temporal_patterns(instance_type, region)
+                    best_windows = patterns.get("best_windows", [])[:3]
+                except Exception:
+                    best_windows = []
+                context[f"{instance_type}#{region}"] = {
+                    "instance_type": instance_type,
+                    "region": region,
+                    "current_spot_score": current,
+                    "p25": spot_stats["p25"],
+                    "p50": spot_stats["p50"],
+                    "p75": spot_stats["p75"],
+                    "best_windows": best_windows,
+                }
+        return context
+
     def _build_prompt(
         self,
         capacity_data: dict[str, Any],
         workload_description: str | None = None,
         requirements: dict[str, Any] | None = None,
+        historical_context: dict[str, Any] | None = None,
     ) -> str:
         """Build the prompt for Bedrock."""
         requirements = requirements or {}
@@ -386,6 +434,31 @@ IMPORTANT DISCLAIMERS:
                         )
             prompt += "\n"
 
+        if historical_context:
+            prompt += "## Historical Context (last 7 days)\n"
+            for ctx in historical_context.values():
+                current = ctx["current_spot_score"]
+                p25 = ctx["p25"]
+                p50 = ctx["p50"]
+                p75 = ctx["p75"]
+                if current < p25:
+                    interpretation = "likely transient contention"
+                elif current <= p75:
+                    interpretation = "within normal range"
+                else:
+                    interpretation = "unusually favorable"
+                prompt += f"  {ctx['instance_type']} in {ctx['region']}:\n"
+                prompt += f"    Current spot score: {current}\n"
+                prompt += f"    Historical p25/p50/p75: {p25}/{p50}/{p75}\n"
+                prompt += f"    Interpretation: {interpretation}\n"
+                windows = ctx.get("best_windows") or []
+                if windows:
+                    rendered = ", ".join(
+                        f"{w['day']} {w['hour']:02d}:00 (avg {w['avg']})" for w in windows
+                    )
+                    prompt += f"    Best historical windows (top 3): {rendered}\n"
+            prompt += "\n"
+
         prompt += """Based on this data, provide your recommendation in the following JSON format:
 {
     "recommended_region": "region-name",
@@ -427,8 +500,13 @@ Respond ONLY with the JSON object, no additional text."""
         # Gather capacity data
         capacity_data = self.gather_capacity_data(instance_types, regions)
 
+        # Gather best-effort historical context (skipped when unavailable)
+        historical_context = self._gather_historical_context(capacity_data)
+
         # Build prompt
-        prompt = self._build_prompt(capacity_data, workload_description, requirements)
+        prompt = self._build_prompt(
+            capacity_data, workload_description, requirements, historical_context
+        )
 
         # Call Bedrock
         bedrock = self._get_bedrock_client()

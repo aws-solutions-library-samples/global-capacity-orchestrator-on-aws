@@ -21,6 +21,11 @@ from .advisor import (
     get_bedrock_capacity_advisor,
 )
 from .checker import CapacityChecker, get_capacity_checker
+from .history import (
+    CapacityHistoryStore,
+    flatten_capacity_data,
+    get_capacity_history_store,
+)
 from .models import (
     GPU_INSTANCE_SPECS,
     CapacityEstimate,
@@ -41,13 +46,16 @@ __all__ = [
     "BedrockCapacityRecommendation",
     "CapacityChecker",
     "CapacityEstimate",
+    "CapacityHistoryStore",
     "InstanceTypeInfo",
     "MultiRegionCapacityChecker",
     "RegionCapacity",
     "SpotPriceInfo",
     "compute_price_trend",
     "compute_weighted_score",
+    "flatten_capacity_data",
     "get_bedrock_capacity_advisor",
     "get_capacity_checker",
+    "get_capacity_history_store",
     "get_multi_region_capacity_checker",
 ]

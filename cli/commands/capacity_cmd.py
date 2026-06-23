@@ -30,8 +30,19 @@ def capacity(config: Any) -> None:
     default="both",
     help="Capacity type to check",
 )
+@click.option(
+    "--enrich-historical",
+    is_flag=True,
+    help="Append historical capacity context (requires historical.enabled)",
+)
 @pass_config
-def check_capacity(config: Any, instance_type: Any, region: Any, capacity_type: Any) -> None:
+def check_capacity(
+    config: Any,
+    instance_type: Any,
+    region: Any,
+    capacity_type: Any,
+    enrich_historical: Any,
+) -> None:
     """Check capacity availability for an instance type.
 
     Provides estimates based on spot price history and availability patterns.
@@ -46,6 +57,9 @@ def check_capacity(config: Any, instance_type: Any, region: Any, capacity_type: 
             print(format_capacity_table(estimates))
         else:
             formatter.print(estimates)
+
+        if enrich_historical:
+            _print_historical_enrichment(formatter, instance_type, region)
 
     except Exception as e:
         formatter.print_error(f"Failed to check capacity: {e}")
@@ -665,4 +679,169 @@ def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any) -
 
     except Exception as e:
         formatter.print_error(f"Failed to reserve capacity: {e}")
+        sys.exit(1)
+
+
+def _print_historical_enrichment(formatter: Any, instance_type: str, region: str) -> None:
+    """Append a historical capacity summary to ``gco capacity check`` output."""
+    from ..capacity.history import get_capacity_history_store
+
+    store = get_capacity_history_store()
+    stats = store.get_statistics(instance_type, region)
+    if stats["sample_count"] == 0:
+        formatter.print_warning(
+            f"No historical data for {instance_type} in {region}. "
+            "Enable historical.enabled and let the poller collect samples."
+        )
+        return
+
+    formatter.print_info(f"Historical context (last 7 days, {stats['sample_count']} samples):")
+    spot_stats = stats["metrics"].get("spot_score")
+    if spot_stats:
+        print(
+            f"  spot_score p25/p50/p75: "
+            f"{spot_stats['p25']}/{spot_stats['p50']}/{spot_stats['p75']} "
+            f"(min {spot_stats['min']}, max {spot_stats['max']})"
+        )
+    price_stats = stats["metrics"].get("spot_price")
+    if price_stats:
+        print(
+            f"  spot_price p25/p50/p75: "
+            f"{price_stats['p25']}/{price_stats['p50']}/{price_stats['p75']}"
+        )
+
+
+def _format_patterns_grid(patterns: dict[str, Any]) -> str:
+    """Render a day-of-week x hour heatmap of average scores."""
+    from ..capacity.history import DAY_NAMES
+
+    grid = patterns.get("patterns", {})
+    metric = patterns.get("metric", "spot_score")
+    lines = [f"Average {metric} by day-of-week and hour (UTC)"]
+    header = "Day".ljust(10) + "".join(f"{hour:>5}" for hour in range(24))
+    lines.append(header)
+    lines.append("-" * len(header))
+    for day in DAY_NAMES:
+        hours = grid.get(day, {})
+        row = day[:9].ljust(10)
+        for hour in range(24):
+            cell = hours.get(hour) or hours.get(str(hour))
+            row += f"{cell['avg']:>5.1f}" if cell else f"{'.':>5}"
+        lines.append(row)
+    best = patterns.get("best_windows", [])[:3]
+    if best:
+        lines.append("")
+        lines.append("Best windows:")
+        for window in best:
+            lines.append(
+                f"- {window['day']} {window['hour']:02d}:00 UTC "
+                f"avg={window['avg']} (n={window['count']})"
+            )
+    return "\n".join(lines)
+
+
+@capacity.group("history")
+def history() -> None:
+    """Query the historical capacity surface (requires historical.enabled)."""
+
+
+@history.command("show")
+@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option("--region", "-r", required=True, help="AWS region")
+@click.option("--hours", "-H", default=168, help="Hours of history (default 168 = 7 days)")
+@pass_config
+def history_show(config: Any, instance_type: Any, region: Any, hours: Any) -> None:
+    """Show the capacity time-series for an instance type in a region."""
+    from ..capacity.history import get_capacity_history_store
+
+    formatter = get_output_formatter(config)
+    try:
+        trend = get_capacity_history_store().get_trend(instance_type, region, hours)
+        if not trend:
+            formatter.print_warning(
+                f"No historical data for {instance_type} in {region} (last {hours}h)."
+            )
+            return
+        formatter.print(
+            trend,
+            columns=[
+                "timestamp",
+                "spot_score",
+                "spot_price",
+                "az_count",
+                "queue_depth",
+                "capacity_blocks_available",
+                "capacity_blocks_total",
+            ],
+        )
+    except Exception as e:
+        formatter.print_error(f"Failed to load capacity history: {e}")
+        sys.exit(1)
+
+
+@history.command("stats")
+@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option("--region", "-r", required=True, help="AWS region")
+@click.option("--hours", "-H", default=168, help="Hours of history (default 168 = 7 days)")
+@pass_config
+def history_stats(config: Any, instance_type: Any, region: Any, hours: Any) -> None:
+    """Show a statistical summary (p25/p50/p75/min/max/stddev) per metric."""
+    from ..capacity.history import get_capacity_history_store
+
+    formatter = get_output_formatter(config)
+    try:
+        stats = get_capacity_history_store().get_statistics(instance_type, region, hours)
+        if stats["sample_count"] == 0:
+            formatter.print_warning(
+                f"No historical data for {instance_type} in {region} (last {hours}h)."
+            )
+            return
+        if config.output_format == "table":
+            rows = [{"metric": name, **values} for name, values in stats["metrics"].items()]
+            print(
+                formatter.format(
+                    rows,
+                    columns=[
+                        "metric",
+                        "count",
+                        "min",
+                        "p25",
+                        "p50",
+                        "p75",
+                        "max",
+                        "mean",
+                        "stddev",
+                    ],
+                )
+            )
+        else:
+            formatter.print(stats)
+    except Exception as e:
+        formatter.print_error(f"Failed to compute capacity statistics: {e}")
+        sys.exit(1)
+
+
+@history.command("patterns")
+@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option("--region", "-r", required=True, help="AWS region")
+@click.option("--hours", "-H", default=168, help="Hours of history (default 168 = 7 days)")
+@pass_config
+def history_patterns(config: Any, instance_type: Any, region: Any, hours: Any) -> None:
+    """Show a day/hour heatmap grid of average spot scores."""
+    from ..capacity.history import get_capacity_history_store
+
+    formatter = get_output_formatter(config)
+    try:
+        patterns = get_capacity_history_store().get_temporal_patterns(instance_type, region, hours)
+        if not patterns["patterns"]:
+            formatter.print_warning(
+                f"No historical data for {instance_type} in {region} (last {hours}h)."
+            )
+            return
+        if config.output_format == "table":
+            print(_format_patterns_grid(patterns))
+        else:
+            formatter.print(patterns)
+    except Exception as e:
+        formatter.print_error(f"Failed to compute capacity patterns: {e}")
         sys.exit(1)

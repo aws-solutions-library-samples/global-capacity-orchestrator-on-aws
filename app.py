@@ -31,6 +31,7 @@ from constructs import IConstruct
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.analytics_stack import GCOAnalyticsStack
 from gco.stacks.api_gateway_global_stack import AnalyticsApiConfig, GCOApiGatewayGlobalStack
+from gco.stacks.capacity_poller_stack import GCOCapacityPollerStack
 from gco.stacks.global_stack import GCOGlobalStack
 from gco.stacks.monitoring_stack import GCOMonitoringStack
 from gco.stacks.regional_stack import GCORegionalStack
@@ -219,6 +220,23 @@ def main() -> None:
         )
         api_gateway_stack.set_analytics_config(analytics_api_config)
         api_gateway_stack.add_dependency(analytics_stack)
+
+    # Optionally deploy the historical capacity surface poller stack. Gated on
+    # historical.enabled in cdk.json (default false); when off, no DynamoDB
+    # table, Lambda, or EventBridge rule is synthesized. Deployed in the global
+    # region so a single table + poller covers all deployed regions.
+    if config.get_capacity_history_enabled():
+        capacity_poller_stack = GCOCapacityPollerStack(
+            app,
+            f"{project_name}-capacity-poller",
+            config=config,
+            env=cdk.Environment(region=global_region),
+            description=(
+                f"{SOLUTION_DESCRIPTION_PREFIX} - Optional historical capacity surface "
+                "(time-series poller Lambda + DynamoDB history table)"
+            ),
+        )
+        capacity_poller_stack.add_dependency(global_stack)
 
     app.synth()
 

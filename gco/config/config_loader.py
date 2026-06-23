@@ -117,6 +117,9 @@ class ConfigLoader:
         # Validate analytics environment config (optional block)
         self._validate_analytics_environment_config()
 
+        # Validate historical capacity surface config (optional block)
+        self._validate_capacity_history_config()
+
     def _validate_regions(self) -> None:
         """Validate region configuration"""
         regions = self.get_regions()
@@ -403,6 +406,53 @@ class ConfigLoader:
                 raise ConfigValidationError(
                     f"analytics_environment.{sub_block}.removal_policy must be one of "
                     f"{sorted(valid_removal_policies)}, got {removal_policy!r}"
+                )
+
+    def _validate_capacity_history_config(self) -> None:
+        """Validate the optional ``historical`` block in cdk.json.
+
+        The block is entirely optional; absence means the historical capacity
+        surface is disabled and no validation is needed. When present, types
+        are validated so a typo fails fast at synth time:
+
+        - ``enabled``: bool if present.
+        - ``retention_days`` / ``poll_interval_minutes``: positive ints if present.
+        - ``watch_instance_types`` / ``enabled_regions``: lists of strings if present.
+        - every region in ``enabled_regions`` must be a known AWS region.
+        """
+        historical_ctx = self.app.node.try_get_context("historical")
+        if not isinstance(historical_ctx, dict):
+            return
+
+        if "enabled" in historical_ctx and not isinstance(historical_ctx["enabled"], bool):
+            raise ConfigValidationError(
+                f"historical.enabled must be a bool, got "
+                f"{type(historical_ctx['enabled']).__name__}: {historical_ctx['enabled']!r}"
+            )
+
+        for int_field in ("retention_days", "poll_interval_minutes"):
+            if int_field not in historical_ctx:
+                continue
+            value = historical_ctx[int_field]
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ConfigValidationError(
+                    f"historical.{int_field} must be a positive integer, got {value!r}"
+                )
+
+        for list_field in ("watch_instance_types", "enabled_regions"):
+            if list_field not in historical_ctx:
+                continue
+            value = historical_ctx[list_field]
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise ConfigValidationError(
+                    f"historical.{list_field} must be a list of strings, got {value!r}"
+                )
+
+        for region in historical_ctx.get("enabled_regions", []) or []:
+            if region not in self.VALID_REGIONS:
+                raise ConfigValidationError(
+                    f"historical.enabled_regions contains invalid region '{region}'. "
+                    f"Valid regions: {sorted(self.VALID_REGIONS)}"
                 )
 
     def get_project_name(self) -> str:
@@ -814,6 +864,45 @@ class ConfigLoader:
         merged dict.
         """
         return bool(self.get_analytics_config()["enabled"])
+
+    def get_capacity_history_config(self) -> dict[str, Any]:
+        """Get the optional historical capacity surface configuration.
+
+        Returns the merged ``historical`` block from cdk.json layered on top of
+        the defaults below. The feature is off unless ``historical.enabled`` is
+        explicitly true, mirroring the analytics-environment opt-in pattern.
+
+        Keys:
+            - enabled: deploy the capacity poller stack + history table (default False)
+            - retention_days: DynamoDB TTL window for snapshots (default 90)
+            - poll_interval_minutes: EventBridge schedule cadence (default 15)
+            - watch_instance_types: instance types the poller snapshots
+            - enabled_regions: regions to poll; empty means all deployed regions
+        """
+        default_config: dict[str, Any] = {
+            "enabled": False,
+            "retention_days": 90,
+            "poll_interval_minutes": 15,
+            "watch_instance_types": [
+                "p4d.24xlarge",
+                "p5.48xlarge",
+                "g5.xlarge",
+                "g5.2xlarge",
+                "g5.12xlarge",
+                "g6.xlarge",
+                "g6.2xlarge",
+                "trn1.32xlarge",
+                "inf2.xlarge",
+            ],
+            "enabled_regions": [],
+        }
+        historical_ctx = self.app.node.try_get_context("historical")
+        historical_config = historical_ctx if isinstance(historical_ctx, dict) else {}
+        return {**default_config, **historical_config}
+
+    def get_capacity_history_enabled(self) -> bool:
+        """Return whether the historical capacity surface is enabled."""
+        return bool(self.get_capacity_history_config()["enabled"])
 
     def get_tags(self) -> dict[str, str]:
         """Get common tags from configuration"""
