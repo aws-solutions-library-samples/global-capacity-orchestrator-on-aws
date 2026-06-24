@@ -199,3 +199,29 @@ class TestGetRegionsWithData:
             {"Items": [{"region": "eu-west-1"}]},
         ]
         assert store.get_regions_with_data("g5.xlarge") == ["eu-west-1", "us-east-1"]
+
+
+class TestRegionResolution:
+    def test_explicit_region_wins(self, mock_table):
+        store = hist.CapacityHistoryStore(table_name="t", region="eu-west-1")
+        assert store._region == "eu-west-1"
+
+    def test_env_overrides_config(self, mock_table, monkeypatch):
+        monkeypatch.setenv("DYNAMODB_REGION", "ap-south-1")
+        store = hist.CapacityHistoryStore(table_name="t")
+        assert store._region == "ap-south-1"
+
+    def test_resolves_global_region_from_config(self, mock_table, monkeypatch):
+        monkeypatch.delenv("DYNAMODB_REGION", raising=False)
+        monkeypatch.delenv("REGION", raising=False)
+        with patch("cli.config.get_config") as mock_get_config:
+            mock_get_config.return_value.global_region = "us-east-2"
+            store = hist.CapacityHistoryStore(table_name="t")
+        assert store._region == "us-east-2"
+
+    def test_falls_back_to_us_east_1_when_config_unavailable(self, mock_table, monkeypatch):
+        monkeypatch.delenv("DYNAMODB_REGION", raising=False)
+        monkeypatch.delenv("REGION", raising=False)
+        with patch("cli.config.get_config", side_effect=RuntimeError("boom")):
+            store = hist.CapacityHistoryStore(table_name="t")
+        assert store._region == "us-east-1"

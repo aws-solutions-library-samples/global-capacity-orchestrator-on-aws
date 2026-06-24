@@ -193,12 +193,30 @@ def flatten_capacity_data(capacity_data: dict[str, Any]) -> list[dict[str, Any]]
     return records
 
 
+def _resolve_global_region() -> str:
+    """Resolve the region where the capacity-history table lives.
+
+    The table is created by the global stack, so it lives in the GCO global
+    region. Resolve that from the CLI config (which reads cdk.json and
+    GCO_GLOBAL_REGION) so callers don't need to set DYNAMODB_REGION. Falls back
+    to us-east-1 only if the config cannot be loaded.
+    """
+    try:
+        from cli.config import get_config
+
+        return get_config().global_region or "us-east-1"
+    except Exception:
+        return "us-east-1"
+
+
 class CapacityHistoryStore:
     """DynamoDB-backed time-series store for capacity snapshots.
 
     Table name resolves from the CAPACITY_HISTORY_TABLE_NAME env var (default
-    gco-capacity-history); region from DYNAMODB_REGION or REGION (default
-    us-east-1). Retention defaults to 90 days and feeds the per-item ttl.
+    gco-capacity-history). Region resolves from an explicit argument, then
+    DYNAMODB_REGION or REGION, then the configured GCO global region (where the
+    global stack creates the table), falling back to us-east-1. Retention
+    defaults to 90 days and feeds the per-item ttl.
     """
 
     def __init__(
@@ -208,7 +226,12 @@ class CapacityHistoryStore:
         retention_days: int | None = None,
     ):
         self.table_name = table_name or os.getenv("CAPACITY_HISTORY_TABLE_NAME", DEFAULT_TABLE_NAME)
-        self._region = region or os.getenv("DYNAMODB_REGION") or os.getenv("REGION", "us-east-1")
+        self._region = (
+            region
+            or os.getenv("DYNAMODB_REGION")
+            or os.getenv("REGION")
+            or _resolve_global_region()
+        )
         if retention_days is not None:
             self.retention_days = retention_days
         else:
