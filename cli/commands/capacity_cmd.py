@@ -877,67 +877,23 @@ def history_patterns(config: Any, instance_type: Any, region: Any, hours: Any) -
         sys.exit(1)
 
 
-@capacity.command("predict")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
-@click.option("--region", "-r", required=True, help="AWS region")
-@click.option(
-    "--hours", "-H", default=168, help="Hours of history to analyze (default 168 = 7 days)"
-)
-@click.option(
-    "--model",
-    "-m",
-    default="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    help="Bedrock model ID to use",
-)
-@click.option("--raw", is_flag=True, help="Show the raw AI response")
-@pass_config
-def predict_capacity(
-    config: Any,
-    instance_type: Any,
-    region: Any,
-    hours: Any,
-    model: Any,
-    raw: Any,
-) -> None:
-    """Predict the best time to acquire capacity from historical patterns (Bedrock).
+def _prediction_to_dict(prediction: Any) -> dict[str, Any]:
+    """Serialize a CapacityPredictionResult for non-table output."""
+    return {
+        "instance_type": prediction.instance_type,
+        "region": prediction.region,
+        "confidence": prediction.confidence,
+        "best_windows": prediction.best_windows,
+        "avoid_windows": prediction.avoid_windows,
+        "reasoning": prediction.reasoning,
+    }
 
-    Combines the historical capacity surface (an optional add-on to the global
-    stack) with Amazon Bedrock to recommend the day/hour windows with the best
-    spot availability and pricing. Requires historical.enabled and collected
-    samples.
-    """
-    from ..capacity import get_bedrock_capacity_advisor
 
-    formatter = get_output_formatter(config)
-    try:
-        advisor = get_bedrock_capacity_advisor(config, model_id=model)
-        prediction = advisor.predict_capacity_window(instance_type, region, hours_back=hours)
-    except ValueError as e:
-        formatter.print_warning(str(e))
-        return
-    except Exception as e:
-        if _history_disabled(e):
-            formatter.print_warning(_HISTORY_DISABLED_HINT)
-            return
-        formatter.print_error(f"Failed to predict capacity window: {e}")
-        sys.exit(1)
-
-    if config.output_format != "table":
-        formatter.print(
-            {
-                "instance_type": prediction.instance_type,
-                "region": prediction.region,
-                "confidence": prediction.confidence,
-                "best_windows": prediction.best_windows,
-                "avoid_windows": prediction.avoid_windows,
-                "reasoning": prediction.reasoning,
-            }
-        )
-        return
-
+def _print_prediction(prediction: Any, raw: bool) -> None:
+    """Render a single capacity-window prediction as a table block."""
     print()
     print(
-        f"  Best time to acquire {instance_type} in {region} "
+        f"  Best time to acquire {prediction.instance_type} in {prediction.region} "
         f"(confidence: {prediction.confidence.upper()})"
     )
     print("  " + "-" * 68)
@@ -966,3 +922,88 @@ def predict_capacity(
     if raw:
         print()
         print(prediction.raw_response)
+
+
+@capacity.command("predict")
+@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option("--region", "-r", help="AWS region (omit when using --all-regions)")
+@click.option(
+    "--all-regions",
+    "-a",
+    is_flag=True,
+    help="Predict across every region that has historical data for the instance type",
+)
+@click.option(
+    "--hours", "-H", default=168, help="Hours of history to analyze (default 168 = 7 days)"
+)
+@click.option(
+    "--model",
+    "-m",
+    default="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    help="Bedrock model ID to use",
+)
+@click.option("--raw", is_flag=True, help="Show the raw AI response")
+@pass_config
+def predict_capacity(
+    config: Any,
+    instance_type: Any,
+    region: Any,
+    all_regions: Any,
+    hours: Any,
+    model: Any,
+    raw: Any,
+) -> None:
+    """Predict the best time to acquire capacity from historical patterns (Bedrock).
+
+    Combines the historical capacity surface (an optional add-on to the global
+    stack) with Amazon Bedrock to recommend the day/hour windows with the best
+    spot availability and pricing. Requires historical.enabled and collected
+    samples. Pass --all-regions to run the prediction for every region that has
+    data for the instance type instead of a single --region.
+    """
+    from ..capacity import get_bedrock_capacity_advisor
+
+    formatter = get_output_formatter(config)
+    if all_regions and region:
+        formatter.print_error("Pass either --region or --all-regions, not both.")
+        sys.exit(1)
+    if not all_regions and not region:
+        formatter.print_error("Provide --region <region> or --all-regions.")
+        sys.exit(1)
+
+    try:
+        advisor = get_bedrock_capacity_advisor(config, model_id=model)
+        if all_regions:
+            predictions = advisor.predict_capacity_windows_all_regions(
+                instance_type, hours_back=hours
+            )
+        else:
+            predictions = [advisor.predict_capacity_window(instance_type, region, hours_back=hours)]
+    except ValueError as e:
+        formatter.print_warning(str(e))
+        return
+    except Exception as e:
+        if _history_disabled(e):
+            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            return
+        formatter.print_error(f"Failed to predict capacity window: {e}")
+        sys.exit(1)
+
+    if not predictions:
+        formatter.print_warning(
+            f"No usable historical samples for {instance_type} in any region yet."
+        )
+        return
+
+    if config.output_format != "table":
+        payload = [_prediction_to_dict(p) for p in predictions]
+        formatter.print(payload if all_regions else payload[0])
+        return
+
+    if all_regions:
+        formatter.print_info(
+            f"Predicted acquisition windows for {instance_type} across "
+            f"{len(predictions)} region(s) with data:"
+        )
+    for prediction in predictions:
+        _print_prediction(prediction, raw)

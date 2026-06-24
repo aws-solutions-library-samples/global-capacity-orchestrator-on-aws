@@ -172,3 +172,43 @@ class TestPredictCapacityWindow:
         assert result.best_windows == []
         assert result.confidence == "low"
         assert "rambled" in result.raw_response
+
+
+class TestPredictAllRegions:
+    @patch("cli.capacity.history.get_capacity_history_store")
+    def test_predicts_each_region(self, mock_get_store):
+        store = MagicMock()
+        store.get_regions_with_data.return_value = ["us-east-1", "us-west-2"]
+        store.get_statistics.return_value = _PREDICT_STATS
+        store.get_temporal_patterns.return_value = _PREDICT_PATTERNS
+        mock_get_store.return_value = store
+        client = MagicMock()
+        client.converse.return_value = _converse(
+            '{"best_windows": [], "avoid_windows": [], "reasoning": "x", "confidence": "medium"}'
+        )
+        results = _predict_advisor(client).predict_capacity_windows_all_regions("g5.xlarge")
+        assert [r.region for r in results] == ["us-east-1", "us-west-2"]
+        assert all(r.confidence == "medium" for r in results)
+
+    @patch("cli.capacity.history.get_capacity_history_store")
+    def test_raises_when_no_regions(self, mock_get_store):
+        store = MagicMock()
+        store.get_regions_with_data.return_value = []
+        mock_get_store.return_value = store
+        with pytest.raises(ValueError, match="any region"):
+            _predict_advisor(MagicMock()).predict_capacity_windows_all_regions("g5.xlarge")
+
+    @patch("cli.capacity.history.get_capacity_history_store")
+    def test_skips_region_with_no_samples(self, mock_get_store):
+        store = MagicMock()
+        store.get_regions_with_data.return_value = ["us-east-1", "us-west-2"]
+        store.get_statistics.side_effect = [
+            {"sample_count": 0, "metrics": {}},
+            _PREDICT_STATS,
+        ]
+        store.get_temporal_patterns.return_value = _PREDICT_PATTERNS
+        mock_get_store.return_value = store
+        client = MagicMock()
+        client.converse.return_value = _converse('{"confidence": "low"}')
+        results = _predict_advisor(client).predict_capacity_windows_all_regions("g5.xlarge")
+        assert [r.region for r in results] == ["us-west-2"]

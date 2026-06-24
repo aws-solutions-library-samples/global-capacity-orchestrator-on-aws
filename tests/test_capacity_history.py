@@ -176,3 +176,26 @@ class TestFactory:
         result = hist.get_capacity_history_store(table_name="t", region="us-east-1")
         assert isinstance(result, hist.CapacityHistoryStore)
         assert result.table_name == "t"
+
+
+class TestGetRegionsWithData:
+    def test_distinct_sorted(self, store, mock_table):
+        mock_table.query.return_value = {
+            "Items": [
+                {"region": "us-west-2"},
+                {"region": "us-east-1"},
+                {"region": "us-west-2"},
+            ]
+        }
+        assert store.get_regions_with_data("g5.xlarge") == ["us-east-1", "us-west-2"]
+
+    def test_empty(self, store, mock_table):
+        mock_table.query.return_value = {"Items": []}
+        assert store.get_regions_with_data("g5.xlarge") == []
+
+    def test_paginates(self, store, mock_table):
+        mock_table.query.side_effect = [
+            {"Items": [{"region": "us-east-1"}], "LastEvaluatedKey": {"k": 1}},
+            {"Items": [{"region": "eu-west-1"}]},
+        ]
+        assert store.get_regions_with_data("g5.xlarge") == ["eu-west-1", "us-east-1"]

@@ -682,6 +682,36 @@ Respond ONLY with the JSON object, no additional text."""
             raw_response=text,
         )
 
+    def predict_capacity_windows_all_regions(
+        self,
+        instance_type: str,
+        hours_back: int = 168,
+    ) -> list[CapacityPredictionResult]:
+        """Predict acquisition windows for every region that has history.
+
+        Discovers the regions with samples for ``instance_type`` via the history
+        store's ``by-timestamp`` GSI and runs :meth:`predict_capacity_window`
+        for each. Raises ``ValueError`` when no region has samples yet;
+        propagates the underlying ``ClientError`` (e.g. ResourceNotFoundException)
+        when the history table does not exist.
+        """
+        from cli.capacity.history import get_capacity_history_store
+
+        store = get_capacity_history_store()
+        regions = store.get_regions_with_data(instance_type, hours_back)
+        if not regions:
+            raise ValueError(
+                f"No historical capacity samples for {instance_type} in any region yet. "
+                "The poller records one about every 15 minutes once enabled."
+            )
+        results: list[CapacityPredictionResult] = []
+        for region in regions:
+            try:
+                results.append(self.predict_capacity_window(instance_type, region, hours_back))
+            except ValueError:
+                continue
+        return results
+
 
 def get_bedrock_capacity_advisor(
     config: GCOConfig | None = None, model_id: str | None = None

@@ -225,7 +225,12 @@ def capacity_history_patterns(instance_type: str, region: str, hours: int = 168)
 
 @mcp.tool(tags={"safe", "capacity"})
 @audit_logged
-def capacity_predict(instance_type: str, region: str, hours: int = 168) -> str:
+def capacity_predict(
+    instance_type: str,
+    region: str | None = None,
+    hours: int = 168,
+    all_regions: bool = False,
+) -> str:
     """Predict the best time to acquire capacity from historical patterns (Bedrock).
 
     Uses the historical capacity surface plus Amazon Bedrock to recommend the
@@ -233,12 +238,16 @@ def capacity_predict(instance_type: str, region: str, hours: int = 168) -> str:
 
     Args:
         instance_type: EC2 instance type.
-        region: AWS region.
+        region: AWS region. Omit when all_regions is true.
         hours: Hours of history to analyze (default 168 = 7 days).
+        all_regions: Predict across every region that has data for the type.
     """
-    return cli_runner._run_cli(
-        "capacity", "predict", "-i", instance_type, "-r", region, "-H", str(hours)
-    )
+    args = ["capacity", "predict", "-i", instance_type, "-H", str(hours)]
+    if all_regions:
+        args.append("--all-regions")
+    elif region:
+        args += ["-r", region]
+    return cli_runner._run_cli(*args)
 
 
 # Capacity Block purchasing — disabled by default.

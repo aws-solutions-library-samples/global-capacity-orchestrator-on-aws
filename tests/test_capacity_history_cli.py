@@ -217,3 +217,58 @@ class TestHistoryFriendlyErrors:
         )
         assert result.exit_code == 0
         assert "optional add-on" in result.output
+
+
+class TestPredictAllRegions:
+    @patch("cli.capacity.get_bedrock_capacity_advisor")
+    def test_all_regions_renders_each(self, mock_get_advisor):
+        advisor = MagicMock()
+        advisor.predict_capacity_windows_all_regions.return_value = [
+            CapacityPredictionResult(
+                instance_type="g5.xlarge",
+                region="us-east-1",
+                best_windows=[{"day": "Monday", "hour_range": "13:00-16:00 UTC", "why": "peak"}],
+                reasoning="r",
+                confidence="high",
+            ),
+            CapacityPredictionResult(
+                instance_type="g5.xlarge",
+                region="us-west-2",
+                best_windows=[],
+                reasoning="",
+                confidence="low",
+            ),
+        ]
+        mock_get_advisor.return_value = advisor
+        result = CliRunner().invoke(
+            cli, ["capacity", "predict", "-i", "g5.xlarge", "--all-regions"]
+        )
+        assert result.exit_code == 0
+        assert "us-east-1" in result.output
+        assert "us-west-2" in result.output
+        assert "2 region(s)" in result.output
+
+    @patch("cli.capacity.get_bedrock_capacity_advisor")
+    def test_all_regions_no_data_warns(self, mock_get_advisor):
+        advisor = MagicMock()
+        advisor.predict_capacity_windows_all_regions.side_effect = ValueError(
+            "No historical capacity samples for g5.xlarge in any region yet."
+        )
+        mock_get_advisor.return_value = advisor
+        result = CliRunner().invoke(
+            cli, ["capacity", "predict", "-i", "g5.xlarge", "--all-regions"]
+        )
+        assert result.exit_code == 0
+        assert "any region" in result.output
+
+    def test_region_and_all_regions_conflict(self):
+        result = CliRunner().invoke(
+            cli, ["capacity", "predict", "-i", "g5.xlarge", "-r", "us-east-1", "--all-regions"]
+        )
+        assert result.exit_code != 0
+        assert "not both" in result.output
+
+    def test_requires_region_or_all_regions(self):
+        result = CliRunner().invoke(cli, ["capacity", "predict", "-i", "g5.xlarge"])
+        assert result.exit_code != 0
+        assert "all-regions" in result.output

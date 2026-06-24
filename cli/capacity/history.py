@@ -371,6 +371,39 @@ class CapacityHistoryStore:
             "best_windows": best_windows,
         }
 
+    def get_regions_with_data(
+        self,
+        instance_type: str,
+        hours_back: int = 168,
+    ) -> list[str]:
+        """Return the distinct regions that have snapshots for an instance type.
+
+        Queries the ``by-timestamp`` GSI (pk=instance_type) within the window
+        and collects the distinct ``region`` values, sorted alphabetically.
+        Powers cross-region queries such as ``gco capacity predict --all-regions``.
+        """
+        cutoff = (_utc_now() - timedelta(hours=hours_back)).isoformat()
+        regions: set[str] = set()
+        kwargs: dict[str, Any] = {
+            "IndexName": GSI_BY_TIMESTAMP,
+            "KeyConditionExpression": (
+                Key("instance_type").eq(instance_type) & Key("sk").gte(cutoff)
+            ),
+            "ProjectionExpression": "#r",
+            "ExpressionAttributeNames": {"#r": "region"},
+        }
+        while True:
+            resp = self._table.query(**kwargs)
+            for item in resp.get("Items", []):
+                value = item.get("region")
+                if value:
+                    regions.add(str(value))
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+        return sorted(regions)
+
 
 def get_capacity_history_store(
     table_name: str | None = None,

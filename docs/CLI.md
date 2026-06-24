@@ -1795,7 +1795,8 @@ Predict the best time to acquire capacity from historical patterns using Amazon
 Bedrock. Combines the historical capacity surface (an optional add-on to the
 global stack, enabled by default) with an LLM to recommend the day/hour windows
 with the best spot availability and pricing, and which windows to avoid.
-Requires collected history.
+Requires collected history. Pass `--all-regions` to run the prediction for every
+region that has data for the instance type instead of a single `--region`.
 
 ```bash
 gco capacity predict [OPTIONS]
@@ -1806,7 +1807,8 @@ gco capacity predict [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--instance-type` | `-i` | EC2 instance type (required) |
-| `--region` | `-r` | AWS region (required) |
+| `--region` | `-r` | AWS region (omit when using `--all-regions`) |
+| `--all-regions` | `-a` | Predict across every region that has historical data for the instance type |
 | `--hours` | `-H` | Hours of history to analyze (default 168 = 7 days) |
 | `--model` | `-m` | Bedrock model ID to use |
 | `--raw` | | Show the raw AI response |
@@ -1816,6 +1818,7 @@ gco capacity predict [OPTIONS]
 ```bash
 gco capacity predict -i p5.48xlarge -r us-east-1
 gco capacity predict -i g5.xlarge -r us-west-2 -H 336
+gco capacity predict -i g5.xlarge --all-regions
 ```
 
 ---
