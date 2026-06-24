@@ -77,6 +77,22 @@ docker run -it --rm \
 
 The `docker.sock` mount lets `gco stacks deploy-all` bundle Lambda assets through your host Docker daemon. See [Prerequisites](#prerequisites) for Colima/Finch socket paths and the security note about host-socket pass-through.
 
+**Run `gco` straight from your shell — no interactive session needed.** Prefer not to drop into the container every time? After building the image once, alias `gco` so each command runs inside the dev container against your current working directory. Add this to your shell profile (`~/.zshrc` or `~/.bashrc`):
+
+```bash
+alias gco='docker run --rm -it -v ~/.aws:/root/.aws:ro -v "$(pwd):/workspace" -v /var/run/docker.sock:/var/run/docker.sock -w /workspace gco-dev gco'
+```
+
+Now run GCO from your repo checkout exactly as the docs show it — the alias forwards straight into the container:
+
+```bash
+gco --help # explore every command
+gco stacks deploy-all -y # stand up every region defined in cdk.json
+gco stacks destroy-all -y # tear it all down
+```
+
+*Finch or Colima?* Swap `docker` for `finch` and use the matching socket path from [Prerequisites](#prerequisites). Run these from the repo root — `$(pwd)` is mounted as the container workspace.
+
 <details>
 <summary>Prefer to install on your host? (advanced — the dev container is recommended)</summary>
 
