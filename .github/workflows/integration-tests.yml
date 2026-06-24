@@ -7,6 +7,10 @@
 # Triggers: push: main, pull_request, workflow_dispatch.
 #
 # Jobs (alphabetical by display name):
+#   - integration:dev-alias:docker           — install latest Docker, build gco-dev, prove the generated `gco` alias runs
+#   - integration:dev-alias:finch            — install latest Finch (rootful), build gco-dev, prove the generated `gco` alias runs
+#   - integration:dev-alias:none             — prove setup-dev-alias.sh refuses cleanly when no runtime is installed
+#   - integration:dev-alias:podman           — install latest Podman, build gco-dev, prove the generated `gco` alias runs
 #   - integration:docker:dev-container       — Dockerfile.dev native-arch matrix (amd64 + arm64 runners)
 #   - integration:docker:health-monitor      — build + /healthz + /readyz
 #   - integration:docker:helm-installer      — build + `helm version`/`kubectl version`
@@ -869,3 +873,117 @@ jobs:
           kubectl -n gco-system logs deploy/health-monitor --tail=200 || true
           kubectl -n gco-system logs deploy/manifest-processor --tail=200 || true
           kubectl -n gco-system logs deploy/inference-monitor --tail=200 || true
+
+  # --------------------------------------------------------------------------
+  # Dev-onboarding alias live proofs. Each job installs the latest version of a
+  # container runtime, builds the gco-dev image ("setup GCO"), then proves the
+  # `gco` shell function emitted by scripts/setup-dev-alias.sh actually launches
+  # the runtime and runs the real CLI — closing the gap left by the mocked
+  # tests/BATS/test_setup_dev_alias.bats suite. Logic lives in
+  # .github/scripts/dev_alias_live.sh so it can be run locally too.
+  # --------------------------------------------------------------------------
+
+  integration-dev-alias-docker:
+    name: "integration:dev-alias:docker"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the latest Docker CE
+        run: |
+          set -euo pipefail
+          curl -fsSL https://get.docker.com | sudo sh
+          docker version
+      - name: Live-prove the generated gco function against Docker
+        # Runner user is in the docker group, so the emitted `docker run`
+        # (no sudo) works as-is.
+        run: .github/scripts/dev_alias_live.sh docker
+
+  integration-dev-alias-podman:
+    name: "integration:dev-alias:podman"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the latest Podman
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y podman
+          podman version
+      - name: Live-prove the generated gco function against Podman
+        run: |
+          set -euo pipefail
+          # The emitted podman function bind-mounts the rootless API socket
+          # ($XDG_RUNTIME_DIR/podman/podman.sock) onto /var/run/docker.sock.
+          # Pin XDG_RUNTIME_DIR to a writable dir and start the API service so
+          # the bind-mount source exists (the test image never uses it, but
+          # `podman run` needs the source path present).
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg"
+          mkdir -p "$XDG_RUNTIME_DIR/podman"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          nohup podman system service --time=0 \
+            "unix://$XDG_RUNTIME_DIR/podman/podman.sock" >"$RUNNER_TEMP/podman-api.log" 2>&1 &
+          for _ in $(seq 1 15); do
+            [ -S "$XDG_RUNTIME_DIR/podman/podman.sock" ] && break
+            sleep 1
+          done
+          # Fallback so the bind-mount source always exists.
+          [ -e "$XDG_RUNTIME_DIR/podman/podman.sock" ] || : >"$XDG_RUNTIME_DIR/podman/podman.sock"
+          .github/scripts/dev_alias_live.sh podman
+
+  integration-dev-alias-finch:
+    name: "integration:dev-alias:finch"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the latest Finch (runfinch APT repo)
+        run: |
+          set -euo pipefail
+          curl -fsSL https://artifact.runfinch.com/deb/GPG_KEY.pub \
+            | sudo gpg --dearmor -o /usr/share/keyrings/runfinch-finch-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/runfinch-finch-archive-keyring.gpg arch=amd64] https://artifact.runfinch.com/deb noble main" \
+            | sudo tee /etc/apt/sources.list.d/runfinch-finch.list
+          sudo apt-get update
+          sudo apt-get install -y runfinch-finch
+          sudo finch --version
+      - name: Start the Finch daemon stack and wait for it
+        run: |
+          set -uo pipefail
+          # The runfinch package ships systemd units for the daemon stack.
+          # Start them best-effort, then gate on `finch info` answering.
+          sudo systemctl daemon-reload || true
+          for unit in containerd finch-buildkit finch-daemon; do
+            sudo systemctl enable --now "$unit" 2>/dev/null \
+              || sudo systemctl start "$unit" 2>/dev/null || true
+          done
+          ok=0
+          for _ in $(seq 1 20); do
+            if sudo finch info >/dev/null 2>&1; then ok=1; break; fi
+            sleep 3
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::finch daemon did not become ready"
+            sudo systemctl --no-pager status containerd finch-buildkit finch-daemon 2>&1 | tail -60 || true
+            sudo finch info || true
+            exit 1
+          fi
+          sudo finch info
+      - name: Live-prove the generated gco function against Finch
+        # Linux finch talks to a root-owned daemon, so the whole script runs as
+        # root. setup-dev-alias.sh emits a plain `finch run` (no sudo); running
+        # the generated function as root is what makes it work on Linux.
+        run: sudo --preserve-env=PATH .github/scripts/dev_alias_live.sh finch
+
+  integration-dev-alias-none:
+    name: "integration:dev-alias:none"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prove setup-dev-alias.sh refuses when no runtime answers
+        # Docker is preinstalled on the runner, so the script masks all three
+        # runtimes with stubs that fail `<rt> info` to exercise the refusal
+        # path deterministically.
+        run: .github/scripts/dev_alias_live.sh --no-runtime
