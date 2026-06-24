@@ -6,6 +6,11 @@ Two behaviours land here:
    code alone on success; it confirms CloudFormation actually shows a terminal
    ``CREATE_COMPLETE`` / ``UPDATE_COMPLETE`` so a silent rollback can't read as a
    successful deploy. An unknown status (``None``) leaves cdk's verdict intact.
+   The inverse also holds: when cdk exits non-zero but CloudFormation is still
+   mid-operation (e.g. cdk died on a transient ``read EADDRNOTAVAIL`` socket
+   error), ``deploy()`` waits for the stack to settle via
+   ``_wait_for_stack_settle`` and treats a terminal ``CREATE_COMPLETE`` /
+   ``UPDATE_COMPLETE`` as success rather than a false failure.
 
 2. Orphaned-ENI sweep — the between-retry cleanup is generalized from "EKS
    cluster SG + its ENIs" to a report-and-clear pass over every network
@@ -70,6 +75,126 @@ class TestDeploySuccessStateVerification:
         result, get_status = self._deploy("ROLLBACK_COMPLETE", all_stacks=True)
         assert result is True
         get_status.assert_not_called()
+
+
+class TestDeployFailureReconcileWaitsForSettle:
+    """When cdk dies on a transient client error (e.g. read EADDRNOTAVAIL) while
+    CloudFormation is still mid-flight, deploy() waits for the stack to settle to
+    a terminal state and judges that — not a status read taken the instant cdk
+    exits, which can catch the stack seconds before CREATE_COMPLETE."""
+
+    def _deploy(self, status_sequence, *, returncode=1, stack="gco-monitoring"):
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.global_region = "us-east-2"
+        get_status = MagicMock(side_effect=list(status_sequence))
+        with (
+            patch("cli.stacks._detect_container_runtime", return_value="docker"),
+            patch.object(StackManager, "_check_and_fix_stuck_stack"),
+            patch.object(StackManager, "ensure_bootstrapped", return_value=True),
+            patch.object(StackManager, "_run_cdk") as mock_run,
+            patch.object(StackManager, "_get_stack_status", get_status),
+            patch.object(StackManager, "_diagnose_deploy_failure"),
+            patch("time.sleep") as mock_sleep,
+        ):
+            mock_run.return_value = MagicMock(returncode=returncode)
+            manager = StackManager(config)
+            result = manager.deploy(stack_name=stack, require_approval=False)
+        return result, get_status, mock_sleep
+
+    def test_in_progress_then_complete_is_success(self):
+        """cdk fails; CFN reads CREATE_IN_PROGRESS, then settles CREATE_COMPLETE."""
+        result, get_status, _ = self._deploy(
+            [
+                "CREATE_IN_PROGRESS",  # failure-reconcile read
+                "CREATE_IN_PROGRESS",  # first settle poll
+                "CREATE_COMPLETE",  # settle poll resolves
+                "CREATE_COMPLETE",  # success-path re-verification
+            ]
+        )
+        assert result is True
+        assert get_status.call_count == 4
+
+    def test_in_progress_then_rollback_is_failure(self):
+        """A stack that settles into rollback stays a failed deploy."""
+        result, _, _ = self._deploy(
+            ["CREATE_IN_PROGRESS", "ROLLBACK_IN_PROGRESS", "ROLLBACK_COMPLETE"]
+        )
+        assert result is False
+
+    def test_already_complete_does_not_wait(self):
+        """Terminal on the first read → no settle wait (time.sleep never called)."""
+        result, get_status, mock_sleep = self._deploy(["CREATE_COMPLETE", "CREATE_COMPLETE"])
+        assert result is True
+        mock_sleep.assert_not_called()
+        assert get_status.call_count == 2
+
+    def test_unknown_status_keeps_cdk_failure(self):
+        """A None status (lookup failed / transient) leaves cdk's failure intact."""
+        result, _, mock_sleep = self._deploy([None])
+        assert result is False
+        mock_sleep.assert_not_called()
+
+
+class TestWaitForStackSettle:
+    """_wait_for_stack_settle polls CloudFormation out of *_IN_PROGRESS states."""
+
+    def _manager(self):
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.global_region = "us-east-2"
+        with patch("cli.stacks._detect_container_runtime", return_value="docker"):
+            return StackManager(config)
+
+    def test_returns_terminal_immediately_without_sleeping(self):
+        from cli.stacks import StackManager
+
+        manager = self._manager()
+        with (
+            patch.object(StackManager, "_get_stack_status", return_value="CREATE_COMPLETE") as gs,
+            patch("time.sleep") as mock_sleep,
+        ):
+            assert manager._wait_for_stack_settle("gco-monitoring") == "CREATE_COMPLETE"
+            gs.assert_called_once()
+            mock_sleep.assert_not_called()
+
+    def test_polls_until_terminal(self):
+        from cli.stacks import StackManager
+
+        manager = self._manager()
+        seq = ["CREATE_IN_PROGRESS", "CREATE_IN_PROGRESS", "CREATE_COMPLETE"]
+        with (
+            patch.object(StackManager, "_get_stack_status", side_effect=seq),
+            patch("time.sleep") as mock_sleep,
+        ):
+            assert manager._wait_for_stack_settle("gco-monitoring") == "CREATE_COMPLETE"
+            assert mock_sleep.call_count == 2
+
+    def test_none_status_returns_none_without_sleeping(self):
+        from cli.stacks import StackManager
+
+        manager = self._manager()
+        with (
+            patch.object(StackManager, "_get_stack_status", return_value=None),
+            patch("time.sleep") as mock_sleep,
+        ):
+            assert manager._wait_for_stack_settle("gco-monitoring") is None
+            mock_sleep.assert_not_called()
+
+    def test_timeout_gives_up_and_returns_last_status(self):
+        from cli.stacks import StackManager
+
+        manager = self._manager()
+        with (
+            patch.object(StackManager, "_get_stack_status", return_value="CREATE_IN_PROGRESS"),
+            patch("time.sleep") as mock_sleep,
+        ):
+            # timeout=0 → deadline already passed → bail after the first read.
+            result = manager._wait_for_stack_settle("gco-monitoring", timeout=0)
+            assert result == "CREATE_IN_PROGRESS"
+            mock_sleep.assert_not_called()
 
 
 class TestClassifyOrphanedEni:

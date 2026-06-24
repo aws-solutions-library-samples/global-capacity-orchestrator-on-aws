@@ -705,6 +705,18 @@ class StackManager:
         # despite cdk's exit code or timeout.
         if stack_name and not all_stacks and not success:
             cfn_status = self._get_stack_status(stack_name)
+            # cdk may have died on a transient client-side error (e.g. a
+            # ``read EADDRNOTAVAIL`` socket failure) while CloudFormation kept
+            # working. If the stack is still mid-operation, wait for it to
+            # settle to a terminal state before judging — a status read taken
+            # the instant cdk exits can otherwise catch a stack seconds before
+            # it reaches CREATE_COMPLETE and report a false failure.
+            if cfn_status is not None and cfn_status.endswith("_IN_PROGRESS"):
+                print(
+                    f"  cdk exited non-zero but {stack_name} is {cfn_status} in "
+                    "CloudFormation; waiting for the operation to settle..."
+                )
+                cfn_status = self._wait_for_stack_settle(stack_name)
             if cfn_status in ("CREATE_COMPLETE", "UPDATE_COMPLETE"):
                 print(
                     f"  cdk reported a non-zero exit but {stack_name} is in "
@@ -1065,6 +1077,35 @@ class StackManager:
             return str(resp["Stacks"][0]["StackStatus"])
         except Exception:
             return None
+
+    def _wait_for_stack_settle(self, stack_name: str, timeout: float | None = None) -> str | None:
+        """Poll CloudFormation until ``stack_name`` leaves a ``*_IN_PROGRESS`` state.
+
+        When ``cdk deploy`` dies on a transient client-side error (e.g. a
+        ``read EADDRNOTAVAIL`` socket failure) the CloudFormation operation it
+        started usually keeps running server-side. ``deploy()`` reconciles
+        against CloudFormation, but a single status read taken the instant cdk
+        exits can catch the stack mid-flight (``CREATE_IN_PROGRESS``) and give
+        up only seconds before it would have reached ``CREATE_COMPLETE``. This
+        helper waits out the in-progress window so the reconcile judges the
+        *terminal* state instead of a transient one.
+
+        Returns the terminal status string, the last status seen on timeout, or
+        ``None`` if the status could not be read (so callers treat the unknown
+        case as 'cdk's verdict stands').
+        """
+        import time
+
+        if timeout is None:
+            timeout = float(os.environ.get("GCO_CDK_SETTLE_TIMEOUT_SECONDS", "1200"))
+        deadline = time.monotonic() + timeout
+        status = self._get_stack_status(stack_name)
+        while status is not None and status.endswith("_IN_PROGRESS"):
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(15.0)
+            status = self._get_stack_status(stack_name)
+        return status
 
     def _cloudformation_delete_stack(self, stack_name: str) -> bool:
         """Delete a stack directly via CloudFormation API."""
