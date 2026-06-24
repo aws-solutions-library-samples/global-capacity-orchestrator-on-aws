@@ -10,13 +10,13 @@
 #
 # Usage (recommended, multi-region aware):
 #   gco inference deploy sglang-phi3 \
-#     -i lmsysorg/sglang:v0.5.12 \
+#     -i lmsysorg/sglang:v0.5.13 \
 #     --gpu-count 1 --replicas 1 \
 #     -e MODEL=microsoft/Phi-3.5-mini-instruct
 #
 # Usage with autoscaling:
 #   gco inference deploy sglang-phi3 \
-#     -i lmsysorg/sglang:v0.5.12 \
+#     -i lmsysorg/sglang:v0.5.13 \
 #     --gpu-count 1 --replicas 2 \
 #     --min-replicas 1 --max-replicas 8 \
 #     --autoscale-metric cpu:70 --autoscale-metric memory:80 \
@@ -56,7 +56,7 @@ spec:
     spec:
       containers:
       - name: sglang
-        image: lmsysorg/sglang:v0.5.12
+        image: lmsysorg/sglang:v0.5.13
         securityContext:
           allowPrivilegeEscalation: false
         ports:

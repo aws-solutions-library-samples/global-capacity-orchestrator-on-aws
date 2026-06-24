@@ -1213,6 +1213,18 @@ class GCOAnalyticsStack(Stack):
             removal_policy=self.cognito_removal,
         )
 
+        from cdk_nag import NagSuppressions
+
+        # cdk-nag AwsSolutions-COG8 (new in cdk-nag 2.38.x): the Lite feature plan is intentional (cost); see UserPool above.
+        NagSuppressions.add_resource_suppressions(
+            self.cognito_pool,
+            [
+                {
+                    "id": "AwsSolutions-COG8",
+                    "reason": "Studio user pool intentionally uses the Lite feature plan with NO_ENFORCEMENT threat protection to avoid the Plus plan per-MAU cost; it only gates internal SageMaker Studio access. Operators who need threat protection can opt into the Essentials/Plus feature plan as documented on the UserPool definition.",
+                }
+            ],
+        )
         self.cognito_client = self.cognito_pool.add_client(
             "StudioUserPoolClient",
             auth_flows=cognito.AuthFlow(

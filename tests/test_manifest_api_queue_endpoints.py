@@ -1184,7 +1184,7 @@ class TestQueueRouteExistence:
         """Test app has all queue routes."""
         from gco.services.manifest_api import app
 
-        routes = [route.path for route in app.routes]
+        routes = [r.path for r in app.routes if hasattr(r, "path")] + [s.path for r in app.routes for s in getattr(getattr(r, "original_router", None), "routes", []) if hasattr(s, "path")]
 
         # Queue endpoints
         assert "/api/v1/queue/jobs" in routes

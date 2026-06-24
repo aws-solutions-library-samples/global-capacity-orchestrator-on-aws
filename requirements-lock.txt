@@ -26,26 +26,28 @@ anyio==4.13.0
     #   sse-starlette
     #   starlette
     #   watchfiles
+ast-serialize==0.5.0
+    # via mypy
 attrs==25.4.0
     # via
     #   aiohttp
     #   cattrs
     #   cyclopts
-    #   hypothesis
     #   jsii
     #   jsonschema
+    #   jsonschema-path
     #   referencing
 authlib==1.7.1
     # via fastmcp-slim
-aws-cdk-asset-awscli-v1==2.2.273
+aws-cdk-asset-awscli-v1==2.2.282
     # via aws-cdk-lib
-aws-cdk-asset-node-proxy-agent-v6==2.1.1
+aws-cdk-asset-node-proxy-agent-v6==2.1.2
     # via aws-cdk-lib
 aws-cdk-aws-cognito-identitypool-alpha==2.186.0a0
     # via aws-pdk
-aws-cdk-cloud-assembly-schema==53.19.0
+aws-cdk-cloud-assembly-schema==54.5.0
     # via aws-cdk-lib
-aws-cdk-lib==2.251.0
+aws-cdk-lib==2.260.0
     # via
     #   aws-cdk-aws-cognito-identitypool-alpha
     #   aws-pdk
@@ -62,12 +64,12 @@ bandit==1.9.4
     #   gco-cli (pyproject.toml)
 beartype==0.22.9
     # via py-key-value-aio
-boto3==1.43.18
+boto3==1.43.36
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
     #   moto
-botocore==1.43.18
+botocore==1.43.36
     # via
     #   boto3
     #   moto
@@ -82,7 +84,7 @@ caio==0.9.25
     # via aiofile
 cattrs==25.3.0
     # via jsii
-cdk-nag==2.37.55
+cdk-nag==2.38.2
     # via
     #   aws-pdk
     #   gco-cli
@@ -148,15 +150,15 @@ exceptiongroup==1.3.1
     # via fastmcp-slim
 execnet==2.1.2
     # via pytest-xdist
-fastapi==0.136.3
+fastapi==0.138.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-fastmcp==3.3.1
+fastmcp==3.4.2
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-fastmcp-slim==3.3.1
+fastmcp-slim==3.4.2
     # via fastmcp
 filelock==3.29.0
     # via
@@ -184,7 +186,7 @@ httpx==0.28.1
     #   mcp
 httpx-sse==0.4.3
     # via mcp
-hypothesis==6.131.0
+hypothesis==6.155.7
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -199,8 +201,6 @@ idna==3.15
     #   yarl
 importlib-metadata==8.7.1
     # via opentelemetry-api
-importlib-resources==7.1.0
-    # via jsii
 iniconfig==2.3.0
     # via pytest
 jaraco-classes==3.4.0
@@ -213,15 +213,15 @@ jeepney==0.9.0
     # via
     #   keyring
     #   secretstorage
-jinja2==3.1.6
-    # via moto
 jmespath==1.1.0
     # via
     #   boto3
     #   botocore
 joserfc==1.6.4
-    # via authlib
-jsii==1.128.0
+    # via
+    #   authlib
+    #   fastmcp-slim
+jsii==1.137.0
     # via
     #   aws-cdk-asset-awscli-v1
     #   aws-cdk-asset-node-proxy-agent-v6
@@ -239,7 +239,7 @@ jsonschema==4.26.0
     #   mcp
     #   openapi-schema-validator
     #   openapi-spec-validator
-jsonschema-path==0.4.6
+jsonschema-path==0.5.0
     # via
     #   fastmcp-slim
     #   openapi-spec-validator
@@ -255,14 +255,12 @@ kubernetes==36.0.2
     #   gco-cli (pyproject.toml)
 lazy-object-proxy==1.12.0
     # via openapi-spec-validator
-librt==0.9.0
+librt==0.11.0
     # via mypy
 markdown-it-py==4.0.0
     # via rich
 markupsafe==3.0.3
-    # via
-    #   jinja2
-    #   werkzeug
+    # via werkzeug
 mcp==1.27.0
     # via fastmcp-slim
 mdurl==0.1.2
@@ -271,7 +269,7 @@ more-itertools==11.0.2
     # via
     #   jaraco-classes
     #   jaraco-functools
-moto==5.1.22
+moto==5.2.2
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -279,7 +277,7 @@ multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
-mypy==1.19.1
+mypy==2.1.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -293,9 +291,9 @@ oauthlib==3.3.1
     # via requests-oauthlib
 openapi-pydantic==0.5.1
     # via fastmcp-slim
-openapi-schema-validator==0.8.1
+openapi-schema-validator==0.9.0
     # via openapi-spec-validator
-openapi-spec-validator==0.8.5
+openapi-spec-validator==0.9.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -309,7 +307,7 @@ packaging==26.2
     #   fastmcp-slim
     #   pytest
     #   wheel
-pathable==0.5.0
+pathable==0.6.0
     # via jsonschema-path
 pathspec==1.1.1
     # via
@@ -324,7 +322,7 @@ platformdirs==4.9.6
     #   fastmcp-slim
     #   python-discovery
     #   virtualenv
-playwright==1.59.0
+playwright==1.60.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -332,7 +330,7 @@ pluggy==1.6.0
     # via
     #   pytest
     #   pytest-cov
-pre-commit==4.5.1
+pre-commit==4.6.0
     # via gco-cli (pyproject.toml)
 projen==0.82.8
     # via aws-pdk
@@ -378,7 +376,7 @@ pydantic==2.13.4
     #   pydantic-settings
 pydantic-core==2.46.4
     # via pydantic
-pydantic-monty==0.0.16
+pydantic-monty==0.0.17
     # via fastmcp-slim
 pydantic-settings==2.14.2
     # via
@@ -406,7 +404,7 @@ pyproject-hooks==1.2.0
     # via
     #   build
     #   pip-tools
-pytest==9.0.3
+pytest==9.1.1
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -414,7 +412,7 @@ pytest==9.0.3
     #   pytest-cov
     #   pytest-mock
     #   pytest-xdist
-pytest-asyncio==1.3.0
+pytest-asyncio==1.4.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -435,7 +433,6 @@ python-dateutil==2.9.0.post0
     #   botocore
     #   jsii
     #   kubernetes
-    #   moto
 python-discovery==1.2.2
     # via virtualenv
 python-dotenv==1.2.2
@@ -501,11 +498,11 @@ rpds-py==0.30.0
     # via
     #   jsonschema
     #   referencing
-ruff==0.15.7
+ruff==0.15.19
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-s3transfer==0.18.0
+s3transfer==0.19.0
     # via boto3
 secretstorage==3.5.0
     # via keyring
@@ -523,6 +520,7 @@ sse-starlette==3.4.1
 starlette==1.3.1
     # via
     #   fastapi
+    #   fastmcp-slim
     #   mcp
     #   sse-starlette
 stevedore==5.7.0
@@ -532,7 +530,6 @@ typeguard==2.13.3
     #   aws-cdk-asset-awscli-v1
     #   aws-cdk-asset-node-proxy-agent-v6
     #   aws-cdk-aws-cognito-identitypool-alpha
-    #   aws-cdk-cloud-assembly-schema
     #   aws-cdk-lib
     #   aws-pdk
     #   cdk-nag
@@ -541,11 +538,11 @@ typeguard==2.13.3
     #   projen
 typer==0.25.1
     # via pydocket
-types-pyyaml==6.0.12.20250915
+types-pyyaml==6.0.12.20260518
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-types-requests==2.32.4.20260107
+types-requests==2.33.0.20260518
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -584,7 +581,7 @@ urllib3==2.7.0
     #   requests
     #   responses
     #   types-requests
-uvicorn==0.48.0
+uvicorn==0.49.0
     # via
     #   fastmcp-slim
     #   gco-cli

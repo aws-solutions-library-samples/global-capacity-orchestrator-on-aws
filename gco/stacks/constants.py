@@ -38,13 +38,13 @@ LAMBDA_PYTHON_RUNTIME = "PYTHON_3_14"
 EKS_ADDON_POD_IDENTITY_AGENT = "v1.3.10-eksbuild.3"
 """EKS Pod Identity Agent — enables IRSA and Pod Identity for service accounts."""
 
-EKS_ADDON_METRICS_SERVER = "v0.8.1-eksbuild.6"
+EKS_ADDON_METRICS_SERVER = "v0.8.1-eksbuild.11"
 """Kubernetes Metrics Server — provides CPU/memory metrics for HPA and ``kubectl top``."""
 
-EKS_ADDON_EFS_CSI_DRIVER = "v3.2.0-eksbuild.1"
+EKS_ADDON_EFS_CSI_DRIVER = "v3.3.0-eksbuild.1"
 """Amazon EFS CSI Driver — mounts EFS file systems as Kubernetes persistent volumes."""
 
-EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v5.4.0-eksbuild.1"
+EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v6.2.0-eksbuild.1"
 """Amazon CloudWatch Observability — Container Insights, Prometheus metrics, FluentBit logs."""
 
 EKS_ADDON_FSX_CSI_DRIVER = "v1.9.0-eksbuild.1"

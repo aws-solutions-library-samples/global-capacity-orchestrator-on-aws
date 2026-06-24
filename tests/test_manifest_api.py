@@ -56,7 +56,7 @@ class TestManifestAPIModels:
         """Test app has expected routes."""
         from gco.services.manifest_api import app
 
-        routes = [route.path for route in app.routes]
+        routes = [r.path for r in app.routes if hasattr(r, "path")] + [s.path for r in app.routes for s in getattr(getattr(r, "original_router", None), "routes", []) if hasattr(s, "path")]
         assert "/" in routes
         assert "/healthz" in routes
         assert "/readyz" in routes
@@ -667,7 +667,7 @@ class TestListJobsEndpoint:
         """Test app has /api/v1/jobs route."""
         from gco.services.manifest_api import app
 
-        routes = [route.path for route in app.routes]
+        routes = [r.path for r in app.routes if hasattr(r, "path")] + [s.path for r in app.routes for s in getattr(getattr(r, "original_router", None), "routes", []) if hasattr(s, "path")]
         assert "/api/v1/jobs" in routes
 
 

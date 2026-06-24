@@ -33,14 +33,14 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "boto3==1.43.18",
+    "boto3==1.43.36",
     "click==8.4.1",
     "requests==2.34.2",
     "pyyaml==6.0.3",
     "constructs==10.6.0",
     "kubernetes==36.0.2",
-    "fastapi==0.136.3",
-    "uvicorn==0.48.0",
+    "fastapi==0.138.0",
+    "uvicorn==0.49.0",
     "pydantic==2.13.4",
     "prometheus-client==0.25.0",
     "httpx==0.28.1",
@@ -52,7 +52,7 @@ dependencies = [
     # ``fastmcp.experimental.transforms.code_mode`` dependencies (the
     # MontySandboxProvider runtime + the GetTags/Search/GetSchemas
     # discovery tools) used when GCO_MCP_TOOL_SEARCH=code_mode.
-    "fastmcp[tasks,code-mode]==3.3.1",
+    "fastmcp[tasks,code-mode]==3.4.2",
     # BM25 ranking backend for FastMCP's tool-search transform when
     # GCO_MCP_TOOL_SEARCH=bm25.
     "rank-bm25==0.2.2",
@@ -60,9 +60,9 @@ dependencies = [
 
 [project.optional-dependencies]
 cdk = [
-    "aws-cdk-lib==2.251.0",
+    "aws-cdk-lib==2.260.0",
     "aws-pdk==0.26.15",
-    "cdk-nag==2.37.55",
+    "cdk-nag==2.38.2",
     "constructs==10.6.0",
 ]
 diagrams = [
@@ -79,11 +79,11 @@ diagrams = [
     # ``lint`` extra to avoid version-drift between the generator and
     # the CI lint gate).
     "pyflowchart==0.6.0",
-    "playwright==1.59.0",
-    "ruff==0.15.7",
+    "playwright==1.60.0",
+    "ruff==0.15.19",
 ]
 inference-monitor = [
-    "boto3==1.43.18",
+    "boto3==1.43.36",
     "kubernetes==36.0.2",
     "pyyaml==6.0.3",
 ]
@@ -92,24 +92,24 @@ mcp = [
     # so the documented ``pip install -e ".[mcp]"`` install path keeps
     # working. Pinned to match the base ``dependencies`` entry exactly to
     # avoid resolver thrash.
-    "fastmcp[tasks,code-mode]==3.3.1",
+    "fastmcp[tasks,code-mode]==3.4.2",
 ]
 lint = [
-    "ruff==0.15.7",
+    "ruff==0.15.19",
     "yamllint==1.38.0",
 ]
 typecheck = [
-    "mypy==1.19.1",
-    "types-requests==2.32.4.20260107",
-    "types-PyYAML==6.0.12.20250915",
+    "mypy==2.1.0",
+    "types-requests==2.33.0.20260518",
+    "types-PyYAML==6.0.12.20260518",
 ]
 test = [
-    "pytest==9.0.3",
+    "pytest==9.1.1",
     "pytest-cov==7.1.0",
     "pytest-mock==3.15.1",
-    "pytest-asyncio==1.3.0",
+    "pytest-asyncio==1.4.0",
     "pytest-xdist[psutil]==3.8.0",
-    "moto==5.1.22",
+    "moto==5.2.2",
     # moto==5.1.22 lazy-imports its API Gateway backend whenever
     # ``cloudformation.create_stack`` is called (even if the stack template
     # contains no API Gateway resources), and that backend requires
@@ -119,8 +119,8 @@ test = [
     # ``ModuleNotFoundError: openapi_spec_validator`` the first time a
     # test seeds a CloudFormation stack for output discovery. Pinning it
     # explicitly keeps test environments reproducible.
-    "openapi-spec-validator==0.8.5",
-    "hypothesis==6.131.0",
+    "openapi-spec-validator==0.9.0",
+    "hypothesis==6.155.7",
 ]
 security = [
     "bandit==1.9.4",
@@ -128,7 +128,7 @@ security = [
 ]
 dev = [
     "gco-cli[cdk,diagrams,lint,typecheck,test,security]",
-    "pre-commit==4.5.1",
+    "pre-commit==4.6.0",
 ]
 
 [project.scripts]

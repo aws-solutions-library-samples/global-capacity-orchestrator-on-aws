@@ -49,7 +49,7 @@ spec:
       priorityClassName: system-node-critical
       containers:
         - name: nvidia-device-plugin-ctr
-          image: nvcr.io/nvidia/k8s-device-plugin:v0.19.2
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.19.3
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
