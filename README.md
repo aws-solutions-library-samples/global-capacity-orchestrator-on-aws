@@ -87,7 +87,7 @@ Now run GCO from your repo checkout exactly as the docs show it — the alias fo
 
 ```bash
 gco --help # explore every command
-gco stacks deploy-all -y # stand up every region defined in cdk.json
+gco stacks deploy-all -y  # stand up every region defined in cdk.json
 gco stacks destroy-all -y # tear it all down
 ```
 
