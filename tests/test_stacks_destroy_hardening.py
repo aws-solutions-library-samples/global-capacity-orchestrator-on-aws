@@ -1,4 +1,4 @@
-"""Tests for the Workstream-B destroy/deploy hardening in cli/stacks.py.
+"""Tests for the destroy/deploy hardening in cli/stacks.py.
 
 Two behaviours land here:
 
