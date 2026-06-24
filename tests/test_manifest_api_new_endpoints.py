@@ -1533,7 +1533,12 @@ class TestRouteExistence:
         """Test app has all new routes."""
         from gco.services.manifest_api import app
 
-        routes = [r.path for r in app.routes if hasattr(r, "path")] + [s.path for r in app.routes for s in getattr(getattr(r, "original_router", None), "routes", []) if hasattr(s, "path")]
+        routes = [r.path for r in app.routes if hasattr(r, "path")] + [
+            s.path
+            for r in app.routes
+            for s in getattr(getattr(r, "original_router", None), "routes", [])
+            if hasattr(s, "path")
+        ]
 
         # Job endpoints
         assert "/api/v1/jobs" in routes
