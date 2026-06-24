@@ -720,6 +720,7 @@ class TestDeployCallsEnsureBootstrapped:
         mgr._sync_lambda_sources = MagicMock()
         mgr.ensure_bootstrapped = MagicMock(return_value=True)
         mgr._run_cdk = MagicMock(return_value=MagicMock(returncode=0))
+        mgr._get_stack_status = MagicMock(return_value="CREATE_COMPLETE")
 
         mgr.deploy(stack_name="gco-global", require_approval=False)
         mgr.ensure_bootstrapped.assert_called_once_with("us-east-2")

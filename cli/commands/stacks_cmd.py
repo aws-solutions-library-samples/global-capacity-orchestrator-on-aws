@@ -303,11 +303,17 @@ def destroy_all_orchestrated(config: Any, yes: Any, parallel: Any, max_workers: 
 
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
-                # Clean up EKS-managed security groups between retries.
-                # After the first attempt, the EKS cluster is deleted but its
-                # security group (eks-cluster-sg-*) may linger and block VPC deletion.
-                formatter.print_info("Cleaning up orphaned EKS resources...")
-                manager.cleanup_eks_security_groups()
+                # Inspect each regional VPC for resources that block teardown
+                # (the EKS cluster security group EKS leaves behind, plus any
+                # lingering ENIs from ELB / Global Accelerator), clear what's
+                # safe to remove, and report what the next attempt is waiting
+                # on. The service-managed ENIs drain asynchronously, which is
+                # what the 30s wait is for.
+                formatter.print_info(
+                    "Inspecting VPCs for resources that can block teardown "
+                    "(orphaned ENIs, EKS security groups)..."
+                )
+                manager.cleanup_orphaned_network_interfaces()
                 formatter.print_warning(
                     f"Attempt {attempt}/{max_attempts}: waiting 30 seconds before retrying..."
                 )

@@ -168,6 +168,43 @@ def _no_real_image_mirror(request):
 
 
 # ============================================================================
+# Function-scoped: never make real AWS calls from the destroy-cleanup helpers
+# ============================================================================
+#
+# ``StackManager.destroy_orchestrated`` invokes three boto3-backed cleanup
+# helpers — ``_cleanup_backup_vault`` (deletes backup recovery points),
+# ``_start_eks_sg_watchdog`` (spawns a thread that polls EC2), and
+# ``_cleanup_eks_security_groups`` (deletes EKS-owned SGs + their ENIs).
+# Orchestration tests that mock ``destroy`` / ``list_stacks`` but not these
+# helpers otherwise fire real AWS calls: slow and non-hermetic, and outright
+# destructive if ``config.project_name`` resolved to a live value. No-op them
+# for every test except the classes that exercise them directly (those mock
+# boto3 themselves); tests that assert these methods were called still patch
+# them locally, so their patch nests over this one and wins.
+_DESTROY_CLEANUP_OWNERS = {
+    "TestCleanupBackupVault",
+    "TestEksSecurityGroupCleanup",
+    "TestCleanupEksSecurityGroups",
+    "TestEksSgWatchdog",
+}
+
+
+@pytest.fixture(autouse=True)
+def _no_real_destroy_cleanup_aws_calls(request):
+    if request.cls is not None and request.cls.__name__ in _DESTROY_CLEANUP_OWNERS:
+        yield
+        return
+    from cli import stacks as _stacks
+
+    with (
+        patch.object(_stacks.StackManager, "_cleanup_backup_vault", return_value=None),
+        patch.object(_stacks.StackManager, "_cleanup_eks_security_groups", return_value=None),
+        patch.object(_stacks.StackManager, "_start_eks_sg_watchdog", return_value=MagicMock()),
+    ):
+        yield
+
+
+# ============================================================================
 # Model Fixtures
 # ============================================================================
 

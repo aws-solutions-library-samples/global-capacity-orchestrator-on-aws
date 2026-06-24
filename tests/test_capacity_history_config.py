@@ -2,6 +2,8 @@
 # Covers defaults (feature off), partial override merging, and validation errors
 # for the optional cdk.json "historical" block.
 
+import re
+
 import aws_cdk as cdk
 import pytest
 
@@ -23,8 +25,33 @@ class TestDefaults:
         assert cfg["enabled"] is False
         assert cfg["retention_days"] == 90
         assert cfg["poll_interval_minutes"] == 15
-        assert len(cfg["watch_instance_types"]) == 9
+        assert len(cfg["watch_instance_types"]) == 57
         assert cfg["enabled_regions"] == []
+
+    def test_default_watch_instance_types_are_well_formed(self, valid_cdk_context):
+        # Guard the default watch list shape so an accidental edit (dupes,
+        # typos, stray whitespace) is caught here rather than at deploy time.
+        cfg = _loader(valid_cdk_context).get_capacity_history_config()
+        types = cfg["watch_instance_types"]
+        assert len(types) == len(set(types)), "duplicate instance types"
+        pattern = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)?\.[a-z0-9]+$")
+        malformed = [t for t in types if not pattern.match(t)]
+        assert not malformed, malformed
+        families = {t.split(".", 1)[0] for t in types}
+        for fam in (
+            "p4d",
+            "p5",
+            "p6-b200",
+            "g5",
+            "g5g",
+            "g6",
+            "g6e",
+            "g7e",
+            "trn1",
+            "inf1",
+            "inf2",
+        ):
+            assert fam in families, fam
 
 
 class TestEnabledOverride:
@@ -34,7 +61,7 @@ class TestEnabledOverride:
         cfg = loader.get_capacity_history_config()
         assert cfg["poll_interval_minutes"] == 5
         assert cfg["retention_days"] == 90
-        assert len(cfg["watch_instance_types"]) == 9
+        assert len(cfg["watch_instance_types"]) == 57
 
 
 class TestValidation:

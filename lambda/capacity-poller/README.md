@@ -39,7 +39,7 @@ All knobs live under the `historical` block in `cdk.json`:
 | `enabled` | `true` | Deploy the add-on (table + poller + schedule). |
 | `retention_days` | `90` | DynamoDB TTL window for snapshots. |
 | `poll_interval_minutes` | `15` | EventBridge schedule cadence. |
-| `watch_instance_types` | 9 GPU/Trn/Inf types | Instance types to snapshot. |
+| `watch_instance_types` | 57 GPU/Trn/Inf types | Instance types to snapshot. |
 | `enabled_regions` | `[]` (all deployed) | Regions to poll. |
 
 The Lambda reads these via environment variables `CAPACITY_HISTORY_TABLE_NAME`,
@@ -66,15 +66,15 @@ The poller is intentionally cheap. The dominant inputs are the schedule cadence
 and the number of `watch_instance_types` x `enabled_regions` pairs polled each
 run.
 
-Worked example - default cadence (15 min, ~2,920 runs/month), 9 instance types
-x 2 regions = 18 pairs/run:
+Worked example - default cadence (15 min, ~2,920 runs/month), 57 instance types
+x 1 region (the default `regional` deployment) = 57 pairs/run:
 
 | Component | Basis | Est. monthly cost |
 |-----------|-------|-------------------|
-| Lambda compute | ~2,920 runs x ~30 s x 256 MB ~= 21,900 GB-s | $0 within the 400,000 GB-s free tier; ~$0.37 beyond it |
+| Lambda compute | ~2,920 runs x ~95 s x 256 MB ~= 69,000 GB-s | $0 within the 400,000 GB-s free tier (~17% of it); ~$1.16 beyond it |
 | Lambda requests | ~2,920 requests | < $0.01 |
-| DynamoDB writes | ~52,600 on-demand writes (<= 1 KB) | ~$0.07 |
-| DynamoDB storage | ~40 MB steady state (90-day TTL) + PITR | < $0.01 |
+| DynamoDB writes | ~166,000 on-demand writes (<= 1 KB) | ~$0.21 |
+| DynamoDB storage | ~150 MB steady state (90-day TTL) + PITR | < $0.05 |
 | EC2 describe/score APIs | DescribeSpotPriceHistory, GetSpotPlacementScores, etc. | $0 (no per-call charge) |
 | EventBridge schedule | scheduled rule on the default bus | $0 |
 | CloudWatch Logs | a few MB/month | < $0.05 (mostly free tier) |
@@ -82,9 +82,9 @@ x 2 regions = 18 pairs/run:
 
 **Total: effectively $0/month within free-tier allowances, and well under
 $1/month otherwise.** Cost scales roughly linearly with `watch_instance_types`
-x `enabled_regions` and inversely with `poll_interval_minutes`. Even at 9 types
-x 5 regions on the default 15-minute cadence, DynamoDB writes are ~$0.15/month
-and Lambda compute typically stays within the free tier.
+x `enabled_regions` and inversely with `poll_interval_minutes`. Even at 57 types
+x 2 regions = 114 pairs/run, Lambda compute (~139,000 GB-s) stays within the
+free tier and DynamoDB writes are ~$0.42/month.
 
 Figures use us-east-1 on-demand pricing and are estimates; validate against AWS
 Pricing / Cost Explorer for your account and regions.

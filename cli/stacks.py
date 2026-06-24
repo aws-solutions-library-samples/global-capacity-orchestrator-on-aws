@@ -712,6 +712,27 @@ class StackManager:
                 )
                 success = True
 
+        # Conversely, when cdk reports success, confirm CloudFormation actually
+        # landed in a terminal success state. A zero cdk exit can still mask a
+        # stack that silently rolled back (e.g. UPDATE_ROLLBACK_COMPLETE) or is
+        # otherwise not in a healthy COMPLETE state — verifying the AWS-side
+        # truth keeps deploy() from reporting a rolled-back stack as deployed.
+        # A None status (lookup failed / transient) leaves cdk's verdict intact;
+        # we only override on a *known* non-success state. No-op deploys stay in
+        # CREATE_COMPLETE/UPDATE_COMPLETE, so this never false-fails them — we
+        # deliberately don't require LastUpdatedTime to advance.
+        if success and stack_name and not all_stacks:
+            cfn_status = self._get_stack_status(stack_name)
+            if cfn_status is not None and cfn_status not in (
+                "CREATE_COMPLETE",
+                "UPDATE_COMPLETE",
+            ):
+                print(
+                    f"  cdk reported success but {stack_name} is in {cfn_status} "
+                    f"in CloudFormation — treating as a failed deploy."
+                )
+                success = False
+
         if not success and stack_name:
             self._diagnose_deploy_failure(stack_name)
 
@@ -1037,9 +1058,9 @@ class StackManager:
         """
         import boto3
 
-        region = self._get_destroy_region(stack_name)
-        cfn = boto3.client("cloudformation", region_name=region)
         try:
+            region = self._get_destroy_region(stack_name)
+            cfn = boto3.client("cloudformation", region_name=region)
             resp = cfn.describe_stacks(StackName=stack_name)
             return str(resp["Stacks"][0]["StackStatus"])
         except Exception:
@@ -1938,6 +1959,136 @@ class StackManager:
         regional_stacks = [s for s in stacks if s not in pre_regional]
         for stack_name in regional_stacks:
             self._cleanup_eks_security_groups(stack_name)
+
+    def cleanup_orphaned_network_interfaces(self) -> None:
+        """Report and clear resources that can block VPC deletion, across all
+        regional stacks. Run between destroy retries.
+
+        Generalizes ``cleanup_eks_security_groups`` (which force-deletes the
+        ``eks-cluster-sg-*`` security group + its ENIs that EKS leaves behind)
+        with a broader sweep: for each regional stack's VPC it enumerates every
+        remaining network interface, categorizes them (Global Accelerator / ELB
+        / EKS / other), deletes the ones that are safe to remove (detached and
+        not service-managed), and prints a friendly summary of what it found and
+        what the next retry is waiting on. Service-managed ENIs (Global
+        Accelerator, ELB) are released asynchronously by AWS once the endpoint /
+        load balancer is gone, so we report them rather than fight them.
+        """
+        stacks = self.list_stacks()
+        pre_regional = {"gco-global", "gco-api-gateway", "gco-monitoring"}
+        regional_stacks = [s for s in stacks if s not in pre_regional]
+        for stack_name in regional_stacks:
+            # Existing behaviour first: clear the EKS cluster SG + its ENIs.
+            self._cleanup_eks_security_groups(stack_name)
+            # Then report (and safely clear) anything else lingering in the VPC.
+            summary = self._summarize_orphaned_enis(stack_name)
+            self._print_orphaned_eni_summary(stack_name, summary)
+
+    @staticmethod
+    def _classify_orphaned_eni(eni: dict[str, Any]) -> str:
+        """Bucket a network interface by which AWS service owns it.
+
+        Uses ``InterfaceType`` first (authoritative for Global Accelerator and
+        the load-balancer types) and falls back to the human ``Description``
+        string for the EKS / ELB cases that present as a plain ``interface``.
+        Returns one of ``global_accelerator`` / ``elb`` / ``eks`` / ``other``.
+        """
+        itype = str(eni.get("InterfaceType") or "").lower()
+        desc = str(eni.get("Description") or "").lower()
+        if (
+            itype == "global_accelerator_managed"
+            or "global_accelerator" in desc
+            or "global accelerator" in desc
+        ):
+            return "global_accelerator"
+        if itype in ("load_balancer", "network_load_balancer") or desc.startswith("elb "):
+            return "elb"
+        if "eks" in desc or "k8s" in desc or "kubernetes" in desc:
+            return "eks"
+        return "other"
+
+    def _summarize_orphaned_enis(self, stack_name: str) -> dict[str, int]:
+        """Inspect the stack's VPC(s) for lingering ENIs, categorize them, and
+        best-effort delete the ones that are safe to remove.
+
+        "Safe to remove" means ``Status == "available"`` (detached) and not
+        ``RequesterManaged`` (i.e. not owned by a service like GA / ELB, which
+        rejects manual deletion and releases the ENI on its own schedule).
+
+        Returns a dict of counts: per-category totals plus ``deleted`` and
+        ``vpcs``. Wholly best-effort — any AWS error degrades to the counts
+        gathered so far rather than raising into the destroy flow.
+        """
+        import boto3
+
+        region = stack_name.replace(f"{self.config.project_name}-", "", 1)
+        summary: dict[str, int] = {
+            "global_accelerator": 0,
+            "elb": 0,
+            "eks": 0,
+            "other": 0,
+            "deleted": 0,
+            "vpcs": 0,
+        }
+        try:
+            ec2 = boto3.client("ec2", region_name=region)
+            vpcs = ec2.describe_vpcs(
+                Filters=[{"Name": "tag:aws:cloudformation:stack-name", "Values": [stack_name]}]
+            ).get("Vpcs", [])
+        except Exception as e:  # noqa: BLE001
+            logger.debug("ENI sweep: VPC lookup failed for %s: %s", stack_name, e)
+            return summary
+
+        for vpc in vpcs:
+            summary["vpcs"] += 1
+            vpc_id = vpc.get("VpcId")
+            try:
+                enis = ec2.describe_network_interfaces(
+                    Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+                ).get("NetworkInterfaces", [])
+            except Exception as e:  # noqa: BLE001
+                logger.debug("ENI sweep: describe ENIs failed for %s: %s", vpc_id, e)
+                continue
+
+            for eni in enis:
+                summary[self._classify_orphaned_eni(eni)] += 1
+                detached = eni.get("Status") == "available"
+                service_managed = bool(eni.get("RequesterManaged", False))
+                if detached and not service_managed:
+                    eni_id = eni.get("NetworkInterfaceId")
+                    try:
+                        ec2.delete_network_interface(NetworkInterfaceId=eni_id)
+                        summary["deleted"] += 1
+                        logger.debug("ENI sweep: deleted detached ENI %s in %s", eni_id, vpc_id)
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug("ENI sweep: delete of %s failed: %s", eni_id, e)
+        return summary
+
+    @staticmethod
+    def _print_orphaned_eni_summary(stack_name: str, summary: dict[str, int]) -> None:
+        """Print a friendly summary of what the ENI sweep found and handled."""
+        categories = (
+            ("global_accelerator", "Global Accelerator-managed"),
+            ("elb", "ELB-managed"),
+            ("eks", "EKS-managed"),
+            ("other", "other"),
+        )
+        total = sum(summary.get(key, 0) for key, _ in categories)
+        if total == 0:
+            return
+        breakdown = ", ".join(
+            f"{summary[key]} {label}" for key, label in categories if summary.get(key)
+        )
+        print(f"  {stack_name}: {total} network interface(s) still in the VPC ({breakdown}).")
+        if summary.get("deleted"):
+            print(f"    Removed {summary['deleted']} detached interface(s).")
+        remaining = total - summary.get("deleted", 0)
+        if remaining > 0:
+            print(
+                f"    {remaining} still held by AWS — Global Accelerator / ELB release these "
+                "asynchronously once the endpoint and load balancer are gone; the next retry "
+                "proceeds once they drain."
+            )
 
     def _cleanup_eks_security_groups(self, stack_name: str) -> None:
         """Clean up EKS-managed security groups that block VPC deletion.
