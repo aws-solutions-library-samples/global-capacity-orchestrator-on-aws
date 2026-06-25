@@ -1681,7 +1681,7 @@ gco capacity find-blocks [OPTIONS]
 
 **Allowed Capacity Block durations.** AWS accepts reservation durations in **1-day increments up to 14 days, then 7-day increments up to 182 days** (26 weeks). Because the `DescribeCapacityBlockOfferings` API requires an exact duration per query, a duration *range* is expanded to those discrete valid values automatically (e.g. `1`–`63` days probes 1…14, 21, 28, …, 63 days). All Capacity Blocks end at 11:30 UTC, so a returned block's actual duration is the closest valid match to your request and is reported per offering.
 
-**Instance-type notes.** Friendly names are normalized (`p6-b200` → `p6-b200.48xlarge`). `p6-b300` is **not** a standalone EC2 instance type — B300 (Blackwell Ultra) ships as **P6e-GB300 UltraServers**, so it is flagged rather than silently returning nothing. Unknown/typo'd types are reported as invalid (distinct from a valid type that simply has zero offerings).
+**Instance-type notes.** Friendly names are normalized (`p6-b200` → `p6-b200.48xlarge`, `p6-b300` → `p6-b300.48xlarge`). Both B200 and B300 (Blackwell Ultra) are standalone EC2 instance types and resolve normally. The Grace-Blackwell **GB200/GB300** NVL72 *superchips* ship only as **P6e-GB200 / P6e-GB300 UltraServers** (never as a standalone `InstanceType`), so those names are flagged with guidance toward the UltraServer flow rather than silently returning nothing. Unknown/typo'd types are reported as invalid (distinct from a valid type that simply has zero offerings).
 
 ```bash
 # Bound the motivating scenario in a single call:

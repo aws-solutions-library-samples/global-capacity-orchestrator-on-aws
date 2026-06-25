@@ -146,7 +146,6 @@ def list_reservations(
 @audit_logged
 def reservation_check(
     instance_type: str,
-    region: str | None = None,
     regions: list[str] | None = None,
     count: int = 1,
     include_blocks: bool = True,
@@ -167,9 +166,8 @@ def reservation_check(
 
     Args:
         instance_type: GPU instance type (e.g. p4d.24xlarge, p5.48xlarge, p6-b200).
-        region: A single region to check (kept for backward compatibility).
-        regions: Explicit list of regions to check in parallel (any regions, not
-            just deployed). Takes precedence over region.
+        regions: Regions to check in parallel (any regions, not just deployed);
+            omit to check all deployed regions.
         count: Minimum number of instances needed.
         include_blocks: Whether to include Capacity Block offerings.
         block_duration: Capacity Block duration in hours (default 24).
@@ -178,7 +176,7 @@ def reservation_check(
         latest_start: Latest block start date (YYYY-MM-DD or ISO datetime).
     """
     args = ["capacity", "reservation-check", "-i", instance_type, "-c", str(count)]
-    for r in regions or ([region] if region else []):
+    for r in regions or []:
         args += ["-r", r]
     if not include_blocks:
         args.append("--no-blocks")
@@ -219,9 +217,10 @@ def find_capacity_blocks(
 
     AWS allows durations in 1-day increments up to 14 days, then 7-day increments
     up to 182 days; a duration range is expanded to those discrete values
-    automatically. Friendly names are normalized (p6-b200 -> p6-b200.48xlarge),
-    and UltraServer-only families (p6-b300 / P6e-GB300) are flagged rather than
-    silently returning nothing.
+    automatically. Friendly names are normalized (p6-b200 -> p6-b200.48xlarge,
+    p6-b300 -> p6-b300.48xlarge), and UltraServer-only families (the Grace-
+    Blackwell GB200/GB300 superchips / P6e-GB UltraServers) are flagged rather
+    than silently returning nothing.
 
     Args:
         instance_type: GPU instance type or alias (e.g. p6-b200, p5.48xlarge).

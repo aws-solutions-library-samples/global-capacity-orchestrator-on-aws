@@ -420,7 +420,7 @@ def test_check_reservation_availability_skips_zero_available():
         patch.object(checker, "list_capacity_block_offerings", return_value=[]),
     ):
         result = checker.check_reservation_availability(
-            "p5.48xlarge", region="us-east-1", min_count=1
+            "p5.48xlarge", regions=["us-east-1"], min_count=1
         )
     assert result["odcr"]["total_reserved_instances"] == 2
     assert result["odcr"]["total_available_instances"] == 0

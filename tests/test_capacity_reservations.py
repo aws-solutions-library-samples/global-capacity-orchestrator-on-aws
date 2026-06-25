@@ -282,7 +282,7 @@ class TestCheckReservationAvailability:
         checker.list_capacity_block_offerings = MagicMock(return_value=[])
 
         result = checker.check_reservation_availability(
-            "p5.48xlarge", region="us-east-1", min_count=2
+            "p5.48xlarge", regions=["us-east-1"], min_count=2
         )
 
         assert result["odcr"]["has_availability"] is True
@@ -302,7 +302,7 @@ class TestCheckReservationAvailability:
             ]
         )
 
-        result = checker.check_reservation_availability("p5.48xlarge", region="us-east-1")
+        result = checker.check_reservation_availability("p5.48xlarge", regions=["us-east-1"])
 
         assert result["odcr"]["has_availability"] is False
         assert result["capacity_blocks"]["has_offerings"] is True
@@ -313,7 +313,7 @@ class TestCheckReservationAvailability:
         checker.list_capacity_reservations = MagicMock(return_value=[])
         checker.list_capacity_block_offerings = MagicMock(return_value=[])
 
-        result = checker.check_reservation_availability("p5.48xlarge", region="us-east-1")
+        result = checker.check_reservation_availability("p5.48xlarge", regions=["us-east-1"])
 
         assert result["odcr"]["has_availability"] is False
         assert result["capacity_blocks"]["has_offerings"] is False
@@ -325,7 +325,7 @@ class TestCheckReservationAvailability:
         checker.list_capacity_block_offerings = MagicMock(return_value=[])
 
         result = checker.check_reservation_availability(
-            "g5.xlarge", region="us-east-1", include_capacity_blocks=False
+            "g5.xlarge", regions=["us-east-1"], include_capacity_blocks=False
         )
 
         checker.list_capacity_block_offerings.assert_not_called()
@@ -345,7 +345,7 @@ class TestCheckReservationAvailability:
         # Pass explicit regions to avoid discover_regional_stacks (needs AWS creds)
         result = checker.check_reservation_availability(
             "p5.48xlarge",
-            region="us-west-2",
+            regions=["us-west-2"],
             min_count=1,
             include_capacity_blocks=False,
         )

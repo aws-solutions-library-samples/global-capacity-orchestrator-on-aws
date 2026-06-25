@@ -7,8 +7,9 @@ Covers:
 * ``cli/capacity/blocks.py`` pure helpers — the AWS duration ladder (1-day
   increments to 14 days, then 7-day increments to 182), duration snapping and
   range resolution, hours/days coercion, ISO/date parsing, friendly instance
-  normalization (p6-b200 -> p6-b200.48xlarge) and the UltraServer-only note for
-  p6-b300, upfront-fee parsing, per-hour / per-GPU-hour pricing, and the
+  normalization (p6-b200 -> p6-b200.48xlarge, p6-b300 -> p6-b300.48xlarge) and
+  the UltraServer-only note for the Grace-Blackwell gb200/gb300 superchips,
+  upfront-fee parsing, per-hour / per-GPU-hour pricing, and the
   offering de-dup / sort / rank / longest helpers.
 * ``CapacityChecker.validate_instance_type`` — known offline spec, alias
   expansion, UltraServer-only families, EC2 InvalidInstanceType vs transient
@@ -200,9 +201,22 @@ class TestNormalizeInstanceType:
         canonical, _ = blocks.normalize_instance_type("P6-B200")
         assert canonical == "p6-b200.48xlarge"
 
-    def test_ultraserver_only_b300(self):
+    def test_b300_alias_expands_to_standalone(self):
+        # B300 is a standalone EC2 type (p6-b300.48xlarge), like B200 — not
+        # UltraServer-only.
         canonical, note = blocks.normalize_instance_type("p6-b300")
-        assert canonical == "p6-b300"
+        assert canonical == "p6-b300.48xlarge"
+        assert note and "p6-b300.48xlarge" in note
+
+    def test_ultraserver_only_gb300(self):
+        # The Grace-Blackwell GB300 superchip ships only as P6e-GB300 UltraServers.
+        canonical, note = blocks.normalize_instance_type("gb300")
+        assert canonical == "gb300"
+        assert note and "UltraServer" in note
+
+    def test_ultraserver_only_p6e_gb300(self):
+        canonical, note = blocks.normalize_instance_type("p6e-gb300")
+        assert canonical == "p6e-gb300"
         assert note and "UltraServer" in note
 
     def test_unknown_passthrough(self):
@@ -356,9 +370,17 @@ class TestValidateInstanceType:
         assert result["gpu_count"] == 8
         assert "p6-b200.48xlarge" in result["note"]
 
-    def test_ultraserver_only_is_invalid(self):
+    def test_b300_is_valid_standalone(self):
         checker = _make_checker()
         result = checker.validate_instance_type("p6-b300")
+        assert result["instance_type"] == "p6-b300.48xlarge"
+        assert result["valid"] is True
+        assert result["known"] is True
+        assert result["gpu_count"] == 8
+
+    def test_ultraserver_only_is_invalid(self):
+        checker = _make_checker()
+        result = checker.validate_instance_type("gb300")
         assert result["valid"] is False
         assert "UltraServer" in result["note"]
 
@@ -623,7 +645,7 @@ class TestFindCapacityBlocks:
     def test_ultraserver_only_short_circuits_with_note(self):
         checker = _make_checker()
         with patch.object(checker, "list_capacity_block_offerings") as mock_list:
-            report = checker.find_capacity_blocks("p6-b300", regions=["us-east-1"])
+            report = checker.find_capacity_blocks("gb300", regions=["us-east-1"])
         assert report["valid_instance_type"] is False
         assert "UltraServer" in report["recommendation"]
         mock_list.assert_not_called()
@@ -809,15 +831,6 @@ class TestCheckReservationAvailabilityEnhanced:
         # One ODCR query per region.
         assert checker.list_capacity_reservations.call_count == 3
 
-    def test_regions_list_takes_precedence_over_region(self):
-        checker = _make_checker()
-        checker.list_capacity_reservations = MagicMock(return_value=[])
-        checker.list_capacity_block_offerings = MagicMock(return_value=[])
-        result = checker.check_reservation_availability(
-            "p5.48xlarge", region="us-east-1", regions=["eu-west-1"]
-        )
-        assert result["regions_checked"] == ["eu-west-1"]
-
     def test_block_duration_days_overrides_hours(self):
         checker = _make_checker()
         checker.list_capacity_reservations = MagicMock(return_value=[])
@@ -831,7 +844,7 @@ class TestCheckReservationAvailabilityEnhanced:
         checker.list_capacity_block_offerings = MagicMock(side_effect=fake_blocks)
         result = checker.check_reservation_availability(
             "p5.48xlarge",
-            region="us-east-1",
+            regions=["us-east-1"],
             block_duration_days=14,
             earliest_start="2026-07-01",
         )
@@ -861,7 +874,7 @@ class TestCheckReservationAvailabilityEnhanced:
                 },
             ]
         )
-        result = checker.check_reservation_availability("p5.48xlarge", region="us-east-1")
+        result = checker.check_reservation_availability("p5.48xlarge", regions=["us-east-1"])
         assert result["capacity_blocks"]["has_offerings"] is True
         assert "$3000.0" in result["recommendation"]
 
@@ -966,11 +979,11 @@ class TestFindBlocksCLI:
             valid_instance_type=False,
             offerings=[],
             best=None,
-            recommendation="p6-b300 is not a standalone EC2 instance type.",
+            recommendation="gb300 is not a standalone EC2 instance type.",
         )
 
         runner = CliRunner()
-        result = runner.invoke(cli, ["capacity", "find-blocks", "-i", "p6-b300"])
+        result = runner.invoke(cli, ["capacity", "find-blocks", "-i", "gb300"])
         assert result.exit_code == 0
         assert "not a standalone EC2 instance type" in result.output
 
@@ -1140,10 +1153,10 @@ class TestMCPCapacitySweepTools:
             assert "--earliest-start" in cmd
             assert "--latest-start" in cmd
 
-    def test_reservation_check_single_region_backward_compat(self):
+    def test_reservation_check_single_region(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
-            run_mcp.reservation_check("p4d.24xlarge", region="us-east-1", block_duration=48)
+            run_mcp.reservation_check("p4d.24xlarge", regions=["us-east-1"], block_duration=48)
             cmd = mock.call_args[0][0]
             assert cmd.count("-r") == 1
             assert "us-east-1" in cmd

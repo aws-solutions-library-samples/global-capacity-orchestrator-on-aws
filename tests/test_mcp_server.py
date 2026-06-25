@@ -634,7 +634,7 @@ class TestCapacityTools:
     def test_reservation_check(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
-            run_mcp.reservation_check("p4d.24xlarge", region="us-east-1", block_duration=48)
+            run_mcp.reservation_check("p4d.24xlarge", regions=["us-east-1"], block_duration=48)
             cmd = mock.call_args[0][0]
             assert "reservation-check" in cmd
             assert "p4d.24xlarge" in cmd

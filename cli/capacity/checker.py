@@ -156,9 +156,11 @@ class CapacityChecker:
         * Otherwise EC2 ``DescribeInstanceTypes`` is consulted; an
           ``InvalidInstanceType`` (or empty result) marks it invalid, while a
           transient API error leaves it valid-but-unverified with a note.
-        * Friendly aliases are expanded (``p6-b200`` -> ``p6-b200.48xlarge``) and
-          UltraServer-only families (``p6-b300``) are flagged invalid-for-
-          ``InstanceType`` with guidance toward the UltraServer search flow.
+        * Friendly aliases are expanded (``p6-b200`` -> ``p6-b200.48xlarge``,
+          ``p6-b300`` -> ``p6-b300.48xlarge``) and UltraServer-only families
+          (the Grace-Blackwell ``gb200``/``gb300`` superchips, sold only as
+          ``P6e-GB`` UltraServers) are flagged invalid-for-``InstanceType`` with
+          guidance toward the UltraServer search flow.
 
         Returns a dict: ``requested``, ``instance_type`` (canonical), ``valid``,
         ``known``, ``note``, ``gpu_count``.
@@ -991,9 +993,9 @@ class CapacityChecker:
 
         Reports the offering's *actual* duration (the API returns blocks whose
         duration is the closest match to the request, not necessarily equal) and
-        adds per-hour / per-GPU-hour pricing derived from the upfront fee. The raw
-        ``upfront_fee`` is preserved for backward compatibility; ``upfront_fee_usd``
-        is the parsed float used for ranking.
+        adds per-hour / per-GPU-hour pricing derived from the upfront fee.
+        ``upfront_fee`` is the raw API value (a string); ``upfront_fee_usd`` is the
+        parsed float used for ranking and display.
         """
         start_date = offering.get("StartDate")
         end_date = offering.get("EndDate")
@@ -1431,7 +1433,6 @@ class CapacityChecker:
     def check_reservation_availability(
         self,
         instance_type: str,
-        region: str | None = None,
         min_count: int = 1,
         include_capacity_blocks: bool = True,
         block_duration_hours: int = 24,
@@ -1451,13 +1452,11 @@ class CapacityChecker:
 
         Args:
             instance_type: EC2 instance type to check
-            region: A single region (kept for backward compatibility)
             min_count: Minimum number of available instances needed
             include_capacity_blocks: Also check Capacity Block offerings
             block_duration_hours: Duration for capacity block search (hours)
-            regions: Explicit list of regions to check in parallel. Takes
-                precedence over ``region``; falls back to deployed regions when
-                neither is given.
+            regions: Regions to check in parallel (any regions, not just
+                deployed); falls back to the deployed regions when omitted.
             block_duration_days: Block duration in days (overrides hours when set).
             earliest_start / latest_start: Date window for block start
                 (StartDateRange / EndDateRange).
@@ -1468,8 +1467,6 @@ class CapacityChecker:
         """
         if regions:
             target_regions = list(regions)
-        elif region:
-            target_regions = [region]
         else:
             from cli.aws_client import get_aws_client
 

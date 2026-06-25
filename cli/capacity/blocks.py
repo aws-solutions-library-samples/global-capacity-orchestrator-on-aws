@@ -179,6 +179,9 @@ INSTANCE_TYPE_ALIASES: dict[str, str] = {
     "p6-b200": "p6-b200.48xlarge",
     "p6b200": "p6-b200.48xlarge",
     "b200": "p6-b200.48xlarge",
+    "p6-b300": "p6-b300.48xlarge",
+    "p6b300": "p6-b300.48xlarge",
+    "b300": "p6-b300.48xlarge",
     "p5": "p5.48xlarge",
     "p5e": "p5e.48xlarge",
     "p5en": "p5en.48xlarge",
@@ -187,31 +190,32 @@ INSTANCE_TYPE_ALIASES: dict[str, str] = {
     "p3dn": "p3dn.24xlarge",
 }
 
-#: Accelerator families that are NOT sold as standalone EC2 instance types — they
-#: ship only as UltraServers, so ``DescribeCapacityBlockOfferings(InstanceType=…)``
-#: never returns them. The note steers callers to the UltraServer search flow.
+#: Accelerator families that are NOT sold as standalone EC2 instance types — the
+#: Grace-Blackwell *superchips* (GB200/GB300) ship only as P6e-GB UltraServers, so
+#: ``DescribeCapacityBlockOfferings(InstanceType=…)`` never returns them. The note
+#: steers callers to the UltraServer search flow and to the standalone B200/B300
+#: EC2 types where one exists. NB: the discrete ``b200``/``b300`` GPUs *are* sold
+#: as standalone ``p6-b200.48xlarge`` / ``p6-b300.48xlarge`` instances (see
+#: ``INSTANCE_TYPE_ALIASES``) — only the GB NVL72 superchips are UltraServer-only.
 NON_STANDALONE_INSTANCE_NOTES: dict[str, str] = {
-    "p6-b300": (
-        "p6-b300 is not a standalone EC2 instance type. B300 (Blackwell Ultra) "
-        "ships as P6e-GB300 UltraServers — search with an UltraServer type "
-        "(e.g. UltraserverType=u-p6e-gb300x..., not InstanceType)."
-    ),
     "p6e-gb300": (
         "P6e-GB300 is an UltraServer family, not a standalone EC2 instance type. "
         "Search Capacity Blocks with UltraserverType=u-p6e-gb300x... instead of "
-        "InstanceType."
-    ),
-    "b300": (
-        "B300 (Blackwell Ultra) is not a standalone EC2 instance type; it ships "
-        "as P6e-GB300 UltraServers. Use the UltraServer Capacity Block flow."
+        "InstanceType. For a standalone Blackwell Ultra EC2 type use p6-b300.48xlarge."
     ),
     "gb300": (
-        "GB300 ships as P6e-GB300 UltraServers, not a standalone EC2 instance "
-        "type. Use UltraserverType=u-p6e-gb300x... ."
+        "GB300 (Grace Blackwell Ultra NVL72) ships as P6e-GB300 UltraServers, not "
+        "a standalone EC2 instance type. For standalone Blackwell Ultra EC2 "
+        "capacity use p6-b300.48xlarge instead."
+    ),
+    "p6e-gb200": (
+        "P6e-GB200 is an UltraServer family, not a standalone EC2 instance type. "
+        "Search Capacity Blocks with UltraserverType=u-p6e-gb200x... instead of "
+        "InstanceType. For a standalone Blackwell EC2 type use p6-b200.48xlarge."
     ),
     "gb200": (
-        "GB200 ships as P6e-GB200 UltraServers. For standalone Blackwell EC2 "
-        "capacity use p6-b200.48xlarge instead."
+        "GB200 (Grace Blackwell NVL72) ships as P6e-GB200 UltraServers. For "
+        "standalone Blackwell EC2 capacity use p6-b200.48xlarge instead."
     ),
 }
 
