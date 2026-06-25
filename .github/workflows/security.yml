@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
@@ -73,7 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
@@ -136,7 +136,7 @@ jobs:
       # Pin in lockstep with TRIVY_VERSION in cve-scan.yml.
       TRIVY_VERSION: "v0.70.0"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install pinned Trivy
         uses: ./.github/actions/install-trivy
         with:
@@ -203,7 +203,7 @@ jobs:
           - image: dev
             dockerfile: Dockerfile.dev
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
       - name: Install pinned Trivy
         uses: ./.github/actions/install-trivy
@@ -264,7 +264,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run TruffleHog
         run: |
           docker run --rm -v "$PWD":/repo \
@@ -283,7 +283,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run gitleaks
         run: |
           docker run --rm -v "$PWD":/repo -w /repo \
@@ -306,7 +306,7 @@ jobs:
     container:
       image: semgrep/semgrep:1.167.0
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run semgrep
         run: semgrep scan --config auto --error --json -o semgrep-report.json .
       - name: Upload semgrep report
@@ -322,7 +322,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run checkov
         run: |
           docker run --rm -v "$PWD":/repo -w /repo \
@@ -341,7 +341,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -403,7 +403,7 @@ jobs:
       matrix:
         language: [python]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:

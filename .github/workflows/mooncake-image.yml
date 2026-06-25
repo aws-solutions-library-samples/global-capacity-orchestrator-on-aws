@@ -49,7 +49,7 @@ jobs:
       # Opt the suite in (it is skipped everywhere else, e.g. the unit job).
       GCO_MOONCAKE_IMAGE_TEST: "1"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # The ~9GB vLLM image needs headroom on the runner's ~14GB root volume.
       - uses: ./.github/actions/free-disk-space
       - uses: actions/setup-python@v6
