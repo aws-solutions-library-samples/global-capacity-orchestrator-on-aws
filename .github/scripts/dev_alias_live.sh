@@ -144,15 +144,19 @@ steps:
     manifest: $FIXTURE_REL/probe-job.yaml
 YAML
 
-home="$WORK/home"
-mkdir -p "$home/.aws"   # the generated function bind-mounts ~/.aws read-only
+# Run under the real $HOME so that rootless podman's image store
+# (~/.local/share/containers) is the same one the build above wrote to.
+# Overriding HOME here would point podman at an empty store and it would try
+# to *pull* the locally-built image (docker is daemon-wide and finch is
+# rootful, so neither is HOME-sensitive — but podman is).
+mkdir -p "$HOME/.aws"   # the generated function bind-mounts ~/.aws read-only
 
 # ---------------------------------------------------------------------------
 # Proof 1: the real CLI runs through the generated function (run from the repo
 # root so the editable install resolves cli/ + gco/ at /workspace).
 # ---------------------------------------------------------------------------
 note "prove the real gco CLI runs through the generated function"
-if ! ver="$(cd "$REPO_ROOT" && HOME="$home" bash --noprofile --norc -c ". '$rc'; gco --version" 2>&1)"; then
+if ! ver="$(cd "$REPO_ROOT" && bash --noprofile --norc -c ". '$rc'; gco --version" 2>&1)"; then
     printf '%s\n' "$ver" | sed 's/^/  | /'
     die "'gco --version' failed through the generated function"
 fi
@@ -165,7 +169,7 @@ printf '  gco --version -> %s\n' "$ver"
 # /workspace; gco dag validate then reads both the DAG and its manifest.
 # ---------------------------------------------------------------------------
 note "prove arg-forwarding + workspace bind mount + cwd via 'gco dag validate'"
-if ! out="$(cd "$REPO_ROOT" && HOME="$home" bash --noprofile --norc -c ". '$rc'; gco dag validate '$FIXTURE_REL/ci-dag.yaml'" 2>&1)"; then
+if ! out="$(cd "$REPO_ROOT" && bash --noprofile --norc -c ". '$rc'; gco dag validate '$FIXTURE_REL/ci-dag.yaml'" 2>&1)"; then
     printf '%s\n' "$out" | sed 's/^/  | /'
     die "'gco dag validate $FIXTURE_REL/ci-dag.yaml' failed through the generated function"
 fi
