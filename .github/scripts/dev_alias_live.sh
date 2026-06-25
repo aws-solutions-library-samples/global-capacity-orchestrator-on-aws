@@ -9,18 +9,20 @@
 # gco-dev image ("setup GCO"), installs the generated function into a throwaway
 # rc, sources it in a fresh shell, and proves through that function:
 #   * `gco --version`                — the real CLI runs (and the arg reaches it)
-#   * `gco dag validate ci-dag.yaml` — an offline command that reads files from
-#                                      the mounted workspace via a *relative*
-#                                      path, proving arg-forwarding, the
-#                                      $PWD -> /workspace bind mount, and
+#   * `gco dag validate <rel>/ci-dag.yaml` — an offline command that reads files
+#                                      from the mounted workspace via a
+#                                      *relative* path, proving arg-forwarding,
+#                                      the $PWD -> /workspace bind mount, and
 #                                      cwd=/workspace all at once.
+#
+# Dockerfile.dev installs the CLI editable (`pip install -e .`) at /workspace,
+# so the generated function must be run from the project directory: it mounts
+# $PWD at /workspace, and gco resolves its source there. We therefore run from
+# the repo root and drop the DAG fixture into a throwaway subdirectory of it.
 #
 # Modes:
 #   dev_alias_live.sh <docker|finch|podman> [--skip-build] [--image NAME]
-#       Build (or reuse, with --skip-build) the dev image and run the proof.
 #   dev_alias_live.sh --no-runtime
-#       Prove the script refuses (non-zero exit + guidance, no rc block) when no
-#       container runtime answers.
 #
 # Privilege note: on Linux, finch talks to a root-owned daemon, so the finch CI
 # job invokes this via sudo. docker (docker group) and podman (rootless) run it
@@ -54,7 +56,12 @@ done
 [ -x "$SETUP" ] || die "setup script not found or not executable: $SETUP"
 
 WORK="$(mktemp -d)"
-cleanup() { rm -rf "$WORK"; }
+FIXTURE_DIR=""   # a throwaway subdir of the repo; set + cleaned up below
+cleanup() {
+    rm -rf "$WORK" 2>/dev/null || true
+    [ -n "$FIXTURE_DIR" ] && rm -rf "$FIXTURE_DIR" 2>/dev/null
+    return 0
+}
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
@@ -119,30 +126,36 @@ rc="$WORK/rc"
 grep -q '>>> gco >>>' "$rc" || die "setup script did not write a gco function block"
 
 # ---------------------------------------------------------------------------
-# Build a workspace fixture. The DAG references a manifest by *relative* path;
-# DagDefinition.validate() checks both the DAG and the manifest exist (relative
-# to cwd), so a successful validate proves the $PWD -> /workspace bind mount and
-# cwd=/workspace are wired correctly.
+# Workspace fixture. The dev image's editable install needs the repo at
+# /workspace, so we run from the repo root (the function mounts $PWD) and drop
+# the DAG fixture into a throwaway subdir of it. The DAG references its manifest
+# by a path relative to cwd; DagDefinition.validate() checks both the DAG and
+# the manifest exist, so a successful validate proves the bind mount surfaced
+# the files and that cwd is /workspace.
 # ---------------------------------------------------------------------------
-ws="$WORK/ws"
-mkdir -p "$ws"
-printf '# placeholder job manifest for the dev-alias live proof\n' >"$ws/probe-job.yaml"
-cat >"$ws/ci-dag.yaml" <<'YAML'
+FIXTURE_REL=".gco_dev_alias_live.$$"
+FIXTURE_DIR="$REPO_ROOT/$FIXTURE_REL"
+mkdir -p "$FIXTURE_DIR"
+printf '# placeholder job manifest for the dev-alias live proof\n' >"$FIXTURE_DIR/probe-job.yaml"
+cat >"$FIXTURE_DIR/ci-dag.yaml" <<YAML
 name: dev-alias-live-probe
 steps:
   - name: probe
-    manifest: probe-job.yaml
+    manifest: $FIXTURE_REL/probe-job.yaml
 YAML
 
 home="$WORK/home"
 mkdir -p "$home/.aws"   # the generated function bind-mounts ~/.aws read-only
 
 # ---------------------------------------------------------------------------
-# Proof 1: the real CLI runs through the generated function.
+# Proof 1: the real CLI runs through the generated function (run from the repo
+# root so the editable install resolves cli/ + gco/ at /workspace).
 # ---------------------------------------------------------------------------
 note "prove the real gco CLI runs through the generated function"
-ver="$(cd "$ws" && HOME="$home" bash --noprofile --norc -c ". '$rc'; gco --version" 2>&1)" \
-    || die "'gco --version' failed through the generated function"
+if ! ver="$(cd "$REPO_ROOT" && HOME="$home" bash --noprofile --norc -c ". '$rc'; gco --version" 2>&1)"; then
+    printf '%s\n' "$ver" | sed 's/^/  | /'
+    die "'gco --version' failed through the generated function"
+fi
 printf '  gco --version -> %s\n' "$ver"
 [ -n "$ver" ] || die "'gco --version' produced no output"
 
@@ -151,9 +164,11 @@ printf '  gco --version -> %s\n' "$ver"
 # The relative path resolves only if $PWD was mounted at /workspace and cwd is
 # /workspace; gco dag validate then reads both the DAG and its manifest.
 # ---------------------------------------------------------------------------
-note "prove arg-forwarding + workspace bind mount + cwd via 'gco dag validate ci-dag.yaml'"
-out="$(cd "$ws" && HOME="$home" bash --noprofile --norc -c ". '$rc'; gco dag validate ci-dag.yaml" 2>&1)" \
-    || { printf '%s\n' "$out" | sed 's/^/  | /'; die "'gco dag validate ci-dag.yaml' failed through the generated function"; }
+note "prove arg-forwarding + workspace bind mount + cwd via 'gco dag validate'"
+if ! out="$(cd "$REPO_ROOT" && HOME="$home" bash --noprofile --norc -c ". '$rc'; gco dag validate '$FIXTURE_REL/ci-dag.yaml'" 2>&1)"; then
+    printf '%s\n' "$out" | sed 's/^/  | /'
+    die "'gco dag validate $FIXTURE_REL/ci-dag.yaml' failed through the generated function"
+fi
 printf '%s\n' "$out" | sed 's/^/  | /'
 printf '%s\n' "$out" | grep -qi 'is valid' \
     || die "expected 'is valid' (workspace bind mount or cwd not wired correctly)"

@@ -911,6 +911,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y podman
           podman version
+          # Rootless podman in CI has no systemd user session, so crun's sd-bus
+          # calls fail ("Interactive authentication required") during build/run.
+          # Enable lingering and pin cgroupfs + the file events logger so the
+          # container runtime does not need a systemd session.
+          sudo loginctl enable-linger "$(id -un)" 2>/dev/null || true
+          mkdir -p "$HOME/.config/containers"
+          {
+            echo '[engine]'
+            echo 'cgroup_manager = "cgroupfs"'
+            echo 'events_logger = "file"'
+            echo '[containers]'
+            echo 'cgroups = "disabled"'
+          } > "$HOME/.config/containers/containers.conf"
       - name: Live-prove the generated gco function against Podman
         run: |
           set -euo pipefail
@@ -941,6 +954,14 @@ jobs:
       - name: Install the latest Finch (runfinch APT repo)
         run: |
           set -euo pipefail
+          # runfinch-finch depends on the distro `containerd` (+ runc >= 1.1.5),
+          # which conflicts with the Docker `containerd.io` preinstalled on the
+          # runner. Remove the Docker/containerd stack so finch's deps resolve.
+          sudo systemctl stop docker.socket docker.service 2>/dev/null || true
+          sudo apt-get remove -y --purge \
+            containerd.io docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin \
+            moby-engine moby-cli moby-containerd moby-runc moby-buildx moby-compose 2>/dev/null || true
+          sudo apt-get autoremove -y 2>/dev/null || true
           curl -fsSL https://artifact.runfinch.com/deb/GPG_KEY.pub \
             | sudo gpg --dearmor -o /usr/share/keyrings/runfinch-finch-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/runfinch-finch-archive-keyring.gpg arch=amd64] https://artifact.runfinch.com/deb noble main" \
@@ -954,7 +975,7 @@ jobs:
           # The runfinch package ships systemd units for the daemon stack.
           # Start them best-effort, then gate on `finch info` answering.
           sudo systemctl daemon-reload || true
-          for unit in containerd finch-buildkit finch-daemon; do
+          for unit in containerd buildkit finch-buildkit finch-daemon finch; do
             sudo systemctl enable --now "$unit" 2>/dev/null \
               || sudo systemctl start "$unit" 2>/dev/null || true
           done
@@ -965,7 +986,8 @@ jobs:
           done
           if [ "$ok" -ne 1 ]; then
             echo "::error::finch daemon did not become ready"
-            sudo systemctl --no-pager status containerd finch-buildkit finch-daemon 2>&1 | tail -60 || true
+            systemctl list-unit-files 2>/dev/null | grep -iE 'finch|containerd|buildkit' || true
+            sudo systemctl --no-pager status containerd buildkit finch-buildkit finch-daemon finch 2>&1 | tail -80 || true
             sudo finch info || true
             exit 1
           fi
