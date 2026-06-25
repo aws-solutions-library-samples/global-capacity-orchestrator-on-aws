@@ -581,6 +581,30 @@ class TestListCapacityBlockOfferingsEnhanced:
         checker._session.client = MagicMock(return_value=mock_ec2)
         assert checker.list_capacity_block_offerings("ap-south-1", "p5.48xlarge") == []
 
+    def test_unsupported_region_invalidaction_returns_empty(self):
+        # eu-west-1 returns InvalidAction (the Capacity Block API isn't available
+        # there); treated as an expected unsupported-region signal, so it returns
+        # [] quietly rather than raising or logging a warning.
+        checker = _make_checker()
+        mock_ec2 = MagicMock()
+        mock_ec2.describe_capacity_block_offerings.side_effect = ClientError(
+            {"Error": {"Code": "InvalidAction", "Message": "not valid for this web service"}},
+            "DescribeCapacityBlockOfferings",
+        )
+        checker._session.client = MagicMock(return_value=mock_ec2)
+        assert checker.list_capacity_block_offerings("eu-west-1", "p5.48xlarge") == []
+
+    def test_adaptive_retry_config_applied(self):
+        # The capacity-block client uses adaptive retries so the parallel sweep
+        # degrades gracefully under RequestLimitExceeded instead of failing fast.
+        checker = _make_checker()
+        mock_ec2 = self._ec2_with({"CapacityBlockOfferings": []})
+        checker._session.client = MagicMock(return_value=mock_ec2)
+        checker.list_capacity_block_offerings("us-east-1", "p5.48xlarge")
+        cfg = checker._session.client.call_args.kwargs["config"]
+        assert cfg.retries["mode"] == "adaptive"
+        assert cfg.retries["max_attempts"] == 10
+
     def test_botocore_error_returns_empty(self):
         checker = _make_checker()
         mock_ec2 = MagicMock()

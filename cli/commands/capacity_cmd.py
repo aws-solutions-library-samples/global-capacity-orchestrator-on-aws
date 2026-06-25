@@ -742,7 +742,8 @@ def find_blocks(
     AWS allows Capacity Block durations in 1-day increments up to 14 days, then
     7-day increments up to 182 days; a duration range is expanded to those
     discrete values automatically. Friendly names are normalized (p6-b200 ->
-    p6-b200.48xlarge); B300 is flagged as UltraServer-only (P6e-GB300).
+    p6-b200.48xlarge, p6-b300 -> p6-b300.48xlarge); the Grace-Blackwell GB200/
+    GB300 UltraServer families (P6e-GB200/P6e-GB300) are flagged as not standalone.
 
     Examples:
         gco capacity find-blocks -i p6-b200.48xlarge \\

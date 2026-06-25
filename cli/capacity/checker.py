@@ -41,6 +41,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from cli.config import GCOConfig, get_config
@@ -57,10 +58,26 @@ logger = logging.getLogger(__name__)
 
 # Capacity Block offering API error codes that mean "this instance type / region
 # simply doesn't have Capacity Blocks" rather than a real failure — expected and
-# handled quietly. ``Unsupported`` covers regions where the API isn't available.
+# handled quietly. ``Unsupported`` / ``UnsupportedOperation`` / ``InvalidAction``
+# cover regions where the Capacity Block API isn't available at all (e.g.
+# DescribeCapacityBlockOfferings returns ``InvalidAction`` in eu-west-1).
 _CB_EXPECTED_ERROR_CODES = frozenset(
-    {"Unsupported", "InvalidParameterValue", "InvalidParameterCombination"}
+    {
+        "Unsupported",
+        "UnsupportedOperation",
+        "InvalidAction",
+        "InvalidParameterValue",
+        "InvalidParameterCombination",
+    }
 )
+
+# Adaptive client-side retry config for DescribeCapacityBlockOfferings. The
+# find_capacity_blocks sweep fans out region x duration probes in parallel, which
+# can trip the API's per-account request-rate limit (RequestLimitExceeded).
+# Adaptive mode adds client-side rate limiting plus exponential backoff, and a
+# higher attempt budget gives each probe room to succeed under throttling rather
+# than silently returning an empty (misleading) result for a throttled region.
+_CB_RETRY_CONFIG = Config(retries={"max_attempts": 10, "mode": "adaptive"})
 
 # A conservative cap on the parallel fan-out so a wide region x duration sweep
 # can't open an unbounded number of threads / sockets at once.
@@ -1070,7 +1087,7 @@ class CapacityChecker:
             List of available capacity block offerings (enriched with pricing).
             All matching pages are followed via NextToken.
         """
-        ec2 = self._session.client("ec2", region_name=region)
+        ec2 = self._session.client("ec2", region_name=region, config=_CB_RETRY_CONFIG)
         offerings: list[dict[str, Any]] = []
 
         if gpus_per_instance is None:
@@ -1134,7 +1151,7 @@ class CapacityChecker:
               = 0 = stable or no data
               < 0 = capacity shrinking (offerings decreasing week-over-week)
         """
-        ec2 = self._session.client("ec2", region_name=region)
+        ec2 = self._session.client("ec2", region_name=region, config=_CB_RETRY_CONFIG)
 
         now = datetime.now(UTC)
         far_end = now + timedelta(days=182)
