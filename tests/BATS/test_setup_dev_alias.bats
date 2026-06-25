@@ -77,6 +77,20 @@ teardown() {
     [[ "$output" == *"podman.sock:/var/run/docker.sock"* ]]
 }
 
+@test "--print --runtime podman qualifies a bare image with localhost/" {
+    # podman won't resolve a bare locally-built name; it needs localhost/.
+    run bash "$SCRIPT" --print --runtime podman
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"localhost/gco-dev gco"* ]]
+}
+
+@test "--print --runtime podman leaves a registry-qualified image untouched" {
+    run bash "$SCRIPT" --print --runtime podman --image my/gco:dev
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"my/gco:dev gco"* ]]
+    [[ "$output" != *"localhost/my/gco:dev"* ]]
+}
+
 @test "--print emits both a TTY (-it) and a non-TTY (-i) branch" {
     run bash "$SCRIPT" --print --runtime docker
     [ "$status" -eq 0 ]

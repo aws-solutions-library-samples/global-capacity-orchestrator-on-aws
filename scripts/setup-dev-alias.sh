@@ -154,7 +154,23 @@ runtime="$(resolve_runtime || true)"
 [ -n "$runtime" ] || die "no container runtime found. Install Docker, Finch, or Podman and start it, then re-run (or force one with --runtime NAME)."
 
 socket="$(socket_args_for "$runtime")"
-block="$(emit_block "$runtime" "$socket" "$IMAGE")"
+
+# Podman does not resolve a bare, locally-built image name: an image built with
+# `podman build -t gco-dev` is stored as `localhost/gco-dev`, but `podman run
+# gco-dev` treats the unqualified name as remote and searches the configured
+# registries (docker.io, quay.io, ...) instead of local storage. Prefix
+# `localhost/` so the emitted `podman run` finds the image you built locally.
+# Names that already carry a registry/namespace (contain a `/`) are untouched,
+# and docker/finch — which do resolve bare local names — keep the plain name.
+image_ref="$IMAGE"
+if [ "$runtime" = "podman" ]; then
+    case "$IMAGE" in
+        */*) : ;;
+        *)   image_ref="localhost/$IMAGE" ;;
+    esac
+fi
+
+block="$(emit_block "$runtime" "$socket" "$image_ref")"
 
 if [ "$PRINT_ONLY" -eq 1 ]; then
     printf '%s\n' "$block"
@@ -168,7 +184,7 @@ log "Installed the 'gco' dev-container function."
 log ""
 log "  Container runtime : $runtime"
 log "  Socket mount      : $(socket_desc_for "$runtime")"
-log "  Dev image         : $IMAGE"
+log "  Dev image         : $image_ref"
 log "  Shell profile     : $rc"
 log ""
 log "Activate it in this shell:  source \"$rc\""
