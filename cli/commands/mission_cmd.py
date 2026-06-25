@@ -1136,9 +1136,7 @@ def mission_scaffold_criteria_cmd(
     resulting file is immediately usable with ``mission start
     --criteria-file``.
     """
-    from mission import (  # noqa: PLC0415 — lazy: avoids cost when help-only
-        criteria_scaffold,
-    )
+    import mission.criteria_scaffold as criteria_scaffold  # noqa: PLC0415 — lazy: avoids cost when help-only
     from mission import (
         sampling as mission_sampling,
     )
@@ -1370,9 +1368,7 @@ def mission_run_cmd(
     also written to ``PATH`` so the operator can inspect / re-use it
     without re-running the scaffold step.
     """
-    from mission import (  # noqa: PLC0415 — lazy
-        criteria_scaffold,
-    )
+    import mission.criteria_scaffold as criteria_scaffold  # noqa: PLC0415 — lazy
     from mission import (
         sampling as mission_sampling,
     )

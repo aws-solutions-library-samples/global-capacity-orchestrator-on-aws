@@ -430,13 +430,27 @@ class ConfigLoader:
                 f"{type(historical_ctx['enabled']).__name__}: {historical_ctx['enabled']!r}"
             )
 
-        for int_field in ("retention_days", "poll_interval_minutes"):
+        for int_field in (
+            "retention_days",
+            "poll_interval_minutes",
+            "capacity_block_duration_hours",
+        ):
             if int_field not in historical_ctx:
                 continue
             value = historical_ctx[int_field]
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ConfigValidationError(
                     f"historical.{int_field} must be a positive integer, got {value!r}"
+                )
+
+        # The long-block probe duration may be 0 to disable the long probe
+        # entirely, so it is validated as non-negative rather than positive.
+        if "capacity_block_long_duration_hours" in historical_ctx:
+            long_value = historical_ctx["capacity_block_long_duration_hours"]
+            if not isinstance(long_value, int) or isinstance(long_value, bool) or long_value < 0:
+                raise ConfigValidationError(
+                    "historical.capacity_block_long_duration_hours must be a non-negative "
+                    f"integer (0 disables the long probe), got {long_value!r}"
                 )
 
         for list_field in ("watch_instance_types", "enabled_regions"):
@@ -876,6 +890,11 @@ class ConfigLoader:
             - enabled: deploy the capacity poller stack + history table (default False)
             - retention_days: DynamoDB TTL window for snapshots (default 90)
             - poll_interval_minutes: EventBridge schedule cadence (default 15)
+            - capacity_block_duration_hours: short Capacity Block probe duration
+              the poller snapshots (default 24 = 1 day)
+            - capacity_block_long_duration_hours: long Capacity Block probe
+              duration in hours (default 1512 = 63 days); 0 disables the long
+              probe and its ``capacity_blocks_long_*`` metrics
             - watch_instance_types: instance types the poller snapshots
             - enabled_regions: regions to poll; empty means all deployed regions
         """
@@ -883,6 +902,8 @@ class ConfigLoader:
             "enabled": False,
             "retention_days": 90,
             "poll_interval_minutes": 15,
+            "capacity_block_duration_hours": 24,
+            "capacity_block_long_duration_hours": 63 * 24,
             "watch_instance_types": [
                 "p4d.24xlarge",
                 "p5.4xlarge",

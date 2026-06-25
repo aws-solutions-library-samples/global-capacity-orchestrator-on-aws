@@ -528,6 +528,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_capacity.py` | Tests for cli/capacity/ — the GPU capacity checker and recommender. |
 | `test_capacity_advisor_coverage.py` | Coverage for the capacity advisor prompt builder (`cli/capacity/advisor.py`) and the multi-region aggregator (`cli/capacity/multi_region.py`): recommendation tie-breaks and SQS and CloudWatch error handling. |
 | `test_capacity_advisor_historical.py` | Tests for the Bedrock capacity-advisor historical-context enrichment in cli/capacity/advisor.py. |
+| `test_capacity_block_search.py` | Tests for the Capacity Block search expansion — `cli/capacity/blocks.py` duration/normalization/pricing helpers, `validate_instance_type`, date-range + pagination on `list_capacity_block_offerings`, the consolidated `find_capacity_blocks` region x duration sweep (de-dup, ranking, longest, the p6-b200 acceptance scenario), multi-region `check_reservation_availability`, and the `gco capacity find-blocks` CLI plus `find_capacity_blocks` / `reservation_check` MCP argv. |
 | `test_capacity_checker_coverage.py` | Error, empty-result, and scarcity-assessment coverage for the capacity checker (`cli/capacity/checker.py`): boto3 ClientError paths, availability bands, and reservation and capacity-block discovery. |
 | `test_capacity_cmd_coverage.py` | Tests for the capacity CLI subcommands in cli/commands/capacity_cmd.py. |
 | `test_capacity_history.py` | Tests for cli/capacity/history.CapacityHistoryStore (time-series store, statistics, and temporal patterns). |

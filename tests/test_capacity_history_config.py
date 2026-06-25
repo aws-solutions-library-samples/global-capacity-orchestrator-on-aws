@@ -25,6 +25,8 @@ class TestDefaults:
         assert cfg["enabled"] is False
         assert cfg["retention_days"] == 90
         assert cfg["poll_interval_minutes"] == 15
+        assert cfg["capacity_block_duration_hours"] == 24
+        assert cfg["capacity_block_long_duration_hours"] == 1512
         assert len(cfg["watch_instance_types"]) == 57
         assert cfg["enabled_regions"] == []
 
@@ -63,6 +65,16 @@ class TestEnabledOverride:
         assert cfg["retention_days"] == 90
         assert len(cfg["watch_instance_types"]) == 57
 
+    def test_block_duration_overrides_merge(self, valid_cdk_context):
+        loader = _loader(
+            valid_cdk_context,
+            {"capacity_block_duration_hours": 48, "capacity_block_long_duration_hours": 0},
+        )
+        cfg = loader.get_capacity_history_config()
+        assert cfg["capacity_block_duration_hours"] == 48
+        # 0 is a valid value: it disables the long probe.
+        assert cfg["capacity_block_long_duration_hours"] == 0
+
 
 class TestValidation:
     @pytest.mark.parametrize(
@@ -72,6 +84,11 @@ class TestValidation:
             {"retention_days": 0},
             {"retention_days": -1},
             {"poll_interval_minutes": "x"},
+            {"capacity_block_duration_hours": 0},
+            {"capacity_block_duration_hours": -1},
+            {"capacity_block_duration_hours": "x"},
+            {"capacity_block_long_duration_hours": -1},
+            {"capacity_block_long_duration_hours": "x"},
             {"watch_instance_types": "g5.xlarge"},
             {"watch_instance_types": [1, 2]},
             {"enabled_regions": ["not-a-region"]},
@@ -80,3 +97,8 @@ class TestValidation:
     def test_invalid_historical_raises(self, valid_cdk_context, historical):
         with pytest.raises(ConfigValidationError):
             _loader(valid_cdk_context, historical)
+
+    def test_long_duration_zero_is_valid(self, valid_cdk_context):
+        # 0 disables the long probe and must not raise.
+        loader = _loader(valid_cdk_context, {"capacity_block_long_duration_hours": 0})
+        assert loader.get_capacity_history_config()["capacity_block_long_duration_hours"] == 0

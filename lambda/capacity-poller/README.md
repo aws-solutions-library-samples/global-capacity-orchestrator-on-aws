@@ -39,18 +39,28 @@ All knobs live under the `historical` block in `cdk.json`:
 | `enabled` | `true` | Deploy the add-on (table + poller + schedule). |
 | `retention_days` | `90` | DynamoDB TTL window for snapshots. |
 | `poll_interval_minutes` | `15` | EventBridge schedule cadence. |
+| `capacity_block_duration_hours` | `24` | Short Capacity Block probe duration (soonest-available, 1-day block). |
+| `capacity_block_long_duration_hours` | `1512` | Long Capacity Block probe duration in hours (63 days). Tracks extended-term block availability; set `0` to disable the long probe. |
 | `watch_instance_types` | 57 GPU/Trn/Inf types | Instance types to snapshot. |
 | `enabled_regions` | `[]` (all deployed) | Regions to poll. |
 
 The Lambda reads these via environment variables `CAPACITY_HISTORY_TABLE_NAME`,
-`WATCH_INSTANCE_TYPES`, `ENABLED_REGIONS`, and `CAPACITY_HISTORY_RETENTION_DAYS`.
+`WATCH_INSTANCE_TYPES`, `ENABLED_REGIONS`, `CAPACITY_HISTORY_RETENTION_DAYS`,
+`CAPACITY_BLOCK_DURATION_HOURS`, and `CAPACITY_BLOCK_LONG_DURATION_HOURS`. AWS
+accepts Capacity Block durations in 1-day increments up to 14 days, then 7-day
+increments up to 182 days, so the long duration default of 1512h (63 days = 9
+weeks) is a valid block length.
 
 ## What it records
 
 Per `(instance_type, region)` per run: `spot_score`, `spot_price`, `az_count`,
-`capacity_blocks_available`, and `capacity_blocks_total`. (`queue_depth` is a
-cluster-level signal this EC2-only poller does not collect; the store treats a
-missing metric as absent rather than zero.)
+`capacity_blocks_available` / `capacity_blocks_total` (the short, soonest-available
+block tier), and `capacity_blocks_long_available` / `capacity_blocks_long_total`
+(the long-duration tier — e.g. a 63-day block — so history and alerting can tell
+whether *extended-term* capacity exists, not just the soonest 1-day block).
+(`queue_depth` is a cluster-level signal this EC2-only poller does not collect;
+the store treats a missing metric as absent rather than zero. The long tier is
+likewise omitted when `capacity_block_long_duration_hours` is `0`.)
 
 ## IAM permissions
 

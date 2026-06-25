@@ -58,6 +58,18 @@ class TestCapacityBlockSummary:
         assert offerings == 2
         assert total == 5
 
+    def test_duration_param_passed_to_api(self, handler):
+        ec2 = _fake_ec2()
+        handler._capacity_block_summary(ec2, "p5.48xlarge", 1512)
+        kwargs = ec2.describe_capacity_block_offerings.call_args.kwargs
+        assert kwargs["CapacityDurationHours"] == 1512
+
+    def test_default_duration_is_short(self, handler):
+        ec2 = _fake_ec2()
+        handler._capacity_block_summary(ec2, "p5.48xlarge")
+        kwargs = ec2.describe_capacity_block_offerings.call_args.kwargs
+        assert kwargs["CapacityDurationHours"] == handler.DEFAULT_BLOCK_DURATION_HOURS == 24
+
 
 class TestLambdaHandler:
     def test_writes_one_item(self, handler, monkeypatch):
@@ -76,7 +88,56 @@ class TestLambdaHandler:
         assert item["az_count"] == 2
         assert item["capacity_blocks_available"] == 2
         assert item["capacity_blocks_total"] == 5
+        # Long-duration tier is on by default (63 days) and probed separately.
+        assert item["capacity_blocks_long_available"] == 2
+        assert item["capacity_blocks_long_total"] == 5
+        assert ec2.describe_capacity_block_offerings.call_count == 2
+        durations = {
+            c.kwargs["CapacityDurationHours"]
+            for c in ec2.describe_capacity_block_offerings.call_args_list
+        }
+        assert durations == {24, handler.DEFAULT_LONG_BLOCK_DURATION_HOURS}
         assert isinstance(item["ttl"], int)
+
+    def test_long_probe_disabled_omits_long_fields(self, handler, monkeypatch):
+        _set_env(monkeypatch)
+        monkeypatch.setenv("CAPACITY_BLOCK_LONG_DURATION_HOURS", "0")
+        mock_table = MagicMock()
+        ec2 = _fake_ec2()
+        with patch.object(handler, "boto3", _fake_boto3(mock_table, ec2)):
+            handler.lambda_handler({}, None)
+        item = mock_table.put_item.call_args.kwargs["Item"]
+        assert "capacity_blocks_long_available" not in item
+        assert "capacity_blocks_long_total" not in item
+        # Only the short probe runs when the long probe is disabled.
+        assert ec2.describe_capacity_block_offerings.call_count == 1
+
+    def test_long_probe_reused_when_equal_to_short(self, handler, monkeypatch):
+        _set_env(monkeypatch)
+        monkeypatch.setenv("CAPACITY_BLOCK_DURATION_HOURS", "24")
+        monkeypatch.setenv("CAPACITY_BLOCK_LONG_DURATION_HOURS", "24")
+        mock_table = MagicMock()
+        ec2 = _fake_ec2()
+        with patch.object(handler, "boto3", _fake_boto3(mock_table, ec2)):
+            handler.lambda_handler({}, None)
+        item = mock_table.put_item.call_args.kwargs["Item"]
+        # Long fields mirror the short tier without a second API call.
+        assert item["capacity_blocks_long_available"] == item["capacity_blocks_available"]
+        assert item["capacity_blocks_long_total"] == item["capacity_blocks_total"]
+        assert ec2.describe_capacity_block_offerings.call_count == 1
+
+    def test_custom_long_duration_probed_separately(self, handler, monkeypatch):
+        _set_env(monkeypatch)
+        monkeypatch.setenv("CAPACITY_BLOCK_LONG_DURATION_HOURS", "672")  # 28 days
+        mock_table = MagicMock()
+        ec2 = _fake_ec2()
+        with patch.object(handler, "boto3", _fake_boto3(mock_table, ec2)):
+            handler.lambda_handler({}, None)
+        durations = {
+            c.kwargs["CapacityDurationHours"]
+            for c in ec2.describe_capacity_block_offerings.call_args_list
+        }
+        assert durations == {24, 672}
 
     def test_missing_table_name_raises(self, handler, monkeypatch):
         monkeypatch.delenv("CAPACITY_HISTORY_TABLE_NAME", raising=False)

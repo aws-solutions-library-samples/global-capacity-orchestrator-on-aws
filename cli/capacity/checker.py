@@ -36,14 +36,16 @@ from __future__ import annotations
 import json
 import logging
 import statistics
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from cli.config import GCOConfig, get_config
 
+from . import blocks
 from .models import (
     GPU_INSTANCE_SPECS,
     CapacityEstimate,
@@ -53,6 +55,17 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+# Capacity Block offering API error codes that mean "this instance type / region
+# simply doesn't have Capacity Blocks" rather than a real failure — expected and
+# handled quietly. ``Unsupported`` covers regions where the API isn't available.
+_CB_EXPECTED_ERROR_CODES = frozenset(
+    {"Unsupported", "InvalidParameterValue", "InvalidParameterCombination"}
+)
+
+# A conservative cap on the parallel fan-out so a wide region x duration sweep
+# can't open an unbounded number of threads / sockets at once.
+_MAX_SEARCH_WORKERS = 12
+
 
 def _instance_desc(instance_type: str, gpu_count: int, gpu_type: str, total_gpu_mem: float) -> str:
     """Build a human-readable instance description."""
@@ -60,6 +73,14 @@ def _instance_desc(instance_type: str, gpu_count: int, gpu_type: str, total_gpu_
         mem_str = f", {total_gpu_mem:.0f}GB" if total_gpu_mem else ""
         return f"{instance_type} ({gpu_count}x {gpu_type}{mem_str})"
     return instance_type
+
+
+def _offering_fee(offering: dict[str, Any]) -> float:
+    """Sort key: an offering's upfront fee in USD, with missing fees sorting last."""
+    fee = offering.get("upfront_fee_usd")
+    if fee is None:
+        fee = blocks.parse_upfront_fee(offering.get("upfront_fee"))
+    return fee if fee is not None else float("inf")
 
 
 class CapacityChecker:
@@ -122,6 +143,70 @@ class CapacityChecker:
             logger.warning("Unexpected error getting instance info for %s: %s", instance_type, e)
 
         return None
+
+    def validate_instance_type(self, instance_type: str) -> dict[str, Any]:
+        """Classify an instance type as valid / invalid, with friendly normalization.
+
+        The offering APIs collapse "unknown instance type" and "valid type with
+        zero offerings" into the same empty result. This method separates them so
+        callers can tell a typo from genuine unavailability:
+
+        * A type in ``GPU_INSTANCE_SPECS`` is valid and ``known`` without any AWS
+          call.
+        * Otherwise EC2 ``DescribeInstanceTypes`` is consulted; an
+          ``InvalidInstanceType`` (or empty result) marks it invalid, while a
+          transient API error leaves it valid-but-unverified with a note.
+        * Friendly aliases are expanded (``p6-b200`` -> ``p6-b200.48xlarge``) and
+          UltraServer-only families (``p6-b300``) are flagged invalid-for-
+          ``InstanceType`` with guidance toward the UltraServer search flow.
+
+        Returns a dict: ``requested``, ``instance_type`` (canonical), ``valid``,
+        ``known``, ``note``, ``gpu_count``.
+        """
+        canonical, note = blocks.normalize_instance_type(instance_type)
+        result: dict[str, Any] = {
+            "requested": instance_type,
+            "instance_type": canonical,
+            "valid": True,
+            "known": False,
+            "note": note,
+            "gpu_count": None,
+        }
+
+        # UltraServer-only families are real accelerators but not standalone EC2
+        # instance types, so InstanceType-based searches can never resolve them.
+        if (instance_type or "").strip().lower() in blocks.NON_STANDALONE_INSTANCE_NOTES:
+            result["valid"] = False
+            return result
+
+        if canonical in GPU_INSTANCE_SPECS:
+            spec = GPU_INSTANCE_SPECS[canonical]
+            result["known"] = True
+            result["gpu_count"] = spec.gpu_count
+            return result
+
+        # Not in the offline table — ask EC2, separating "invalid" from "API error".
+        try:
+            ec2 = self._session.client("ec2", region_name="us-east-1")
+            response = ec2.describe_instance_types(InstanceTypes=[canonical])
+            types = response.get("InstanceTypes", [])
+            if not types:
+                result["valid"] = False
+                return result
+            gpu_info = types[0].get("GpuInfo") or {}
+            gpus = gpu_info.get("Gpus", [])
+            result["gpu_count"] = gpus[0].get("Count", 0) if gpus else 0
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code in ("InvalidInstanceType", "InvalidParameterValue"):
+                result["valid"] = False
+            else:
+                logger.debug("Could not verify instance type %s: %s", canonical, e)
+                result["note"] = note or f"Could not verify instance type via EC2 ({code or e})."
+        except Exception as e:
+            logger.debug("Unexpected error validating instance type %s: %s", canonical, e)
+            result["note"] = note or f"Could not verify instance type: {e}"
+        return result
 
     def check_instance_available_in_region(self, instance_type: str, region: str) -> bool:
         """Check if an instance type is offered in a region."""
@@ -894,65 +979,137 @@ class CapacityChecker:
 
         return reservations
 
+    def _build_block_offering(
+        self,
+        offering: dict[str, Any],
+        region: str,
+        requested_count: int,
+        gpus_per_instance: int | None,
+        requested_duration_hours: int,
+    ) -> dict[str, Any]:
+        """Shape a raw DescribeCapacityBlockOfferings entry into an enriched dict.
+
+        Reports the offering's *actual* duration (the API returns blocks whose
+        duration is the closest match to the request, not necessarily equal) and
+        adds per-hour / per-GPU-hour pricing derived from the upfront fee. The raw
+        ``upfront_fee`` is preserved for backward compatibility; ``upfront_fee_usd``
+        is the parsed float used for ranking.
+        """
+        start_date = offering.get("StartDate")
+        end_date = offering.get("EndDate")
+
+        actual_duration = offering.get("CapacityBlockDurationHours")
+        if actual_duration is None:
+            minutes = offering.get("CapacityBlockDurationMinutes")
+            actual_duration = round(minutes / 60) if minutes else requested_duration_hours
+
+        count = offering.get("InstanceCount")
+        if count is None:
+            count = requested_count
+
+        pricing = blocks.compute_offering_pricing(
+            offering.get("UpfrontFee"), actual_duration, count, gpus_per_instance
+        )
+
+        return {
+            "type": "capacity_block",
+            "offering_id": offering.get("CapacityBlockOfferingId"),
+            "instance_type": offering.get("InstanceType"),
+            "availability_zone": offering.get("AvailabilityZone"),
+            "region": region,
+            "instance_count": count,
+            "duration_hours": actual_duration,
+            "duration_days": blocks.hours_to_days(actual_duration),
+            "start_date": start_date.isoformat() if start_date else None,
+            "end_date": end_date.isoformat() if end_date else None,
+            "upfront_fee": offering.get("UpfrontFee"),
+            "upfront_fee_usd": pricing["upfront_fee_usd"],
+            "price_per_hour": pricing["price_per_hour"],
+            "price_per_instance_hour": pricing["price_per_instance_hour"],
+            "price_per_gpu_hour": pricing["price_per_gpu_hour"],
+            "gpus_per_instance": gpus_per_instance,
+            "currency": offering.get("CurrencyCode", "USD"),
+            "tenancy": offering.get("Tenancy"),
+        }
+
     def list_capacity_block_offerings(
         self,
         region: str,
         instance_type: str,
         instance_count: int = 1,
         duration_hours: int = 24,
+        *,
+        earliest_start: datetime | None = None,
+        latest_start: datetime | None = None,
+        gpus_per_instance: int | None = None,
     ) -> list[dict[str, Any]]:
         """
         List available Capacity Block offerings for ML workloads.
 
         Capacity Blocks provide guaranteed GPU capacity for a fixed duration
         at a known price — ideal for training jobs with predictable runtimes.
+        Queries a single duration in a single region; the date window and the
+        multi-duration / multi-region sweep are layered on top by
+        :meth:`find_capacity_blocks`.
 
         Args:
             region: AWS region to query
             instance_type: GPU instance type (e.g. p5.48xlarge, p4d.24xlarge)
             instance_count: Number of instances needed
             duration_hours: Desired block duration in hours (must be a supported value)
+            earliest_start: Only return blocks starting on/after this datetime
+                (EC2 StartDateRange). Lets callers ask "blocks starting near D1".
+            latest_start: Only return blocks starting on/before this datetime
+                (EC2 EndDateRange).
+            gpus_per_instance: GPUs per instance, used for per-GPU-hour pricing.
+                Resolved from the instance specs when omitted.
 
         Returns:
-            List of available capacity block offerings
+            List of available capacity block offerings (enriched with pricing).
+            All matching pages are followed via NextToken.
         """
         ec2 = self._session.client("ec2", region_name=region)
         offerings: list[dict[str, Any]] = []
 
+        if gpus_per_instance is None:
+            info = self.get_instance_info(instance_type)
+            gpus_per_instance = info.gpu_count if info else None
+
+        api_kwargs: dict[str, Any] = {
+            "InstanceType": instance_type,
+            "InstanceCount": instance_count,
+            "CapacityDurationHours": duration_hours,
+        }
+        if earliest_start is not None:
+            api_kwargs["StartDateRange"] = earliest_start
+        if latest_start is not None:
+            api_kwargs["EndDateRange"] = latest_start
+
         try:
-            response = ec2.describe_capacity_block_offerings(
-                InstanceType=instance_type,
-                InstanceCount=instance_count,
-                CapacityDurationHours=duration_hours,
-            )
-
-            for offering in response.get("CapacityBlockOfferings", []):
-                start_date = offering.get("StartDate")
-                end_date = offering.get("EndDate")
-                price = offering.get("UpfrontFee")
-
-                offerings.append(
-                    {
-                        "type": "capacity_block",
-                        "offering_id": offering.get("CapacityBlockOfferingId"),
-                        "instance_type": offering.get("InstanceType"),
-                        "availability_zone": offering.get("AvailabilityZone"),
-                        "region": region,
-                        "instance_count": offering.get("InstanceCount"),
-                        "duration_hours": offering.get("CapacityBlockDurationHours"),
-                        "start_date": start_date.isoformat() if start_date else None,
-                        "end_date": end_date.isoformat() if end_date else None,
-                        "upfront_fee": price,
-                        "currency": offering.get("CurrencyCode", "USD"),
-                        "tenancy": offering.get("Tenancy"),
-                    }
-                )
+            next_token: str | None = None
+            while True:
+                if next_token:
+                    api_kwargs["NextToken"] = next_token
+                response = ec2.describe_capacity_block_offerings(**api_kwargs)
+                for offering in response.get("CapacityBlockOfferings", []):
+                    offerings.append(
+                        self._build_block_offering(
+                            offering, region, instance_count, gpus_per_instance, duration_hours
+                        )
+                    )
+                next_token = response.get("NextToken")
+                if not next_token:
+                    break
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code", "")
-            if error_code in ("Unsupported", "InvalidParameterValue"):
-                pass  # Instance type doesn't support Capacity Blocks — expected
+            if error_code in _CB_EXPECTED_ERROR_CODES:
+                pass  # Type/region doesn't support Capacity Blocks — expected
             else:
                 logger.warning("Failed to list capacity block offerings in %s: %s", region, e)
+        except BotoCoreError as e:
+            # Endpoint resolution / connection errors surface here when the
+            # Capacity Block API isn't available in a region.
+            logger.warning("Capacity Block API unavailable in %s: %s", region, e)
 
         return offerings
 
@@ -988,7 +1145,20 @@ class CapacityChecker:
                 StartDateRange=now,
                 EndDateRange=far_end,
             )
-        except ClientError, Exception:
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            if error_code not in _CB_EXPECTED_ERROR_CODES:
+                logger.warning(
+                    "Capacity block trend query failed for %s in %s: %s",
+                    instance_type,
+                    region,
+                    e,
+                )
+            return 0.0
+        except BotoCoreError as e:
+            logger.warning(
+                "Capacity block trend query failed for %s in %s: %s", instance_type, region, e
+            )
             return 0.0
 
         offerings = response.get("CapacityBlockOfferings", [])
@@ -1072,6 +1242,192 @@ class CapacityChecker:
             "reservations": all_reservations,
         }
 
+    @staticmethod
+    def _summarize_block_search(
+        instance_type: str,
+        regions: list[str],
+        offerings: list[dict[str, Any]],
+        best: dict[str, Any] | None,
+        longest: dict[str, Any] | None,
+        note: str | None,
+    ) -> str:
+        """Build a one-line human recommendation for a consolidated block search."""
+        if not offerings:
+            msg = (
+                f"No Capacity Block offerings for {instance_type} across "
+                f"{len(regions)} region(s) in the requested window. Try a wider "
+                "date range, a shorter duration, more regions, or check back later."
+            )
+            return f"{note} {msg}" if note else msg
+
+        regions_with = sorted({o["region"] for o in offerings if o.get("region")})
+        parts = [
+            f"Found {len(offerings)} Capacity Block offering(s) for {instance_type} "
+            f"across {len(regions_with)} region(s)."
+        ]
+        if best:
+            price = best.get("price_per_gpu_hour")
+            price_str = f", from ${price}/GPU-hr" if price is not None else ""
+            parts.append(
+                f"Cheapest: {best.get('region')}/{best.get('availability_zone')} "
+                f"{best.get('duration_days')}d starting "
+                f"{(best.get('start_date') or '')[:16]}{price_str}."
+            )
+        if longest and longest is not best:
+            parts.append(
+                f"Longest: {longest.get('duration_days')}d in "
+                f"{longest.get('region')}/{longest.get('availability_zone')}."
+            )
+        msg = " ".join(parts)
+        return f"{note} {msg}" if note else msg
+
+    def find_capacity_blocks(
+        self,
+        instance_type: str,
+        regions: list[str] | None = None,
+        *,
+        instance_count: int = 1,
+        duration_hours: int | None = None,
+        duration_days: int | None = None,
+        min_duration_hours: int | None = None,
+        min_duration_days: int | None = None,
+        max_duration_hours: int | None = None,
+        max_duration_days: int | None = None,
+        earliest_start: str | datetime | None = None,
+        latest_start: str | datetime | None = None,
+        find_longest: bool = False,
+        max_workers: int | None = None,
+    ) -> dict[str, Any]:
+        """Sweep regions x durations x a date window for Capacity Blocks in one call.
+
+        This is the high-level search that answers "find 1x p6-b200.48xlarge
+        across us-east-1/us-east-2/us-west-2/eu-west-1 for durations 1-63 days
+        starting 2026-07-01..2026-07-10" without manual multi-call sweeping.
+
+        Because EC2 requires an exact ``CapacityDurationHours`` per query, a
+        duration *range* (or ``find_longest``) expands to every valid Capacity
+        Block duration in the range, and each (region, duration) pair is probed
+        in parallel. Offerings are de-duplicated across probes, grouped/sorted by
+        region + AZ + start date, and ranked cheapest-first by per-GPU-hour price.
+
+        Args:
+            instance_type: GPU instance type or friendly alias (e.g. p6-b200).
+            regions: Explicit regions to search (any regions, not just deployed).
+                Defaults to the deployed GCO regions when omitted.
+            instance_count: Instances per block.
+            duration_hours / duration_days: A single target duration.
+            min_duration_hours / min_duration_days: Lower bound of a duration range.
+            max_duration_hours / max_duration_days: Upper bound of a duration range.
+            earliest_start / latest_start: Date (YYYY-MM-DD) or ISO datetime window
+                for the block start, threaded to StartDateRange / EndDateRange.
+            find_longest: Sweep the full duration ladder (within any range given)
+                and surface the longest available block.
+            max_workers: Override the parallel fan-out width.
+
+        Returns:
+            A consolidated report dict (see keys assembled below).
+        """
+        validation = self.validate_instance_type(instance_type)
+        canonical = validation["instance_type"]
+        gpus_per_instance = validation["gpu_count"]
+
+        parsed_earliest = blocks.parse_date_input(earliest_start)
+        parsed_latest = blocks.parse_date_input(latest_start)
+
+        durations = blocks.resolve_search_durations(
+            duration_hours=blocks.coerce_hours(duration_hours, duration_days),
+            min_duration_hours=blocks.coerce_hours(min_duration_hours, min_duration_days),
+            max_duration_hours=blocks.coerce_hours(max_duration_hours, max_duration_days),
+            find_longest=find_longest,
+        )
+
+        if not regions:
+            from cli.aws_client import get_aws_client
+
+            aws_client = get_aws_client(self.config)
+            stacks = aws_client.discover_regional_stacks()
+            regions = list(stacks.keys()) if stacks else [self.config.default_region]
+
+        report: dict[str, Any] = {
+            "instance_type": canonical,
+            "requested_instance_type": instance_type,
+            "valid_instance_type": validation["valid"],
+            "known_instance_type": validation["known"],
+            "note": validation["note"],
+            "instance_count": instance_count,
+            "regions_checked": list(regions),
+            "durations_probed_hours": durations,
+            "durations_probed_days": [blocks.hours_to_days(h) for h in durations],
+            "date_window": {
+                "earliest_start": parsed_earliest.isoformat() if parsed_earliest else None,
+                "latest_start": parsed_latest.isoformat() if parsed_latest else None,
+            },
+            "offerings_found": 0,
+            "offerings": [],
+            "ranked": [],
+            "best": None,
+            "longest": None,
+            "regions_with_offerings": [],
+        }
+
+        if not validation["valid"]:
+            report["recommendation"] = (
+                validation["note"]
+                or f"'{instance_type}' is not a valid standalone EC2 instance type "
+                "for Capacity Blocks."
+            )
+            return report
+
+        probes = [(region, dur) for region in regions for dur in durations]
+        collected: list[dict[str, Any]] = []
+        workers = max(1, min(max_workers or _MAX_SEARCH_WORKERS, len(probes)))
+
+        def _probe(region: str, dur: int) -> list[dict[str, Any]]:
+            try:
+                return self.list_capacity_block_offerings(
+                    region,
+                    canonical,
+                    instance_count=instance_count,
+                    duration_hours=dur,
+                    earliest_start=parsed_earliest,
+                    latest_start=parsed_latest,
+                    gpus_per_instance=gpus_per_instance,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Capacity block probe failed for %s in %s (%sh): %s",
+                    canonical,
+                    region,
+                    dur,
+                    e,
+                )
+                return []
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_probe, region, dur) for region, dur in probes]
+            for future in as_completed(futures):
+                collected.extend(future.result())
+
+        unique = blocks.dedupe_offerings(collected)
+        ranked = blocks.rank_offerings(unique)
+        best = ranked[0] if ranked else None
+        longest = blocks.longest_offering(unique)
+
+        report.update(
+            {
+                "offerings_found": len(unique),
+                "offerings": blocks.sort_offerings(unique),
+                "ranked": ranked,
+                "best": best,
+                "longest": longest,
+                "regions_with_offerings": sorted({o["region"] for o in unique if o.get("region")}),
+                "recommendation": self._summarize_block_search(
+                    canonical, regions, unique, best, longest, validation["note"]
+                ),
+            }
+        )
+        return report
+
     def check_reservation_availability(
         self,
         instance_type: str,
@@ -1079,58 +1435,90 @@ class CapacityChecker:
         min_count: int = 1,
         include_capacity_blocks: bool = True,
         block_duration_hours: int = 24,
+        *,
+        regions: list[str] | None = None,
+        block_duration_days: int | None = None,
+        earliest_start: str | datetime | None = None,
+        latest_start: str | datetime | None = None,
+        max_workers: int | None = None,
     ) -> dict[str, Any]:
         """
         Check if capacity reservations or blocks have available instances.
 
         Checks both ODCRs (existing reservations) and Capacity Block offerings
-        (purchasable guaranteed capacity) for a given instance type.
+        (purchasable guaranteed capacity) for a given instance type, across one
+        or many regions queried in parallel.
 
         Args:
             instance_type: EC2 instance type to check
-            region: Specific region (or None to check all deployed regions)
+            region: A single region (kept for backward compatibility)
             min_count: Minimum number of available instances needed
             include_capacity_blocks: Also check Capacity Block offerings
-            block_duration_hours: Duration for capacity block search
+            block_duration_hours: Duration for capacity block search (hours)
+            regions: Explicit list of regions to check in parallel. Takes
+                precedence over ``region``; falls back to deployed regions when
+                neither is given.
+            block_duration_days: Block duration in days (overrides hours when set).
+            earliest_start / latest_start: Date window for block start
+                (StartDateRange / EndDateRange).
+            max_workers: Override the parallel fan-out width.
 
         Returns:
             Dictionary with ODCR availability and capacity block offerings
         """
-        if region:
-            regions = [region]
+        if regions:
+            target_regions = list(regions)
+        elif region:
+            target_regions = [region]
         else:
             from cli.aws_client import get_aws_client
 
             aws_client = get_aws_client(self.config)
             stacks = aws_client.discover_regional_stacks()
-            regions = list(stacks.keys()) if stacks else [self.config.default_region]
+            target_regions = list(stacks.keys()) if stacks else [self.config.default_region]
 
-        # Check ODCRs
+        effective_duration = blocks.snap_duration_hours(
+            blocks.coerce_hours(block_duration_hours, block_duration_days) or 24
+        )
+        parsed_earliest = blocks.parse_date_input(earliest_start)
+        parsed_latest = blocks.parse_date_input(latest_start)
+
+        def _check_region(r: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            reservations = self.list_capacity_reservations(r, instance_type=instance_type)
+            region_blocks: list[dict[str, Any]] = []
+            if include_capacity_blocks:
+                region_blocks = self.list_capacity_block_offerings(
+                    r,
+                    instance_type=instance_type,
+                    instance_count=min_count,
+                    duration_hours=effective_duration,
+                    earliest_start=parsed_earliest,
+                    latest_start=parsed_latest,
+                )
+            return reservations, region_blocks
+
         odcr_results: list[dict[str, Any]] = []
+        block_offerings: list[dict[str, Any]] = []
         total_available = 0
         total_reserved = 0
 
-        for r in regions:
-            reservations = self.list_capacity_reservations(r, instance_type=instance_type)
+        workers = max(1, min(max_workers or _MAX_SEARCH_WORKERS, len(target_regions)))
+        if len(target_regions) == 1:
+            region_results = [_check_region(target_regions[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                region_results = list(executor.map(_check_region, target_regions))
+
+        for reservations, region_blocks in region_results:
             for res in reservations:
                 avail = res["available_instances"]
                 total_available += avail
                 total_reserved += res["total_instances"]
                 if avail > 0:
                     odcr_results.append(res)
+            block_offerings.extend(region_blocks)
 
-        # Check Capacity Block offerings
-        block_offerings: list[dict[str, Any]] = []
-        if include_capacity_blocks:
-            for r in regions:
-                offerings = self.list_capacity_block_offerings(
-                    r,
-                    instance_type=instance_type,
-                    instance_count=min_count,
-                    duration_hours=block_duration_hours,
-                )
-                block_offerings.extend(offerings)
-
+        block_offerings = blocks.sort_offerings(block_offerings)
         has_odcr = total_available >= min_count
         has_blocks = len(block_offerings) > 0
 
@@ -1141,11 +1529,13 @@ class CapacityChecker:
                 f"across {len(odcr_results)} reservation(s)"
             )
         elif has_blocks:
-            cheapest = min(block_offerings, key=lambda x: x.get("upfront_fee") or float("inf"))
+            cheapest = min(block_offerings, key=_offering_fee)
+            fee_display = cheapest.get("upfront_fee_usd")
+            if fee_display is None:
+                fee_display = cheapest.get("upfront_fee", "?")
             recommendation = (
                 f"No ODCR capacity, but {len(block_offerings)} Capacity Block offering(s) "
-                f"available (from ${cheapest.get('upfront_fee', '?')} "
-                f"for {block_duration_hours}h)"
+                f"available (from ${fee_display} for {effective_duration}h)"
             )
         else:
             recommendation = (
@@ -1157,7 +1547,7 @@ class CapacityChecker:
         return {
             "instance_type": instance_type,
             "min_count_requested": min_count,
-            "regions_checked": regions,
+            "regions_checked": target_regions,
             "odcr": {
                 "total_reserved_instances": total_reserved,
                 "total_available_instances": total_available,
@@ -1167,7 +1557,11 @@ class CapacityChecker:
             "capacity_blocks": {
                 "offerings_found": len(block_offerings),
                 "has_offerings": has_blocks,
-                "duration_hours": block_duration_hours,
+                "duration_hours": effective_duration,
+                "date_window": {
+                    "earliest_start": parsed_earliest.isoformat() if parsed_earliest else None,
+                    "latest_start": parsed_latest.isoformat() if parsed_latest else None,
+                },
                 "offerings": block_offerings,
             },
             "recommendation": recommendation,

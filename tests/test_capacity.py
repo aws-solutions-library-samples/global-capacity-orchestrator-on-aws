@@ -2651,7 +2651,9 @@ class TestCapacityBlockTrend:
                 assert trend == 0.0
 
     def test_api_error_returns_zero(self):
-        """API errors should return 0.0 trend."""
+        """AWS client errors should be caught and return a 0.0 trend."""
+        from botocore.exceptions import ClientError
+
         from cli.capacity import CapacityChecker
 
         with patch("cli.capacity.checker.get_config") as mock_config:
@@ -2662,7 +2664,10 @@ class TestCapacityBlockTrend:
             with patch.object(checker, "_session") as mock_session:
                 mock_ec2 = MagicMock()
                 mock_session.client.return_value = mock_ec2
-                mock_ec2.describe_capacity_block_offerings.side_effect = Exception("API Error")
+                mock_ec2.describe_capacity_block_offerings.side_effect = ClientError(
+                    {"Error": {"Code": "InternalError", "Message": "boom"}},
+                    "DescribeCapacityBlockOfferings",
+                )
 
                 trend = checker.get_capacity_block_trend("p4d.24xlarge", "us-east-1")
                 assert trend == 0.0

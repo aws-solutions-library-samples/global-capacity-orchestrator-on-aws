@@ -498,7 +498,13 @@ def list_reservations(config: Any, instance_type: Any, region: Any) -> None:
 
 @capacity.command("reservation-check")
 @click.option("--instance-type", "-i", required=True, help="Instance type to check")
-@click.option("--region", "-r", help="Specific region (default: all deployed regions)")
+@click.option(
+    "--region",
+    "-r",
+    "regions",
+    multiple=True,
+    help="Region(s) to check; repeatable (default: all deployed regions)",
+)
 @click.option("--count", "-c", default=1, help="Minimum instances needed")
 @click.option(
     "--include-blocks/--no-blocks",
@@ -511,25 +517,49 @@ def list_reservations(config: Any, instance_type: Any, region: Any) -> None:
     type=int,
     help="Capacity Block duration in hours (default: 24)",
 )
+@click.option(
+    "--block-duration-days",
+    default=None,
+    type=int,
+    help="Capacity Block duration in days (overrides --block-duration)",
+)
+@click.option(
+    "--earliest-start",
+    default=None,
+    help="Earliest block start date (YYYY-MM-DD or ISO datetime)",
+)
+@click.option(
+    "--latest-start",
+    default=None,
+    help="Latest block start date (YYYY-MM-DD or ISO datetime)",
+)
 @pass_config
 def reservation_check(
     config: Any,
     instance_type: Any,
-    region: Any,
+    regions: Any,
     count: Any,
     include_blocks: Any,
     block_duration: Any,
+    block_duration_days: Any,
+    earliest_start: Any,
+    latest_start: Any,
 ) -> None:
     """Check reservation availability and Capacity Block offerings.
 
     Checks both existing ODCRs and purchasable Capacity Blocks for ML
     workloads. Capacity Blocks provide guaranteed GPU capacity for a
-    fixed duration at a known price.
+    fixed duration at a known price. Pass --region more than once to check
+    several regions in parallel, and use --earliest-start/--latest-start to
+    bound when the block may begin. For a full duration-range sweep across
+    many regions, use 'gco capacity find-blocks'.
 
     Examples:
         gco capacity reservation-check -i p5.48xlarge
         gco capacity reservation-check -i p4d.24xlarge -c 2 --block-duration 48
         gco capacity reservation-check -i g5.48xlarge -r us-east-1 --no-blocks
+        gco capacity reservation-check -i p5.48xlarge -r us-east-1 -r us-west-2 \\
+            --block-duration-days 14 --earliest-start 2026-07-01
     """
     formatter = get_output_formatter(config)
     checker = get_capacity_checker(config)
@@ -542,10 +572,13 @@ def reservation_check(
 
         result = checker.check_reservation_availability(
             instance_type=instance_type,
-            region=region,
+            regions=list(regions) or None,
             min_count=count,
             include_capacity_blocks=include_blocks,
             block_duration_hours=block_duration,
+            block_duration_days=block_duration_days,
+            earliest_start=earliest_start,
+            latest_start=latest_start,
         )
 
         if config.output_format != "table":
@@ -572,15 +605,19 @@ def reservation_check(
 
         # Capacity Blocks section
         if include_blocks:
-            blocks = result["capacity_blocks"]
-            print(f"\n  Capacity Block Offerings ({block_duration}h)")
+            block_section = result["capacity_blocks"]
+            duration = block_section.get("duration_hours", block_duration)
+            print(f"\n  Capacity Block Offerings ({duration}h)")
             print("  " + "-" * 60)
-            if blocks["offerings"]:
-                for b in blocks["offerings"]:
+            if block_section["offerings"]:
+                for b in block_section["offerings"]:
+                    gpu_hr = b.get("price_per_gpu_hour")
+                    gpu_hr_str = f" (${gpu_hr}/GPU-hr)" if gpu_hr is not None else ""
+                    start = (b.get("start_date") or "")[:16]
                     print(
                         f"  ✓ {b['availability_zone']}: "
                         f"{b['instance_count']}x {b['duration_hours']}h "
-                        f"starting {b['start_date'][:16]} — ${b['upfront_fee']}"
+                        f"starting {start} — ${b['upfront_fee']}{gpu_hr_str}"
                     )
             else:
                 print("  No Capacity Block offerings available")
@@ -592,6 +629,156 @@ def reservation_check(
 
     except Exception as e:
         formatter.print_error(f"Failed to check reservations: {e}")
+        sys.exit(1)
+
+
+def _print_find_blocks_report(result: dict[str, Any]) -> None:
+    """Render a consolidated find-blocks report as a readable table block."""
+    itype = result["instance_type"]
+    if result.get("requested_instance_type") and result["requested_instance_type"] != itype:
+        print(f"\n  Capacity Block search for {result['requested_instance_type']} -> {itype}")
+    else:
+        print(f"\n  Capacity Block search for {itype}")
+    print("  " + "-" * 72)
+
+    window = result.get("date_window", {})
+    earliest = (window.get("earliest_start") or "any")[:16]
+    latest = (window.get("latest_start") or "any")[:16]
+    days = result.get("durations_probed_days") or []
+    if days:
+        span = f"{min(days):g}-{max(days):g}d" if len(days) > 1 else f"{days[0]:g}d"
+    else:
+        span = "n/a"
+    print(f"  Regions: {', '.join(result.get('regions_checked', []))}")
+    print(f"  Durations probed: {span}    Start window: {earliest} .. {latest}")
+
+    if not result.get("valid_instance_type", True):
+        print()
+        print(f"  ⚠  {result.get('recommendation', 'Invalid instance type.')}")
+        print()
+        return
+
+    offerings = result.get("offerings", [])
+    if not offerings:
+        print()
+        print(f"  {result.get('recommendation', 'No offerings found.')}")
+        print()
+        return
+
+    print()
+    print(f"  {'REGION':<13} {'AZ':<17} {'START':<17} {'DUR':>6} {'UPFRONT':>11} {'$/GPU-hr':>10}")
+    print("  " + "-" * 72)
+    for b in offerings:
+        start = (b.get("start_date") or "")[:16]
+        dur = f"{b.get('duration_days') or '?'}d"
+        fee = b.get("upfront_fee_usd")
+        fee_str = f"${fee:,.0f}" if isinstance(fee, int | float) else "?"
+        gpu_hr = b.get("price_per_gpu_hour")
+        gpu_hr_str = f"${gpu_hr:,.2f}" if isinstance(gpu_hr, int | float) else "-"
+        print(
+            f"  {str(b.get('region') or ''):<13} {str(b.get('availability_zone') or ''):<17} "
+            f"{start:<17} {dur:>6} {fee_str:>11} {gpu_hr_str:>10}"
+        )
+    print()
+    print(f"  💡 {result['recommendation']}")
+    print()
+
+
+@capacity.command("find-blocks")
+@click.option(
+    "--instance-type", "-i", required=True, help="GPU instance type or alias (e.g. p6-b200)"
+)
+@click.option(
+    "--region",
+    "-r",
+    "regions",
+    multiple=True,
+    help="Region(s) to search; repeatable (default: all deployed regions)",
+)
+@click.option("--count", "-c", default=1, help="Instances per block")
+@click.option("--duration-days", default=None, type=int, help="Single target duration in days")
+@click.option("--duration-hours", default=None, type=int, help="Single target duration in hours")
+@click.option(
+    "--min-duration-days", default=None, type=int, help="Minimum duration (days) for a range search"
+)
+@click.option(
+    "--max-duration-days", default=None, type=int, help="Maximum duration (days) for a range search"
+)
+@click.option("--min-duration-hours", default=None, type=int, help="Minimum duration (hours)")
+@click.option("--max-duration-hours", default=None, type=int, help="Maximum duration (hours)")
+@click.option(
+    "--earliest-start", default=None, help="Earliest block start (YYYY-MM-DD or ISO datetime)"
+)
+@click.option(
+    "--latest-start", default=None, help="Latest block start (YYYY-MM-DD or ISO datetime)"
+)
+@click.option(
+    "--find-longest",
+    is_flag=True,
+    help="Sweep the duration ladder and surface the longest available block",
+)
+@pass_config
+def find_blocks(
+    config: Any,
+    instance_type: Any,
+    regions: Any,
+    count: Any,
+    duration_days: Any,
+    duration_hours: Any,
+    min_duration_days: Any,
+    max_duration_days: Any,
+    min_duration_hours: Any,
+    max_duration_hours: Any,
+    earliest_start: Any,
+    latest_start: Any,
+    find_longest: Any,
+) -> None:
+    """Find Capacity Blocks across regions, durations, and a start-date window.
+
+    One command sweeps every requested region and every valid Capacity Block
+    duration in the range, in parallel, then returns a single consolidated,
+    de-duplicated, ranked report with per-hour and per-GPU-hour pricing.
+
+    AWS allows Capacity Block durations in 1-day increments up to 14 days, then
+    7-day increments up to 182 days; a duration range is expanded to those
+    discrete values automatically. Friendly names are normalized (p6-b200 ->
+    p6-b200.48xlarge); B300 is flagged as UltraServer-only (P6e-GB300).
+
+    Examples:
+        gco capacity find-blocks -i p6-b200.48xlarge \\
+            -r us-east-1 -r us-east-2 -r us-west-2 -r eu-west-1 \\
+            --min-duration-days 1 --max-duration-days 63 \\
+            --earliest-start 2026-07-01 --latest-start 2026-07-10
+        gco capacity find-blocks -i p5.48xlarge -r us-east-1 --duration-days 14
+        gco capacity find-blocks -i p5.48xlarge -r us-east-1 --find-longest
+    """
+    formatter = get_output_formatter(config)
+    checker = get_capacity_checker(config)
+
+    try:
+        result = checker.find_capacity_blocks(
+            instance_type,
+            regions=list(regions) or None,
+            instance_count=count,
+            duration_hours=duration_hours,
+            duration_days=duration_days,
+            min_duration_hours=min_duration_hours,
+            min_duration_days=min_duration_days,
+            max_duration_hours=max_duration_hours,
+            max_duration_days=max_duration_days,
+            earliest_start=earliest_start,
+            latest_start=latest_start,
+            find_longest=find_longest,
+        )
+
+        if config.output_format != "table":
+            formatter.print(result)
+            return
+
+        _print_find_blocks_report(result)
+
+    except Exception as e:
+        formatter.print_error(f"Failed to find capacity blocks: {e}")
         sys.exit(1)
 
 
@@ -793,6 +980,8 @@ def history_show(config: Any, instance_type: Any, region: Any, hours: Any) -> No
                 "queue_depth",
                 "capacity_blocks_available",
                 "capacity_blocks_total",
+                "capacity_blocks_long_available",
+                "capacity_blocks_long_total",
             ],
         )
     except Exception as e:

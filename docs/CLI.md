@@ -1437,7 +1437,7 @@ gco costs forecast --days 60
 Check and manage cluster capacity.
 
 <details>
-<summary>All <code>gco capacity</code> commands (15) — click to expand</summary>
+<summary>All <code>gco capacity</code> commands (16) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -1448,6 +1448,7 @@ Check and manage cluster capacity.
 | [`gco capacity ai-recommend`](#gco-capacity-ai-recommend) | Get AI-powered capacity recommendation using Amazon Bedrock. |
 | [`gco capacity reservations`](#gco-capacity-reservations) | List On-Demand Capacity Reservations (ODCRs) across deployed regions. |
 | [`gco capacity reservation-check`](#gco-capacity-reservation-check) | Check reservation availability and Capacity Block offerings for ML workloads. |
+| [`gco capacity find-blocks`](#gco-capacity-find-blocks) | Find Capacity Blocks across regions, durations, and a start-date window in one consolidated, ranked report. |
 | [`gco capacity reserve`](#gco-capacity-reserve) | Purchase a Capacity Block offering by ID. |
 | [`gco capacity instance-info`](#gco-capacity-instance-info) | Print AWS-published metadata for an instance type — vCPUs, memory, GPU count, network performance, and supported architectures. |
 | [`gco capacity spot-prices`](#gco-capacity-spot-prices) | Get spot price history for an instance type in a region. |
@@ -1625,7 +1626,7 @@ gco capacity reservations -r us-east-1
 
 #### `gco capacity reservation-check`
 
-Check reservation availability and Capacity Block offerings for ML workloads. Checks both existing ODCRs and purchasable Capacity Blocks (guaranteed GPU capacity for a fixed duration at a known price).
+Check reservation availability and Capacity Block offerings for ML workloads. Checks both existing ODCRs and purchasable Capacity Blocks (guaranteed GPU capacity for a fixed duration at a known price). Pass `--region` more than once to check several regions in parallel, and use `--earliest-start`/`--latest-start` to ask for blocks starting near a date. For a full duration-range sweep that returns one consolidated ranked report, use [`gco capacity find-blocks`](#gco-capacity-find-blocks).
 
 ```bash
 gco capacity reservation-check [OPTIONS]
@@ -1634,10 +1635,13 @@ gco capacity reservation-check [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `-i, --instance-type` | Instance type to check (required) |
-| `-r, --region` | Specific region (default: all deployed regions) |
+| `-r, --region` | Region(s) to check; repeatable (default: all deployed regions) |
 | `-c, --count` | Minimum instances needed (default: 1) |
 | `--include-blocks/--no-blocks` | Include Capacity Block offerings (default: yes) |
 | `--block-duration` | Capacity Block duration in hours (default: 24) |
+| `--block-duration-days` | Capacity Block duration in days (overrides `--block-duration`) |
+| `--earliest-start` | Earliest block start date (`YYYY-MM-DD` or ISO datetime) |
+| `--latest-start` | Latest block start date (`YYYY-MM-DD` or ISO datetime) |
 
 ```bash
 # Check for p5.48xlarge reservations and block offerings
@@ -1648,6 +1652,52 @@ gco capacity reservation-check -i p4d.24xlarge -c 2 --block-duration 48
 
 # ODCRs only, no block offerings
 gco capacity reservation-check -i g5.48xlarge -r us-east-1 --no-blocks
+
+# Two regions, a 14-day block starting on/after a date
+gco capacity reservation-check -i p5.48xlarge -r us-east-1 -r us-west-2 \
+  --block-duration-days 14 --earliest-start 2026-07-01
+```
+
+#### `gco capacity find-blocks`
+
+Find EC2 Capacity Blocks for ML across regions, durations, and a start-date window in a single call. One command fans out across every requested region and every valid Capacity Block duration in the range (in parallel), then returns one consolidated, de-duplicated, ranked report — cheapest per-GPU-hour first — with per-hour and per-GPU-hour pricing and the longest available block. This replaces the manual multi-call sweeping the older `reservation-check` required to bound "where and when can I get this GPU for N days?".
+
+```bash
+gco capacity find-blocks [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-i, --instance-type` | GPU instance type or friendly alias, e.g. `p6-b200` (required) |
+| `-r, --region` | Region(s) to search; repeatable (default: all deployed regions) |
+| `-c, --count` | Instances per block (default: 1) |
+| `--duration-days` | Single target duration in days |
+| `--duration-hours` | Single target duration in hours |
+| `--min-duration-days` / `--max-duration-days` | Duration range bounds, in days |
+| `--min-duration-hours` / `--max-duration-hours` | Duration range bounds, in hours |
+| `--earliest-start` | Earliest block start (`YYYY-MM-DD` or ISO datetime) |
+| `--latest-start` | Latest block start (`YYYY-MM-DD` or ISO datetime) |
+| `--find-longest` | Sweep the duration ladder and surface the longest available block |
+
+**Allowed Capacity Block durations.** AWS accepts reservation durations in **1-day increments up to 14 days, then 7-day increments up to 182 days** (26 weeks). Because the `DescribeCapacityBlockOfferings` API requires an exact duration per query, a duration *range* is expanded to those discrete valid values automatically (e.g. `1`–`63` days probes 1…14, 21, 28, …, 63 days). All Capacity Blocks end at 11:30 UTC, so a returned block's actual duration is the closest valid match to your request and is reported per offering.
+
+**Instance-type notes.** Friendly names are normalized (`p6-b200` → `p6-b200.48xlarge`). `p6-b300` is **not** a standalone EC2 instance type — B300 (Blackwell Ultra) ships as **P6e-GB300 UltraServers**, so it is flagged rather than silently returning nothing. Unknown/typo'd types are reported as invalid (distinct from a valid type that simply has zero offerings).
+
+```bash
+# Bound the motivating scenario in a single call:
+gco capacity find-blocks -i p6-b200.48xlarge \
+  -r us-east-1 -r us-east-2 -r us-west-2 -r eu-west-1 \
+  --min-duration-days 1 --max-duration-days 63 \
+  --earliest-start 2026-07-01 --latest-start 2026-07-10
+
+# A single 14-day block in one region
+gco capacity find-blocks -i p5.48xlarge -r us-east-1 --duration-days 14
+
+# Longest block available in the next window
+gco capacity find-blocks -i p5.48xlarge -r us-east-1 --find-longest
+
+# JSON for scripting (consolidated report with ranked offerings)
+gco --output json capacity find-blocks -i p6-b200 -r us-east-1 --max-duration-days 7
 ```
 
 #### `gco capacity reserve`

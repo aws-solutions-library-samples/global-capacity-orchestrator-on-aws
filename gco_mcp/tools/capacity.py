@@ -147,30 +147,116 @@ def list_reservations(
 def reservation_check(
     instance_type: str,
     region: str | None = None,
+    regions: list[str] | None = None,
     count: int = 1,
     include_blocks: bool = True,
     block_duration: int = 24,
+    block_duration_days: int | None = None,
+    earliest_start: str | None = None,
+    latest_start: str | None = None,
 ) -> str:
-    """Check reservation availability and Capacity Block offerings.
+    """Check ODCR and Capacity Block availability for an instance type.
 
-    Checks both existing ODCRs and purchasable Capacity Blocks for ML
-    workloads. Capacity Blocks provide guaranteed GPU capacity for a
-    fixed duration at a known price.
+    Checks existing On-Demand Capacity Reservations and purchasable Capacity
+    Blocks for ML. By default it searches a 24h block soonest-available, but you
+    can widen the search: pass several regions to fan out in parallel, set a
+    start-date window (earliest_start / latest_start) to ask for blocks starting
+    near a date, and set the block duration in hours or days. For a full
+    duration-range sweep that returns one ranked, de-duplicated report, use
+    find_capacity_blocks instead.
 
     Args:
-        instance_type: GPU instance type (e.g. p4d.24xlarge, p5.48xlarge).
-        region: Specific region to check (omit for all deployed regions).
+        instance_type: GPU instance type (e.g. p4d.24xlarge, p5.48xlarge, p6-b200).
+        region: A single region to check (kept for backward compatibility).
+        regions: Explicit list of regions to check in parallel (any regions, not
+            just deployed). Takes precedence over region.
         count: Minimum number of instances needed.
         include_blocks: Whether to include Capacity Block offerings.
-        block_duration: Capacity Block duration in hours.
+        block_duration: Capacity Block duration in hours (default 24).
+        block_duration_days: Capacity Block duration in days (overrides hours).
+        earliest_start: Earliest block start date (YYYY-MM-DD or ISO datetime).
+        latest_start: Latest block start date (YYYY-MM-DD or ISO datetime).
     """
     args = ["capacity", "reservation-check", "-i", instance_type, "-c", str(count)]
-    if region:
-        args += ["-r", region]
+    for r in regions or ([region] if region else []):
+        args += ["-r", r]
     if not include_blocks:
         args.append("--no-blocks")
     if block_duration != 24:
         args += ["--block-duration", str(block_duration)]
+    if block_duration_days is not None:
+        args += ["--block-duration-days", str(block_duration_days)]
+    if earliest_start:
+        args += ["--earliest-start", earliest_start]
+    if latest_start:
+        args += ["--latest-start", latest_start]
+    return cli_runner._run_cli(*args)
+
+
+@mcp.tool(tags={"safe", "capacity"})
+@audit_logged
+def find_capacity_blocks(
+    instance_type: str,
+    regions: list[str] | None = None,
+    count: int = 1,
+    duration_days: int | None = None,
+    duration_hours: int | None = None,
+    min_duration_days: int | None = None,
+    max_duration_days: int | None = None,
+    min_duration_hours: int | None = None,
+    max_duration_hours: int | None = None,
+    earliest_start: str | None = None,
+    latest_start: str | None = None,
+    find_longest: bool = False,
+) -> str:
+    """Find EC2 Capacity Blocks across regions x durations x a start-date window.
+
+    This is the one-call sweep for "where and when can I get N of this GPU
+    instance for D days?". It searches every requested region and every valid
+    Capacity Block duration in the range, in parallel, then returns a single
+    consolidated, de-duplicated, ranked report (cheapest per-GPU-hour first) with
+    per-hour and per-GPU-hour pricing and the longest available block.
+
+    AWS allows durations in 1-day increments up to 14 days, then 7-day increments
+    up to 182 days; a duration range is expanded to those discrete values
+    automatically. Friendly names are normalized (p6-b200 -> p6-b200.48xlarge),
+    and UltraServer-only families (p6-b300 / P6e-GB300) are flagged rather than
+    silently returning nothing.
+
+    Args:
+        instance_type: GPU instance type or alias (e.g. p6-b200, p5.48xlarge).
+        regions: Regions to search (any regions; defaults to deployed regions).
+        count: Instances per block.
+        duration_days / duration_hours: A single target duration.
+        min_duration_days / max_duration_days: Duration range bounds in days.
+        min_duration_hours / max_duration_hours: Duration range bounds in hours.
+        earliest_start: Earliest block start (YYYY-MM-DD or ISO datetime).
+        latest_start: Latest block start (YYYY-MM-DD or ISO datetime).
+        find_longest: Sweep the duration ladder and surface the longest block.
+    """
+    args = ["capacity", "find-blocks", "-i", instance_type]
+    for r in regions or []:
+        args += ["-r", r]
+    if count != 1:
+        args += ["-c", str(count)]
+    if duration_days is not None:
+        args += ["--duration-days", str(duration_days)]
+    if duration_hours is not None:
+        args += ["--duration-hours", str(duration_hours)]
+    if min_duration_days is not None:
+        args += ["--min-duration-days", str(min_duration_days)]
+    if max_duration_days is not None:
+        args += ["--max-duration-days", str(max_duration_days)]
+    if min_duration_hours is not None:
+        args += ["--min-duration-hours", str(min_duration_hours)]
+    if max_duration_hours is not None:
+        args += ["--max-duration-hours", str(max_duration_hours)]
+    if earliest_start:
+        args += ["--earliest-start", earliest_start]
+    if latest_start:
+        args += ["--latest-start", latest_start]
+    if find_longest:
+        args.append("--find-longest")
     return cli_runner._run_cli(*args)
 
 

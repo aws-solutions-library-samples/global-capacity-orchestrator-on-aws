@@ -22,6 +22,8 @@ class _EnabledConfig(MockConfigLoader):
             "enabled": True,
             "retention_days": 90,
             "poll_interval_minutes": 15,
+            "capacity_block_duration_hours": 24,
+            "capacity_block_long_duration_hours": 1512,
             "watch_instance_types": ["g5.xlarge", "p5.48xlarge"],
             "enabled_regions": [],
         }
@@ -66,6 +68,13 @@ class TestCapacityPollerAddOnEnabled:
         lambdas = _capacity_lambdas(template)
         assert len(lambdas) == 1
         assert next(iter(lambdas.values()))["Properties"]["Handler"] == "handler.lambda_handler"
+
+    def test_poller_lambda_has_block_duration_env(self):
+        template = _synth(_EnabledConfig())
+        lambdas = _capacity_lambdas(template)
+        env = next(iter(lambdas.values()))["Properties"]["Environment"]["Variables"]
+        assert env["CAPACITY_BLOCK_DURATION_HOURS"] == "24"
+        assert env["CAPACITY_BLOCK_LONG_DURATION_HOURS"] == "1512"
 
     def test_schedule_rule_present(self):
         template = _synth(_EnabledConfig())

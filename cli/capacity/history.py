@@ -17,8 +17,11 @@ Table schema (a single global table; see GCOGlobalStack._create_capacity_poller)
     (cross-region trend queries for one instance type)
 
 Item attributes: instance_type, region, timestamp, spot_score, spot_price,
-az_count, queue_depth, capacity_blocks_available, capacity_blocks_total, and
-ttl (epoch seconds for DynamoDB auto-expiry, default 90 days).
+az_count, queue_depth, capacity_blocks_available, capacity_blocks_total,
+capacity_blocks_long_available, capacity_blocks_long_total, and ttl (epoch
+seconds for DynamoDB auto-expiry, default 90 days). The ``*_long_*`` fields
+track availability of extended-term blocks (the poller's long-duration probe,
+default 63 days) separately from the soonest short block.
 
 Numbers are stored as DynamoDB Decimal (the resource API rejects float) and
 re-hydrated to int/float on read. The poller Lambda is self-contained and
@@ -46,6 +49,9 @@ GSI_BY_TIMESTAMP = "by-timestamp"
 
 # The numeric metrics tracked per snapshot. Statistics and temporal-pattern
 # aggregation iterate over this tuple, so adding a metric is a one-line change.
+# The ``capacity_blocks_long_*`` pair mirrors the short-duration block metrics
+# but for the poller's long-duration probe (default 63 days), so trend/alerting
+# queries can distinguish soonest-available blocks from extended-term ones.
 METRIC_FIELDS: tuple[str, ...] = (
     "spot_score",
     "spot_price",
@@ -53,6 +59,8 @@ METRIC_FIELDS: tuple[str, ...] = (
     "queue_depth",
     "capacity_blocks_available",
     "capacity_blocks_total",
+    "capacity_blocks_long_available",
+    "capacity_blocks_long_total",
 )
 
 # weekday() -> name. Monday is 0, matching datetime.weekday().

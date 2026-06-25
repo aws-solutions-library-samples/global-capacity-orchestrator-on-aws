@@ -109,6 +109,33 @@ class TestPutSnapshot:
         assert item["spot_score"] == 8
         assert "queue_depth" not in item
 
+    def test_put_snapshot_persists_long_block_metrics(self, store, mock_table):
+        now = datetime(2025, 6, 23, 14, 0, 0, tzinfo=UTC)
+        store.put_snapshot(
+            "p5.48xlarge",
+            "us-east-1",
+            {
+                "capacity_blocks_available": 3,
+                "capacity_blocks_total": 6,
+                "capacity_blocks_long_available": 1,
+                "capacity_blocks_long_total": 2,
+            },
+            now=now,
+        )
+        item = mock_table.put_item.call_args.kwargs["Item"]
+        assert item["capacity_blocks_long_available"] == 1
+        assert item["capacity_blocks_long_total"] == 2
+
+    def test_get_statistics_includes_long_block_metric(self, store, monkeypatch):
+        trend = [
+            {"capacity_blocks_long_available": 0},
+            {"capacity_blocks_long_available": 2},
+        ]
+        monkeypatch.setattr(store, "get_trend", lambda *a, **k: trend)
+        stats = store.get_statistics("p5.48xlarge", "us-east-1")
+        assert "capacity_blocks_long_available" in stats["metrics"]
+        assert stats["metrics"]["capacity_blocks_long_available"]["max"] == 2
+
 
 class TestRecord:
     def test_record_writes_one_item(self, store, mock_table):

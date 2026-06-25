@@ -20,7 +20,7 @@ flag-to-tool mapping.
 | File | Tools | Description |
 |------|-------|-------------|
 | `jobs.py` | 9 | `list_jobs`, `submit_job_sqs`, `submit_job_api`, `get_job`, `get_job_logs`, `get_job_events`, `delete_job` (gated), `cluster_health`, `queue_status` |
-| `capacity.py` | 12 | `check_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `capacity_history_show`, `capacity_history_stats`, `capacity_history_patterns`, `capacity_predict`, `reserve_capacity` (gated) |
+| `capacity.py` | 13 | `check_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `find_capacity_blocks`, `capacity_history_show`, `capacity_history_stats`, `capacity_history_patterns`, `capacity_predict`, `reserve_capacity` (gated) |
 | `inference.py` | 19 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `mooncake_topology_status`, `populate_kv_cache` |
 | `costs.py` | 4 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast` |
 | `stacks.py` | 20 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `valkey_status`, `aurora_status`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated) |
@@ -70,9 +70,10 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `capacity_predict` | Predict the best time to acquire capacity from historical patterns (Bedrock). |
 | `capacity_status` | View capacity status across all deployed regions. |
 | `check_capacity` | Check spot and on-demand capacity for a specific instance type. |
+| `find_capacity_blocks` | Find EC2 Capacity Blocks across regions x durations x a start-date window in one consolidated, ranked, de-duplicated report. |
 | `list_reservations` | List On-Demand Capacity Reservations (ODCRs) across regions. |
 | `recommend_region` | Get optimal region recommendation based on capacity. |
-| `reservation_check` | Check reservation availability and Capacity Block offerings. |
+| `reservation_check` | Check ODCR and Capacity Block availability (multi-region, date-window, duration in hours or days). |
 | `reserve_capacity` | Purchase a Capacity Block offering by its ID. |
 | `spot_prices` | Get current spot prices for an instance type. |
 
