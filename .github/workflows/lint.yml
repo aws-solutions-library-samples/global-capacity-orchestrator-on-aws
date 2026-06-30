@@ -219,7 +219,7 @@ jobs:
           # NOT installed here — gco/stacks/ is checked in lint-mypy-stacks.
           pip install -e ".[typecheck,mcp]"
       - name: Cache mypy results
-        uses: actions/cache@v6
+        uses: actions/cache@v6.1.0
         with:
           path: .mypy_cache
           key: mypy-strict-${{ hashFiles('pyproject.toml', 'requirements-lock.txt') }}
@@ -241,7 +241,7 @@ jobs:
         run: |
           pip install -e ".[cdk,typecheck]"
       - name: Cache mypy results
-        uses: actions/cache@v6
+        uses: actions/cache@v6.1.0
         with:
           path: .mypy_cache
           key: mypy-stacks-${{ hashFiles('pyproject.toml', 'requirements-lock.txt') }}
@@ -263,7 +263,7 @@ jobs:
         run: |
           pip install -e ".[typecheck]"
       - name: Cache mypy results
-        uses: actions/cache@v6
+        uses: actions/cache@v6.1.0
         with:
           path: .mypy_cache
           key: mypy-lambda-${{ hashFiles('pyproject.toml', 'requirements-lock.txt') }}
