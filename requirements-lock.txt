@@ -217,7 +217,7 @@ jmespath==1.1.0
     # via
     #   boto3
     #   botocore
-joserfc==1.6.4
+joserfc==1.6.7
     # via
     #   authlib
     #   fastmcp-slim
