@@ -67,7 +67,9 @@ def test_gitlab_ci_python_images_match_the_dockerfile_tag():
     assert ref_match, "inference-monitor-dockerfile has no 'FROM python:' line"
     ref_tag = ref_match.group(1)
 
-    ci_tags = set(_CI_IMAGE_PYTHON.findall((REPO_ROOT / ".github" / "legacy" / ".gitlab-ci.yml").read_text()))
+    ci_tags = set(
+        _CI_IMAGE_PYTHON.findall((REPO_ROOT / ".github" / "legacy" / ".gitlab-ci.yml").read_text())
+    )
     assert ci_tags, ".gitlab-ci.yml declares no 'image: python:...' jobs"
     assert ci_tags == {ref_tag}, (
         f".gitlab-ci.yml python images {ci_tags} do not match the Dockerfile tag {ref_tag!r}"
