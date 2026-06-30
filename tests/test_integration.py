@@ -14,6 +14,7 @@ in one place.
 
 import inspect
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -1176,8 +1177,13 @@ class TestDocumentation:
             content = f.read()
 
         assert len(content) > 1000, "README.md should have substantial content"
-        assert "<h1>Global Capacity Orchestrator (GCO)</h1>" in content, (
-            "README.md should have project title"
+        # The H1 wording carries a marketing prefix/suffix on some branches
+        # (e.g. "Automated Deployment of EKS AutoMode Clusters with Global
+        # Capacity Orchestrator (GCO) on AWS"), so assert the project name
+        # appears inside the top-level heading rather than matching an exact
+        # string.
+        assert re.search(r"<h1>[^<]*Global Capacity Orchestrator \(GCO\)[^<]*</h1>", content), (
+            "README.md should have a project-title H1 naming Global Capacity Orchestrator (GCO)"
         )
 
     def test_architecture_doc_exists(self):
