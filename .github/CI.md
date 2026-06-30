@@ -74,7 +74,7 @@ Each file maps to one row in the README badge table.
 | File | Trigger | Purpose |
 |------|---------|---------|
 | `workflows/release.yml` | `workflow_dispatch` | Bump version, tag, create a GitHub Release with auto-generated notes. Uses the built-in `GITHUB_TOKEN` — no PAT required |
-| `workflows/deps-scan.yml` | `cron: 0 9 1 * *` (monthly, UTC) + manual | Check Python / Docker / Helm / EKS-addon versions; open a GitHub issue if drift is found |
+| `workflows/deps-scan.yml` | `cron: 0 9 1 * *` (monthly, UTC) + manual | Check Python / Docker / Helm / EKS-addon / Bedrock-model versions; open a GitHub issue if drift is found |
 | `workflows/cve-scan.yml` | `cron: 0 9 * * 1` (Mondays, UTC) + manual | Re-run trivy against current CVE databases |
 
 ### Naming conventions
@@ -164,6 +164,7 @@ Ecosystems tracked:
 | Helm charts | `lambda/helm-installer/charts.yaml` | Uses `helm show chart` for OCI charts and `helm search repo` for traditional repos |
 | EKS add-ons | `addon_name`/`addon_version` pairs extracted from `gco/stacks/constants.py` | Requires AWS credentials (via OIDC). The script pre-flights `sts get-caller-identity`; without valid creds the add-on section is explicitly **skipped** and the report notes why — everything else still runs |
 | Aurora PostgreSQL engine | `AURORA_POSTGRES_VERSION_DISPLAY` from `gco/stacks/constants.py` | Requires AWS credentials (via OIDC). Queries `rds describe-db-engine-versions` for the latest minor release within the same major line |
+| Bedrock default model | `DEFAULT_BEDROCK_MODEL_ID` from `gco_mcp/mission/sampling.py` (mirrored by `cli/capacity/advisor.py`) | Requires AWS credentials (via OIDC). Lists system-defined inference profiles (`bedrock list-inference-profiles`, pinned to us-east-1) and reports drift when a newer release exists in the *same model family*. The id is a Python constant, so Dependabot never sees it |
 | Pre-commit hooks | `repo:` / `rev:` blocks in `.pre-commit-config.yaml` | Calls `GET /repos/{owner}/{repo}/tags` on GitHub for each hook and reports drift when our pinned `rev:` is older than the highest semver-shaped tag. Unauthenticated; SHA pins and non-GitHub repos are skipped silently |
 | CDK enum constants | `LAMBDA_PYTHON_RUNTIME` and `AURORA_POSTGRES_VERSION` from `gco/stacks/constants.py` | Introspects the installed `aws-cdk-lib` (the `deps-scan` workflow installs the latest) for `aws_lambda.Runtime.PYTHON_X_Y` and `aws_rds.AuroraPostgresEngineVersion.VER_X_Y` and reports drift when our pinned enum is older than the highest member exposed by the library. Skipped with a note when `aws-cdk-lib` isn't importable |
 | Python release | `LAMBDA_PYTHON_RUNTIME` (the major Python version we standardise on across Lambdas) | Queries `https://endoflife.date/api/python.json` for the highest currently-supported stable cycle and reports drift compared to the `LAMBDA_PYTHON_RUNTIME` constant. Public endpoint, no AWS creds |
@@ -209,6 +210,7 @@ The console output shows each surface's drift inline. To trigger the exact workf
 - **New Aurora engine version** — update `AURORA_POSTGRES_VERSION` and `AURORA_POSTGRES_VERSION_DISPLAY` in `gco/stacks/constants.py`.
 - **New pre-commit hook** — nothing to change; `extract_precommit_hooks` walks every `repo:` block in `.pre-commit-config.yaml` and the GitHub-tags lookup picks up the hook automatically (as long as the upstream lives on GitHub and tags semver-shaped releases).
 - **New CDK enum constant** — add the constant in `gco/stacks/constants.py`, then add a comparison block in `dependency-scan.sh`'s "Checking CDK enum constants" section that calls a new `get_latest_<name>` helper from `lib_dependency_scan.sh`. Pattern-match the existing `LAMBDA_PYTHON_RUNTIME` and `AURORA_POSTGRES_VERSION` blocks.
+- **New default Bedrock model** — bump `DEFAULT_BEDROCK_MODEL_ID` in `gco_mcp/mission/sampling.py` and `BedrockCapacityAdvisor.DEFAULT_MODEL` in `cli/capacity/advisor.py` (kept identical by `tests/test_default_bedrock_model_consistency.py`); the "Checking Bedrock default model" section then tracks the new model family automatically. If the new model has no captured scaffold fixture yet, run `python scripts/capture_scaffold_fixtures.py --model <id>`.
 
 #### Failure modes & debugging
 
@@ -257,6 +259,10 @@ To turn the check on without introducing long-lived access keys, configure a Git
      "Statement": [{
        "Effect":   "Allow",
        "Action": [
+         "bedrock:ListFoundationModels",
+         "bedrock:GetFoundationModel",
+         "bedrock:ListInferenceProfiles",
+         "bedrock:GetInferenceProfile",
          "eks:DescribeAddonVersions",
          "eks:DescribeClusterVersions",
          "elasticmapreduce:ListReleaseLabels",

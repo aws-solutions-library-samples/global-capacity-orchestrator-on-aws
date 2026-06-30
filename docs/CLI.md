@@ -3766,7 +3766,7 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_ENABLE_MISSION` | Gate the `gco mission` subcommand group (`true`/`false`). With the flag unset, every subcommand exits 2 with a hint. |
 | `GCO_ENABLE_ALL_TOOLS` | Umbrella flag that satisfies every per-tool gate including `GCO_ENABLE_MISSION`. |
 | `GCO_MISSION_STATE_BACKEND` | Persistence backend for sessions (`filesystem` or `dynamodb`). Unrecognised values fall back to filesystem with a one-line warning. |
-| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the default Bedrock model id used by the CLI sampling backend. |
+| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the default Bedrock model id (Amazon Nova Pro, `us.amazon.nova-pro-v1:0`) used by the CLI sampling backend. See [Customization → Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). |
 | `GCO_MISSION_BEDROCK_REGION` | Override the default Bedrock region (`us-east-1`). |
 
 ## Examples

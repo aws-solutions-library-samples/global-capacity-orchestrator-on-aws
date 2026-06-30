@@ -109,13 +109,16 @@ _DIRECTIVES: tuple[_Directive, ...] = (
 # Pythonic emission shapes. When a new family or size lands in
 # Bedrock, add it here and re-run the capture script.
 _DEFAULT_MODELS: tuple[str, ...] = (
-    # Anthropic family — current default + adjacent sizes for diversity.
+    # Anthropic family — kept for cross-family diversity. NOTE: Anthropic
+    # models require a one-time First-Time-Use (FTU) form per account/org
+    # before first invoke, so they are NOT the GCO default.
     "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
     "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "us.anthropic.claude-opus-4-5-20251101-v1:0",
     "us.anthropic.claude-3-5-haiku-20241022-v1:0",
     "us.anthropic.claude-3-haiku-20240307-v1:0",
-    # Amazon Nova family — every visible CRIS profile.
+    # Amazon Nova family — first-party, no FTU form; nova-pro is the GCO
+    # default (DEFAULT_BEDROCK_MODEL_ID). Every visible CRIS profile.
     "us.amazon.nova-premier-v1:0",
     "us.amazon.nova-pro-v1:0",
     "us.amazon.nova-lite-v1:0",

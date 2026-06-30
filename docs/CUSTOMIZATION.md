@@ -49,6 +49,7 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
 - [Configure Aurora pgvector](#configure-aurora-pgvector)
   - [Using Aurora pgvector in Jobs](#using-aurora-pgvector-in-jobs)
 - [Infrastructure Version Constants](#infrastructure-version-constants)
+- [Bedrock Model Selection](#bedrock-model-selection)
 - [CDK-nag Compliance](#cdk-nag-compliance)
   - [Enabled Frameworks](#enabled-frameworks)
   - [Customizing Suppressions](#customizing-suppressions)
@@ -1353,6 +1354,63 @@ When updating a version:
 4. Redeploy with `gco stacks deploy-all -y`
 
 The monthly `deps-scan` workflow (`.github/scripts/dependency-scan.sh`) checks these constants against the latest available versions and opens a GitHub issue when updates are available.
+
+## Bedrock Model Selection
+
+GCO uses an Amazon Bedrock model for two optional, **advisory** features:
+
+- **Mission sampling** — the goal-directed Mission engine can ask a model for strategy-revision rationales and final-report lessons (`gco mission ...`).
+- **Capacity advisor** — `gco capacity ai-recommend` and `gco capacity predict` send capacity data to a model for a placement/timing recommendation, and the `ai_recommend` MCP tool does the same.
+
+Both default to **Amazon Nova Pro** (`us.amazon.nova-pro-v1:0`). Nova Pro is the default because:
+
+- It is a system-defined cross-Region inference profile that is **enabled by default** in commercial AWS Regions with the standard AWS Marketplace permissions.
+- As a first-party Amazon model it does **not** require the one-time **First-Time-Use (FTU)** form that Anthropic asks each account (or organization) to submit before first invocation — so the advisory paths work on a fresh account with no extra onboarding step.
+
+> These Bedrock features are advisory and degrade gracefully. When no model is reachable (no credentials, model not enabled, or access denied) the Mission engine falls back to its deterministic templates and the capacity advisor surfaces a clear error. Core orchestration never depends on Bedrock.
+
+### Choosing a different model
+
+You may need a specific model for **regulatory, data-residency, model-governance, or cost** reasons — for example an approved-model allowlist, a mandated Region, or a required provider. You can override the default without changing code, at three levels (highest precedence first):
+
+**1. Per command (CLI / MCP)**
+
+```bash
+# Capacity advisor — pass any model or inference-profile id enabled in your account
+gco capacity ai-recommend -w "Fine-tune a 13B model" --model us.anthropic.claude-sonnet-4-5-20250929-v1:0
+gco capacity predict -i p5.48xlarge -r us-east-1 --model eu.amazon.nova-pro-v1:0
+
+# Mission engine
+gco mission start "..." --bedrock-model-id us.meta.llama3-3-70b-instruct-v1:0
+```
+
+The `ai_recommend` MCP tool takes the same override as a `model="..."` argument; omit it to use the default.
+
+**2. Per environment (env vars)** — these apply to the Mission sampling backend:
+
+```bash
+export GCO_MISSION_BEDROCK_MODEL_ID="us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+export GCO_MISSION_BEDROCK_REGION="eu-west-1"   # default: us-east-1
+```
+
+**3. Change the default for everyone** — edit the two constants that pin it. They are deliberately kept identical by a CI test (`tests/test_default_bedrock_model_consistency.py`):
+
+| File | Constant |
+|------|----------|
+| `gco_mcp/mission/sampling.py` | `DEFAULT_BEDROCK_MODEL_ID` |
+| `cli/capacity/advisor.py` | `BedrockCapacityAdvisor.DEFAULT_MODEL` |
+
+Resolution order: per-call flag (`--model` / `--bedrock-model-id` / MCP `model=`) → `GCO_MISSION_BEDROCK_MODEL_ID` (Mission path only) → the pinned default constant.
+
+### What to check when choosing a model
+
+- **Access** — the model (or its cross-Region inference profile) must be enabled in your account and reachable from the configured Region. Third-party models may require AWS Marketplace subscription permissions and, for Anthropic, the FTU form. See the AWS guide on [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html).
+- **Inference profile vs base id** — GCO pins a system-defined **inference profile** id (the `us.` / `eu.` / `apac.` prefix) so requests route across Regions. Prefer a profile id over a bare model id where one exists.
+- **Converse API support** — GCO calls the Bedrock **Converse** API, so the model must support it (the defaults and every entry in the curated set in `scripts/capture_scaffold_fixtures.py` do).
+
+### Staying current
+
+The monthly **deps-scan** workflow compares the pinned default against the newest system-defined inference profile in the *same model family* (for example, a newer Amazon Nova Pro release) and opens a GitHub issue when a newer one is available, so the default never silently falls behind. It uses read-only Bedrock list permissions on the CI OIDC role; see [CI documentation](../.github/CI.md#dependency-scan-script) and `.github/scripts/dependency-scan.sh`.
 
 ## CDK-nag Compliance
 

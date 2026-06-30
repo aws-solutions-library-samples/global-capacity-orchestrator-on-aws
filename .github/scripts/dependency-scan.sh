@@ -15,6 +15,9 @@
 #   - EKS Kubernetes minor from cdk.json (AWS creds)
 #   - Aurora PostgreSQL engine versions (AWS creds)
 #   - EMR Serverless release labels (AWS creds)
+#   - Bedrock default model id from gco_mcp/mission/sampling.py compared
+#     against the newest system-defined inference profile in the same
+#     model family (AWS creds)
 #   - Dockerfile.dev ARG pins (Node LTS major, npm, CDK CLI, kubectl,
 #     AWS CLI v2, Docker CLI, Docker Buildx) — public endpoints, no AWS creds needed
 #   - Pre-commit hook revisions in .pre-commit-config.yaml compared
@@ -489,6 +492,55 @@ EMR_COUNT="$(wc -l < "$EMR_RESULTS" 2>/dev/null | tr -d ' ')"
 [ -z "$EMR_COUNT" ] && EMR_COUNT=0
 
 # ---------------------------------------------------------------------------
+# Bedrock default model (best-effort — requires AWS credentials)
+#
+# Compares the default Bedrock model id pinned in
+# gco_mcp/mission/sampling.py (DEFAULT_BEDROCK_MODEL_ID, mirrored by
+# cli/capacity/advisor.py BedrockCapacityAdvisor.DEFAULT_MODEL) against the
+# newest system-defined inference profile in the SAME model family, as
+# listed by aws bedrock list-inference-profiles. This id lives in a Python
+# constant, so neither Dependabot nor the manifest/Dockerfile sweeps above
+# ever see it.
+#
+# Same-family scoping (see bedrock_model_family) means we only flag a newer
+# release of the same model line (e.g. a newer Amazon Nova Pro) — never a
+# different tier or provider, since switching those is a human decision,
+# not drift. When a newer release is reported, bump DEFAULT_BEDROCK_MODEL_ID
+# (and the mirrored advisor constant), then re-capture the scaffold fixture
+# with scripts/capture_scaffold_fixtures.py.
+#
+# IAM action: bedrock:ListInferenceProfiles. Pinned to us-east-1 (the
+# advisor + Mission sampling default region) regardless of the workflow's
+# configured region. Same credential preflight as the EKS add-on / Aurora /
+# EMR checks.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking Bedrock default model ==="
+
+BEDROCK_MODEL_RESULTS="$(mktemp)"
+BEDROCK_MODEL_SKIP_REASON=""
+CURRENT_BEDROCK_MODEL="$(extract_default_bedrock_model gco_mcp/mission/sampling.py)"
+
+if [ -z "$CURRENT_BEDROCK_MODEL" ]; then
+  BEDROCK_MODEL_SKIP_REASON="Could not read DEFAULT_BEDROCK_MODEL_ID from gco_mcp/mission/sampling.py."
+  echo "  $BEDROCK_MODEL_SKIP_REASON"
+elif ! aws sts get-caller-identity >/dev/null 2>&1; then
+  BEDROCK_MODEL_SKIP_REASON="No AWS credentials available (scan needs bedrock:ListInferenceProfiles). Configure OIDC to enable."
+  echo "  $BEDROCK_MODEL_SKIP_REASON"
+else
+  LATEST_BEDROCK_MODEL="$(get_latest_bedrock_model "$CURRENT_BEDROCK_MODEL" us-east-1)"
+  if [ -n "$LATEST_BEDROCK_MODEL" ] && [ "$CURRENT_BEDROCK_MODEL" != "$LATEST_BEDROCK_MODEL" ] \
+     && [ "$(compare_bedrock_model "$CURRENT_BEDROCK_MODEL" "$LATEST_BEDROCK_MODEL")" = "newer" ]; then
+    echo "  - bedrock default model: ${CURRENT_BEDROCK_MODEL} -> ${LATEST_BEDROCK_MODEL}"
+    echo "DEFAULT_BEDROCK_MODEL_ID|${CURRENT_BEDROCK_MODEL}|${LATEST_BEDROCK_MODEL}" >> "$BEDROCK_MODEL_RESULTS"
+  fi
+fi
+
+BEDROCK_MODEL_COUNT="$(wc -l < "$BEDROCK_MODEL_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$BEDROCK_MODEL_COUNT" ] && BEDROCK_MODEL_COUNT=0
+
+
+# ---------------------------------------------------------------------------
 # Dockerfile.dev ARG pins
 #
 # Checks the tooling versions pinned in ``Dockerfile.dev`` (Node.js LTS
@@ -814,6 +866,11 @@ if [ -n "$EMR_SKIP_REASON" ]; then
 else
   echo "EMR Serverless release:   $EMR_COUNT"
 fi
+if [ -n "$BEDROCK_MODEL_SKIP_REASON" ]; then
+  echo "Bedrock default model:    (skipped)"
+else
+  echo "Bedrock default model:    $BEDROCK_MODEL_COUNT"
+fi
 echo "Dockerfile.dev pins:      $DOCKERFILE_COUNT"
 echo "Pre-commit hooks:         $PRECOMMIT_COUNT"
 if [ -n "$CDK_ENUM_SKIP_REASON" ]; then
@@ -834,7 +891,8 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 0 ] \
    && [ "$DOCKERFILE_COUNT" -eq 0 ] \
    && [ "$PRECOMMIT_COUNT" -eq 0 ] \
    && [ "$CDK_ENUM_COUNT" -eq 0 ] \
-   && [ "$PYTHON_RELEASE_COUNT" -eq 0 ]; then
+   && [ "$PYTHON_RELEASE_COUNT" -eq 0 ] \
+   && [ "$BEDROCK_MODEL_COUNT" -eq 0 ]; then
   echo ""
   SKIP_NOTES=""
   if [ -n "$ADDON_SKIP_REASON" ]; then
@@ -852,6 +910,10 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 0 ] \
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}EMR Serverless skipped: $EMR_SKIP_REASON"
   fi
+  if [ -n "$BEDROCK_MODEL_SKIP_REASON" ]; then
+    [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
+    SKIP_NOTES="${SKIP_NOTES}Bedrock model skipped: $BEDROCK_MODEL_SKIP_REASON"
+  fi
   if [ -n "$CDK_ENUM_SKIP_REASON" ]; then
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}CDK enums skipped: $CDK_ENUM_SKIP_REASON"
@@ -865,7 +927,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 0 ] \
   else
     echo "All dependencies are up to date."
   fi
-  rm -f "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS"
+  rm -f "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS"
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "has_drift=false" >> "$GITHUB_OUTPUT"
   fi
@@ -989,6 +1051,30 @@ fi
     echo ""
   fi
 
+  if [ "$BEDROCK_MODEL_COUNT" -gt 0 ]; then
+    echo "## Bedrock Default Model"
+    echo ""
+    echo "The default Bedrock model id pinned in gco_mcp/mission/sampling.py"
+    echo "(DEFAULT_BEDROCK_MODEL_ID, mirrored by cli/capacity/advisor.py) is"
+    echo "behind a newer system-defined inference profile in the same model"
+    echo "family. Bump the constant in both files, then re-capture the"
+    echo "scaffold fixture (scripts/capture_scaffold_fixtures.py)."
+    echo ""
+    echo "| Constant | Current | Latest |"
+    echo "|----------|---------|--------|"
+    while IFS='|' read -r const cur lat; do
+      echo "| $const | $cur | $lat |"
+    done < "$BEDROCK_MODEL_RESULTS"
+    echo ""
+  fi
+
+  if [ -n "$BEDROCK_MODEL_SKIP_REASON" ]; then
+    echo "## Bedrock Default Model (skipped)"
+    echo ""
+    echo "> $BEDROCK_MODEL_SKIP_REASON"
+    echo ""
+  fi
+
   if [ "$DOCKERFILE_COUNT" -gt 0 ]; then
     echo "## Dockerfile.dev Pins"
     echo ""
@@ -1077,7 +1163,7 @@ fi
   echo "_Automatically created by the \`deps-scan\` workflow._"
 } > "$REPORT_FILE"
 
-rm -f "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS"
+rm -f "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   echo "has_drift=true"            >> "$GITHUB_OUTPUT"

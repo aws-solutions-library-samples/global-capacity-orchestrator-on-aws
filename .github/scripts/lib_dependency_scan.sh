@@ -574,3 +574,157 @@ if m:
     print(m.group(1))
 " "$file" 2>/dev/null
 }
+
+# extract_default_bedrock_model [sampling_py_path]
+#
+# Prints the default Bedrock model id pinned in
+# ``gco_mcp/mission/sampling.py`` as ``DEFAULT_BEDROCK_MODEL_ID`` — the
+# system-defined cross-Region inference-profile id GCO routes its
+# advisory LLM calls to (Mission strategy-revision / final-lessons
+# sampling and, mirrored in ``cli/capacity/advisor.py`` as
+# ``BedrockCapacityAdvisor.DEFAULT_MODEL``, the capacity advisor) when
+# no per-call override is supplied.
+#
+# This id lives in a Python constant, not a Dockerfile/manifest/CDK
+# enum, so none of the other extractors here see it. It feeds the
+# Bedrock-model drift check in dependency-scan.sh, which compares it
+# against the newest profile in the same model family
+# (get_latest_bedrock_model) so a newer release surfaces in the
+# monthly report — the cue to bump the constant (and re-capture the
+# scaffold fixture under tests/fixtures/scaffold_responses/).
+#
+# The regex tolerates the ``: str`` type annotation on the constant.
+# Prints nothing if the file or constant is absent — the caller treats
+# an empty result as "skip", same as the other extractors here.
+extract_default_bedrock_model() {
+  local file="${1:-gco_mcp/mission/sampling.py}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+with open(sys.argv[1]) as f:
+    text = f.read()
+m = re.search(r'^DEFAULT_BEDROCK_MODEL_ID\s*(?::[^=]+)?=\s*\"([^\"]+)\"', text, re.MULTILINE)
+if m:
+    print(m.group(1))
+" "$file" 2>/dev/null
+}
+
+# bedrock_model_family <inference_profile_id>
+#
+# Prints the "model family" key for a Bedrock system-defined inference
+# profile id so two releases of the same model line compare equal on
+# family and differ only on version. The family is the geography +
+# provider + the *alphabetic* tokens of the model name, with every
+# purely-numeric token (model version, generation, date) dropped:
+#
+#   us.amazon.nova-pro-v1:0                       -> us.amazon.nova-pro
+#   us.amazon.nova-2-lite-v1:0                    -> us.amazon.nova-lite
+#   us.anthropic.claude-sonnet-4-5-20250929-v1:0  -> us.anthropic.claude-sonnet
+#
+# Folding the numeric generation token into the version key (rather
+# than the family) is deliberate: it keeps "Nova 1 Pro" and a future
+# "Nova 2 Pro" in the same family so a generation bump is reported as
+# drift, while different tiers (nova-pro vs nova-lite) and providers
+# stay in separate families and are never cross-suggested.
+bedrock_model_family() {
+  python3 -c "
+import re, sys
+mid = sys.argv[1]
+core = re.sub(r'-v\d+:\d+\Z', '', mid)
+parts = core.split('.')
+if len(parts) >= 3:
+    geo, provider, name = parts[0], parts[1], '.'.join(parts[2:])
+elif len(parts) == 2:
+    geo, provider, name = '', parts[0], parts[1]
+else:
+    geo, provider, name = '', '', core
+tokens = [t for t in name.split('-') if t and not t.isdigit()]
+prefix = '.'.join([p for p in (geo, provider) if p])
+print(prefix + ('.' + '-'.join(tokens) if tokens else ''))
+" "$1" 2>/dev/null
+}
+
+# compare_bedrock_model <current_id> <candidate_id>
+#
+# Prints "newer" when candidate is a newer release than current,
+# "same" when equal, "older" otherwise — mirroring compare_semver's
+# contract so the drift check reads the same way. The comparison key
+# is the tuple of every integer in the id, left to right (model
+# version, generation, date, and the trailing ``vMAJOR:MINOR``), so
+# nova-pro-v1:0 (1,0) is older than a hypothetical nova-pro-v2:0 (2,0)
+# and claude-sonnet-4-5-...-v1:0 (4,5,...) is older than a
+# claude-sonnet-4-6-...-v1:0. Callers scope to one family first (see
+# bedrock_model_family); this helper only looks at the integer key.
+compare_bedrock_model() {
+  python3 -c "
+import re, sys
+def key(mid):
+    return [int(n) for n in re.findall(r'\d+', mid)]
+a, b = key(sys.argv[1]), key(sys.argv[2])
+print('same' if a == b else ('newer' if b > a else 'older'))
+" "$1" "$2" 2>/dev/null
+}
+
+# get_latest_bedrock_model <current_id> [region]
+#
+# Prints the newest system-defined inference-profile id in the same
+# model family as <current_id> (see bedrock_model_family), as reported
+# by ``aws bedrock list-inference-profiles --type-equals SYSTEM_DEFINED``.
+# Used by the Bedrock-model drift check to tell whether the pinned
+# DEFAULT_BEDROCK_MODEL_ID has a newer release available.
+#
+# Family scoping keeps the comparison apples-to-apples: a newer Nova
+# Pro is reported against a pinned Nova Pro, but a different tier (Nova
+# Lite, a Claude model, ...) is never suggested as a "newer" default —
+# switching tier/provider is a human decision, not drift.
+#
+# Region defaults to us-east-1 (matches the advisor + Mission sampling
+# default region) regardless of the workflow's configured region, so
+# the us.* cross-Region profiles resolve consistently. Empty output on
+# any failure (no creds, throttling, schema change) — the caller
+# treats an empty result as "skip", same as the other AWS-creds
+# helpers.
+#
+# IAM action: bedrock:ListInferenceProfiles.
+get_latest_bedrock_model() {
+  local current="$1"
+  local region="${2:-us-east-1}"
+  [ -n "$current" ] || return 0
+  aws bedrock list-inference-profiles \
+    --type-equals SYSTEM_DEFINED \
+    --region "$region" \
+    --output json 2>/dev/null \
+  | python3 -c "
+import json, re, sys
+current = sys.argv[1]
+def family(mid):
+    core = re.sub(r'-v\d+:\d+\Z', '', mid)
+    parts = core.split('.')
+    if len(parts) >= 3:
+        geo, provider, name = parts[0], parts[1], '.'.join(parts[2:])
+    elif len(parts) == 2:
+        geo, provider, name = '', parts[0], parts[1]
+    else:
+        geo, provider, name = '', '', core
+    tokens = [t for t in name.split('-') if t and not t.isdigit()]
+    prefix = '.'.join([p for p in (geo, provider) if p])
+    return prefix + ('.' + '-'.join(tokens) if tokens else '')
+def key(mid):
+    return [int(n) for n in re.findall(r'\d+', mid)]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+target = family(current)
+cands = []
+for prof in data.get('inferenceProfileSummaries', []) or []:
+    pid = prof.get('inferenceProfileId', '') or ''
+    if (prof.get('status') or 'ACTIVE') != 'ACTIVE':
+        continue
+    if pid and family(pid) == target:
+        cands.append(pid)
+if cands:
+    cands.sort(key=key)
+    print(cands[-1])
+" "$current" 2>/dev/null
+}

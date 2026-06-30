@@ -280,8 +280,8 @@ def recommend_region(
 @click.option(
     "--model",
     "-m",
-    default="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    help="Bedrock model ID to use",
+    default=None,
+    help="Bedrock model ID to use (default: the advisor's Amazon Nova Pro).",
 )
 @click.option("--raw", is_flag=True, help="Show raw AI response")
 @pass_config
@@ -316,7 +316,7 @@ def ai_recommend(
     REQUIREMENTS:
     - AWS credentials with bedrock:InvokeModel permission
     - The specified Bedrock model must be enabled in your account
-    - Default model: Claude Sonnet 4.5 (anthropic.claude-sonnet-4-5-20250929-v1:0)
+    - Default model: Amazon Nova Pro (us.amazon.nova-pro-v1:0) — a first-party model with no First-Time-Use form
 
     Examples:
         gco capacity ai-recommend --workload "Training a large language model"
@@ -1129,8 +1129,8 @@ def _print_prediction(prediction: Any, raw: bool) -> None:
 @click.option(
     "--model",
     "-m",
-    default="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    help="Bedrock model ID to use",
+    default=None,
+    help="Bedrock model ID to use (default: the advisor's Amazon Nova Pro).",
 )
 @click.option("--raw", is_flag=True, help="Show the raw AI response")
 @pass_config

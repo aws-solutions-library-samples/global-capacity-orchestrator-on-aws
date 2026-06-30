@@ -78,7 +78,7 @@ def ai_recommend(
     min_memory_gb: int = 0,
     fault_tolerance: str = "low",
     max_cost: float | None = None,
-    model: str = "anthropic.claude-sonnet-4-5-20250929-v1:0",
+    model: str | None = None,
 ) -> str:
     """Get AI-powered capacity recommendation using Amazon Bedrock.
 
@@ -98,7 +98,11 @@ def ai_recommend(
         min_memory_gb: Minimum GPU memory in GB.
         fault_tolerance: Tolerance for interruptions ("low", "medium", "high").
         max_cost: Maximum acceptable cost per hour in USD.
-        model: Bedrock model ID to use for analysis.
+        model: Bedrock model ID to use for analysis. Omit to use the
+            server default (Amazon Nova Pro, us.amazon.nova-pro-v1:0 — a
+            first-party model with no First-Time-Use form); the CLI and
+            capacity advisor resolve that default, so it lives in one
+            place rather than being duplicated here.
     """
     args = ["capacity", "ai-recommend", "-w", workload]
     if instance_type:
@@ -115,7 +119,7 @@ def ai_recommend(
         args += ["--fault-tolerance", fault_tolerance]
     if max_cost is not None:
         args += ["--max-cost", str(max_cost)]
-    if model != "anthropic.claude-sonnet-4-5-20250929-v1:0":
+    if model:
         args += ["--model", model]
     return cli_runner._run_cli(*args)
 

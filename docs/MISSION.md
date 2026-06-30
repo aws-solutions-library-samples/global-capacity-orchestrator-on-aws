@@ -541,9 +541,9 @@ On success the judge returns the **canonical metrics shape** — the very shape 
 {
   "metrics": {"progress_score": 0.72},
   "rationale": "Two of the three regions report healthy nodepools; the third is still scaling.",
-  "source": "bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+  "source": "bedrock:us.amazon.nova-pro-v1:0",
   "backend_name": "bedrock",
-  "model_id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+  "model_id": "us.amazon.nova-pro-v1:0",
   "rubric_version": "spj-v1",
   "raw_score": 0.72
 }
@@ -805,7 +805,7 @@ Resolution precedence at session start:
 
 Defaults:
 
-- Model — `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Override via `GCO_MISSION_BEDROCK_MODEL_ID` or `--bedrock-model-id`.
+- Model — `us.amazon.nova-pro-v1:0` (Amazon Nova Pro — a first-party model that is enabled by default and needs no First-Time-Use form). Override via `GCO_MISSION_BEDROCK_MODEL_ID` or `--bedrock-model-id`; see [Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection).
 - Region — `us-east-1`. Override via `GCO_MISSION_BEDROCK_REGION`.
 
 Every sampling attempt emits one structured audit event (`sampling_purpose`, `sampling_status`, `sampling_backend`, `sampling_model_id`, `model_output_bytes`, `validation_error`). Sampling rejections (transport errors, malformed JSON, schema mismatch, allowlist or budget violations, AST rejections on proposed scripts) cause an automatic deterministic fallback — the iteration still runs.

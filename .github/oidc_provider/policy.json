@@ -5,6 +5,10 @@
       "Sid": "CIDependencyScan",
       "Effect": "Allow",
       "Action": [
+        "bedrock:ListFoundationModels",
+        "bedrock:GetFoundationModel",
+        "bedrock:ListInferenceProfiles",
+        "bedrock:GetInferenceProfile",
         "eks:DescribeAddonVersions",
         "eks:DescribeClusterVersions",
         "elasticmapreduce:ListReleaseLabels",

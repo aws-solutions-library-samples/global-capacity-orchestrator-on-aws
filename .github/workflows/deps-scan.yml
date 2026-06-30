@@ -14,6 +14,9 @@
 #     via OIDC; falls back gracefully when no creds are configured)
 #   - Aurora PostgreSQL engine versions (AWS creds via OIDC)
 #   - EMR Serverless release labels (AWS creds via OIDC)
+#   - Bedrock default model id from gco_mcp/mission/sampling.py compared
+#     against the newest system-defined inference profile in the same
+#     model family (AWS creds via OIDC)
 #   - Dockerfile.dev ARG pins (NODE_MAJOR, NPM_VERSION, CDK_VERSION,
 #     KUBECTL_VERSION, AWSCLI_VERSION, DOCKER_VERSION, BUILDX_VERSION) — public endpoints,
 #     no AWS creds needed

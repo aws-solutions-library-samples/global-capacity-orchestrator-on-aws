@@ -991,3 +991,174 @@ EOF
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
+
+# ── extract_default_bedrock_model ──────────────────────────────────────
+
+@test "extract_default_bedrock_model: reads the pinned id from sampling.py" {
+    run extract_default_bedrock_model "gco_mcp/mission/sampling.py"
+    [ "$status" -eq 0 ]
+    # A system-defined inference-profile id: geography.provider.model-vMAJOR:MINOR.
+    [ -n "$output" ]
+    [[ "$output" == *"."* ]]
+    [[ "$output" == *":"* ]]
+}
+
+@test "extract_default_bedrock_model: returns the exact pinned constant value" {
+    # Pin the helper output against the source of truth via an
+    # independent regex (mirroring the constant's real ``: str``
+    # annotation) so any drift between the two surfaces here.
+    expected="$(python3 -c '
+import re
+with open("gco_mcp/mission/sampling.py") as f:
+    m = re.search(r"DEFAULT_BEDROCK_MODEL_ID\s*(?::[^=]+)?=\s*\"([^\"]+)\"", f.read())
+print(m.group(1) if m else "")
+')"
+    [ -n "$expected" ]
+    run extract_default_bedrock_model "gco_mcp/mission/sampling.py"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$expected" ]
+}
+
+@test "extract_default_bedrock_model: parses the constant from a fixture (with : str annotation)" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+# comment
+DEFAULT_BEDROCK_MODEL_ID: str = "us.amazon.nova-pro-v1:0"
+EOF
+    run extract_default_bedrock_model "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$output" = "us.amazon.nova-pro-v1:0" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_default_bedrock_model: empty when the constant is absent" {
+    tmpfile="$(mktemp)"
+    echo "no model constant here" > "$tmpfile"
+    run extract_default_bedrock_model "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_default_bedrock_model: empty when file is missing" {
+    run extract_default_bedrock_model "/nonexistent/sampling.py"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# ── bedrock_model_family ────────────────────────────────────────────
+
+@test "bedrock_model_family: Nova Pro keeps the tier, drops the version" {
+    result="$(bedrock_model_family "us.amazon.nova-pro-v1:0")"
+    [ "$result" = "us.amazon.nova-pro" ]
+}
+
+@test "bedrock_model_family: Nova 2 Lite folds the generation into the version" {
+    # The numeric generation token is dropped from the family so Nova 1
+    # Lite and Nova 2 Lite share a family (and compare by version).
+    result="$(bedrock_model_family "us.amazon.nova-2-lite-v1:0")"
+    [ "$result" = "us.amazon.nova-lite" ]
+}
+
+@test "bedrock_model_family: Claude Sonnet drops the model version and date" {
+    result="$(bedrock_model_family "us.anthropic.claude-sonnet-4-5-20250929-v1:0")"
+    [ "$result" = "us.anthropic.claude-sonnet" ]
+}
+
+@test "bedrock_model_family: different tiers are different families" {
+    a="$(bedrock_model_family "us.amazon.nova-pro-v1:0")"
+    b="$(bedrock_model_family "us.amazon.nova-lite-v1:0")"
+    [ "$a" != "$b" ]
+}
+
+# ── compare_bedrock_model ─────────────────────────────────────────
+
+@test "compare_bedrock_model: v1:0 vs v2:0 is newer" {
+    result="$(compare_bedrock_model "us.amazon.nova-pro-v1:0" "us.amazon.nova-pro-v2:0")"
+    [ "$result" = "newer" ]
+}
+
+@test "compare_bedrock_model: identical ids are the same" {
+    result="$(compare_bedrock_model "us.amazon.nova-pro-v1:0" "us.amazon.nova-pro-v1:0")"
+    [ "$result" = "same" ]
+}
+
+@test "compare_bedrock_model: a newer model-version/date candidate is newer" {
+    result="$(compare_bedrock_model "us.anthropic.claude-sonnet-4-5-20250929-v1:0" "us.anthropic.claude-sonnet-4-6-20251101-v1:0")"
+    [ "$result" = "newer" ]
+}
+
+@test "compare_bedrock_model: an older candidate is older" {
+    result="$(compare_bedrock_model "us.anthropic.claude-sonnet-4-6-20251101-v1:0" "us.anthropic.claude-sonnet-4-5-20250929-v1:0")"
+    [ "$result" = "older" ]
+}
+
+@test "compare_bedrock_model: a later generation is newer (Nova 1 -> Nova 2)" {
+    result="$(compare_bedrock_model "us.amazon.nova-pro-v1:0" "us.amazon.nova-2-pro-v1:0")"
+    [ "$result" = "newer" ]
+}
+
+# ── get_latest_bedrock_model ─────────────────────────────────────
+#
+# The happy path shells out to ``aws bedrock list-inference-profiles``; the
+# BATS suite must not make a real AWS call, so a shim on PATH returns a canned
+# response. This exercises the family filter, the ACTIVE-status filter, and the
+# version ranking without credentials (same shimming pattern the
+# get_latest_precommit_hook_release tests use for curl).
+
+@test "get_latest_bedrock_model: returns the newest ACTIVE profile in the same family" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/aws" <<'SHIM'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"inferenceProfileSummaries":[
+  {"inferenceProfileId":"us.amazon.nova-pro-v1:0","status":"ACTIVE"},
+  {"inferenceProfileId":"us.amazon.nova-pro-v2:0","status":"ACTIVE"},
+  {"inferenceProfileId":"us.amazon.nova-lite-v1:0","status":"ACTIVE"},
+  {"inferenceProfileId":"us.anthropic.claude-sonnet-9-9-20990101-v1:0","status":"ACTIVE"},
+  {"inferenceProfileId":"us.amazon.nova-pro-v9:0","status":"LEGACY"}
+]}
+JSON
+SHIM
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_model "us.amazon.nova-pro-v1:0" us-east-1
+    [ "$status" -eq 0 ]
+    # v2:0 is the newest ACTIVE nova-pro; the LEGACY v9:0 is skipped and
+    # other families (nova-lite, claude) are filtered out.
+    [ "$output" = "us.amazon.nova-pro-v2:0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_model: scopes to the pinned model's family" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/aws" <<'SHIM'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"inferenceProfileSummaries":[
+  {"inferenceProfileId":"us.amazon.nova-pro-v1:0","status":"ACTIVE"},
+  {"inferenceProfileId":"us.anthropic.claude-sonnet-9-9-20990101-v1:0","status":"ACTIVE"}
+]}
+JSON
+SHIM
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_model "us.anthropic.claude-sonnet-4-5-20250929-v1:0" us-east-1
+    [ "$status" -eq 0 ]
+    [ "$output" = "us.anthropic.claude-sonnet-9-9-20990101-v1:0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_model: empty when the aws call fails" {
+    tmpdir="$(mktemp -d)"
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$tmpdir/aws"
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_model "us.amazon.nova-pro-v1:0" us-east-1
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_model: empty for empty input" {
+    run get_latest_bedrock_model ""
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
