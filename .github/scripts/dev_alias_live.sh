@@ -5,9 +5,10 @@
 # gco-dev image.
 #
 # tests/BATS/test_setup_dev_alias.bats mocks the runtimes and only inspects the
-# emitted text. This script closes that gap end to end: it builds the real
-# gco-dev image ("setup GCO"), installs the generated function into a throwaway
-# rc, sources it in a fresh shell, and proves through that function:
+# emitted text. This script closes that gap end to end: it runs
+# scripts/setup-dev-alias.sh to build the real gco-dev image and install the
+# generated function into a throwaway rc, sources it in a fresh shell, and
+# proves through that function:
 #   * `gco --version`                — the real CLI runs (and the arg reaches it)
 #   * `gco dag validate <rel>/ci-dag.yaml` — an offline command that reads files
 #                                      from the mounted workspace via a
@@ -31,7 +32,6 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SETUP="$REPO_ROOT/scripts/setup-dev-alias.sh"
-DOCKERFILE="$REPO_ROOT/Dockerfile.dev"
 
 RUNTIME=""
 MODE="runtime"
@@ -105,27 +105,24 @@ command -v "$RUNTIME" >/dev/null 2>&1 || die "$RUNTIME is not on PATH"
 "$RUNTIME" --version || true
 
 # ---------------------------------------------------------------------------
-# Setup GCO: build (or reuse) the real dev image.
+# Setup GCO: setup-dev-alias.sh builds the dev image and installs the function.
 # ---------------------------------------------------------------------------
+# Building the image is the setup script's own job, so the normal path lets it
+# do exactly that: this is the end-to-end proof that `setup-dev-alias.sh` builds
+# gco-dev *and* wires up the alias in a single run. --skip-build instead reuses
+# an already-built image and tells the script to skip its build.
+rc="$WORK/rc"
 if [ "$SKIP_BUILD" -eq 1 ]; then
-    note "using existing image: $IMAGE (--skip-build)"
+    note "using existing image: $IMAGE (--skip-build); setup-dev-alias.sh --no-build"
     "$RUNTIME" image inspect "$IMAGE" >/dev/null 2>&1 \
         || die "--skip-build set but image '$IMAGE' was not found in $RUNTIME"
+    "$SETUP" --runtime "$RUNTIME" --image "$IMAGE" --no-build --rc "$rc" >/dev/null \
+        || die "setup-dev-alias.sh failed to install the gco function for $RUNTIME"
 else
-    note "setup GCO: build $IMAGE from Dockerfile.dev with $RUNTIME"
-    "$RUNTIME" build -f "$DOCKERFILE" -t "$IMAGE" "$REPO_ROOT" \
-        || die "$RUNTIME failed to build $IMAGE from Dockerfile.dev"
+    note "setup GCO: setup-dev-alias.sh builds $IMAGE from Dockerfile.dev with $RUNTIME and installs the function"
+    "$SETUP" --runtime "$RUNTIME" --image "$IMAGE" --rc "$rc" \
+        || die "setup-dev-alias.sh failed to build $IMAGE / install the gco function for $RUNTIME"
 fi
-
-# ---------------------------------------------------------------------------
-# Generate the gco function into a throwaway rc.
-# ---------------------------------------------------------------------------
-# setup-dev-alias.sh now builds the image itself by default. This harness has
-# already built $IMAGE above (or verified it under --skip-build), so pass
-# --no-build here to avoid a redundant rebuild and keep --skip-build honest.
-note "generate the gco function (setup-dev-alias.sh --runtime $RUNTIME --image $IMAGE --no-build)"
-rc="$WORK/rc"
-"$SETUP" --runtime "$RUNTIME" --image "$IMAGE" --no-build --rc "$rc" >/dev/null
 grep -q '>>> gco >>>' "$rc" || die "setup script did not write a gco function block"
 
 # ---------------------------------------------------------------------------

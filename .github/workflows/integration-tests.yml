@@ -876,10 +876,10 @@ jobs:
 
   # --------------------------------------------------------------------------
   # Dev-onboarding alias live proofs. Each job installs the latest version of a
-  # container runtime, builds the gco-dev image ("setup GCO"), then proves the
-  # `gco` shell function emitted by scripts/setup-dev-alias.sh actually launches
-  # the runtime and runs the real CLI — closing the gap left by the mocked
-  # tests/BATS/test_setup_dev_alias.bats suite. Logic lives in
+  # container runtime, then runs scripts/setup-dev-alias.sh end to end — proving
+  # it builds the gco-dev image AND that the `gco` shell function it emits
+  # actually launches the runtime and runs the real CLI — closing the gap left
+  # by the mocked tests/BATS/test_setup_dev_alias.bats suite. Logic lives in
   # .github/scripts/dev_alias_live.sh so it can be run locally too.
   # --------------------------------------------------------------------------
 
