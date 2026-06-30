@@ -43,9 +43,12 @@ from gco.stacks.regional_stack import GCORegionalStack
 # <pyflowchart-code-diagram> END
 
 
-# AWS Solutions guidance identifier. Every GCO CloudFormation stack description
-# is prefixed with this string so a deployment is attributable to the published
-# guidance (SO9707); each stack's own specific description follows the prefix.
+# AWS Solutions guidance identifier. Only the GCO *global* stack description is
+# prefixed with this string, so a single deployment is attributable to the
+# published guidance (SO9707) through one stack. The guidance crawler counts
+# every stack whose description carries the (SO9707) marker, so prefixing all
+# stacks would over-count one deployment as many. Every other stack keeps just
+# its own specific description (no prefix).
 SOLUTION_ID = "SO9707"
 SOLUTION_DESCRIPTION_PREFIX = (
     f"({SOLUTION_ID}) - Guidance for Automated Deployment of EKS AutoMode Clusters "
@@ -114,7 +117,9 @@ def main() -> None:
         cdk.Tags.of(app).add(key, value)
 
     # Create global stack (Global Accelerator)
-    # Note: Global Accelerator is a global service but needs a "home" region for CloudFormation
+    # Note: Global Accelerator is a global service but needs a "home" region for CloudFormation.
+    # This is the ONLY stack whose description carries the (SO9707) guidance prefix, so the
+    # deployment stays attributable to the published guidance without over-counting (see SOLUTION_ID).
     global_stack = GCOGlobalStack(
         app,
         f"{project_name}-global",
@@ -129,7 +134,7 @@ def main() -> None:
         f"{project_name}-api-gateway",
         global_accelerator_dns=global_stack.accelerator.dns_name,
         env=cdk.Environment(region=api_gateway_region),
-        description=f"{SOLUTION_DESCRIPTION_PREFIX} - Global API Gateway with IAM authentication",
+        description="Global API Gateway with IAM authentication",
     )
     api_gateway_stack.add_dependency(global_stack)
 
@@ -143,7 +148,7 @@ def main() -> None:
             region=region,
             auth_secret_arn=api_gateway_stack.secret.secret_arn,
             env=cdk.Environment(region=region),
-            description=f"{SOLUTION_DESCRIPTION_PREFIX} - Regional resources for {region} - EKS cluster, ALB, and services",
+            description=f"Regional resources for {region} - EKS cluster, ALB, and services",
         )
 
         # Add dependencies
@@ -165,7 +170,7 @@ def main() -> None:
         regional_stacks=regional_stacks,
         api_gateway_stack=api_gateway_stack,
         env=cdk.Environment(region=monitoring_region),
-        description=f"{SOLUTION_DESCRIPTION_PREFIX} - Cross-region monitoring and observability for GCO (Global Capacity Orchestrator on AWS)",
+        description="Cross-region monitoring and observability for GCO (Global Capacity Orchestrator on AWS)",
     )
 
     # Add dependencies on all regional stacks
@@ -191,7 +196,7 @@ def main() -> None:
             f"{project_name}-analytics",
             config=config,
             env=cdk.Environment(region=api_gateway_region),
-            description=f"{SOLUTION_DESCRIPTION_PREFIX} - Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)",
+            description="Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)",
         )
         analytics_stack.add_dependency(global_stack)
 

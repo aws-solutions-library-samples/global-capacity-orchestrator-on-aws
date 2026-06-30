@@ -60,13 +60,37 @@ gco stacks deploy-all -y      # stand up every region defined in cdk.json
 gco stacks destroy-all -y     # destroy every stack across every region — no orphaned resources
 ```
 
-**Recommended: run everything from the dev container.** GCO pins exact versions of a lot of Python packages (CDK, AWS SDKs, FastAPI, mypy, Ruff, etc.), and installing them on top of an existing Python environment is the most common source of "it doesn't install" reports. The dev container ships a fully resolved environment (Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, Docker CLI + Buildx, all Python deps) so you skip the whole problem. Buildx is included so the multi-arch image mirror and `linux/amd64` asset builds that `gco stacks deploy-all` performs work out of the box on Apple Silicon (arm64).
+**Recommended: run everything from the dev container.** GCO pins exact versions of a lot of Python packages (CDK, AWS SDKs, FastAPI, mypy, Ruff, etc.), and installing them on top of an existing Python environment is the most common source of "it doesn't install" reports. The dev container ships a fully resolved environment (Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, Docker CLI + Buildx, all Python deps) so you skip the whole problem.
+
+**Build the image once, then let the setup script wire up a `gco` command for you.** You shouldn't hand-write `docker run …` invocations or live inside an interactive container shell — `scripts/setup-dev-alias.sh` does the wiring so `gco` runs straight from your normal shell:
 
 ```bash
 git clone git@github.com:awslabs/global-capacity-orchestrator-on-aws.git
 cd global-capacity-orchestrator-on-aws
 
-docker build -f Dockerfile.dev -t gco-dev .
+docker build -f Dockerfile.dev -t gco-dev .   # one-time image build
+./scripts/setup-dev-alias.sh                  # install the `gco` shell function
+source ~/.zshrc                               # or ~/.bashrc — the script prints which file it updated
+```
+
+`setup-dev-alias.sh` detects your container runtime (Docker, Finch, or Podman), wires up the correct socket pass-through for it, and installs an idempotent `gco` shell *function* (not a bare alias, so arguments and pipes forward correctly and a TTY is attached only when one is present) into your profile. From then on, run GCO straight from your repo checkout — each command executes inside the dev container against your current directory:
+
+```bash
+gco --help                # explore every command
+gco stacks deploy-all -y  # stand up every region defined in cdk.json
+gco stacks destroy-all -y # tear it all down
+```
+
+Re-run the script whenever you switch runtimes, or use `--print` to preview the function, `--runtime <name>` to force one, and `--rc <path>` to target a specific profile.
+
+The function shares your host Docker socket with every `gco` call, and `gco stacks deploy-all` uses it for much more than bundling Lambda assets: through your host Docker daemon it builds and bundles the Lambda function assets (as `linux/amd64`, cross-built via Buildx so this works on Apple Silicon / arm64) and — when the Volcano image mirror is enabled in `cdk.json` — mirrors third-party images such as the Volcano scheduler from Docker Hub into your ECR before the Helm install runs. The same socket also backs `gco images build` / `push`. See [Prerequisites](#prerequisites) for Colima/Finch socket paths and the security note about host-socket pass-through. *Finch users:* Finch runs in its own VM with no host Docker socket to share, so the function omits the socket mount — everyday commands work as-is, while build-heavy ones like `deploy-all` run on the host with Finch as the CDK builder.
+
+<details>
+<summary>Prefer an interactive container shell instead?</summary>
+
+You can also drop straight into the dev container and run `gco` from inside it — handy for ad-hoc tools and exploration. The `-v /var/run/docker.sock:/var/run/docker.sock` mount gives the container's Docker CLI access to your host daemon for the asset builds, image mirroring, and bundling described above:
+
+```bash
 docker run -it --rm \
   -v ~/.aws:/root/.aws:ro \
   -v $(pwd):/workspace \
@@ -75,24 +99,7 @@ docker run -it --rm \
   gco-dev
 ```
 
-The `docker.sock` mount lets `gco stacks deploy-all` bundle Lambda assets through your host Docker daemon. See [Prerequisites](#prerequisites) for Colima/Finch socket paths and the security note about host-socket pass-through.
-
-**Run `gco` straight from your shell — no interactive session needed.** Prefer not to drop into the container every time? After building the image once, run the setup script. It detects your container runtime (Docker, Finch, or Podman), wires up the right socket pass-through for it, and installs an idempotent `gco` shell function into your profile (`~/.zshrc` or `~/.bashrc`):
-
-```bash
-./scripts/setup-dev-alias.sh
-source ~/.zshrc   # or ~/.bashrc — the script prints which file it updated
-```
-
-Now run GCO from your repo checkout exactly as the docs show it — each command runs inside the dev container against your current directory:
-
-```bash
-gco --help                # explore every command
-gco stacks deploy-all -y  # stand up every region defined in cdk.json
-gco stacks destroy-all -y # tear it all down
-```
-
-The script installs a shell *function* (not a bare alias) so arguments and pipes forward correctly and a TTY is attached only when one is present. Re-run it whenever you switch runtimes, or use `--print` to preview the function, `--runtime <name>` to force one, and `--rc <path>` to target a specific profile. *Finch users:* Finch runs in its own VM with no host Docker socket to share, so the function omits the socket mount — everyday commands work as-is, while build-heavy ones like `deploy-all` run on the host with Finch as the builder (see the dev-container note above).
+</details>
 
 <details>
 <summary>Prefer to install on your host? (advanced — the dev container is recommended)</summary>
@@ -157,25 +164,21 @@ Running GPU workloads at scale is hard. You need to find regions with available 
 
 The fastest, most reliable path is the dev container — it sidesteps the dependency-conflict issues that come with installing GCO's pinned Python packages on top of your existing Python environment.
 
-Build the dev container (Python, Node.js, CDK, kubectl, and the AWS CLI are all pinned and pre-installed), then drop into a shell with the `gco` CLI already on the path:
+Build the image once (Python, Node.js, CDK, kubectl, and the AWS CLI are all pinned and pre-installed), then run the setup script so `gco` works straight from your shell — no need to hand-write `docker run …` or stay inside an interactive container:
 
 ```bash
-docker build -f Dockerfile.dev -t gco-dev .
-docker run -it --rm \
-  -v ~/.aws:/root/.aws:ro \
-  -v $(pwd):/workspace \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -w /workspace \
-  gco-dev
+docker build -f Dockerfile.dev -t gco-dev .   # one-time image build
+./scripts/setup-dev-alias.sh                  # install the `gco` shell function
+source ~/.zshrc                               # or ~/.bashrc — the script prints which file it updated
 ```
 
-From inside the container, deploy everything — CDK bootstrap runs automatically for every region defined in `cdk.json`:
+Then deploy everything — CDK bootstrap runs automatically for every region defined in `cdk.json`:
 
 ```bash
 gco stacks deploy-all -y
 ```
 
-If you'd rather install on your host, use a clean virtual environment or pipx — see the [Prerequisites](#prerequisites) and [QUICKSTART.md](QUICKSTART.md) for the details and known caveats.
+Prefer an interactive container shell, or want to install on your host instead? See the [Prerequisites](#prerequisites) and [QUICKSTART.md](QUICKSTART.md) for those options and known caveats.
 
 > **Heads up — Helm charts finish installing in the background.** When `deploy-all` reports the cluster `CREATE_COMPLETE`, the scheduler/operator Helm charts (KEDA, Volcano, KubeRay, cert-manager, Kueue, …) have only been *kicked off*; they converge asynchronously and can take **10–30+ minutes** to all become ready. This is intentional — a slow chart never rolls back the cluster. Track progress with `gco stacks addons status -r <region>` and re-converge any failures with `gco stacks addons install -r <region>`. See [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md#helm-chart-configuration).
 
@@ -476,7 +479,7 @@ docker build -f Dockerfile.dev -t gco-dev .
 docker run -it --rm -v ~/.aws:/root/.aws:ro -v $(pwd):/workspace -w /workspace gco-dev
 ```
 
-For `gco stacks deploy-all`, `cdk deploy` needs to run Docker to bundle Lambda assets. Mount the host Docker socket so the container's CLI talks to your host daemon (works with Docker Desktop on macOS/Windows, with Docker on Linux, and with Colima on macOS — see `Dockerfile.dev` for Colima-specific socket paths):
+For `gco stacks deploy-all`, the CLI and `cdk deploy` drive Docker for several steps — building and bundling the Lambda function assets (as `linux/amd64`, via Buildx on Apple Silicon), and, when the Volcano image mirror is enabled, mirroring third-party images from Docker Hub into ECR before the Helm install. `setup-dev-alias.sh` already wires the host Docker socket into the `gco` function; if you instead run the container by hand, mount the socket so the container's CLI talks to your host daemon (works with Docker Desktop on macOS/Windows, with Docker on Linux, and with Colima on macOS — see `Dockerfile.dev` for Colima-specific socket paths):
 
 ```bash
 docker run --rm -it \
@@ -513,7 +516,7 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 │   ├── config/                          # Configuration loader with validation
 │   ├── models/                          # Data models for k8s clusters, health monitor, inference monitor and manifest processor
 │   ├── services/                        # K8s services (health monitor, inference monitor, manifest processor, queue processor)
-│   └── stacks/                          # CDK stacks (global, regional, API gateway, monitoring)
+│   └── stacks/                          # CDK stacks (global, API gateway, regional, regional API gateway, monitoring, analytics)
 │       └── constants.py                 # Pinned versions: EKS addons, Lambda runtime, Aurora engine
 │
 ├── lambda/                              # Lambda functions
