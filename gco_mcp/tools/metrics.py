@@ -43,7 +43,7 @@ from typing import Any
 
 import cli_runner
 from audit import audit_logged
-from feature_flags import is_enabled
+from feature_flags import FLAG_LOCAL_METRICS, is_enabled
 from server import mcp
 
 # The pure ``metric_readers`` package lives under ``gco_mcp/`` alongside this
@@ -459,7 +459,7 @@ async def metrics_from_shared_storage_file(
 #
 # This reader is the deliberate exception to the default-on rule: it reads the
 # MCP host's *local* filesystem, a real security concern even for a read-only
-# tool, so its decorator is wrapped in ``if is_enabled("GCO_ENABLE_LOCAL_METRICS")``
+# tool, so its decorator is wrapped in ``if is_enabled(FLAG_LOCAL_METRICS)``
 # (mirroring the module-body gate in ``gco_mcp/tools/mission.py``). With the flag
 # unset the decorator never fires and FastMCP never sees the tool. The
 # gate is evaluated **only** through ``feature_flags.is_enabled`` — never by
@@ -494,7 +494,7 @@ def _read_local_file(resolved_path: Path, path: str, max_bytes: int) -> bytes:
         return handle.read()
 
 
-if is_enabled("GCO_ENABLE_LOCAL_METRICS"):
+if is_enabled(FLAG_LOCAL_METRICS):
 
     @mcp.tool(tags={"safe", "metrics"})
     @audit_logged

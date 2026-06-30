@@ -194,7 +194,7 @@ def test_search_tools_filters_by_tag() -> None:
 
 
 def test_always_visible_tools_appear_in_listing() -> None:
-    """Under bm25, ``list_tools()`` includes the five pinned tools, search synthetics, and resource synthetics."""
+    """Under bm25, ``list_tools()`` includes the seven pinned tools, search synthetics, and resource synthetics."""
     env = {"GCO_MCP_TOOL_SEARCH": "bm25"}
     for var in ("GCO_ENABLE_ALL_TOOLS", "GCO_ENABLE_DESTRUCTIVE_OPERATIONS"):
         os.environ.pop(var, None)
@@ -208,12 +208,56 @@ def test_always_visible_tools_appear_in_listing() -> None:
         "list_jobs",
         "submit_job_sqs",
         "list_inference_endpoints",
+        "check_capacity",
+        "task_status",
     }
     expected_search_synthetics = {"search_tools", "call_tool"}
     expected_resource_synthetics = {"list_resources", "read_resource"}
 
     missing = (expected_pinned | expected_search_synthetics | expected_resource_synthetics) - names
     assert not missing, f"expected pinned/synthetic tools missing from listing: {missing!r}"
+
+
+def test_every_registered_tool_is_reexported_on_run_mcp() -> None:
+    """Every registered ``@mcp.tool`` is reachable as ``run_mcp.<name>`` and in ``__all__``.
+
+    Guards the ``run_mcp`` re-export surface against drift: a tool module that
+    registers a tool but isn't wired into ``run_mcp``'s imports/``__all__`` would
+    let ``run_mcp.<tool>`` — the backward-compatible access path the test suite
+    and downstream consumers rely on — silently miss. Runs under a clean,
+    flag-free reload so the asserted set is the deterministic default-on
+    surface; gated families have their own per-flag gating suites.
+    """
+    import run_mcp
+
+    clean_env = {
+        "GCO_MCP_TOOL_SEARCH": "off",
+        "GCO_ENABLE_ALL_TOOLS": "",
+        "GCO_ENABLE_CAPACITY_PURCHASE": "",
+        "GCO_ENABLE_MODEL_UPLOAD": "",
+        "GCO_ENABLE_IMAGE_PUBLISH": "",
+        "GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "",
+        "GCO_ENABLE_INFRASTRUCTURE_DESTROY": "",
+        "GCO_ENABLE_DESTRUCTIVE_OPERATIONS": "",
+        "GCO_ENABLE_MISSION": "",
+        "GCO_ENABLE_LOCAL_METRICS": "",
+        "GCO_ENABLE_SEMANTIC_PROGRESS": "",
+    }
+    with patch.dict(os.environ, clean_env, clear=False):
+        mcp_instance = _reload_mcp_with_env(clean_env)
+        # ``_list_tools()`` bypasses the catalog-replacement transform, so this
+        # is the full registered set, not the search-filtered listing.
+        registered = {t.name for t in asyncio.run(mcp_instance._list_tools())}
+
+    # Transform-synthesized tools are not ``@mcp.tool`` functions and are never
+    # re-exported on run_mcp.
+    synthetic = {"search_tools", "call_tool", "list_resources", "read_resource"}
+    registered -= synthetic
+
+    missing_attr = sorted(n for n in registered if not hasattr(run_mcp, n))
+    missing_all = sorted(n for n in registered if n not in run_mcp.__all__)
+    assert not missing_attr, f"registered tools not reachable as run_mcp.<name>: {missing_attr!r}"
+    assert not missing_all, f"registered tools absent from run_mcp.__all__: {missing_all!r}"
 
 
 def test_default_env_uses_bm25() -> None:

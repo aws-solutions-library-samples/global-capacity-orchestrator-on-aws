@@ -21,6 +21,12 @@ FLAG_INFRASTRUCTURE_DEPLOY = "GCO_ENABLE_INFRASTRUCTURE_DEPLOY"
 FLAG_INFRASTRUCTURE_DESTROY = "GCO_ENABLE_INFRASTRUCTURE_DESTROY"
 FLAG_DESTRUCTIVE_OPERATIONS = "GCO_ENABLE_DESTRUCTIVE_OPERATIONS"
 FLAG_MISSION = "GCO_ENABLE_MISSION"
+# Read-only-but-sensitive metric readers: local-filesystem reads and per-call
+# LLM scoring are default-off for security / cost reasons even though they
+# never mutate AWS state. They are full members of the registry like any
+# other per-tool flag.
+FLAG_LOCAL_METRICS = "GCO_ENABLE_LOCAL_METRICS"
+FLAG_SEMANTIC_PROGRESS = "GCO_ENABLE_SEMANTIC_PROGRESS"
 
 # Per-tool flags. The umbrella is intentionally not in this tuple — callers
 # iterating ALL_FLAGS for "what gates this tool?" lookups should not see
@@ -33,6 +39,8 @@ ALL_FLAGS = (
     FLAG_INFRASTRUCTURE_DESTROY,
     FLAG_DESTRUCTIVE_OPERATIONS,
     FLAG_MISSION,
+    FLAG_LOCAL_METRICS,
+    FLAG_SEMANTIC_PROGRESS,
 )
 
 

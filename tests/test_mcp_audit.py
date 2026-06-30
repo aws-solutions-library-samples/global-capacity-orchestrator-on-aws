@@ -872,3 +872,60 @@ class TestStartupLogNewFields:
 
         entry = _last_startup_entry(caplog)
         assert "mission_enabled" not in entry
+
+    def test_emit_startup_log_lists_enabled_per_tool_flags(self, caplog, monkeypatch):
+        """enabled_flags lists every effectively-enabled per-tool flag, sorted.
+
+        Two unrelated per-tool flags are set; both must appear (sorted) so an
+        audit consumer sees the full gated-tool surface for the run from a
+        single line. Every other ALL_FLAGS entry is cleared first so the
+        assertion is exact regardless of the runner's shell.
+        """
+        monkeypatch.delenv("GCO_ENABLE_ALL_TOOLS", raising=False)
+        monkeypatch.delenv("GCO_MCP_TOOL_SEARCH", raising=False)
+        for flag in audit.feature_flags.ALL_FLAGS:
+            monkeypatch.delenv(flag, raising=False)
+        monkeypatch.setenv("GCO_ENABLE_DESTRUCTIVE_OPERATIONS", "true")
+        monkeypatch.setenv("GCO_ENABLE_IMAGE_PUBLISH", "true")
+
+        with caplog.at_level(logging.INFO, logger="gco.mcp.audit"):
+            run_mcp.emit_startup_log()
+
+        entry = _last_startup_entry(caplog)
+        assert entry["enabled_flags"] == [
+            "GCO_ENABLE_DESTRUCTIVE_OPERATIONS",
+            "GCO_ENABLE_IMAGE_PUBLISH",
+        ]
+
+    def test_emit_startup_log_omits_enabled_flags_when_none_set(self, caplog, monkeypatch):
+        """enabled_flags is omitted entirely when no per-tool flag is enabled."""
+        monkeypatch.delenv("GCO_ENABLE_ALL_TOOLS", raising=False)
+        monkeypatch.delenv("GCO_MCP_TOOL_SEARCH", raising=False)
+        for flag in audit.feature_flags.ALL_FLAGS:
+            monkeypatch.delenv(flag, raising=False)
+
+        with caplog.at_level(logging.INFO, logger="gco.mcp.audit"):
+            run_mcp.emit_startup_log()
+
+        entry = _last_startup_entry(caplog)
+        assert "enabled_flags" not in entry
+
+    def test_emit_startup_log_enabled_flags_under_umbrella_lists_all(self, caplog, monkeypatch):
+        """The umbrella flag surfaces the full ALL_FLAGS set in enabled_flags.
+
+        With GCO_ENABLE_ALL_TOOLS=true every per-tool flag is effectively
+        enabled, so enabled_flags equals the sorted ALL_FLAGS — the effective
+        gated-tool surface, reported alongside the all_tools_enabled boolean
+        that explains why.
+        """
+        monkeypatch.delenv("GCO_MCP_TOOL_SEARCH", raising=False)
+        for flag in audit.feature_flags.ALL_FLAGS:
+            monkeypatch.delenv(flag, raising=False)
+        monkeypatch.setenv("GCO_ENABLE_ALL_TOOLS", "true")
+
+        with caplog.at_level(logging.INFO, logger="gco.mcp.audit"):
+            run_mcp.emit_startup_log()
+
+        entry = _last_startup_entry(caplog)
+        assert entry["all_tools_enabled"] is True
+        assert entry["enabled_flags"] == sorted(audit.feature_flags.ALL_FLAGS)

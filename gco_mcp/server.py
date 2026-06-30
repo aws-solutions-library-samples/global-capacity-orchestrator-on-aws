@@ -95,6 +95,7 @@ _ALWAYS_VISIBLE = [
     "list_jobs",
     "submit_job_sqs",
     "list_inference_endpoints",
+    "check_capacity",
     "task_status",
 ]
 if _TOOL_SEARCH == "bm25":

@@ -243,3 +243,42 @@ class TestMissionFlag:
         """
         assert feature_flags.FLAG_MISSION == "GCO_ENABLE_MISSION"
         assert feature_flags.FLAG_MISSION in feature_flags.ALL_FLAGS
+
+
+class TestMetricReaderFlags:
+    """FLAG_LOCAL_METRICS and FLAG_SEMANTIC_PROGRESS are first-class registry members.
+
+    Both gate read-only-but-sensitive metric readers — a local-filesystem
+    read and a per-call LLM judge. They were previously evaluated via bare
+    string literals that bypassed the central registry, so the umbrella
+    override and the startup-log flag report did not cover them. Pinning
+    their constant names and ``ALL_FLAGS`` membership keeps iterating callers
+    (the umbrella truth-table, ``emit_startup_log``) covering them with no
+    further changes — the same contract ``test_flag_mission_in_all_flags_tuple``
+    pins for the Mission flag.
+    """
+
+    def test_local_metrics_flag_constant_and_membership(self) -> None:
+        """FLAG_LOCAL_METRICS is the GCO_ENABLE_LOCAL_METRICS constant and in ALL_FLAGS."""
+        assert feature_flags.FLAG_LOCAL_METRICS == "GCO_ENABLE_LOCAL_METRICS"
+        assert feature_flags.FLAG_LOCAL_METRICS in feature_flags.ALL_FLAGS
+
+    def test_semantic_progress_flag_constant_and_membership(self) -> None:
+        """FLAG_SEMANTIC_PROGRESS is the GCO_ENABLE_SEMANTIC_PROGRESS constant and in ALL_FLAGS."""
+        assert feature_flags.FLAG_SEMANTIC_PROGRESS == "GCO_ENABLE_SEMANTIC_PROGRESS"
+        assert feature_flags.FLAG_SEMANTIC_PROGRESS in feature_flags.ALL_FLAGS
+
+    def test_metric_reader_flags_respect_umbrella(self) -> None:
+        """The umbrella enables both metric-reader flags even when their env vars are unset.
+
+        Confirms the centralisation actually buys the umbrella override: with
+        ``GCO_ENABLE_ALL_TOOLS=true`` and both per-flag env vars popped,
+        ``is_enabled`` returns True for each — the behaviour the bare-literal
+        gates only got because they happened to call ``is_enabled`` too, now
+        guaranteed by registry membership.
+        """
+        with patch.dict(os.environ, {feature_flags.FLAG_ALL_TOOLS: "true"}, clear=False):
+            os.environ.pop(feature_flags.FLAG_LOCAL_METRICS, None)
+            os.environ.pop(feature_flags.FLAG_SEMANTIC_PROGRESS, None)
+            assert feature_flags.is_enabled(feature_flags.FLAG_LOCAL_METRICS) is True
+            assert feature_flags.is_enabled(feature_flags.FLAG_SEMANTIC_PROGRESS) is True

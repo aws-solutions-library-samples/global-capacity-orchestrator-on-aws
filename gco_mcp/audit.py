@@ -317,6 +317,15 @@ def emit_startup_log() -> None:
         entry["all_tools_enabled"] = True
     if feature_flags.is_enabled(feature_flags.FLAG_MISSION):
         entry["mission_enabled"] = True
+    # Every per-tool flag that is effectively enabled (by its own env var or by
+    # the umbrella), so an audit consumer sees the full gated-tool surface for a
+    # run from a single line instead of diffing env vars. Sorted for stable
+    # output and omitted entirely when nothing beyond the default-on set is
+    # enabled. The all_tools_enabled / mission_enabled booleans above are kept
+    # for backward compatibility with existing audit consumers.
+    enabled_flags = sorted(f for f in feature_flags.ALL_FLAGS if feature_flags.is_enabled(f))
+    if enabled_flags:
+        entry["enabled_flags"] = enabled_flags
     tool_search = _resolve_tool_search()
     entry["tool_search"] = tool_search
     if tool_search == "code_mode":

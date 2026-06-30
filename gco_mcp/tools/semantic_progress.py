@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from audit import audit_logged
-from feature_flags import is_enabled
+from feature_flags import FLAG_SEMANTIC_PROGRESS, is_enabled
 from server import mcp
 
 # The pure judge package and the sampling seam live under ``gco_mcp/``; the
@@ -69,7 +69,7 @@ def _try_get_context() -> Any | None:
 # the decorator below never fires and FastMCP never sees the tool, so it does
 # not appear in ``mcp.list_tools()``. The gate is evaluated only through
 # ``feature_flags.is_enabled`` — never by reading ``os.environ`` here.
-if is_enabled("GCO_ENABLE_SEMANTIC_PROGRESS"):
+if is_enabled(FLAG_SEMANTIC_PROGRESS):
 
     @mcp.tool(tags={"safe", "metrics"})
     @audit_logged

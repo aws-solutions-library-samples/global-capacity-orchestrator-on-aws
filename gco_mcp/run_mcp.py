@@ -91,8 +91,8 @@ register_all_resources()
 # contextlib.suppress is the idiomatic "swallow this exception" form.
 import contextlib as _contextlib  # noqa: E402
 import importlib as _importlib  # noqa: E402
-import os as _os  # noqa: E402
 
+import feature_flags as _feature_flags  # noqa: E402
 from tools.analytics import (  # noqa: E402, F401
     analytics_doctor,
     analytics_login_url,
@@ -103,6 +103,10 @@ from tools.analytics import (  # noqa: E402, F401
 )
 from tools.capacity import (  # noqa: E402, F401
     ai_recommend,
+    capacity_history_patterns,
+    capacity_history_show,
+    capacity_history_stats,
+    capacity_predict,
     capacity_status,
     check_capacity,
     find_capacity_blocks,
@@ -134,15 +138,19 @@ from tools.images import (  # noqa: E402, F401
 from tools.inference import (  # noqa: E402, F401
     canary_deploy,
     chat_inference,
+    deploy_disaggregated_inference,
     deploy_inference,
     inference_health,
     inference_status,
     invoke_inference,
     list_endpoint_models,
     list_inference_endpoints,
+    mooncake_topology_status,
+    populate_kv_cache,
     promote_canary,
     rollback_canary,
     scale_inference,
+    set_mooncake_topology,
     start_inference,
     stop_inference,
     update_inference_image,
@@ -156,6 +164,11 @@ from tools.jobs import (  # noqa: E402, F401
     queue_status,
     submit_job_api,
     submit_job_sqs,
+)
+from tools.metrics import (  # noqa: E402, F401
+    metrics_cloudwatch_get,
+    metrics_from_job_logs,
+    metrics_from_shared_storage_file,
 )
 from tools.models import get_model_uri, list_models  # noqa: E402, F401
 from tools.nodepools import (  # noqa: E402, F401
@@ -186,6 +199,7 @@ from tools.storage import (  # noqa: E402, F401
     files_get,
     list_file_systems,
     list_storage_contents,
+    upload_to_regional_bucket,
 )
 from tools.tasks import task_status, task_tail  # noqa: E402, F401
 from tools.templates import (  # noqa: E402, F401
@@ -247,14 +261,38 @@ with _contextlib.suppress(ImportError):
 with _contextlib.suppress(ImportError):
     from tools.models import models_upload  # noqa: F401
 
+# Local-metrics, semantic-progress, and mission gated tools. Each family
+# registers its tools at import time inside an ``if is_enabled(...)`` module-body
+# gate, so when the flag is unset the names don't exist and the import is a
+# no-op. Unlike the gated families above they intentionally carry NO
+# importlib.reload rebind block: nothing accesses them as ``run_mcp.<name>``
+# after a mid-process flag flip, and forcing a reload would re-execute the gated
+# body and re-register the tools on the live singleton (the Mission suite guards
+# against exactly that cross-test registration leak).
+with _contextlib.suppress(ImportError):
+    from tools.metrics import metrics_from_local_file  # noqa: F401
+
+with _contextlib.suppress(ImportError):
+    from tools.semantic_progress import metrics_semantic_progress  # noqa: F401
+
+with _contextlib.suppress(ImportError):
+    from tools.mission import (  # noqa: F401
+        mission_abort,
+        mission_checkpoint,
+        mission_complete,
+        mission_history,
+        mission_iterate,
+        mission_list,
+        mission_resume,
+        mission_start,
+        mission_status,
+    )
+
 # Also make reserve_capacity available after module reload (tests use
-# importlib.reload with GCO_ENABLE_CAPACITY_PURCHASE=true). The umbrella
-# flag GCO_ENABLE_ALL_TOOLS is also honoured here so the per-flag and the
+# importlib.reload with GCO_ENABLE_CAPACITY_PURCHASE=true). is_enabled()
+# folds in the umbrella GCO_ENABLE_ALL_TOOLS so the per-flag and the
 # umbrella both yield the same module-level rebinds.
-if (
-    _os.environ.get("GCO_ENABLE_CAPACITY_PURCHASE", "").lower() == "true"
-    or _os.environ.get("GCO_ENABLE_ALL_TOOLS", "").lower() == "true"
-):
+if _feature_flags.is_enabled(_feature_flags.FLAG_CAPACITY_PURCHASE):
     from tools import capacity as _cap_mod  # noqa: E402
 
     _importlib.reload(_cap_mod)
@@ -264,10 +302,8 @@ if (
 # Reload tools.images when image-publish or destructive flags are set so
 # the gated build/push/delete tools are present after a test
 # ``importlib.reload(run_mcp)`` cycle. Mirrors the reserve_capacity pattern.
-if (
-    _os.environ.get("GCO_ENABLE_IMAGE_PUBLISH", "").lower() == "true"
-    or _os.environ.get("GCO_ENABLE_DESTRUCTIVE_OPERATIONS", "").lower() == "true"
-    or _os.environ.get("GCO_ENABLE_ALL_TOOLS", "").lower() == "true"
+if _feature_flags.is_enabled(_feature_flags.FLAG_IMAGE_PUBLISH) or _feature_flags.is_enabled(
+    _feature_flags.FLAG_DESTRUCTIVE_OPERATIONS
 ):
     from tools import images as _img_mod  # noqa: E402
 
@@ -287,11 +323,9 @@ if (
 # Reload tools.stacks when either infrastructure flag is set so the
 # gated deploy/destroy/bootstrap tools are present after a test
 # ``importlib.reload(run_mcp)`` cycle. Mirrors the reserve_capacity pattern.
-if (
-    _os.environ.get("GCO_ENABLE_INFRASTRUCTURE_DEPLOY", "").lower() == "true"
-    or _os.environ.get("GCO_ENABLE_INFRASTRUCTURE_DESTROY", "").lower() == "true"
-    or _os.environ.get("GCO_ENABLE_ALL_TOOLS", "").lower() == "true"
-):
+if _feature_flags.is_enabled(
+    _feature_flags.FLAG_INFRASTRUCTURE_DEPLOY
+) or _feature_flags.is_enabled(_feature_flags.FLAG_INFRASTRUCTURE_DESTROY):
     from tools import stacks as _stacks_mod  # noqa: E402
 
     _importlib.reload(_stacks_mod)
@@ -308,14 +342,8 @@ if (
 # Destructive-operations and model-upload gated reload blocks — mirror the
 # reserve_capacity pattern so flag-driven tests can do ``importlib.reload(
 # run_mcp)`` and have the gated names appear as module-level attributes.
-_DESTRUCTIVE_FLAG_ON = (
-    _os.environ.get("GCO_ENABLE_DESTRUCTIVE_OPERATIONS", "").lower() == "true"
-    or _os.environ.get("GCO_ENABLE_ALL_TOOLS", "").lower() == "true"
-)
-_MODEL_UPLOAD_FLAG_ON = (
-    _os.environ.get("GCO_ENABLE_MODEL_UPLOAD", "").lower() == "true"
-    or _os.environ.get("GCO_ENABLE_ALL_TOOLS", "").lower() == "true"
-)
+_DESTRUCTIVE_FLAG_ON = _feature_flags.is_enabled(_feature_flags.FLAG_DESTRUCTIVE_OPERATIONS)
+_MODEL_UPLOAD_FLAG_ON = _feature_flags.is_enabled(_feature_flags.FLAG_MODEL_UPLOAD)
 
 if _DESTRUCTIVE_FLAG_ON:
     from tools import jobs as _jobs_mod  # noqa: E402
@@ -417,6 +445,10 @@ __all__ = [
     "bootstrap_cdk",
     "canary_deploy",
     "cancel_queue_job",
+    "capacity_history_patterns",
+    "capacity_history_show",
+    "capacity_history_stats",
+    "capacity_predict",
     "capacity_status",
     "chat_inference",
     "check_capacity",
@@ -435,6 +467,7 @@ __all__ = [
     "delete_template",
     "delete_webhook",
     "deploy_all",
+    "deploy_disaggregated_inference",
     "deploy_inference",
     "deploy_stack",
     "destroy_all",
@@ -491,10 +524,26 @@ __all__ = [
     "list_stacks",
     "list_storage_contents",
     "mcp",
+    "metrics_cloudwatch_get",
+    "metrics_from_job_logs",
+    "metrics_from_local_file",
+    "metrics_from_shared_storage_file",
+    "metrics_semantic_progress",
+    "mission_abort",
+    "mission_checkpoint",
+    "mission_complete",
+    "mission_history",
+    "mission_iterate",
+    "mission_list",
+    "mission_resume",
+    "mission_start",
+    "mission_status",
     "models_upload",
+    "mooncake_topology_status",
     "nodepools_create_odcr",
     "nodepools_describe",
     "nodepools_list",
+    "populate_kv_cache",
     "promote_canary",
     "queue_get",
     "queue_list",
@@ -503,8 +552,10 @@ __all__ = [
     "queue_submit",
     "recommend_region",
     "reservation_check",
+    "reserve_capacity",
     "rollback_canary",
     "scale_inference",
+    "set_mooncake_topology",
     "setup_cluster_access",
     "spot_prices",
     "stack_diff",
@@ -522,6 +573,7 @@ __all__ = [
     "templates_list",
     "templates_run",
     "update_inference_image",
+    "upload_to_regional_bucket",
     "valkey_status",
     "webhooks_create",
     "webhooks_get",
