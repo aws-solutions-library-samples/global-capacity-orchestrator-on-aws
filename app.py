@@ -45,10 +45,7 @@ from gco.stacks.regional_stack import GCORegionalStack
 
 # AWS Solutions guidance identifier. Only the GCO *global* stack description is
 # prefixed with this string, so a single deployment is attributable to the
-# published guidance (SO9707) through one stack. The guidance crawler counts
-# every stack whose description carries the (SO9707) marker, so prefixing all
-# stacks would over-count one deployment as many. Every other stack keeps just
-# its own specific description (no prefix).
+# published guidance (SO9707) through one stack.
 SOLUTION_ID = "SO9707"
 SOLUTION_DESCRIPTION_PREFIX = (
     f"({SOLUTION_ID}) - Guidance for Automated Deployment of EKS AutoMode Clusters "
@@ -117,9 +114,7 @@ def main() -> None:
         cdk.Tags.of(app).add(key, value)
 
     # Create global stack (Global Accelerator)
-    # Note: Global Accelerator is a global service but needs a "home" region for CloudFormation.
-    # This is the ONLY stack whose description carries the (SO9707) guidance prefix, so the
-    # deployment stays attributable to the published guidance without over-counting (see SOLUTION_ID).
+    # Note: Global Accelerator is a global service but needs a "home" region for CloudFormation
     global_stack = GCOGlobalStack(
         app,
         f"{project_name}-global",
