@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1>Global Capacity Orchestrator (GCO)</h1>
+<h1>Automated Deployment of EKS AutoMode Clusters with Global Capacity Orchestrator (GCO) on AWS</h1>
 
 <p><b><i>One API. Every Accelerator. Any Region.</i></b></p>
 
@@ -118,7 +118,7 @@ See the [Quick Start](#quick-start) for the full install + first-job walkthrough
 > **💡 New to the codebase?** GCO ships with the **GCO MCP server** — an [MCP server](gco_mcp/) exposing 98 tools by default (up to 130 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with MCP support (like [Kiro](https://kiro.dev)) and explore GCO conversationally — ask questions about the codebase instead of reading repository files directly: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [gco_mcp/README.md](gco_mcp/README.md).
 
 <details>
-<summary><b>Table of contents</b></summary>
+<summary><b>Table of Contents</b></summary>
 
 - [Why GCO?](#why-gco)
 - [Quick Start](#quick-start)
