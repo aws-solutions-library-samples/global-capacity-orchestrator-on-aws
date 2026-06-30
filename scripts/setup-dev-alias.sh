@@ -10,6 +10,12 @@
 # not. The block is written between marker lines, so re-running this script
 # updates it in place instead of appending duplicates.
 #
+# By default it also builds (or refreshes) the dev image from Dockerfile.dev
+# with the detected runtime before installing the function, so a single run
+# takes a fresh clone all the way to a working `gco`. Re-running always rebuilds
+# (cached layers make that cheap), which transparently replaces a stale local
+# image. Pass --no-build to skip the build when you manage the image yourself.
+#
 set -euo pipefail
 
 MARKER_BEGIN="# >>> gco >>>"
@@ -18,6 +24,13 @@ IMAGE="gco-dev"
 FORCED_RUNTIME=""
 RC_FILE=""
 PRINT_ONLY=0
+NO_BUILD=0
+
+# The dev image is built from Dockerfile.dev at the repository root. Resolve it
+# from this script's own location so the build works from any working directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DOCKERFILE="$REPO_ROOT/Dockerfile.dev"
 
 log()  { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
@@ -29,14 +42,17 @@ setup-dev-alias.sh — install a `gco` shell function for the dev container.
 
 Usage: scripts/setup-dev-alias.sh [options]
 
-  -p, --print          Print the shell function to stdout and exit (no writes).
+  -p, --print          Print the shell function to stdout and exit (no build, no writes).
   -r, --runtime NAME   Force a runtime (docker|finch|podman) vs auto-detecting.
       --rc PATH        Target this rc file instead of the one inferred from $SHELL.
-      --image NAME     Dev image to run (default: gco-dev).
+      --image NAME     Dev image to build and run (default: gco-dev).
+      --no-build       Skip building the dev image; assume it already exists.
   -h, --help           Show this help and exit.
 
-Detection prefers docker, then finch, then podman (the first whose daemon
-answers `<rt> info`). GCO_CONTAINER_RUNTIME or CDK_DOCKER override detection.
+By default the script builds (or refreshes) the dev image from Dockerfile.dev
+with the detected runtime, then installs the `gco` function. Detection prefers
+docker, then finch, then podman (the first whose daemon answers `<rt> info`).
+GCO_CONTAINER_RUNTIME or CDK_DOCKER override detection.
 EOF
 }
 
@@ -49,6 +65,7 @@ while [ "$#" -gt 0 ]; do
         --rc=*) RC_FILE="${1#*=}"; shift ;;
         --image) [ "$#" -ge 2 ] || die "--image needs a value"; IMAGE="$2"; shift 2 ;;
         --image=*) IMAGE="${1#*=}"; shift ;;
+        --no-build) NO_BUILD=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown option: $1 (try --help)" ;;
     esac
@@ -135,6 +152,16 @@ $MARKER_END
 EOF
 }
 
+build_image() {
+    local rt="$1"
+    [ -f "$DOCKERFILE" ] || die "cannot build '$IMAGE': $DOCKERFILE not found."
+    log "Building the '$IMAGE' image from Dockerfile.dev with $rt ..."
+    log "(the first build can take a few minutes; re-runs reuse cached layers and just refresh what changed)"
+    "$rt" build -f "$DOCKERFILE" -t "$IMAGE" "$REPO_ROOT" || die "$rt failed to build '$IMAGE' from $DOCKERFILE."
+    log "Image '$IMAGE' is ready."
+    log ""
+}
+
 install_block() {
     local rc="$1" block="$2" tmp
     tmp="$(mktemp)"
@@ -175,6 +202,16 @@ block="$(emit_block "$runtime" "$socket" "$image_ref")"
 if [ "$PRINT_ONLY" -eq 1 ]; then
     printf '%s\n' "$block"
     exit 0
+fi
+
+# Build (or refresh) the dev image before wiring up the function, so a single
+# run takes a fresh clone all the way to a working `gco`. Always rebuilding also
+# means a stale local image is transparently replaced. Skipped with --no-build.
+if [ "$NO_BUILD" -eq 1 ]; then
+    log "Skipping the image build (--no-build); assuming '$image_ref' already exists."
+    log ""
+else
+    build_image "$runtime"
 fi
 
 rc="$(choose_rc_file)"

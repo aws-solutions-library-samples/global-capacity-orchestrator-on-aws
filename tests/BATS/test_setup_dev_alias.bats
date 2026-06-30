@@ -12,14 +12,16 @@
 SCRIPT="scripts/setup-dev-alias.sh"
 
 # Make a fake runtime executable on PATH. It answers `<rt> info` with the exit
-# code requested via $3 (so detection can be steered), exits 0 otherwise, and
-# logs every invocation's args to $GCO_SHIM_LOG when that var is set.
+# code requested via $3 (so detection can be steered) and `<rt> build` with the
+# optional exit code in $4 (default 0, so a build failure can be simulated),
+# exits 0 otherwise, and logs every invocation's args to $GCO_SHIM_LOG when set.
 make_shim() {
-    local dir="$1" name="$2" code="$3"
+    local dir="$1" name="$2" code="$3" build_code="${4:-0}"
     cat > "$dir/$name" <<SHIM
 #!/usr/bin/env bash
 if [ -n "\${GCO_SHIM_LOG:-}" ]; then printf '%s\n' "\$*" >> "\$GCO_SHIM_LOG"; fi
 if [ "\$1" = "info" ]; then exit $code; fi
+if [ "\$1" = "build" ]; then exit $build_code; fi
 exit 0
 SHIM
     chmod +x "$dir/$name"
@@ -174,37 +176,80 @@ teardown() {
 
 # -- Idempotent rc-file install -----------------------------------------------
 @test "install writes exactly one marked block" {
-    bash "$SCRIPT" --runtime docker --rc "$RCFILE" >/dev/null
+    bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE" >/dev/null
     [ "$(grep -c '# >>> gco >>>' "$RCFILE")" -eq 1 ]
     [ "$(grep -c '# <<< gco <<<' "$RCFILE")" -eq 1 ]
     grep -q 'gco()' "$RCFILE"
 }
 
 @test "install is idempotent across repeated runs" {
-    bash "$SCRIPT" --runtime docker --rc "$RCFILE" >/dev/null
-    bash "$SCRIPT" --runtime docker --rc "$RCFILE" >/dev/null
+    bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE" >/dev/null
+    bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE" >/dev/null
     [ "$(grep -c '# >>> gco >>>' "$RCFILE")" -eq 1 ]
     [ "$(grep -c '# <<< gco <<<' "$RCFILE")" -eq 1 ]
 }
 
 @test "install preserves pre-existing rc content" {
     printf '%s\n' "export FOO=bar" > "$RCFILE"
-    bash "$SCRIPT" --runtime docker --rc "$RCFILE" >/dev/null
+    bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE" >/dev/null
     grep -q 'export FOO=bar' "$RCFILE"
     [ "$(grep -c '# >>> gco >>>' "$RCFILE")" -eq 1 ]
 }
 
 @test "re-running with a different image replaces the block in place" {
-    bash "$SCRIPT" --runtime docker --image old/img --rc "$RCFILE" >/dev/null
-    bash "$SCRIPT" --runtime docker --image new/img --rc "$RCFILE" >/dev/null
+    bash "$SCRIPT" --runtime docker --no-build --image old/img --rc "$RCFILE" >/dev/null
+    bash "$SCRIPT" --runtime docker --no-build --image new/img --rc "$RCFILE" >/dev/null
     grep -q 'new/img gco' "$RCFILE"
     ! grep -q 'old/img gco' "$RCFILE"
     [ "$(grep -c '# >>> gco >>>' "$RCFILE")" -eq 1 ]
 }
 
 @test "the installed rc block passes bash -n" {
-    bash "$SCRIPT" --runtime docker --rc "$RCFILE" >/dev/null
+    bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE" >/dev/null
     bash -n "$RCFILE"
+}
+
+# -- Image build (always builds unless --no-build / --print) ------------------
+@test "install builds the dev image by default with the resolved runtime" {
+    make_shim "$SHIMDIR" docker 0
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime docker --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    # The build ran: it tagged the image and pointed at Dockerfile.dev.
+    grep -q '^build ' "$GCO_SHIM_LOG"
+    grep -q -- '-t gco-dev' "$GCO_SHIM_LOG"
+    grep -qE -- '-f .*Dockerfile\.dev' "$GCO_SHIM_LOG"
+    # ...and the function was still installed afterwards.
+    [ "$(grep -c '# >>> gco >>>' "$RCFILE")" -eq 1 ]
+}
+
+@test "--no-build installs the function without building" {
+    make_shim "$SHIMDIR" docker 0
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    ! grep -q '^build ' "$GCO_SHIM_LOG"
+    [ "$(grep -c '# >>> gco >>>' "$RCFILE")" -eq 1 ]
+}
+
+@test "--print never builds the image" {
+    make_shim "$SHIMDIR" docker 0
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --print --runtime docker
+    [ "$status" -eq 0 ]
+    ! grep -q '^build ' "$GCO_SHIM_LOG"
+}
+
+@test "a failed image build aborts before writing the rc file" {
+    # info succeeds so the runtime is accepted; build fails.
+    make_shim "$SHIMDIR" docker 0 1
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime docker --rc "$RCFILE"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"failed to build"* ]]
+    [ ! -f "$RCFILE" ]
 }
 
 # -- The emitted function actually runs the runtime correctly -----------------

@@ -120,9 +120,12 @@ fi
 # ---------------------------------------------------------------------------
 # Generate the gco function into a throwaway rc.
 # ---------------------------------------------------------------------------
-note "generate the gco function (setup-dev-alias.sh --runtime $RUNTIME --image $IMAGE)"
+# setup-dev-alias.sh now builds the image itself by default. This harness has
+# already built $IMAGE above (or verified it under --skip-build), so pass
+# --no-build here to avoid a redundant rebuild and keep --skip-build honest.
+note "generate the gco function (setup-dev-alias.sh --runtime $RUNTIME --image $IMAGE --no-build)"
 rc="$WORK/rc"
-"$SETUP" --runtime "$RUNTIME" --image "$IMAGE" --rc "$rc" >/dev/null
+"$SETUP" --runtime "$RUNTIME" --image "$IMAGE" --no-build --rc "$rc" >/dev/null
 grep -q '>>> gco >>>' "$rc" || die "setup script did not write a gco function block"
 
 # ---------------------------------------------------------------------------

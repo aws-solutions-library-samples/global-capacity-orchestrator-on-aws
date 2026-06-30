@@ -62,18 +62,17 @@ gco stacks destroy-all -y     # destroy every stack across every region — no o
 
 **Recommended: run everything from the dev container.** GCO pins exact versions of a lot of Python packages (CDK, AWS SDKs, FastAPI, mypy, Ruff, etc.), and installing them on top of an existing Python environment is the most common source of "it doesn't install" reports. The dev container ships a fully resolved environment (Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, Docker CLI + Buildx, all Python deps) so you skip the whole problem.
 
-**Build the image once, then let the setup script wire up a `gco` command for you.** You shouldn't hand-write `docker run …` invocations or live inside an interactive container shell — `scripts/setup-dev-alias.sh` does the wiring so `gco` runs straight from your normal shell:
+**Let the setup script do it all — build the image and wire up a `gco` command for you.** You shouldn't hand-write `docker run …` invocations or live inside an interactive container shell — `scripts/setup-dev-alias.sh` builds the `gco-dev` image and installs the wiring, so `gco` runs straight from your normal shell:
 
 ```bash
 git clone git@github.com:awslabs/global-capacity-orchestrator-on-aws.git
 cd global-capacity-orchestrator-on-aws
 
-docker build -f Dockerfile.dev -t gco-dev .   # one-time image build
-./scripts/setup-dev-alias.sh                  # install the `gco` shell function
-source ~/.zshrc                               # or ~/.bashrc — the script prints which file it updated
+./scripts/setup-dev-alias.sh   # builds gco-dev from Dockerfile.dev + installs the `gco` shell function
+source ~/.zshrc                # or ~/.bashrc — the script prints which file it updated
 ```
 
-`setup-dev-alias.sh` detects your container runtime (Docker, Finch, or Podman), wires up the correct socket pass-through for it, and installs an idempotent `gco` shell *function* (not a bare alias, so arguments and pipes forward correctly and a TTY is attached only when one is present) into your profile. From then on, run GCO straight from your repo checkout — each command executes inside the dev container against your current directory:
+`setup-dev-alias.sh` detects your container runtime (Docker, Finch, or Podman), builds the `gco-dev` image from `Dockerfile.dev` (re-running rebuilds it, so a stale image is refreshed automatically — pass `--no-build` to skip), wires up the correct socket pass-through, and installs an idempotent `gco` shell *function* (not a bare alias, so arguments and pipes forward correctly and a TTY is attached only when one is present) into your profile. From then on, run GCO straight from your repo checkout — each command executes inside the dev container against your current directory:
 
 ```bash
 gco --help                # explore every command
@@ -88,9 +87,10 @@ The function shares your host Docker socket with every `gco` call, and `gco stac
 <details>
 <summary>Prefer an interactive container shell instead?</summary>
 
-You can also drop straight into the dev container and run `gco` from inside it — handy for ad-hoc tools and exploration. The `-v /var/run/docker.sock:/var/run/docker.sock` mount gives the container's Docker CLI access to your host daemon for the asset builds, image mirroring, and bundling described above:
+You can also build the image yourself and drop straight into the dev container, running `gco` from inside it — handy for ad-hoc tools and exploration. The `-v /var/run/docker.sock:/var/run/docker.sock` mount gives the container's Docker CLI access to your host daemon for the asset builds, image mirroring, and bundling described above:
 
 ```bash
+docker build -f Dockerfile.dev -t gco-dev .
 docker run -it --rm \
   -v ~/.aws:/root/.aws:ro \
   -v $(pwd):/workspace \
@@ -164,12 +164,11 @@ Running GPU workloads at scale is hard. You need to find regions with available 
 
 The fastest, most reliable path is the dev container — it sidesteps the dependency-conflict issues that come with installing GCO's pinned Python packages on top of your existing Python environment.
 
-Build the image once (Python, Node.js, CDK, kubectl, and the AWS CLI are all pinned and pre-installed), then run the setup script so `gco` works straight from your shell — no need to hand-write `docker run …` or stay inside an interactive container:
+Run the setup script — it builds the `gco-dev` image (Python, Node.js, CDK, kubectl, and the AWS CLI all pinned and pre-installed) and wires up `gco` so it works straight from your shell, with no hand-written `docker run …` and no interactive container:
 
 ```bash
-docker build -f Dockerfile.dev -t gco-dev .   # one-time image build
-./scripts/setup-dev-alias.sh                  # install the `gco` shell function
-source ~/.zshrc                               # or ~/.bashrc — the script prints which file it updated
+./scripts/setup-dev-alias.sh   # builds gco-dev from Dockerfile.dev + installs the `gco` shell function
+source ~/.zshrc                # or ~/.bashrc — the script prints which file it updated
 ```
 
 Then deploy everything — CDK bootstrap runs automatically for every region defined in `cdk.json`:

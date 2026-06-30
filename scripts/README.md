@@ -20,7 +20,7 @@ Utility scripts for development, testing, and operations.
 | Script | Description |
 |--------|-------------|
 | `setup-cluster-access.sh` | Configures kubectl access to a GCO EKS cluster. Adds your IAM principal to the cluster's access entries and verifies connectivity. |
-| `setup-dev-alias.sh` | Installs a `gco` shell function (between `# >>> gco >>>` markers) into your shell rc file so the CLI runs inside the dev container against your current directory. Auto-detects the container runtime (Docker/Finch/Podman), picks the matching socket mount, and is safe to re-run. |
+| `setup-dev-alias.sh` | Builds (or refreshes) the `gco-dev` image from `Dockerfile.dev`, then installs a `gco` shell function (between `# >>> gco >>>` markers) into your shell rc file so the CLI runs inside the dev container against your current directory. Auto-detects the container runtime (Docker/Finch/Podman), picks the matching socket mount, and is safe to re-run (`--no-build` skips the rebuild). |
 | `bump_version.py` | Bumps the project version across all locations (pyproject.toml, CLI, docs). Supports major, minor, and patch increments. |
 | `dump_nag_findings.py` | Dev-only debugging helper: runs the `tests/test_nag_compliance.py` harness and prints every cdk-nag finding grouped by rule + resource path + config. Use this when the compliance test gate fails in CI and you want a compact per-finding view instead of pytest's `AssertionError` repr. |
 | `test_webhook_delivery.py` | Tests the webhook dispatcher by sending sample events and verifying delivery, HMAC signatures, and retry behavior. |
@@ -45,15 +45,18 @@ Requires `PUBLIC_AND_PRIVATE` endpoint access mode in `cdk.json`. See [Customiza
 ### Setup Dev Alias
 
 ```bash
-# Detect your container runtime and install the `gco` shell function
+# Build the gco-dev image and install the `gco` shell function
 ./scripts/setup-dev-alias.sh
 source ~/.zshrc   # or ~/.bashrc — the script prints which file it updated
 
-# Preview the generated function without writing anything
+# Preview the generated function without building or writing anything
 ./scripts/setup-dev-alias.sh --print
+
+# Reuse an existing image (skip the Dockerfile.dev build)
+./scripts/setup-dev-alias.sh --no-build
 ```
 
-Makes `gco` run inside the dev container against your current directory — no interactive session needed. Auto-detects Docker, Finch, or Podman (override with `--runtime`) and writes an idempotent block to your shell profile (`--rc` to target a specific file). This is the onboarding path recommended in the [main README](../README.md).
+Builds (or refreshes) the `gco-dev` image from `Dockerfile.dev`, then makes `gco` run inside the dev container against your current directory — no interactive session needed, and no separate build step. Re-running rebuilds the image so a stale one is refreshed automatically (`--no-build` skips it). Auto-detects Docker, Finch, or Podman (override with `--runtime`) and writes an idempotent block to your shell profile (`--rc` to target a specific file). This is the onboarding path recommended in the [main README](../README.md).
 
 ### Bump Version
 
