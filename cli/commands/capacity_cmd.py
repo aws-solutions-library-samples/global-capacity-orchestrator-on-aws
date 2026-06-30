@@ -362,7 +362,7 @@ def ai_recommend(
         # Remove None values
         requirements = {k: v for k, v in requirements.items() if v is not None}
 
-        formatter.print_info(f"Analyzing with {model}...")
+        formatter.print_info(f"Analyzing with {advisor.model_id}...")
 
         recommendation = advisor.get_recommendation(
             workload_description=workload,
