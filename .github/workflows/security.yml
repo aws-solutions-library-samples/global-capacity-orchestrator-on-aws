@@ -93,7 +93,7 @@ jobs:
         # .trivyignore today). Logic and tests live in
         # .github/scripts/check_pip_audit_ignore.py +
         # tests/test_pip_audit_ignore_validator.py.
-        run: python3 .github/scripts/check_pip_audit_ignore.py .pip-audit-ignore
+        run: python3 .github/scripts/check_pip_audit_ignore.py .github/config/.pip-audit-ignore
       - name: Run pip-audit
         # First invocation writes the artifact even on failure; the second
         # fails the job when vulnerabilities are present. Mirrors the
@@ -109,11 +109,11 @@ jobs:
         run: |
           set -uo pipefail
           IGNORE_FLAGS=()
-          if [ -f .pip-audit-ignore ]; then
+          if [ -f .github/config/.pip-audit-ignore ]; then
             while IFS= read -r id; do
               [ -z "$id" ] && continue
               IGNORE_FLAGS+=(--ignore-vuln "$id")
-            done < <(grep -vE '^[[:space:]]*(#|$)' .pip-audit-ignore | awk '{print $1}')
+            done < <(grep -vE '^[[:space:]]*(#|$)' .github/config/.pip-audit-ignore | awk '{print $1}')
           fi
           pip-audit -r requirements-lock.txt --format json \
             --output pip-audit-report.json --desc \
@@ -152,7 +152,7 @@ jobs:
             --severity HIGH,CRITICAL \
             --scanners vuln \
             --skip-version-check \
-            --ignorefile .trivyignore \
+            --ignorefile .github/config/.trivyignore \
             --format json \
             --output trivy-fs-report.json \
             .
@@ -161,7 +161,7 @@ jobs:
             --severity HIGH,CRITICAL \
             --scanners vuln \
             --skip-version-check \
-            --ignorefile .trivyignore \
+            --ignorefile .github/config/.trivyignore \
             .
       - name: Upload trivy report
         if: always()
@@ -239,7 +239,7 @@ jobs:
             --ignore-unfixed \
             --scanners vuln \
             --skip-version-check \
-            --ignorefile .trivyignore \
+            --ignorefile .github/config/.trivyignore \
             --format json \
             --output "trivy-${IMAGE}-report.json" \
             "${IMAGE}:scan"
@@ -249,7 +249,7 @@ jobs:
             --ignore-unfixed \
             --scanners vuln \
             --skip-version-check \
-            --ignorefile .trivyignore \
+            --ignorefile .github/config/.trivyignore \
             "${IMAGE}:scan"
       - name: Upload trivy report
         if: always()
@@ -289,7 +289,7 @@ jobs:
           docker run --rm -v "$PWD":/repo -w /repo \
             zricethezav/gitleaks:v8.30.1 \
             detect --source . --no-git \
-            --config .gitleaks.toml \
+            --config .github/config/.gitleaks.toml \
             --report-format json --report-path gitleaks-report.json
       - name: Upload gitleaks report
         if: always()
@@ -308,7 +308,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Run semgrep
-        run: semgrep scan --config auto --error --json -o semgrep-report.json .
+        # Suppressed rules live in .github/config/semgrep-excluded-rules.txt;
+        # run-semgrep.sh expands them into --exclude-rule flags. shell: sh is
+        # set because the semgrep container image is not guaranteed to ship bash.
+        shell: sh
+        run: sh .github/scripts/run-semgrep.sh
       - name: Upload semgrep report
         if: always()
         uses: ./.github/actions/upload-artifact-with-retry
@@ -327,7 +331,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD":/repo -w /repo \
             bridgecrew/checkov:3.2.524 \
-            -d . --config-file .checkov.yaml -o json > checkov-report.json
+            -d . --config-file .github/config/.checkov.yaml -o json > checkov-report.json
       - name: Upload checkov report
         if: always()
         uses: ./.github/actions/upload-artifact-with-retry
@@ -364,7 +368,7 @@ jobs:
             scan -p cdk.out -o . \
             --report-formats json,html \
             --output-name kics-report \
-            --config .kics.yaml --fail-on high
+            --config .github/config/.kics.yaml --fail-on high
       - name: Upload KICS report
         if: always()
         uses: ./.github/actions/upload-artifact-with-retry

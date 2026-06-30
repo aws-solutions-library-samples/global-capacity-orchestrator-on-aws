@@ -53,9 +53,8 @@ ignore: |
   .pytest_cache/
   .ruff_cache/
   .git/
-  # .gitlab-ci.yml is a frozen reference file kept in sync with GitHub
-  # Actions for anyone forking to GitLab. Some lines legitimately exceed
-  # 150 chars (long lint command chains matching the authoritative
-  # workflow). We exclude it rather than churn the frozen file to match
-  # an arbitrary width.
-  .gitlab-ci.yml
+  # .github/legacy/.gitlab-ci.yml is a frozen reference kept for anyone
+  # forking to GitLab. Some lines legitimately exceed 150 chars (long lint
+  # command chains matching the authoritative workflow). We exclude it
+  # rather than churn the frozen file to match an arbitrary width.
+  .github/legacy/.gitlab-ci.yml

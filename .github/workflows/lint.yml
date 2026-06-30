@@ -73,7 +73,7 @@ jobs:
       - name: Install yamllint
         run: pip install -e ".[lint]"
       - name: yamllint --strict .
-        run: yamllint --strict .
+        run: yamllint -c .github/config/.yamllint.yml --strict .
 
   lint-ruff-python:
     name: "lint:ruff:python"
@@ -128,10 +128,11 @@ jobs:
       - name: Run markdownlint-cli2
         # Pin to a specific action version so a new major rev doesn't quietly
         # start firing new rules. Configuration (rule set, globs, ignores) lives
-        # in .markdownlint-cli2.yaml at the repo root; see CONTRIBUTING.md for
+        # in .github/config/.markdownlint-cli2.yaml; see CONTRIBUTING.md for
         # how to run the same check locally.
         uses: DavidAnson/markdownlint-cli2-action@v23
         with:
+          config: ".github/config/.markdownlint-cli2.yaml"
           globs: "**/*.md"
 
   lint-hadolint-dockerfile:

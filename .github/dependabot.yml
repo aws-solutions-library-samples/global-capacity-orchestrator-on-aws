@@ -11,6 +11,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Wait a week after a release before proposing an update, so a freshly
+    # published (possibly compromised or broken) version isn't pulled in
+    # immediately. Satisfies the dependabot-missing-cooldown semgrep rule.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
@@ -21,6 +26,8 @@ updates:
     directory: "/dockerfiles"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 3
     labels:
       - "dependencies"
@@ -31,6 +38,8 @@ updates:
     directory: "/lambda/helm-installer"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     labels:
       - "dependencies"
       - "docker"
@@ -40,6 +49,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     labels:
       - "dependencies"
       - "docker"

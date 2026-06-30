@@ -110,7 +110,7 @@ lint:python:
     - isort --check-only --diff --skip-glob 'cdk.out*' --skip-glob 'lambda/kubectl-applier-simple-build*' --skip-glob 'lambda/helm-installer-build*' gco/ cli/ gco_mcp/ tests/ lambda/ scripts/
     - ruff check gco/ cli/ gco_mcp/ tests/ --exclude lambda/kubectl-applier-simple-build --exclude lambda/helm-installer-build
     - flake8 gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ --exclude lambda/kubectl-applier-simple-build,lambda/helm-installer-build
-    - yamllint .
+    - yamllint -c .github/config/.yamllint.yml .
   cache:
     key: lint-${CI_COMMIT_REF_SLUG}
     paths:
@@ -351,8 +351,8 @@ security:gitleaks:
     entrypoint: [""]
   script:
     # Scan only current files, not git history (use --no-git)
-    # Uses .gitleaks.toml for path exclusions and allowlists
-    - gitleaks detect --source . --no-git --config .gitleaks.toml --report-format json --report-path gitleaks-report.json
+    # Uses .github/config/.gitleaks.toml for path exclusions and allowlists
+    - gitleaks detect --source . --no-git --config .github/config/.gitleaks.toml --report-format json --report-path gitleaks-report.json
   artifacts:
     when: always
     paths:
@@ -363,7 +363,7 @@ security:semgrep:
   stage: validate
   image: semgrep/semgrep:1.164.0
   script:
-    - semgrep scan --config auto --error --json -o semgrep-report.json .
+    - sh .github/scripts/run-semgrep.sh
   artifacts:
     when: always
     paths:
@@ -376,7 +376,7 @@ security:checkov:
     name: bridgecrew/checkov:3.2.500
     entrypoint: [""]
   script:
-    - checkov -d . --config-file .checkov.yaml -o json > checkov-report.json
+    - checkov -d . --config-file .github/config/.checkov.yaml -o json > checkov-report.json
   artifacts:
     when: always
     paths:
@@ -390,7 +390,7 @@ security:kics:
     entrypoint: [""]
   needs: ["build:cdk"]
   script:
-    - /app/bin/kics scan -p cdk.out -o . --report-formats json,html --output-name kics-report --config .kics.yaml --fail-on high
+    - /app/bin/kics scan -p cdk.out -o . --report-formats json,html --output-name kics-report --config .github/config/.kics.yaml --fail-on high
   artifacts:
     when: always
     paths:

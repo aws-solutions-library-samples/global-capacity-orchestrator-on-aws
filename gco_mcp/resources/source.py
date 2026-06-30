@@ -25,20 +25,25 @@ _SKIP_DIRS = {
 }
 _SOURCE_EXTENSIONS = {".py", ".yaml", ".yml", ".json", ".txt", ".toml", ".cfg", ".sh", ".md"}
 
+# Config files exposed via the source://gco/config/<name> URI. The logical name
+# (the key) is kept stable even though several files now live under .github/, so
+# existing references to these URIs keep resolving.
+_GITHUB_CONFIG_DIR = PROJECT_ROOT / ".github" / "config"
+_GITHUB_LEGACY_DIR = PROJECT_ROOT / ".github" / "legacy"
 _CONFIG_FILES = {
-    "pyproject.toml",
-    "cdk.json",
-    "app.py",
-    "Dockerfile.dev",
-    ".gitlab-ci.yml",
-    ".pre-commit-config.yaml",
-    ".yamllint.yml",
-    ".checkov.yaml",
-    ".kics.yaml",
-    ".gitleaks.toml",
-    ".semgrepignore",
-    ".dockerignore",
-    ".gitignore",
+    "pyproject.toml": PROJECT_ROOT / "pyproject.toml",
+    "cdk.json": PROJECT_ROOT / "cdk.json",
+    "app.py": PROJECT_ROOT / "app.py",
+    "Dockerfile.dev": PROJECT_ROOT / "Dockerfile.dev",
+    ".pre-commit-config.yaml": PROJECT_ROOT / ".pre-commit-config.yaml",
+    ".dockerignore": PROJECT_ROOT / ".dockerignore",
+    ".gitignore": PROJECT_ROOT / ".gitignore",
+    ".semgrepignore": PROJECT_ROOT / ".semgrepignore",
+    ".gitlab-ci.yml": _GITHUB_LEGACY_DIR / ".gitlab-ci.yml",
+    ".yamllint.yml": _GITHUB_CONFIG_DIR / ".yamllint.yml",
+    ".checkov.yaml": _GITHUB_CONFIG_DIR / ".checkov.yaml",
+    ".kics.yaml": _GITHUB_CONFIG_DIR / ".kics.yaml",
+    ".gitleaks.toml": _GITHUB_CONFIG_DIR / ".gitleaks.toml",
 }
 
 
@@ -58,8 +63,8 @@ def source_index() -> str:
     """List all source code files available for reading, grouped by package."""
     sections = ["# GCO Source Code Index\n"]
     sections.append("## Project Config")
-    for name in sorted(_CONFIG_FILES):
-        if (PROJECT_ROOT / name).is_file():
+    for name, path in sorted(_CONFIG_FILES.items()):
+        if path.is_file():
             sections.append(f"- `source://gco/config/{name}`")
     for pkg, base in _SOURCE_DIRS.items():
         if not base.is_dir():
@@ -79,7 +84,7 @@ def config_file_resource(filename: str) -> str:
     """Read a top-level project config file (pyproject.toml, cdk.json, etc.)."""
     if filename not in _CONFIG_FILES:
         return f"Not available. Allowed: {', '.join(sorted(_CONFIG_FILES))}"
-    path = PROJECT_ROOT / filename
+    path = _CONFIG_FILES[filename]
     if not path.is_file():
         return f"File '{filename}' not found."
     return path.read_text()

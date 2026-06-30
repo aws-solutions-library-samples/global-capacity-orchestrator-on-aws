@@ -269,9 +269,9 @@ class TestLiveFile:
     """
 
     def test_committed_file_passes_today(self, capsys: pytest.CaptureFixture[str]) -> None:
-        live_path = PROJECT_ROOT / ".pip-audit-ignore"
+        live_path = PROJECT_ROOT / ".github" / "config" / ".pip-audit-ignore"
         if not live_path.exists():
-            pytest.skip("No .pip-audit-ignore committed at project root")
+            pytest.skip("No .pip-audit-ignore committed under .github/config/")
         rc = validator.main([str(live_path)])
         captured = capsys.readouterr()
         assert rc == 0, (

@@ -1,0 +1,28 @@
+# =============================================================================
+# semgrep-excluded-rules.txt — repo-wide semgrep rule suppressions
+# =============================================================================
+#
+# Consumed by .github/scripts/run-semgrep.sh, which turns each non-comment,
+# non-blank line into a `--exclude-rule <id>` flag for `semgrep scan`. Keeping
+# the suppressed rule IDs in this version-controlled data file (mirroring
+# .github/config/.trivyignore and .github/config/.pip-audit-ignore) means a
+# suppression is reviewed as an explicit data change rather than being buried
+# inside pipeline YAML, and the GitHub Actions + GitLab pipelines share one list.
+#
+# Format: one full semgrep rule ID per line. Inline comments (from `#`) and
+# blank lines are ignored. Prefer fixing a finding over suppressing it; only add
+# a rule here when the finding is a deliberate, documented project choice.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# github-actions-mutable-action-tag
+# -----------------------------------------------------------------------------
+# Flags `uses: owner/action@vN` because a major-version tag can be re-pointed by
+# the action's maintainer. This project deliberately pins GitHub Actions to
+# human-readable major-version tags (e.g. `@v7`) rather than 40-character commit
+# SHAs: Dependabot (.github/dependabot.yml) tracks the github-actions ecosystem
+# and opens PRs when a new major ships, and SHA pins make every workflow diff
+# unreviewable. The residual risk — trusting the publisher of a first-party
+# `actions/*`, `aws-actions/*`, or `docker/*` action not to move a tag onto
+# malicious code — is accepted for the small set of vetted actions used here.
+yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag

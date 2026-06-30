@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CODEQL_CONFIG = PROJECT_ROOT / ".github" / "codeql" / "codeql-config.yml"
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 WORKFLOWS_DIR = PROJECT_ROOT / ".github" / "workflows"
-CI_FILES = sorted(WORKFLOWS_DIR.glob("*.yml")) + [PROJECT_ROOT / ".gitlab-ci.yml"]
+CI_FILES = sorted(WORKFLOWS_DIR.glob("*.yml")) + [PROJECT_ROOT / ".github" / "legacy" / ".gitlab-ci.yml"]
 
 _COV_RE = re.compile(r"--cov=([A-Za-z0-9_./]+)")
 

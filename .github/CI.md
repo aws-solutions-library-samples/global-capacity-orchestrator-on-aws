@@ -317,7 +317,7 @@ The `security:pip-audit:deps` job runs the validator as a dedicated step before 
 
 ```yaml
 - name: Validate .pip-audit-ignore expirations
-  run: python3 .github/scripts/check_pip_audit_ignore.py .pip-audit-ignore
+  run: python3 .github/scripts/check_pip_audit_ignore.py .github/config/.pip-audit-ignore
 
 - name: Run pip-audit
   # ... reads .pip-audit-ignore and converts each ID into --ignore-vuln <ID>
@@ -329,11 +329,11 @@ Splitting validation into its own step makes the failure surface clearly in the 
 
 ```bash
 # Pass current date (default)
-python3 .github/scripts/check_pip_audit_ignore.py .pip-audit-ignore
+python3 .github/scripts/check_pip_audit_ignore.py .github/config/.pip-audit-ignore
 
 # Pin "today" to a specific date — useful for previewing what will fail
 # on or after that date
-python3 .github/scripts/check_pip_audit_ignore.py .pip-audit-ignore --today 2026-09-01
+python3 .github/scripts/check_pip_audit_ignore.py .github/config/.pip-audit-ignore --today 2026-09-01
 ```
 
 Exit codes: `0` (clean), `1` (one or more entries failed), `2` (argparse / I/O error).
@@ -366,7 +366,7 @@ Pick an `exp:` date that gives upstream a reasonable window to ship a fix or hav
 
 ## Markdownlint config
 
-Configuration for the `lint:markdownlint:md` job lives in **`.markdownlint-cli2.yaml`** at the repo root. A single file covers three surfaces:
+Configuration for the `lint:markdownlint:md` job lives in **`.github/config/.markdownlint-cli2.yaml`**. A single file covers three surfaces:
 
 - The **GitHub Actions job** (`lint-markdownlint-md` in `workflows/lint.yml`) via `DavidAnson/markdownlint-cli2-action`.
 - The **pre-commit hook** (`markdownlint-cli2` in `.pre-commit-config.yaml`).
@@ -387,8 +387,8 @@ Most jobs map to a single command you can run locally. Quick reference:
 # Lint (matches jobs in workflows/lint.yml)
 ruff format --check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
-yamllint --strict .
-npx markdownlint-cli2                 # uses .markdownlint-cli2.yaml config
+yamllint -c .github/config/.yamllint.yml --strict .
+npx markdownlint-cli2 --config .github/config/.markdownlint-cli2.yaml
 
 # Type check (matches lint:mypy:strict and lint:mypy:stacks)
 mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'

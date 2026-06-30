@@ -25,11 +25,13 @@ repos:
     rev: v1.38.0
     hooks:
       - id: yamllint
+        args: [-c, .github/config/.yamllint.yml]
 
   - repo: https://github.com/DavidAnson/markdownlint-cli2
     rev: v0.22.1
     hooks:
       # Configuration (rule set, globs, ignores) lives in
-      # .markdownlint-cli2.yaml at the repo root. See CONTRIBUTING.md for
+      # .github/config/.markdownlint-cli2.yaml. See CONTRIBUTING.md for
       # how to run the same check locally via `npx markdownlint-cli2`.
       - id: markdownlint-cli2
+        args: ["--config", ".github/config/.markdownlint-cli2.yaml"]

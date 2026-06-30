@@ -58,8 +58,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7  # version tags pinned by project convention (not SHAs); nosemgrep: github-actions-mutable-action-tag
-      - uses: actions/setup-python@v6  # version tags pinned by project convention (not SHAs); nosemgrep: github-actions-mutable-action-tag
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
           cache: "pip"
@@ -99,7 +99,7 @@ jobs:
           kubectl version --client --output=yaml | head -5
       - name: Configure AWS credentials (OIDC)
         if: env.GCO_CI_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@v6  # version tags pinned by project convention (not SHAs); nosemgrep: github-actions-mutable-action-tag
+        uses: aws-actions/configure-aws-credentials@v6
         env:
           GCO_CI_ROLE_ARN: ${{ secrets.GCO_CI_ROLE_ARN }}
         with:

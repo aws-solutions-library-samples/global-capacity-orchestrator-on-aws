@@ -447,11 +447,11 @@ pip install -e ".[dev]"
 # Run linters (matches lint.yml jobs)
 ruff format --check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
-yamllint --strict .
+yamllint -c .github/config/.yamllint.yml --strict .
 
 # Run markdownlint (requires Node; no Python install needed).
-# Config lives in .markdownlint-cli2.yaml at the repo root.
-npx markdownlint-cli2
+# Config lives in .github/config/.markdownlint-cli2.yaml.
+npx markdownlint-cli2 --config .github/config/.markdownlint-cli2.yaml
 
 # Run type checks (everything except stacks — fast, no CDK needed)
 mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
@@ -495,7 +495,7 @@ Click any badge to land on the workflow page; the Actions UI lists every job.
 
 #### Frozen GitLab pipeline
 
-`.gitlab-ci.yml` is kept as a frozen reference for anyone forking to GitLab. It is NOT maintained and may drift as tools evolve. GitHub Actions is authoritative.
+`.github/legacy/.gitlab-ci.yml` is kept as a frozen reference for anyone forking to GitLab. It is NOT maintained and may drift as tools evolve. GitHub Actions is authoritative. See `.github/legacy/README.md`.
 
 ### Integration Tests
 
