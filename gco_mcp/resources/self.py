@@ -147,12 +147,29 @@ def _source_info_for_fn(fn: Any) -> tuple[str | None, int | None]:
 
     try:
         src_path = inspect.getsourcefile(target)
-    except TypeError, OSError:
+    except (TypeError, OSError):
         src_path = None
-    try:
-        _src_lines, src_lineno = inspect.getsourcelines(target)
-    except TypeError, OSError:
-        src_lineno = None
+
+    # Resolve the first line number. Prefer the code object's
+    # ``co_firstlineno``: it is always present for real Python functions
+    # and lambdas and equals what ``inspect.getsourcelines`` reports for
+    # them, but (unlike ``getsourcelines``) it needs no re-read of the
+    # on-disk source. That robustness matters under pytest's assertion-
+    # rewriting import hook, where re-reading the source of a function
+    # defined in a rewritten module raises ``OSError`` on newer CPython
+    # 3.14 patch releases and would otherwise drop the line to ``None``.
+    # Fall back to ``getsourcelines`` for the rare callable that exposes
+    # a source location but no ``__code__``, and to ``None`` for built-ins.
+    src_lineno: int | None = None
+    code = getattr(target, "__code__", None)
+    co_firstlineno = getattr(code, "co_firstlineno", None)
+    if isinstance(co_firstlineno, int):
+        src_lineno = co_firstlineno
+    else:
+        try:
+            _src_lines, src_lineno = inspect.getsourcelines(target)
+        except (TypeError, OSError):
+            src_lineno = None
 
     rel_path: str | None = None
     if src_path:
