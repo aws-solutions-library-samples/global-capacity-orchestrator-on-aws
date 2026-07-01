@@ -44,7 +44,7 @@ EKS_ADDON_METRICS_SERVER = "v0.8.1-eksbuild.11"
 EKS_ADDON_EFS_CSI_DRIVER = "v3.3.0-eksbuild.1"
 """Amazon EFS CSI Driver — mounts EFS file systems as Kubernetes persistent volumes."""
 
-EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v6.2.0-eksbuild.1"
+EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v6.3.0-eksbuild.1"
 """Amazon CloudWatch Observability — Container Insights, Prometheus metrics, FluentBit logs."""
 
 EKS_ADDON_FSX_CSI_DRIVER = "v1.9.0-eksbuild.1"
@@ -165,7 +165,7 @@ keeps a local copy of this value so it needs no CDK imports at runtime, so keep
 the two in lockstep if the prefix ever changes.
 """
 
-MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.23.0"
+MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.24.0"
 """Default container image for the shared per-region Mooncake master.
 
 The master StatefulSet runs the ``mooncake_master`` daemon (RPC + built-in HTTP

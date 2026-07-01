@@ -33,13 +33,13 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "boto3==1.43.36",
-    "click==8.4.1",
+    "boto3==1.43.38",
+    "click==8.4.2",
     "requests==2.34.2",
     "pyyaml==6.0.3",
     "constructs==10.6.0",
     "kubernetes==36.0.2",
-    "fastapi==0.138.0",
+    "fastapi==0.138.2",
     "uvicorn==0.49.0",
     "pydantic==2.13.4",
     "prometheus-client==0.25.0",
@@ -83,7 +83,7 @@ diagrams = [
     "ruff==0.15.19",
 ]
 inference-monitor = [
-    "boto3==1.43.36",
+    "boto3==1.43.38",
     "kubernetes==36.0.2",
     "pyyaml==6.0.3",
 ]

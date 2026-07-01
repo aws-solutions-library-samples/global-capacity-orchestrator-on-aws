@@ -13,7 +13,7 @@
 #   kubectl apply -f examples/model-download-job.yaml
 #   # After completion, deploy inference with the cached model:
 #   gco inference deploy my-model \
-#     -i vllm/vllm-openai:v0.23.0 \
+#     -i vllm/vllm-openai:v0.24.0 \
 #     --model-path /models/opt-125m
 #
 # Notes:
