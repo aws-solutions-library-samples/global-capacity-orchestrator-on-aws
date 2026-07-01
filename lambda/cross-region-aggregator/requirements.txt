@@ -1,3 +1,3 @@
 # Cross-Region Aggregator Lambda dependencies
-boto3==1.43.36
+boto3==1.43.38
 urllib3==2.7.0

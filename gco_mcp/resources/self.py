@@ -147,7 +147,7 @@ def _source_info_for_fn(fn: Any) -> tuple[str | None, int | None]:
 
     try:
         src_path = inspect.getsourcefile(target)
-    except (TypeError, OSError):
+    except TypeError, OSError:
         src_path = None
 
     # Resolve the first line number. Prefer the code object's
@@ -168,7 +168,7 @@ def _source_info_for_fn(fn: Any) -> tuple[str | None, int | None]:
     else:
         try:
             _src_lines, src_lineno = inspect.getsourcelines(target)
-        except (TypeError, OSError):
+        except TypeError, OSError:
             src_lineno = None
 
     rel_path: str | None = None
