@@ -280,7 +280,7 @@ jobs:
         # reused by this job, integration:kind:cluster-e2e, and
         # security:trivy:container-scan — all three build the same image
         # from the same Dockerfile + context.
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.2.0
         with:
           context: .
           file: dockerfiles/health-monitor-dockerfile
@@ -305,7 +305,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
       - name: Build image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.2.0
         with:
           context: .
           file: dockerfiles/manifest-processor-dockerfile
@@ -330,7 +330,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
       - name: Build image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.2.0
         with:
           context: .
           file: dockerfiles/inference-monitor-dockerfile
@@ -356,7 +356,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
       - name: Build image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.2.0
         with:
           context: .
           file: dockerfiles/queue-processor-dockerfile
@@ -383,7 +383,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
       - name: Build image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.2.0
         with:
           context: lambda/helm-installer
           file: lambda/helm-installer/Dockerfile
@@ -627,7 +627,7 @@ jobs:
         # Shares the same GHA cache scope as integration:docker:health-monitor
         # and security:trivy:container-scan. All three build the same image
         # from the same Dockerfile + context, so layer reuse is automatic.
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.2.0
         with:
           context: .
           file: dockerfiles/health-monitor-dockerfile
@@ -636,7 +636,7 @@ jobs:
           cache-from: type=gha,scope=health-monitor
           cache-to: type=gha,mode=max,scope=health-monitor,ignore-error=true
       - name: Build manifest-processor image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.2.0
         with:
           context: .
           file: dockerfiles/manifest-processor-dockerfile
@@ -645,7 +645,7 @@ jobs:
           cache-from: type=gha,scope=manifest-processor
           cache-to: type=gha,mode=max,scope=manifest-processor,ignore-error=true
       - name: Build inference-monitor image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.2.0
         with:
           context: .
           file: dockerfiles/inference-monitor-dockerfile
