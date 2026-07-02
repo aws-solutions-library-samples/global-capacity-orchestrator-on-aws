@@ -48,7 +48,8 @@ For contributor-facing docs (how to run tests locally, release process, dependen
 │   ├── lint.yml                    # Linting workflow
 │   ├── release.yml                 # Manual workflow_dispatch release
 │   ├── deps-scan.yml               # Monthly dependency scan
-│   └── cve-scan.yml                # Weekly CVE scan
+│   ├── cve-scan.yml                # Weekly CVE scan
+│   └── pages.yml                   # Publish coverage report to GitHub Pages (workflow_run)
 ├── CODEOWNERS
 ├── dependabot.yml
 ├── pull_request_template.md
@@ -76,6 +77,7 @@ Each file maps to one row in the README badge table.
 | `workflows/release.yml` | `workflow_dispatch` | Bump version, tag, create a GitHub Release with auto-generated notes. Uses the built-in `GITHUB_TOKEN` — no PAT required |
 | `workflows/deps-scan.yml` | `cron: 0 9 1 * *` (monthly, UTC) + manual | Check Python / Docker / Helm / EKS-addon / Bedrock-model versions; open a GitHub issue if drift is found |
 | `workflows/cve-scan.yml` | `cron: 0 9 * * 1` (Mondays, UTC) + manual | Re-run trivy against current CVE databases |
+| `workflows/pages.yml` | `workflow_run` after **Unit Tests** completes on `main` | Download the `pytest-coverage` artifact from the triggering run, regenerate the shields.io coverage badge, and deploy `htmlcov/` to GitHub Pages via `actions/deploy-pages`. Split out of `unit-tests.yml` so a GitHub Pages backend stall surfaces here instead of failing the test gate |
 
 ### Naming conventions
 
@@ -87,9 +89,9 @@ Each file maps to one row in the README badge table.
 
 All CI workflows share the same safety defaults:
 
-- `concurrency.group: ${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: true` so rapid pushes on the same branch supersede in-flight runs. Explicitly **off** on `release.yml` — a half-run release is worse than a slow one.
+- `concurrency.group: ${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: true` so rapid pushes on the same branch supersede in-flight runs. Explicitly **off** on `release.yml` — a half-run release is worse than a slow one. `pages.yml` is the other exception: it uses a dedicated `concurrency.group: pages` with `cancel-in-progress: false` so a real Pages deployment is never cancelled mid-flight.
 - `timeout-minutes` on every job (10 min for lint, 15 for unit, 20–30 for integration).
-- `permissions:` scoped narrowly. All CI workflows run with `contents: read`; `release.yml` upgrades to `contents: write` so the version-bump job can push a tag and create a GitHub Release.
+- `permissions:` scoped narrowly. All CI workflows run with `contents: read`; `release.yml` upgrades to `contents: write` so the version-bump job can push a tag and create a GitHub Release. `pages.yml`'s deploy job grants `pages: write` + `id-token: write` (to publish to Pages) and `actions: read` (to pull the `pytest-coverage` artifact from the triggering Unit Tests run).
 - Caching: `actions/setup-python@v6` with `cache: pip` and `cache-dependency-path: requirements-lock.txt`. Mypy jobs add an explicit `actions/cache@v5` on `.mypy_cache/`.
 - AWS auth (when a future test needs it) uses OIDC via `aws-actions/configure-aws-credentials@v4` — not long-lived access keys.
 

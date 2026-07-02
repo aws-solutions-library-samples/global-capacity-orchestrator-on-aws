@@ -27,6 +27,7 @@ Run on every push to `main` and every pull request.
 | `release.yml` | `workflow_dispatch` | Bump version, tag, create GitHub Release with auto-generated notes |
 | `deps-scan.yml` | Monthly cron + manual | Check Python, Docker, Helm, EKS-addon versions; open issue if drift found |
 | `cve-scan.yml` | Weekly cron + manual | Re-run trivy against current CVE databases |
+| `pages.yml` | `workflow_run` after Unit Tests on `main` | Publish the HTML coverage report + shields.io badge JSON to GitHub Pages. Split out of Unit Tests so a Pages outage can't fail the test gate |
 
 ## Naming Conventions
 
