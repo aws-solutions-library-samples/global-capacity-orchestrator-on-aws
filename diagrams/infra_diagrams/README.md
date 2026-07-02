@@ -73,7 +73,6 @@ After running the generator, diagrams are saved to `diagrams/infra_diagrams/`:
 | `monitoring-stack.png` | CloudWatch dashboards, alarms, and SNS. The full app is synthesized so the monitoring stack can read attributes from the other stacks, but the diagram is scoped to the monitoring stack via `--include`. |
 | `analytics-stack.png` | SageMaker Studio, EMR Serverless, Cognito, and the presigned-URL Lambda |
 | `full-architecture.png` | Complete infrastructure (collapsed overview) |
-| `full-architecture-detailed.png` | Complete infrastructure (expanded `--no-collapse` view) |
 | `full-architecture-detailed.png` | Complete infrastructure (expanded, `--no-collapse`) |
 
 ## Stack Overview
