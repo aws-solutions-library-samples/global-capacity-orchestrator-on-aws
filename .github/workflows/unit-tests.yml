@@ -189,6 +189,15 @@ jobs:
     needs: unit-pytest-core
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Publishing the coverage report to Pages is best-effort. A GitHub Pages
+    # backend stall — where the submitted deployment sits in
+    # `deployment_queued` / `in_progress` and never finalizes — must not turn
+    # the whole Unit Tests workflow red when every test job has passed. With
+    # continue-on-error the job still surfaces as "failed (allowed)" for
+    # visibility, but the overall run stays green. The deploy-pages `timeout`
+    # input (below) makes the step self-terminate before this job's
+    # timeout-minutes cap so a stall ends cleanly instead of a hard cancel.
+    continue-on-error: true
     # `pages: write` lets actions/deploy-pages finalize the deployment.
     # `id-token: write` gives the action an OIDC token to authenticate
     # with the Pages service — this is the documented requirement, not
@@ -204,6 +213,11 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
+        with:
+          # Give up after 3 minutes rather than the action's 10-minute
+          # default, so a stuck Pages deployment ends the step cleanly well
+          # inside this job's 5-minute timeout-minutes backstop.
+          timeout: 180000
 
   unit-bats-shell:
     name: "unit:bats:shell"
