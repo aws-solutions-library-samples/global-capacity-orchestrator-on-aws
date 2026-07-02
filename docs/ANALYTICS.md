@@ -124,7 +124,7 @@ vendored wheel instead.
 
 ![Analytics Stack Architecture](../diagrams/infra_diagrams/analytics-stack.png)
 
-*Auto-generated from the CDK app via AWS PDK cdk-graph. Regenerate with `python diagrams/infra_diagrams/generate.py --stack analytics`.*
+*Auto-generated from the CDK app via cdk-dia. Regenerate with `python diagrams/infra_diagrams/generate.py --stack analytics`.*
 
 </details>
 

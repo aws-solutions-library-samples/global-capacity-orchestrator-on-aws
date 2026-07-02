@@ -541,7 +541,7 @@ gco stacks destroy-all -y
 - Add diagrams where helpful — GCO has two auto-generated diagram
   catalogues you can lean on or extend:
   - `diagrams/infra_diagrams/` — per-stack and full-architecture
-    views synthesized from the CDK app via AWS PDK cdk-graph. Run
+    views synthesized from the CDK app via cdk-dia. Run
     `python diagrams/infra_diagrams/generate.py` to refresh.
   - `diagrams/code_diagrams/` — per-function control-flow charts
     (Lambda handlers, CLI entry points) rendered with pyflowchart +

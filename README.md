@@ -256,11 +256,11 @@ Below is the per-region view showing how a single regional stack is composed.
 <details>
 <summary>📊 Full Architecture Diagram (click to expand)</summary>
 
-![Full Architecture](diagrams/infra_diagrams/diagram.full-architecture.png)
+![Full Architecture](diagrams/infra_diagrams/full-architecture.png)
 
 </details>
 
-Regenerate this diagram and every per-stack view on demand with `python diagrams/infra_diagrams/generate.py` — it synthesises the current CDK app through AWS PDK cdk-graph so the diagrams never drift from the source. See [`diagrams/infra_diagrams/README.md`](diagrams/infra_diagrams/README.md) for per-stack flags (`--stack global|api-gateway|regional|regional-api|monitoring|analytics|all`). Flowcharts of the code itself (Lambda handlers, CLI commands) live alongside them under [`diagrams/code_diagrams/`](diagrams/code_diagrams/README.md).
+Regenerate this diagram and every per-stack view on demand with `python diagrams/infra_diagrams/generate.py` — it synthesises the current CDK app through cdk-dia so the diagrams never drift from the source. See [`diagrams/infra_diagrams/README.md`](diagrams/infra_diagrams/README.md) for per-stack flags (`--stack global|api-gateway|regional|regional-api|monitoring|analytics|all`). Flowcharts of the code itself (Lambda handlers, CLI commands) live alongside them under [`diagrams/code_diagrams/`](diagrams/code_diagrams/README.md).
 
 > The regional stack can be deployed to any AWS region. Add or remove regions by editing the `deployment_regions.regional` array in `cdk.json`.
 
