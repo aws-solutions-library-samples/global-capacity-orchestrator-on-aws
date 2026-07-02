@@ -15,9 +15,13 @@
 #   - unit:fresh-install           — pip install from scratch, verify imports
 #   - unit:lockfile:freshness      — requirements-lock.txt matches pyproject.toml
 #   - unit:mcp:install             — uv-installs gco-mcp from source, then launches the server
-#   - unit:pages:deploy            — publish htmlcov/ (coverage report + badge) to Pages
-#   - unit:pytest:core             — pytest (coverage target 85%) + upload Pages artifact
+#   - unit:pytest:core             — pytest (coverage gate 90%) + upload coverage artifact
 #   - unit:workload:imports        — K8s service import + circular-import detection
+#
+# The HTML coverage report is published to GitHub Pages by a separate
+# workflow — pages.yml ("Deploy Pages") — triggered via workflow_run after
+# this workflow completes on main. Keeping the deploy out of this file means a
+# GitHub Pages outage can't turn this test gate red.
 #
 # =============================================================================
 
@@ -133,77 +137,6 @@ jobs:
             coverage.json
             report.xml
           retention-days: 7
-      - name: Generate shields.io badge endpoint JSON
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          set -euo pipefail
-          # coverage.json is written by coverage.py. Pull totals.percent_covered,
-          # round to one decimal, and emit the shields.io endpoint badge
-          # schema so the README badge can link to a static JSON file on
-          # GitHub Pages without calling a third-party service.
-          #
-          # Color threshold matches the --cov-fail-under value (90%) from
-          # the pytest step above: anything below that would have already
-          # failed CI, so the badge only has two meaningful states.
-          #
-          # The JSON write is done entirely in Python (heredoc + json.dump)
-          # rather than piped back through shell — earlier attempts to
-          # interpolate a Python f-string result into shell printf ran into
-          # PEP 498's ban on backslash escapes inside f-string `{ }`
-          # expressions, producing a `SyntaxError: unexpected character
-          # after line continuation character` at CI time.
-          python3 <<'PY'
-          import json
-          with open("coverage.json") as f:
-              pct = json.load(f)["totals"]["percent_covered"]
-          color = "brightgreen" if pct >= 90 else "red"
-          badge = {
-              "schemaVersion": 1,
-              "label": "coverage",
-              "message": f"{pct:.1f}%",
-              "color": color,
-          }
-          with open("htmlcov/coverage-badge.json", "w") as f:
-              json.dump(badge, f)
-          print(f"Coverage: {pct:.1f}% ({color})")
-          PY
-      - name: Upload coverage report as Pages artifact
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-pages-artifact@v5
-        with:
-          # htmlcov/ now contains index.html (coverage.py's report root)
-          # plus coverage-badge.json. GitHub Pages serves this at
-          # https://awslabs.github.io/<repo>/ once the deploy job below
-          # finalizes it. The README badge and report link both point
-          # under that base URL.
-          path: htmlcov
-
-  unit-pages-deploy:
-    name: "unit:pages:deploy"
-    # Deploys the htmlcov Pages artifact uploaded by unit-pytest-core to
-    # GitHub Pages. Runs only on push to main — PRs, manual dispatch,
-    # and forks all skip this job. Uses the official actions/deploy-pages
-    # flow rather than pushing to a gh-pages branch, so the Pages site
-    # is managed entirely through GitHub's built-in deployment system.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: unit-pytest-core
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    # `pages: write` lets actions/deploy-pages finalize the deployment.
-    # `id-token: write` gives the action an OIDC token to authenticate
-    # with the Pages service — this is the documented requirement, not
-    # optional. `contents: read` is the default and sufficient since
-    # this job doesn't check out the repo.
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5
 
   unit-bats-shell:
     name: "unit:bats:shell"

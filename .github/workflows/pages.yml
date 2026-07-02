@@ -1,0 +1,124 @@
+# =============================================================================
+# pages.yml — Publish the coverage report to GitHub Pages
+# =============================================================================
+#
+# Deploys the HTML coverage report (htmlcov/) plus the shields.io badge
+# endpoint JSON to GitHub Pages, served at
+# https://awslabs.github.io/global-capacity-orchestrator-on-aws/.
+#
+# Why a separate workflow (not a job inside unit-tests.yml)?
+#   Publishing the coverage site is best-effort infrastructure, not a test.
+#   When the GitHub Pages backend stalls — the submitted deployment sits in
+#   `deployment_queued` / `in_progress` and never finalizes — a deploy job
+#   living inside "Unit Tests" drags that whole workflow red even though every
+#   test passed. Giving the deploy its own workflow gives it an independent
+#   status: a Pages outage surfaces here, on "Deploy Pages", and the
+#   "Unit Tests" gate keeps reporting purely on tests.
+#
+# How it gets the report:
+#   `workflow_run` fires when "Unit Tests" finishes on main. This job then
+#   downloads the `pytest-coverage` artifact from that run (via
+#   actions/download-artifact with run-id + github-token — the documented way
+#   to pull an artifact from another run), regenerates the coverage badge,
+#   packages htmlcov/ as a Pages artifact, and deploys it. No pytest re-run,
+#   so there's no duplicate compute and the published report is exactly the
+#   one the gate measured.
+#
+# Note: workflow_run always uses the workflow definition from the default
+# branch, so edits here only take effect once merged to main (they can't be
+# exercised from a PR branch).
+# =============================================================================
+
+name: Deploy Pages
+
+on:
+  workflow_run:
+    workflows: ["Unit Tests"]
+    types: [completed]
+    branches: [main]
+
+# Serialize Pages deployments and never cancel an in-flight real deploy.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: "pages:deploy"
+    # Only publish from a green Unit Tests run. The `branches: [main]` filter
+    # above already restricts the trigger to runs whose head branch is main,
+    # so no additional ref guard is needed here.
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Job-level permissions replace the top-level block for this job. This job
+    # does not check out the repo, so it needs no `contents` scope — only:
+    #   pages: write    — actions/deploy-pages finalizes the deployment
+    #   id-token: write — OIDC token the deploy action authenticates with
+    #   actions: read   — download-artifact reads an artifact from another run
+    permissions:
+      pages: write
+      id-token: write
+      actions: read
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download coverage artifact from the Unit Tests run
+        uses: actions/download-artifact@v5
+        with:
+          name: pytest-coverage
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: coverage-data
+      - name: Generate shields.io badge endpoint JSON
+        # coverage.json is written by coverage.py during the Unit Tests run
+        # and ships inside the pytest-coverage artifact. Pull
+        # totals.percent_covered, round to one decimal, and emit the
+        # shields.io endpoint schema so the README badge can link to a static
+        # JSON on Pages without calling a third-party service.
+        #
+        # Color threshold matches the --cov-fail-under gate (90%) in
+        # unit-tests.yml: a run below that would have failed and been skipped
+        # by the `if` above, so the badge only has two meaningful states.
+        #
+        # The write is done entirely in Python (heredoc + json.dump) rather
+        # than piped through shell — interpolating an f-string result into
+        # shell printf trips PEP 498's ban on backslash escapes inside
+        # f-string `{ }` expressions.
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json
+          with open("coverage-data/coverage.json") as f:
+              pct = json.load(f)["totals"]["percent_covered"]
+          color = "brightgreen" if pct >= 90 else "red"
+          badge = {
+              "schemaVersion": 1,
+              "label": "coverage",
+              "message": f"{pct:.1f}%",
+              "color": color,
+          }
+          with open("coverage-data/htmlcov/coverage-badge.json", "w") as f:
+              json.dump(badge, f)
+          print(f"Coverage: {pct:.1f}% ({color})")
+          PY
+      - name: Package htmlcov/ as a Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          # htmlcov/ holds index.html (coverage.py's report root) plus the
+          # coverage-badge.json written above. GitHub Pages serves this at
+          # the site root, so the README badge and report links keep working
+          # unchanged.
+          path: coverage-data/htmlcov
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+        with:
+          # Give up after 3 minutes rather than the action's 10-minute
+          # default, so a stuck Pages deployment ends the step cleanly inside
+          # this job's timeout-minutes backstop.
+          timeout: 180000
