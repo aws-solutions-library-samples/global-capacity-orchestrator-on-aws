@@ -15,12 +15,14 @@ Run on every push to `main` and every pull request.
 
 | File | Badge | Description |
 |------|-------|-------------|
-| `unit-tests.yml` | Unit Tests | pytest with coverage (85% gate), BATS shell tests, CDK synth, config matrix, cdk-nag compliance, lockfile freshness, CLI smoke |
+| `unit-tests.yml` | Unit Tests | pytest with coverage (90% gate), BATS shell tests, CDK synth, config matrix, cdk-nag compliance, lockfile freshness, CLI smoke |
 | `integration-tests.yml` | Integration Tests | Dockerfile builds, kind cluster E2E with Calico (3 service deployments, RBAC enforcement, NetworkPolicy blocking, ResourceQuota, PDB validation), K8s manifest validation, Lambda import checks, MCP server tests |
 | `security.yml` | Security | bandit, pip-audit, trivy (filesystem + container), trufflehog, gitleaks, semgrep, checkov, KICS |
 | `lint.yml` | Linting | actionlint, hadolint, markdownlint, mypy (strict + stacks + lambda), ruff (format + check, imports included), shellcheck, yamllint |
 
 ## Satellite Workflows
+
+Workflows outside the four badged gates above. Most are schedule- or dispatch-driven; `mooncake-image.yml` also runs on push and PR but is a narrow, feature-specific contract test rather than a headline gate.
 
 | File | Trigger | Description |
 |------|---------|-------------|
@@ -28,6 +30,7 @@ Run on every push to `main` and every pull request.
 | `deps-scan.yml` | Monthly cron + manual | Check Python, Docker, Helm, EKS-addon versions; open issue if drift found |
 | `cve-scan.yml` | Weekly cron + manual | Re-run trivy against current CVE databases |
 | `pages.yml` | `workflow_run` after Unit Tests on `main` | Publish the HTML coverage report + shields.io badge JSON to GitHub Pages. Split out of Unit Tests so a Pages outage can't fail the test gate |
+| `mooncake-image.yml` | `push`: `main`, PR, manual | Contract-test the real upstream Mooncake vLLM image GCO defaults to — proxy `/healthz`, store-config loader, KV-connector names. Not CVE-scanned (upstream image); version drift is caught by `deps-scan` |
 
 ## Naming Conventions
 
