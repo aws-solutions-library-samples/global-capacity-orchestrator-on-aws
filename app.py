@@ -19,13 +19,6 @@ Usage:
 
 import aws_cdk as cdk
 import jsii
-from cdk_nag import (
-    AwsSolutionsChecks,
-    HIPAASecurityChecks,
-    NIST80053R5Checks,
-    PCIDSS321Checks,
-    ServerlessChecks,
-)
 from constructs import IConstruct
 
 from gco.config.config_loader import ConfigLoader
@@ -33,6 +26,7 @@ from gco.stacks.analytics_stack import GCOAnalyticsStack
 from gco.stacks.api_gateway_global_stack import AnalyticsApiConfig, GCOApiGatewayGlobalStack
 from gco.stacks.global_stack import GCOGlobalStack
 from gco.stacks.monitoring_stack import GCOMonitoringStack
+from gco.stacks.nag_suppressions import nag_validation_plugins
 from gco.stacks.regional_stack import GCORegionalStack
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -78,22 +72,25 @@ def main() -> None:
     """
     app = cdk.App()
 
-    # Enable cdk-nag compliance rule packs. These validate all CDK constructs
-    # against security best practices during synthesis. Any violations that
-    # aren't explicitly suppressed (see nag_suppressions.py) will fail the build.
+    # Enable cdk-nag compliance rule packs. These validate the synthesized
+    # CloudFormation templates against security best practices. Any violations
+    # that aren't explicitly acknowledged (see nag_suppressions.py) are written
+    # to the cloud assembly's policy-validation report.
     # Note: These are rule packs, not certifications — passing cdk-nag does not
     # make the deployment automatically compliant with these frameworks.
 
-    # IMPORTANT: Register the tracing aspect BEFORE nag checks. CDK Aspects run
-    # in registration order — if nag checks run first, they see Lambda functions
-    # without tracing and emit Serverless-LambdaTracing warnings.
+    # The X-Ray tracing aspect must run before the nag packs *see* the
+    # templates. In cdk-nag v3 the packs are IPolicyValidationPlugins that
+    # validate the synthesized templates AFTER every Aspect has run, so
+    # registering the aspect here guarantees tracing=Active is already set by
+    # the time the Serverless pack checks for it.
     cdk.Aspects.of(app).add(LambdaTracingAspect())
 
-    cdk.Aspects.of(app).add(AwsSolutionsChecks(verbose=True))  # AWS architecture best practices
-    cdk.Aspects.of(app).add(HIPAASecurityChecks(verbose=True))  # Healthcare security rules
-    cdk.Aspects.of(app).add(NIST80053R5Checks(verbose=True))  # Federal security controls
-    cdk.Aspects.of(app).add(PCIDSS321Checks(verbose=True))  # Payment card industry rules
-    cdk.Aspects.of(app).add(ServerlessChecks(verbose=True))  # Serverless best practices
+    # Register the five rule packs (AWS Solutions, HIPAA, NIST 800-53 R5,
+    # PCI DSS 3.2.1, Serverless) as CDK policy-validation plugins. Each pack
+    # reads the acknowledgment metadata written by ``acknowledge_nag_findings``
+    # natively, so the packs run directly.
+    cdk.Validations.of(app).add_plugins(*nag_validation_plugins(app, verbose=True))
 
     # Load configuration from cdk.json
     config = ConfigLoader(app)

@@ -634,9 +634,9 @@ class GCORegionalStack(Stack):
         #   structure is ``<project>/<parameter>``. Scoping to the
         #   project prefix restricts access to parameters owned by this
         #   project only.
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.aws_custom_resource_role,
             [
                 {
@@ -663,7 +663,6 @@ class GCORegionalStack(Stack):
                     ],
                 },
             ],
-            apply_to_children=True,
         )
 
     def _create_container_images(self) -> None:
@@ -853,6 +852,25 @@ class GCORegionalStack(Stack):
             ],
             # SECURITY: Enable envelope encryption for Kubernetes secrets using KMS
             secrets_encryption_key=self.eks_encryption_key,
+        )
+
+        # The EKS cluster security group's auto-generated ingress rule allows
+        # 443 from the VPC CIDR, expressed as a CloudFormation token. cdk-nag's
+        # SG-ingress rules can't resolve the token and throw; scope the
+        # acknowledgment to the cluster construct so it can't mask an
+        # open-ingress finding elsewhere in the stack.
+        from gco.stacks.nag_suppressions import acknowledge_security_group_cidr_findings
+
+        acknowledge_security_group_cidr_findings(
+            self.cluster,
+            reason=(
+                "The EKS Auto Mode cluster security group allows HTTPS (443) "
+                "ingress from the VPC CIDR only, referenced via an "
+                "``Fn::GetAtt`` token that cdk-nag cannot resolve at synth "
+                "time. Ingress is restricted to intra-VPC traffic, the "
+                "tightest possible source for the Kubernetes API and webhook "
+                "endpoints."
+            ),
         )
 
         # Auto Mode comes with essential addons pre-configured:
@@ -1213,45 +1231,19 @@ class GCORegionalStack(Stack):
             )
         )
 
-        # cdk-nag suppression: the trailing ``*`` on the auth secret
-        # ARN above is intentional and is NOT a broad wildcard. Secrets
-        # Manager appends a random 6-character suffix to every secret
-        # ARN at creation time (``arn:...:secret:my-secret-AbC123``).
-        # The secret lives in a separate stack (api_gateway_global_stack)
-        # and is referenced here via a cross-stack token, so the actual
-        # suffix is unknown at synth time. The wildcard matches the
-        # suffix only — every finding under this rule is still scoped
-        # to this single secret.
-        from cdk_nag import NagSuppressions
-
-        NagSuppressions.add_resource_suppressions(
-            self.service_account_role,
-            [
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "reason": (
-                        "The trailing ``*`` matches the 6-character "
-                        "random suffix Secrets Manager appends to secret "
-                        "ARNs. The secret is created in a different stack "
-                        "(api_gateway_global_stack) and referenced here "
-                        "via a cross-stack token, so the actual suffix "
-                        "isn't known at synth time. The wildcard is "
-                        "bounded to a single secret — it does not grant "
-                        "access to any other secret in the account."
-                    ),
-                    "appliesTo": [
-                        {"regex": "/^Resource::<GCOAuthSecret.*>\\*$/"},
-                    ],
-                },
-            ],
-            apply_to_children=True,
-        )
+        # NOTE: the trailing ``*`` on the auth-secret ARN above matches the
+        # random 6-character suffix Secrets Manager appends to secret ARNs.
+        # cdk-nag v3 does not raise an IAM5 finding on it: the secret is a
+        # cross-stack ``Fn::ImportValue`` token, and the IAM5 wildcard check
+        # does not flag import-based resources — so no acknowledgment is
+        # needed here (verified across the full nag config matrix).
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         # cdk-nag suppression: the ServiceAccountRole grants ec2:Describe*
         # and elasticloadbalancing:Describe* for the AWS Load Balancer
         # Controller. These AWS APIs do not support resource-level IAM
         # scoping — Resource: * is the only valid form.
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.service_account_role,
             [
                 {
@@ -1267,7 +1259,6 @@ class GCORegionalStack(Stack):
                     "appliesTo": ["Resource::*"],
                 },
             ],
-            apply_to_children=True,
         )
 
         # Add permissions for AWS Load Balancer Controller
@@ -1549,9 +1540,9 @@ class GCORegionalStack(Stack):
 
         # cdk-nag suppression: the CloudWatch metric-read APIs do not support
         # resource-level IAM scoping — Resource: * is the only valid form.
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.keda_operator_role,
             [
                 {
@@ -1566,7 +1557,6 @@ class GCORegionalStack(Stack):
                     "appliesTo": ["Resource::*"],
                 },
             ],
-            apply_to_children=True,
         )
 
     def _create_pod_identity_associations(self) -> None:
@@ -1651,7 +1641,7 @@ class GCORegionalStack(Stack):
             :class:`SharedBucketIdentity` with ``name``, ``arn``, and
             ``region`` populated as CDK tokens that resolve at deploy time.
         """
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         global_region = self.config.get_global_region()
         resolved: dict[str, str] = {}
@@ -1692,7 +1682,7 @@ class GCORegionalStack(Stack):
             # fixed to ssm:GetParameter and the parameter Name is fixed to
             # a literal string, so the wildcard can only ever read one
             # parameter.
-            NagSuppressions.add_resource_suppressions(
+            acknowledge_nag_findings(
                 read_cr,
                 [
                     {
@@ -1711,7 +1701,6 @@ class GCORegionalStack(Stack):
                         "appliesTo": ["Resource::*"],
                     },
                 ],
-                apply_to_children=True,
             )
 
             resolved[suffix] = read_cr.get_response_field("Parameter.Value")
@@ -1745,7 +1734,7 @@ class GCORegionalStack(Stack):
         present on every regional cluster whether or not analytics is
         enabled.
         """
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         self.service_account_role.add_to_policy(
             iam.PolicyStatement(
@@ -1779,7 +1768,7 @@ class GCORegionalStack(Stack):
         # literal Cluster_Shared_Bucket ARN resolved from SSM — the ``/*``
         # covers all object keys inside that single bucket, which is the
         # intended semantic for the RW grant.
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.service_account_role,
             [
                 {
@@ -1795,11 +1784,10 @@ class GCORegionalStack(Stack):
                         "is written against."
                     ),
                     "appliesTo": [
-                        {"regex": r"/^Resource::<ReadClusterSharedBucketArn.*>\/\*$/"},
+                        "Resource::<ReadClusterSharedBucketArn4B0BD291.Parameter.Value>/*",
                     ],
                 },
             ],
-            apply_to_children=True,
         )
 
     def _create_regional_shared_bucket(self) -> None:
@@ -1981,7 +1969,7 @@ class GCORegionalStack(Stack):
         # CDK-nag suppressions scoped per-resource at the construct site,
         # mirroring the central bucket pattern. Every suppression carries an
         # explicit reason; no blanket bypasses.
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         regional_replication_reason = (
             "The general-purpose regional bucket is a region-local store; "
@@ -1991,7 +1979,7 @@ class GCORegionalStack(Stack):
             "reason."
         )
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.regional_shared_bucket,
             [
                 {
@@ -2013,7 +2001,7 @@ class GCORegionalStack(Stack):
             "This is the server access logs destination bucket for the "
             "general-purpose regional bucket."
         )
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.regional_shared_access_logs_bucket,
             [
                 {
@@ -2073,7 +2061,7 @@ class GCORegionalStack(Stack):
         precisely this bucket and this key. The grant runs unconditionally as
         part of provisioning the always-on regional bucket.
         """
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         self.service_account_role.add_to_policy(
             iam.PolicyStatement(
@@ -2110,7 +2098,7 @@ class GCORegionalStack(Stack):
         # literal regional bucket ARN created in this stack — the ``/*`` covers
         # all object keys inside that single bucket, which is the intended
         # semantic for the RW grant. The KMS statement carries no wildcard.
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.service_account_role,
             [
                 {
@@ -2125,11 +2113,10 @@ class GCORegionalStack(Stack):
                         "allow-list assertion is written against."
                     ),
                     "appliesTo": [
-                        {"regex": r"/^Resource::<RegionalSharedBucket.*\.Arn>\/\*$/"},
+                        "Resource::<RegionalSharedBucket3FF19783.Arn>/*",
                     ],
                 },
             ],
-            apply_to_children=True,
         )
 
     def _create_kubectl_lambda(self) -> None:
@@ -2250,9 +2237,9 @@ class GCORegionalStack(Stack):
 
         # cdk-nag suppression: the kubectl-applier Lambda requires broad
         # EKS and Kubernetes API access to apply arbitrary manifests.
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             kubectl_lambda_role,
             [
                 {
@@ -2267,7 +2254,6 @@ class GCORegionalStack(Stack):
                     "appliesTo": ["Resource::*"],
                 },
             ],
-            apply_to_children=True,
         )
 
     def _apply_kubernetes_manifests(self) -> None:
@@ -2712,9 +2698,9 @@ class GCORegionalStack(Stack):
 
         # cdk-nag suppression: the GA registration Lambda needs broad
         # Global Accelerator and ELB Describe access with Resource: *.
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             ga_registration_lambda,
             [
                 {
@@ -2728,7 +2714,6 @@ class GCORegionalStack(Stack):
                     "appliesTo": ["Resource::*"],
                 },
             ],
-            apply_to_children=True,
         )
 
     def _get_volcano_image_mirror_config(self) -> dict[str, Any]:
@@ -3220,9 +3205,9 @@ class GCORegionalStack(Stack):
         )
 
         # cdk-nag suppressions for the install path.
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             helm_lambda_role,
             [
                 {
@@ -3237,12 +3222,11 @@ class GCORegionalStack(Stack):
                     "appliesTo": ["Resource::*"],
                 },
             ],
-            apply_to_children=True,
         )
         # The state machine role (auto-generated) invokes the worker Lambda
         # across versions using the AWS-standard ``:*`` qualifier that cannot be
         # enumerated at synth time.
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.helm_install_state_machine,
             [
                 {
@@ -3255,9 +3239,8 @@ class GCORegionalStack(Stack):
                     "appliesTo": ["Resource::*"],
                 },
             ],
-            apply_to_children=True,
         )
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             helm_orchestrator_on_event,
             [
                 {
@@ -3271,7 +3254,6 @@ class GCORegionalStack(Stack):
                     ),
                 },
             ],
-            apply_to_children=True,
         )
 
         # The cr.Provider framework auto-generates a framework-onEvent Lambda and
@@ -3284,7 +3266,7 @@ class GCORegionalStack(Stack):
         # CDK-managed resources we do not author. The SF1/SF2/X-Ray entries are
         # retained defensively to cover any helper state machine the framework may
         # emit across CDK versions; they are harmless no-ops when none exists.
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.helm_installer_provider,
             [
                 {
@@ -3320,7 +3302,6 @@ class GCORegionalStack(Stack):
                     ),
                 },
             ],
-            apply_to_children=True,
         )
 
     def _create_efs(self) -> None:
@@ -3576,6 +3557,22 @@ class GCORegionalStack(Stack):
             "Allow Valkey access from VPC",
         )
 
+        # The Valkey SG ingress allows 6379 from the VPC CIDR (an ``Fn::GetAtt``
+        # token cdk-nag can't resolve), so the SG-ingress rules throw. Scope the
+        # acknowledgment to the Valkey SG construct itself.
+        from gco.stacks.nag_suppressions import acknowledge_security_group_cidr_findings
+
+        acknowledge_security_group_cidr_findings(
+            valkey_sg,
+            reason=(
+                "The Valkey Serverless cache security group allows the Valkey "
+                "port (6379) from the VPC CIDR only, referenced via an "
+                "``Fn::GetAtt`` token that cdk-nag cannot resolve at synth "
+                "time. Ingress is restricted to intra-VPC traffic from the "
+                "job pods that use the cache."
+            ),
+        )
+
         private_subnet_ids = [s.subnet_id for s in self.vpc.private_subnets]
 
         self.valkey_cache = elasticache.CfnServerlessCache(
@@ -3711,12 +3708,12 @@ class GCORegionalStack(Stack):
         )
 
         # Construct-level cdk-nag suppressions for Aurora pgvector
-        from cdk_nag import NagPackSuppression, NagSuppressions
+        from gco.stacks.nag_suppressions import NagSuppression, acknowledge_nag_findings
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.aurora_cluster,
             [
-                NagPackSuppression(
+                NagSuppression(
                     id="AwsSolutions-RDS10",
                     reason=(
                         "Deletion protection is intentionally disabled for dev/test deployments. "
@@ -3724,7 +3721,7 @@ class GCORegionalStack(Stack):
                         "in cdk.json."
                     ),
                 ),
-                NagPackSuppression(
+                NagSuppression(
                     id="AwsSolutions-SMG4",
                     reason=(
                         "Aurora manages credential rotation via the RDS integration with Secrets "
@@ -3732,7 +3729,7 @@ class GCORegionalStack(Stack):
                         "See: https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/rds-secrets-manager.html"
                     ),
                 ),
-                NagPackSuppression(
+                NagSuppression(
                     id="HIPAA.Security-RDSInstanceDeletionProtectionEnabled",
                     reason=(
                         "Deletion protection is intentionally disabled for dev/test deployments. "
@@ -3740,7 +3737,7 @@ class GCORegionalStack(Stack):
                         "in cdk.json."
                     ),
                 ),
-                NagPackSuppression(
+                NagSuppression(
                     id="NIST.800.53.R5-RDSInstanceDeletionProtectionEnabled",
                     reason=(
                         "Deletion protection is intentionally disabled for dev/test deployments. "
@@ -3748,7 +3745,7 @@ class GCORegionalStack(Stack):
                         "in cdk.json."
                     ),
                 ),
-                NagPackSuppression(
+                NagSuppression(
                     id="PCI.DSS.321-SecretsManagerUsingKMSKey",
                     reason=(
                         "Aurora Serverless v2 credentials in Secrets Manager are encrypted with "
@@ -3757,7 +3754,6 @@ class GCORegionalStack(Stack):
                     ),
                 ),
             ],
-            apply_to_children=True,
         )
 
         # Outputs
@@ -3847,9 +3843,9 @@ class GCORegionalStack(Stack):
 
         # cdk-nag suppression: the FSx CSI driver role grants
         # ec2:Describe* APIs that don't support resource-level scoping.
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.fsx_csi_role,
             [
                 {
@@ -3863,7 +3859,6 @@ class GCORegionalStack(Stack):
                     "appliesTo": ["Resource::*"],
                 },
             ],
-            apply_to_children=True,
         )
 
         # Create FSx CSI Driver add-on
@@ -4046,9 +4041,9 @@ class GCORegionalStack(Stack):
 
         # DLQs themselves are terminal — they don't need their own DLQ.
         # Suppress the circular AwsSolutions-SQS3 nag finding.
-        from cdk_nag import NagSuppressions as _DlqNagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        _DlqNagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             drift_rule_dlq,
             [
                 {
@@ -4092,9 +4087,9 @@ class GCORegionalStack(Stack):
         )
 
         # cdk-nag suppressions for this component
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             drift_lambda_role,
             [
                 {
@@ -4114,11 +4109,17 @@ class GCORegionalStack(Stack):
                         "specific stack resource via IAM; the action-level "
                         "scoping requires wildcard resources. The Lambda's "
                         "environment pins it to a single stack name, so the "
-                        "effective blast radius is limited."
+                        "effective blast radius is limited. The "
+                        "``kms:GenerateDataKey*`` action wildcard is the "
+                        "AWS-recommended grant for publishing to the "
+                        "KMS-encrypted drift-detection SNS topic."
                     ),
+                    "appliesTo": [
+                        "Resource::*",
+                        "Action::kms:GenerateDataKey*",
+                    ],
                 },
             ],
-            apply_to_children=True,
         )
 
     def _create_mcp_role(self) -> None:
@@ -4232,9 +4233,9 @@ class GCORegionalStack(Stack):
         )
 
         # cdk-nag suppressions: CloudWatch metrics APIs cannot be scoped.
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.mcp_server_role,
             [
                 {
@@ -4250,9 +4251,11 @@ class GCORegionalStack(Stack):
                         "coupling. All actions are read-only or scoped "
                         "send-only (SQS)."
                     ),
+                    "appliesTo": [
+                        "Resource::*",
+                    ],
                 },
             ],
-            apply_to_children=True,
         )
 
     def _create_outputs(self) -> None:

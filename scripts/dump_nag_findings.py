@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Dev-only helper: run the cdk-nag compliance test harness and print
-a human-readable inventory of every finding, grouped by rule +
-resource-path + finding-id, with the config name(s) each finding
-appears under.
+a human-readable inventory of every finding, grouped by pack + rule +
+resource-path, with the config name(s) each finding appears under.
 
 When to use this
 ----------------
@@ -10,17 +9,17 @@ Reach for this script when ``tests/test_nag_compliance.py`` starts
 failing and you need a compact view of what cdk-nag is actually
 objecting to. pytest's default output buries the per-finding detail
 inside an ``AssertionError`` repr — useful for CI gate failures, but
-hard to read when you're trying to scope a new ``NagSuppressions``
-entry. This script:
+hard to read when you're trying to scope a new acknowledgment. This
+script:
 
 1. Iterates the same ``CONFIGS`` list pytest does (imported from
    ``tests._cdk_config_matrix`` so the two can never drift).
 2. For each config, builds the full CDK app the way ``app.py`` does,
-   attaches a ``CapturingCdkNagLogger`` to every rule pack, calls
-   ``app.synth()``, and collects the raw findings.
-3. Groups them by ``(rule_id, resource_path, finding_id)`` so a
-   wildcard that appears in N configs shows up once with the list
-   of config names rather than N repeated entries.
+   registers the five rule packs as policy-validation plugins, calls
+   ``app.synth()``, and reads the resulting ``validation-report.json``.
+3. Groups them by ``(pack, rule, resource_path)`` so a wildcard that
+   appears in N configs shows up once with the list of config names
+   rather than N repeated entries.
 4. Exits 0 if zero findings, 1 otherwise — which matches the pytest
    gate and means you can pipe this script's output to
    ``pre-commit`` or use it as a quick smoke before pushing.
@@ -33,26 +32,23 @@ and doesn't produce a junit.xml. For development use only.
 Relationship to other tooling
 -----------------------------
 * ``tests/test_nag_compliance.py`` — the PR gate. Parameterizes over
-  the same ``CONFIGS`` and fails if any unsuppressed finding exists.
+  the same ``CONFIGS`` and fails if any unacknowledged finding exists.
+  cdk-nag v3 writes findings to ``validation-report.json`` in the cloud
+  assembly; both this script and the gate read that file.
 * ``tests/test_cdk_synthesis_matrix.py`` — runs ``app.synth()``
   in-process for each config with pytest-xdist parallelism. Catches
-  synth-time breakage; does NOT catch cdk-nag findings because synth
-  exits 0
-  even when unsuppressed findings exist (that was the us-east-1
-  deploy bug).
-* ``tests/_cdk_nag_logger.py`` — the ``INagLogger`` implementation
-  that all three tools share. Route all rule packs' findings into a
-  Python list.
+  synth-time breakage; does NOT catch cdk-nag findings because
+  ``app.synth()`` exits 0 even when unacknowledged findings exist.
 
 Typical workflow
 ----------------
     # A finding shows up in CI on your PR. Reproduce locally:
     python3 scripts/dump_nag_findings.py
 
-    # Scope the suppression in gco/stacks/nag_suppressions.py or
+    # Scope the acknowledgment in gco/stacks/nag_suppressions.py or
     # whichever construct owns the resource, ideally with
-    # ``applies_to`` as tight as possible (prefer a regex or literal
-    # ARN over an unscoped blanket).
+    # ``applies_to`` as tight as possible (prefer an exact literal
+    # ARN/detail over an unscoped blanket).
     # Re-run:
     python3 scripts/dump_nag_findings.py
     # -> exits 0, no findings.
@@ -77,7 +73,8 @@ if str(REPO_ROOT) not in sys.path:
 from tests._cdk_config_matrix import CONFIGS  # noqa: E402
 from tests.test_nag_compliance import (  # noqa: E402
     _build_all_stacks,
-    _build_app_with_logger,
+    _build_app,
+    _collect_nag_violations,
     _mock_helm_installer,
 )
 
@@ -90,16 +87,17 @@ def run_config(name: str, overrides: dict[str, object]) -> list[dict[str, object
     helm installer Lambda are both mocked so no Docker daemon is
     required — same as the regional-stack unit tests.
 
-    Returns the list of captured ``NonCompliance`` finding dicts. An
-    empty list means the config is clean.
+    Returns the list of finding dicts read from ``validation-report.json``
+    (keys: ``pack`` / ``rule`` / ``description`` / ``paths``). An empty
+    list means the config is clean.
     """
-    # Late import because ``_build_app_with_logger`` also imports
-    # gco.stacks under the hood — keep the import side-effects inside
-    # the call so ``python3 scripts/dump_nag_findings.py --help`` (or
-    # future arg parsing) doesn't pay the CDK-init cost.
+    # Late import because ``_build_app`` also imports gco.stacks under
+    # the hood — keep the import side-effects inside the call so
+    # ``python3 scripts/dump_nag_findings.py --help`` (or future arg
+    # parsing) doesn't pay the CDK-init cost.
     from gco.stacks.regional_stack import GCORegionalStack
 
-    app, logger = _build_app_with_logger(context_overrides=overrides)
+    app = _build_app(context_overrides=overrides)
     with (
         patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
         patch.object(GCORegionalStack, "_create_helm_installer_lambda", _mock_helm_installer),
@@ -108,16 +106,15 @@ def run_config(name: str, overrides: dict[str, object]) -> list[dict[str, object
         mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
         mock_docker.return_value = mock_image
         _build_all_stacks(app)
-        # ``app.synth()`` is what triggers the Aspects pass — no
-        # synth means no cdk-nag findings. Must happen inside the
-        # ``with`` block so the mocks are still active during the
-        # aspect traversal.
+        # ``app.synth()`` is what runs the validation plugins and writes
+        # validation-report.json — must happen inside the ``with`` block
+        # so the Docker/helm mocks are still active during synthesis.
         app.synth()
-    return logger.findings
+    return _collect_nag_violations(app)
 
 
 def main() -> int:
-    # Track findings as {(rule_id, resource_path, finding_id): [config_names]}
+    # Track findings as {(pack, rule, resource_path): [config_names]}
     # so findings that repeat across configs collapse to one entry
     # with a list of where they showed up. The keys are deliberately
     # tuples (not dicts) so the ``sorted()`` call below is
@@ -133,16 +130,17 @@ def main() -> int:
         findings = run_config(name, overrides)
         print(f"  total findings: {len(findings)}")
         for f in findings:
-            key = (str(f["rule_id"]), str(f["resource_path"]), str(f["finding_id"]))
-            all_findings.setdefault(key, []).append(name)
+            paths = f["paths"] or ["(no construct path)"]
+            for path in paths:  # type: ignore[union-attr]
+                key = (str(f["pack"]), str(f["rule"]), str(path))
+                all_findings.setdefault(key, []).append(name)
 
     print(f"\n{'=' * 72}")
     print(f"UNIQUE FINDINGS ACROSS ALL CONFIGS: {len(all_findings)}")
     print(f"{'=' * 72}")
-    for (rule, path, fid), cfgs in sorted(all_findings.items()):
-        print(f"\n  {rule}")
+    for (pack, rule, path), cfgs in sorted(all_findings.items()):
+        print(f"\n  [{pack}] {rule}")
         print(f"    path:      {path}")
-        print(f"    finding:   {fid}")
         # dedupe + sort configs so order is stable
         print(f"    seen in:   {', '.join(sorted(set(cfgs)))}")
 

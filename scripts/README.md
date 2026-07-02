@@ -83,7 +83,7 @@ Reach for this when the `unit:cdk:nag-compliance` CI job fails. It synthesizes e
 python3 scripts/dump_nag_findings.py
 ```
 
-Once you've scoped the relevant `NagSuppressions` entries, re-run to verify, then run the pytest gate to confirm:
+Once you've scoped the relevant `acknowledge_nag_findings` entries, re-run to verify, then run the pytest gate to confirm:
 
 ```bash
 pytest tests/test_nag_compliance.py -n auto -q

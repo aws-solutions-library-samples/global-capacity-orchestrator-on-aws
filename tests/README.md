@@ -215,17 +215,17 @@ The cdk-nag rule packs that block production deploys (AwsSolutions-IAM5 wildcard
 
 **How it works:**
 
-- `tests/_cdk_nag_logger.py` implements a custom `INagLogger` that routes every rule-pack finding into a Python list rather than CDK's annotation system. This bypasses the CLI's silent-drop behavior.
-- `tests/test_nag_compliance.py` parameterizes over the IAM-relevant `NAG_CONFIGS` subset, builds the complete CDK app (Global, API Gateway, Regional, Monitoring) the same way `app.py` does, attaches all five rule packs plus the capturing logger, calls `app.synth()`, and asserts the finding list is empty.
+- cdk-nag v3 runs as a CDK **policy-validation plugin** (`IPolicyValidationPlugin`) rather than an `IAspect`. `app.synth()` writes every unacknowledged finding to `validation-report.json` in the cloud assembly directory (and does **not** raise on findings), so the test reads that report to assert on findings programmatically.
+- `tests/test_nag_compliance.py` parameterizes over the IAM-relevant `NAG_CONFIGS` subset, builds the complete CDK app (Global, API Gateway, Regional, Monitoring) the same way `app.py` does, registers all five rule packs via `cdk.Validations.of(app).add_plugins(...)`, calls `app.synth()`, and asserts the report's finding list is empty.
 - CI runs this as its own job — `unit:cdk:nag-compliance` — with `pytest-xdist`'s `-n auto` (via the `psutil` extra).
 
 **Scope discipline for new suppressions:**
 
-Any `NagSuppressions.add_*_suppressions` call this test forces you to add should:
+Any `acknowledge_nag_findings` call this test forces you to add should:
 
-- Scope via `applies_to` to the specific resource (literal ARN, regex-matched token reference, etc.). Never use `applies_to=["Resource::*"]` or `applies_to=["Action::*"]` — those are blanket bypasses that defeat the whole test.
+- Scope via `applies_to` to the specific finding detail — an exact string such as a literal ARN or `Resource::<LogicalId.Arn>/*`. cdk-nag v3 matches details verbatim (there is no regex), so it must match exactly, including any synthesis-time logical-id hash. Never use `applies_to=["Resource::*"]` or `applies_to=["Action::*"]` unless the AWS API genuinely offers no resource-level scoping — blanket bypasses defeat the whole test.
 - Include a `reason` string that explains WHY the wildcard is necessary (cross-stack token, AWS-managed policy, Secrets Manager suffix, etc.) and links to any relevant AWS documentation.
-- Live as close to the construct that created the finding as possible. Resource-level suppressions via `NagSuppressions.add_resource_suppressions` are preferred over stack-level suppressions via `add_stack_suppressions` — the former fail closed when the construct is renamed.
+- Live as close to the construct that created the finding as possible. `acknowledge_nag_findings(construct, ...)` records the acknowledgment on that construct's node and cdk-nag walks the ancestor tree, so scope it to the smallest construct that owns the finding rather than the whole stack — that fails closed when the construct is renamed.
 
 **Debugging findings locally:**
 
@@ -450,7 +450,6 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `conftest.py` | Shared pytest fixtures and configuration |
 | `_lambda_imports.py` | `load_lambda_module()` helper for importing Lambda handler modules under unique `sys.modules` names. See the [Lambda Handler Import Helper](#lambda-handler-import-helper) section above. |
 | `_cdk_config_matrix.py` | The canonical list of `cdk.json` configuration overlays (default, multi-region, feature toggles, thresholds, helm matrix, analytics fixtures). Imported by both `tests/test_cdk_synthesis_matrix.py` and `tests/test_nag_compliance.py` so the two iterate over the same set. See the [CDK Configuration Matrix](#cdk-stack-tests) section. |
-| `_cdk_nag_logger.py` | `CapturingCdkNagLogger` — a custom `INagLogger` implementation that routes every cdk-nag finding into a Python list instead of CDK's annotation system. Used by `test_nag_compliance.py` and `scripts/dump_nag_findings.py` to assert on findings programmatically. |
 | `__init__.py` | Package initialization |
 
 > The category tables above are curated by area. The tables below complete the per-file index so that **every** test module in this directory is documented; new clusters get their own subsection and everything else is listed alphabetically under Additional Tests.

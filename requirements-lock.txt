@@ -43,19 +43,11 @@ aws-cdk-asset-awscli-v1==2.2.282
     # via aws-cdk-lib
 aws-cdk-asset-node-proxy-agent-v6==2.1.2
     # via aws-cdk-lib
-aws-cdk-aws-cognito-identitypool-alpha==2.186.0a0
-    # via aws-pdk
 aws-cdk-cloud-assembly-schema==54.5.0
     # via aws-cdk-lib
 aws-cdk-lib==2.260.0
     # via
-    #   aws-cdk-aws-cognito-identitypool-alpha
-    #   aws-pdk
     #   cdk-nag
-    #   gco-cli
-    #   gco-cli (pyproject.toml)
-aws-pdk==0.26.15
-    # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
 bandit==1.9.4
@@ -84,9 +76,8 @@ caio==0.9.25
     # via aiofile
 cattrs==25.3.0
     # via jsii
-cdk-nag==2.38.2
+cdk-nag==3.0.1
     # via
-    #   aws-pdk
     #   gco-cli
     #   gco-cli (pyproject.toml)
 certifi==2026.2.25
@@ -114,13 +105,10 @@ cloudpickle==3.1.2
     # via pydocket
 constructs==10.6.0
     # via
-    #   aws-cdk-aws-cognito-identitypool-alpha
     #   aws-cdk-lib
-    #   aws-pdk
     #   cdk-nag
     #   gco-cli
     #   gco-cli (pyproject.toml)
-    #   projen
 coverage==7.13.5
     # via pytest-cov
 cronsim==2.7
@@ -225,13 +213,10 @@ jsii==1.137.0
     # via
     #   aws-cdk-asset-awscli-v1
     #   aws-cdk-asset-node-proxy-agent-v6
-    #   aws-cdk-aws-cognito-identitypool-alpha
     #   aws-cdk-cloud-assembly-schema
     #   aws-cdk-lib
-    #   aws-pdk
     #   cdk-nag
     #   constructs
-    #   projen
 jsonref==1.1.0
     # via fastmcp-slim
 jsonschema==4.26.0
@@ -332,8 +317,6 @@ pluggy==1.6.0
     #   pytest-cov
 pre-commit==4.6.0
     # via gco-cli (pyproject.toml)
-projen==0.82.8
-    # via aws-pdk
 prometheus-client==0.25.0
     # via
     #   gco-cli
@@ -349,14 +332,11 @@ publication==0.0.3
     # via
     #   aws-cdk-asset-awscli-v1
     #   aws-cdk-asset-node-proxy-agent-v6
-    #   aws-cdk-aws-cognito-identitypool-alpha
     #   aws-cdk-cloud-assembly-schema
     #   aws-cdk-lib
-    #   aws-pdk
     #   cdk-nag
     #   constructs
     #   jsii
-    #   projen
 py-key-value-aio==0.4.4
     # via
     #   fastmcp-slim
@@ -529,13 +509,9 @@ typeguard==2.13.3
     # via
     #   aws-cdk-asset-awscli-v1
     #   aws-cdk-asset-node-proxy-agent-v6
-    #   aws-cdk-aws-cognito-identitypool-alpha
     #   aws-cdk-lib
-    #   aws-pdk
-    #   cdk-nag
     #   constructs
     #   jsii
-    #   projen
 typer==0.25.1
     # via pydocket
 types-pyyaml==6.0.12.20260518

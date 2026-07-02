@@ -1109,23 +1109,25 @@ class TestAwsCustomResourceSharedRole:
 
 
 class TestServiceAccountRoleSecretSuppression:
-    """Regression guard for the v0.1.2+ deploy-blocking cdk-nag finding
-    on the auth secret wildcard.
+    """Regression guard for the ``ServiceAccountRole`` cdk-nag suppressions.
 
-    The ``ServiceAccountRole``'s inline policy grants
-    ``secretsmanager:GetSecretValue`` on the cross-stack auth secret
-    ARN with a trailing ``*`` so it matches both the full ARN (with
-    the 6-character suffix AWS appends) and the partial ARN form.
-    cdk-nag's ``AwsSolutions-IAM5`` rule flags that wildcard and
-    blocks ``cdk deploy`` unless the policy has a scoped
-    ``rules_to_suppress`` entry with a matching ``applies_to``.
+    The ``ServiceAccountRole``'s inline policy grants read/write on the
+    regional-shared and cluster-shared buckets using an ``<arn>/*``
+    object-key wildcard, which cdk-nag's ``AwsSolutions-IAM5`` rule flags
+    and blocks ``cdk deploy`` on unless the role carries a scoped
+    acknowledgment. cdk-nag v3 records acknowledgments as exact-string
+    finding ids in construct metadata (there is no regex support), so this
+    test asserts the role carries an ``AwsSolutions-IAM5`` acknowledgment
+    for each bucket wildcard.
 
-    The suppression was absent on initial launch, which surfaced as a
-    deploy-time failure when first deploying to a region whose
-    regional stack had never synthesized before. This test ensures
-    every synthesized regional stack carries the suppression, so any
-    future refactor that drops or renames it fails PR CI instead of
-    deploy.
+    The original launch-blocking bug was a *missing* suppression that only
+    surfaced at deploy time. This test ensures every synthesized regional
+    stack carries the bucket-wildcard acknowledgments, so any refactor that
+    drops or renames them fails PR CI instead of deploy.
+
+    (The cross-stack auth-secret wildcard also lives on this role but does
+    not produce a v3 finding — cdk-nag's IAM5 check does not flag
+    ``Fn::ImportValue``-based resources — so it needs no acknowledgment.)
     """
 
     def _synth(self, fsx_enabled: bool, logical_name: str):
@@ -1161,67 +1163,35 @@ class TestServiceAccountRoleSecretSuppression:
         return stack, assertions.Template.from_stack(stack)
 
     def test_service_account_role_policy_has_iam5_suppression(self):
-        """The ServiceAccountRole's DefaultPolicy must carry a
-        scoped AwsSolutions-IAM5 suppression for the auth secret
-        wildcard."""
-        _stack, template = self._synth(fsx_enabled=False, logical_name="test-sa-role-suppression")
+        """The ServiceAccountRole must carry scoped ``AwsSolutions-IAM5``
+        acknowledgments for its shared-bucket object-key wildcards."""
+        from gco.stacks.nag_suppressions import _ACK_METADATA_KEY
 
-        policies = template.find_resources("AWS::IAM::Policy")
-        sa_policies = {
-            lid: res
-            for lid, res in policies.items()
-            if lid.startswith("ServiceAccountRoleDefaultPolicy")
-        }
-        assert sa_policies, (
-            "ServiceAccountRole DefaultPolicy not found — the IAM5 "
-            "suppression check below can't run. Something in the "
-            "regional stack structure has changed."
+        stack, _template = self._synth(fsx_enabled=False, logical_name="test-sa-role-suppression")
+
+        # cdk-nag v3 records acknowledgments as {finding_id: reason} dicts in
+        # construct metadata. Collect every acknowledged finding id on the role.
+        role = stack.service_account_role
+        ack_ids: list[str] = []
+        for entry in role.node.metadata:
+            if entry.type == _ACK_METADATA_KEY and entry.data:
+                ack_ids.extend(entry.data.keys())
+
+        iam5 = [fid for fid in ack_ids if fid.startswith("AwsSolutions-IAM5[")]
+        assert iam5, (
+            "ServiceAccountRole is missing its AwsSolutions-IAM5 "
+            "acknowledgments. Its inline policy grants read/write on the "
+            "shared buckets with <arn>/* object-key wildcards, which cdk-nag "
+            "blocks deploy on. Add a scoped acknowledge_nag_findings entry "
+            "with an exact applies_to detail for each bucket wildcard."
         )
 
-        # Find the IAM5 suppression among the policy's metadata rules.
-        for lid, policy in sa_policies.items():
-            metadata = policy.get("Metadata", {}) or {}
-            supps = (metadata.get("cdk_nag") or {}).get("rules_to_suppress") or []
-            iam5 = [s for s in supps if s.get("id") == "AwsSolutions-IAM5"]
-            assert iam5, (
-                f"{lid} is missing an AwsSolutions-IAM5 suppression. The "
-                f"inline policy grants secretsmanager:GetSecretValue on a "
-                f"wildcarded ARN (secret ARN + '*'), which cdk-nag will "
-                f"block deploy on. Add a scoped NagSuppressions entry "
-                f"matching the GCOAuthSecret token."
-            )
-
-            # The appliesTo must specifically scope the suppression to
-            # the auth secret, not just a blanket wildcard entry.
-            applies_to = []
-            for s in iam5:
-                at = s.get("applies_to") or s.get("appliesTo") or []
-                applies_to.extend(at)
-            assert applies_to, (
-                f"{lid}'s AwsSolutions-IAM5 suppression has no appliesTo. "
-                f"Unscoped IAM5 suppressions are not acceptable — the "
-                f"suppression must pin to the specific GCOAuthSecret "
-                f"resource via a regex or literal pattern."
-            )
-
-            # At least one entry must match the GCOAuthSecret token.
-            # Accepts both literal string patterns and regex dicts.
-            matched = False
-            for entry in applies_to:
-                if isinstance(entry, str) and "GCOAuthSecret" in entry:
-                    matched = True
-                    break
-                if isinstance(entry, dict):
-                    raw = entry.get("regex", "")
-                    if "GCOAuthSecret" in raw:
-                        matched = True
-                        break
-            assert matched, (
-                f"{lid}'s AwsSolutions-IAM5 suppression has appliesTo "
-                f"entries but none of them reference GCOAuthSecret. The "
-                f"suppression must specifically scope to the auth secret "
-                f"resource, not some unrelated wildcard. Found entries: "
-                f"{applies_to!r}"
+        # The regional-shared and cluster-shared bucket wildcards must each be
+        # acknowledged by their exact finding id (not a broad Resource::*).
+        for token in ("RegionalSharedBucket", "ReadClusterSharedBucketArn"):
+            assert any(token in fid for fid in iam5), (
+                "ServiceAccountRole is missing an AwsSolutions-IAM5 "
+                f"acknowledgment referencing {token}. Found: {iam5!r}"
             )
 
 

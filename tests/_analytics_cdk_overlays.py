@@ -87,7 +87,7 @@ def _merge_context(baseline: dict[str, Any], overrides: dict[str, Any]) -> dict[
     """Shallow-merge dict-valued keys, replace scalar/list keys.
 
     Mirrors the merge semantics used by
-    ``tests/test_nag_compliance.py::_build_app_with_logger``.
+    ``tests/test_nag_compliance.py::_build_app``.
     """
     context = dict(baseline)
     for key, value in overrides.items():

@@ -4,23 +4,23 @@ What this catches
 -----------------
 The class ``TestCdkNagCompliance`` synthesizes the full CDK application
 exactly the way ``app.py`` does — Global, API Gateway, one or more
-Regional stacks, and the Monitoring stack — with a custom
-``INagLogger`` attached alongside the normal cdk-nag rule packs. After
-``app.synth()`` returns, the test asserts that the logger collected
-zero unsuppressed findings.
+Regional stacks, and the Monitoring stack — with the five cdk-nag rule
+packs registered as CDK policy-validation plugins. After ``app.synth()``
+returns, the test reads the cloud assembly's ``validation-report.json``
+and asserts that no unacknowledged findings survived.
 
-Why not rely on ``cdk synth`` exit codes
-----------------------------------------
-``cdk synth`` writes cdk-nag findings to the CDK Annotations system,
-which ``cdk synth --quiet`` suppresses entirely, and the CLI's exit
-code is 0 even when unsuppressed findings exist. Our ``test:cdk:config-matrix``
-job runs with ``--quiet`` to keep logs manageable — which means a
-user-facing deploy can hit an ``AwsSolutions-IAM5`` error that CI
-didn't catch.
-
-Attaching a custom ``INagLogger`` gives us a Python-side hook that
-captures findings directly, so pytest can assert on them without any
-subprocess or text-parsing layer.
+Why read the validation report
+-------------------------------
+cdk-nag v3 runs as an ``IPolicyValidationPlugin`` (CDK's native policy
+validation framework) rather than as an ``IAspect`` that emits synth
+annotations. Violations are written to ``validation-report.json`` in the
+cloud assembly directory; ``app.synth()`` itself does **not** raise on
+findings (the CDK toolkit sets a non-zero exit code instead), so a plain
+in-process synth would silently pass. Reading the report gives us a
+deterministic, in-process signal: every unacknowledged finding lands in
+the report and the test fails with the rule id, resource path, and a
+short description — the three things you need to either scope an existing
+acknowledgment or add a new one.
 
 Scope
 -----
@@ -36,28 +36,22 @@ policies, which is where cdk-nag findings live.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import aws_cdk as cdk
 import pytest
-from cdk_nag import (
-    AwsSolutionsChecks,
-    HIPAASecurityChecks,
-    NIST80053R5Checks,
-    PCIDSS321Checks,
-    ServerlessChecks,
-)
 
 from tests._cdk_config_matrix import NAG_CONFIGS as _CONFIGS
-from tests._cdk_nag_logger import CapturingCdkNagLogger
 
 
-def _build_app_with_logger(
+def _build_app(
     context_overrides: dict[str, Any] | None = None,
-) -> tuple[cdk.App, CapturingCdkNagLogger]:
-    """Construct a CDK ``App`` configured the same way ``app.py`` does,
-    with a ``CapturingCdkNagLogger`` attached to every rule pack.
+) -> cdk.App:
+    """Construct a CDK ``App`` configured the same way ``app.py`` does, with
+    the five cdk-nag rule packs registered as policy-validation plugins.
 
     Args:
         context_overrides: cdk.json context keys to override. Merged
@@ -66,17 +60,14 @@ def _build_app_with_logger(
             different code path (multi-region, FSx on, etc.).
 
     Returns:
-        ``(app, logger)`` — the constructed (but not yet synthesized)
-        ``cdk.App`` and the logger whose ``.findings`` list will be
-        populated when the caller invokes ``app.synth()``.
+        The constructed (but not yet synthesized) ``cdk.App``. Call
+        ``app.synth()`` and then :func:`_collect_nag_violations` to read
+        the findings.
 
     The Docker asset and helm-installer Lambda are mocked out the
     same way every other regional-stack test mocks them, so no
     Docker daemon is required during pytest.
     """
-    import json
-    from pathlib import Path
-
     # Load the baseline cdk.json context.
     cdk_json_path = Path(__file__).resolve().parent.parent / "cdk.json"
     with cdk_json_path.open() as f:
@@ -96,25 +87,61 @@ def _build_app_with_logger(
                 context[key] = value
 
     app = cdk.App(context=context)
-    logger = CapturingCdkNagLogger()
 
-    # Register aspects identically to app.py, but with our logger
-    # attached via additional_loggers. The real AnnotationLogger is
-    # still registered by default so cdk-nag's own behavior is
-    # unchanged — we just get a parallel feed into our list.
+    # Register the nag packs exactly the way ``app.py`` does: the
+    # LambdaTracingAspect (a real Aspect) runs during synthesis, then the
+    # five rule packs run as policy-validation plugins against the
+    # synthesized templates.
     from app import LambdaTracingAspect
+    from gco.stacks.nag_suppressions import nag_validation_plugins
 
     cdk.Aspects.of(app).add(LambdaTracingAspect())
-    for check_cls in (
-        AwsSolutionsChecks,
-        HIPAASecurityChecks,
-        NIST80053R5Checks,
-        PCIDSS321Checks,
-        ServerlessChecks,
-    ):
-        cdk.Aspects.of(app).add(check_cls(verbose=True, additional_loggers=[logger]))
+    cdk.Validations.of(app).add_plugins(*nag_validation_plugins(app, verbose=True))
 
-    return app, logger
+    return app
+
+
+def _collect_nag_violations(app: cdk.App) -> list[dict[str, Any]]:
+    """Read every unacknowledged finding from the app's validation report.
+
+    cdk-nag writes ``validation-report.json`` into the cloud assembly
+    directory (``app.outdir``) during ``app.synth()``. Returns one dict per
+    finding with ``pack`` / ``rule`` / ``description`` / ``paths`` so the
+    assertion message can point at exactly what fired and where.
+    """
+    report_path = Path(app.outdir) / "validation-report.json"
+    if not report_path.exists():
+        return []
+    data = json.loads(report_path.read_text())
+    findings: list[dict[str, Any]] = []
+    for plugin_report in data.get("pluginReports", []):
+        pack = plugin_report.get("pluginName", "?")
+        for violation in plugin_report.get("violations", []):
+            findings.append(
+                {
+                    "pack": pack,
+                    "rule": violation.get("ruleName", "?"),
+                    "description": violation.get("description", ""),
+                    "paths": [
+                        c.get("constructPath", "?")
+                        for c in violation.get("violatingConstructs", [])
+                    ],
+                }
+            )
+    return findings
+
+
+def _format_violations(findings: list[dict[str, Any]]) -> str:
+    """Multi-line, deterministic summary suitable for a pytest assertion message."""
+    lines: list[str] = []
+    for f in sorted(findings, key=lambda x: (x["pack"], x["rule"], "".join(x["paths"]))):
+        for path in f["paths"] or ["(no construct path)"]:
+            lines.append(f"  [{f['pack']}] {f['rule']} at {path}")
+        info = f["description"]
+        if len(info) > 200:
+            info = info[:197] + "..."
+        lines.append(f"    -> {info}")
+    return "\n".join(lines) if lines else "(no findings)"
 
 
 def _build_all_stacks(app: cdk.App) -> None:
@@ -242,13 +269,13 @@ def _mock_helm_installer(stack: Any) -> None:
 
 class TestCdkNagCompliance:
     """End-to-end regression: ``app.synth()`` must produce zero
-    unsuppressed cdk-nag findings across every representative
+    unacknowledged cdk-nag findings across every representative
     configuration.
 
     When a test fails, the assertion message lists every finding by
     rule ID, resource path, and a short description — the same three
     pieces of information you'd need to either scope an existing
-    suppression or add a new one.
+    acknowledgment or add a new one.
     """
 
     # The IAM-relevant config subset is shared with
@@ -264,7 +291,7 @@ class TestCdkNagCompliance:
     def test_no_unsuppressed_findings(self, config_name: str, overrides: dict[str, Any]) -> None:
         from gco.stacks.regional_stack import GCORegionalStack
 
-        app, logger = _build_app_with_logger(context_overrides=overrides)
+        app = _build_app(context_overrides=overrides)
 
         with (
             patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
@@ -281,19 +308,14 @@ class TestCdkNagCompliance:
             _build_all_stacks(app)
             app.synth()
 
-        assert not logger.findings, (
-            f"cdk-nag found {len(logger.findings)} unsuppressed finding(s) "
-            f"with config {config_name!r}.\n\n{logger.format_findings()}\n\n"
+        findings = _collect_nag_violations(app)
+        assert not findings, (
+            f"cdk-nag found {len(findings)} unacknowledged finding(s) "
+            f"with config {config_name!r}.\n\n{_format_violations(findings)}\n\n"
             f"Each finding either needs its underlying wildcard scoped "
-            f"further or a targeted NagSuppressions entry with a "
+            f"further or a targeted ``acknowledge_nag_findings`` entry with a "
             f"justification and an ``applies_to`` scoped to the "
             f"specific resource. Do NOT add broad ``Resource::*`` or "
             f"``Action::*`` entries — those defeat the whole point of "
             f"cdk-nag."
-        )
-        assert not logger.errors, (
-            f"cdk-nag encountered {len(logger.errors)} rule evaluation "
-            f"error(s) with config {config_name!r}. This usually means a "
-            f"Token didn't resolve at synth time — investigate before "
-            f"merging.\n\n{logger.format_findings()}"
         )

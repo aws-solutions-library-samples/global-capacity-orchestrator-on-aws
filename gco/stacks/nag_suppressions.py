@@ -17,9 +17,186 @@ Suppression Categories:
 4. Infrastructure Patterns - Intentional architectural decisions
 """
 
-from aws_cdk import Stack
-from cdk_nag import NagPackSuppression, NagSuppressions
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+from aws_cdk import (
+    IPolicyValidationPlugin,
+    Stack,
+    Validations,
+)
+from cdk_nag import (
+    AwsSolutionsChecks,
+    HIPAASecurityChecks,
+    NIST80053R5Checks,
+    PCIDSS321Checks,
+    ServerlessChecks,
+)
 from constructs import IConstruct
+
+# ---------------------------------------------------------------------------
+# cdk-nag v3 acknowledgment mechanism
+# ---------------------------------------------------------------------------
+# cdk-nag v3 rewrote its engine from an ``IAspect`` to an
+# ``IPolicyValidationPlugin`` (CDK's native policy-validation framework). The
+# old ``NagSuppressions.add_(resource|stack)_suppressions`` /
+# ``NagPackSuppression`` API is gone. Suppressions are now *acknowledgments*
+# recorded as construct metadata under a well-known key; cdk-nag's
+# ``isAcknowledged`` walks a construct's ancestor tree looking for that key, so
+# an acknowledgment placed on a stack (or a role) covers every matching finding
+# on that construct **and all of its descendants** — which is why there is no
+# ``apply_to_children`` flag anymore (it is always effectively ``True``).
+#
+# Finding ids come in two shapes:
+#   * scalar rules  -> the bare rule id, e.g. ``AwsSolutions-EC23``
+#   * array rules   -> ``<rule>[<detail>]``, e.g.
+#                      ``AwsSolutions-IAM5[Resource::*]`` — matched EXACTLY
+#                      (there is no bare-id fallback for these, and no regex
+#                      matching either: every detail must be spelled out to the
+#                      exact string cdk-nag emits, including any synthesis-time
+#                      logical-id hash such as
+#                      ``Resource::<RegionalSharedBucket3FF19783.Arn>/*``).
+#
+# We record acknowledgments by writing the metadata key ourselves via
+# ``node.add_metadata`` rather than calling ``Validations.of(x).acknowledge``.
+# Every detail we scope starts with ``Resource::`` / ``Policy::`` /
+# ``Action::`` / ``Condition::`` — all contain ``::``, and ``acknowledge()``
+# rejects any id containing ``::`` with ``InvalidValidationId``
+# (https://github.com/cdklabs/cdk-nag/issues/2351). Writing the metadata key
+# directly is the documented workaround and applies uniformly to every
+# suppression, scalar or array.
+
+# The construct-metadata key cdk-nag v3 reads for acknowledged findings.
+_ACK_METADATA_KEY: str = Validations.ACKNOWLEDGED_RULES_METADATA_KEY
+
+
+@dataclass(frozen=True)
+class NagSuppression:
+    """A single cdk-nag v3 finding acknowledgment.
+
+    Args:
+        id: The rule id to acknowledge (e.g. ``"AwsSolutions-IAM5"``).
+        reason: Human-readable justification recorded alongside the
+            acknowledgment.
+        applies_to: Optional finding *details* to scope the acknowledgment.
+            Each entry is matched verbatim against the ``<rule>[<detail>]``
+            finding id cdk-nag emits, so it must be the exact string —
+            including any synthesis-time logical-id hash (e.g.
+            ``Resource::<RegionalSharedBucket3FF19783.Arn>/*``). When empty,
+            the bare rule id is acknowledged (correct for scalar rules that
+            emit no ``[detail]`` suffix, such as ``AwsSolutions-EC23``).
+    """
+
+    id: str
+    reason: str
+    applies_to: Sequence[str] = field(default_factory=tuple)
+
+
+def _normalize(supp: NagSuppression | Mapping[str, Any]) -> tuple[str, str, list[str]]:
+    """Normalize a suppression to ``(rule_id, reason, details)``.
+
+    Accepts either a :class:`NagSuppression` or a plain mapping with ``id`` /
+    ``reason`` / ``applies_to`` (or the jsii spelling ``appliesTo`` used by the
+    resource-scoped call sites). Every ``applies_to`` entry must be an exact
+    string — cdk-nag v3 matches finding details verbatim (there is no regex
+    support).
+    """
+    if isinstance(supp, NagSuppression):
+        rule_id, reason, entries = supp.id, supp.reason, list(supp.applies_to)
+    else:
+        rule_id = supp["id"]
+        reason = supp["reason"]
+        entries = list(supp.get("applies_to") or supp.get("appliesTo") or [])
+
+    for entry in entries:
+        if not isinstance(entry, str):
+            raise ValueError(
+                f"Unsupported applies_to entry for {rule_id!r}: {entry!r} "
+                "(expected an exact detail string; cdk-nag v3 has no regex support)"
+            )
+    return rule_id, reason, entries
+
+
+def acknowledge_nag_findings(
+    scope: IConstruct,
+    suppressions: Sequence[NagSuppression | Mapping[str, Any]],
+) -> None:
+    """Record cdk-nag v3 acknowledgments on ``scope`` (covers its descendants).
+
+    This is GCO's v3-native replacement for the removed
+    ``NagSuppressions.add_resource_suppressions`` /
+    ``add_stack_suppressions``. Each finding id (``<rule>[<detail>]`` for
+    scoped details, or the bare ``<rule>`` when ``applies_to`` is empty) is
+    written to the cdk-nag acknowledgment metadata key, which every rule pack
+    honors natively. Because cdk-nag walks the ancestor tree, an
+    acknowledgment on a stack covers all resources in that stack, and one on a
+    role covers the role's generated policies.
+    """
+    ack: dict[str, str] = {}
+    for supp in suppressions:
+        rule_id, reason, details = _normalize(supp)
+        if not details:
+            ack[rule_id] = reason
+        for detail in details:
+            ack[f"{rule_id}[{detail}]"] = reason
+    if ack:
+        scope.node.add_metadata(_ACK_METADATA_KEY, ack)
+
+
+# The cdk-nag rules that evaluate security-group *ingress CIDRs*. When an
+# ingress rule's CIDR is a CloudFormation token (e.g. a VPC CIDR resolved via
+# ``Fn::GetAtt``), these rules cannot resolve it to a primitive value and
+# *throw*. cdk-nag v3 surfaces a thrown rule under its bare id (the v2
+# ``CdkNagValidationFailure`` aggregate rule is gone), so a single unresolvable
+# ingress rule produces one bare finding per rule below. Every GCO security
+# group whose ingress is pinned to its own VPC CIDR trips this exact set.
+_SECURITY_GROUP_CIDR_RULES: tuple[str, ...] = (
+    "AwsSolutions-EC23",
+    "HIPAA.Security-EC2RestrictedCommonPorts",
+    "HIPAA.Security-EC2RestrictedSSH",
+    "NIST.800.53.R5-EC2RestrictedCommonPorts",
+    "NIST.800.53.R5-EC2RestrictedSSH",
+    "PCI.DSS.321-EC2RestrictedCommonPorts",
+    "PCI.DSS.321-EC2RestrictedSSH",
+)
+
+
+def acknowledge_security_group_cidr_findings(scope: IConstruct, *, reason: str) -> None:
+    """Acknowledge the SG-ingress rules that throw on a token (VPC CIDR) source.
+
+    Scope this to the specific security-group-bearing construct — an EKS
+    cluster, a VPC whose interface endpoints carry security groups, or a
+    standalone ``SecurityGroup`` — rather than the whole stack, so the bare-id
+    acknowledgment cannot mask a genuine open-ingress finding elsewhere.
+    cdk-nag walks the ancestor tree, so the acknowledgment covers every ingress
+    rule under ``scope``.
+    """
+    acknowledge_nag_findings(
+        scope,
+        [NagSuppression(id=rule, reason=reason) for rule in _SECURITY_GROUP_CIDR_RULES],
+    )
+
+
+def nag_validation_plugins(
+    scope: IConstruct, *, verbose: bool = True
+) -> list[IPolicyValidationPlugin]:
+    """Return the five GCO cdk-nag rule packs as v3 policy-validation plugins.
+
+    Register with ``Validations.of(app).add_plugins(*nag_validation_plugins(app))``.
+    Each pack reads the acknowledgment metadata written by
+    :func:`acknowledge_nag_findings` natively, so the packs run directly with
+    no wrapping.
+    """
+    return [
+        AwsSolutionsChecks(scope, verbose=verbose),
+        HIPAASecurityChecks(scope, verbose=verbose),
+        NIST80053R5Checks(scope, verbose=verbose),
+        PCIDSS321Checks(scope, verbose=verbose),
+        ServerlessChecks(scope, verbose=verbose),
+    ]
 
 
 def suppress_managed_policy_opt_in(
@@ -27,7 +204,6 @@ def suppress_managed_policy_opt_in(
     *,
     managed_policy_name: str,
     reason: str,
-    apply_to_children: bool = False,
 ) -> None:
     """Scoped ``AwsSolutions-IAM4`` suppression for an intentional managed-policy attach.
 
@@ -59,13 +235,11 @@ def suppress_managed_policy_opt_in(
             least-privilege policy, and (b) what the toggle or
             conditional is that gates the attachment (so reviewers
             can confirm the wider permission surface is opt-in).
-        apply_to_children: Forward to
-            ``NagSuppressions.add_resource_suppressions``.
     """
-    NagSuppressions.add_resource_suppressions(
+    acknowledge_nag_findings(
         resource,
         [
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-IAM4",
                 reason=reason,
                 applies_to=[
@@ -73,7 +247,6 @@ def suppress_managed_policy_opt_in(
                 ],
             ),
         ],
-        apply_to_children=apply_to_children,
     )
 
 
@@ -99,10 +272,10 @@ def add_eks_suppressions(stack: Stack) -> None:
         "Policy::arn:<AWS::Partition>:iam::aws:policy/AWSXrayWriteOnlyAccess",
     ]
 
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-IAM4",
                 reason=(
                     "EKS requires AWS managed policies for cluster, node, and add-on functionality. "
@@ -126,10 +299,10 @@ def add_lambda_suppressions(stack: Stack) -> None:
         "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole",
     ]
 
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-IAM4",
                 reason=(
                     "Lambda basic execution and VPC access roles are AWS-recommended managed policies. "
@@ -138,7 +311,7 @@ def add_lambda_suppressions(stack: Stack) -> None:
                 ),
                 applies_to=lambda_managed_policies,
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-L1",
                 reason=(
                     "CDK Provider framework Lambda functions use a specific runtime version "
@@ -146,21 +319,21 @@ def add_lambda_suppressions(stack: Stack) -> None:
                 ),
             ),
             # HIPAA Lambda suppressions
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-LambdaConcurrency",
                 reason=(
                     "Infrastructure Lambda functions (custom resources) are invoked only during "
                     "stack deployment and do not require concurrency limits. They are not user-facing."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-LambdaDLQ",
                 reason=(
                     "CDK custom resource Lambda functions have built-in retry logic and report "
                     "failures directly to CloudFormation. DLQ is not applicable for this pattern."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-LambdaInsideVPC",
                 reason=(
                     "CDK Provider framework Lambda functions need internet access to communicate "
@@ -169,21 +342,21 @@ def add_lambda_suppressions(stack: Stack) -> None:
                 ),
             ),
             # NIST 800-53 Lambda suppressions
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-LambdaConcurrency",
                 reason=(
                     "Infrastructure Lambda functions (custom resources) are invoked only during "
                     "stack deployment and do not require concurrency limits."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-LambdaDLQ",
                 reason=(
                     "CDK custom resource Lambda functions have built-in retry logic and report "
                     "failures directly to CloudFormation. DLQ is not applicable."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-LambdaInsideVPC",
                 reason=(
                     "CDK Provider framework Lambda functions need internet access to communicate "
@@ -191,7 +364,7 @@ def add_lambda_suppressions(stack: Stack) -> None:
                 ),
             ),
             # PCI DSS Lambda suppressions
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-LambdaInsideVPC",
                 reason=(
                     "CDK Provider framework Lambda functions need internet access to communicate "
@@ -199,21 +372,21 @@ def add_lambda_suppressions(stack: Stack) -> None:
                 ),
             ),
             # Serverless Lambda suppressions
-            NagPackSuppression(
+            NagSuppression(
                 id="Serverless-LambdaLatestVersion",
                 reason=(
                     "CDK Provider framework Lambda functions use a specific runtime version "
                     "managed by CDK. These are internal functions not exposed to users."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="Serverless-LambdaDefaultMemorySize",
                 reason=(
                     "CDK Provider framework Lambda functions have appropriate memory for their "
                     "workload. Custom Lambda functions have explicit memory configuration."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="Serverless-LambdaDLQ",
                 reason=(
                     "CDK custom resource Lambda functions have built-in retry logic and report "
@@ -296,25 +469,25 @@ def add_iam_suppressions(
     # KMS wildcard scoped to S3 via condition for model weights bucket decryption
     applies_to.append("Resource::arn:aws:kms:*:<AWS::AccountId>:key/*")
 
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
             # Inline policy suppressions for all frameworks
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-IAMNoInlinePolicy",
                 reason=(
                     "CDK generates inline policies for custom resources and Lambda functions. "
                     "These are scoped to specific resources and follow least-privilege principles."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-IAMNoInlinePolicy",
                 reason=(
                     "CDK generates inline policies for custom resources and Lambda functions. "
                     "These are scoped to specific resources and follow least-privilege principles."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-IAMNoInlinePolicy",
                 reason=(
                     "CDK generates inline policies for custom resources and Lambda functions. "
@@ -322,7 +495,7 @@ def add_iam_suppressions(
                 ),
             ),
             # Wildcard permission suppressions
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-IAM5",
                 reason=(
                     "Wildcard permissions are required for: (1) EKS cluster admin access to manage "
@@ -346,18 +519,18 @@ def add_vpc_suppressions(stack: Stack) -> None:
     Public subnets and IGW routes are required for ALB and NAT Gateway
     functionality in a multi-tier architecture.
     """
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
             # HIPAA VPC suppressions
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-VPCSubnetAutoAssignPublicIpDisabled",
                 reason=(
                     "Public subnets are required for internet-facing ALB. EC2 instances "
                     "(EKS nodes) are deployed only in private subnets."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-VPCNoUnrestrictedRouteToIGW",
                 reason=(
                     "Public subnets require IGW route for ALB to receive traffic from "
@@ -365,14 +538,14 @@ def add_vpc_suppressions(stack: Stack) -> None:
                 ),
             ),
             # NIST 800-53 VPC suppressions
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-VPCSubnetAutoAssignPublicIpDisabled",
                 reason=(
                     "Public subnets are required for internet-facing ALB. EC2 instances "
                     "(EKS nodes) are deployed only in private subnets."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-VPCNoUnrestrictedRouteToIGW",
                 reason=(
                     "Public subnets require IGW route for ALB to receive traffic from "
@@ -380,14 +553,14 @@ def add_vpc_suppressions(stack: Stack) -> None:
                 ),
             ),
             # PCI DSS VPC suppressions
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-VPCSubnetAutoAssignPublicIpDisabled",
                 reason=(
                     "Public subnets are required for internet-facing ALB. EC2 instances "
                     "(EKS nodes) are deployed only in private subnets."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-VPCNoUnrestrictedRouteToIGW",
                 reason=(
                     "Public subnets require IGW route for ALB to receive traffic from "
@@ -400,17 +573,17 @@ def add_vpc_suppressions(stack: Stack) -> None:
 
 def add_api_gateway_suppressions(stack: Stack) -> None:
     """Add suppressions for API Gateway-related cdk-nag findings."""
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-COG4",
                 reason=(
                     "API Gateway uses IAM authentication (SigV4) instead of Cognito. "
                     "This is intentional for machine-to-machine API access patterns."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-APIG2",
                 reason=(
                     "Request validation is performed by the backend Manifest Processor service "
@@ -418,21 +591,21 @@ def add_api_gateway_suppressions(stack: Stack) -> None:
                 ),
             ),
             # Cache suppressions - caching is intentionally disabled
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-APIGWCacheEnabledAndEncrypted",
                 reason=(
                     "Caching is disabled intentionally. Manifest submissions are unique "
                     "and should not be cached. Health checks need real-time data."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-APIGWCacheEnabledAndEncrypted",
                 reason=(
                     "Caching is disabled intentionally. Manifest submissions are unique "
                     "and should not be cached. Health checks need real-time data."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-APIGWCacheEnabledAndEncrypted",
                 reason=(
                     "Caching is disabled intentionally. Manifest submissions are unique "
@@ -440,21 +613,21 @@ def add_api_gateway_suppressions(stack: Stack) -> None:
                 ),
             ),
             # SSL certificate suppressions
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-APIGWSSLEnabled",
                 reason=(
                     "Backend SSL certificates are not required as traffic flows through "
                     "Global Accelerator (TLS terminated) to internal ALB (HTTPS)."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-APIGWSSLEnabled",
                 reason=(
                     "Backend SSL certificates are not required as traffic flows through "
                     "Global Accelerator (TLS terminated) to internal ALB (HTTPS)."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-APIGWSSLEnabled",
                 reason=(
                     "Backend SSL certificates are not required as traffic flows through "
@@ -462,21 +635,21 @@ def add_api_gateway_suppressions(stack: Stack) -> None:
                 ),
             ),
             # CloudWatch Log Group encryption suppressions
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-CloudWatchLogGroupEncrypted",
                 reason=(
                     "CloudWatch Logs are encrypted by default with AWS-managed keys. "
                     "Customer-managed KMS keys can be enabled via configuration if required."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-CloudWatchLogGroupEncrypted",
                 reason=(
                     "CloudWatch Logs are encrypted by default with AWS-managed keys. "
                     "Customer-managed KMS keys can be enabled via configuration if required."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-CloudWatchLogGroupEncrypted",
                 reason=(
                     "CloudWatch Logs are encrypted by default with AWS-managed keys. "
@@ -484,7 +657,7 @@ def add_api_gateway_suppressions(stack: Stack) -> None:
                 ),
             ),
             # API Gateway CloudWatch role
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-IAM4",
                 reason=(
                     "API Gateway CloudWatch role requires the AWS managed policy "
@@ -494,42 +667,34 @@ def add_api_gateway_suppressions(stack: Stack) -> None:
                     "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs",
                 ],
             ),
-            # CdkNagValidationFailure for structured logging check
-            NagPackSuppression(
-                id="CdkNagValidationFailure",
-                reason=(
-                    "Validation failure due to CloudFormation intrinsic functions. "
-                    "Access logging is properly configured on the API Gateway stage."
-                ),
-            ),
         ],
     )
 
 
 def add_monitoring_suppressions(stack: Stack) -> None:
     """Add suppressions for monitoring-related cdk-nag findings."""
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-SNS3",
                 reason="SNS topic has enforce_ssl=True enabled, which adds the required policy.",
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-SNSEncryptedKMS",
                 reason=(
                     "Alert notifications contain operational data (alarm names, thresholds) "
                     "not PHI. KMS encryption adds latency to time-sensitive alerts."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-SNSEncryptedKMS",
                 reason=(
                     "Alert notifications contain operational data (alarm names, thresholds). "
                     "KMS encryption adds latency to time-sensitive alerts."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-SNSEncryptedKMS",
                 reason=(
                     "Alert notifications contain operational data (alarm names, thresholds). "
@@ -537,29 +702,29 @@ def add_monitoring_suppressions(stack: Stack) -> None:
                 ),
             ),
             # CloudWatch Log Group encryption
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-CloudWatchLogGroupEncrypted",
                 reason="CloudWatch Logs are encrypted by default with AWS-managed keys.",
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-CloudWatchLogGroupEncrypted",
                 reason="CloudWatch Logs are encrypted by default with AWS-managed keys.",
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-CloudWatchLogGroupEncrypted",
                 reason="CloudWatch Logs are encrypted by default with AWS-managed keys.",
             ),
             # CloudWatch Alarm Action suppressions for composite alarm inputs
             # These alarms are intentionally used only as inputs to composite alarms
             # The composite alarms have actions attached, not the individual alarms
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-CloudWatchAlarmAction",
                 reason=(
                     "These alarms are inputs to composite alarms which have SNS actions. "
                     "Individual alarms don't need actions as they're aggregated for better signal-to-noise."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-CloudWatchAlarmAction",
                 reason=(
                     "These alarms are inputs to composite alarms which have SNS actions. "
@@ -572,18 +737,18 @@ def add_monitoring_suppressions(stack: Stack) -> None:
 
 def add_storage_suppressions(stack: Stack) -> None:
     """Add suppressions for storage-related cdk-nag findings."""
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
             # EFS backup suppressions
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-EFSInBackupPlan",
                 reason=(
                     "EFS backup is optional and can be enabled via AWS Backup if required. "
                     "Default deployment prioritizes cost optimization."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-EFSInBackupPlan",
                 reason=(
                     "EFS backup is optional and can be enabled via AWS Backup if required. "
@@ -591,21 +756,21 @@ def add_storage_suppressions(stack: Stack) -> None:
                 ),
             ),
             # CloudWatch Log Group encryption
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-CloudWatchLogGroupEncrypted",
                 reason=(
                     "CloudWatch Logs are encrypted by default with AWS-managed keys. "
                     "CDK Provider log groups are for infrastructure automation only."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-CloudWatchLogGroupEncrypted",
                 reason=(
                     "CloudWatch Logs are encrypted by default with AWS-managed keys. "
                     "CDK Provider log groups are for infrastructure automation only."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-CloudWatchLogGroupEncrypted",
                 reason=(
                     "CloudWatch Logs are encrypted by default with AWS-managed keys. "
@@ -618,14 +783,14 @@ def add_storage_suppressions(stack: Stack) -> None:
 
 def add_sqs_suppressions(stack: Stack) -> None:
     """Add suppressions for SQS-related cdk-nag findings."""
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-SQS4",
                 reason="SQS queues have enforce_ssl=True enabled, which adds the required policy.",
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="Serverless-SQSRedrivePolicy",
                 reason=(
                     "The dead-letter queue itself does not need a redrive policy. "
@@ -638,22 +803,22 @@ def add_sqs_suppressions(stack: Stack) -> None:
 
 def add_secrets_suppressions(stack: Stack) -> None:
     """Add suppressions for Secrets Manager-related cdk-nag findings."""
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
             # KMS key suppressions - using AWS-managed keys is acceptable
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-SecretsManagerUsingKMSKey",
                 reason=(
                     "Secrets Manager encrypts secrets by default with AWS-managed keys. "
                     "Customer-managed KMS can be enabled if required for compliance."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-SecretsManagerUsingKMSKey",
                 reason="Secrets Manager encrypts secrets by default with AWS-managed keys.",
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-SecretsManagerUsingKMSKey",
                 reason=(
                     "Secrets Manager encrypts secrets by default with AWS-managed keys. "
@@ -666,22 +831,14 @@ def add_secrets_suppressions(stack: Stack) -> None:
 
 def add_eks_cluster_suppressions(stack: Stack) -> None:
     """Add suppressions for EKS cluster-specific findings."""
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-EKS1",
                 reason=(
                     "EKS public endpoint is enabled for kubectl access from CI/CD pipelines "
                     "and developer workstations. Access is controlled via IAM."
-                ),
-            ),
-            # CdkNagValidationFailure suppressions for security group rules with intrinsic functions
-            NagPackSuppression(
-                id="CdkNagValidationFailure",
-                reason=(
-                    "Security group rules use VPC CIDR block via CloudFormation intrinsic function. "
-                    "The rule restricts access to VPC CIDR only, which is secure."
                 ),
             ),
         ],
@@ -690,10 +847,10 @@ def add_eks_cluster_suppressions(stack: Stack) -> None:
 
 def add_backup_suppressions(stack: Stack) -> None:
     """Add suppressions for AWS Backup-related cdk-nag findings."""
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-IAM4",
                 reason=(
                     "AWS Backup requires the AWSBackupServiceRolePolicyForBackup managed policy "
@@ -715,18 +872,18 @@ def add_aurora_pgvector_suppressions(stack: Stack) -> None:
     Aurora Serverless v2 with pgvector triggers several compliance findings
     that are intentionally accepted for this deployment pattern.
     """
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
             # Secrets Manager KMS key — Aurora secret uses AWS-managed encryption
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-SecretsManagerUsingKMSKey",
                 reason=(
                     "Aurora Serverless v2 credentials in Secrets Manager are encrypted with "
                     "AWS-managed keys by default. Customer-managed KMS can be enabled if required."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-SecretsManagerUsingKMSKey",
                 reason=(
                     "Aurora Serverless v2 credentials in Secrets Manager are encrypted with "
@@ -734,14 +891,14 @@ def add_aurora_pgvector_suppressions(stack: Stack) -> None:
                 ),
             ),
             # Secrets Manager rotation — Aurora manages rotation via RDS integration
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-SecretsManagerRotationEnabled",
                 reason=(
                     "Aurora manages credential rotation via the RDS integration with Secrets "
                     "Manager. Manual rotation configuration is not required."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-SecretsManagerRotationEnabled",
                 reason=(
                     "Aurora manages credential rotation via the RDS integration with Secrets "
@@ -749,14 +906,14 @@ def add_aurora_pgvector_suppressions(stack: Stack) -> None:
                 ),
             ),
             # RDS in backup plan — Aurora has built-in continuous backups
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-RDSInBackupPlan",
                 reason=(
                     "Aurora Serverless v2 has built-in continuous backups with point-in-time "
                     "recovery. AWS Backup integration is optional and can be enabled if required."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-RDSInBackupPlan",
                 reason=(
                     "Aurora Serverless v2 has built-in continuous backups with point-in-time "
@@ -765,21 +922,21 @@ def add_aurora_pgvector_suppressions(stack: Stack) -> None:
             ),
             # RDS logging enabled — covered by cloudwatch_logs_exports=["postgresql"]
             # but some frameworks check for additional log types
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-RDSLoggingEnabled",
                 reason=(
                     "PostgreSQL logs are exported to CloudWatch via cloudwatch_logs_exports. "
                     "Aurora Serverless v2 does not support all log types available on provisioned instances."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-RDSLoggingEnabled",
                 reason=(
                     "PostgreSQL logs are exported to CloudWatch via cloudwatch_logs_exports. "
                     "Aurora Serverless v2 does not support all log types available on provisioned instances."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-RDSLoggingEnabled",
                 reason=(
                     "PostgreSQL logs are exported to CloudWatch via cloudwatch_logs_exports. "
@@ -787,21 +944,21 @@ def add_aurora_pgvector_suppressions(stack: Stack) -> None:
                 ),
             ),
             # CloudWatch Log Group encryption for Aurora logs
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-CloudWatchLogGroupEncrypted",
                 reason=(
                     "CloudWatch Logs for Aurora PostgreSQL are encrypted by default with "
                     "AWS-managed keys. Customer-managed KMS can be enabled if required."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-CloudWatchLogGroupEncrypted",
                 reason=(
                     "CloudWatch Logs for Aurora PostgreSQL are encrypted by default with "
                     "AWS-managed keys."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-CloudWatchLogGroupEncrypted",
                 reason=(
                     "CloudWatch Logs for Aurora PostgreSQL are encrypted by default with "
@@ -809,7 +966,7 @@ def add_aurora_pgvector_suppressions(stack: Stack) -> None:
                 ),
             ),
             # Enhanced monitoring IAM role uses AWS managed policy
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-IAM4",
                 reason=(
                     "Aurora enhanced monitoring requires the AWS managed policy "
@@ -853,7 +1010,7 @@ def add_sagemaker_suppressions(
     api_region = api_gateway_region or "*"
     gbl_region = global_region or "*"
 
-    applies_to: list[str | dict[str, str]] = [
+    applies_to: list[str] = [
         # SageMaker execution role — SQS submit to any regional queue under
         # the project's ``<project>-jobs-*`` pattern. The SQS queue ARNs
         # are owned by the regional stacks and not directly importable.
@@ -895,7 +1052,7 @@ def add_sagemaker_suppressions(
         "Action::kms:ReEncrypt*",
         # Object-key wildcard on the literal Studio_Only_Bucket ARN — the
         # RW grant must cover every object key under the bucket.
-        {"regex": r"/^Resource::<StudioOnlyBucket.*\.Arn>\/\*$/"},
+        "Resource::<StudioOnlyBucket80FF5E65.Arn>/*",
         # ``kms:ViaService`` condition-scoped wildcard on the cluster-
         # shared bucket's KMS key — only matched when s3 is the invoking
         # service in the global region.
@@ -928,10 +1085,10 @@ def add_sagemaker_suppressions(
         "Action::sts:GetCallerIdentity",
     ]
 
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-IAM5",
                 reason=(
                     "SageMaker_Execution_Role uses wildcard ARNs and actions for: "
@@ -978,7 +1135,7 @@ def add_sagemaker_suppressions(
             # SageMaker execution role does not require MFA — callers reach
             # the role through Cognito-gated presigned URLs rather
             # than direct AssumeRole calls from operator terminals.
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-IAM4",
                 reason=(
                     "SageMaker_Execution_Role does not attach AWS managed "
@@ -992,7 +1149,7 @@ def add_sagemaker_suppressions(
             # assume a customer-managed image (``AwsSolutions-SM2`` etc.)
             # are suppressed because this deployment intentionally uses
             # the stock AWS-published SageMaker Distribution images.
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-SM2",
                 reason=(
                     "The Studio domain uses AWS-published stock SageMaker "
@@ -1001,7 +1158,7 @@ def add_sagemaker_suppressions(
                     "give POSIX isolation without a custom image."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-SM3",
                 reason=(
                     "SageMaker Studio domain is provisioned with "
@@ -1021,10 +1178,10 @@ def add_sagemaker_suppressions(
     # cross-region SSM. Resource-level scoping isn't possible here —
     # the parent role's resource suppression has ``apply_to_children``
     # semantics that only traverse CDK children, not siblings.
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-IAM5",
                 reason=(
                     "SagemakerClusterSharedBucketGrant attaches the RW "
@@ -1037,9 +1194,7 @@ def add_sagemaker_suppressions(
                     "analogous job-pod grant."
                 ),
                 applies_to=[
-                    {
-                        "regex": r"/^Resource::<ReadClusterSharedBucketArn.*\.Parameter\.Value>\/\*$/"
-                    },
+                    "Resource::<ReadClusterSharedBucketArn4B0BD291.Parameter.Value>/*",
                 ],
             ),
         ],
@@ -1056,10 +1211,10 @@ def add_cognito_suppressions(stack: Stack) -> None:
     that don't apply to a machine-to-machine + presigned-URL model where
     there is no hosted UI callback to harden.
     """
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-COG3",
                 reason=(
                     "The Cognito user pool has ``advanced_security_mode=ENFORCED`` "
@@ -1075,7 +1230,7 @@ def add_cognito_suppressions(stack: Stack) -> None:
             # than being enforced pool-wide; enforcing it at the pool
             # level would lock out admins bootstrapping the first user
             # during initial deploy.
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-COG2",
                 reason=(
                     "MFA is managed per-user through the ``gco analytics "
@@ -1099,14 +1254,14 @@ def add_analytics_vpc_suppressions(stack: Stack) -> None:
     that hosts only the NAT gateway ENI. Findings on the public subnet
     and IGW route are expected — no compute runs there.
     """
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
             # Flow-logs suppressions — analytics VPC is private-isolated,
             # has no IGW/NAT, and every egress path is a VPC endpoint. The
             # service endpoints already emit CloudTrail data events that
             # cover every packet-producing API call on the VPC.
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-VPC7",
                 reason=(
                     "The analytics VPC is private-isolated (no IGW, no "
@@ -1117,7 +1272,7 @@ def add_analytics_vpc_suppressions(stack: Stack) -> None:
                     "significant storage cost without adding visibility."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-VPCFlowLogsEnabled",
                 reason=(
                     "The analytics VPC is private-isolated (no IGW, no "
@@ -1128,7 +1283,7 @@ def add_analytics_vpc_suppressions(stack: Stack) -> None:
                     "significant storage cost without adding visibility."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-VPCFlowLogsEnabled",
                 reason=(
                     "The analytics VPC is private-isolated (no IGW, no "
@@ -1139,7 +1294,7 @@ def add_analytics_vpc_suppressions(stack: Stack) -> None:
                     "significant storage cost without adding visibility."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-VPCFlowLogsEnabled",
                 reason=(
                     "The analytics VPC is private-isolated (no IGW, no "
@@ -1150,26 +1305,10 @@ def add_analytics_vpc_suppressions(stack: Stack) -> None:
                     "significant storage cost without adding visibility."
                 ),
             ),
-            # CdkNagValidationFailure suppressions for the VPC endpoint
-            # security-group rules — cdk-nag can't resolve the VPC CIDR
-            # block at synth time because it's an ``Fn::GetAtt`` token.
-            # The regional stack handles the same pattern via
-            # ``add_eks_cluster_suppressions``.
-            NagPackSuppression(
-                id="CdkNagValidationFailure",
-                reason=(
-                    "VPC interface-endpoint security-group rules reference "
-                    "the VPC CIDR block via ``Fn::GetAtt``. The Token "
-                    "doesn't resolve at synth time so cdk-nag cannot "
-                    "validate the rule; the rule itself is scoped to the "
-                    "VPC CIDR, which is the tightest possible source for "
-                    "intra-VPC endpoint traffic."
-                ),
-            ),
             # Public subnet findings — the NAT gateway requires a public
             # subnet with an IGW route. No compute runs in the public
             # subnet; it only hosts the NAT gateway's ENI.
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-VPCSubnetAutoAssignPublicIpDisabled",
                 reason=(
                     "The public subnet exists solely to host the NAT "
@@ -1178,21 +1317,21 @@ def add_analytics_vpc_suppressions(stack: Stack) -> None:
                     "in this subnet."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-VPCSubnetAutoAssignPublicIpDisabled",
                 reason=(
                     "The public subnet exists solely to host the NAT "
                     "gateway ENI. No compute workloads run here."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-VPCSubnetAutoAssignPublicIpDisabled",
                 reason=(
                     "The public subnet exists solely to host the NAT "
                     "gateway ENI. No compute workloads run here."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-VPCNoUnrestrictedRouteToIGW",
                 reason=(
                     "The 0.0.0.0/0 route to the IGW is in the public "
@@ -1200,14 +1339,14 @@ def add_analytics_vpc_suppressions(stack: Stack) -> None:
                     "gateway. Private subnets route through NAT, not IGW."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-VPCNoUnrestrictedRouteToIGW",
                 reason=(
                     "The 0.0.0.0/0 route to the IGW is in the public "
                     "subnet's route table for NAT gateway egress only."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-VPCNoUnrestrictedRouteToIGW",
                 reason=(
                     "The 0.0.0.0/0 route to the IGW is in the public "
@@ -1235,7 +1374,7 @@ def add_analytics_s3_suppressions(stack: Stack) -> None:
        construct does not wire automatically. Replication is not enabled
        because the bucket is the log sink, not a data store.
     """
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
             # S3 replication suppressions — both buckets are single-
@@ -1243,7 +1382,7 @@ def add_analytics_s3_suppressions(stack: Stack) -> None:
             # deploy region (api-gateway region) and the access-logs
             # bucket is its log sink; cross-region replication is not
             # applicable to either.
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-S3BucketReplicationEnabled",
                 reason=(
                     "Studio_Only_Bucket and its access-logs bucket are "
@@ -1256,7 +1395,7 @@ def add_analytics_s3_suppressions(stack: Stack) -> None:
                     "the data bucket by construction."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-S3BucketReplicationEnabled",
                 reason=(
                     "Studio_Only_Bucket and its access-logs bucket are "
@@ -1269,7 +1408,7 @@ def add_analytics_s3_suppressions(stack: Stack) -> None:
                     "the data bucket by construction."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-S3BucketReplicationEnabled",
                 reason=(
                     "Studio_Only_Bucket and its access-logs bucket are "
@@ -1287,7 +1426,7 @@ def add_analytics_s3_suppressions(stack: Stack) -> None:
             # sinks. Switching to SSE-KMS would require an additional
             # log-delivery role that the CDK ``s3.Bucket`` construct does
             # not wire automatically.
-            NagPackSuppression(
+            NagSuppression(
                 id="HIPAA.Security-S3DefaultEncryptionKMS",
                 reason=(
                     "The analytics access-logs bucket uses SSE-S3 because "
@@ -1298,7 +1437,7 @@ def add_analytics_s3_suppressions(stack: Stack) -> None:
                     "with ``Analytics_KMS_Key``."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="NIST.800.53.R5-S3DefaultEncryptionKMS",
                 reason=(
                     "The analytics access-logs bucket uses SSE-S3 because "
@@ -1309,7 +1448,7 @@ def add_analytics_s3_suppressions(stack: Stack) -> None:
                     "with ``Analytics_KMS_Key``."
                 ),
             ),
-            NagPackSuppression(
+            NagSuppression(
                 id="PCI.DSS.321-S3DefaultEncryptionKMS",
                 reason=(
                     "The analytics access-logs bucket uses SSE-S3 because "
@@ -1337,10 +1476,10 @@ def add_presigned_url_lambda_suppressions(
     ARN shapes we can bind in the IAM policy.
     """
     region = api_gateway_region or "*"
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-IAM5",
                 reason=(
                     "The presigned-URL Lambda role uses SageMaker ARN "
@@ -1379,7 +1518,7 @@ def add_emr_serverless_suppressions(stack: Stack) -> None:
     dedicated SG) and the release-label pinning (covered by a constant in
     ``gco.stacks.constants``).
     """
-    NagSuppressions.add_stack_suppressions(
+    acknowledge_nag_findings(
         stack,
         [
             # Placeholder — EMR Serverless currently has no nag rules that
@@ -1388,7 +1527,7 @@ def add_emr_serverless_suppressions(stack: Stack) -> None:
             # ``apply_all_suppressions`` has a single, predictable entry
             # point for EMR Serverless — future EMR-related rules land
             # here without touching the branch dispatch.
-            NagPackSuppression(
+            NagSuppression(
                 id="AwsSolutions-EMR1",
                 reason=(
                     "EMR Serverless application is created with explicit "

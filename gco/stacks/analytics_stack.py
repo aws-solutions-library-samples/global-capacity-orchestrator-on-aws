@@ -234,6 +234,24 @@ class GCOAnalyticsStack(Stack):
                 subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
             )
 
+        # Each interface endpoint's default security group allows 443 from the
+        # VPC CIDR (an ``Fn::GetAtt`` token cdk-nag can't resolve), so the
+        # SG-ingress rules throw. Scope the acknowledgment to the VPC construct
+        # so it covers every endpoint SG under it without touching the stack.
+        from gco.stacks.nag_suppressions import acknowledge_security_group_cidr_findings
+
+        acknowledge_security_group_cidr_findings(
+            self.vpc,
+            reason=(
+                "The Studio VPC interface endpoints use their default security "
+                "group, which allows HTTPS (443) ingress from the VPC CIDR "
+                "only, referenced via an ``Fn::GetAtt`` token that cdk-nag "
+                "cannot resolve at synth time. Ingress is restricted to "
+                "intra-VPC traffic — the tightest source for private "
+                "endpoint access."
+            ),
+        )
+
     # ==================================================================
     # S3 buckets
     # ==================================================================
@@ -337,6 +355,22 @@ class GCOAnalyticsStack(Stack):
             peer=ec2.Peer.ipv4(self.vpc.vpc_cidr_block),
             connection=ec2.Port.tcp(2049),
             description="NFS from analytics VPC private subnets",
+        )
+
+        # The EFS SG ingress allows NFS (2049) from the VPC CIDR (an
+        # ``Fn::GetAtt`` token cdk-nag can't resolve), so the SG-ingress rules
+        # throw. Scope the acknowledgment to the EFS SG construct itself.
+        from gco.stacks.nag_suppressions import acknowledge_security_group_cidr_findings
+
+        acknowledge_security_group_cidr_findings(
+            self.studio_efs_security_group,
+            reason=(
+                "The Studio_EFS security group allows NFS (2049) ingress from "
+                "the VPC CIDR only, referenced via an ``Fn::GetAtt`` token "
+                "that cdk-nag cannot resolve at synth time. Ingress is "
+                "restricted to intra-VPC traffic from the Studio compute "
+                "subnet that mounts the file system."
+            ),
         )
 
         self.studio_efs = efs.FileSystem(
@@ -757,7 +791,7 @@ class GCOAnalyticsStack(Stack):
         This is a role-side policy — the bucket policy is owned
         exclusively by ``GCOGlobalStack``.
         """
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         global_region = self.config.get_global_region()
         parameter_name = f"{CLUSTER_SHARED_SSM_PARAMETER_PREFIX}/arn"
@@ -789,7 +823,7 @@ class GCOAnalyticsStack(Stack):
         # CR policy is ``Resource::*`` because cross-region SSM does not
         # support resource-level scoping cleanly; the action is a fixed
         # ``ssm:GetParameter`` for a single literal parameter Name.
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             read_cr,
             [
                 {
@@ -807,7 +841,6 @@ class GCOAnalyticsStack(Stack):
                     "appliesTo": ["Resource::*"],
                 },
             ],
-            apply_to_children=True,
         )
 
         shared_arn = read_cr.get_response_field("Parameter.Value")
@@ -847,7 +880,7 @@ class GCOAnalyticsStack(Stack):
         # literal cluster-shared bucket ARN resolved from SSM — identical
         # shape to the regional stack's analogous grant, with the same
         # reason text (bucket-scoped RW).
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.sagemaker_execution_role,
             [
                 {
@@ -860,11 +893,10 @@ class GCOAnalyticsStack(Stack):
                         "gco-cluster-shared-<account>-<region> bucket."
                     ),
                     "appliesTo": [
-                        {"regex": (r"/^Resource::<ReadClusterSharedBucketArn.*>\/\*$/")},
+                        "Resource::<ReadClusterSharedBucketArn4B0BD291.Parameter.Value>/*",
                     ],
                 },
             ],
-            apply_to_children=True,
         )
 
     # ==================================================================
@@ -1070,10 +1102,10 @@ class GCOAnalyticsStack(Stack):
         # because ListUserProfiles/DeleteUserProfile and
         # DescribeAccessPoints/DeleteAccessPoint don't support resource-level
         # scoping (the domain ID and EFS ID are passed via env vars, not ARNs).
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         assert cleanup_fn.role is not None  # always set for non-imported functions
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             cleanup_fn.role,
             [
                 {
@@ -1099,9 +1131,8 @@ class GCOAnalyticsStack(Stack):
                     ],
                 },
             ],
-            apply_to_children=True,
         )
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             cleanup_provider,
             [
                 {
@@ -1112,7 +1143,7 @@ class GCOAnalyticsStack(Stack):
                     ),
                     "appliesTo": [
                         "Resource::*",
-                        {"regex": "/^Resource::<CleanupFunction.*\\.Arn>:\\*$/"},
+                        "Resource::<CleanupFunction1604930F.Arn>:*",
                     ],
                 },
                 {
@@ -1127,7 +1158,6 @@ class GCOAnalyticsStack(Stack):
                     "reason": ("CDK Provider framework manages its own Lambda runtime version."),
                 },
             ],
-            apply_to_children=True,
         )
 
     # ==================================================================
@@ -1213,10 +1243,10 @@ class GCOAnalyticsStack(Stack):
             removal_policy=self.cognito_removal,
         )
 
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         # cdk-nag AwsSolutions-COG8 (new in cdk-nag 2.38.x): the Lite feature plan is intentional (cost); see UserPool above.
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.cognito_pool,
             [
                 {
@@ -1313,7 +1343,7 @@ class GCOAnalyticsStack(Stack):
         * ``AWSLambdaBasicExecutionRole`` managed policy for the CloudWatch
           Logs + X-Ray write path.
         """
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         # Dedicated IAM role — narrow-scoped, no reuse across other
         # Lambdas. We attach the basic execution role as a managed policy
@@ -1450,7 +1480,7 @@ class GCOAnalyticsStack(Stack):
         # Nag suppressions. Each one carries a literal-ARN or documented
         # wildcard ``applies_to`` and a ``reason`` string explaining why
         # tighter scoping isn't possible.
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.presigned_url_lambda_role,
             [
                 {
@@ -1481,7 +1511,6 @@ class GCOAnalyticsStack(Stack):
                     ],
                 },
             ],
-            apply_to_children=True,
         )
 
         # The cleanup custom resource must fire AFTER the presigned-URL

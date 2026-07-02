@@ -14,7 +14,7 @@ other's way:
 
 | Catalogue | What it shows | Generator |
 |-----------|---------------|-----------|
-| [`infra_diagrams/`](infra_diagrams/README.md) | Per-stack and whole-architecture CloudFormation topologies synthesised from the CDK app (AWS PDK cdk-graph). PNG + SVG outputs for embedding in READMEs. | `python diagrams/infra_diagrams/generate.py` |
+| [`infra_diagrams/`](infra_diagrams/README.md) | Per-stack and whole-architecture CloudFormation topologies synthesised from the CDK app ([cdk-dia](https://github.com/pistazie/cdk-dia)). PNG outputs for embedding in READMEs. | `python diagrams/infra_diagrams/generate.py` |
 | [`code_diagrams/`](code_diagrams/README.md) | Per-function control-flow charts for Lambda handlers, CLI entry points, and CDK stack constructors (pyflowchart + Playwright). Interactive HTML + rasterised PNG. | `python diagrams/code_diagrams/generate.py` |
 
 Both catalogues regenerate deterministically from the source tree —
@@ -48,11 +48,13 @@ python diagrams/code_diagrams/generate.py --strip-markers
 The two generators have independent dependency chains — only install
 what you need.
 
-**Infrastructure diagrams** (`aws-pdk` + Graphviz):
+**Infrastructure diagrams** ([cdk-dia](https://github.com/pistazie/cdk-dia) + Graphviz + Node):
 
 ```bash
-pip install -e '.[cdk]'
-brew install graphviz      # or: apt-get install graphviz
+pip install -e '.[cdk]'    # CDK libs used to synthesize the app in-process
+brew install graphviz      # or: apt-get install graphviz  (provides `dot`)
+# cdk-dia itself is fetched on demand via npx (Node.js required); no global
+# install needed.
 ```
 
 **Code flowcharts** (`pyflowchart` + `playwright` + Chromium):

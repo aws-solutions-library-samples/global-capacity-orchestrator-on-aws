@@ -277,9 +277,9 @@ class GCOApiGatewayGlobalStack(Stack):
 
         # cdk-nag suppression: CDK's grant methods generate Resource: * for
         # the rotation function's execution role.
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             rotation_role,
             [
                 {
@@ -294,7 +294,6 @@ class GCOApiGatewayGlobalStack(Stack):
                     "appliesTo": ["Resource::*"],
                 },
             ],
-            apply_to_children=True,
         )
 
         return rotation_lambda
@@ -345,9 +344,9 @@ class GCOApiGatewayGlobalStack(Stack):
 
         # cdk-nag suppression: the proxy Lambda's execution role needs
         # broad network access for VPC Lambda execution.
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             lambda_role,
             [
                 {
@@ -361,7 +360,6 @@ class GCOApiGatewayGlobalStack(Stack):
                     "appliesTo": ["Resource::*"],
                 },
             ],
-            apply_to_children=True,
         )
 
         return proxy_lambda
@@ -426,9 +424,9 @@ class GCOApiGatewayGlobalStack(Stack):
 
         # cdk-nag suppression: the aggregator Lambda reads SSM parameters
         # and invokes regional endpoints.
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             aggregator_role,
             [
                 {
@@ -442,7 +440,6 @@ class GCOApiGatewayGlobalStack(Stack):
                     "appliesTo": ["Resource::*"],
                 },
             ],
-            apply_to_children=True,
         )
 
         return aggregator_lambda
@@ -828,9 +825,9 @@ class GCOApiGatewayGlobalStack(Stack):
         # the client-side JavaScript. Adding IAM or Cognito authorization
         # here would break the OAuth flow because the browser redirect
         # from Cognito does not carry SigV4 or an id-token header.
-        from cdk_nag import NagSuppressions as _CallbackNagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        _CallbackNagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             callback_method,
             [
                 {

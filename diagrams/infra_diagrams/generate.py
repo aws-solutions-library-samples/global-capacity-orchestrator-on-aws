@@ -1,51 +1,77 @@
 #!/usr/bin/env python3
-"""
-Generate infrastructure diagrams for GCO using AWS PDK cdk-graph.
+"""Generate infrastructure diagrams for GCO with cdk-dia.
 
-This script synthesizes the CDK app and generates architecture diagrams
-for each stack type (global, api-gateway, regional, regional-api, monitoring) as well
-as a combined full architecture diagram.
+This script synthesizes the CDK app the same way ``app.py`` does and renders
+one architecture diagram per stack type (global, api-gateway, regional,
+regional-api, monitoring, analytics) plus a combined full-architecture
+diagram, as PNG, using `cdk-dia <https://github.com/pistazie/cdk-dia>`_.
 
-Per-stack diagrams synthesize just the target stack in isolation by
-passing placeholder strings for cross-stack inputs (ARNs, DNS names,
-etc.) rather than instantiating the dependency stacks. Two exceptions:
+Why cdk-dia (and not aws-pdk)?
+-----------------------------
+The previous generator used ``aws-pdk``'s ``cdk-graph`` +
+``cdk-graph-plugin-diagram``. Every ``aws-pdk`` release (through the latest,
+0.26.15) hard-pins ``cdk-nag<3.0.0``, which is incompatible with the
+cdk-nag 3.x this project now uses — it blocks the ``[cdk]`` extra and the
+lockfile, and aws-pdk is end-of-life (its successor, the Nx Plugin for AWS,
+is a TypeScript monorepo scaffolder that does not carry the diagram plugin
+forward). ``cdk-dia`` is an actively maintained, purpose-built CDK diagram
+tool that depends only on ``aws-cdk-lib``/``constructs`` (no cdk-nag) and
+renders AWS-icon diagrams via the system ``dot`` binary.
 
-* ``regional-api`` consumes the regional stack's VPC construct directly,
-  so both stacks appear in that diagram.
-* ``monitoring`` reads live attributes from the global, api-gateway, and
-  regional stacks (table names, cluster IDs, Lambda names), so all four
-  stacks appear in that diagram.
+How it works
+------------
+``cdk-dia`` reads a *synthesized* cloud assembly (``cdk.out/tree.json``) — it
+does not run ``cdk synth`` itself. So this script synthesizes each diagram's
+stack set in-process to a temporary ``cdk.out`` (with the Docker image asset
+and helm-installer Lambda mocked, exactly like the unit tests, so no Docker
+daemon or live AWS access is required) and then invokes
+``npx cdk-dia --tree <cdk.out>/tree.json --target <name>.png``.
+
+Per-stack diagrams synthesize just the target stack (passing placeholder
+strings for cross-stack inputs). ``regional-api`` also instantiates the
+regional stack because its constructor consumes the regional VPC construct;
+``--include`` then scopes the diagram to the regional-api stack.
+
+Output is PNG only (cdk-dia does not emit SVG). The full-architecture diagram
+is rendered twice: a collapsed overview and a ``--no-collapse`` detailed view.
 
 Usage:
-    python diagrams/infra_diagrams/generate.py              # Generate all diagrams
-    python diagrams/infra_diagrams/generate.py --stack all  # Generate all diagrams
+    python diagrams/infra_diagrams/generate.py              # all diagrams
+    python diagrams/infra_diagrams/generate.py --stack all  # all diagrams
     python diagrams/infra_diagrams/generate.py --stack global
     python diagrams/infra_diagrams/generate.py --stack api-gateway
     python diagrams/infra_diagrams/generate.py --stack regional
     python diagrams/infra_diagrams/generate.py --stack regional-api
     python diagrams/infra_diagrams/generate.py --stack monitoring
     python diagrams/infra_diagrams/generate.py --stack analytics
+
+Prerequisites:
+    * Graphviz ``dot`` on PATH (``brew install graphviz`` / ``apt-get install
+      graphviz``).
+    * Node.js + npx (``cdk-dia`` is fetched on demand, pinned to
+      ``CDK_DIA_VERSION``).
 """
 
+from __future__ import annotations
+
 import argparse
-import shutil
+import contextlib
+import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 # Add project root to path. This script lives at
-# ``diagrams/infra_diagrams/generate.py`` so the project root is two
-# parents up. The ``sys.path.insert`` lets the script be invoked
-# standalone (``python diagrams/infra_diagrams/generate.py``) without a
-# prior ``pip install -e .``.
+# ``diagrams/infra_diagrams/generate.py`` so the project root is two parents
+# up. The ``sys.path.insert`` lets the script be invoked standalone
+# (``python diagrams/infra_diagrams/generate.py``) without a prior
+# ``pip install -e .``.
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import aws_cdk as cdk
-from aws_pdk.cdk_graph import CdkGraph, FilterPreset
-from aws_pdk.cdk_graph_plugin_diagram import (
-    CdkGraphDiagramPlugin,
-    DiagramFormat,
-)
 
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.analytics_stack import GCOAnalyticsStack
@@ -55,448 +81,258 @@ from gco.stacks.monitoring_stack import GCOMonitoringStack
 from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
 from gco.stacks.regional_stack import GCORegionalStack
 
+# Pinned cdk-dia version fetched via ``npx`` (repo has no root package.json;
+# Node CLIs are invoked through npx, matching how ``cli/stacks.py`` shells out
+# to ``npx cdk``).
+CDK_DIA_VERSION = "0.12.3"
 
-def generate_global_stack_diagram(output_dir: Path) -> None:
-    """Generate diagram for the Global Stack (Global Accelerator)."""
-    print("\n📊 Generating Global Stack diagram...")
+# A builder instantiates the stacks for one diagram and returns the stack ids
+# to pass to ``cdk-dia --include`` (or ``None`` to diagram every stack in the
+# assembly, used for the full-architecture views).
+Builder = Callable[[cdk.App, ConfigLoader], "list[str] | None"]
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_path = Path(tmp_dir)
-        app = cdk.App(outdir=str(tmp_path / "cdk.out"))
+
+@contextlib.contextmanager
+def _mocked_regional_assets() -> Iterator[None]:
+    """Mock the Docker image asset + helm-installer Lambda during synth.
+
+    Diagram generation only needs the CloudFormation topology, not real
+    container images, so we stub the Docker asset (no daemon required) and the
+    helm-installer custom resource the same way the unit tests do.
+    """
+
+    def _mock_helm_installer(stack: Any) -> None:
+        stack.helm_installer_lambda = MagicMock()
+        stack.helm_installer_provider = MagicMock()
+        stack.helm_installer_provider.service_token = (
+            "arn:aws:lambda:us-east-1:123456789012:function:mock"  # nosec B106
+        )
+        stack.helm_installer_lambda_function_name = (
+            f"gco-helm-{getattr(stack, 'deployment_region', 'us-east-1')}"
+        )
+
+    with (
+        patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+        patch.object(GCORegionalStack, "_create_helm_installer_lambda", _mock_helm_installer),
+    ):
+        mock_docker.return_value.image_uri = (
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+        )
+        yield
+
+
+def _run_cdk_dia(
+    tree_path: Path, target: Path, *, include: list[str] | None, collapse: bool
+) -> None:
+    """Invoke ``npx cdk-dia`` against a synthesized ``tree.json``."""
+    cmd = [
+        "npx",
+        "--yes",
+        f"cdk-dia@{CDK_DIA_VERSION}",
+        "--tree",
+        str(tree_path),
+        "--target",
+        str(target),
+    ]
+    if not collapse:
+        cmd.append("--no-collapse")
+    if include:
+        cmd += ["--include", *include]
+    subprocess.run(cmd, check=True)  # noqa: S603 — fixed argv, no shell, paths we control
+    # cdk-dia writes a Graphviz ``.dot`` sidecar next to the target. It's a
+    # transient intermediate (and its AWS-icon ``image=`` refs are absolute
+    # local npx-cache paths, so it isn't portable) — drop it. The PNG has the
+    # icons rasterized in and is the committed artifact.
+    target.with_suffix(".dot").unlink(missing_ok=True)
+
+
+def _generate(
+    name: str,
+    title: str,
+    build: Builder,
+    *,
+    collapse: bool = True,
+    context: dict[str, Any] | None = None,
+) -> None:
+    """Synthesize the app built by ``build`` and render it to ``<name>.png``."""
+    print(f"\n📊 Generating {title}...")
+    output_dir = Path(__file__).parent
+    with tempfile.TemporaryDirectory() as tmp:
+        assembly_dir = Path(tmp) / "cdk.out"
+        app = cdk.App(outdir=str(assembly_dir), context=context)
         config = ConfigLoader(app)
-
-        project_name = config.get_project_name()
-        deployment_regions = config.get_deployment_regions()
-        global_region = deployment_regions["global"]
-
-        GCOGlobalStack(
-            app,
-            f"{project_name}-global",
-            config=config,
-            env=cdk.Environment(region=global_region),
-            description="Global resources including AWS Global Accelerator",
+        with _mocked_regional_assets():
+            include = build(app, config)
+            app.synth()
+        _run_cdk_dia(
+            assembly_dir / "tree.json",
+            output_dir / f"{name}.png",
+            include=include,
+            collapse=collapse,
         )
-
-        graph = CdkGraph(
-            app,
-            plugins=[
-                CdkGraphDiagramPlugin(
-                    defaults={"format": [DiagramFormat.PNG, DiagramFormat.SVG]},
-                    diagrams=[
-                        {
-                            "name": "global-stack",
-                            "title": "GCO Global Stack - AWS Global Accelerator",
-                            "filter_plan": {"preset": FilterPreset.COMPACT},
-                        },
-                    ],
-                )
-            ],
-        )
-
-        app.synth()
-        graph.report()
-        _copy_diagrams_from_temp(tmp_path, output_dir, "global")
+    print(f"   ✓ Created {name}.png")
 
 
-def generate_api_gateway_stack_diagram(output_dir: Path) -> None:
-    """Generate diagram for the API Gateway Stack."""
-    print("\n📊 Generating API Gateway Stack diagram...")
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_path = Path(tmp_dir)
-        app = cdk.App(outdir=str(tmp_path / "cdk.out"))
-        config = ConfigLoader(app)
-
-        project_name = config.get_project_name()
-        deployment_regions = config.get_deployment_regions()
-        api_gateway_region = deployment_regions["api_gateway"]
-
-        # Placeholder for the Global Accelerator DNS so the stack can synth
-        # without instantiating GCOGlobalStack (which would pull the global
-        # stack into this per-stack diagram).
-        GCOApiGatewayGlobalStack(
-            app,
-            f"{project_name}-api-gateway",
-            global_accelerator_dns="placeholder.awsglobalaccelerator.com",
-            env=cdk.Environment(region=api_gateway_region),
-            description="Global API Gateway with IAM authentication",
-        )
-
-        graph = CdkGraph(
-            app,
-            plugins=[
-                CdkGraphDiagramPlugin(
-                    defaults={"format": [DiagramFormat.PNG, DiagramFormat.SVG]},
-                    diagrams=[
-                        {
-                            "name": "api-gateway-stack",
-                            "title": "GCO API Gateway Stack",
-                            "filter_plan": {"preset": FilterPreset.COMPACT},
-                        },
-                    ],
-                )
-            ],
-        )
-
-        app.synth()
-        graph.report()
-        _copy_diagrams_from_temp(tmp_path, output_dir, "api-gateway")
+# ---------------------------------------------------------------------------
+# Per-diagram builders (mirror app.py's construction, with placeholder inputs
+# for cross-stack values so each diagram stays scoped to its own stack).
+# ---------------------------------------------------------------------------
 
 
-def generate_regional_stack_diagram(output_dir: Path) -> None:
-    """Generate diagram for the Regional Stack (EKS, ALB, etc.)."""
-    print("\n📊 Generating Regional Stack diagram...")
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_path = Path(tmp_dir)
-        app = cdk.App(outdir=str(tmp_path / "cdk.out"))
-        config = ConfigLoader(app)
-
-        project_name = config.get_project_name()
-        deployment_regions = config.get_deployment_regions()
-        regional_regions = deployment_regions["regional"]
-
-        # Create regional stack for first region. Placeholder ARN stands in
-        # for the cross-stack auth secret so the dependency stacks don't
-        # need to be instantiated for this per-stack diagram.
-        region = regional_regions[0]
-        GCORegionalStack(
-            app,
-            f"{project_name}-{region}",
-            config=config,
-            region=region,
-            auth_secret_arn=f"arn:aws:secretsmanager:{region}:123456789012:secret:placeholder",
-            env=cdk.Environment(region=region),
-            description=f"Regional resources for {region} - EKS, ALB, Services",
-        )
-
-        graph = CdkGraph(
-            app,
-            plugins=[
-                CdkGraphDiagramPlugin(
-                    defaults={"format": [DiagramFormat.PNG, DiagramFormat.SVG]},
-                    diagrams=[
-                        {
-                            "name": "regional-stack",
-                            "title": f"GCO Regional Stack ({region})",
-                            "filter_plan": {"preset": FilterPreset.COMPACT},
-                        },
-                    ],
-                )
-            ],
-        )
-
-        app.synth()
-        graph.report()
-        _copy_diagrams_from_temp(tmp_path, output_dir, "regional")
+def _build_global(app: cdk.App, config: ConfigLoader) -> list[str]:
+    project = config.get_project_name()
+    region = config.get_deployment_regions()["global"]
+    GCOGlobalStack(
+        app,
+        f"{project}-global",
+        config=config,
+        env=cdk.Environment(region=region),
+        description="Global resources including AWS Global Accelerator",
+    )
+    return [f"{project}-global"]
 
 
-def generate_regional_api_stack_diagram(output_dir: Path) -> None:
-    """Generate diagram for the Regional API Gateway Stack (Private Access)."""
-    print("\n📊 Generating Regional API Gateway Stack diagram...")
+def _build_api_gateway(app: cdk.App, config: ConfigLoader) -> list[str]:
+    project = config.get_project_name()
+    region = config.get_deployment_regions()["api_gateway"]
+    GCOApiGatewayGlobalStack(
+        app,
+        f"{project}-api-gateway",
+        global_accelerator_dns="placeholder.awsglobalaccelerator.com",
+        env=cdk.Environment(region=region),
+        description="Global API Gateway with IAM authentication",
+    )
+    return [f"{project}-api-gateway"]
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_path = Path(tmp_dir)
-        app = cdk.App(outdir=str(tmp_path / "cdk.out"))
-        config = ConfigLoader(app)
 
-        project_name = config.get_project_name()
-        deployment_regions = config.get_deployment_regions()
-        regional_regions = deployment_regions["regional"]
+def _build_regional(app: cdk.App, config: ConfigLoader) -> list[str]:
+    project = config.get_project_name()
+    region = config.get_deployment_regions()["regional"][0]
+    GCORegionalStack(
+        app,
+        f"{project}-{region}",
+        config=config,
+        region=region,
+        auth_secret_arn=f"arn:aws:secretsmanager:{region}:123456789012:secret:placeholder",
+        env=cdk.Environment(region=region),
+        description=f"Regional resources for {region} - EKS, ALB, Services",
+    )
+    return [f"{project}-{region}"]
 
-        # The regional API gateway stack needs a real VPC construct, so we
-        # instantiate the regional stack (with a placeholder auth ARN) and
-        # skip the global + api-gateway dependencies.
-        region = regional_regions[0]
+
+def _build_regional_api(app: cdk.App, config: ConfigLoader) -> list[str]:
+    project = config.get_project_name()
+    region = config.get_deployment_regions()["regional"][0]
+    # The regional API gateway stack needs a real VPC construct, so we
+    # instantiate the regional stack (with placeholder inputs) purely to
+    # supply it; ``--include`` scopes the diagram to the regional-api stack.
+    regional_stack = GCORegionalStack(
+        app,
+        f"{project}-{region}",
+        config=config,
+        region=region,
+        auth_secret_arn=f"arn:aws:secretsmanager:{region}:123456789012:secret:placeholder",
+        env=cdk.Environment(region=region),
+        description=f"Regional resources for {region}",
+    )
+    GCORegionalApiGatewayStack(
+        app,
+        f"{project}-regional-api-{region}",
+        config=config,
+        region=region,
+        vpc=regional_stack.vpc,
+        alb_dns_name=f"internal-{project}-{region}.elb.amazonaws.com",
+        auth_secret_arn=f"arn:aws:secretsmanager:{region}:123456789012:secret:placeholder",
+        env=cdk.Environment(region=region),
+        description=f"Regional API Gateway for {region} (private access)",
+    )
+    return [f"{project}-regional-api-{region}"]
+
+
+def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
+    """Build the whole app: global, api-gateway, every regional stack, monitoring.
+
+    Returns ``None`` so callers diagram every stack. ``monitoring`` passes its
+    own ``--include`` to scope the view to the monitoring stack.
+    """
+    project = config.get_project_name()
+    regions = config.get_deployment_regions()
+
+    global_stack = GCOGlobalStack(
+        app, f"{project}-global", config=config, env=cdk.Environment(region=regions["global"])
+    )
+    api_gateway_stack = GCOApiGatewayGlobalStack(
+        app,
+        f"{project}-api-gateway",
+        global_accelerator_dns=global_stack.accelerator.dns_name,
+        env=cdk.Environment(region=regions["api_gateway"]),
+    )
+    api_gateway_stack.add_dependency(global_stack)
+
+    regional_stacks = []
+    for region in regions["regional"]:
         regional_stack = GCORegionalStack(
             app,
-            f"{project_name}-{region}",
+            f"{project}-{region}",
             config=config,
             region=region,
-            auth_secret_arn=f"arn:aws:secretsmanager:{region}:123456789012:secret:placeholder",
+            auth_secret_arn=api_gateway_stack.secret.secret_arn,
             env=cdk.Environment(region=region),
-            description=f"Regional resources for {region}",
         )
+        regional_stack.add_dependency(global_stack)
+        regional_stack.add_dependency(api_gateway_stack)
+        regional_stacks.append(regional_stack)
 
-        # Create regional API gateway stack. ALB DNS is a placeholder since
-        # it's created by the EKS ingress controller at runtime.
-        GCORegionalApiGatewayStack(
-            app,
-            f"{project_name}-regional-api-{region}",
-            config=config,
-            region=region,
-            vpc=regional_stack.vpc,
-            alb_dns_name=f"internal-{project_name}-{region}.elb.amazonaws.com",
-            auth_secret_arn=f"arn:aws:secretsmanager:{region}:123456789012:secret:placeholder",
-            env=cdk.Environment(region=region),
-            description=f"Regional API Gateway for {region} (private access)",
-        )
-
-        graph = CdkGraph(
-            app,
-            plugins=[
-                CdkGraphDiagramPlugin(
-                    defaults={"format": [DiagramFormat.PNG, DiagramFormat.SVG]},
-                    diagrams=[
-                        {
-                            "name": "regional-api-stack",
-                            "title": f"GCO Regional API Gateway Stack ({region})",
-                            "filter_plan": {"preset": FilterPreset.COMPACT},
-                        },
-                    ],
-                )
-            ],
-        )
-
-        app.synth()
-        graph.report()
-        _copy_diagrams_from_temp(tmp_path, output_dir, "regional-api")
+    monitoring_stack = GCOMonitoringStack(
+        app,
+        f"{project}-monitoring",
+        config=config,
+        global_stack=global_stack,
+        regional_stacks=regional_stacks,
+        api_gateway_stack=api_gateway_stack,
+        env=cdk.Environment(region=regions["monitoring"]),
+    )
+    for regional_stack in regional_stacks:
+        monitoring_stack.add_dependency(regional_stack)
+    return None
 
 
-def generate_monitoring_stack_diagram(output_dir: Path) -> None:
-    """Generate diagram for the Monitoring Stack."""
-    print("\n📊 Generating Monitoring Stack diagram...")
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_path = Path(tmp_dir)
-        app = cdk.App(outdir=str(tmp_path / "cdk.out"))
-        config = ConfigLoader(app)
-
-        project_name = config.get_project_name()
-        deployment_regions = config.get_deployment_regions()
-        global_region = deployment_regions["global"]
-        api_gateway_region = deployment_regions["api_gateway"]
-        monitoring_region = deployment_regions["monitoring"]
-        regional_regions = deployment_regions["regional"]
-
-        # Need all dependencies
-        global_stack = GCOGlobalStack(
-            app,
-            f"{project_name}-global",
-            config=config,
-            env=cdk.Environment(region=global_region),
-        )
-
-        api_gateway_stack = GCOApiGatewayGlobalStack(
-            app,
-            f"{project_name}-api-gateway",
-            global_accelerator_dns=global_stack.accelerator.dns_name,
-            env=cdk.Environment(region=api_gateway_region),
-        )
-        api_gateway_stack.add_dependency(global_stack)
-
-        regional_stacks = []
-        for region in regional_regions:
-            regional_stack = GCORegionalStack(
-                app,
-                f"{project_name}-{region}",
-                config=config,
-                region=region,
-                auth_secret_arn=api_gateway_stack.secret.secret_arn,
-                env=cdk.Environment(region=region),
-            )
-            regional_stack.add_dependency(global_stack)
-            regional_stack.add_dependency(api_gateway_stack)
-            regional_stacks.append(regional_stack)
-
-        monitoring_stack = GCOMonitoringStack(
-            app,
-            f"{project_name}-monitoring",
-            config=config,
-            global_stack=global_stack,
-            regional_stacks=regional_stacks,
-            api_gateway_stack=api_gateway_stack,
-            env=cdk.Environment(region=monitoring_region),
-            description="Cross-region monitoring and observability",
-        )
-        for rs in regional_stacks:
-            monitoring_stack.add_dependency(rs)
-
-        graph = CdkGraph(
-            app,
-            plugins=[
-                CdkGraphDiagramPlugin(
-                    defaults={"format": [DiagramFormat.PNG, DiagramFormat.SVG]},
-                    diagrams=[
-                        {
-                            "name": "monitoring-stack",
-                            "title": "GCO Monitoring Stack",
-                            "filter_plan": {"preset": FilterPreset.COMPACT},
-                        },
-                    ],
-                )
-            ],
-        )
-
-        app.synth()
-        graph.report()
-        _copy_diagrams_from_temp(tmp_path, output_dir, "monitoring")
+def _build_monitoring(app: cdk.App, config: ConfigLoader) -> list[str]:
+    _build_full(app, config)
+    return [f"{config.get_project_name()}-monitoring"]
 
 
-def generate_analytics_stack_diagram(output_dir: Path) -> None:
-    """Generate diagram for the Analytics Stack (SageMaker Studio, EMR, Cognito)."""
-    print("\n📊 Generating Analytics Stack diagram...")
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_path = Path(tmp_dir)
-
-        # Force-enable the analytics toggle via a CDK context override so
-        # ``ConfigLoader.get_analytics_enabled()`` returns True during this
-        # synth. Mirrors the overlay the property tests use in
-        # ``tests/_analytics_cdk_overlays.build_overlay``.
-        app = cdk.App(
-            context={
-                "analytics_environment": {
-                    "enabled": True,
-                    "hyperpod": {"enabled": False},
-                    "canvas": {"enabled": False},
-                    "cognito": {"domain_prefix": None, "removal_policy": "destroy"},
-                    "efs": {"removal_policy": "destroy"},
-                    "studio": {"user_profile_name_prefix": None},
-                },
-            },
-            outdir=str(tmp_path / "cdk.out"),
-        )
-        config = ConfigLoader(app)
-
-        project_name = config.get_project_name()
-        deployment_regions = config.get_deployment_regions()
-        api_gateway_region = deployment_regions["api_gateway"]
-
-        # The analytics stack reads Cluster_Shared_Bucket SSM parameters via
-        # cross-region ``AwsCustomResource`` lookups, but it does not take
-        # the global or api-gateway stacks as constructor arguments. So for
-        # the per-stack diagram we skip those dependencies entirely and the
-        # resulting graph contains only the analytics stack.
-        GCOAnalyticsStack(
-            app,
-            f"{project_name}-analytics",
-            config=config,
-            env=cdk.Environment(region=api_gateway_region),
-            description="Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)",
-        )
-
-        graph = CdkGraph(
-            app,
-            plugins=[
-                CdkGraphDiagramPlugin(
-                    defaults={"format": [DiagramFormat.PNG, DiagramFormat.SVG]},
-                    diagrams=[
-                        {
-                            "name": "analytics-stack",
-                            "title": "GCO Analytics Stack - SageMaker Studio + EMR + Cognito",
-                            "filter_plan": {"preset": FilterPreset.COMPACT},
-                        },
-                    ],
-                )
-            ],
-        )
-
-        app.synth()
-        graph.report()
-        _copy_diagrams_from_temp(tmp_path, output_dir, "analytics")
+def _build_analytics(app: cdk.App, config: ConfigLoader) -> list[str]:
+    project = config.get_project_name()
+    region = config.get_deployment_regions()["api_gateway"]
+    GCOAnalyticsStack(
+        app,
+        f"{project}-analytics",
+        config=config,
+        env=cdk.Environment(region=region),
+        description=(
+            "Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)"
+        ),
+    )
+    return [f"{project}-analytics"]
 
 
-def generate_full_architecture_diagram(output_dir: Path) -> None:
-    """Generate diagram for the complete architecture."""
-    print("\n📊 Generating Full Architecture diagram...")
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_path = Path(tmp_dir)
-        app = cdk.App(outdir=str(tmp_path / "cdk.out"))
-        config = ConfigLoader(app)
-
-        project_name = config.get_project_name()
-        deployment_regions = config.get_deployment_regions()
-        global_region = deployment_regions["global"]
-        api_gateway_region = deployment_regions["api_gateway"]
-        monitoring_region = deployment_regions["monitoring"]
-        regional_regions = deployment_regions["regional"]
-
-        global_stack = GCOGlobalStack(
-            app,
-            f"{project_name}-global",
-            config=config,
-            env=cdk.Environment(region=global_region),
-        )
-
-        api_gateway_stack = GCOApiGatewayGlobalStack(
-            app,
-            f"{project_name}-api-gateway",
-            global_accelerator_dns=global_stack.accelerator.dns_name,
-            env=cdk.Environment(region=api_gateway_region),
-        )
-        api_gateway_stack.add_dependency(global_stack)
-
-        regional_stacks = []
-        for region in regional_regions:
-            regional_stack = GCORegionalStack(
-                app,
-                f"{project_name}-{region}",
-                config=config,
-                region=region,
-                auth_secret_arn=api_gateway_stack.secret.secret_arn,
-                env=cdk.Environment(region=region),
-            )
-            regional_stack.add_dependency(global_stack)
-            regional_stack.add_dependency(api_gateway_stack)
-            regional_stacks.append(regional_stack)
-
-        monitoring_stack = GCOMonitoringStack(
-            app,
-            f"{project_name}-monitoring",
-            config=config,
-            global_stack=global_stack,
-            regional_stacks=regional_stacks,
-            api_gateway_stack=api_gateway_stack,
-            env=cdk.Environment(region=monitoring_region),
-        )
-        for rs in regional_stacks:
-            monitoring_stack.add_dependency(rs)
-
-        graph = CdkGraph(
-            app,
-            plugins=[
-                CdkGraphDiagramPlugin(
-                    defaults={"format": [DiagramFormat.PNG, DiagramFormat.SVG]},
-                    diagrams=[
-                        {
-                            "name": "full-architecture",
-                            "title": "GCO Complete Infrastructure Architecture",
-                            "filter_plan": {"preset": FilterPreset.COMPACT},
-                        },
-                        {
-                            "name": "full-architecture-detailed",
-                            "title": "GCO Detailed Architecture",
-                            "filter_plan": {"preset": FilterPreset.NONE},
-                            "theme": "dark",
-                        },
-                    ],
-                )
-            ],
-        )
-
-        app.synth()
-        graph.report()
-        _copy_diagrams_from_temp(tmp_path, output_dir, "full")
+# Context overlay that force-enables the analytics environment (mirrors the
+# overlay the property tests use), so ``ConfigLoader.get_analytics_enabled()``
+# returns True during the analytics-diagram synth.
+_ANALYTICS_CONTEXT: dict[str, Any] = {
+    "analytics_environment": {
+        "enabled": True,
+        "hyperpod": {"enabled": False},
+        "canvas": {"enabled": False},
+        "cognito": {"domain_prefix": None, "removal_policy": "destroy"},
+        "efs": {"removal_policy": "destroy"},
+        "studio": {"user_profile_name_prefix": None},
+    },
+}
 
 
-def _copy_diagrams_from_temp(tmp_dir: Path, output_dir: Path, prefix: str) -> None:
-    """Copy generated diagrams from temp cdk.out to output directory."""
-    cdkgraph_dir = tmp_dir / "cdk.out" / "cdkgraph"
-    if cdkgraph_dir.exists():
-        for f in cdkgraph_dir.glob("*.png"):
-            dest_name = f.name if prefix == "full" else f"{prefix}-stack.png"
-            shutil.copy(f, output_dir / dest_name)
-            print(f"   ✓ Created {dest_name}")
-        for f in cdkgraph_dir.glob("*.svg"):
-            dest_name = f.name if prefix == "full" else f"{prefix}-stack.svg"
-            shutil.copy(f, output_dir / dest_name)
-            print(f"   ✓ Created {dest_name}")
-
-
-def main():
-    """Main entry point."""
+def main() -> None:
     parser = argparse.ArgumentParser(description="Generate GCO infrastructure diagrams")
     parser.add_argument(
         "--stack",
@@ -515,39 +351,40 @@ def main():
     args = parser.parse_args()
 
     output_dir = Path(__file__).parent
-
-    print("🏗️  GCO Infrastructure Diagram Generator")
+    print("🏗️  GCO Infrastructure Diagram Generator (cdk-dia)")
     print("=" * 50)
 
     if args.stack in ("all", "global"):
-        generate_global_stack_diagram(output_dir)
-
+        _generate("global-stack", "GCO Global Stack - AWS Global Accelerator", _build_global)
     if args.stack in ("all", "api-gateway"):
-        generate_api_gateway_stack_diagram(output_dir)
-
+        _generate("api-gateway-stack", "GCO API Gateway Stack", _build_api_gateway)
     if args.stack in ("all", "regional"):
-        generate_regional_stack_diagram(output_dir)
-
+        _generate("regional-stack", "GCO Regional Stack", _build_regional)
     if args.stack in ("all", "regional-api"):
-        generate_regional_api_stack_diagram(output_dir)
-
+        _generate("regional-api-stack", "GCO Regional API Gateway Stack", _build_regional_api)
     if args.stack in ("all", "monitoring"):
-        generate_monitoring_stack_diagram(output_dir)
-
+        _generate("monitoring-stack", "GCO Monitoring Stack", _build_monitoring)
     if args.stack in ("all", "analytics"):
-        generate_analytics_stack_diagram(output_dir)
-
+        _generate(
+            "analytics-stack",
+            "GCO Analytics Stack - SageMaker Studio + EMR + Cognito",
+            _build_analytics,
+            context=_ANALYTICS_CONTEXT,
+        )
     if args.stack == "all":
-        generate_full_architecture_diagram(output_dir)
+        _generate("full-architecture", "GCO Complete Infrastructure Architecture", _build_full)
+        _generate(
+            "full-architecture-detailed",
+            "GCO Detailed Architecture",
+            _build_full,
+            collapse=False,
+        )
 
     print("\n" + "=" * 50)
     print("✅ Diagram generation complete!")
     print(f"   Output directory: {output_dir.absolute()}")
-    print("\n   Generated files:")
     for f in sorted(output_dir.glob("*.png")):
         print(f"   - {f.name} ({f.stat().st_size / 1024 / 1024:.1f} MB)")
-    for f in sorted(output_dir.glob("*.svg")):
-        print(f"   - {f.name} ({f.stat().st_size / 1024:.1f} KB)")
 
 
 if __name__ == "__main__":

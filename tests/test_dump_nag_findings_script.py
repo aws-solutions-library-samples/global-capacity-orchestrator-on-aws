@@ -2,14 +2,14 @@
 
 The script is a dev-only debugging helper that iterates the same
 ``CONFIGS`` list the pytest cdk-nag gate uses and prints every finding
-grouped by ``(rule_id, resource_path, finding_id)``. These tests cover:
+grouped by ``(pack, rule, resource_path)``. These tests cover:
 
 * ``run_config`` — the thin wrapper around
-  ``tests.test_nag_compliance._build_app_with_logger`` / ``_build_all_stacks``
-  / ``_mock_helm_installer``. We don't synth a real CDK app here (that's
-  what ``test_nag_compliance`` does); we patch the helpers and assert
-  ``run_config`` threads overrides through and returns the logger's
-  captured findings unchanged.
+  ``tests.test_nag_compliance._build_app`` / ``_build_all_stacks`` /
+  ``_mock_helm_installer`` / ``_collect_nag_violations``. We don't synth
+  a real CDK app here (that's what ``test_nag_compliance`` does); we
+  patch the helpers and assert ``run_config`` threads overrides through
+  and returns the collected findings unchanged.
 * ``main`` — argparse-less entry point. Asserts the output structure
   (``CONFIG:`` header per config, ``UNIQUE FINDINGS`` summary, exit
   code 0 on clean, 1 on any finding) against a stubbed ``run_config``
@@ -38,33 +38,38 @@ sys.modules.setdefault("dump_nag_findings", dump_nag)
 _SPEC.loader.exec_module(dump_nag)
 
 
+# A finding dict has the shape produced by
+# ``tests.test_nag_compliance._collect_nag_violations``:
+#   {"pack": str, "rule": str, "description": str, "paths": list[str]}
+
+
 # ---------------------------------------------------------------------------
 # run_config
 # ---------------------------------------------------------------------------
 
 
-class _StubLogger:
-    """Minimal stand-in for ``CapturingCdkNagLogger``.
-
-    ``run_config`` only touches ``.findings``; anything else is overkill.
-    """
-
-    def __init__(self, findings: list[dict[str, object]]) -> None:
-        self.findings = findings
-
-
-def test_run_config_returns_logger_findings_verbatim():
-    """``run_config`` must return ``logger.findings`` without filtering."""
+def test_run_config_returns_collected_findings_verbatim():
+    """``run_config`` must return the collected violations without filtering."""
     expected = [
-        {"rule_id": "AwsSolutions-IAM5", "resource_path": "/A/B", "finding_id": "f1"},
-        {"rule_id": "AwsSolutions-L1", "resource_path": "/A/Lambda", "finding_id": "f2"},
+        {
+            "pack": "AwsSolutions",
+            "rule": "AwsSolutions-IAM5[Resource::*]",
+            "description": "wildcard",
+            "paths": ["/A/B"],
+        },
+        {
+            "pack": "Serverless",
+            "rule": "Serverless-LambdaTracing",
+            "description": "tracing",
+            "paths": ["/A/Lambda"],
+        },
     ]
     app = MagicMock()
-    logger = _StubLogger(findings=expected)
 
     with (
-        patch.object(dump_nag, "_build_app_with_logger", return_value=(app, logger)) as mock_build,
+        patch.object(dump_nag, "_build_app", return_value=app) as mock_build,
         patch.object(dump_nag, "_build_all_stacks") as mock_stacks,
+        patch.object(dump_nag, "_collect_nag_violations", return_value=expected) as mock_collect,
         # ecr_assets / helm are patched by run_config itself; let the real
         # ``with patch(...)`` blocks run — they don't touch the network.
         patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
@@ -76,20 +81,21 @@ def test_run_config_returns_logger_findings_verbatim():
         result = dump_nag.run_config("some-config", {"key": "value"})
 
     assert result == expected
-    # overrides flow through to _build_app_with_logger
+    # overrides flow through to _build_app
     mock_build.assert_called_once_with(context_overrides={"key": "value"})
     mock_stacks.assert_called_once_with(app)
+    mock_collect.assert_called_once_with(app)
     app.synth.assert_called_once()
 
 
 def test_run_config_empty_findings_list_when_clean():
     """A config that produces no findings returns an empty list, not None."""
     app = MagicMock()
-    logger = _StubLogger(findings=[])
 
     with (
-        patch.object(dump_nag, "_build_app_with_logger", return_value=(app, logger)),
+        patch.object(dump_nag, "_build_app", return_value=app),
         patch.object(dump_nag, "_build_all_stacks"),
+        patch.object(dump_nag, "_collect_nag_violations", return_value=[]),
         patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
     ):
         mock_docker.return_value.image_uri = "x"
@@ -103,30 +109,20 @@ def test_run_config_synthesizes_inside_mock_context():
 
     If synth runs after the ``with`` block exits, the real
     ``ecr_assets.DockerImageAsset`` would try to build an image and fail
-    in CI. Assert synth happens before we leave the patch scope by
-    checking call order via a shared recorder.
+    in CI. Assert synth happens before we leave the patch scope.
     """
     calls: list[str] = []
 
-    def _record_synth():
-        calls.append("synth")
-
     app = MagicMock()
-    app.synth.side_effect = _record_synth
-    logger = _StubLogger(findings=[])
+    app.synth.side_effect = lambda: calls.append("synth")
 
     with (
-        patch.object(dump_nag, "_build_app_with_logger", return_value=(app, logger)),
+        patch.object(dump_nag, "_build_app", return_value=app),
         patch.object(dump_nag, "_build_all_stacks"),
+        patch.object(dump_nag, "_collect_nag_violations", return_value=[]),
         patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
     ):
         mock_docker.return_value.image_uri = "x"
-
-        def _record_docker_access(*_args, **_kw):
-            calls.append("docker_asset_used")
-            return mock_docker.return_value
-
-        mock_docker.side_effect = _record_docker_access
         dump_nag.run_config("c", {})
 
     # synth was called at least once while the Docker patch was live.
@@ -144,6 +140,10 @@ def _fake_configs():
         ("cfg-a", {"key": "a"}),
         ("cfg-b", {"key": "b"}),
     ]
+
+
+def _finding(rule: str, path: str, pack: str = "AwsSolutions") -> dict[str, object]:
+    return {"pack": pack, "rule": rule, "description": "", "paths": [path]}
 
 
 def test_main_exits_zero_when_no_findings(capsys):
@@ -165,11 +165,7 @@ def test_main_exits_zero_when_no_findings(capsys):
 
 def test_main_exits_one_when_any_finding_present(capsys):
     """A single finding anywhere in the matrix must fail the gate."""
-    finding = {
-        "rule_id": "AwsSolutions-IAM5",
-        "resource_path": "/App/Stack/Role",
-        "finding_id": "wildcard-in-policy",
-    }
+    finding = _finding("AwsSolutions-IAM5[Resource::*]", "/App/Stack/Role")
     with (
         patch.object(dump_nag, "CONFIGS", _fake_configs()),
         patch.object(dump_nag, "run_config", side_effect=[[], [finding]]),
@@ -180,9 +176,8 @@ def test_main_exits_one_when_any_finding_present(capsys):
     out = capsys.readouterr().out
     # Summary counts uniques, not occurrences.
     assert "UNIQUE FINDINGS ACROSS ALL CONFIGS: 1" in out
-    assert "AwsSolutions-IAM5" in out
+    assert "AwsSolutions-IAM5[Resource::*]" in out
     assert "/App/Stack/Role" in out
-    assert "wildcard-in-policy" in out
     # The summary should name the config the finding appeared in.
     assert "cfg-b" in out
 
@@ -193,11 +188,7 @@ def test_main_dedupes_findings_across_configs(capsys):
     The summary should list both configs in the ``seen in:`` line rather
     than printing two separate entries.
     """
-    repeat = {
-        "rule_id": "AwsSolutions-IAM5",
-        "resource_path": "/App/Stack/Role",
-        "finding_id": "f1",
-    }
+    repeat = _finding("AwsSolutions-IAM5[Resource::*]", "/App/Stack/Role")
     with (
         patch.object(dump_nag, "CONFIGS", _fake_configs()),
         patch.object(dump_nag, "run_config", side_effect=[[repeat], [repeat]]),
@@ -230,8 +221,8 @@ def test_main_uses_live_configs_list_when_not_patched():
 def test_main_prints_total_findings_per_config(capsys):
     """The per-config section header must include the count of findings."""
     findings_a = [
-        {"rule_id": "R1", "resource_path": "/A", "finding_id": "x"},
-        {"rule_id": "R2", "resource_path": "/B", "finding_id": "y"},
+        _finding("R1[x]", "/A"),
+        _finding("R2[y]", "/B"),
     ]
     with (
         patch.object(dump_nag, "CONFIGS", _fake_configs()),

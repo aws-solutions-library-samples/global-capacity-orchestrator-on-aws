@@ -45,7 +45,7 @@ from tests._cdk_config_matrix import CONFIGS
 def _build_app(context_overrides: dict[str, Any]) -> cdk.App:
     """Construct a CDK ``App`` with the baseline cdk.json context plus
     the per-config overlay. Mirrors the merge rules in
-    ``test_nag_compliance._build_app_with_logger`` so a config here
+    ``test_nag_compliance._build_app`` so a config here
     and a config there exercise identical code paths.
     """
     import json

@@ -15,7 +15,8 @@ This directory contains tools and auto-generated architecture diagrams for the G
 
 ### Graphviz Installation
 
-The diagram generator requires Graphviz to be installed globally for PNG and SVG output.
+The diagram generator uses [cdk-dia](https://github.com/pistazie/cdk-dia),
+which requires Graphviz to be installed globally for PNG output.
 
 **macOS (Homebrew):**
 
@@ -38,7 +39,11 @@ sudo yum install graphviz
 **Windows:**
 Download from <https://graphviz.org/download/> and add to PATH.
 
-Without Graphviz, only DOT format files will be generated.
+### Node.js
+
+`cdk-dia` is a Node CLI, fetched on demand via `npx` (pinned to
+`CDK_DIA_VERSION` in `generate.py`), so Node.js must be installed. No global
+`npm install` is required — the same way this repo invokes `npx cdk`.
 
 ## Quick Start
 
@@ -61,14 +66,14 @@ After running the generator, diagrams are saved to `diagrams/infra_diagrams/`:
 
 | Diagram | Description |
 |---------|-------------|
-| `global-stack.png/svg` | Global Accelerator and endpoint groups |
-| `api-gateway-stack.png/svg` | API Gateway with IAM authentication |
-| `regional-stack.png/svg` | EKS cluster, ALB, SQS, EFS, and services |
-| `regional-api-stack.png/svg` | Regional API Gateway with VPC Lambda (private access). Also shows the regional stack because the regional API gateway consumes the regional VPC construct directly, so both stacks must be synthesized together. |
-| `monitoring-stack.png/svg` | CloudWatch dashboards, alarms, and SNS. Also shows the global, API gateway, and regional stacks because the monitoring stack reads live attributes from each of them (table names, cluster IDs, Lambda names), so all four stacks must be synthesized together. |
-| `analytics-stack.png/svg` | SageMaker Studio, EMR Serverless, Cognito, and the presigned-URL Lambda |
-| `full-architecture.png/svg` | Complete infrastructure (compact view) |
-| `full-architecture-detailed.png/svg` | Complete infrastructure (detailed, dark theme) |
+| `global-stack.png` | Global Accelerator and endpoint groups |
+| `api-gateway-stack.png` | API Gateway with IAM authentication |
+| `regional-stack.png` | EKS cluster, ALB, SQS, EFS, and services |
+| `regional-api-stack.png` | Regional API Gateway with VPC Lambda (private access). The regional stack is synthesized alongside it (its VPC construct is a constructor input), but the diagram is scoped to the regional-api stack via `--include`. |
+| `monitoring-stack.png` | CloudWatch dashboards, alarms, and SNS. The full app is synthesized so the monitoring stack can read attributes from the other stacks, but the diagram is scoped to the monitoring stack via `--include`. |
+| `analytics-stack.png` | SageMaker Studio, EMR Serverless, Cognito, and the presigned-URL Lambda |
+| `full-architecture.png` | Complete infrastructure (collapsed overview) |
+| `full-architecture-detailed.png` | Complete infrastructure (expanded, `--no-collapse`) |
 
 ## Stack Overview
 
@@ -128,13 +133,17 @@ After running the generator, diagrams are saved to `diagrams/infra_diagrams/`:
 
 The diagram generator requires:
 
-- `aws-pdk` (included in `pyproject.toml`)
-- Graphviz (see Prerequisites above)
+- The `[cdk]` extra (`pip install -e '.[cdk]'`) — CDK libraries used to
+  synthesize the app in-process.
+- [cdk-dia](https://github.com/pistazie/cdk-dia) — fetched on demand via
+  `npx` (Node.js required).
+- Graphviz `dot` (see Prerequisites above).
 
 ## Customization
 
 Edit `diagrams/infra_diagrams/generate.py` to customize:
 
-- Diagram themes (`"dark"` or default light)
-- Filter presets (`FilterPreset.COMPACT` or `FilterPreset.NONE`)
-- Output formats (PNG, SVG, DOT)
+- Which stacks each diagram includes (via each builder's returned
+  `--include` list)
+- Collapsed vs expanded views (cdk-dia's `--collapse` / `--no-collapse`)
+- The pinned cdk-dia version (`CDK_DIA_VERSION`)

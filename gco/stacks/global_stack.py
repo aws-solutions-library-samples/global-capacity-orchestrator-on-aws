@@ -279,7 +279,8 @@ class GCOGlobalStack(Stack):
         """
         from aws_cdk import aws_events_targets as events_targets
         from aws_cdk import aws_sqs as sqs
-        from cdk_nag import NagSuppressions
+
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         project_name = self.config.get_project_name()
         historical = self.config.get_capacity_history_config()
@@ -419,7 +420,7 @@ class GCOGlobalStack(Stack):
             export_name=f"{project_name}-capacity-history-table-arn",
         )
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             poller_role,
             [
                 {
@@ -439,11 +440,14 @@ class GCOGlobalStack(Stack):
                         "resource. The DynamoDB index wildcard is scoped to this table's "
                         "own indexes."
                     ),
+                    "appliesTo": [
+                        "Resource::*",
+                        "Resource::<CapacityHistoryTable506A0FBA.Arn>/index/*",
+                    ],
                 },
             ],
-            apply_to_children=True,
         )
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             poller_dlq,
             [
                 {
@@ -464,7 +468,7 @@ class GCOGlobalStack(Stack):
                 },
             ],
         )
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.capacity_history_table,
             [
                 {
@@ -952,7 +956,7 @@ class GCOGlobalStack(Stack):
         )
 
         # CDK-nag suppressions — only replication (not needed for model weights)
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         replication_reason = (
             "Model weights are user-uploaded artifacts that can be re-uploaded. "
@@ -960,7 +964,7 @@ class GCOGlobalStack(Stack):
             "syncs models from S3 to each region's EFS at pod startup."
         )
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.model_bucket,
             [
                 {
@@ -979,7 +983,7 @@ class GCOGlobalStack(Stack):
         )
 
         logs_reason = "This is the server access logs destination bucket."
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.model_bucket_access_logs,
             [
                 {"id": "AwsSolutions-S1", "reason": logs_reason},
@@ -1278,7 +1282,7 @@ class GCOGlobalStack(Stack):
         # co-located with the construct it applies to, so the reason survives
         # refactors). Every suppression carries an explicit reason
         # string; no blanket ``Resource::*`` bypasses.
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         shared_replication_reason = (
             "Cluster_Shared_Bucket is a regional scratch sink; cluster jobs "
@@ -1287,7 +1291,7 @@ class GCOGlobalStack(Stack):
             "do not require replication for the same reason."
         )
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.cluster_shared_bucket,
             [
                 {
@@ -1308,7 +1312,7 @@ class GCOGlobalStack(Stack):
         access_logs_is_self_target_reason = (
             "This is the server access logs destination bucket for Cluster_Shared_Bucket."
         )
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.cluster_shared_access_logs_bucket,
             [
                 {
@@ -1562,9 +1566,9 @@ class GCOGlobalStack(Stack):
         # cdk-nag uses when it reports the finding's ``finding_id``. The
         # ``appliesTo`` value below has to match that literal form exactly,
         # so we hard-code the token rather than interpolating ``self.account``.
-        from cdk_nag import NagSuppressions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        NagSuppressions.add_resource_suppressions(
+        acknowledge_nag_findings(
             self.image_lookup_lambda.role,
             [
                 {
@@ -1583,5 +1587,4 @@ class GCOGlobalStack(Stack):
                     ],
                 },
             ],
-            apply_to_children=True,
         )
