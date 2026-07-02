@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 # Put the repo root on sys.path so ``tests._cdk_config_matrix`` and
@@ -79,7 +80,7 @@ from tests.test_nag_compliance import (  # noqa: E402
 )
 
 
-def run_config(name: str, overrides: dict[str, object]) -> list[dict[str, object]]:
+def run_config(name: str, overrides: dict[str, object]) -> list[dict[str, Any]]:
     """Build and synthesize the full CDK app under one config overlay.
 
     Mirrors what ``tests/test_nag_compliance.py::TestCdkNagCompliance``
@@ -131,7 +132,7 @@ def main() -> int:
         print(f"  total findings: {len(findings)}")
         for f in findings:
             paths = f["paths"] or ["(no construct path)"]
-            for path in paths:  # type: ignore[union-attr]
+            for path in paths:
                 key = (str(f["pack"]), str(f["rule"]), str(path))
                 all_findings.setdefault(key, []).append(name)
 

@@ -26,6 +26,7 @@ from typing import Any
 from aws_cdk import (
     IPolicyValidationPlugin,
     Stack,
+    Token,
     Validations,
 )
 from cdk_nag import (
@@ -135,13 +136,39 @@ def acknowledge_nag_findings(
     acknowledgment on a stack covers all resources in that stack, and one on a
     role covers the role's generated policies.
     """
+    # cdk-nag renders CloudFormation pseudo-parameters in finding details as
+    # literals (``<AWS::Region>``, ``<AWS::AccountId>``). A detail built with
+    # this stack's region/account *token* must be normalized to that literal
+    # form: the finding id is used as a metadata *map key*, and an unresolved
+    # token in a key makes CloudFormation synthesis fail with
+    # ``KeyMustResolveToString``. When the stack has a concrete env the
+    # region/account are not tokens, so nothing is rewritten and the detail
+    # still matches the concrete finding cdk-nag emits.
+    stack = Stack.of(scope)
+    token_literals: list[tuple[str, str]] = []
+    if Token.is_unresolved(stack.region):
+        token_literals.append((stack.region, "<AWS::Region>"))
+    if Token.is_unresolved(stack.account):
+        token_literals.append((stack.account, "<AWS::AccountId>"))
+
+    def _key_for(rule_id: str, detail: str) -> str:
+        for token_str, literal in token_literals:
+            detail = detail.replace(token_str, literal)
+        if Token.is_unresolved(detail):
+            raise ValueError(
+                "cdk-nag acknowledgment detail contains an unresolved token and "
+                f"cannot be used as a metadata key: {detail!r}. Use cdk-nag's "
+                "literal rendering (e.g. '<AWS::Region>', '<LogicalId.Arn>') instead."
+            )
+        return f"{rule_id}[{detail}]"
+
     ack: dict[str, str] = {}
     for supp in suppressions:
         rule_id, reason, details = _normalize(supp)
         if not details:
             ack[rule_id] = reason
         for detail in details:
-            ack[f"{rule_id}[{detail}]"] = reason
+            ack[_key_for(rule_id, detail)] = reason
     if ack:
         scope.node.add_metadata(_ACK_METADATA_KEY, ack)
 

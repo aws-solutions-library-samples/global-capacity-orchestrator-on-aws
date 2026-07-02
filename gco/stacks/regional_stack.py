@@ -3276,6 +3276,9 @@ class GCORegionalStack(Stack):
                         "orchestrator Lambdas via the standard '<lambda-arn>:*' version "
                         "qualifier, which cannot be enumerated at synth time."
                     ),
+                    "appliesTo": [
+                        "Resource::<HelmOrchestratorOnEventD0D51D9B.Arn>:*",
+                    ],
                 },
                 {
                     "id": "AwsSolutions-SF1",
