@@ -51,7 +51,7 @@ Each region contains:
 
 **VPC Configuration**
 
-- 3 Availability Zones
+- Spans every Availability Zone in the region (one public + one private subnet per AZ)
 - Public subnets (24-bit CIDR) for ALB
 - Private subnets (24-bit CIDR) for EKS nodes
 - 2 NAT Gateways for high availability

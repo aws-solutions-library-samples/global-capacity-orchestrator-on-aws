@@ -773,6 +773,17 @@ gco stacks deploy-all -y
 
 ## Modifying Network Configuration
 
+### Availability Zone coverage
+
+Each regional VPC spans **every** Availability Zone in its region: `max_azs=99` in
+`gco/stacks/regional_stack.py` is the CDK idiom for "use all AZs", and each AZ gets
+one public and one private subnet (so a 6-AZ region such as `us-east-1` yields 12
+subnets). CDK can only enumerate a region's real AZ list when the stack is
+environment-specific, so `app.py` sets each stack's account from
+`CDK_DEFAULT_ACCOUNT` — which the CDK CLI populates automatically from your active
+credentials at `gco stacks` / `cdk` time. To pin a fixed number of AZs instead,
+lower `max_azs` (e.g. `max_azs=3`).
+
 ### Change VPC CIDR
 
 Edit `gco/stacks/regional_stack.py`:
@@ -781,7 +792,7 @@ Edit `gco/stacks/regional_stack.py`:
 self.vpc = ec2.Vpc(
     self, "GCOVpc",
     vpc_name=f"{config.get_project_name()}-vpc-{region}",
-    max_azs=3,
+    max_azs=99,  # span every AZ in the region (lower this to cap AZ count)
     ip_addresses=ec2.IpAddresses.cidr("10.1.0.0/16"),  # Custom CIDR
     nat_gateways=2,
     subnet_configuration=[

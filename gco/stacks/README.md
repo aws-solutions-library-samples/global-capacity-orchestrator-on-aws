@@ -29,7 +29,7 @@ GCO deploys four stack layers in order: Global → API Gateway → Regional (per
 |------|-------------|
 | `global_stack.py` | Global Accelerator, SSM parameters, S3 model bucket, DynamoDB tables (templates, webhooks, inference endpoints) |
 | `api_gateway_global_stack.py` | Edge-optimized API Gateway with IAM auth (SigV4), Lambda proxy, Secrets Manager secret with daily rotation, multi-region replication |
-| `regional_stack.py` | Per-region VPC (3 AZs), EKS Auto Mode cluster, ALB, EFS/FSx storage, ECR images, Lambda functions (kubectl-applier, helm-installer, GA registration), IRSA roles |
+| `regional_stack.py` | Per-region VPC (spans all AZs in the region), EKS Auto Mode cluster, ALB, EFS/FSx storage, ECR images, Lambda functions (kubectl-applier, helm-installer, GA registration), IRSA roles |
 | `regional_api_gateway_stack.py` | Regional API Gateway for private VPC access via internal NLB |
 | `monitoring_stack.py` | Cross-region CloudWatch dashboard (GA, API GW, Lambda, SQS, DynamoDB, EKS, ALB widgets), SNS alerting, CloudWatch alarms |
 | `nag_suppressions.py` | CDK-nag compliance suppressions for five rule packs (AWS Solutions, HIPAA, NIST 800-53, PCI DSS, Serverless) |
