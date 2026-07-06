@@ -7,7 +7,7 @@ in cdk.json.
 
 Resources Created:
     VPC & Networking:
-        - VPC with 3 AZs, public subnets (ALB), private subnets (EKS nodes)
+        - VPC spanning every AZ in the region, public subnets (ALB), private subnets (EKS nodes)
         - 2 NAT Gateways for high availability
         - VPC endpoints for ECR, S3, STS, Secrets Manager, SSM, CloudWatch
         - VPC Flow Logs (CloudWatch Logs, 30-day retention)
@@ -309,12 +309,21 @@ class GCORegionalStack(Stack):
         cluster_config = self.config.get_cluster_config(region)
         self.cluster_config = cluster_config
 
-        # Create VPC for the EKS cluster
+        # Create VPC for the EKS cluster.
+        #
+        # ``max_azs=99`` is the CDK idiom for "span every Availability Zone the
+        # region offers" — CDK caps the value at the number of AZs actually
+        # returned for this account+region, so each AZ gets one public and one
+        # private subnet. This only enumerates the *real* AZ list when the stack
+        # is environment-specific (account + region both resolved); app.py sets
+        # the account from CDK_DEFAULT_ACCOUNT for exactly this reason. In an
+        # environment-agnostic synth (no account, e.g. some CI paths) CDK falls
+        # back to a fixed placeholder AZ list rather than the full set.
         self.vpc = ec2.Vpc(
             self,
             "GCOVpc",
             # vpc_name intentionally omitted - let CDK generate unique name
-            max_azs=3,
+            max_azs=99,  # one subnet per AZ across all AZs in the region
             nat_gateways=2,  # For high availability
             subnet_configuration=[
                 ec2.SubnetConfiguration(

@@ -17,6 +17,8 @@ Usage:
     cdk destroy --all                   # Cleanup all resources
 """
 
+import os
+
 import aws_cdk as cdk
 import jsii
 from constructs import IConstruct
@@ -110,13 +112,24 @@ def main() -> None:
     for key, value in tags.items():
         cdk.Tags.of(app).add(key, value)
 
+    # Resolve the target AWS account for every stack. Deploying (or even
+    # synthesizing against real infrastructure) requires valid credentials, so
+    # the CDK CLI populates CDK_DEFAULT_ACCOUNT from the active identity. Pairing
+    # it with each stack's region makes the stacks *environment-specific*, which
+    # is what lets CDK's availability-zones context provider look up the real AZ
+    # list for the account+region. The regional VPC relies on that lookup to
+    # place a subnet in every AZ (regional_stack.py uses max_azs=99). When the
+    # variable is unset — e.g. an environment-agnostic ``cdk synth`` in CI — this
+    # is None and stacks stay agnostic exactly as before.
+    account = os.environ.get("CDK_DEFAULT_ACCOUNT")
+
     # Create global stack (Global Accelerator)
     # Note: Global Accelerator is a global service but needs a "home" region for CloudFormation
     global_stack = GCOGlobalStack(
         app,
         f"{project_name}-global",
         config=config,
-        env=cdk.Environment(region=global_region),
+        env=cdk.Environment(account=account, region=global_region),
         description=f"{SOLUTION_DESCRIPTION_PREFIX} - Global resources including AWS Global Accelerator for GCO (Global Capacity Orchestrator on AWS)",
     )
 
@@ -125,7 +138,7 @@ def main() -> None:
         app,
         f"{project_name}-api-gateway",
         global_accelerator_dns=global_stack.accelerator.dns_name,
-        env=cdk.Environment(region=api_gateway_region),
+        env=cdk.Environment(account=account, region=api_gateway_region),
         description="Global API Gateway with IAM authentication",
     )
     api_gateway_stack.add_dependency(global_stack)
@@ -139,7 +152,7 @@ def main() -> None:
             config=config,
             region=region,
             auth_secret_arn=api_gateway_stack.secret.secret_arn,
-            env=cdk.Environment(region=region),
+            env=cdk.Environment(account=account, region=region),
             description=f"Regional resources for {region} - EKS cluster, ALB, and services",
         )
 
@@ -161,7 +174,7 @@ def main() -> None:
         global_stack=global_stack,
         regional_stacks=regional_stacks,
         api_gateway_stack=api_gateway_stack,
-        env=cdk.Environment(region=monitoring_region),
+        env=cdk.Environment(account=account, region=monitoring_region),
         description="Cross-region monitoring and observability for GCO (Global Capacity Orchestrator on AWS)",
     )
 
@@ -187,7 +200,7 @@ def main() -> None:
             app,
             f"{project_name}-analytics",
             config=config,
-            env=cdk.Environment(region=api_gateway_region),
+            env=cdk.Environment(account=account, region=api_gateway_region),
             description="Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)",
         )
         analytics_stack.add_dependency(global_stack)
