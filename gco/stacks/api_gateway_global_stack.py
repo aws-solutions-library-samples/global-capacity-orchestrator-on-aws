@@ -50,7 +50,7 @@ from aws_cdk import aws_secretsmanager as secretsmanager
 from aws_cdk import aws_wafv2 as wafv2
 from constructs import Construct
 
-from gco.stacks.constants import LAMBDA_PYTHON_RUNTIME
+from gco.stacks.constants import API_GATEWAY_AUTH_SECRET_NAME, LAMBDA_PYTHON_RUNTIME
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Flowchart(s) generated from this file:
@@ -188,7 +188,7 @@ class GCOApiGatewayGlobalStack(Stack):
         secret = secretsmanager.Secret(
             self,
             "GCOAuthSecret",
-            secret_name="gco/api-gateway-auth-token",  # nosec B106 — this is the secret path, not a password
+            secret_name=API_GATEWAY_AUTH_SECRET_NAME,  # nosec B106 — this is the secret path, not a password
             description="Secret token for validating requests from API Gateway to ALB (auto-rotated)",
             generate_secret_string=secretsmanager.SecretStringGenerator(
                 secret_string_template=json.dumps({"description": "GCO API Gateway auth token"}),

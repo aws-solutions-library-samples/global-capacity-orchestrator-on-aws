@@ -69,6 +69,29 @@ CONFIGS: list[tuple[str, dict[str, Any]]] = [
         },
     ),
     (
+        # Single-region topology: every stack (global, api_gateway,
+        # monitoring) collapses onto the one regional entry. This is the
+        # exact shape from issue #125 — when the API Gateway stack is
+        # co-located with the regional stack, the auth-secret cross-stack
+        # reference resolves to a native CloudFormation export
+        # (``gco-api-gateway:ExportsOutputRefGCOAuthSecret<hash>``) instead of
+        # a literal ARN, which used to slip past the AwsSolutions-IAM5
+        # suppression and fail ``cdk synth``. Every other topology in this
+        # matrix keeps ``regional`` in a different region from ``global`` /
+        # ``api_gateway``, so this is the only entry that exercises the
+        # same-region auth-secret code path. Keep it here as a regression
+        # guard for both the synthesis matrix and the cdk-nag matrix.
+        "single-region",
+        {
+            "deployment_regions": {
+                "global": "us-east-1",
+                "api_gateway": "us-east-1",
+                "monitoring": "us-east-1",
+                "regional": ["us-east-1"],
+            }
+        },
+    ),
+    (
         "valkey-enabled",
         {
             "valkey": {
@@ -437,6 +460,14 @@ CONFIGS.append(
 _NAG_CONFIG_NAMES = {
     "default-regions",
     "multi-region",
+    # Single-region topology (global == api_gateway == regional). This is the
+    # IAM code path from issue #125: the auth-secret grant on the regional
+    # service-account role must stay covered by its AwsSolutions-IAM5
+    # suppression even when the API Gateway stack is co-located with the
+    # regional stack. It is the only config that exercises the same-region
+    # cross-stack reference form, so it MUST run through cdk-nag, not just the
+    # synthesis matrix.
+    "single-region",
     "fsx-enabled",
     "all-features-enabled",
     "three-regions",

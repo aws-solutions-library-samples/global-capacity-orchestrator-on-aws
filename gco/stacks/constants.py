@@ -29,6 +29,34 @@ LAMBDA_PYTHON_RUNTIME = "PYTHON_3_14"
 """CDK enum name for the Lambda runtime (e.g. ``lambda_.Runtime.PYTHON_3_14``)."""
 
 # ---------------------------------------------------------------------------
+# API Gateway Auth Secret
+# ---------------------------------------------------------------------------
+# Physical name of the Secrets Manager secret that holds the token API Gateway
+# uses to authenticate requests to the regional ALBs. It is created by
+# ``GCOApiGatewayGlobalStack`` (in the ``api_gateway`` region) and read by the
+# regional service-account role and the regional API proxy Lambda.
+
+API_GATEWAY_AUTH_SECRET_NAME = "gco/api-gateway-auth-token"  # nosec B105 — secret path/name, not a credential
+"""Secrets Manager secret name for the API Gateway → ALB auth token.
+
+Single source of truth shared by three call sites that must agree exactly:
+
+1. ``GCOApiGatewayGlobalStack._create_secret`` — the ``secret_name`` the
+   secret is actually created with.
+2. ``GCORegionalStack`` — the deterministic IAM ``Resource`` ARN granting the
+   service-account role read access to the secret. Built from this name plus
+   the API Gateway region and account so it renders identically whether the
+   API Gateway stack is cross-region or co-located with the regional stack
+   (see issue #125 — a synthesis-time cross-stack export token used to leak
+   into the ARN and dodge the cdk-nag suppression in single-region topologies).
+3. ``gco.stacks.nag_suppressions.add_iam_suppressions`` — the
+   ``AwsSolutions-IAM5`` acknowledgment scoped to this exact ARN.
+
+The name is a fixed string (not derived from ``project_name``); keep the three
+call sites in lockstep by importing this constant rather than re-typing it.
+"""
+
+# ---------------------------------------------------------------------------
 # EKS Add-on Versions
 # ---------------------------------------------------------------------------
 # Pinned to specific eksbuild versions for reproducible deployments.

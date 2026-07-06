@@ -101,6 +101,7 @@ from constructs import Construct
 
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.constants import (
+    API_GATEWAY_AUTH_SECRET_NAME,
     AURORA_POSTGRES_VERSION,
     CLUSTER_SHARED_SSM_PARAMETER_PREFIX,
     EKS_ADDON_CLOUDWATCH_OBSERVABILITY,
@@ -466,6 +467,7 @@ class GCORegionalStack(Stack):
             stack_type="regional",
             regions=self.config.get_regions(),
             global_region=self.config.get_global_region(),
+            api_gateway_region=self.config.get_api_gateway_region(),
         )
 
     def _create_sqs_queue(self) -> None:
@@ -1213,13 +1215,32 @@ class GCORegionalStack(Stack):
             namespaces=["gco-system", "gco-jobs", "gco-inference"],
         )
 
-        # Grant permission to read the auth secret
-        # Note: We use an explicit IAM policy statement with a wildcard (*) because:
-        # 1. The secret is in a different region (API Gateway region)
-        # 2. CDK's grant_read() generates a policy with ?????? suffix which requires
-        #    exactly 6 characters, but the SDK can call GetSecretValue with either
-        #    the full ARN (with suffix) or partial ARN (without suffix)
-        # 3. Using * ensures both forms work correctly
+        # Grant permission to read the auth secret.
+        #
+        # The resource is built as a *deterministic* ARN from the known secret
+        # name, the API Gateway region (where the secret lives), and this
+        # stack's account — rather than from ``self.auth_secret_arn``, which is
+        # ``api_gateway_stack.secret.secret_arn`` (a cross-stack reference
+        # token). The token was the source of issue #125: it renders
+        # differently depending on topology —
+        #   * cross-region  -> a literal ARN, and
+        #   * same-region   -> a native cross-stack export
+        #                      (``gco-api-gateway:ExportsOutputRefGCOAuthSecret<hash>``)
+        # so the trailing-``*`` IAM resource only matched the stack-level
+        # AwsSolutions-IAM5 suppression in the cross-region (default) topology.
+        # Collapsing every stack into one region left the export-token form
+        # unsuppressed and failed ``cdk synth``. Building the ARN ourselves
+        # makes the ``Resource`` render identically in both topologies so a
+        # single deterministic suppression (see ``add_iam_suppressions``)
+        # always matches.
+        #
+        # The trailing ``*`` matches the random 6-character suffix Secrets
+        # Manager appends to secret ARNs (Secrets Manager accepts either the
+        # full ARN with suffix or the partial ARN without it).
+        auth_secret_resource = (
+            f"arn:aws:secretsmanager:{self.config.get_api_gateway_region()}"
+            f":{self.account}:secret:{API_GATEWAY_AUTH_SECRET_NAME}*"
+        )
         self.service_account_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -1227,16 +1248,10 @@ class GCORegionalStack(Stack):
                     "secretsmanager:GetSecretValue",
                     "secretsmanager:DescribeSecret",
                 ],
-                resources=[f"{self.auth_secret_arn}*"],  # Wildcard to match with or without suffix
+                resources=[auth_secret_resource],
             )
         )
 
-        # NOTE: the trailing ``*`` on the auth-secret ARN above matches the
-        # random 6-character suffix Secrets Manager appends to secret ARNs.
-        # cdk-nag v3 does not raise an IAM5 finding on it: the secret is a
-        # cross-stack ``Fn::ImportValue`` token, and the IAM5 wildcard check
-        # does not flag import-based resources — so no acknowledgment is
-        # needed here (verified across the full nag config matrix).
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         # cdk-nag suppression: the ServiceAccountRole grants ec2:Describe*

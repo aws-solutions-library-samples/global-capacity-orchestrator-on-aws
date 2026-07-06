@@ -38,6 +38,8 @@ from cdk_nag import (
 )
 from constructs import IConstruct
 
+from gco.stacks.constants import API_GATEWAY_AUTH_SECRET_NAME
+
 # ---------------------------------------------------------------------------
 # cdk-nag v3 acknowledgment mechanism
 # ---------------------------------------------------------------------------
@@ -425,7 +427,10 @@ def add_lambda_suppressions(stack: Stack) -> None:
 
 
 def add_iam_suppressions(
-    stack: Stack, regions: list[str] | None = None, global_region: str | None = None
+    stack: Stack,
+    regions: list[str] | None = None,
+    global_region: str | None = None,
+    api_gateway_region: str | None = None,
 ) -> None:
     """Add suppressions for IAM-related cdk-nag findings.
 
@@ -436,15 +441,31 @@ def add_iam_suppressions(
         stack: The CDK stack to apply suppressions to
         regions: List of regional deployment regions (for EKS addon patterns)
         global_region: Global region for SSM parameters and DynamoDB tables
+        api_gateway_region: Region where the API Gateway auth secret lives.
+            The regional service-account role's read grant is scoped to a
+            deterministic ARN in this region (see ``GCORegionalStack`` and
+            issue #125). Falls back to ``global_region`` for callers that
+            don't split the API Gateway stack into its own region — the two
+            are co-located in the default topology.
     """
+    # Region the API Gateway auth secret is created in. It is normally the
+    # same as ``global_region`` (default cdk.json co-locates them), but the
+    # secret physically lives in the API Gateway stack's region, so scope the
+    # grant/suppression to that region when it is provided.
+    secret_region = api_gateway_region or global_region or "us-east-2"
+
     # Build dynamic applies_to list based on configured regions
     applies_to = [
         "Resource::<KubectlApplierFunction6147DA0C.Arn>:*",
         "Resource::<GaRegistrationFunction4A12C41B.Arn>:*",
         "Resource::<HelmInstallerFunction3FEB04EF.Arn>:*",
         "Resource::<VpcFlowLogGroup86559C69.Arn>:*",
-        # Secrets Manager cross-region access with wildcard for suffix
-        f"Resource::arn:aws:secretsmanager:{global_region or 'us-east-2'}:<AWS::AccountId>:secret:gco/api-gateway-auth-token*",
+        # Secrets Manager access for the API Gateway auth token, with a
+        # trailing wildcard for the random 6-char suffix. The regional
+        # service-account role builds this exact ARN deterministically (from
+        # the secret name + API Gateway region + account) so it matches in
+        # both single-region and cross-region topologies — see issue #125.
+        f"Resource::arn:aws:secretsmanager:{secret_region}:<AWS::AccountId>:secret:{API_GATEWAY_AUTH_SECRET_NAME}*",
     ]
 
     # Add EKS addon patterns for each configured region
@@ -1586,7 +1607,12 @@ def apply_all_suppressions(
     """
     # Common suppressions for all stacks
     add_lambda_suppressions(stack)
-    add_iam_suppressions(stack, regions=regions, global_region=global_region)
+    add_iam_suppressions(
+        stack,
+        regions=regions,
+        global_region=global_region,
+        api_gateway_region=api_gateway_region,
+    )
 
     if stack_type == "regional":
         add_eks_suppressions(stack)
