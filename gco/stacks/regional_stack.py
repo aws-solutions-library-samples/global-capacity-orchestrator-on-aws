@@ -323,7 +323,7 @@ class GCORegionalStack(Stack):
             self,
             "GCOVpc",
             # vpc_name intentionally omitted - let CDK generate unique name
-            max_azs=99,  # one subnet per AZ across all AZs in the region
+            max_azs=99,  # use every AZ in the region (each AZ gets 1 public + 1 private subnet)
             nat_gateways=2,  # For high availability
             subnet_configuration=[
                 ec2.SubnetConfiguration(

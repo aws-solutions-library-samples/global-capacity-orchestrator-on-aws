@@ -138,31 +138,46 @@ def acknowledge_nag_findings(
     acknowledgment on a stack covers all resources in that stack, and one on a
     role covers the role's generated policies.
     """
-    # cdk-nag renders CloudFormation pseudo-parameters in finding details as
-    # literals (``<AWS::Region>``, ``<AWS::AccountId>``). A detail built with
-    # this stack's region/account *token* must be normalized to that literal
-    # form: the finding id is used as a metadata *map key*, and an unresolved
-    # token in a key makes CloudFormation synthesis fail with
-    # ``KeyMustResolveToString``. When the stack has a concrete env the
-    # region/account are not tokens, so nothing is rewritten and the detail
-    # still matches the concrete finding cdk-nag emits.
+    # cdk-nag renders the CloudFormation account/region pseudo-parameters in a
+    # finding's detail two different ways, and which one appears is decided
+    # per-ARN, not per-stack:
+    #   * an ARN built from an ``Aws.ACCOUNT_ID`` / ``Aws.REGION`` pseudo-param
+    #     always renders as the angle-bracket literal ``<AWS::AccountId>`` /
+    #     ``<AWS::Region>`` (CloudFormation resolves the pseudo-param at deploy,
+    #     never at synth), whereas
+    #   * an ARN hand-built from ``stack.account`` / ``stack.region`` renders as
+    #     the *concrete* value when the stack is environment-specific, and as
+    #     the pseudo-param literal when it is environment-agnostic.
+    # So for a concrete env we can't know from here which form cdk-nag will
+    # emit for any given finding. We therefore register the acknowledgment
+    # under BOTH the placeholder detail and its literal rendering; extra keys
+    # that match no finding are harmless, and whichever form cdk-nag emits then
+    # has a matching acknowledgment. A detail we ourselves built from a region/
+    # account *token* is first normalized to the placeholder form — a raw token
+    # can't be used as a metadata-map key (synth fails with
+    # ``KeyMustResolveToString``).
     stack = Stack.of(scope)
-    token_literals: list[tuple[str, str]] = []
-    if Token.is_unresolved(stack.region):
-        token_literals.append((stack.region, "<AWS::Region>"))
-    if Token.is_unresolved(stack.account):
-        token_literals.append((stack.account, "<AWS::AccountId>"))
 
-    def _key_for(rule_id: str, detail: str) -> str:
-        for token_str, literal in token_literals:
-            detail = detail.replace(token_str, literal)
+    def _keys_for(rule_id: str, detail: str) -> list[str]:
+        if Token.is_unresolved(stack.region):
+            detail = detail.replace(stack.region, "<AWS::Region>")
+        if Token.is_unresolved(stack.account):
+            detail = detail.replace(stack.account, "<AWS::AccountId>")
         if Token.is_unresolved(detail):
             raise ValueError(
                 "cdk-nag acknowledgment detail contains an unresolved token and "
                 f"cannot be used as a metadata key: {detail!r}. Use cdk-nag's "
                 "literal rendering (e.g. '<AWS::Region>', '<LogicalId.Arn>') instead."
             )
-        return f"{rule_id}[{detail}]"
+        # Expand the placeholder detail into every form cdk-nag might emit: for
+        # each concrete env dimension, add a variant with the pseudo-param
+        # placeholder swapped for its literal value.
+        variants = {detail}
+        if not Token.is_unresolved(stack.account):
+            variants.update(v.replace("<AWS::AccountId>", stack.account) for v in list(variants))
+        if not Token.is_unresolved(stack.region):
+            variants.update(v.replace("<AWS::Region>", stack.region) for v in list(variants))
+        return [f"{rule_id}[{v}]" for v in variants]
 
     ack: dict[str, str] = {}
     for supp in suppressions:
@@ -170,7 +185,8 @@ def acknowledge_nag_findings(
         if not details:
             ack[rule_id] = reason
         for detail in details:
-            ack[_key_for(rule_id, detail)] = reason
+            for key in _keys_for(rule_id, detail):
+                ack[key] = reason
     if ack:
         scope.node.add_metadata(_ACK_METADATA_KEY, ack)
 

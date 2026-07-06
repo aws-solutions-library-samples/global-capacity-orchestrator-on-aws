@@ -144,13 +144,24 @@ def _format_violations(findings: list[dict[str, Any]]) -> str:
     return "\n".join(lines) if lines else "(no findings)"
 
 
-def _build_all_stacks(app: cdk.App) -> None:
+def _build_all_stacks(app: cdk.App, account: str | None = None) -> None:
     """Instantiate every stack ``app.py`` builds: global, API gateway,
     one regional stack per configured region, monitoring, and — when
     ``analytics_environment.enabled=true`` — the optional
     ``GCOAnalyticsStack``. Matches ``app.py::main`` one-for-one so the
     cdk-nag findings captured here are the same ones a
     ``cdk deploy --all`` would surface.
+
+    Args:
+        app: the CDK app to attach the stacks to.
+        account: when provided, every stack is created with a concrete
+            ``env`` account (mirroring ``app.py`` resolving
+            ``CDK_DEFAULT_ACCOUNT`` at deploy time). This flips the
+            account from the ``<AWS::AccountId>`` pseudo-parameter to a
+            literal in synthesized ARNs, which is the exact rendering
+            that a ``cdk deploy`` performs and that agnostic-only synth
+            never exercises. Leave ``None`` for the environment-agnostic
+            case.
 
     The heavy per-stack mocks (Docker asset + helm installer) are
     applied with ``patch.object`` inside the caller's ``with`` block;
@@ -179,14 +190,14 @@ def _build_all_stacks(app: cdk.App) -> None:
         app,
         f"{project_name}-global",
         config=config,
-        env=cdk.Environment(region=global_region),
+        env=cdk.Environment(account=account, region=global_region),
     )
 
     api_gateway_stack = GCOApiGatewayGlobalStack(
         app,
         f"{project_name}-api-gateway",
         global_accelerator_dns=global_stack.accelerator.dns_name,
-        env=cdk.Environment(region=api_gateway_region),
+        env=cdk.Environment(account=account, region=api_gateway_region),
     )
     api_gateway_stack.add_dependency(global_stack)
 
@@ -198,7 +209,7 @@ def _build_all_stacks(app: cdk.App) -> None:
             config=config,
             region=region,
             auth_secret_arn=api_gateway_stack.secret.secret_arn,
-            env=cdk.Environment(region=region),
+            env=cdk.Environment(account=account, region=region),
         )
         regional_stack.add_dependency(global_stack)
         regional_stack.add_dependency(api_gateway_stack)
@@ -212,7 +223,7 @@ def _build_all_stacks(app: cdk.App) -> None:
         global_stack=global_stack,
         regional_stacks=regional_stacks,
         api_gateway_stack=api_gateway_stack,
-        env=cdk.Environment(region=monitoring_region),
+        env=cdk.Environment(account=account, region=monitoring_region),
     )
     for regional_stack in regional_stacks:
         monitoring_stack.add_dependency(regional_stack)
@@ -227,7 +238,7 @@ def _build_all_stacks(app: cdk.App) -> None:
             app,
             f"{project_name}-analytics",
             config=config,
-            env=cdk.Environment(region=api_gateway_region),
+            env=cdk.Environment(account=account, region=api_gateway_region),
             description=(
                 "Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)"
             ),
@@ -318,4 +329,56 @@ class TestCdkNagCompliance:
             f"specific resource. Do NOT add broad ``Resource::*`` or "
             f"``Action::*`` entries — those defeat the whole point of "
             f"cdk-nag."
+        )
+
+    # An obviously-fake 12-digit account used only to force
+    # environment-specific synthesis. It never reaches AWS — it just makes CDK
+    # render account-bearing ARNs as a literal instead of the <AWS::AccountId>
+    # pseudo-parameter.
+    _CONCRETE_ACCOUNT = "123456789012"
+
+    def test_no_unsuppressed_findings_with_concrete_account(self) -> None:
+        """The full app must also synthesize with zero unacknowledged cdk-nag
+        findings when the stacks are environment-specific (a concrete ``env``
+        account).
+
+        ``app.py`` resolves ``CDK_DEFAULT_ACCOUNT`` into every stack's ``env``
+        so the regional VPC can enumerate the region's real AZ list. That flips
+        account-bearing ARNs from the ``<AWS::AccountId>`` pseudo-parameter to a
+        literal — exactly the rendering a ``cdk deploy`` uses, and one the
+        agnostic ``test_no_unsuppressed_findings`` parametrization never
+        exercises. This is the regression guard for suppressions whose
+        ``applies_to`` previously matched only the pseudo-parameter form (see
+        ``acknowledge_nag_findings`` in ``gco/stacks/nag_suppressions.py``). The
+        account rendering is config-independent, so the default config suffices.
+        """
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        app = _build_app()
+
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                _mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+
+            _build_all_stacks(app, account=self._CONCRETE_ACCOUNT)
+            app.synth()
+
+        findings = _collect_nag_violations(app)
+        assert not findings, (
+            f"cdk-nag found {len(findings)} unacknowledged finding(s) when synthesizing with "
+            f"a concrete env account ({self._CONCRETE_ACCOUNT}).\n\n"
+            f"{_format_violations(findings)}\n\n"
+            f"These do NOT appear in the environment-agnostic matrix because account-bearing "
+            f"ARNs render as the <AWS::AccountId> pseudo-parameter there, but as a literal "
+            f"account id under a real ``cdk deploy``. Fix by making the acknowledgment's "
+            f"applies_to match both renderings — ``acknowledge_nag_findings`` registers both "
+            f"forms when the stack account is concrete."
         )

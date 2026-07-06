@@ -1561,11 +1561,14 @@ class GCOGlobalStack(Stack):
         # ARN pattern (and to all ECR Describe/Read action wildcards in
         # the policy below) rather than a blanket ``Resource::*`` bypass.
         #
-        # ``self.account`` resolves to the unresolved CDK token
-        # ``<AWS::AccountId>`` at synth time, which is the literal form
-        # cdk-nag uses when it reports the finding's ``finding_id``. The
-        # ``appliesTo`` value below has to match that literal form exactly,
-        # so we hard-code the token rather than interpolating ``self.account``.
+        # cdk-nag reports this finding's account as the ``<AWS::AccountId>``
+        # placeholder for an environment-agnostic synth, but as the concrete
+        # account id for an environment-specific one (the ARN above is
+        # hand-built from ``self.account``, which becomes a literal once the
+        # stack has a resolved account). We author the ``appliesTo`` with the
+        # placeholder; ``acknowledge_nag_findings`` additionally registers the
+        # concrete-account rendering when the account is resolved, so the
+        # acknowledgment matches in both cases.
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         acknowledge_nag_findings(
