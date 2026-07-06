@@ -2378,3 +2378,134 @@ class TestRegionalStackVolcanoImageMirror:
         app = self._enabled_app(ecr_namespace="gco/Bad_Seg!")
         with pytest.raises(ValueError, match="ecr_namespace"):
             self._build(app)
+
+
+class TestRegionalStackEksControlPlaneAzExclusion:
+    """EKS control-plane subnets must exclude AZs EKS does not support.
+
+    Regression guard for the all-AZ VPC change (max_azs=99): the VPC spans every
+    Availability Zone, but EKS refuses to create a cluster whose subnets land in
+    a disallowed AZ (published by *AZ ID* — e.g. ``use1-az3`` in us-east-1). A
+    real ``deploy-all`` fails at ``CreateCluster`` if such a subnet is passed, so
+    ``_eks_control_plane_subnets`` filters them out while leaving the subnet in
+    the VPC for worker/other use.
+
+    ``_resolve_unsupported_az_names`` (which does a credentialed EC2 AZ-ID -> name
+    lookup) is patched here so the test is fully hermetic — it never calls AWS.
+    """
+
+    _SIX_AZS = [f"us-east-1{s}" for s in "abcdef"]
+
+    @staticmethod
+    def _mock_helm_installer(stack):
+        stack.helm_installer_lambda = MagicMock()
+        stack.helm_installer_provider = MagicMock()
+        stack.helm_installer_provider.service_token = (
+            "arn:aws:lambda:us-east-1:123456789012:function:mock"  # nosec B106 - test fixture ARN
+        )
+
+    def _build(self, unsupported_names):
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        # Seed the availability-zones context so the VPC spans all six us-east-1
+        # AZs with concrete names (mirrors what a real credentialed synth caches).
+        app = cdk.App(
+            context={
+                "availability-zones:account=123456789012:region=us-east-1": self._SIX_AZS,
+            }
+        )
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackEksControlPlaneAzExclusion._mock_helm_installer,
+            ),
+            patch.object(
+                GCORegionalStack,
+                "_resolve_unsupported_az_names",
+                return_value=unsupported_names,
+            ),
+        ):
+            mock_docker.return_value.image_uri = (
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            )
+            return GCORegionalStack(
+                app,
+                "test-regional-eks-az",
+                config=MockConfigLoader(app),
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test",  # nosec B106
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+    def test_control_plane_excludes_unsupported_az(self):
+        """When an AZ is unsupported (use1-az3 -> us-east-1e here), the EKS
+        control-plane subnets drop it but the VPC keeps a subnet in every AZ."""
+        stack = self._build(["us-east-1e"])
+
+        control_plane_azs = {s.availability_zone for s in stack.eks_control_plane_subnets}
+        assert "us-east-1e" not in control_plane_azs
+        assert control_plane_azs == {
+            "us-east-1a",
+            "us-east-1b",
+            "us-east-1c",
+            "us-east-1d",
+            "us-east-1f",
+        }
+
+        # The VPC itself still spans all six AZs — "a subnet in every AZ" holds.
+        vpc_azs = {s.availability_zone for s in stack.vpc.private_subnets}
+        assert vpc_azs == set(self._SIX_AZS)
+
+    def test_no_restriction_keeps_all_private_subnets(self):
+        """Regions without a restriction (empty resolver result) hand the EKS
+        control plane every private subnet, unchanged from before."""
+        stack = self._build([])
+
+        control_plane_azs = {s.availability_zone for s in stack.eks_control_plane_subnets}
+        assert control_plane_azs == set(self._SIX_AZS)
+        assert stack.eks_unsupported_az_names == []
+
+    def test_resolver_no_ec2_call_without_account_env(self, monkeypatch):
+        """``_resolve_unsupported_az_names`` must not touch AWS when the deploy
+        account isn't resolved (the unit-test / agnostic-synth case): no
+        ``CDK_DEFAULT_ACCOUNT`` => empty result, no EC2 client constructed."""
+        from gco.stacks import regional_stack as rs
+
+        monkeypatch.delenv("CDK_DEFAULT_ACCOUNT", raising=False)
+
+        def _boom(*args, **kwargs):  # pragma: no cover - must never run
+            raise AssertionError("boto3 must not be called without CDK_DEFAULT_ACCOUNT")
+
+        # Build a stack (region us-east-1 has a restriction) with the resolver
+        # UNpatched; the env guard alone must keep it from calling boto3.
+        app = cdk.App(
+            context={
+                "availability-zones:account=123456789012:region=us-east-1": self._SIX_AZS,
+            }
+        )
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                rs.GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackEksControlPlaneAzExclusion._mock_helm_installer,
+            ),
+            patch("boto3.client", _boom),
+        ):
+            mock_docker.return_value.image_uri = (
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            )
+            stack = rs.GCORegionalStack(
+                app,
+                "test-regional-eks-az-guard",
+                config=MockConfigLoader(app),
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test",  # nosec B106
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+        # No credentials env => no filtering => control plane uses all private subnets.
+        assert stack.eks_unsupported_az_names == []
+        assert {s.availability_zone for s in stack.eks_control_plane_subnets} == set(self._SIX_AZS)

@@ -61,6 +61,7 @@ Modification Guide:
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,6 +110,7 @@ from gco.stacks.constants import (
     EKS_ADDON_FSX_CSI_DRIVER,
     EKS_ADDON_METRICS_SERVER,
     EKS_ADDON_POD_IDENTITY_AGENT,
+    EKS_UNSUPPORTED_AZ_IDS,
     LAMBDA_PYTHON_RUNTIME,
     MOONCAKE_MASTER_DEFAULT_IMAGE,
     REGIONAL_SHARED_BUCKET_NAME_PREFIX,
@@ -775,6 +777,71 @@ class GCORegionalStack(Stack):
                 description="Queue Processor Docker image URI",
             )
 
+    def _resolve_unsupported_az_names(self) -> list[str]:
+        """Resolve this region's EKS-unsupported AZ *IDs* to this account's AZ *names*.
+
+        EKS rejects cluster subnets in a small set of Availability Zones,
+        published by AZ ID (``EKS_UNSUPPORTED_AZ_IDS``). AZ *names* are
+        randomized per account, so the disallowed ``use1-az3`` may be
+        ``us-east-1e`` in one account and a different name in another — we must
+        map ID -> name for the deploy account.
+
+        Returns an empty list when the region has no restriction (the common
+        case), when the deploy account is not resolved (environment-agnostic
+        synth in CI/unit tests never sets ``CDK_DEFAULT_ACCOUNT``, and CDK uses
+        placeholder AZs that never include a real restricted zone), or when the
+        EC2 lookup fails. In every one of those cases the caller falls back to
+        selecting all private subnets, matching the pre-existing behavior.
+        """
+        unsupported_ids = EKS_UNSUPPORTED_AZ_IDS.get(self.deployment_region, ())
+        if not unsupported_ids:
+            return []
+        # Only reach EC2 during a credentialed, environment-specific synth or
+        # deploy. The CDK CLI exports CDK_DEFAULT_ACCOUNT from the active
+        # identity; unit tests and agnostic synth don't, so we never call AWS
+        # (nor block synthesis on missing credentials) there.
+        if not os.environ.get("CDK_DEFAULT_ACCOUNT"):
+            return []
+        try:
+            import boto3
+            from botocore.config import Config
+
+            ec2_client = boto3.client(
+                "ec2",
+                region_name=self.deployment_region,
+                config=Config(connect_timeout=5, read_timeout=5, retries={"max_attempts": 2}),
+            )
+            response = ec2_client.describe_availability_zones(
+                Filters=[{"Name": "zone-id", "Values": list(unsupported_ids)}]
+            )
+            return [zone["ZoneName"] for zone in response.get("AvailabilityZones", [])]
+        except Exception:
+            # No credentials / throttling / API error: fall back to no filtering
+            # rather than break synthesis.
+            return []
+
+    def _eks_control_plane_subnets(self) -> ec2.SubnetSelection:
+        """Private-subnet selection for the EKS control plane, excluding any AZ
+        EKS does not support for cluster subnets.
+
+        Records the outcome on ``self`` (``eks_unsupported_az_names`` and
+        ``eks_control_plane_subnets``) so tests and operators can introspect
+        exactly which subnets the cluster was given.
+        """
+        unsupported = set(self._resolve_unsupported_az_names())
+        usable = [
+            subnet
+            for subnet in self.vpc.private_subnets
+            if subnet.availability_zone not in unsupported
+        ]
+        self.eks_unsupported_az_names = sorted(unsupported)
+        self.eks_control_plane_subnets = usable
+        if not unsupported:
+            # No restricted AZ in this region: keep the subnet-type selection so
+            # the synthesized template is identical to before for the common case.
+            return ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
+        return ec2.SubnetSelection(subnets=usable)
+
     def _create_eks_cluster(self, cluster_config: Any) -> None:
         """Create the EKS cluster with auto mode and GPU node groups"""
 
@@ -852,7 +919,11 @@ class GCORegionalStack(Stack):
             #   Allows direct kubectl access but less secure
             endpoint_access=endpoint_access,
             role=cluster_admin_role,
-            vpc_subnets=[ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)],
+            # The VPC spans every AZ, but EKS refuses control-plane subnets in a
+            # few AZs (by stable AZ ID; see EKS_UNSUPPORTED_AZ_IDS). Select the
+            # private subnets in supported AZs only — worker/other subnets in the
+            # excluded AZs still exist in the VPC.
+            vpc_subnets=[self._eks_control_plane_subnets()],
             # Enable all control plane logging for security and compliance
             cluster_logging=[
                 eks.ClusterLoggingTypes.API,

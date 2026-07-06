@@ -79,6 +79,32 @@ EKS_ADDON_FSX_CSI_DRIVER = "v1.9.0-eksbuild.1"
 """Amazon FSx CSI Driver — mounts FSx for Lustre file systems as Kubernetes persistent volumes."""
 
 # ---------------------------------------------------------------------------
+# EKS Cluster Subnet Constraints
+# ---------------------------------------------------------------------------
+# A few Availability Zones cannot host the subnets you pass when creating an
+# EKS cluster (the control-plane elastic network interfaces). EKS rejects
+# cluster creation if any supplied subnet is in one of these zones. The
+# constraint is published by *Availability Zone ID* (e.g. ``use1-az3``), which
+# is stable across accounts — unlike the AZ *name* (``us-east-1e``), which AWS
+# randomizes per account. Match by ID, then resolve to this account's names.
+# Source: https://docs.aws.amazon.com/eks/latest/userguide/network-reqs.html
+# ("Subnet requirements for clusters" — disallowed Availability Zone IDs).
+
+EKS_UNSUPPORTED_AZ_IDS: dict[str, tuple[str, ...]] = {
+    "us-east-1": ("use1-az3",),
+    "us-west-1": ("usw1-az2",),
+    "ca-central-1": ("cac1-az3",),
+}
+"""AWS-region → Availability Zone IDs that cannot hold EKS cluster subnets.
+
+The regional VPC deliberately spans every AZ in the region (one public + one
+private subnet each), but the EKS cluster's control-plane subnet selection must
+exclude any subnet in these zones or ``CreateCluster`` fails with
+``InvalidParameterException``. Regions absent from this map have no such
+restriction. Keep in sync with the AWS EKS networking requirements doc.
+"""
+
+# ---------------------------------------------------------------------------
 # Aurora PostgreSQL Engine Version
 # ---------------------------------------------------------------------------
 # Pinned to a specific minor version. The dependency scanner checks
