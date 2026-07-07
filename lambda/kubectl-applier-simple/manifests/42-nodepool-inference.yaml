@@ -1,7 +1,10 @@
-# Inference NodePool — on-demand GPU instances for live serving
-# Uses WhenEmpty consolidation (not WhenEmptyOrUnderutilized) to avoid
-# disrupting in-flight inference requests. Nodes are only removed when
-# fully empty, with a 5-minute grace period.
+# Inference NodePool — NVIDIA x86 GPU instances for live serving.
+# Families: g4dn (T4), g5 (A10G), g6 + g6f + gr6 + gr6f (L4), g6e (L40S),
+# g7 + g7e (Blackwell RTX PRO). Allows both on-demand and spot; for a workload
+# where spot reclaim would be disruptive, pin on-demand with a nodeSelector on
+# karpenter.sh/capacity-type: on-demand. Uses WhenEmpty consolidation (not
+# WhenEmptyOrUnderutilized) to avoid disrupting in-flight inference requests —
+# nodes are only removed when fully empty, with a 5-minute grace period.
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
@@ -21,13 +24,13 @@ spec:
       requirements:
         - key: "eks.amazonaws.com/instance-family"
           operator: In
-          values: ["g4dn", "g5", "g6", "g6e"]
+          values: ["g4dn", "g5", "g6", "g6e", "g6f", "gr6", "gr6f", "g7", "g7e"]
         - key: "kubernetes.io/arch"
           operator: In
           values: ["amd64"]
         - key: "karpenter.sh/capacity-type"
           operator: In
-          values: ["on-demand"]
+          values: ["on-demand", "spot"]
         - key: "eks.amazonaws.com/instance-gpu-manufacturer"
           operator: In
           values: ["nvidia"]

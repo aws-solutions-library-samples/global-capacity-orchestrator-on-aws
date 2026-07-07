@@ -1,4 +1,4 @@
-# Neuron NodePool — AWS Trainium (trn1, trn1n, trn2) and Inferentia (inf2)
+# Neuron NodePool — AWS Trainium (trn1, trn1n, trn2) and Inferentia (inf1, inf2)
 # Purpose-built ML accelerators using the Neuron SDK instead of CUDA.
 # Pods request Neuron devices via: resources.limits["aws.amazon.com/neuron"]
 # Requires: Neuron device plugin (helm.aws_neuron_device_plugin.enabled = true in cdk.json)
@@ -30,7 +30,7 @@ spec:
       requirements:
         - key: "eks.amazonaws.com/instance-family"
           operator: In
-          values: ["trn1", "trn1n", "trn2", "inf2"]
+          values: ["trn1", "trn1n", "trn2", "inf1", "inf2"]
         - key: "kubernetes.io/arch"
           operator: In
           values: ["amd64"]

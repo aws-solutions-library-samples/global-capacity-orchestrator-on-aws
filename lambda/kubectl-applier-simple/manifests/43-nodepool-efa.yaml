@@ -1,4 +1,4 @@
-# EFA NodePool — high-performance distributed training (p4d, p5/p5e/p5en, p6-b200/p6e-gb200/p6-b300)
+# EFA NodePool — high-performance distributed training (p4d/p4de, p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200)
 # EFA (Elastic Fabric Adapter) enables low-latency, high-bandwidth inter-node
 # communication for large-scale distributed training jobs.
 # Uses WhenEmpty consolidation to avoid interrupting long-running training runs.
@@ -35,7 +35,7 @@ spec:
       requirements:
         - key: "eks.amazonaws.com/instance-family"
           operator: In
-          values: ["p4d", "p5", "p5e", "p5en", "p6-b200", "p6-b300", "p6e-gb200"]
+          values: ["p4d", "p4de", "p5", "p5e", "p5en", "p6-b200", "p6-b300", "p6e-gb200"]
         - key: "kubernetes.io/arch"
           operator: In
           values: ["amd64"]

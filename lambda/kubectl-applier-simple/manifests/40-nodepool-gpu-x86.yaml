@@ -1,6 +1,9 @@
-# GPU NodePool — x86_64 (g4dn, g5, g6, g6e, p3 with NVIDIA GPUs)
-# Covers current-gen (g5, g6) and previous-gen (g4dn, p3) for broad availability.
-# g6/g6e use L4 GPUs; p3 uses V100s. Supports both on-demand and spot.
+# GPU NodePool — x86_64 NVIDIA GPU instances (non-EFA general / graphics / inference).
+# Families: g4dn (T4), g5 (A10G), g6 + g6f + gr6 + gr6f (L4), g6e (L40S),
+# g7 + g7e (Blackwell RTX PRO), p3 + p3dn (V100). Covers current- and previous-gen
+# for broad availability; g6f/gr6f are fractional-GPU sizes. Large multi-GPU
+# training families (p4d/p5/p6) live in the EFA pool (43-nodepool-efa.yaml).
+# Supports both on-demand and spot.
 # See docs/CUSTOMIZATION.md to add instance families or adjust limits.
 apiVersion: karpenter.sh/v1
 kind: NodePool
@@ -21,7 +24,7 @@ spec:
       requirements:
         - key: "eks.amazonaws.com/instance-family"
           operator: In
-          values: ["g4dn", "g5", "g6", "g6e", "p3"]
+          values: ["g4dn", "g5", "g6", "g6e", "g6f", "gr6", "gr6f", "g7", "g7e", "p3", "p3dn"]
         - key: "kubernetes.io/arch"
           operator: In
           values: ["amd64"]

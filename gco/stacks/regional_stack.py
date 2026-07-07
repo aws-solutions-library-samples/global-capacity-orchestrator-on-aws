@@ -985,10 +985,10 @@ class GCORegionalStack(Stack):
 
         # NOTE: GPU compute is configured via Karpenter NodePools (not managed node groups)
         # NodePool manifests are located in lambda/kubectl-applier-simple/manifests/:
-        # - 40-nodepool-gpu-x86.yaml: x86_64 GPU instances (g4dn, g5, g6, g6e, p3)
+        # - 40-nodepool-gpu-x86.yaml: x86_64 GPU instances (g4dn, g5, g6, g6e, g6f, gr6, gr6f, g7, g7e, p3, p3dn)
         # - 41-nodepool-gpu-arm.yaml: ARM64 GPU instances (g5g)
         # - 42-nodepool-inference.yaml: inference-optimized GPU instances
-        # - 43-nodepool-efa.yaml: EFA-enabled instances (p4d, p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200)
+        # - 43-nodepool-efa.yaml: EFA-enabled instances (p4d, p4de, p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200)
         # - 44-nodepool-neuron.yaml: Trainium/Inferentia instances
         # These will be applied by the kubectl Lambda custom resource (created below)
 

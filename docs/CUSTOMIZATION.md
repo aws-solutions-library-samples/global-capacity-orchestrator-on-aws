@@ -1625,6 +1625,7 @@ See `examples/efa-distributed-training.yaml` for a complete example.
 | Instance Type | EFA Networking | GPUs (Total GPU Memory) | Use Case |
 |--------------|---------------|------------------------|----------|
 | `p4d.24xlarge` | 400 Gbps (4x EFA) | 8x A100 (320 GB HBM2e) | Distributed training, fine-tuning |
+| `p4de.24xlarge` | 400 Gbps (4x EFA) | 8x A100 (640 GB HBM2e) | Distributed training, fine-tuning |
 | `p5.48xlarge` | 3,200 Gbps (32x EFA) | 8x H100 (640 GB HBM3) | Large-scale training, high-performance inference |
 | `p5e.48xlarge` | 3,200 Gbps (32x EFA) | 8x H200 (1,128 GB HBM3e) | Large-scale training, high-performance inference |
 | `p5en.48xlarge` | 3,200 Gbps (32x EFA) | 8x H200 (1,128 GB HBM3e) | Large-scale training, high-performance inference |
