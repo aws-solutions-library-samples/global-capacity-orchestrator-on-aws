@@ -676,6 +676,38 @@ class TestRegionalStackSynthesis:
                 f"for teardown ordering; DependsOn={depends_on}"
             )
 
+            # (3) Regression guard for the RemoveEndpoints IAM requirement: the
+            # Global Accelerator RemoveEndpoints API is implemented as an
+            # endpoint-group update, so the dereg role must ALSO hold
+            # UpdateEndpointGroup or teardown deregistration fails at runtime with
+            # AccessDeniedException (see issue #130). The dereg policy is uniquely
+            # identifiable by DescribeAccelerator — the registration Lambda's
+            # policy does not grant it.
+            template.has_resource_properties(
+                "AWS::IAM::Policy",
+                {
+                    "PolicyDocument": assertions.Match.object_like(
+                        {
+                            "Statement": assertions.Match.array_with(
+                                [
+                                    assertions.Match.object_like(
+                                        {
+                                            "Action": assertions.Match.array_with(
+                                                [
+                                                    "globalaccelerator:DescribeAccelerator",
+                                                    "globalaccelerator:RemoveEndpoints",
+                                                    "globalaccelerator:UpdateEndpointGroup",
+                                                ]
+                                            )
+                                        }
+                                    )
+                                ]
+                            )
+                        }
+                    )
+                },
+            )
+
     def test_regional_stack_creates_ecr_repositories(self):
         """Test that RegionalStack creates ECR repositories."""
 

@@ -2857,7 +2857,13 @@ class GCORegionalStack(Stack):
                 actions=[
                     "globalaccelerator:DescribeAccelerator",
                     "globalaccelerator:DescribeEndpointGroup",
+                    # RemoveEndpoints is implemented as an endpoint-group update,
+                    # so the caller must ALSO hold globalaccelerator:UpdateEndpointGroup
+                    # — without it RemoveEndpoints fails with AccessDeniedException
+                    # and the ALB is never deregistered (matches the registration
+                    # Lambda's grant).
                     "globalaccelerator:RemoveEndpoints",
+                    "globalaccelerator:UpdateEndpointGroup",
                 ],
                 resources=["*"],
             )
@@ -2910,10 +2916,11 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The GA deregistration Lambda needs globalaccelerator:Describe* "
-                        "and RemoveEndpoints to release the accelerator's managed ENIs "
-                        "during teardown. These APIs do not support resource-level IAM "
-                        "scoping — Resource: * is the only valid form."
+                        "The GA deregistration Lambda needs globalaccelerator:Describe*, "
+                        "RemoveEndpoints, and UpdateEndpointGroup (RemoveEndpoints is "
+                        "implemented as an endpoint-group update) to release the "
+                        "accelerator's managed ENIs during teardown. These APIs do not "
+                        "support resource-level IAM scoping — Resource: * is the only valid form."
                     ),
                     "appliesTo": ["Resource::*"],
                 },
