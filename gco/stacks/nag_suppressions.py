@@ -472,9 +472,20 @@ def add_iam_suppressions(
 
     # Build dynamic applies_to list based on configured regions
     applies_to = [
+        # The convergence Step Functions state machine's role invokes each
+        # Lambda task's versions — CDK's LambdaInvoke grants `<fn>.Arn:*` for
+        # the version/alias qualifier, which is what these `:*` findings flag.
+        # kubectl-applier: the base and post-Helm manifest passes.
         "Resource::<KubectlApplierFunction6147DA0C.Arn>:*",
+        # GA-registration: the final Global Accelerator registration task.
         "Resource::<GaRegistrationFunction4A12C41B.Arn>:*",
+        # Delete-time GA deregistration guard (issue #130): its cr.Provider
+        # framework-onEvent role invokes the deregistration Lambda's versions.
+        "Resource::<GaDeregistrationFunction5CFAADA4.Arn>:*",
+        # helm-installer: one task per Helm chart.
         "Resource::<HelmInstallerFunction3FEB04EF.Arn>:*",
+        # VPC Flow Logs delivery role writes log events to every stream in the
+        # flow-log group (logs:CreateLogStream/PutLogEvents on `<group>.Arn:*`).
         "Resource::<VpcFlowLogGroup86559C69.Arn>:*",
         # Secrets Manager access for the API Gateway auth token, with a
         # trailing wildcard for the random 6-char suffix. The regional

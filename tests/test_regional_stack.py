@@ -608,6 +608,74 @@ class TestRegionalStackSynthesis:
             template = assertions.Template.from_stack(stack)
             template.resource_count_is("AWS::EC2::VPC", 1)
 
+    def test_regional_stack_ga_deregistration_teardown_guard(self):
+        """Issue #130: a delete-time custom resource must deregister the ALB
+        from Global Accelerator before the VPC public subnets are deleted.
+
+        Registration is one-directional (the convergence state machine adds the
+        ALB at deploy time), so without a teardown hook Global Accelerator keeps
+        its managed ENIs pinned in the public subnets and subnet deletion — and
+        the whole stack delete — fails. This asserts (1) the dedicated
+        deregistration Lambda exists with the ``handler.on_delete_event``
+        entrypoint, and (2) its custom resource depends on the public subnets so
+        CloudFormation runs the deregistration (releasing the ENIs) first.
+        """
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+
+            stack = GCORegionalStack(
+                app,
+                "test-regional-ga-dereg",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+            template = assertions.Template.from_stack(stack)
+
+            # (1) The dedicated deregistration Lambda uses the on_delete_event entrypoint.
+            template.has_resource_properties(
+                "AWS::Lambda::Function",
+                {"Handler": "handler.on_delete_event"},
+            )
+
+            # (2) The deregistration custom resource must depend on the public
+            # subnets so teardown deregisters (releasing GA ENIs) before subnet
+            # deletion. add_dependency(self.vpc) renders as DependsOn entries on
+            # the custom resource for the VPC's resources, including the subnets.
+            custom_resources = template.find_resources("AWS::CloudFormation::CustomResource")
+            dereg = {
+                lid: res
+                for lid, res in custom_resources.items()
+                if lid.startswith("GaDeregistration")
+            }
+            assert dereg, (
+                f"Expected a GaDeregistration custom resource; found: {list(custom_resources)}"
+            )
+            (dereg_res,) = dereg.values()
+            depends_on = dereg_res.get("DependsOn", [])
+            if isinstance(depends_on, str):
+                depends_on = [depends_on]
+            assert any("PublicSubnet" in d for d in depends_on), (
+                "GaDeregistration custom resource must depend on the VPC public subnets "
+                f"for teardown ordering; DependsOn={depends_on}"
+            )
+
     def test_regional_stack_creates_ecr_repositories(self):
         """Test that RegionalStack creates ECR repositories."""
 

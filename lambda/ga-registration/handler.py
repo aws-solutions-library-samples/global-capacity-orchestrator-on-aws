@@ -1,17 +1,38 @@
 """
-GA Registration Lambda Handler.
+GA Registration/Deregistration Lambda Handler.
 
-This Lambda registers the Ingress-created ALB with Global Accelerator.
+This Lambda owns both sides of the Ingress-created ALB's lifecycle with the
+shared Global Accelerator endpoint group. This is necessary because the ALB is
+created by the AWS Load Balancer Controller (not CDK), so CloudFormation can't
+directly reference its ARN.
 
-Workflow:
+Registration (deploy time):
     1. Waits for the ALB to be created and become active
     2. Uses multiple detection methods (tags, Ingress status, name prefix)
     3. Registers that ALB with Global Accelerator
     4. Stores the ALB hostname in SSM for cross-region aggregation
     5. Handles idempotency (won't fail if ALB already registered)
 
-This is necessary because the ALB is created by the AWS Load Balancer Controller
-(not CDK), so we can't directly reference its ARN.
+Deregistration (destroy time — issue #130):
+    Registration is one-directional, so without a teardown hook the endpoint
+    group keeps referencing the (LB-controller-deleted) ALB and Global
+    Accelerator keeps its `global_accelerator_managed` ENIs pinned in the VPC's
+    public subnets — blocking subnet deletion and leaving the stack in
+    DELETE_FAILED. On delete this Lambda removes the endpoint(s) from the group
+    and waits for the accelerator to redeploy (return to DEPLOYED), which is
+    when Global Accelerator releases those managed ENIs.
+
+Entrypoints (all share this module's helpers):
+    - `handle_task`: the convergence Step Functions state machine's final task
+      (register). Dispatched by `lambda_handler` when the event carries an
+      `Action` key.
+    - `lambda_handler`: legacy CloudFormation custom-resource path. Create/Update
+      register (`handle_create_update`); Delete deregisters and waits
+      (`handle_delete`). Responds via the CloudFormation ResponseURL protocol.
+    - `on_delete_event`: the delete-time deregistration guard, invoked through a
+      CDK `cr.Provider`. A no-op on Create/Update (registration stays owned by
+      the state machine); on Delete it deregisters and waits so the accelerator
+      releases its ENIs before CloudFormation deletes the public subnets.
 
 SSM Parameter Storage:
     The ALB hostname is stored in SSM Parameter Store at:
@@ -66,6 +87,16 @@ MAX_WAIT_SECONDS = 840  # 14 minutes total budget for finding active ALB
 ALB_POLL_INTERVAL = 5  # Poll every 5 seconds to detect ALB quickly
 ALB_DELETION_POLL_INTERVAL = 10  # 10 seconds for deletion polling
 ALB_DELETION_WAIT_SECONDS = 180  # 3 minutes for ALB deletion during cleanup
+
+# Global Accelerator redeploy budget for the delete-time deregistration guard.
+# After endpoints are removed, GA transitions the accelerator IN_PROGRESS ->
+# DEPLOYED and only releases its `global_accelerator_managed` ENIs once it is
+# back to DEPLOYED. Teardown must wait for that release before CloudFormation
+# deletes the public subnets those ENIs occupy (see issue #130). Kept under the
+# 14-minute ceiling recommended for cr.Provider onEvent handlers (all framework
+# functions time out at 15 minutes).
+GA_DEPLOYED_WAIT_SECONDS = 720  # 12 minutes waiting for the accelerator to redeploy
+GA_DEPLOYED_POLL_INTERVAL = 15  # Poll accelerator status every 15 seconds
 
 
 def send_response(
@@ -506,6 +537,77 @@ def remove_ga_endpoints(ga_client: Any, endpoint_group_arn: str) -> None:
         logger.warning(f"Failed to clean up GA endpoints: {e}")
 
 
+def _accelerator_arn_from_endpoint_group(endpoint_group_arn: str) -> str:
+    """Derive the accelerator ARN from one of its endpoint-group ARNs.
+
+    Endpoint-group ARN:
+        arn:aws:globalaccelerator::<acct>:accelerator/<id>/listener/<lid>/endpoint-group/<egid>
+    Accelerator ARN:
+        arn:aws:globalaccelerator::<acct>:accelerator/<id>
+    """
+    return endpoint_group_arn.split("/listener/")[0]
+
+
+def wait_for_accelerator_deployed(
+    ga_client: Any,
+    endpoint_group_arn: str,
+    timeout_seconds: int = GA_DEPLOYED_WAIT_SECONDS,
+) -> bool:
+    """Block until the accelerator reports ``DEPLOYED`` (or the budget expires).
+
+    Global Accelerator only releases its ``global_accelerator_managed`` ENIs
+    from a region's subnets once the accelerator finishes redeploying after an
+    endpoint change (it reports ``IN_PROGRESS`` until then). During teardown we
+    must wait for that release before CloudFormation deletes the public subnets
+    those ENIs occupy — otherwise subnet deletion fails and the stack is left in
+    DELETE_FAILED (see issue #130).
+
+    Best-effort: returns ``True`` once ``DEPLOYED`` is observed (or the
+    accelerator is already gone), ``False`` on timeout or a non-fatal API error.
+    Never raises, so a Global Accelerator hiccup can't wedge the stack delete.
+    """
+    accelerator_arn = _accelerator_arn_from_endpoint_group(endpoint_group_arn)
+    start_time = time.time()
+    while time.time() - start_time < timeout_seconds:
+        try:
+            accelerator = ga_client.describe_accelerator(AcceleratorArn=accelerator_arn)
+            status = accelerator.get("Accelerator", {}).get("Status", "")
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            if error_code == "AcceleratorNotFoundException":
+                logger.info("Accelerator no longer exists; nothing to wait for")
+                return True
+            logger.warning(f"Failed to describe accelerator status: {e}")
+            return False
+        if status == "DEPLOYED":
+            elapsed = int(time.time() - start_time)
+            logger.info(f"Accelerator DEPLOYED after {elapsed}s; GA released its managed ENIs")
+            return True
+        logger.info(f"Accelerator status={status!r}; waiting for DEPLOYED...")
+        # nosemgrep: arbitrary-sleep - intentional polling for GA redeploy
+        time.sleep(GA_DEPLOYED_POLL_INTERVAL)
+
+    logger.warning(
+        f"Timed out after {timeout_seconds}s waiting for the accelerator to reach DEPLOYED"
+    )
+    return False
+
+
+def deregister_alb_from_ga(ga_client: Any, endpoint_group_arn: str) -> None:
+    """Remove every endpoint from the GA endpoint group and wait for GA to
+    release its managed ENIs.
+
+    Used by the delete-time teardown guard: registration is one-directional
+    (the convergence state machine's final task adds the Ingress-created ALB at
+    deploy time), so without this the endpoint group keeps referencing the
+    LB-controller-deleted ALB and Global Accelerator keeps
+    ``global_accelerator_managed`` ENIs pinned in the VPC's public subnets,
+    blocking subnet — and stack — deletion (see issue #130).
+    """
+    remove_ga_endpoints(ga_client, endpoint_group_arn)
+    wait_for_accelerator_deployed(ga_client, endpoint_group_arn)
+
+
 def delete_ingress_and_wait_for_alb_deletion(
     cluster_name: str, region: str, namespace: str, ingress_name: str
 ) -> None:
@@ -561,9 +663,11 @@ def handle_delete(
     global_region = props.get("GlobalRegion", "us-east-2")
     project_name = props.get("ProjectName", "gco")
 
-    # Step 1: Remove all endpoints from GA endpoint group
+    # Step 1: Remove all endpoints from GA endpoint group and wait for Global
+    # Accelerator to release its managed ENIs, so the public subnets those ENIs
+    # occupy can be deleted cleanly during teardown (see issue #130).
     ga = boto3.client("globalaccelerator", region_name="us-west-2")
-    remove_ga_endpoints(ga, endpoint_group_arn)
+    deregister_alb_from_ga(ga, endpoint_group_arn)
 
     # Step 2: Delete the Ingress to trigger ALB deletion
     delete_ingress_and_wait_for_alb_deletion(cluster_name, region, namespace, ingress_name)
@@ -692,6 +796,49 @@ def handle_create_update(
     # IMPORTANT: Keep PhysicalResourceId stable to avoid CloudFormation treating
     # updates as replacements (which would trigger a Delete of the old resource)
     send_response(event, context, "SUCCESS", data, physical_id)
+
+
+def on_delete_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
+    """CDK ``cr.Provider`` handler for the delete-time GA deregistration guard.
+
+    Wired by ``regional_stack.py`` as a standalone custom resource whose sole
+    job is teardown ordering. It is a **no-op on Create/Update** — registration
+    stays owned by the convergence state machine's final task — and on **Delete**
+    it deregisters the region's ALB from the shared Global Accelerator endpoint
+    group and waits for GA to release its managed ENIs, BEFORE CloudFormation
+    deletes the VPC public subnets those ENIs sit in.
+
+    Without this hook the endpoint group keeps referencing the
+    LB-controller-deleted ALB, Global Accelerator keeps
+    ``global_accelerator_managed`` ENIs pinned in the public subnets, subnet
+    deletion fails, and the stack is left in DELETE_FAILED (see issue #130).
+
+    Unlike the raw CloudFormation custom-resource path (:func:`lambda_handler`),
+    this is invoked through the provider framework, so it returns a plain dict
+    instead of POSTing to a response URL. Best-effort: it never raises, so a
+    transient Global Accelerator error can't wedge the stack in DELETE_FAILED.
+    """
+    request_type = event.get("RequestType")
+    props = event.get("ResourceProperties", {})
+    physical_id = event.get("PhysicalResourceId") or f"ga-dereg-{props.get('Region', 'unknown')}"
+
+    # Registration happens in the state machine; this guard only acts on Delete.
+    if request_type != "Delete":
+        return {"PhysicalResourceId": physical_id}
+
+    endpoint_group_arn = props.get("EndpointGroupArn")
+    if not endpoint_group_arn:
+        logger.warning("No EndpointGroupArn in resource properties; skipping GA deregistration")
+        return {"PhysicalResourceId": physical_id}
+
+    logger.info(f"Deregistering region's ALB from Global Accelerator: {endpoint_group_arn}")
+    try:
+        ga = boto3.client("globalaccelerator", region_name="us-west-2")
+        deregister_alb_from_ga(ga, endpoint_group_arn)
+    except Exception as e:  # noqa: BLE001 - teardown guard must never wedge the stack delete
+        logger.error(f"GA deregistration guard failed (continuing teardown): {e}", exc_info=True)
+
+    return {"PhysicalResourceId": physical_id}
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> Any:

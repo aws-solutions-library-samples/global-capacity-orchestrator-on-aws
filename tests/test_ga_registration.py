@@ -794,3 +794,212 @@ class TestLambdaHandler:
             handler.lambda_handler(event, context)
 
             mock_update.assert_called_once()
+
+
+# ============================================================================
+# Delete-time GA Deregistration Guard Tests (issue #130)
+# ============================================================================
+
+ACCELERATOR_ARN = "arn:aws:globalaccelerator::123:accelerator/abc"
+
+
+class TestAcceleratorArnFromEndpointGroup:
+    """The accelerator ARN is derived from the endpoint-group ARN so the delete
+    guard can poll the accelerator's status without a separate lookup."""
+
+    def test_derives_accelerator_arn(self, ga_module):
+        handler, _, _ = ga_module
+        assert handler._accelerator_arn_from_endpoint_group(ENDPOINT_GROUP_ARN) == ACCELERATOR_ARN
+
+
+class TestRemoveGaEndpoints:
+    """The delete guard must clear every endpoint from the group so Global
+    Accelerator releases its managed ENIs."""
+
+    def test_removes_all_endpoints(self, ga_module):
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        ga.describe_endpoint_group.return_value = {
+            "EndpointGroup": {
+                "EndpointDescriptions": [
+                    {"EndpointId": PLATFORM_ALB_ARN},
+                    {"EndpointId": INFERENCE_ALB_ARN},
+                ]
+            }
+        }
+
+        handler.remove_ga_endpoints(ga, ENDPOINT_GROUP_ARN)
+
+        assert ga.remove_endpoints.call_count == 2
+
+    def test_no_endpoints_is_a_noop(self, ga_module):
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        ga.describe_endpoint_group.return_value = {"EndpointGroup": {"EndpointDescriptions": []}}
+
+        handler.remove_ga_endpoints(ga, ENDPOINT_GROUP_ARN)
+
+        ga.remove_endpoints.assert_not_called()
+
+    def test_endpoint_not_found_is_swallowed(self, ga_module):
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        ga.describe_endpoint_group.return_value = {
+            "EndpointGroup": {"EndpointDescriptions": [{"EndpointId": PLATFORM_ALB_ARN}]}
+        }
+        ga.remove_endpoints.side_effect = ClientError(
+            {"Error": {"Code": "EndpointNotFoundException", "Message": "gone"}},
+            "RemoveEndpoints",
+        )
+
+        # Should not raise — the endpoint is already gone, which is success.
+        handler.remove_ga_endpoints(ga, ENDPOINT_GROUP_ARN)
+
+
+class TestWaitForAcceleratorDeployed:
+    """Global Accelerator only releases its managed ENIs once the accelerator
+    redeploys to DEPLOYED; teardown blocks on that so subnet deletion succeeds."""
+
+    def test_returns_true_when_already_deployed(self, ga_module):
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        ga.describe_accelerator.return_value = {"Accelerator": {"Status": "DEPLOYED"}}
+
+        assert handler.wait_for_accelerator_deployed(ga, ENDPOINT_GROUP_ARN) is True
+        ga.describe_accelerator.assert_called_once_with(AcceleratorArn=ACCELERATOR_ARN)
+
+    def test_polls_until_deployed(self, ga_module):
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        ga.describe_accelerator.side_effect = [
+            {"Accelerator": {"Status": "IN_PROGRESS"}},
+            {"Accelerator": {"Status": "DEPLOYED"}},
+        ]
+
+        with patch.object(handler.time, "sleep"):
+            assert handler.wait_for_accelerator_deployed(ga, ENDPOINT_GROUP_ARN) is True
+
+        assert ga.describe_accelerator.call_count == 2
+
+    def test_returns_true_when_accelerator_gone(self, ga_module):
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        ga.describe_accelerator.side_effect = ClientError(
+            {"Error": {"Code": "AcceleratorNotFoundException", "Message": "gone"}},
+            "DescribeAccelerator",
+        )
+
+        # A missing accelerator means there are no ENIs left to release.
+        assert handler.wait_for_accelerator_deployed(ga, ENDPOINT_GROUP_ARN) is True
+
+    def test_returns_false_on_other_client_error(self, ga_module):
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        ga.describe_accelerator.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "no"}},
+            "DescribeAccelerator",
+        )
+
+        assert handler.wait_for_accelerator_deployed(ga, ENDPOINT_GROUP_ARN) is False
+
+    def test_returns_false_on_timeout(self, ga_module):
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        ga.describe_accelerator.return_value = {"Accelerator": {"Status": "IN_PROGRESS"}}
+
+        # A zero budget exits before the first poll — exercises the timeout path
+        # without sleeping.
+        assert handler.wait_for_accelerator_deployed(ga, ENDPOINT_GROUP_ARN, timeout_seconds=0) is (
+            False
+        )
+
+
+class TestDeregisterAlbFromGa:
+    """The deregistration helper removes endpoints and then waits for the ENIs
+    to be released, in that order."""
+
+    def test_removes_then_waits(self, ga_module):
+        handler, _, _ = ga_module
+        ga = MagicMock()
+
+        with (
+            patch.object(handler, "remove_ga_endpoints") as mock_remove,
+            patch.object(handler, "wait_for_accelerator_deployed") as mock_wait,
+        ):
+            handler.deregister_alb_from_ga(ga, ENDPOINT_GROUP_ARN)
+
+        mock_remove.assert_called_once_with(ga, ENDPOINT_GROUP_ARN)
+        mock_wait.assert_called_once_with(ga, ENDPOINT_GROUP_ARN)
+
+
+class TestOnDeleteEvent:
+    """The cr.Provider entrypoint for the delete-time teardown guard."""
+
+    def _delete_event(self):
+        return {
+            "RequestType": "Delete",
+            "PhysicalResourceId": "ga-dereg-us-east-1",
+            "ResourceProperties": {
+                "EndpointGroupArn": ENDPOINT_GROUP_ARN,
+                "Region": "us-east-1",
+                "ProjectName": "gco",
+            },
+        }
+
+    def test_delete_deregisters_alb(self, ga_module):
+        handler, mock_boto_client, _ = ga_module
+
+        with patch.object(handler, "deregister_alb_from_ga") as mock_dereg:
+            result = handler.on_delete_event(self._delete_event(), None)
+
+        mock_dereg.assert_called_once()
+        # Called with (ga_client, endpoint_group_arn).
+        assert mock_dereg.call_args[0][1] == ENDPOINT_GROUP_ARN
+        assert result["PhysicalResourceId"] == "ga-dereg-us-east-1"
+
+    def test_create_is_noop(self, ga_module):
+        handler, _, _ = ga_module
+        event = {
+            "RequestType": "Create",
+            "ResourceProperties": {"EndpointGroupArn": ENDPOINT_GROUP_ARN, "Region": "us-east-1"},
+        }
+
+        with patch.object(handler, "deregister_alb_from_ga") as mock_dereg:
+            result = handler.on_delete_event(event, None)
+
+        mock_dereg.assert_not_called()
+        assert "PhysicalResourceId" in result
+
+    def test_update_is_noop(self, ga_module):
+        handler, _, _ = ga_module
+        event = {
+            "RequestType": "Update",
+            "PhysicalResourceId": "pid",
+            "ResourceProperties": {"EndpointGroupArn": ENDPOINT_GROUP_ARN},
+        }
+
+        with patch.object(handler, "deregister_alb_from_ga") as mock_dereg:
+            result = handler.on_delete_event(event, None)
+
+        mock_dereg.assert_not_called()
+        assert result["PhysicalResourceId"] == "pid"
+
+    def test_delete_without_endpoint_group_is_noop(self, ga_module):
+        handler, _, _ = ga_module
+        event = {"RequestType": "Delete", "ResourceProperties": {"Region": "us-east-1"}}
+
+        with patch.object(handler, "deregister_alb_from_ga") as mock_dereg:
+            result = handler.on_delete_event(event, None)
+
+        mock_dereg.assert_not_called()
+        assert result["PhysicalResourceId"].startswith("ga-dereg")
+
+    def test_delete_never_raises_on_error(self, ga_module):
+        handler, _, _ = ga_module
+
+        # Even if deregistration blows up, the guard must return success so the
+        # stack delete is never wedged in DELETE_FAILED by the guard itself.
+        with patch.object(handler, "deregister_alb_from_ga", side_effect=Exception("boom")):
+            result = handler.on_delete_event(self._delete_event(), None)
+
+        assert result["PhysicalResourceId"] == "ga-dereg-us-east-1"

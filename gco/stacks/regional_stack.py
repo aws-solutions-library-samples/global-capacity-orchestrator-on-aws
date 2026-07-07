@@ -2811,6 +2811,115 @@ class GCORegionalStack(Stack):
             ],
         )
 
+        # Wire the delete-time teardown guard that deregisters this region's ALB
+        # from Global Accelerator before the VPC/public subnets are deleted.
+        self._create_ga_deregistration_resource()
+
+    def _create_ga_deregistration_resource(self) -> None:
+        """Deregister the region's ALB from Global Accelerator during teardown.
+
+        Registration is one-directional: the convergence state machine's final
+        task adds the Ingress-created ALB to the shared Global Accelerator
+        endpoint group at deploy time, but nothing removed it at destroy time.
+        When the regional stack is torn down the AWS Load Balancer Controller
+        deletes the ALB, yet the endpoint group still references the now-dangling
+        ALB ARN, so Global Accelerator keeps its ``global_accelerator_managed``
+        ENIs pinned in the VPC's public subnets. VPC subnet deletion then fails
+        and the stack is left in ``DELETE_FAILED`` (see issue #130).
+
+        This wires a dedicated, delete-only custom resource: a no-op on
+        create/update (registration stays owned by the state machine), and on
+        delete it removes the endpoint(s) and waits for the accelerator to
+        redeploy so Global Accelerator releases the ENIs. An explicit dependency
+        on the VPC makes CloudFormation run this deregistration BEFORE it deletes
+        the public subnets those ENIs occupy.
+        """
+        project_name = self.config.get_project_name()
+
+        # Dedicated Lambda built from the SAME asset as the registration Lambda
+        # (it reuses the shared remove/wait helpers, entry point
+        # handler.on_delete_event). Deliberately NOT in the VPC: it only calls
+        # the public Global Accelerator API and must not create its own ENIs in
+        # the VPC it is helping to tear down.
+        ga_deregistration_lambda = lambda_.Function(
+            self,
+            "GaDeregistrationFunction",
+            runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
+            handler="handler.on_delete_event",
+            code=lambda_.Code.from_asset("lambda/ga-registration"),
+            timeout=Duration.minutes(15),  # covers the GA redeploy wait budget
+            memory_size=256,
+            tracing=lambda_.Tracing.ACTIVE,
+        )
+        ga_deregistration_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "globalaccelerator:DescribeAccelerator",
+                    "globalaccelerator:DescribeEndpointGroup",
+                    "globalaccelerator:RemoveEndpoints",
+                ],
+                resources=["*"],
+            )
+        )
+
+        # Provider framework fronts the Lambda so CloudFormation invocation,
+        # response signalling and retries are handled for us. An explicit log
+        # group avoids the default LogRetention custom resource.
+        ga_deregistration_log_group = logs.LogGroup(
+            self,
+            "GaDeregistrationProviderLogGroup",
+            retention=logs.RetentionDays.ONE_WEEK,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        ga_deregistration_provider = cr.Provider(
+            self,
+            "GaDeregistrationProvider",
+            on_event_handler=ga_deregistration_lambda,
+            log_group=ga_deregistration_log_group,
+        )
+
+        ga_deregistration = CustomResource(
+            self,
+            "GaDeregistration",
+            service_token=ga_deregistration_provider.service_token,
+            properties={
+                # Delete handler reads these from the resource's last-known
+                # properties (CloudFormation replays them on Delete).
+                "EndpointGroupArn": self.endpoint_group_arn,
+                "Region": self.deployment_region,
+                "ProjectName": project_name,
+            },
+        )
+
+        # Teardown ordering: this deregistration must run BEFORE the VPC (and its
+        # public subnets, where Global Accelerator pins its managed ENIs) is
+        # deleted. Depending on the VPC means CloudFormation creates the VPC
+        # first and — critically — deletes this custom resource first on
+        # teardown, releasing the GA ENIs so the subnets can be removed cleanly.
+        ga_deregistration.node.add_dependency(self.vpc)
+
+        # cdk-nag: the deregistration Lambda needs globalaccelerator Describe*/
+        # RemoveEndpoints with Resource: * (these Global Accelerator APIs do not
+        # support resource-level IAM scoping), mirroring the registration Lambda.
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        acknowledge_nag_findings(
+            ga_deregistration_lambda,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The GA deregistration Lambda needs globalaccelerator:Describe* "
+                        "and RemoveEndpoints to release the accelerator's managed ENIs "
+                        "during teardown. These APIs do not support resource-level IAM "
+                        "scoping — Resource: * is the only valid form."
+                    ),
+                    "appliesTo": ["Resource::*"],
+                },
+            ],
+        )
+
     def _get_volcano_image_mirror_config(self) -> dict[str, Any]:
         """Parse the ``volcano_image_mirror`` block from cdk.json.
 
