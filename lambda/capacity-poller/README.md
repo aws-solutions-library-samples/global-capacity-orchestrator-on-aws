@@ -41,7 +41,7 @@ All knobs live under the `historical` block in `cdk.json`:
 | `poll_interval_minutes` | `15` | EventBridge schedule cadence. |
 | `capacity_block_duration_hours` | `24` | Short Capacity Block probe duration (soonest-available, 1-day block). |
 | `capacity_block_long_duration_hours` | `1512` | Long Capacity Block probe duration in hours (63 days). Tracks extended-term block availability; set `0` to disable the long probe. |
-| `watch_instance_types` | 57 GPU/Trn/Inf types | Instance types to snapshot. |
+| `watch_instance_types` | 59 GPU/Trn/Inf types | Instance types to snapshot. |
 | `enabled_regions` | `[]` (all deployed) | Regions to poll. |
 
 The Lambda reads these via environment variables `CAPACITY_HISTORY_TABLE_NAME`,
@@ -76,8 +76,8 @@ The poller is intentionally cheap. The dominant inputs are the schedule cadence
 and the number of `watch_instance_types` x `enabled_regions` pairs polled each
 run.
 
-Worked example - default cadence (15 min, ~2,920 runs/month), 57 instance types
-x 1 region (the default `regional` deployment) = 57 pairs/run:
+Worked example - default cadence (15 min, ~2,920 runs/month), 59 instance types
+x 1 region (the default `regional` deployment) = 59 pairs/run:
 
 | Component | Basis | Est. monthly cost |
 |-----------|-------|-------------------|
@@ -92,8 +92,8 @@ x 1 region (the default `regional` deployment) = 57 pairs/run:
 
 **Total: effectively $0/month within free-tier allowances, and well under
 $1/month otherwise.** Cost scales roughly linearly with `watch_instance_types`
-x `enabled_regions` and inversely with `poll_interval_minutes`. Even at 57 types
-x 2 regions = 114 pairs/run, Lambda compute (~139,000 GB-s) stays within the
+x `enabled_regions` and inversely with `poll_interval_minutes`. Even at 59 types
+x 2 regions = 118 pairs/run, Lambda compute (~139,000 GB-s) stays within the
 free tier and DynamoDB writes are ~$0.42/month.
 
 Figures use us-east-1 on-demand pricing and are estimates; validate against AWS

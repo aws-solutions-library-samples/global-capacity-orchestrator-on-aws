@@ -325,12 +325,12 @@ Edit `lambda/kubectl-applier-simple/manifests/40-nodepool-gpu-x86.yaml`:
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
-  name: gpu-x86
+  name: gpu-x86-pool
 spec:
   template:
     spec:
       requirements:
-        - key: karpenter.k8s.aws/instance-family
+        - key: eks.amazonaws.com/instance-family
           operator: In
           values:
             - g5      # NVIDIA A10G GPUs
@@ -338,7 +338,7 @@ spec:
             - p3      # NVIDIA V100 GPUs (add this)
             - p4d     # NVIDIA A100 GPUs (add this)
         
-        - key: karpenter.k8s.aws/instance-size
+        - key: eks.amazonaws.com/instance-size
           operator: In
           values:
             - xlarge
@@ -398,7 +398,7 @@ spec:
       value: "true"
       effect: NoSchedule
   nodeSelector:
-    karpenter.k8s.aws/instance-family: g5
+    eks.amazonaws.com/instance-family: g5
 ```
 
 ### GPU Time-Slicing (Fractional GPUs)
@@ -1627,6 +1627,7 @@ See `examples/efa-distributed-training.yaml` for a complete example.
 | `p4d.24xlarge` | 400 Gbps (4x EFA) | 8x A100 (320 GB HBM2e) | Distributed training, fine-tuning |
 | `p5.48xlarge` | 3,200 Gbps (32x EFA) | 8x H100 (640 GB HBM3) | Large-scale training, high-performance inference |
 | `p5e.48xlarge` | 3,200 Gbps (32x EFA) | 8x H200 (1,128 GB HBM3e) | Large-scale training, high-performance inference |
+| `p5en.48xlarge` | 3,200 Gbps (32x EFA) | 8x H200 (1,128 GB HBM3e) | Large-scale training, high-performance inference |
 | `p6-b200.48xlarge` | 3.2 Tbps (8x EFAv4) | 8x B200 (1,432 GB HBM3e) | Large-scale training and inference |
 | `p6-b300.48xlarge` | 6.4 Tbps EFAv4 | 8x B300 Ultra (2,144 GB HBM3e) | Large-scale training and inference |
 | `p6e-gb200` | 28.8 Tbps (EFAv4 UltraServer) | GB200 NVL72 | Largest-scale training and inference |
@@ -1637,12 +1638,12 @@ With EFA enabled, GCO supports NVIDIA Inference Xfer Library (NIXL) for high-per
 
 ## AWS Trainium and Inferentia Configuration
 
-GCO includes built-in support for AWS Trainium and Inferentia accelerators. These are purpose-built ML chips designed by AWS that use the Neuron SDK instead of CUDA. GCO installs the Neuron device plugin by default and creates a dedicated Neuron nodepool for trn1, trn2, trn3, and inf2 instances.
+GCO includes built-in support for AWS Trainium and Inferentia accelerators. These are purpose-built ML chips designed by AWS that use the Neuron SDK instead of CUDA. GCO installs the Neuron device plugin by default and creates a dedicated Neuron nodepool for trn1, trn1n, trn2, and inf2 instances. (Trainium3/Trn3 currently ships only as Trn3 UltraServers — reserved via EC2 Capacity Blocks rather than provisioned as standalone Karpenter nodes — so it is not part of this NodePool.)
 
 ### How It Works
 
 - The Neuron device plugin (installed via Helm chart) advertises `aws.amazon.com/neuron` resources on Neuron-capable nodes
-- The Neuron nodepool (`lambda/kubectl-applier-simple/manifests/44-nodepool-neuron.yaml`) provisions trn1, trn2, trn3, and inf2 instances
+- The Neuron nodepool (`lambda/kubectl-applier-simple/manifests/44-nodepool-neuron.yaml`) provisions trn1, trn1n, trn2, and inf2 instances
 - A `aws.amazon.com/neuron` taint prevents non-Neuron workloads from scheduling on these nodes
 - Pods must explicitly tolerate the taint and request `aws.amazon.com/neuron` resources
 

@@ -91,7 +91,7 @@ Nodepools define what types of nodes can be provisioned. GCO creates several:
 | `system` | Kubernetes system components | Managed by EKS |
 | `general-purpose` | Standard workloads | Various CPU instances |
 | `gpu-x86` | NVIDIA GPU workloads | g4dn, g5 (T4, A10G GPUs) |
-| `gpu-arm` | ARM64 GPU workloads | g5g (A10G GPUs) |
+| `gpu-arm` | ARM64 GPU workloads | g5g (T4g GPUs) |
 | `inference` | Long-running inference endpoints | Same as gpu-x86, WhenEmpty consolidation |
 | `gpu-efa-pool` | Distributed training and high-performance inference | p4d, p5 (A100, H100 with EFA) |
 

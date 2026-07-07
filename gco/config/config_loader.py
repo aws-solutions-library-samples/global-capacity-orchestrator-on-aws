@@ -906,8 +906,10 @@ class ConfigLoader:
             "capacity_block_long_duration_hours": 63 * 24,
             "watch_instance_types": [
                 "p4d.24xlarge",
+                "p4de.24xlarge",
                 "p5.4xlarge",
                 "p5.48xlarge",
+                "p5e.48xlarge",
                 "p5en.48xlarge",
                 "p6-b200.48xlarge",
                 "p6-b300.48xlarge",

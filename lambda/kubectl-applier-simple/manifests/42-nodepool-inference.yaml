@@ -21,7 +21,7 @@ spec:
       requirements:
         - key: "eks.amazonaws.com/instance-family"
           operator: In
-          values: ["g4dn", "g5", "g6", "g6e", "inf2"]
+          values: ["g4dn", "g5", "g6", "g6e"]
         - key: "kubernetes.io/arch"
           operator: In
           values: ["amd64"]

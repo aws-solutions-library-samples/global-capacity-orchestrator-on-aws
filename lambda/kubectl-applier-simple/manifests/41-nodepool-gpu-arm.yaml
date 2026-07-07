@@ -1,4 +1,4 @@
-# GPU NodePool — ARM64 (g5g with Graviton + A10G GPUs)
+# GPU NodePool — ARM64 (g5g with Graviton + T4g GPUs)
 # Lower cost than x86 GPU instances for compatible workloads.
 apiVersion: karpenter.sh/v1
 kind: NodePool
