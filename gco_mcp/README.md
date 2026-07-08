@@ -60,7 +60,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server wraps the `gco` CLI, exposing 98 tools by default (up to 130 with all flags enabled) that cover the full lifecycle of GPU workload management:
+The MCP server wraps the `gco` CLI, exposing 109 tools by default (up to 144 with all flags enabled) that cover the full lifecycle of GPU workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
