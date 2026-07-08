@@ -714,7 +714,9 @@ class ManifestProcessor:
 
                 if not is_trusted:
                     container_name = container.get("name", "unknown")
-                    logger.warning(f"Untrusted image source: {image}")
+                    # image comes from the user-submitted manifest; sanitize it
+                    # before logging to prevent log injection / forging (CWE-117).
+                    logger.warning("Untrusted image source: %s", sanitize_log_value(image))
                     return (
                         False,
                         f"{container_type} '{container_name}': Untrusted image source '{image}'",
