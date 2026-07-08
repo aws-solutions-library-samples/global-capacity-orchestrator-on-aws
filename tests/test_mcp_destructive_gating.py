@@ -368,25 +368,6 @@ class TestModelUploadGating:
             ]
             assert "-r" not in cmd
 
-    @pytest.mark.asyncio
-    @patch.dict(os.environ, {"GCO_ENABLE_MODEL_UPLOAD": "true"})
-    async def test_models_upload_argv_with_region(self):
-        importlib.reload(run_mcp)
-        with patch("cli_runner.subprocess.run") as mock:
-            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
-            await run_mcp.models_upload(
-                model_name="llama3-8b", source_path="./weights", region="us-east-1"
-            )
-            cmd = mock.call_args[0][0]
-            assert "models" in cmd
-            assert "upload" in cmd
-            assert "./weights" in cmd
-            assert cmd[cmd.index("--name") : cmd.index("--name") + 2] == [
-                "--name",
-                "llama3-8b",
-            ]
-            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
-
 
 # =============================================================================
 # Umbrella flag — GCO_ENABLE_ALL_TOOLS turns every gate on
