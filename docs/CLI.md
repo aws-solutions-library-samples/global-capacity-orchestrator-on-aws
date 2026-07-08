@@ -780,11 +780,12 @@ gco templates run gpu-template -n my-job -r us-east-1 -p image=custom:v1 -p gpus
 Manage webhooks for job event notifications. Webhooks receive HTTP POST notifications when job events occur.
 
 <details>
-<summary>All <code>gco webhooks</code> commands (3) — click to expand</summary>
+<summary>All <code>gco webhooks</code> commands (4) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
 | [`gco webhooks list`](#gco-webhooks-list) | List all registered webhooks. |
+| [`gco webhooks get`](#gco-webhooks-get) | Get a single webhook by id. |
 | [`gco webhooks create`](#gco-webhooks-create) | Register a new webhook for job events. |
 | [`gco webhooks delete`](#gco-webhooks-delete) | Delete a webhook. |
 
@@ -810,6 +811,27 @@ gco webhooks list [OPTIONS]
 ```bash
 gco webhooks list
 gco webhooks list --namespace gco-jobs
+```
+
+#### `gco webhooks get`
+
+Get a single webhook by id. The webhooks API has no fetch-by-id endpoint, so this lists the region's webhooks and returns the one whose id matches.
+
+```bash
+gco webhooks get WEBHOOK_ID [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | Region to query (any region works) |
+
+**Example:**
+
+```bash
+gco webhooks get abc12345
+gco webhooks get abc12345 -r us-east-1
 ```
 
 #### `gco webhooks create`
@@ -3012,7 +3034,7 @@ gco files access-points fs-0123456789abcdef0 -r us-east-1
 Manage Karpenter NodePools.
 
 <details>
-<summary>All <code>gco nodepools</code> commands (4) — click to expand</summary>
+<summary>All <code>gco nodepools</code> commands (5) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -3020,6 +3042,7 @@ Manage Karpenter NodePools.
 | [`gco nodepools describe`](#gco-nodepools-describe) | Describe a specific NodePool. |
 | [`gco nodepools create-odcr`](#gco-nodepools-create-odcr) | Generate nodepool manifest for ODCR (On-Demand Capacity Reservation). |
 | [`gco nodepools create-capacity-block`](#gco-nodepools-create-capacity-block) | Generate nodepool manifest for a purchased Capacity Block. |
+| [`gco nodepools delete`](#gco-nodepools-delete) | Delete a NodePool and its paired EC2NodeClass. |
 
 </details>
 
@@ -3110,6 +3133,29 @@ gco nodepools create-capacity-block \
   --capacity-reservation-id cr-0123456789abcdef0 \
   --instance-type p5.48xlarge \
   --output-file nodepool.yaml
+```
+
+#### `gco nodepools delete`
+
+Delete a NodePool and its paired `<name>-nodeclass` EC2NodeClass. Karpenter drains and terminates any nodes the NodePool provisioned. Cannot be undone.
+
+```bash
+gco nodepools delete NODEPOOL_NAME [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | AWS region (required) |
+| `--cluster` | | EKS cluster name (defaults to `gco-<region>`) |
+| `--yes` | `-y` | Skip confirmation |
+
+**Example:**
+
+```bash
+gco nodepools delete gpu-reserved -r us-east-1
+gco nodepools delete gpu-reserved -r us-east-1 -y
 ```
 
 ---
@@ -3405,12 +3451,13 @@ format, verbose flag) so you don't have to repeat them on every
 invocation.
 
 <details>
-<summary>All <code>gco config-cmd</code> commands (2) — click to expand</summary>
+<summary>All <code>gco config-cmd</code> commands (3) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
 | [`gco config-cmd init`](#gco-config-cmd-init) | Initialize the config file with a starter template. |
 | [`gco config-cmd show`](#gco-config-cmd-show) | Print the current resolved configuration (file values plus any environment-variable overrides). |
+| [`gco config-cmd get`](#gco-config-cmd-get) | Read one configuration value by key (or the full config). |
 
 </details>
 
@@ -3442,6 +3489,21 @@ environment-variable overrides).
 
 ```bash
 gco config-cmd show
+```
+
+#### `gco config-cmd get`
+
+Read one configuration value by key (dotted paths supported), or print the full config when no key is given.
+
+```bash
+gco config-cmd get [KEY]
+```
+
+**Example:**
+
+```bash
+gco config-cmd get
+gco config-cmd get default_region
 ```
 
 ---

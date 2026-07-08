@@ -1,5 +1,6 @@
 """Configuration commands."""
 
+import sys
 from typing import Any
 
 import click
@@ -23,6 +24,32 @@ def show_config(config: Any) -> None:
     """Show current configuration."""
     formatter = get_output_formatter(config)
     formatter.print(config.to_dict())
+
+
+@config_cmd.command("get")
+@click.argument("key", required=False)
+@pass_config
+def get_config(config: Any, key: Any) -> None:
+    """Read a configuration value by KEY (dotted path), or the full config.
+
+    Examples:
+        gco config-cmd get
+        gco config-cmd get default_region
+    """
+    formatter = get_output_formatter(config)
+    data = config.to_dict()
+    if not key:
+        formatter.print(data)
+        return
+
+    node: Any = data
+    for part in key.split("."):
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            formatter.print_error(f"Config key not found: {key}")
+            sys.exit(1)
+    formatter.print({key: node})
 
 
 @config_cmd.command("init")

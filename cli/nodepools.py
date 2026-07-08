@@ -582,3 +582,52 @@ def describe_cluster_nodepool(
         if "404" in str(e):
             return None
         raise RuntimeError(f"Failed to describe NodePool: {e}") from e
+
+
+def delete_cluster_nodepool(cluster_name: str, region: str, nodepool_name: str) -> dict[str, Any]:
+    """
+    Delete a NodePool (and its paired EC2NodeClass) from an EKS cluster.
+
+    Deletes the Karpenter NodePool ``nodepool_name`` and, when present, the
+    EC2NodeClass named ``<nodepool_name>-nodeclass`` that the GCO manifest
+    generators create alongside it. Karpenter drains and terminates any nodes
+    the NodePool provisioned once it is removed. A missing EC2NodeClass (custom
+    name, or already deleted) is not treated as an error.
+
+    Args:
+        cluster_name: EKS cluster name
+        region: AWS region
+        nodepool_name: Name of the NodePool to delete
+
+    Returns:
+        Dict describing what was deleted: ``{"nodepool": <name>,
+        "ec2nodeclass": <name-or-None>}``.
+    """
+    try:
+        custom_api = get_k8s_client(cluster_name, region)
+
+        custom_api.delete_cluster_custom_object(
+            group="karpenter.sh",
+            version="v1",
+            plural="nodepools",
+            name=nodepool_name,
+        )
+        deleted: dict[str, Any] = {"nodepool": nodepool_name, "ec2nodeclass": None}
+
+        nodeclass_name = f"{nodepool_name}-nodeclass"
+        try:
+            custom_api.delete_cluster_custom_object(
+                group="karpenter.k8s.aws",
+                version="v1",
+                plural="ec2nodeclasses",
+                name=nodeclass_name,
+            )
+            deleted["ec2nodeclass"] = nodeclass_name
+        except Exception as e:  # noqa: BLE001 - best effort; the NodePool is the primary target
+            if "404" not in str(e):
+                logger.warning("Could not delete EC2NodeClass %s: %s", nodeclass_name, e)
+
+        return deleted
+
+    except Exception as e:
+        raise RuntimeError(f"Failed to delete NodePool: {e}") from e

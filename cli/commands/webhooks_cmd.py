@@ -78,6 +78,49 @@ def webhooks_list(config: Any, namespace: Any, region: Any) -> None:
         sys.exit(1)
 
 
+@webhooks.command("get")
+@click.argument("webhook_id")
+@click.option("--region", "-r", help="Region to query (any region works)")
+@pass_config
+def webhooks_get(config: Any, webhook_id: Any, region: Any) -> None:
+    """Get a single webhook by id.
+
+    The webhooks API exposes list/create/delete but no fetch-by-id endpoint, so
+    this lists the region's webhooks and returns the one whose id matches.
+
+    Examples:
+        gco webhooks get abc12345
+        gco webhooks get abc12345 -r us-east-1
+    """
+    formatter = get_output_formatter(config)
+
+    try:
+        from ..aws_client import get_aws_client
+
+        aws_client = get_aws_client(config)
+
+        query_region = region or config.default_region
+        result = aws_client.call_api(
+            method="GET",
+            path="/api/v1/webhooks",
+            region=query_region,
+        )
+        match = next(
+            (w for w in result.get("webhooks", []) if w.get("id") == webhook_id),
+            None,
+        )
+        if match is None:
+            formatter.print_error(f"Webhook '{webhook_id}' not found")
+            sys.exit(1)
+        formatter.print(match)
+
+    except SystemExit:
+        raise
+    except Exception as e:
+        formatter.print_error(f"Failed to get webhook: {e}")
+        sys.exit(1)
+
+
 @webhooks.command("create")
 @click.option("--url", "-u", required=True, help="Webhook URL")
 @click.option(

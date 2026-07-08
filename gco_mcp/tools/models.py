@@ -51,22 +51,20 @@ if is_enabled(FLAG_MODEL_UPLOAD):
     async def models_upload(
         model_name: str,
         source_path: str,
-        region: str | None = None,
     ) -> str:
         """[gated by GCO_ENABLE_MODEL_UPLOAD] data-upload.
 
         `gco models upload` — upload model weights from a local path to the
         central S3 bucket. The CLI handles multipart uploads and progress
-        reporting; this tool surface returns the final result JSON.
+        reporting; this tool surface returns the final result JSON. Uploads
+        target the central bucket (no region option — use upload_to_regional_bucket
+        for a region's regional bucket).
 
         Args:
             model_name: Model name in the registry.
             source_path: Local file or directory to upload.
-            region: Optional region override.
         """
         args = ["models", "upload", source_path, "--name", model_name]
-        if region:
-            args += ["-r", region]
         return await asyncio.to_thread(cli_runner._run_cli, *args)
 
 

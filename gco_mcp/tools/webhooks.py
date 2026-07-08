@@ -44,28 +44,31 @@ async def webhooks_get(name: str, region: str | None = None) -> str:
 @mcp.tool(tags={"low-risk", "webhooks"})
 @audit_logged
 async def webhooks_create(
-    name: str,
     url: str,
     events: list[str],
     region: str | None = None,
-    secret_name: str | None = None,
+    namespace: str | None = None,
+    secret: str | None = None,
 ) -> str:
     """`gco webhooks create` — register a new webhook subscription.
 
     Args:
-        name: Webhook name.
         url: Destination URL for webhook deliveries.
-        events: Event names to subscribe to (one ``--event`` flag per entry).
+        events: Event names to subscribe to — one ``--event`` per entry
+            (job.started / job.completed / job.failed).
         region: Region to use (any region works).
-        secret_name: Optional Secrets Manager secret name for HMAC signing.
+        namespace: Only deliver events for jobs in this namespace.
+        secret: Optional secret for HMAC signature verification.
     """
-    args = ["webhooks", "create", name, "--url", url]
+    args = ["webhooks", "create", "--url", url]
     for event in events:
         args += ["--event", event]
+    if namespace:
+        args += ["--namespace", namespace]
     if region:
         args += ["-r", region]
-    if secret_name:
-        args += ["--secret-name", secret_name]
+    if secret:
+        args += ["--secret", secret]
     return await asyncio.to_thread(cli_runner._run_cli, *args)
 
 

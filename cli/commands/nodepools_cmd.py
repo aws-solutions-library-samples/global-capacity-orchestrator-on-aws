@@ -187,6 +187,41 @@ def create_capacity_block_nodepool(
         sys.exit(1)
 
 
+@nodepools.command("delete")
+@click.argument("nodepool_name")
+@click.option("--region", "-r", required=True, help="AWS region")
+@click.option("--cluster", help="EKS cluster name (defaults to gco-<region>)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def delete_nodepool(config: Any, nodepool_name: Any, region: Any, cluster: Any, yes: Any) -> None:
+    """Delete a NodePool and its paired EC2NodeClass.
+
+    Removes the Karpenter NodePool and the ``<name>-nodeclass`` EC2NodeClass
+    created with it. Karpenter drains and terminates any nodes the NodePool
+    provisioned. Cannot be undone.
+
+    Examples:
+        gco nodepools delete gpu-reserved -r us-east-1
+        gco nodepools delete gpu-reserved -r us-east-1 -y
+    """
+    from ..nodepools import delete_cluster_nodepool
+
+    formatter = get_output_formatter(config)
+
+    if not yes:
+        click.confirm(f"Delete NodePool '{nodepool_name}' in {region}?", abort=True)
+
+    try:
+        cluster_name = cluster or f"gco-{region}"
+        deleted = delete_cluster_nodepool(cluster_name, region, nodepool_name)
+        formatter.print_success(f"Deleted NodePool {nodepool_name}")
+        if deleted.get("ec2nodeclass"):
+            formatter.print_info(f"Deleted EC2NodeClass {deleted['ec2nodeclass']}")
+    except Exception as e:
+        formatter.print_error(f"Failed to delete NodePool: {e}")
+        sys.exit(1)
+
+
 @nodepools.command("list")
 @click.option("--region", "-r", help="Filter by region")
 @click.option("--cluster", help="EKS cluster name (defaults to gco-<region>)")

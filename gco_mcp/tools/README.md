@@ -143,7 +143,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | Tool | Description |
 |------|-------------|
 | `files_access_points` | `gco files access-points` — list EFS access points. |
-| `files_get` | `gco files get` — fetch a single file from EFS. |
+| `files_get` | `gco files get` — get file system details for a region (EFS/FSx). |
 | `list_file_systems` | List EFS and FSx file systems. |
 | `list_storage_contents` | List contents of shared EFS storage. |
 | `upload_to_regional_bucket` | `gco models upload-regional` — upload local files to a region's regional bucket. |
@@ -172,12 +172,12 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | Tool | Description |
 |------|-------------|
 | `analytics_doctor` | `gco analytics doctor` — run analytics environment health checks. |
-| `analytics_login_url` | `gco analytics login-url` — get a SageMaker Studio login URL for a user. |
+| `analytics_login_url` | `gco analytics studio login` — get a SageMaker Studio presigned login URL. |
 | `analytics_user_add` | `gco analytics users add` — create a Cognito user in the analytics pool. |
 | `analytics_user_remove` | `gco analytics users remove` — delete a Cognito user from the analytics user pool. |
 | `analytics_users_list` | `gco analytics users list` — list Cognito users in the analytics user pool. |
-| `disable_analytics` | `gco stacks analytics disable` — flip the analytics environment off in cdk.json. |
-| `enable_analytics` | `gco stacks analytics enable` — flip the analytics environment on in cdk.json. |
+| `disable_analytics` | `gco analytics disable` — flip the analytics environment off in cdk.json. |
+| `enable_analytics` | `gco analytics enable` — flip the analytics environment on in cdk.json. |
 
 ### `templates.py`
 

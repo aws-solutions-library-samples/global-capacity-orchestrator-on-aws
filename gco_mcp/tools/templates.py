@@ -68,26 +68,26 @@ async def templates_create(
 @mcp.tool(tags={"low-risk", "templates"})
 @audit_logged
 async def templates_run(
-    name: str,
-    region: str | None = None,
-    override_namespace: str | None = None,
-    override_priority: int | None = None,
+    template_name: str,
+    job_name: str,
+    region: str,
+    namespace: str | None = None,
+    params: list[str] | None = None,
 ) -> str:
-    """`gco templates run` — instantiate a job from a stored template.
+    """`gco templates run` — instantiate and run a job from a stored template.
 
     Args:
-        name: Template name to run.
-        region: Region in which to run the resulting job.
-        override_namespace: Override the namespace embedded in the template.
-        override_priority: Override the priority embedded in the template.
+        template_name: Name of the stored template to instantiate.
+        job_name: Name for the resulting job.
+        region: Region in which to run the job.
+        namespace: Override the Kubernetes namespace (default: gco-jobs).
+        params: Parameter overrides as ``key=value`` strings (one ``-p`` each).
     """
-    args = ["templates", "run", name]
-    if region:
-        args += ["-r", region]
-    if override_namespace:
-        args += ["-n", override_namespace]
-    if override_priority is not None:
-        args += ["--priority", str(override_priority)]
+    args = ["templates", "run", template_name, "--name", job_name, "-r", region]
+    if namespace:
+        args += ["--namespace", namespace]
+    for param in params or []:
+        args += ["-p", param]
     return await asyncio.to_thread(cli_runner._run_cli, *args)
 
 

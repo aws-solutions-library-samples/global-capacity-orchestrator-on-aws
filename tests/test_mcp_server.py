@@ -427,6 +427,24 @@ class TestToolRegistration:
         # Local-file metric reader registers under GCO_ENABLE_LOCAL_METRICS.
         if "metrics_from_local_file" in names:
             expected.add("metrics_from_local_file")
+        # Semantic-progress judge registers under GCO_ENABLE_SEMANTIC_PROGRESS.
+        if "metrics_semantic_progress" in names:
+            expected.add("metrics_semantic_progress")
+        # The nine mission_* tools register together under GCO_ENABLE_MISSION.
+        if "mission_start" in names:
+            expected.update(
+                {
+                    "mission_start",
+                    "mission_status",
+                    "mission_iterate",
+                    "mission_checkpoint",
+                    "mission_complete",
+                    "mission_abort",
+                    "mission_resume",
+                    "mission_history",
+                    "mission_list",
+                }
+            )
         assert names == expected
 
     def test_each_tool_has_description(self):
@@ -1939,13 +1957,15 @@ class TestTemplatesTools:
     async def test_templates_run_minimal(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
-            await run_mcp.templates_run(name="t1")
+            await run_mcp.templates_run(template_name="t1", job_name="j1", region="us-east-1")
             cmd = mock.call_args[0][0]
             assert "templates" in cmd
             assert "run" in cmd
             assert "t1" in cmd
-            assert "-r" not in cmd
-            assert "-n" not in cmd
+            assert cmd[cmd.index("--name") : cmd.index("--name") + 2] == ["--name", "j1"]
+            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
+            assert "--namespace" not in cmd
+            assert "-p" not in cmd
             assert "--priority" not in cmd
 
     @pytest.mark.asyncio
@@ -1953,21 +1973,24 @@ class TestTemplatesTools:
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
             await run_mcp.templates_run(
-                name="t1",
+                template_name="t1",
+                job_name="j1",
                 region="us-east-1",
-                override_namespace="ns2",
-                override_priority=10,
+                namespace="ns2",
+                params=["image=custom:v1"],
             )
             cmd = mock.call_args[0][0]
             assert "templates" in cmd
             assert "run" in cmd
             assert "t1" in cmd
+            assert cmd[cmd.index("--name") : cmd.index("--name") + 2] == ["--name", "j1"]
             assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
-            assert cmd[cmd.index("-n") : cmd.index("-n") + 2] == ["-n", "ns2"]
-            assert cmd[cmd.index("--priority") : cmd.index("--priority") + 2] == [
-                "--priority",
-                "10",
+            assert cmd[cmd.index("--namespace") : cmd.index("--namespace") + 2] == [
+                "--namespace",
+                "ns2",
             ]
+            assert cmd[cmd.index("-p") : cmd.index("-p") + 2] == ["-p", "image=custom:v1"]
+            assert "--priority" not in cmd
 
 
 class TestWebhooksTools:
@@ -2020,14 +2043,12 @@ class TestWebhooksTools:
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
             await run_mcp.webhooks_create(
-                name="hook1",
                 url="https://example.com/hook",
                 events=["job.completed"],
             )
             cmd = mock.call_args[0][0]
             assert "webhooks" in cmd
             assert "create" in cmd
-            assert "hook1" in cmd
             assert cmd[cmd.index("--url") : cmd.index("--url") + 2] == [
                 "--url",
                 "https://example.com/hook",
@@ -2036,31 +2057,29 @@ class TestWebhooksTools:
             assert cmd.count("--event") == 1
             assert "job.completed" in cmd
             assert "-r" not in cmd
-            assert "--secret-name" not in cmd
+            assert "--secret" not in cmd
 
     @pytest.mark.asyncio
     async def test_webhooks_create_multiple_events(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
             await run_mcp.webhooks_create(
-                name="hook1",
                 url="https://example.com/hook",
                 events=["job.started", "job.completed", "job.failed"],
                 region="us-east-1",
-                secret_name="my-secret",
+                secret="my-secret",
             )
             cmd = mock.call_args[0][0]
             assert "webhooks" in cmd
             assert "create" in cmd
-            assert "hook1" in cmd
             # Three --event flags.
             assert cmd.count("--event") == 3
             assert "job.started" in cmd
             assert "job.completed" in cmd
             assert "job.failed" in cmd
             assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
-            assert cmd[cmd.index("--secret-name") : cmd.index("--secret-name") + 2] == [
-                "--secret-name",
+            assert cmd[cmd.index("--secret") : cmd.index("--secret") + 2] == [
+                "--secret",
                 "my-secret",
             ]
 
@@ -2236,8 +2255,12 @@ class TestAnalyticsTools:
             await run_mcp.analytics_login_url(username="alice")
             cmd = mock.call_args[0][0]
             assert "analytics" in cmd
-            assert "login-url" in cmd
-            assert "alice" in cmd
+            assert "studio" in cmd
+            assert "login" in cmd
+            assert cmd[cmd.index("--username") : cmd.index("--username") + 2] == [
+                "--username",
+                "alice",
+            ]
 
     @pytest.mark.asyncio
     async def test_analytics_users_list(self):
@@ -2255,10 +2278,11 @@ class TestAnalyticsTools:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
             await run_mcp.enable_analytics()
             cmd = mock.call_args[0][0]
-            assert "stacks" in cmd
             assert "analytics" in cmd
             assert "enable" in cmd
             assert "-y" in cmd
+            # It's the top-level `analytics enable`, not `stacks analytics enable`.
+            assert "stacks" not in cmd
 
     @pytest.mark.asyncio
     async def test_disable_analytics(self):
@@ -2266,10 +2290,10 @@ class TestAnalyticsTools:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
             await run_mcp.disable_analytics()
             cmd = mock.call_args[0][0]
-            assert "stacks" in cmd
             assert "analytics" in cmd
             assert "disable" in cmd
             assert "-y" in cmd
+            assert "stacks" not in cmd
 
     @pytest.mark.asyncio
     async def test_analytics_user_add(self):
@@ -2298,7 +2322,7 @@ class TestConfigTools:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
             await run_mcp.config_get()
             cmd = mock.call_args[0][0]
-            assert "config" in cmd
+            assert "config-cmd" in cmd
             assert "get" in cmd
             # When no key is supplied, the positional should be absent.
             assert "some.key" not in cmd
@@ -2309,7 +2333,7 @@ class TestConfigTools:
             mock.return_value = MagicMock(returncode=0, stdout='"value"', stderr="")
             await run_mcp.config_get(key="some.key")
             cmd = mock.call_args[0][0]
-            assert "config" in cmd
+            assert "config-cmd" in cmd
             assert "get" in cmd
             assert "some.key" in cmd
 
@@ -2321,12 +2345,14 @@ class TestStorageReadOnlyTools:
     async def test_files_get(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="contents", stderr="")
-            await run_mcp.files_get(path="/some/file", region="us-east-1")
+            await run_mcp.files_get(region="us-east-1")
             cmd = mock.call_args[0][0]
             assert "files" in cmd
             assert "get" in cmd
-            assert "/some/file" in cmd
-            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
+            # `files get REGION [-t type]` — region is positional, no -r.
+            assert "us-east-1" in cmd
+            assert "-r" not in cmd
+            assert cmd[cmd.index("-t") : cmd.index("-t") + 2] == ["-t", "efs"]
 
     @pytest.mark.asyncio
     async def test_files_access_points_no_args(self):

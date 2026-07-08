@@ -16,13 +16,20 @@ async def analytics_doctor() -> str:
 
 @mcp.tool(tags={"safe", "analytics"})
 @audit_logged
-async def analytics_login_url(username: str) -> str:
-    """`gco analytics login-url` — get a SageMaker Studio login URL for a user.
+async def analytics_login_url(username: str, password: str | None = None) -> str:
+    """`gco analytics studio login` — get a SageMaker Studio presigned login URL.
+
+    SRP-authenticates the user against Cognito and prints the presigned Studio
+    URL. The password is read from ``$GCO_STUDIO_PASSWORD`` when not passed here.
 
     Args:
-        username: Cognito username.
+        username: Cognito username to sign in with.
+        password: Cognito password. Omit to use ``$GCO_STUDIO_PASSWORD``.
     """
-    return await asyncio.to_thread(cli_runner._run_cli, "analytics", "login-url", username)
+    args = ["analytics", "studio", "login", "--username", username]
+    if password:
+        args += ["--password", password]
+    return await asyncio.to_thread(cli_runner._run_cli, *args)
 
 
 @mcp.tool(tags={"safe", "analytics"})
@@ -40,23 +47,23 @@ async def analytics_users_list() -> str:
 @mcp.tool(tags={"low-risk", "analytics"})
 @audit_logged
 async def enable_analytics() -> str:
-    """`gco stacks analytics enable` — flip the analytics environment on in cdk.json.
+    """`gco analytics enable` — flip the analytics environment on in cdk.json.
 
     Note: this only edits the cdk.json toggle. The change does not take effect
     until ``gco stacks deploy-all`` runs to provision the analytics stack.
     """
-    return await asyncio.to_thread(cli_runner._run_cli, "stacks", "analytics", "enable", "-y")
+    return await asyncio.to_thread(cli_runner._run_cli, "analytics", "enable", "-y")
 
 
 @mcp.tool(tags={"low-risk", "analytics"})
 @audit_logged
 async def disable_analytics() -> str:
-    """`gco stacks analytics disable` — flip the analytics environment off in cdk.json.
+    """`gco analytics disable` — flip the analytics environment off in cdk.json.
 
     Note: this only edits the cdk.json toggle. The change does not take effect
     until ``gco stacks deploy-all`` runs to tear down the analytics stack.
     """
-    return await asyncio.to_thread(cli_runner._run_cli, "stacks", "analytics", "disable", "-y")
+    return await asyncio.to_thread(cli_runner._run_cli, "analytics", "disable", "-y")
 
 
 @mcp.tool(tags={"low-risk", "analytics"})

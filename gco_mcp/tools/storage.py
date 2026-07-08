@@ -43,14 +43,18 @@ def list_file_systems(region: str | None = None) -> str:
 
 @mcp.tool(tags={"safe", "files"})
 @audit_logged
-async def files_get(path: str, region: str) -> str:
-    """`gco files get` — fetch a single file from EFS.
+async def files_get(region: str, fs_type: str = "efs") -> str:
+    """`gco files get` — get file system details for a region.
+
+    Returns the EFS (or FSx) file system's ID, lifecycle state, throughput mode,
+    encryption flags, and mount targets. To browse or fetch file contents, use
+    list_storage_contents (``gco files ls``) or ``gco files download``.
 
     Args:
-        path: File path relative to the storage root.
         region: AWS region.
+        fs_type: File system type — "efs" (default) or "fsx".
     """
-    return await asyncio.to_thread(cli_runner._run_cli, "files", "get", path, "-r", region)
+    return await asyncio.to_thread(cli_runner._run_cli, "files", "get", region, "-t", fs_type)
 
 
 @mcp.tool(tags={"safe", "files"})
