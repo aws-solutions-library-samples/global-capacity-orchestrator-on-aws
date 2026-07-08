@@ -18,22 +18,12 @@
 #   CVE-XXXX-XXXXX exp:YYYY-MM-DD
 # =============================================================================
 
-# CVE-2026-48863, CVE-2026-48864, CVE-2026-9149, CVE-2026-9150 — libsolv
-# buffer overflows in the AL2023 package shipped by the
-# public.ecr.aws/lambda/python:3.14 base image used by the helm-installer
-# Lambda. Installed 0.7.22-1.amzn2023.0.3; fixed in 0.7.22-1.amzn2023.0.4
-# per the Amazon Linux 2023 advisory (https://alas.aws.amazon.com/AL2023/).
-#
-# The fix is published, but only in an AL2023 releasever newer than the one
-# the base image pins, so it can't be pulled without floating the package.
-# We're waiting for AWS to refresh the Lambda Python 3.14 base image with
-# the rebuilt libsolv rather than patching at build time. Low runtime risk:
-# libsolv is dnf's SAT solver, exercised only at image build, never by the
-# running Lambda. Clears when AWS refreshes the base image.
-CVE-2026-48863 exp:2026-09-12
-CVE-2026-48864 exp:2026-09-12
-CVE-2026-9149 exp:2026-09-12
-CVE-2026-9150 exp:2026-09-12
+# NOTE: The libsolv and OpenSSL AL2023 base-image suppressions that used to
+# live here were removed once lambda/helm-installer/Dockerfile started pulling
+# AL2023 security patches at build time (`dnf upgrade --releasever=latest`).
+# That build-time upgrade pulls the published fixes for those packages, so they
+# no longer need suppressing. If a future AL2023 CVE appears before a fix is
+# published, add a dated entry here per the rules above.
 
 # CVE-2026-12151 — undici (Node.js) Denial of Service via unbounded memory
 # growth on the WebSocket client. Surfaced only by security:trivy:container-scan
@@ -109,34 +99,3 @@ CVE-2026-53488 exp:2026-09-22
 CVE-2026-53489 exp:2026-09-22
 CVE-2026-53492 exp:2026-09-22
 CVE-2026-34040 exp:2026-09-22
-
-# CVE-2026-34180, CVE-2026-34181, CVE-2026-34182, CVE-2026-34183, CVE-2026-42764,
-# CVE-2026-42766, CVE-2026-42767, CVE-2026-42768, CVE-2026-42769, CVE-2026-42770,
-# CVE-2026-45445, CVE-2026-45446, CVE-2026-45447, CVE-2026-7383, CVE-2026-9076 —
-# OpenSSL flaws in the AL2023 openssl-fips-provider-latest and openssl-snapsafe-libs
-# packages shipped by the public.ecr.aws/lambda/python:3.14 base image used by the
-# helm-installer Lambda. Installed 1:3.5.5-1.amzn2023.0.4; fixed in 1:3.5.5-1.amzn2023.0.5
-# per the Amazon Linux 2023 advisory (https://alas.aws.amazon.com/AL2023/).
-#
-# The fix is published, but only in an AL2023 releasever newer than the one the base
-# image pins, so it cannot be pulled without floating the package. We are waiting for AWS
-# to refresh the Lambda Python 3.14 base image with the rebuilt openssl rather than
-# patching at build time, matching how the libsolv entry above is handled. Low runtime
-# risk: the helm-installer is a deploy-time Lambda whose openssl is exercised only for
-# TLS to the trusted EKS API server and chart repositories, not the CMS / PKCS7 / CMP /
-# QUIC / FIPS paths these CVEs touch. Clears when AWS refreshes the base image.
-CVE-2026-34180 exp:2026-09-22
-CVE-2026-34181 exp:2026-09-22
-CVE-2026-34182 exp:2026-09-22
-CVE-2026-34183 exp:2026-09-22
-CVE-2026-42764 exp:2026-09-22
-CVE-2026-42766 exp:2026-09-22
-CVE-2026-42767 exp:2026-09-22
-CVE-2026-42768 exp:2026-09-22
-CVE-2026-42769 exp:2026-09-22
-CVE-2026-42770 exp:2026-09-22
-CVE-2026-45445 exp:2026-09-22
-CVE-2026-45446 exp:2026-09-22
-CVE-2026-45447 exp:2026-09-22
-CVE-2026-7383 exp:2026-09-22
-CVE-2026-9076 exp:2026-09-22

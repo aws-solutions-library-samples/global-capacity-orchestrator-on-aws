@@ -10,6 +10,20 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 WORKDIR ${LAMBDA_TASK_ROOT}
 
+# Apply Amazon Linux 2023 security patches at build time. The AL2023 Lambda
+# base pins a dated releasever, so security-fixed packages (util-linux,
+# sqlite-libs, libsolv, openssl, ...) land only in a newer releasever and are
+# invisible to a plain `dnf upgrade`. Float to `--releasever=latest` to pull
+# them — the AL2023 analogue of the `apt-get upgrade` the Debian service images
+# run. DNF_SECURITY_EPOCH busts the CI layer cache so a freshly-published patch
+# isn't masked by a stale cached upgrade layer; bump the date when a new fix
+# needs pulling.
+ARG DNF_SECURITY_EPOCH=2026-07-08
+# hadolint ignore=DL3041
+RUN echo "dnf security epoch ${DNF_SECURITY_EPOCH}" \
+    && dnf upgrade -y --releasever=latest \
+    && dnf clean all
+
 # Install Helm
 # hadolint ignore=DL3041
 RUN dnf install -y tar gzip && \
