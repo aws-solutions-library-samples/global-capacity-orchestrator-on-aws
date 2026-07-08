@@ -110,6 +110,7 @@ from tools.capacity import (  # noqa: E402, F401
     capacity_status,
     check_capacity,
     find_capacity_blocks,
+    find_capacity_reservations,
     list_reservations,
     recommend_region,
     reservation_check,
@@ -172,6 +173,7 @@ from tools.metrics import (  # noqa: E402, F401
 )
 from tools.models import get_model_uri, list_models  # noqa: E402, F401
 from tools.nodepools import (  # noqa: E402, F401
+    nodepools_create_capacity_block,
     nodepools_create_odcr,
     nodepools_describe,
     nodepools_list,
@@ -211,7 +213,7 @@ from tools.templates import (  # noqa: E402, F401
 from tools.webhooks import webhooks_create, webhooks_get, webhooks_list  # noqa: E402, F401
 
 with _contextlib.suppress(ImportError):
-    from tools.capacity import reserve_capacity  # noqa: F401
+    from tools.capacity import create_reservation, reserve_capacity  # noqa: F401
 
 with _contextlib.suppress(ImportError):
     from tools.images import images_build, images_mirror, images_push  # noqa: F401
@@ -232,6 +234,9 @@ with _contextlib.suppress(ImportError):
 
 # Destructive-operations gated tools — present only when
 # GCO_ENABLE_DESTRUCTIVE_OPERATIONS (or GCO_ENABLE_ALL_TOOLS) is set.
+with _contextlib.suppress(ImportError):
+    from tools.capacity import cancel_reservation  # noqa: F401
+
 with _contextlib.suppress(ImportError):
     from tools.jobs import delete_job  # noqa: F401
 
@@ -445,6 +450,7 @@ __all__ = [
     "bootstrap_cdk",
     "canary_deploy",
     "cancel_queue_job",
+    "cancel_reservation",
     "capacity_history_patterns",
     "capacity_history_show",
     "capacity_history_stats",
@@ -458,6 +464,7 @@ __all__ = [
     "cost_forecast",
     "cost_summary",
     "cost_trend",
+    "create_reservation",
     "dag_run",
     "dag_validate",
     "delete_inference",
@@ -484,6 +491,7 @@ __all__ = [
     "files_access_points",
     "files_get",
     "find_capacity_blocks",
+    "find_capacity_reservations",
     "find_docs",
     "find_examples",
     "fsx_status",
@@ -540,6 +548,7 @@ __all__ = [
     "mission_status",
     "models_upload",
     "mooncake_topology_status",
+    "nodepools_create_capacity_block",
     "nodepools_create_odcr",
     "nodepools_describe",
     "nodepools_list",

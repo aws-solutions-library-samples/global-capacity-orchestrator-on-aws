@@ -1728,6 +1728,77 @@ gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1 --dry-run
 gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1
 ```
 
+#### `gco capacity find-reservations`
+
+Find existing On-Demand Capacity Reservations (ODCRs) across regions in one call — the ODCR counterpart to [`gco capacity find-blocks`](#gco-capacity-find-blocks). Fans out across every requested region in parallel, normalizes friendly instance-type aliases (`p6-b200` → `p6-b200.48xlarge`), enriches each reservation with On-Demand pricing, and returns one consolidated report ranked most-available-first (then cheapest per-GPU-hour).
+
+```bash
+gco capacity find-reservations [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-i, --instance-type` | Instance type or alias to filter by (e.g. `p6-b200`); omit for all types |
+| `-r, --region` | Region(s) to search; repeatable (default: all deployed regions) |
+| `-c, --count` | Minimum available instances to consider the search satisfied (default: 1) |
+| `--state` | Reservation state filter (default: `active`; use `all` for any state) |
+| `--pricing/--no-pricing` | Enrich reservations with On-Demand pricing (default: yes) |
+
+```bash
+# Where do I already have free p5 reserved capacity?
+gco capacity find-reservations -i p5.48xlarge
+
+# Two regions, alias normalization, no pricing lookups
+gco capacity find-reservations -i p6-b200 -r us-east-1 -r us-west-2 --no-pricing
+```
+
+#### `gco capacity create-reservation`
+
+Create a new On-Demand Capacity Reservation (ODCR) — the ODCR counterpart to [`gco capacity reserve`](#gco-capacity-reserve). Reserves On-Demand capacity for an instance type in a specific Availability Zone. **Charges accrue** for the reserved capacity whether or not it is used, until the reservation is cancelled. Always validate with `--dry-run` first.
+
+```bash
+gco capacity create-reservation [OPTIONS]
+```
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--instance-type` | `-i` | EC2 instance type or alias (required) |
+| `--region` | `-r` | AWS region (required) |
+| `--availability-zone` | `-z` | Target Availability Zone, e.g. `us-east-1a` (required) |
+| `--count` | `-c` | Number of instances to reserve (default: 1) |
+| `--platform` | | Instance platform/OS (default: `Linux/UNIX`) |
+| `--tenancy` | | `default` or `dedicated` (default: `default`) |
+| `--match-criteria` | | `open` or `targeted` (default: `open`) |
+| `--end-date` | | Optional end date (`YYYY-MM-DD` or ISO); omit for an unlimited reservation |
+| `--ebs-optimized` | | Reserve EBS-optimized capacity |
+| `--dry-run` | | Validate the request without creating (no cost) |
+
+```bash
+# Validate, then create
+gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2 --dry-run
+gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2
+```
+
+#### `gco capacity cancel-reservation`
+
+Cancel an On-Demand Capacity Reservation, releasing its capacity so it stops incurring On-Demand charges. Only ODCRs can be cancelled this way; a Capacity Block runs for its fixed term. Instances already running against the reservation are not terminated — they revert to normal On-Demand billing.
+
+```bash
+gco capacity cancel-reservation [OPTIONS]
+```
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--reservation-id` | `-o` | Capacity Reservation ID (`cr-…`) to cancel (required) |
+| `--region` | `-r` | AWS region where the reservation exists (required) |
+| `--dry-run` | | Validate the cancellation without cancelling |
+| `--yes` | `-y` | Skip confirmation |
+
+```bash
+gco capacity cancel-reservation -o cr-0123456789abcdef0 -r us-east-1 --dry-run
+gco capacity cancel-reservation -o cr-0123456789abcdef0 -r us-east-1 -y
+```
+
 #### `gco capacity instance-info`
 
 Print AWS-published metadata for an instance type — vCPUs, memory,
@@ -2941,13 +3012,14 @@ gco files access-points fs-0123456789abcdef0 -r us-east-1
 Manage Karpenter NodePools.
 
 <details>
-<summary>All <code>gco nodepools</code> commands (3) — click to expand</summary>
+<summary>All <code>gco nodepools</code> commands (4) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
 | [`gco nodepools list`](#gco-nodepools-list) | List NodePools in a cluster. |
 | [`gco nodepools describe`](#gco-nodepools-describe) | Describe a specific NodePool. |
 | [`gco nodepools create-odcr`](#gco-nodepools-create-odcr) | Generate nodepool manifest for ODCR (On-Demand Capacity Reservation). |
+| [`gco nodepools create-capacity-block`](#gco-nodepools-create-capacity-block) | Generate nodepool manifest for a purchased Capacity Block. |
 
 </details>
 
@@ -3005,6 +3077,38 @@ gco nodepools create-odcr \
   --region us-east-1 \
   --capacity-reservation-id cr-0123456789abcdef0 \
   --instance-type p4d.24xlarge \
+  --output-file nodepool.yaml
+```
+
+#### `gco nodepools create-capacity-block`
+
+Generate a Karpenter NodePool manifest for a purchased Capacity Block — the Capacity Block counterpart to [`gco nodepools create-odcr`](#gco-nodepools-create-odcr). Purchasing a Capacity Block (`gco capacity reserve`) yields an EC2 Capacity Reservation ID (`cr-xxx`), which the generated NodePool consumes via `capacityReservationSelectorTerms`. Because a block is prepaid for a fixed term, the NodePool defaults to holding the capacity (`WhenEmpty` consolidation) rather than consolidating it away early.
+
+```bash
+gco nodepools create-capacity-block [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--name` | `-n` | NodePool name (required) |
+| `--region` | `-r` | AWS region (required) |
+| `--capacity-reservation-id` | `-c` | Capacity Reservation ID (`cr-xxx`) of the purchased Capacity Block (required) |
+| `--instance-type` | `-i` | Instance type (repeatable) |
+| `--max-nodes` | | Maximum nodes in the pool (default: 100) |
+| `--fallback-on-demand` | | Fall back to on-demand when the block is exhausted/expired |
+| `--efa` | | Enable EFA support (adds EFA taint and labels) |
+| `--output-file` | `-o` | Output manifest to file instead of applying |
+
+**Example:**
+
+```bash
+gco nodepools create-capacity-block \
+  --name cb-train \
+  --region us-east-1 \
+  --capacity-reservation-id cr-0123456789abcdef0 \
+  --instance-type p5.48xlarge \
   --output-file nodepool.yaml
 ```
 

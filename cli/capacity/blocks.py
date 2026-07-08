@@ -306,6 +306,52 @@ def compute_offering_pricing(
     return result
 
 
+def compute_reservation_pricing(
+    on_demand_price_per_hour: float | None,
+    instance_count: int | None,
+    gpus_per_instance: int | None,
+) -> dict[str, float | None]:
+    """Derive per-hour / per-instance-hour / per-GPU-hour pricing for an ODCR.
+
+    On-Demand Capacity Reservations bill at the standard On-Demand rate for the
+    reserved instance type for as long as the reservation is held, whether or not
+    the capacity is actually in use. So the reservation's running cost is the
+    On-Demand hourly price times the number of instances reserved. The derived
+    figures mirror :func:`compute_offering_pricing` so an ODCR and a Capacity
+    Block can be compared on the same per-instance-hour / per-GPU-hour footing:
+
+    * ``price_per_instance_hour`` — the On-Demand hourly rate for one instance.
+    * ``price_per_hour`` — whole-reservation hourly cost (rate x instance count).
+    * ``price_per_gpu_hour`` — per-GPU hourly rate (needs a GPU count).
+
+    Any figure that can't be computed (missing rate, zero/unknown count) is
+    ``None`` rather than a misleading zero.
+    """
+    result: dict[str, float | None] = {
+        "price_per_instance_hour": None,
+        "price_per_hour": None,
+        "price_per_gpu_hour": None,
+    }
+    if on_demand_price_per_hour is None:
+        return result
+    try:
+        rate = float(on_demand_price_per_hour)
+    except TypeError, ValueError:
+        return result
+    if rate < 0:
+        return result
+
+    result["price_per_instance_hour"] = round(rate, 4)
+
+    if instance_count and instance_count > 0:
+        result["price_per_hour"] = round(rate * instance_count, 4)
+
+    if gpus_per_instance and gpus_per_instance > 0:
+        result["price_per_gpu_hour"] = round(rate / gpus_per_instance, 4)
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # De-dup / sort
 # ---------------------------------------------------------------------------
@@ -392,3 +438,52 @@ def longest_offering(offerings: list[dict[str, Any]]) -> dict[str, Any] | None:
             -_rank_key(o)[0],
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Reservation (ODCR) sort / rank
+# ---------------------------------------------------------------------------
+
+
+def sort_reservations(reservations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sort reservations by region, then AZ, then instance type — stable browse order.
+
+    The ODCR counterpart to :func:`sort_offerings`, used to present a consolidated
+    multi-region reservation report in a predictable order.
+    """
+    return sorted(
+        reservations,
+        key=lambda r: (
+            str(r.get("region") or ""),
+            str(r.get("availability_zone") or ""),
+            str(r.get("instance_type") or ""),
+        ),
+    )
+
+
+def _reservation_rank_key(reservation: dict[str, Any]) -> tuple[float, float, str]:
+    """Rank key: most available capacity first, then cheapest per-GPU-hour.
+
+    Available instances sort descending (negated), so a reservation with more
+    free capacity ranks ahead of a fuller one; ties break toward the cheaper
+    per-GPU-hour rate, then a stable region string. This mirrors the intent of
+    :func:`_rank_key` for offerings (surface the single best pick first) while
+    optimizing for what matters for an existing reservation: free capacity.
+    """
+    available = reservation.get("available_instances")
+    gpu_hour = reservation.get("price_per_gpu_hour")
+    return (
+        -float(available) if available is not None else 0.0,
+        float(gpu_hour) if gpu_hour is not None else float("inf"),
+        str(reservation.get("region") or ""),
+    )
+
+
+def rank_reservations(reservations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rank reservations by most-available-first, then cheapest per-GPU-hour.
+
+    The ODCR counterpart to :func:`rank_offerings`. Used to surface the single
+    best existing reservation (most free capacity, cheapest) in a consolidated
+    multi-region search report.
+    """
+    return sorted(reservations, key=_reservation_rank_key)

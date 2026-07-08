@@ -2098,6 +2098,101 @@ class TestNodepoolsCommands:
             assert result.exit_code == 1
             assert "failed" in result.output.lower()
 
+    def test_create_capacity_block_nodepool_stdout(self):
+        """Test create-capacity-block nodepool to stdout."""
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        runner = CliRunner()
+
+        with patch("cli.nodepools.generate_capacity_block_nodepool_manifest") as mock_gen:
+            mock_gen.return_value = "apiVersion: karpenter.sh/v1\nkind: NodePool\n"
+
+            result = runner.invoke(
+                cli,
+                [
+                    "nodepools",
+                    "create-capacity-block",
+                    "-n",
+                    "cb-train",
+                    "-r",
+                    "us-east-1",
+                    "-c",
+                    "cr-0123456789abcdef0",
+                    "-i",
+                    "p5.48xlarge",
+                ],
+            )
+            assert result.exit_code == 0
+            assert "NodePool" in result.output
+
+    def test_create_capacity_block_nodepool_to_file(self):
+        """Test create-capacity-block nodepool with output file."""
+        import os
+        import tempfile
+
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        runner = CliRunner()
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            output_path = f.name
+
+        try:
+            with patch("cli.nodepools.generate_capacity_block_nodepool_manifest") as mock_gen:
+                mock_gen.return_value = "apiVersion: karpenter.sh/v1\nkind: NodePool\n"
+
+                result = runner.invoke(
+                    cli,
+                    [
+                        "nodepools",
+                        "create-capacity-block",
+                        "-n",
+                        "cb-train",
+                        "-r",
+                        "us-east-1",
+                        "-c",
+                        "cr-0123456789abcdef0",
+                        "-o",
+                        output_path,
+                    ],
+                )
+                assert result.exit_code == 0
+                assert "written to" in result.output
+        finally:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+
+    def test_create_capacity_block_nodepool_error(self):
+        """Test create-capacity-block nodepool with error."""
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        runner = CliRunner()
+
+        with patch("cli.nodepools.generate_capacity_block_nodepool_manifest") as mock_gen:
+            mock_gen.side_effect = Exception("Invalid capacity reservation")
+
+            result = runner.invoke(
+                cli,
+                [
+                    "nodepools",
+                    "create-capacity-block",
+                    "-n",
+                    "cb-train",
+                    "-r",
+                    "us-east-1",
+                    "-c",
+                    "invalid",
+                ],
+            )
+            assert result.exit_code == 1
+            assert "failed" in result.output.lower()
+
     def test_list_nodepools_success(self):
         """Test list nodepools command."""
         from click.testing import CliRunner

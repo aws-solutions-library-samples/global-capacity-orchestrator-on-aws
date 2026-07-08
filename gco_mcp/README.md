@@ -375,12 +375,12 @@ A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, de
 | Flag | Default | Tools Gated | Why It's Gated |
 |------|---------|-------------|----------------|
 | `GCO_ENABLE_ALL_TOOLS` | `false` | All flagged tools below | Umbrella switch. Setting this to `true` enables every gated tool at once and overrides any per-flag value (even per-flag values explicitly set to `false`). Use sparingly — prefer per-flag opt-in for production clients. |
-| `GCO_ENABLE_CAPACITY_PURCHASE` | `false` | `reserve_capacity` | Purchases a Capacity Block offering and incurs immediate AWS charges. Once committed the reservation cannot be cancelled. |
+| `GCO_ENABLE_CAPACITY_PURCHASE` | `false` | `reserve_capacity`, `create_reservation` | Reserve capacity that incurs AWS charges — either purchasing a fixed-term Capacity Block (`reserve_capacity`, not cancellable once committed) or creating an On-Demand Capacity Reservation (`create_reservation`, billed until cancelled via `cancel_reservation`). |
 | `GCO_ENABLE_MODEL_UPLOAD` | `false` | `models_upload` | Uploads model weights to S3, which can be many GB per call and takes minutes to finish. Network egress and storage costs apply. |
 | `GCO_ENABLE_IMAGE_PUBLISH` | `false` | `images_build`, `images_push`, `images_mirror` | Builds, publishes, and mirrors container images to ECR. `images_build` / `images_push` run a long-running build (FastMCP background task) and push binaries that get replicated across every deployed region; `images_mirror` copies third-party images (Volcano's docker.io images) into the project's `gco/*` ECR. |
 | `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` | `false` | `deploy_stack`, `deploy_all`, `bootstrap_cdk` | Creates or updates CloudFormation stacks. A full `deploy_all` runs 30-60 minutes wall-clock and can provision EKS clusters, NodePools, and storage that incur ongoing charges. |
 | `GCO_ENABLE_INFRASTRUCTURE_DESTROY` | `false` | `destroy_stack`, `destroy_all` | Tears down CloudFormation stacks. Cancellation mid-flight can leave partial state behind that has to be cleaned up by hand. |
-| `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` | `false` | `delete_job`, `delete_inference`, `delete_template`, `delete_webhook`, `delete_model`, `delete_nodepool`, `analytics_user_remove`, `cancel_queue_job`, `images_cleanup`, `images_prune`, `images_delete_tag`, `images_delete_repo` | Delete operations are irreversible — once data, jobs, models, or images are removed they can't be recovered without a backup. |
+| `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` | `false` | `delete_job`, `delete_inference`, `delete_template`, `delete_webhook`, `delete_model`, `delete_nodepool`, `analytics_user_remove`, `cancel_queue_job`, `cancel_reservation`, `images_cleanup`, `images_prune`, `images_delete_tag`, `images_delete_repo` | Delete operations are irreversible — once data, jobs, models, images, or capacity reservations are removed they can't be recovered without a backup. |
 | `GCO_ENABLE_MISSION` | `false` | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list` | Runs an autonomous goal-directed loop that can call any tool in its allowlist. Gated to prevent unattended autonomous execution. |
 
 ### Enabling a Flag
@@ -540,7 +540,10 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `ai_recommend` | Get AI-powered capacity recommendation using Amazon Bedrock | safe | — |
 | `list_reservations` | List On-Demand Capacity Reservations (ODCRs) across regions | safe | — |
 | `reservation_check` | Check reservation availability and Capacity Block offerings | safe | — |
+| `find_capacity_reservations` | Find existing ODCRs across regions in one parallel, ranked, priced report | safe | — |
 | `reserve_capacity` | Purchase a Capacity Block offering by ID (supports dry-run) | cost-incurring | `GCO_ENABLE_CAPACITY_PURCHASE` |
+| `create_reservation` | Create a new On-Demand Capacity Reservation (supports dry-run) | cost-incurring | `GCO_ENABLE_CAPACITY_PURCHASE` |
+| `cancel_reservation` | Cancel an ODCR, releasing its reserved capacity (supports dry-run) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 
 ### Inference Endpoints
 
@@ -660,6 +663,7 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 | `nodepools_list` | List Karpenter NodePools in a cluster | safe | — |
 | `nodepools_describe` | Show one NodePool's full configuration | safe | — |
 | `nodepools_create_odcr` | Create an ODCR-backed NodePool with weighted scheduling | low-risk | — |
+| `nodepools_create_capacity_block` | Create a Capacity Block-backed NodePool (holds the prepaid block) | low-risk | — |
 | `delete_nodepool` | Delete a NodePool (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 
 ### Analytics

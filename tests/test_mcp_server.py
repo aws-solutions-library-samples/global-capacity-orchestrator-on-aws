@@ -156,15 +156,18 @@ class TestToolRegistration:
         #     (deploy_disaggregated_inference, set_mooncake_topology,
         #     mooncake_topology_status, populate_kv_cache,
         #     upload_to_regional_bucket)
-        # = 102 total at default registration.
-        # reserve_capacity adds 1 when GCO_ENABLE_CAPACITY_PURCHASE=true.
+        #   * 2 unconditional ODCR/Capacity-Block parity tools
+        #     (find_capacity_reservations sweep, nodepools_create_capacity_block)
+        # = 104 total at default registration.
+        # reserve_capacity and create_reservation add 2 when
+        # GCO_ENABLE_CAPACITY_PURCHASE=true.
         # Image-publish-gated tools (images_build, images_push, images_mirror)
         # add 3 when GCO_ENABLE_IMAGE_PUBLISH=true. Destructive-gated tools add
-        # 12 when GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true: delete_job,
+        # 13 when GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true: delete_job,
         # delete_inference, delete_template, delete_webhook, delete_model,
-        # delete_nodepool, analytics_user_remove, cancel_queue_job (eight
-        # non-image), plus images_cleanup, images_prune, images_delete_tag,
-        # images_delete_repo (four image variants). Model-upload-gated
+        # delete_nodepool, analytics_user_remove, cancel_queue_job,
+        # cancel_reservation (nine non-image), plus images_cleanup, images_prune,
+        # images_delete_tag, images_delete_repo (four image variants). Model-upload-gated
         # models_upload adds 1 when GCO_ENABLE_MODEL_UPLOAD=true.
         # Infrastructure-deploy gated tools (deploy_stack, deploy_all,
         # bootstrap_cdk) add 3 when GCO_ENABLE_INFRASTRUCTURE_DEPLOY=true.
@@ -177,21 +180,25 @@ class TestToolRegistration:
         # mission_checkpoint, mission_complete, mission_abort, mission_resume,
         # mission_history, mission_list) add 9 when GCO_ENABLE_MISSION=true.
         # With every flag enabled the ceiling is
-        # 107 + 1 + 3 + 12 + 1 + 3 + 2 + 1 + 1 + 9 = 140.
-        # (107 base includes the unconditional find_capacity_blocks sweep tool.)
-        base_count = 107
+        # 109 + 2 + 3 + 13 + 1 + 3 + 2 + 1 + 1 + 9 = 144.
+        # (109 base includes the unconditional find_capacity_blocks and
+        # find_capacity_reservations sweep tools plus the
+        # nodepools_create_capacity_block generator.)
+        base_count = 109
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
-            expected += 1
+            # reserve_capacity + create_reservation register together under
+            # GCO_ENABLE_CAPACITY_PURCHASE.
+            expected += 2
         if "images_build" in tool_names:
             expected += 2  # images_build + images_push register together
         if "images_mirror" in tool_names:
             expected += 1  # images_mirror (also GCO_ENABLE_IMAGE_PUBLISH-gated)
         if "delete_job" in tool_names:
-            # All eight destructive-gated tools register together with the
-            # four destructive image variants — twelve total under the flag.
-            expected += 12
+            # All nine destructive-gated non-image tools register together with
+            # the four destructive image variants — thirteen total under the flag.
+            expected += 13
         if "models_upload" in tool_names:
             expected += 1
         if "deploy_stack" in tool_names:
@@ -231,6 +238,7 @@ class TestToolRegistration:
             "list_reservations",
             "reservation_check",
             "find_capacity_blocks",
+            "find_capacity_reservations",
             "capacity_history_show",
             "capacity_history_stats",
             "capacity_history_patterns",
@@ -321,6 +329,7 @@ class TestToolRegistration:
             "nodepools_describe",
             # Mutating
             "nodepools_create_odcr",
+            "nodepools_create_capacity_block",
             # Analytics
             "analytics_doctor",
             "analytics_login_url",
@@ -361,10 +370,11 @@ class TestToolRegistration:
             "task_status",
             "task_tail",
         }
-        # reserve_capacity is conditionally registered via env var
-        # and may also appear if a prior test reloaded the module
+        # reserve_capacity + create_reservation are conditionally registered via
+        # env var and may also appear if a prior test reloaded the module
         if "reserve_capacity" in names:
             expected.add("reserve_capacity")
+            expected.add("create_reservation")
         # Image-publish-gated tools register under GCO_ENABLE_IMAGE_PUBLISH.
         if "images_build" in names:
             expected.add("images_build")
@@ -400,6 +410,7 @@ class TestToolRegistration:
                     "delete_nodepool",
                     "analytics_user_remove",
                     "cancel_queue_job",
+                    "cancel_reservation",
                 }
             )
         # Model-upload gated tool registers under GCO_ENABLE_MODEL_UPLOAD.
@@ -2161,55 +2172,49 @@ class TestNodepoolsTools:
             await run_mcp.nodepools_create_odcr(
                 name="gpu-reserved",
                 region="us-east-1",
-                instance_type="p4d.24xlarge",
                 capacity_reservation_id="cr-0123456789abcdef0",
+                instance_type=["p4d.24xlarge"],
             )
             cmd = mock.call_args[0][0]
             assert "nodepools" in cmd
             assert "create-odcr" in cmd
-            assert "gpu-reserved" in cmd
+            assert cmd[cmd.index("-n") : cmd.index("-n") + 2] == ["-n", "gpu-reserved"]
             assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
-            assert cmd[cmd.index("--instance-type") : cmd.index("--instance-type") + 2] == [
-                "--instance-type",
-                "p4d.24xlarge",
+            assert cmd[cmd.index("-c") : cmd.index("-c") + 2] == ["-c", "cr-0123456789abcdef0"]
+            assert cmd[cmd.index("-i") : cmd.index("-i") + 2] == ["-i", "p4d.24xlarge"]
+            assert cmd[cmd.index("--max-nodes") : cmd.index("--max-nodes") + 2] == [
+                "--max-nodes",
+                "100",
             ]
-            assert cmd[
-                cmd.index("--capacity-reservation-id") : cmd.index("--capacity-reservation-id") + 2
-            ] == ["--capacity-reservation-id", "cr-0123456789abcdef0"]
-            assert cmd[cmd.index("--count") : cmd.index("--count") + 2] == ["--count", "1"]
             # Optional flags absent when not supplied.
-            assert "--cluster" not in cmd
-            assert "--taint" not in cmd
-            assert "--label" not in cmd
+            assert "--fallback-on-demand" not in cmd
+            assert "--efa" not in cmd
 
     @pytest.mark.asyncio
-    async def test_nodepools_create_odcr_with_cluster(self):
+    async def test_nodepools_create_odcr_with_options(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
             await run_mcp.nodepools_create_odcr(
                 name="gpu-reserved",
                 region="us-east-1",
-                instance_type="p4d.24xlarge",
                 capacity_reservation_id="cr-0123456789abcdef0",
-                cluster="my-cluster",
-                count=4,
-                taints=["nvidia.com/gpu=true:NoSchedule"],
-                labels={"team": "ml", "tier": "reserved"},
+                instance_type=["p4d.24xlarge", "p5.48xlarge"],
+                max_nodes=50,
+                fallback_on_demand=True,
+                efa=True,
             )
             cmd = mock.call_args[0][0]
             assert "nodepools" in cmd
             assert "create-odcr" in cmd
-            assert "gpu-reserved" in cmd
-            assert cmd[cmd.index("--cluster") : cmd.index("--cluster") + 2] == [
-                "--cluster",
-                "my-cluster",
+            assert cmd[cmd.index("--max-nodes") : cmd.index("--max-nodes") + 2] == [
+                "--max-nodes",
+                "50",
             ]
-            assert cmd[cmd.index("--count") : cmd.index("--count") + 2] == ["--count", "4"]
-            assert cmd.count("--taint") == 1
-            assert "nvidia.com/gpu=true:NoSchedule" in cmd
-            assert cmd.count("--label") == 2
-            assert "team=ml" in cmd
-            assert "tier=reserved" in cmd
+            assert cmd.count("-i") == 2
+            assert "p4d.24xlarge" in cmd
+            assert "p5.48xlarge" in cmd
+            assert "--fallback-on-demand" in cmd
+            assert "--efa" in cmd
 
 
 class TestAnalyticsTools:

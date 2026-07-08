@@ -205,7 +205,7 @@ def generate_odcr_nodepool_manifest(
         )
 
     # Add GPU taints for GPU instances
-    gpu_families = ["p3", "p4", "p5", "g4", "g5", "g6"]
+    gpu_families = ["p3", "p4", "p5", "p6", "g4", "g5", "g6"]
     if instance_types and any(
         any(it.startswith(fam) for fam in gpu_families) for it in instance_types
     ):
@@ -248,6 +248,176 @@ def generate_odcr_nodepool_manifest(
     output.append("#")
     output.append("# Apply with: kubectl apply -f <this-file>.yaml")
     output.append("# See: https://karpenter.sh/docs/tasks/odcrs/")
+    output.append("---")
+    output.append(yaml.dump(ec2_node_class, default_flow_style=False, sort_keys=False))
+    output.append("---")
+    output.append(yaml.dump(nodepool, default_flow_style=False, sort_keys=False))
+
+    return "\n".join(output)
+
+
+def generate_capacity_block_nodepool_manifest(
+    name: str,
+    region: str,
+    capacity_reservation_id: str,
+    instance_types: list[str] | None = None,
+    max_nodes: int = 100,
+    fallback_on_demand: bool = False,
+    efa: bool = False,
+) -> str:
+    """
+    Generate a Karpenter NodePool manifest for Capacity Block-backed capacity.
+
+    The Capacity Block counterpart to :func:`generate_odcr_nodepool_manifest`.
+    Purchasing a Capacity Block ("gco capacity reserve") yields a normal EC2
+    Capacity Reservation id (``cr-...``), which Karpenter consumes through the
+    same ``capacityReservationSelectorTerms`` / ``reserved`` capacity type as an
+    ODCR. The difference is intent: a Capacity Block is prepaid for a fixed term,
+    so the generated NodePool defaults to holding that capacity (``WhenEmpty``
+    consolidation with a long delay) rather than consolidating aggressively — you
+    have already paid for the whole block and want it available for its duration.
+
+    Args:
+        name: Name for the NodePool.
+        region: AWS region.
+        capacity_reservation_id: Capacity Reservation ID (cr-xxx) of the purchased
+            Capacity Block (from ``gco capacity reserve`` / reservation-check).
+        instance_types: List of instance types (if None, uses the reservation's type).
+        max_nodes: Maximum number of nodes.
+        fallback_on_demand: Whether to fall back to on-demand when the block is
+            exhausted or after it expires. Off by default — a Capacity Block is
+            fixed-term guaranteed capacity, so silent on-demand fallback can
+            surprise-bill; opt in explicitly.
+        efa: Whether to enable EFA support (adds EFA taint and labels).
+
+    Returns:
+        YAML manifest string for the NodePool and EC2NodeClass.
+    """
+    capacity_types = ["reserved", "on-demand"] if fallback_on_demand else ["reserved"]
+
+    ec2_node_class = {
+        "apiVersion": "karpenter.k8s.aws/v1",
+        "kind": "EC2NodeClass",
+        "metadata": {
+            "name": f"{name}-nodeclass",
+            "labels": {
+                "app.kubernetes.io/part-of": "gco",
+                "gco.io/nodepool": name,
+            },
+        },
+        "spec": {
+            "role": "KarpenterNodeRole-gco",
+            "subnetSelectorTerms": [{"tags": {"karpenter.sh/discovery": f"gco-{region}"}}],
+            "securityGroupSelectorTerms": [{"tags": {"karpenter.sh/discovery": f"gco-{region}"}}],
+            "capacityReservationSelectorTerms": [{"id": capacity_reservation_id}],
+            "tags": {
+                "Name": f"gco-{name}",
+                "gco.io/nodepool": name,
+                "gco.io/capacity-block": capacity_reservation_id,
+            },
+        },
+    }
+
+    requirements: list[dict[str, Any]] = [
+        {
+            "key": "karpenter.sh/capacity-type",
+            "operator": "In",
+            "values": capacity_types,
+        },
+        {
+            "key": "kubernetes.io/arch",
+            "operator": "In",
+            "values": ["amd64"],
+        },
+    ]
+
+    nodepool: dict[str, Any] = {
+        "apiVersion": "karpenter.sh/v1",
+        "kind": "NodePool",
+        "metadata": {
+            "name": name,
+            "labels": {
+                "app.kubernetes.io/part-of": "gco",
+            },
+        },
+        "spec": {
+            "template": {
+                "metadata": {
+                    "labels": {
+                        "workload-type": "capacity-block",
+                        "project": "gco",
+                        "gco.io/capacity-type": "capacity-block",
+                        "gco.io/capacity-block": capacity_reservation_id,
+                    },
+                },
+                "spec": {
+                    "nodeClassRef": {
+                        "group": "karpenter.k8s.aws",
+                        "kind": "EC2NodeClass",
+                        "name": f"{name}-nodeclass",
+                    },
+                    "requirements": requirements,
+                },
+            },
+            "limits": {
+                "cpu": str(calculate_cpu_limit(instance_types, max_nodes, region)),
+            },
+            # A Capacity Block is prepaid for a fixed term — hold the nodes rather
+            # than consolidating them away, so the paid capacity stays available
+            # for the whole block.
+            "disruption": {
+                "consolidationPolicy": "WhenEmpty",
+                "consolidateAfter": "600s",
+                "budgets": [{"nodes": "10%"}],
+            },
+        },
+    }
+
+    if instance_types:
+        requirements.append(
+            {
+                "key": "node.kubernetes.io/instance-type",
+                "operator": "In",
+                "values": instance_types,
+            }
+        )
+
+    gpu_families = ["p3", "p4", "p5", "p6", "g4", "g5", "g6"]
+    if instance_types and any(
+        any(it.startswith(fam) for fam in gpu_families) for it in instance_types
+    ):
+        taints = [
+            {
+                "key": "nvidia.com/gpu",
+                "value": "true",
+                "effect": "NoSchedule",
+            }
+        ]
+        if efa:
+            taints.append(
+                {
+                    "key": "vpc.amazonaws.com/efa",
+                    "value": "true",
+                    "effect": "NoSchedule",
+                }
+            )
+        nodepool["spec"]["template"]["spec"]["taints"] = taints
+
+    if efa:
+        nodepool["spec"]["template"]["metadata"]["labels"]["efa"] = "true"
+        nodepool["spec"]["template"]["metadata"]["labels"]["workload-type"] = "gpu-efa"
+
+    output = []
+    output.append("# Capacity Block-backed NodePool for GCO")
+    output.append(f"# Capacity Reservation (from Capacity Block): {capacity_reservation_id}")
+    output.append(f"# Region: {region}")
+    if fallback_on_demand:
+        output.append("# Fallback: on-demand (when Capacity Block exhausted/expired)")
+    output.append("#")
+    output.append("# Apply with: kubectl apply -f <this-file>.yaml")
+    output.append(
+        "# See: https://karpenter.sh/docs/concepts/nodeclasses/#speccapacityreservationselectorterms"
+    )
     output.append("---")
     output.append(yaml.dump(ec2_node_class, default_flow_style=False, sort_keys=False))
     output.append("---")

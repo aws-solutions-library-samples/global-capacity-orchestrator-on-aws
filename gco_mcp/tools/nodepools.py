@@ -50,46 +50,93 @@ async def nodepools_describe(nodepool_name: str, region: str, cluster: str | Non
 async def nodepools_create_odcr(
     name: str,
     region: str,
-    instance_type: str,
     capacity_reservation_id: str,
-    cluster: str | None = None,
-    count: int = 1,
-    taints: list[str] | None = None,
-    labels: dict[str, str] | None = None,
+    instance_type: list[str] | None = None,
+    max_nodes: int = 100,
+    fallback_on_demand: bool = False,
+    efa: bool = False,
 ) -> str:
     """`gco nodepools create-odcr` — create a Karpenter NodePool tied to an ODCR.
+
+    Generates a Karpenter NodePool + EC2NodeClass that consume an On-Demand
+    Capacity Reservation via ``capacityReservationSelectorTerms``.
 
     Args:
         name: NodePool name.
         region: AWS region.
-        instance_type: EC2 instance type the NodePool will provision.
         capacity_reservation_id: EC2 Capacity Reservation ID (``cr-...``) or ODCR group ARN.
-        cluster: EKS cluster name (defaults to ``gco-<region>``).
-        count: Initial node count target.
-        taints: Optional taints formatted as ``key=value:effect``; one per ``--taint`` flag.
-        labels: Optional ``key=value`` labels; one per ``--label`` flag.
+        instance_type: Instance types the NodePool may provision (one per entry).
+        max_nodes: Maximum nodes in the pool.
+        fallback_on_demand: Fall back to on-demand when the ODCR is exhausted.
+        efa: Enable EFA support (adds EFA taint and labels).
     """
     args = [
         "nodepools",
         "create-odcr",
+        "-n",
         name,
         "-r",
         region,
-        "--instance-type",
-        instance_type,
-        "--capacity-reservation-id",
+        "-c",
         capacity_reservation_id,
-        "--count",
-        str(count),
+        "--max-nodes",
+        str(max_nodes),
     ]
-    if cluster:
-        args += ["--cluster", cluster]
-    if taints:
-        for taint in taints:
-            args += ["--taint", taint]
-    if labels:
-        for key, value in labels.items():
-            args += ["--label", f"{key}={value}"]
+    for it in instance_type or []:
+        args += ["-i", it]
+    if fallback_on_demand:
+        args.append("--fallback-on-demand")
+    if efa:
+        args.append("--efa")
+    return await asyncio.to_thread(cli_runner._run_cli, *args)
+
+
+@mcp.tool(tags={"low-risk", "nodepools"})
+@audit_logged
+async def nodepools_create_capacity_block(
+    name: str,
+    region: str,
+    capacity_reservation_id: str,
+    instance_type: list[str] | None = None,
+    max_nodes: int = 100,
+    fallback_on_demand: bool = False,
+    efa: bool = False,
+) -> str:
+    """`gco nodepools create-capacity-block` — NodePool for a purchased Capacity Block.
+
+    The Capacity Block counterpart to ``nodepools_create_odcr``. Purchasing a
+    Capacity Block yields an EC2 Capacity Reservation id (``cr-...``), which this
+    NodePool consumes via ``capacityReservationSelectorTerms``. Because a block is
+    prepaid for a fixed term, the NodePool holds the capacity rather than
+    consolidating it early.
+
+    Args:
+        name: NodePool name.
+        region: AWS region.
+        capacity_reservation_id: Capacity Reservation ID (``cr-...``) of the block.
+        instance_type: Instance types the NodePool may provision (one per entry).
+        max_nodes: Maximum nodes in the pool.
+        fallback_on_demand: Fall back to on-demand when the block is exhausted/expired.
+        efa: Enable EFA support (adds EFA taint and labels).
+    """
+    args = [
+        "nodepools",
+        "create-capacity-block",
+        "-n",
+        name,
+        "-r",
+        region,
+        "-c",
+        capacity_reservation_id,
+        "--max-nodes",
+        str(max_nodes),
+    ]
+    for it in instance_type or []:
+        args += ["-i", it]
+    if fallback_on_demand:
+        args.append("--fallback-on-demand")
+    if efa:
+        args.append("--efa")
     return await asyncio.to_thread(cli_runner._run_cli, *args)
 
 

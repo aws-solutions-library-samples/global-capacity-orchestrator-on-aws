@@ -2,7 +2,7 @@
 
 import cli_runner
 from audit import audit_logged
-from feature_flags import FLAG_CAPACITY_PURCHASE, is_enabled
+from feature_flags import FLAG_CAPACITY_PURCHASE, FLAG_DESTRUCTIVE_OPERATIONS, is_enabled
 from server import mcp
 
 
@@ -339,7 +339,47 @@ def capacity_predict(
     return cli_runner._run_cli(*args)
 
 
-# Capacity Block purchasing — disabled by default.
+@mcp.tool(tags={"safe", "capacity"})
+@audit_logged
+def find_capacity_reservations(
+    instance_type: str | None = None,
+    regions: list[str] | None = None,
+    count: int = 1,
+    state: str = "active",
+    pricing: bool = True,
+) -> str:
+    """Find existing ODCRs across regions in one parallel, ranked report.
+
+    The ODCR counterpart to find_capacity_blocks: it searches every requested
+    region in parallel, normalizes friendly instance-type aliases (p6-b200 ->
+    p6-b200.48xlarge), enriches each reservation with On-Demand pricing, and
+    ranks them most-available-first (then cheapest per-GPU-hour). Use this to
+    answer "where do I already have free reserved capacity?" rather than
+    list_reservations' plain per-region aggregation.
+
+    Args:
+        instance_type: Instance type or alias to filter by (e.g. p6-b200); omit
+            to return every reservation.
+        regions: Regions to search in parallel (any regions; defaults to deployed).
+        count: Minimum available instances to consider the search satisfied.
+        state: Reservation state filter ("active" default; "all" for any state).
+        pricing: Enrich reservations with On-Demand pricing.
+    """
+    args = ["capacity", "find-reservations"]
+    if instance_type:
+        args += ["-i", instance_type]
+    for r in regions or []:
+        args += ["-r", r]
+    if count != 1:
+        args += ["-c", str(count)]
+    if state != "active":
+        args += ["--state", state]
+    if not pricing:
+        args.append("--no-pricing")
+    return cli_runner._run_cli(*args)
+
+
+# Capacity purchasing / creation — disabled by default.
 # Set GCO_ENABLE_CAPACITY_PURCHASE=true to enable.
 if is_enabled(FLAG_CAPACITY_PURCHASE):
 
@@ -361,6 +401,94 @@ if is_enabled(FLAG_CAPACITY_PURCHASE):
             dry_run: If True, validate the offering without purchasing (no cost).
         """
         args = ["capacity", "reserve", "-o", offering_id, "-r", region]
+        if dry_run:
+            args.append("--dry-run")
+        return cli_runner._run_cli(*args)
+
+    @mcp.tool(tags={"cost-incurring", "capacity"})
+    @audit_logged
+    def create_reservation(
+        instance_type: str,
+        region: str,
+        availability_zone: str,
+        count: int = 1,
+        platform: str = "Linux/UNIX",
+        tenancy: str = "default",
+        match_criteria: str = "open",
+        end_date: str | None = None,
+        ebs_optimized: bool = False,
+        dry_run: bool = False,
+    ) -> str:
+        """Create a new On-Demand Capacity Reservation (ODCR).
+
+        The ODCR counterpart to reserve_capacity. Reserves On-Demand capacity for
+        an instance type in a specific AZ. Charges accrue for the reserved
+        capacity until it is cancelled — use dry_run=True to validate first.
+
+        Args:
+            instance_type: EC2 instance type or alias (e.g. p5.48xlarge, p6-b200).
+            region: AWS region.
+            availability_zone: Target AZ (e.g. us-east-1a).
+            count: Number of instances to reserve.
+            platform: Instance platform/OS (default "Linux/UNIX").
+            tenancy: "default" or "dedicated".
+            match_criteria: "open" or "targeted".
+            end_date: Optional end date (YYYY-MM-DD or ISO); omit for unlimited.
+            ebs_optimized: Reserve EBS-optimized capacity.
+            dry_run: If True, validate without creating (no cost).
+        """
+        args = [
+            "capacity",
+            "create-reservation",
+            "-i",
+            instance_type,
+            "-r",
+            region,
+            "-z",
+            availability_zone,
+            "-c",
+            str(count),
+        ]
+        if platform != "Linux/UNIX":
+            args += ["--platform", platform]
+        if tenancy != "default":
+            args += ["--tenancy", tenancy]
+        if match_criteria != "open":
+            args += ["--match-criteria", match_criteria]
+        if end_date:
+            args += ["--end-date", end_date]
+        if ebs_optimized:
+            args.append("--ebs-optimized")
+        if dry_run:
+            args.append("--dry-run")
+        return cli_runner._run_cli(*args)
+
+
+# Capacity reservation cancellation — destructive, disabled by default.
+# Set GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true to enable.
+if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
+
+    @mcp.tool(tags={"destructive", "capacity"})
+    @audit_logged
+    def cancel_reservation(
+        reservation_id: str,
+        region: str,
+        dry_run: bool = False,
+    ) -> str:
+        """[gated by GCO_ENABLE_DESTRUCTIVE_OPERATIONS] destructive.
+
+        Cancel an On-Demand Capacity Reservation, releasing its capacity.
+
+        Stops On-Demand charges for the reserved capacity. Only ODCRs can be
+        cancelled; a Capacity Block runs for its fixed term. Instances already
+        running against the reservation are not terminated.
+
+        Args:
+            reservation_id: Capacity Reservation ID (cr-xxx) to cancel.
+            region: AWS region where the reservation exists.
+            dry_run: If True, validate the cancellation without cancelling.
+        """
+        args = ["capacity", "cancel-reservation", "-o", reservation_id, "-r", region, "-y"]
         if dry_run:
             args.append("--dry-run")
         return cli_runner._run_cli(*args)

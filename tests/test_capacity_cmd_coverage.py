@@ -322,3 +322,251 @@ class TestCapacityCmdReserve:
         runner = CliRunner()
         result = runner.invoke(cli, ["capacity", "reserve", "-o", "cb-x", "-r", "us-east-1"])
         assert result.exit_code == 1
+
+
+class TestCapacityCmdFindReservations:
+    """Cover the find_reservations CLI command."""
+
+    @patch("cli.commands.capacity_cmd.get_capacity_checker")
+    @patch("cli.commands.capacity_cmd.get_output_formatter")
+    def test_find_reservations_success(self, mock_fmt_fn, mock_checker_fn):
+        from cli.main import cli
+
+        mock_fmt_fn.return_value = MagicMock()
+        mock_checker_fn.return_value.find_capacity_reservations.return_value = {
+            "instance_type": "p5.48xlarge",
+            "requested_instance_type": "p5.48xlarge",
+            "valid_instance_type": True,
+            "regions_checked": ["us-east-1"],
+            "reservations_found": 1,
+            "reservations": [
+                {
+                    "instance_type": "p5.48xlarge",
+                    "region": "us-east-1",
+                    "availability_zone": "us-east-1a",
+                    "available_instances": 2,
+                    "total_instances": 4,
+                    "price_per_gpu_hour": 3.75,
+                }
+            ],
+            "recommendation": "Found 1 reservation(s).",
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["capacity", "find-reservations", "-i", "p5.48xlarge"])
+        assert result.exit_code == 0
+        assert "ODCR search" in result.output
+
+    @patch("cli.commands.capacity_cmd.get_capacity_checker")
+    @patch("cli.commands.capacity_cmd.get_output_formatter")
+    def test_find_reservations_empty(self, mock_fmt_fn, mock_checker_fn):
+        from cli.main import cli
+
+        mock_fmt_fn.return_value = MagicMock()
+        mock_checker_fn.return_value.find_capacity_reservations.return_value = {
+            "instance_type": "p5.48xlarge",
+            "requested_instance_type": "p5.48xlarge",
+            "valid_instance_type": True,
+            "regions_checked": ["us-east-1"],
+            "reservations_found": 0,
+            "reservations": [],
+            "recommendation": "No active ODCRs. Create one with 'gco capacity create-reservation'.",
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["capacity", "find-reservations", "-i", "p5.48xlarge"])
+        assert result.exit_code == 0
+        assert "create-reservation" in result.output
+
+    @patch("cli.commands.capacity_cmd.get_capacity_checker")
+    @patch("cli.commands.capacity_cmd.get_output_formatter")
+    def test_find_reservations_exception(self, mock_fmt_fn, mock_checker_fn):
+        from cli.main import cli
+
+        mock_fmt_fn.return_value = MagicMock()
+        mock_checker_fn.return_value.find_capacity_reservations.side_effect = RuntimeError("boom")
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["capacity", "find-reservations", "-i", "p5.48xlarge"])
+        assert result.exit_code == 1
+
+
+class TestCapacityCmdCreateReservation:
+    """Cover the create_reservation CLI command."""
+
+    @patch("cli.commands.capacity_cmd.get_capacity_checker")
+    @patch("cli.commands.capacity_cmd.get_output_formatter")
+    def test_create_dry_run_success(self, mock_fmt_fn, mock_checker_fn):
+        from cli.main import cli
+
+        mock_fmt_fn.return_value = MagicMock()
+        mock_checker_fn.return_value.create_capacity_reservation.return_value = {
+            "success": True,
+            "dry_run": True,
+            "instance_type": "p5.48xlarge",
+            "availability_zone": "us-east-1a",
+            "instance_count": 2,
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "capacity",
+                "create-reservation",
+                "-i",
+                "p5.48xlarge",
+                "-r",
+                "us-east-1",
+                "-z",
+                "us-east-1a",
+                "-c",
+                "2",
+                "--dry-run",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Dry run passed" in result.output
+
+    @patch("cli.commands.capacity_cmd.get_capacity_checker")
+    @patch("cli.commands.capacity_cmd.get_output_formatter")
+    def test_create_success(self, mock_fmt_fn, mock_checker_fn):
+        from cli.main import cli
+
+        mock_fmt_fn.return_value = MagicMock()
+        mock_checker_fn.return_value.create_capacity_reservation.return_value = {
+            "success": True,
+            "dry_run": False,
+            "reservation_id": "cr-new",
+            "instance_type": "p5.48xlarge",
+            "availability_zone": "us-east-1a",
+            "total_instances": 2,
+            "state": "active",
+            "end_date": None,
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "capacity",
+                "create-reservation",
+                "-i",
+                "p5.48xlarge",
+                "-r",
+                "us-east-1",
+                "-z",
+                "us-east-1a",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "created successfully" in result.output
+
+    @patch("cli.commands.capacity_cmd.get_capacity_checker")
+    @patch("cli.commands.capacity_cmd.get_output_formatter")
+    def test_create_failure(self, mock_fmt_fn, mock_checker_fn):
+        from cli.main import cli
+
+        mock_fmt_fn.return_value = MagicMock()
+        mock_checker_fn.return_value.create_capacity_reservation.return_value = {
+            "success": False,
+            "dry_run": False,
+            "error_code": "InsufficientInstanceCapacity",
+            "error": "no capacity",
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "capacity",
+                "create-reservation",
+                "-i",
+                "p5.48xlarge",
+                "-r",
+                "us-east-1",
+                "-z",
+                "us-east-1a",
+            ],
+        )
+        assert result.exit_code == 1
+
+
+class TestCapacityCmdCancelReservation:
+    """Cover the cancel_reservation CLI command."""
+
+    @patch("cli.commands.capacity_cmd.get_capacity_checker")
+    @patch("cli.commands.capacity_cmd.get_output_formatter")
+    def test_cancel_dry_run(self, mock_fmt_fn, mock_checker_fn):
+        from cli.main import cli
+
+        mock_fmt_fn.return_value = MagicMock()
+        mock_checker_fn.return_value.cancel_capacity_reservation.return_value = {
+            "success": True,
+            "dry_run": True,
+            "reservation_id": "cr-abc",
+            "region": "us-east-1",
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["capacity", "cancel-reservation", "-o", "cr-abc", "-r", "us-east-1", "--dry-run"]
+        )
+        assert result.exit_code == 0
+        assert "can be cancelled" in result.output
+
+    @patch("cli.commands.capacity_cmd.get_capacity_checker")
+    @patch("cli.commands.capacity_cmd.get_output_formatter")
+    def test_cancel_with_yes(self, mock_fmt_fn, mock_checker_fn):
+        from cli.main import cli
+
+        mock_fmt_fn.return_value = MagicMock()
+        mock_checker_fn.return_value.cancel_capacity_reservation.return_value = {
+            "success": True,
+            "dry_run": False,
+            "reservation_id": "cr-abc",
+            "region": "us-east-1",
+            "message": "Capacity reservation cr-abc cancelled.",
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["capacity", "cancel-reservation", "-o", "cr-abc", "-r", "us-east-1", "-y"]
+        )
+        assert result.exit_code == 0
+        assert "cancelled" in result.output
+
+    @patch("cli.commands.capacity_cmd.get_capacity_checker")
+    @patch("cli.commands.capacity_cmd.get_output_formatter")
+    def test_cancel_aborts_without_confirmation(self, mock_fmt_fn, mock_checker_fn):
+        from cli.main import cli
+
+        mock_fmt_fn.return_value = MagicMock()
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["capacity", "cancel-reservation", "-o", "cr-abc", "-r", "us-east-1"],
+            input="n\n",
+        )
+        assert result.exit_code != 0
+        mock_checker_fn.return_value.cancel_capacity_reservation.assert_not_called()
+
+    @patch("cli.commands.capacity_cmd.get_capacity_checker")
+    @patch("cli.commands.capacity_cmd.get_output_formatter")
+    def test_cancel_failure(self, mock_fmt_fn, mock_checker_fn):
+        from cli.main import cli
+
+        mock_fmt_fn.return_value = MagicMock()
+        mock_checker_fn.return_value.cancel_capacity_reservation.return_value = {
+            "success": False,
+            "dry_run": False,
+            "error_code": "InvalidCapacityReservationId.NotFound",
+            "error": "not found",
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["capacity", "cancel-reservation", "-o", "cr-x", "-r", "us-east-1", "-y"]
+        )
+        assert result.exit_code == 1

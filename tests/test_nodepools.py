@@ -20,6 +20,7 @@ from cli.nodepools import (
     NodePoolInfo,
     calculate_cpu_limit,
     describe_cluster_nodepool,
+    generate_capacity_block_nodepool_manifest,
     generate_odcr_nodepool_manifest,
     get_eks_token,
     get_k8s_client,
@@ -562,3 +563,109 @@ class TestDescribeClusterNodepool:
 
         with pytest.raises(RuntimeError, match="Failed to describe NodePool"):
             describe_cluster_nodepool("test-cluster", "us-east-1", "test-pool")
+
+
+class TestGenerateCapacityBlockNodepoolManifest:
+    """Tests for generate_capacity_block_nodepool_manifest function."""
+
+    def test_basic_manifest_generation(self):
+        """Test generating a basic Capacity Block NodePool manifest."""
+        manifest = generate_capacity_block_nodepool_manifest(
+            name="cb-pool",
+            region="us-east-1",
+            capacity_reservation_id="cr-cb12345678901234",
+        )
+
+        assert "# Capacity Block-backed NodePool for GCO" in manifest
+        assert "cr-cb12345678901234" in manifest
+        assert "us-east-1" in manifest
+
+        docs = list(yaml.safe_load_all(manifest))
+        assert len(docs) == 2
+
+        ec2_node_class = docs[0]
+        assert ec2_node_class["kind"] == "EC2NodeClass"
+        assert ec2_node_class["metadata"]["name"] == "cb-pool-nodeclass"
+        assert (
+            ec2_node_class["spec"]["capacityReservationSelectorTerms"][0]["id"]
+            == "cr-cb12345678901234"
+        )
+        assert ec2_node_class["spec"]["tags"]["gco.io/capacity-block"] == "cr-cb12345678901234"
+
+        nodepool = docs[1]
+        assert nodepool["kind"] == "NodePool"
+        assert nodepool["metadata"]["name"] == "cb-pool"
+        labels = nodepool["spec"]["template"]["metadata"]["labels"]
+        assert labels["gco.io/capacity-type"] == "capacity-block"
+        # A prepaid block should be held, not aggressively consolidated.
+        assert nodepool["spec"]["disruption"]["consolidationPolicy"] == "WhenEmpty"
+
+    def test_reserved_only_by_default(self):
+        """Without fallback, only the reserved capacity type is requested."""
+        manifest = generate_capacity_block_nodepool_manifest(
+            name="cb-pool",
+            region="us-east-1",
+            capacity_reservation_id="cr-reserved",
+        )
+        nodepool = list(yaml.safe_load_all(manifest))[1]
+        requirements = nodepool["spec"]["template"]["spec"]["requirements"]
+        capacity_type_req = next(
+            r for r in requirements if r["key"] == "karpenter.sh/capacity-type"
+        )
+        assert capacity_type_req["values"] == ["reserved"]
+
+    def test_fallback_on_demand(self):
+        """With fallback, both reserved and on-demand are requested."""
+        manifest = generate_capacity_block_nodepool_manifest(
+            name="cb-pool",
+            region="us-east-1",
+            capacity_reservation_id="cr-fallback",
+            fallback_on_demand=True,
+        )
+        assert "Fallback: on-demand" in manifest
+        nodepool = list(yaml.safe_load_all(manifest))[1]
+        requirements = nodepool["spec"]["template"]["spec"]["requirements"]
+        capacity_type_req = next(
+            r for r in requirements if r["key"] == "karpenter.sh/capacity-type"
+        )
+        assert "reserved" in capacity_type_req["values"]
+        assert "on-demand" in capacity_type_req["values"]
+
+    def test_gpu_taints_for_p6(self):
+        """P6 (Blackwell) instances get GPU taints."""
+        manifest = generate_capacity_block_nodepool_manifest(
+            name="cb-pool",
+            region="us-east-1",
+            capacity_reservation_id="cr-gpu",
+            instance_types=["p6-b200.48xlarge"],
+        )
+        nodepool = list(yaml.safe_load_all(manifest))[1]
+        taints = nodepool["spec"]["template"]["spec"].get("taints", [])
+        assert len(taints) == 1
+        assert taints[0]["key"] == "nvidia.com/gpu"
+
+    def test_efa_adds_taint_and_labels(self):
+        """EFA adds an EFA taint plus efa/gpu-efa labels."""
+        manifest = generate_capacity_block_nodepool_manifest(
+            name="cb-pool",
+            region="us-east-1",
+            capacity_reservation_id="cr-efa",
+            instance_types=["p5.48xlarge"],
+            efa=True,
+        )
+        nodepool = list(yaml.safe_load_all(manifest))[1]
+        taints = nodepool["spec"]["template"]["spec"]["taints"]
+        assert any(t["key"] == "vpc.amazonaws.com/efa" for t in taints)
+        labels = nodepool["spec"]["template"]["metadata"]["labels"]
+        assert labels["efa"] == "true"
+
+    def test_no_gpu_taints_for_cpu(self):
+        """Non-GPU instance types don't get GPU taints."""
+        manifest = generate_capacity_block_nodepool_manifest(
+            name="cb-pool",
+            region="us-east-1",
+            capacity_reservation_id="cr-cpu",
+            instance_types=["c5.xlarge"],
+        )
+        nodepool = list(yaml.safe_load_all(manifest))[1]
+        assert nodepool["spec"]["template"]["spec"].get("taints", []) == []

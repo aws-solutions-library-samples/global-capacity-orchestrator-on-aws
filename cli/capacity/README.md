@@ -25,7 +25,8 @@ BedrockCapacityAdvisor (AI-powered natural language recommendations)
 
 | File | Description |
 |------|-------------|
-| `checker.py` | Single-region capacity checker. Queries EC2 spot placement scores, spot price history, on-demand availability, instance type specs, and Capacity Block offerings. |
+| `checker.py` | Single-region capacity checker. Queries EC2 spot placement scores, spot price history, on-demand availability, instance type specs, and Capacity Block offerings. Also manages reserved capacity end to end: On-Demand Capacity Reservations (list/find/create/cancel, with parallel multi-region search and On-Demand pricing) and Capacity Blocks (search/purchase). |
+| `blocks.py` | Pure primitives shared by the reserved-capacity flows: Capacity Block duration math, instance-type alias normalization, per-hour / per-GPU-hour pricing (offerings and ODCRs), and offering/reservation de-dup, sort, and rank helpers. |
 | `multi_region.py` | Cross-region aggregation. Queries all deployed regions in parallel, computes weighted scores (spot score, price trend, queue depth, GPU utilization), and ranks regions. |
 | `advisor.py` | AI-powered recommendations via Amazon Bedrock. Gathers capacity data from all regions and sends it to an LLM for analysis with workload-specific context. |
 | `models.py` | Data models — `CapacityEstimate`, `SpotPriceInfo`, `InstanceTypeInfo`, `GPU_INSTANCE_SPECS` lookup table. |

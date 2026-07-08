@@ -939,7 +939,9 @@ class CapacityChecker:
         self,
         region: str,
         instance_type: str | None = None,
-        state: str = "active",
+        state: str | None = "active",
+        *,
+        include_pricing: bool = False,
     ) -> list[dict[str, Any]]:
         """
         List EC2 On-Demand Capacity Reservations (ODCRs) in a region.
@@ -948,6 +950,10 @@ class CapacityChecker:
             region: AWS region to query
             instance_type: Filter by instance type (optional)
             state: Filter by state — "active" (default), or None for all
+            include_pricing: Enrich each reservation with On-Demand pricing
+                (per-instance-hour, whole-reservation per-hour, per-GPU-hour).
+                Adds one Pricing API call per distinct instance type (cached), so
+                it is opt-in and off by default to keep the plain list fast.
 
         Returns:
             List of reservation dictionaries with availability details
@@ -973,30 +979,64 @@ class CapacityChecker:
                     available = cr.get("AvailableInstanceCount", 0)
                     used = total - available
 
-                    reservations.append(
-                        {
-                            "type": "odcr",
-                            "reservation_id": cr.get("CapacityReservationId"),
-                            "instance_type": cr.get("InstanceType"),
-                            "availability_zone": cr.get("AvailabilityZone"),
-                            "region": region,
-                            "state": cr.get("State"),
-                            "total_instances": total,
-                            "available_instances": available,
-                            "used_instances": used,
-                            "utilization_pct": round(used / total * 100, 1) if total else 0,
-                            "instance_platform": cr.get("InstancePlatform"),
-                            "tenancy": cr.get("Tenancy"),
-                            "instance_match_criteria": cr.get("InstanceMatchCriteria"),
-                            "end_date": (cr["EndDate"].isoformat() if cr.get("EndDate") else None),
-                            "end_date_type": cr.get("EndDateType"),
-                            "tags": {t["Key"]: t["Value"] for t in cr.get("Tags", [])},
-                        }
-                    )
+                    entry = {
+                        "type": "odcr",
+                        "reservation_id": cr.get("CapacityReservationId"),
+                        "instance_type": cr.get("InstanceType"),
+                        "availability_zone": cr.get("AvailabilityZone"),
+                        "region": region,
+                        "state": cr.get("State"),
+                        "total_instances": total,
+                        "available_instances": available,
+                        "used_instances": used,
+                        "utilization_pct": round(used / total * 100, 1) if total else 0,
+                        "instance_platform": cr.get("InstancePlatform"),
+                        "tenancy": cr.get("Tenancy"),
+                        "instance_match_criteria": cr.get("InstanceMatchCriteria"),
+                        "start_date": (
+                            cr["StartDate"].isoformat() if cr.get("StartDate") else None
+                        ),
+                        "end_date": (cr["EndDate"].isoformat() if cr.get("EndDate") else None),
+                        "end_date_type": cr.get("EndDateType"),
+                        "tags": {t["Key"]: t["Value"] for t in cr.get("Tags", [])},
+                    }
+                    if include_pricing:
+                        self._enrich_reservation_pricing(entry, region)
+                    reservations.append(entry)
         except ClientError as e:
             logger.debug("Failed to list capacity reservations in %s: %s", region, e)
 
         return reservations
+
+    def _enrich_reservation_pricing(self, reservation: dict[str, Any], region: str) -> None:
+        """Add On-Demand pricing keys to a reservation dict, in place.
+
+        ODCRs bill at the On-Demand rate for the reserved instance type, so the
+        per-instance-hour / per-hour / per-GPU-hour figures mirror the Capacity
+        Block pricing surface (see :func:`blocks.compute_reservation_pricing`) and
+        let a caller rank and compare reservations the same way it ranks blocks.
+        Pricing that can't be resolved is recorded as ``None`` — never fatal.
+        """
+        instance_type = reservation.get("instance_type")
+        if not instance_type:
+            return
+        try:
+            on_demand = self.get_on_demand_price(instance_type, region)
+        except Exception as e:  # pricing is supplementary; never fail the listing
+            logger.debug("On-demand price lookup failed for %s in %s: %s", instance_type, region, e)
+            on_demand = None
+
+        spec = GPU_INSTANCE_SPECS.get(instance_type)
+        gpus_per_instance = spec.gpu_count if spec else None
+
+        pricing = blocks.compute_reservation_pricing(
+            on_demand, reservation.get("total_instances"), gpus_per_instance
+        )
+        reservation["on_demand_price_per_hour"] = (
+            round(float(on_demand), 4) if on_demand is not None else None
+        )
+        reservation["gpus_per_instance"] = gpus_per_instance
+        reservation.update(pricing)
 
     def _build_block_offering(
         self,
@@ -1260,6 +1300,169 @@ class CapacityChecker:
             "total_available_instances": total_available,
             "reservations": all_reservations,
         }
+
+    def find_capacity_reservations(
+        self,
+        instance_type: str | None = None,
+        regions: list[str] | None = None,
+        *,
+        min_count: int = 1,
+        state: str | None = "active",
+        include_pricing: bool = True,
+        max_workers: int | None = None,
+    ) -> dict[str, Any]:
+        """Sweep regions for existing ODCRs in one parallel, ranked call.
+
+        The ODCR counterpart to :meth:`find_capacity_blocks`. It fans out across
+        every requested region in parallel, normalizes a friendly instance-type
+        alias (``p6-b200`` -> ``p6-b200.48xlarge``), enriches each reservation with
+        On-Demand pricing, and returns a single consolidated report ranked
+        most-available-first (then cheapest per-GPU-hour). Where
+        :meth:`list_all_reservations` simply aggregates region by region, this
+        answers "where do I already have free reserved capacity for this instance
+        type?" across many regions at once.
+
+        Args:
+            instance_type: Instance type or friendly alias to filter by. Omit to
+                return every reservation (no type filter).
+            regions: Regions to search in parallel (any regions, not just
+                deployed); defaults to the deployed GCO regions when omitted.
+            min_count: Minimum available instances for the summary to consider the
+                search satisfied (does not filter the returned list).
+            state: Reservation state filter ("active" by default; None for all).
+            include_pricing: Enrich each reservation with On-Demand pricing.
+            max_workers: Override the parallel fan-out width.
+
+        Returns:
+            A consolidated report dict (see keys assembled below).
+        """
+        canonical = instance_type
+        note: str | None = None
+        valid = True
+        known = False
+        if instance_type:
+            validation = self.validate_instance_type(instance_type)
+            canonical = validation["instance_type"]
+            note = validation["note"]
+            valid = validation["valid"]
+            known = validation["known"]
+
+        if not regions:
+            from cli.aws_client import get_aws_client
+
+            aws_client = get_aws_client(self.config)
+            stacks = aws_client.discover_regional_stacks()
+            regions = list(stacks.keys()) if stacks else [self.config.default_region]
+
+        report: dict[str, Any] = {
+            "instance_type": canonical,
+            "requested_instance_type": instance_type,
+            "valid_instance_type": valid,
+            "known_instance_type": known,
+            "note": note,
+            "min_count": min_count,
+            "state": state,
+            "regions_checked": list(regions),
+            "reservations_found": 0,
+            "reservations": [],
+            "ranked": [],
+            "best": None,
+            "total_reserved_instances": 0,
+            "total_available_instances": 0,
+            "regions_with_reservations": [],
+        }
+
+        if instance_type and not valid:
+            report["recommendation"] = (
+                note or f"'{instance_type}' is not a recognized EC2 instance type."
+            )
+            return report
+
+        def _probe(region: str) -> list[dict[str, Any]]:
+            try:
+                return self.list_capacity_reservations(
+                    region,
+                    instance_type=canonical,
+                    state=state,
+                    include_pricing=include_pricing,
+                )
+            except Exception as e:
+                logger.warning("Reservation probe failed for %s in %s: %s", canonical, region, e)
+                return []
+
+        collected: list[dict[str, Any]] = []
+        workers = max(1, min(max_workers or _MAX_SEARCH_WORKERS, len(regions)))
+        if len(regions) == 1:
+            collected.extend(_probe(regions[0]))
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                for result in executor.map(_probe, regions):
+                    collected.extend(result)
+
+        ranked = blocks.rank_reservations(collected)
+        best = ranked[0] if ranked else None
+        total_reserved = sum(r.get("total_instances") or 0 for r in collected)
+        total_available = sum(r.get("available_instances") or 0 for r in collected)
+
+        report.update(
+            {
+                "reservations_found": len(collected),
+                "reservations": blocks.sort_reservations(collected),
+                "ranked": ranked,
+                "best": best,
+                "total_reserved_instances": total_reserved,
+                "total_available_instances": total_available,
+                "regions_with_reservations": sorted(
+                    {r["region"] for r in collected if r.get("region")}
+                ),
+                "recommendation": self._summarize_reservation_search(
+                    canonical, regions, collected, best, min_count, note
+                ),
+            }
+        )
+        return report
+
+    @staticmethod
+    def _summarize_reservation_search(
+        instance_type: str | None,
+        regions: list[str],
+        reservations: list[dict[str, Any]],
+        best: dict[str, Any] | None,
+        min_count: int,
+        note: str | None,
+    ) -> str:
+        """Build a one-line human recommendation for a consolidated ODCR search."""
+        label = instance_type or "any instance type"
+        if not reservations:
+            msg = (
+                f"No active On-Demand Capacity Reservations for {label} across "
+                f"{len(regions)} region(s). Create one with "
+                "'gco capacity create-reservation', or search purchasable Capacity "
+                "Blocks with 'gco capacity find-blocks'."
+            )
+            return f"{note} {msg}" if note else msg
+
+        total_available = sum(r.get("available_instances") or 0 for r in reservations)
+        regions_with = sorted({r["region"] for r in reservations if r.get("region")})
+        parts = [
+            f"Found {len(reservations)} reservation(s) for {label} across "
+            f"{len(regions_with)} region(s); {total_available} instance(s) available."
+        ]
+        if total_available < min_count:
+            parts.append(
+                f"Fewer than the {min_count} requested are free — consider creating "
+                "another reservation or a Capacity Block."
+            )
+        if best and (best.get("available_instances") or 0) > 0:
+            gpu_hr = best.get("price_per_gpu_hour")
+            gpu_hr_str = f", ${gpu_hr}/GPU-hr" if gpu_hr is not None else ""
+            parts.append(
+                f"Most available: {best.get('available_instances')}/"
+                f"{best.get('total_instances')} in {best.get('region')}/"
+                f"{best.get('availability_zone')} ({best.get('reservation_id')}{gpu_hr_str})."
+            )
+        msg = " ".join(parts)
+        return f"{note} {msg}" if note else msg
 
     @staticmethod
     def _summarize_block_search(
@@ -1665,6 +1868,216 @@ class CapacityChecker:
                 "success": False,
                 "dry_run": False,
                 "offering_id": offering_id,
+                "region": region,
+                "error_code": error_code,
+                "error": error_msg,
+            }
+
+    def create_capacity_reservation(
+        self,
+        instance_type: str,
+        region: str,
+        availability_zone: str,
+        instance_count: int = 1,
+        *,
+        instance_platform: str = "Linux/UNIX",
+        tenancy: str = "default",
+        instance_match_criteria: str = "open",
+        end_date: str | datetime | None = None,
+        ebs_optimized: bool = False,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Create a new On-Demand Capacity Reservation (ODCR).
+
+        The ODCR counterpart to :meth:`purchase_capacity_block`: it reserves
+        On-Demand capacity for an instance type in a specific Availability Zone.
+        Unlike a Capacity Block (a fixed-term block bought by offering id), an ODCR
+        is open-ended by default and billed at the On-Demand rate until cancelled.
+        Friendly instance-type aliases are normalized (``p6-b200`` ->
+        ``p6-b200.48xlarge``).
+
+        Args:
+            instance_type: EC2 instance type or friendly alias.
+            region: AWS region.
+            availability_zone: Target AZ (e.g. us-east-1a).
+            instance_count: Number of instances to reserve.
+            instance_platform: Platform/OS (default "Linux/UNIX").
+            tenancy: "default" or "dedicated".
+            instance_match_criteria: "open" (any matching instance) or "targeted".
+            end_date: Optional end date (ISO string or datetime). When set the
+                reservation is "limited" and auto-releases then; omit for
+                "unlimited".
+            ebs_optimized: Reserve EBS-optimized capacity.
+            dry_run: Validate permissions/parameters without creating (no cost).
+
+        Returns:
+            Dict with the created reservation's details, or an error payload.
+        """
+        validation = self.validate_instance_type(instance_type)
+        canonical = validation["instance_type"]
+        if not validation["valid"]:
+            return {
+                "success": False,
+                "dry_run": dry_run,
+                "instance_type": canonical,
+                "region": region,
+                "error_code": "InvalidInstanceType",
+                "error": (
+                    validation["note"] or f"'{instance_type}' is not a valid EC2 instance type."
+                ),
+            }
+
+        ec2 = self._session.client("ec2", region_name=region)
+        parsed_end = blocks.parse_date_input(end_date)
+        api_kwargs: dict[str, Any] = {
+            "InstanceType": canonical,
+            "InstancePlatform": instance_platform,
+            "AvailabilityZone": availability_zone,
+            "InstanceCount": instance_count,
+            "Tenancy": tenancy,
+            "InstanceMatchCriteria": instance_match_criteria,
+            "EbsOptimized": ebs_optimized,
+        }
+        if parsed_end is not None:
+            api_kwargs["EndDate"] = parsed_end
+            api_kwargs["EndDateType"] = "limited"
+        else:
+            api_kwargs["EndDateType"] = "unlimited"
+
+        if dry_run:
+            try:
+                ec2.create_capacity_reservation(DryRun=True, **api_kwargs)
+            except ClientError as e:
+                error_code = e.response.get("Error", {}).get("Code", "")
+                if error_code == "DryRunOperation":
+                    return {
+                        "success": True,
+                        "dry_run": True,
+                        "instance_type": canonical,
+                        "availability_zone": availability_zone,
+                        "region": region,
+                        "instance_count": instance_count,
+                        "message": "Dry run succeeded — reservation parameters are valid.",
+                    }
+                error_msg = e.response.get("Error", {}).get("Message", str(e))
+                return {
+                    "success": False,
+                    "dry_run": True,
+                    "instance_type": canonical,
+                    "region": region,
+                    "error_code": error_code,
+                    "error": error_msg,
+                }
+            return {
+                "success": True,
+                "dry_run": True,
+                "instance_type": canonical,
+                "availability_zone": availability_zone,
+                "region": region,
+                "instance_count": instance_count,
+                "message": "Dry run completed.",
+            }
+
+        try:
+            response = ec2.create_capacity_reservation(**api_kwargs)
+            cr = response.get("CapacityReservation", {})
+            return {
+                "success": True,
+                "dry_run": False,
+                "reservation_id": cr.get("CapacityReservationId", ""),
+                "instance_type": cr.get("InstanceType", canonical),
+                "availability_zone": cr.get("AvailabilityZone", availability_zone),
+                "region": region,
+                "total_instances": cr.get("TotalInstanceCount", instance_count),
+                "available_instances": cr.get("AvailableInstanceCount"),
+                "state": cr.get("State", ""),
+                "tenancy": cr.get("Tenancy", tenancy),
+                "instance_match_criteria": cr.get("InstanceMatchCriteria", instance_match_criteria),
+                "start_date": cr["StartDate"].isoformat() if cr.get("StartDate") else None,
+                "end_date": cr["EndDate"].isoformat() if cr.get("EndDate") else None,
+                "end_date_type": cr.get("EndDateType"),
+            }
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            error_msg = e.response.get("Error", {}).get("Message", str(e))
+            return {
+                "success": False,
+                "dry_run": False,
+                "instance_type": canonical,
+                "region": region,
+                "error_code": error_code,
+                "error": error_msg,
+            }
+
+    def cancel_capacity_reservation(
+        self,
+        reservation_id: str,
+        region: str,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Cancel an On-Demand Capacity Reservation by id.
+
+        Releases reserved capacity so it stops incurring On-Demand charges. Only
+        ODCRs can be cancelled this way; a Capacity Block runs for its fixed term.
+        Cancelling does not terminate instances already running against the
+        reservation — they simply revert to normal On-Demand billing.
+
+        Args:
+            reservation_id: Capacity Reservation id (cr-...).
+            region: AWS region where the reservation exists.
+            dry_run: Validate permissions without cancelling.
+
+        Returns:
+            Dict describing the outcome.
+        """
+        ec2 = self._session.client("ec2", region_name=region)
+
+        if dry_run:
+            try:
+                ec2.cancel_capacity_reservation(CapacityReservationId=reservation_id, DryRun=True)
+            except ClientError as e:
+                error_code = e.response.get("Error", {}).get("Code", "")
+                if error_code == "DryRunOperation":
+                    return {
+                        "success": True,
+                        "dry_run": True,
+                        "reservation_id": reservation_id,
+                        "region": region,
+                        "message": "Dry run succeeded — reservation can be cancelled.",
+                    }
+                error_msg = e.response.get("Error", {}).get("Message", str(e))
+                return {
+                    "success": False,
+                    "dry_run": True,
+                    "reservation_id": reservation_id,
+                    "region": region,
+                    "error_code": error_code,
+                    "error": error_msg,
+                }
+            return {
+                "success": True,
+                "dry_run": True,
+                "reservation_id": reservation_id,
+                "region": region,
+                "message": "Dry run completed.",
+            }
+
+        try:
+            response = ec2.cancel_capacity_reservation(CapacityReservationId=reservation_id)
+            return {
+                "success": bool(response.get("Return", True)),
+                "dry_run": False,
+                "reservation_id": reservation_id,
+                "region": region,
+                "message": f"Capacity reservation {reservation_id} cancelled.",
+            }
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            error_msg = e.response.get("Error", {}).get("Message", str(e))
+            return {
+                "success": False,
+                "dry_run": False,
+                "reservation_id": reservation_id,
                 "region": region,
                 "error_code": error_code,
                 "error": error_msg,

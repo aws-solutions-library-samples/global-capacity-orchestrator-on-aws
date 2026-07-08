@@ -871,6 +871,320 @@ def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any) -
         sys.exit(1)
 
 
+def _print_find_reservations_report(result: dict[str, Any]) -> None:
+    """Render a consolidated find-reservations report as a readable table block."""
+    itype = result.get("instance_type") or "any instance type"
+    req = result.get("requested_instance_type")
+    if req and req != itype:
+        print(f"\n  ODCR search for {req} -> {itype}")
+    else:
+        print(f"\n  ODCR search for {itype}")
+    print("  " + "-" * 78)
+    print(f"  Regions: {', '.join(result.get('regions_checked', []))}")
+
+    if req and not result.get("valid_instance_type", True):
+        print()
+        print(f"  ⚠  {result.get('recommendation', 'Invalid instance type.')}")
+        print()
+        return
+
+    reservations = result.get("reservations", [])
+    if not reservations:
+        print()
+        print(f"  {result.get('recommendation', 'No reservations found.')}")
+        print()
+        return
+
+    print()
+    print(
+        f"  {'INSTANCE TYPE':<18} {'REGION':<13} {'AZ':<17} "
+        f"{'AVAIL':>6} {'TOTAL':>6} {'$/GPU-hr':>10}"
+    )
+    print("  " + "-" * 78)
+    for r in reservations:
+        gpu_hr = r.get("price_per_gpu_hour")
+        gpu_hr_str = f"${gpu_hr:,.2f}" if isinstance(gpu_hr, int | float) else "-"
+        print(
+            f"  {str(r.get('instance_type') or ''):<18} {str(r.get('region') or ''):<13} "
+            f"{str(r.get('availability_zone') or ''):<17} "
+            f"{r.get('available_instances', 0):>6} {r.get('total_instances', 0):>6} "
+            f"{gpu_hr_str:>10}"
+        )
+    print()
+    print(f"  💡 {result['recommendation']}")
+    print()
+
+
+@capacity.command("find-reservations")
+@click.option(
+    "--instance-type",
+    "-i",
+    default=None,
+    help="Instance type or alias to filter by (e.g. p6-b200); omit for all types",
+)
+@click.option(
+    "--region",
+    "-r",
+    "regions",
+    multiple=True,
+    help="Region(s) to search; repeatable (default: all deployed regions)",
+)
+@click.option(
+    "--count",
+    "-c",
+    default=1,
+    help="Minimum available instances to consider the search satisfied",
+)
+@click.option(
+    "--state",
+    default="active",
+    help="Reservation state filter (default: active; use 'all' for any state)",
+)
+@click.option(
+    "--pricing/--no-pricing",
+    default=True,
+    help="Enrich reservations with On-Demand pricing (default: yes)",
+)
+@pass_config
+def find_reservations(
+    config: Any,
+    instance_type: Any,
+    regions: Any,
+    count: Any,
+    state: Any,
+    pricing: Any,
+) -> None:
+    """Find existing ODCRs across regions in one parallel, ranked report.
+
+    The ODCR counterpart to 'gco capacity find-blocks': it searches every
+    requested region in parallel, normalizes friendly instance-type aliases
+    (p6-b200 -> p6-b200.48xlarge), enriches each reservation with On-Demand
+    pricing, and ranks them most-available-first (then cheapest per-GPU-hour).
+
+    Examples:
+        gco capacity find-reservations -i p5.48xlarge
+        gco capacity find-reservations -i p6-b200 -r us-east-1 -r us-west-2
+        gco capacity find-reservations --no-pricing
+    """
+    formatter = get_output_formatter(config)
+    checker = get_capacity_checker(config)
+
+    try:
+        result = checker.find_capacity_reservations(
+            instance_type=instance_type,
+            regions=list(regions) or None,
+            min_count=count,
+            state=None if str(state).lower() == "all" else state,
+            include_pricing=pricing,
+        )
+
+        if config.output_format != "table":
+            formatter.print(result)
+            return
+
+        _print_find_reservations_report(result)
+
+    except Exception as e:
+        formatter.print_error(f"Failed to find reservations: {e}")
+        sys.exit(1)
+
+
+@capacity.command("create-reservation")
+@click.option("--instance-type", "-i", required=True, help="EC2 instance type or alias")
+@click.option("--region", "-r", required=True, help="AWS region")
+@click.option(
+    "--availability-zone", "-z", required=True, help="Target Availability Zone (e.g. us-east-1a)"
+)
+@click.option("--count", "-c", default=1, help="Number of instances to reserve")
+@click.option("--platform", default="Linux/UNIX", help="Instance platform/OS (default: Linux/UNIX)")
+@click.option(
+    "--tenancy",
+    type=click.Choice(["default", "dedicated"]),
+    default="default",
+    help="Reservation tenancy (default: default)",
+)
+@click.option(
+    "--match-criteria",
+    type=click.Choice(["open", "targeted"]),
+    default="open",
+    help="Instance match criteria (default: open)",
+)
+@click.option(
+    "--end-date",
+    default=None,
+    help="Optional end date (YYYY-MM-DD or ISO datetime); omit for an unlimited reservation",
+)
+@click.option("--ebs-optimized", is_flag=True, help="Reserve EBS-optimized capacity")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Validate the request without creating (no cost incurred)",
+)
+@pass_config
+def create_reservation(
+    config: Any,
+    instance_type: Any,
+    region: Any,
+    availability_zone: Any,
+    count: Any,
+    platform: Any,
+    tenancy: Any,
+    match_criteria: Any,
+    end_date: Any,
+    ebs_optimized: Any,
+    dry_run: Any,
+) -> None:
+    """Create a new On-Demand Capacity Reservation (ODCR).
+
+    The ODCR counterpart to 'gco capacity reserve'. Reserves On-Demand capacity
+    for an instance type in a specific AZ.
+
+    ⚠️  WARNING: creating a reservation incurs On-Demand charges for the reserved
+    capacity whether or not it is used, until the reservation is cancelled.
+    Use --dry-run to validate first.
+
+    Examples:
+        gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2 --dry-run
+        gco capacity create-reservation -i p6-b200 -r us-east-1 -z us-east-1a -c 1
+        gco capacity create-reservation -i p4d.24xlarge -r us-west-2 -z us-west-2b \\
+            --end-date 2026-08-01
+    """
+    formatter = get_output_formatter(config)
+    checker = get_capacity_checker(config)
+
+    try:
+        if dry_run:
+            formatter.print_info(
+                f"Dry run: validating reservation for {count}x {instance_type} "
+                f"in {availability_zone}..."
+            )
+        else:
+            formatter.print_info(
+                f"Creating reservation for {count}x {instance_type} in {availability_zone}..."
+            )
+
+        result = checker.create_capacity_reservation(
+            instance_type=instance_type,
+            region=region,
+            availability_zone=availability_zone,
+            instance_count=count,
+            instance_platform=platform,
+            tenancy=tenancy,
+            instance_match_criteria=match_criteria,
+            end_date=end_date,
+            ebs_optimized=ebs_optimized,
+            dry_run=dry_run,
+        )
+
+        if config.output_format != "table":
+            formatter.print(result)
+            return
+
+        if result["success"]:
+            if dry_run:
+                print()
+                print("  ✓ Dry run passed — reservation parameters are valid")
+                print(f"  Instance Type: {result.get('instance_type')}")
+                print(f"  AZ:            {result.get('availability_zone')}")
+                print(f"  Instances:     {result.get('instance_count')}")
+                print()
+                print("  To create, run without --dry-run:")
+                print(
+                    f"    gco capacity create-reservation -i {result.get('instance_type')} "
+                    f"-r {region} -z {availability_zone} -c {count}"
+                )
+                print()
+            else:
+                print()
+                print("  ✓ Capacity Reservation created successfully")
+                print(f"  Reservation ID: {result['reservation_id']}")
+                print(f"  Instance Type:  {result['instance_type']}")
+                print(f"  AZ:             {result['availability_zone']}")
+                print(f"  Instances:      {result['total_instances']}")
+                print(f"  State:          {result.get('state', 'N/A')}")
+                print(f"  End:            {result.get('end_date') or 'unlimited'}")
+                print()
+                print("  To create a NodePool for this reservation:")
+                print(
+                    f"    gco nodepools create-odcr -n my-pool -r {region} "
+                    f"-c {result['reservation_id']} -i {result['instance_type']}"
+                )
+                print()
+        else:
+            formatter.print_error(
+                f"Failed: {result.get('error_code', 'Unknown')}: {result.get('error', '')}"
+            )
+            sys.exit(1)
+
+    except Exception as e:
+        formatter.print_error(f"Failed to create reservation: {e}")
+        sys.exit(1)
+
+
+@capacity.command("cancel-reservation")
+@click.option(
+    "--reservation-id", "-o", required=True, help="Capacity Reservation ID (cr-xxx) to cancel"
+)
+@click.option("--region", "-r", required=True, help="AWS region where the reservation exists")
+@click.option(
+    "--dry-run", is_flag=True, help="Validate the cancellation without cancelling (no change)"
+)
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def cancel_reservation(
+    config: Any, reservation_id: Any, region: Any, dry_run: Any, yes: Any
+) -> None:
+    """Cancel an On-Demand Capacity Reservation, releasing its capacity.
+
+    Stops On-Demand charges for the reserved capacity. Only ODCRs can be
+    cancelled; a Capacity Block runs for its fixed term. Instances already
+    running against the reservation are not terminated — they revert to normal
+    On-Demand billing.
+
+    Examples:
+        gco capacity cancel-reservation -o cr-0123456789abcdef0 -r us-east-1 --dry-run
+        gco capacity cancel-reservation -o cr-0123456789abcdef0 -r us-east-1 -y
+    """
+    formatter = get_output_formatter(config)
+    checker = get_capacity_checker(config)
+
+    if not dry_run and not yes:
+        click.confirm(f"Cancel capacity reservation '{reservation_id}' in {region}?", abort=True)
+
+    try:
+        if dry_run:
+            formatter.print_info(f"Dry run: validating cancellation of {reservation_id}...")
+        else:
+            formatter.print_info(f"Cancelling capacity reservation {reservation_id}...")
+
+        result = checker.cancel_capacity_reservation(
+            reservation_id=reservation_id,
+            region=region,
+            dry_run=dry_run,
+        )
+
+        if config.output_format != "table":
+            formatter.print(result)
+            return
+
+        if result["success"]:
+            print()
+            if dry_run:
+                print(f"  ✓ Dry run passed — {reservation_id} can be cancelled")
+            else:
+                print(f"  ✓ {result.get('message', 'Reservation cancelled.')}")
+            print()
+        else:
+            formatter.print_error(
+                f"Failed: {result.get('error_code', 'Unknown')}: {result.get('error', '')}"
+            )
+            sys.exit(1)
+
+    except Exception as e:
+        formatter.print_error(f"Failed to cancel reservation: {e}")
+        sys.exit(1)
+
+
 _HISTORY_DISABLED_HINT = (
     "The historical capacity surface is not enabled. It is an optional add-on to "
     "the global stack: set historical.enabled to true in cdk.json and run "

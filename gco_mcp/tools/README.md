@@ -13,20 +13,20 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 102 tools; with every flag enabled the
-ceiling is 135. See [Feature Flags](../README.md#feature-flags) for the
+default registration the server exposes 109 tools; with every flag enabled the
+ceiling is 144. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
 |------|-------|-------------|
 | `jobs.py` | 9 | `list_jobs`, `submit_job_sqs`, `submit_job_api`, `get_job`, `get_job_logs`, `get_job_events`, `delete_job` (gated), `cluster_health`, `queue_status` |
-| `capacity.py` | 13 | `check_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `find_capacity_blocks`, `capacity_history_show`, `capacity_history_stats`, `capacity_history_patterns`, `capacity_predict`, `reserve_capacity` (gated) |
+| `capacity.py` | 16 | `check_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `find_capacity_blocks`, `find_capacity_reservations`, `capacity_history_show`, `capacity_history_stats`, `capacity_history_patterns`, `capacity_predict`, `reserve_capacity` (gated), `create_reservation` (gated), `cancel_reservation` (gated) |
 | `inference.py` | 19 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `mooncake_topology_status`, `populate_kv_cache` |
 | `costs.py` | 4 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast` |
 | `stacks.py` | 20 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `valkey_status`, `aurora_status`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated) |
 | `storage.py` | 5 | `list_storage_contents`, `list_file_systems`, `files_get`, `files_access_points`, `upload_to_regional_bucket` |
 | `models.py` | 4 | `list_models`, `get_model_uri`, `models_upload` (gated), `delete_model` (gated) |
-| `nodepools.py` | 4 | `nodepools_list`, `nodepools_describe`, `nodepools_create_odcr`, `delete_nodepool` (gated) |
+| `nodepools.py` | 5 | `nodepools_list`, `nodepools_describe`, `nodepools_create_odcr`, `nodepools_create_capacity_block`, `delete_nodepool` (gated) |
 | `analytics.py` | 7 | `analytics_doctor`, `analytics_login_url`, `analytics_users_list`, `enable_analytics`, `disable_analytics`, `analytics_user_add`, `analytics_user_remove` (gated) |
 | `templates.py` | 5 | `templates_list`, `templates_get`, `templates_create`, `templates_run`, `delete_template` (gated) |
 | `webhooks.py` | 4 | `webhooks_list`, `webhooks_get`, `webhooks_create`, `delete_webhook` (gated) |
@@ -64,13 +64,16 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | Tool | Description |
 |------|-------------|
 | `ai_recommend` | Get AI-powered capacity recommendation using Amazon Bedrock. |
+| `cancel_reservation` | Cancel an On-Demand Capacity Reservation, releasing its capacity (gated by `GCO_ENABLE_DESTRUCTIVE_OPERATIONS`). |
 | `capacity_history_patterns` | Show a day-of-week by hour heatmap of average spot placement scores. |
 | `capacity_history_show` | Show the recorded capacity time-series for an instance type in a region. |
 | `capacity_history_stats` | Show p25/p50/p75/min/max/stddev per capacity metric over a time window. |
 | `capacity_predict` | Predict the best time to acquire capacity from historical patterns (Bedrock). |
 | `capacity_status` | View capacity status across all deployed regions. |
 | `check_capacity` | Check spot and on-demand capacity for a specific instance type. |
+| `create_reservation` | Create a new On-Demand Capacity Reservation (ODCR) (gated by `GCO_ENABLE_CAPACITY_PURCHASE`). |
 | `find_capacity_blocks` | Find EC2 Capacity Blocks across regions x durations x a start-date window in one consolidated, ranked, de-duplicated report. |
+| `find_capacity_reservations` | Find existing ODCRs across regions in one parallel, ranked, priced report. |
 | `list_reservations` | List On-Demand Capacity Reservations (ODCRs) across regions. |
 | `recommend_region` | Get optimal region recommendation based on capacity. |
 | `reservation_check` | Check ODCR and Capacity Block availability (multi-region, date-window, duration in hours or days). |
@@ -159,6 +162,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | Tool | Description |
 |------|-------------|
 | `delete_nodepool` | `gco nodepools delete` — delete a Karpenter NodePool. |
+| `nodepools_create_capacity_block` | `gco nodepools create-capacity-block` — create a Karpenter NodePool for a purchased Capacity Block. |
 | `nodepools_create_odcr` | `gco nodepools create-odcr` — create a Karpenter NodePool tied to an ODCR. |
 | `nodepools_describe` | `gco nodepools describe` — describe a single NodePool. |
 | `nodepools_list` | `gco nodepools list` — list Karpenter NodePools in a cluster. |
