@@ -204,7 +204,7 @@ jobs:
             dockerfile: Dockerfile.dev
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4.1.0
+      - uses: docker/setup-buildx-action@v4.2.0
       - name: Install pinned Trivy
         uses: ./.github/actions/install-trivy
         with:
