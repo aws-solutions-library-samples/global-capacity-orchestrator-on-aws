@@ -68,7 +68,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Download coverage artifact from the Unit Tests run
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: pytest-coverage
           run-id: ${{ github.event.workflow_run.id }}
