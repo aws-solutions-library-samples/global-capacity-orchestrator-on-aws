@@ -368,6 +368,13 @@ class TestNoCollisionsAcrossProjectNames:
             f"would collide with another deployment in the same account: {offenders}"
         )
 
+    def test_two_deployments_share_no_stack_names(self) -> None:
+        # CloudFormation stack names are unique per account+region and are the
+        # first thing that would collide on a second deploy. app.py names every
+        # stack ``<project_name>-<tier>``, so two deployments must share none.
+        overlap = sorted(set(_synth("gco")) & set(_synth("acme")))
+        assert not overlap, f"project_name='gco' and 'acme' share these stack names: {overlap}"
+
     @pytest.mark.parametrize("other", ["acme", "gco-staging", "p1team"])
     def test_two_deployments_same_region_share_no_names(self, other: str) -> None:
         overlap = sorted(
