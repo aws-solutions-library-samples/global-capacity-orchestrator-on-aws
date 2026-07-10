@@ -99,3 +99,27 @@ CVE-2026-53488 exp:2026-09-22
 CVE-2026-53489 exp:2026-09-22
 CVE-2026-53492 exp:2026-09-22
 CVE-2026-34040 exp:2026-09-22
+
+# CVE-2026-39822 — Go standard-library os.Root symlink-following / directory
+# traversal, statically linked into every Go binary in the helm-installer
+# Lambda image: kubectl (v1.36.2), helm (v4.2.1), and the aws-lambda-rie shipped
+# in the public.ecr.aws/lambda/python:3.14 base — all compiled with Go 1.26.4.
+# Also present in the dev image's pinned kubectl (ARG KUBECTL_VERSION in
+# Dockerfile.dev, the same v1.36.2). Surfaced by security:trivy:container-scan.
+# Fixed in Go 1.26.5 / 1.25.12 (released ~2026-07).
+#
+# Not yet clearable by a pin bump: the fix requires each upstream to re-release
+# its binary rebuilt with Go >= 1.26.5. v1.36.2 is the latest stable kubectl
+# (https://dl.k8s.io/release/stable-1.36.txt) and is still built with Go 1.26.4;
+# helm 4.2.1 and the current python:3.14 base image likewise predate the Go
+# bump — Go 1.26.5 is only days old, so no rebuilt release exists to pull today.
+#
+# Low runtime risk: these binaries run only during stack deploys against a
+# trusted EKS control plane / build context, not on attacker-controlled
+# filesystems, so the os.Root traversal path is not exercised at runtime.
+#
+# Clears when kubectl (next 1.36 patch), helm, and the Lambda base image ship
+# rebuilt with Go >= 1.26.5: bump the pins in lambda/helm-installer/Dockerfile
+# (and KUBECTL_VERSION in Dockerfile.dev), re-pull the base image, then drop
+# this entry. Advisory: https://avd.aquasec.com/nvd/cve-2026-39822
+CVE-2026-39822 exp:2026-09-22
