@@ -291,6 +291,11 @@ TARGETS: list[Target] = [
         title="Volcano image-mirror config read (project-scoped ECR namespace default, #139)",
     ),
     Target(
+        source="cli/_image_mirror.py",
+        function="mirror_images",
+        title="Image mirror into project-scoped ECR (plan, strategy, auth, per-image copy, #139)",
+    ),
+    Target(
         source="cli/stacks.py",
         function="StackManager._mirror_images_if_enabled",
         title="gco stacks deploy — pre-deploy image mirror gate (regional-only, #139)",

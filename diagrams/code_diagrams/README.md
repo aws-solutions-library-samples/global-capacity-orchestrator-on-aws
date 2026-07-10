@@ -80,6 +80,7 @@ has multiple charted entry points.
   - gco images push — auth + push existing local image &mdash; `cli/images.py::ImageManager.push` &mdash; [HTML](./cli/images.ImageManager_push.html) · [PNG](./cli/images.ImageManager_push.png)
   - gco images cleanup — bulk tag delete with filter branches &mdash; `cli/images.py::ImageManager.cleanup` &mdash; [HTML](./cli/images.ImageManager_cleanup.html) · [PNG](./cli/images.ImageManager_cleanup.png)
   - Volcano image-mirror config read (project-scoped ECR namespace default, #139) &mdash; `cli/_image_mirror.py::read_mirror_config` &mdash; [HTML](./cli/_image_mirror.read_mirror_config.html) · [PNG](./cli/_image_mirror.read_mirror_config.png)
+  - Image mirror into project-scoped ECR (plan, strategy, auth, per-image copy, #139) &mdash; `cli/_image_mirror.py::mirror_images` &mdash; [HTML](./cli/_image_mirror.mirror_images.html) · [PNG](./cli/_image_mirror.mirror_images.png)
   - gco stacks deploy — pre-deploy image mirror gate (regional-only, #139) &mdash; `cli/stacks.py::StackManager._mirror_images_if_enabled` &mdash; [HTML](./cli/stacks.StackManager__mirror_images_if_enabled.html) · [PNG](./cli/stacks.StackManager__mirror_images_if_enabled.png)
 
 ### `gco/`

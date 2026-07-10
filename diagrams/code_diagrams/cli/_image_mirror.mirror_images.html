@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <title>gco stacks deploy — pre-deploy image mirror gate (regional-only, #139)</title>
+        <title>Image mirror into project-scoped ECR (plan, strategy, auth, per-image copy, #139)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
         </style>
@@ -205,32 +205,55 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3562=>operation: "Mirror third-party images into ECR before a regional stack deploys.\n\n        No-op unless ``volcano_image_mirror.enabled`` is set in cdk.json. Mirrors\n        every relevant regional region (see :meth:`_mirror_target_regions`); the\n        copy is idempotent and skips images already present, so a fresh deploy\n        seeds the mirror automatically and repeat deploys cost only a few ECR\n        describe calls. Raises **before** any CDK call if an enabled mirror fails,\n        so a deploy never points a consumer (e.g. Volcano's ``image_registry``)\n        at images that aren't in ECR yet.\n        "
-op3564=>operation: from . import _image_mirror as image_mirror
-op3566=>operation: cfg = image_mirror.read_mirror_config()
-cond3569=>condition: if not cfg['enabled']
-e3574=>end: end function return
-op3580=>operation: regions = self._mirror_target_regions(stack_name, all_stacks)
-cond3583=>condition: for region in regions
-sub3587=>subroutine: print(f'Mirroring third-party images into ECR for {region} ...')
-sub3592=>subroutine: image_mirror.mirror_images(region, ecr_namespace=cfg['ecr_namespace'], skip_existing=True)
-cond3589=>condition: exception raised?
-cond3594=>condition: except Exception as exc
-sub3598=>subroutine: raise RuntimeError(f"Image mirror failed for region {region}: {exc}\nvolcano_image_mirror is enabled but the images could not be mirrored into ECR. Fix the cause (container runtime / network / credentials) or run 'gco images mirror --region {region}' manually, then retry. Aborting before CDK so the deploy never points a consumer at images that aren't in ECR.") from exc
+        <div><textarea id="code" style="width: 100%;" rows="11">op3481=>operation: 'Mirror the configured upstream images into ECR for ``region`` (full flow).\n\n    ``source_refs`` defaults to :func:`collect_source_refs` (every registered\n    image). Resolves the account/registry, builds the plan, picks a multi-arch\n    copy strategy, authenticates, then for each image ensures the repo exists and\n    copies it — skipping any tag already present when ``skip_existing`` is True\n    (so repeat deploys are a fast no-op). Returns a summary dict with the\n    destination ``registry``, the ``strategy`` used, and the ``mirrored`` /\n    ``skipped`` destination refs.\n    '
+op3483=>operation: ecr_namespace = (ecr_namespace or cdk_default_namespace()).strip('/')
+cond3486=>operation: source_refs = collect_source_refs(load_charts_config(charts_path) if charts_path else None) if  source_refs is None
+op3496=>operation: account_id = _account_id()
+op3498=>operation: registry_host = _registry_host(account_id, region)
+op3500=>operation: plan = plan_from_sources(source_refs, registry_host, ecr_namespace)
+op3502=>operation: runtime = detect_runtime()
+op3504=>operation: strategy = resolve_copy_strategy(runtime)
+sub3506=>subroutine: log(f'Mirroring {len(plan)} image(s) into {registry_host}/{ecr_namespace} (region {region}) via {strategy} (runtime: {runtime}):')
+op3508=>operation: username, password = ecr_auth(region)
+cond3511=>operation: runtime_login(runtime, registry_host, username, password, log=log) if  strategy != 'skopeo'
+op3521=>operation: ecr_client = boto3.client('ecr', region_name=region)
+op3523=>operation: mirrored: list[str] = []
+op3525=>operation: skipped: list[str] = []
+cond3528=>condition: for item in plan
+sub3532=>subroutine: ensure_repository(ecr_client, item.dest_repo, log=log)
+cond3535=>condition: if skip_existing and tag_exists(ecr_client, item.dest_repo, item.tag)
+sub3539=>subroutine: log(f'  skip (already mirrored): {item.dest_ref}')
+sub3541=>subroutine: skipped.append(item.dest_ref)
+sub3543=>subroutine: continue
+sub3548=>subroutine: copy_image(item, runtime=runtime, strategy=strategy, password=password, log=log)
+sub3550=>subroutine: mirrored.append(item.dest_ref)
+io3557=>inputoutput: output: {'registry': f'{registry_host}/{ecr_namespace}', 'strategy': strategy, 'mirrored': mirrored, 'skipped': skipped}
+e3555=>end: end function return
 
-op3562->op3564
-op3564->op3566
-op3566->cond3569
-cond3569(yes)->e3574
-cond3569(no)->op3580
-op3580->cond3583
-cond3583(yes)->sub3587
-sub3587->sub3592
-sub3592->cond3589
-cond3589(yes)->cond3594
-cond3594(yes)->sub3598
-cond3594(no)->cond3583
-cond3589(no)->cond3583
+op3481->op3483
+op3483->cond3486
+cond3486->op3496
+op3496->op3498
+op3498->op3500
+op3500->op3502
+op3502->op3504
+op3504->sub3506
+sub3506->op3508
+op3508->cond3511
+cond3511->op3521
+op3521->op3523
+op3523->op3525
+op3525->cond3528
+cond3528(yes)->sub3532
+sub3532->cond3535
+cond3535(yes)->sub3539
+sub3539->sub3541
+sub3541->sub3543
+cond3535(no)->sub3548
+sub3548->sub3550
+sub3550(left)->cond3528
+cond3528(no)->io3557
+io3557->e3555
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

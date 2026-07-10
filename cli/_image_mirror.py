@@ -74,6 +74,8 @@ import yaml
 # Flowchart(s) generated from this file:
 #   * ``read_mirror_config`` -> ``diagrams/code_diagrams/cli/_image_mirror.read_mirror_config.html``
 #     (PNG: ``diagrams/code_diagrams/cli/_image_mirror.read_mirror_config.png``)
+#   * ``mirror_images`` -> ``diagrams/code_diagrams/cli/_image_mirror.mirror_images.html``
+#     (PNG: ``diagrams/code_diagrams/cli/_image_mirror.mirror_images.png``)
 # Regenerate with ``python diagrams/code_diagrams/generate.py``.
 # <pyflowchart-code-diagram> END
 

@@ -205,34 +205,34 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3526=>operation: 'Parse the ``volcano_image_mirror`` block from cdk.json.\n\n        Returns a normalized dict ``{enabled, ecr_namespace}``. Validation is\n        strict so a misconfiguration fails at synth rather than silently leaving\n        Volcano pointed at docker.io.\n\n        - ``enabled`` (default False) — master toggle.\n        - ``ecr_namespace`` (default ``"<project_name>/dockerhub"``, i.e.\n          ``gco/dockerhub`` for the stock project) — the ECR repository\n          namespace the mirrored Volcano images live under. Must start with\n          ``<project_name>/`` so it inherits the project\'s existing\n          ``<project_name>/*`` machinery (node pull access, replication rule,\n          trusted-registry allow-list) with no extra IAM, and must be a valid\n          (possibly nested) ECR repository path.\n        '
-op3528=>operation: raw = self.node.try_get_context('volcano_image_mirror') or {}
-cond3531=>operation: raise ValueError(f'volcano_image_mirror must be a mapping, got {type(raw).__name__}') if  not isinstance(raw, dict)
-op3541=>operation: project_prefix = f'{self.config.get_project_name()}/'
-op3543=>operation: enabled = bool(raw.get('enabled', False))
-op3545=>operation: ecr_namespace = str(raw.get('ecr_namespace', f'{project_prefix}dockerhub')).strip().strip('/')
-cond3548=>condition: if not enabled
-io3555=>inputoutput: output: {'enabled': False, 'ecr_namespace': ecr_namespace}
-e3553=>end: end function return
-cond3562=>operation: raise ValueError(f"volcano_image_mirror.ecr_namespace must start with {project_prefix!r} so it inherits the project's {project_prefix}* ECR access/replication, got {ecr_namespace!r}") if  not ecr_namespace.startswith(project_prefix)
-op3572=>operation: segment = '[a-z0-9]+(?:[._-][a-z0-9]+)*'
-cond3575=>operation: raise ValueError(f'volcano_image_mirror.ecr_namespace must be a valid ECR repository path (lowercase alphanumerics + . _ - per slash-separated segment), got {ecr_namespace!r}') if  not re.fullmatch(f'{segment}(?:/{segment})+', ecr_namespace)
-io3588=>inputoutput: output: {'enabled': True, 'ecr_namespace': ecr_namespace}
-e3586=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op3607=>operation: 'Parse the ``volcano_image_mirror`` block from cdk.json.\n\n        Returns a normalized dict ``{enabled, ecr_namespace}``. Validation is\n        strict so a misconfiguration fails at synth rather than silently leaving\n        Volcano pointed at docker.io.\n\n        - ``enabled`` (default False) — master toggle.\n        - ``ecr_namespace`` (default ``"<project_name>/dockerhub"``, i.e.\n          ``gco/dockerhub`` for the stock project) — the ECR repository\n          namespace the mirrored Volcano images live under. Must start with\n          ``<project_name>/`` so it inherits the project\'s existing\n          ``<project_name>/*`` machinery (node pull access, replication rule,\n          trusted-registry allow-list) with no extra IAM, and must be a valid\n          (possibly nested) ECR repository path.\n        '
+op3609=>operation: raw = self.node.try_get_context('volcano_image_mirror') or {}
+cond3612=>operation: raise ValueError(f'volcano_image_mirror must be a mapping, got {type(raw).__name__}') if  not isinstance(raw, dict)
+op3622=>operation: project_prefix = f'{self.config.get_project_name()}/'
+op3624=>operation: enabled = bool(raw.get('enabled', False))
+op3626=>operation: ecr_namespace = str(raw.get('ecr_namespace', f'{project_prefix}dockerhub')).strip().strip('/')
+cond3629=>condition: if not enabled
+io3636=>inputoutput: output: {'enabled': False, 'ecr_namespace': ecr_namespace}
+e3634=>end: end function return
+cond3643=>operation: raise ValueError(f"volcano_image_mirror.ecr_namespace must start with {project_prefix!r} so it inherits the project's {project_prefix}* ECR access/replication, got {ecr_namespace!r}") if  not ecr_namespace.startswith(project_prefix)
+op3653=>operation: segment = '[a-z0-9]+(?:[._-][a-z0-9]+)*'
+cond3656=>operation: raise ValueError(f'volcano_image_mirror.ecr_namespace must be a valid ECR repository path (lowercase alphanumerics + . _ - per slash-separated segment), got {ecr_namespace!r}') if  not re.fullmatch(f'{segment}(?:/{segment})+', ecr_namespace)
+io3669=>inputoutput: output: {'enabled': True, 'ecr_namespace': ecr_namespace}
+e3667=>end: end function return
 
-op3526->op3528
-op3528->cond3531
-cond3531->op3541
-op3541->op3543
-op3543->op3545
-op3545->cond3548
-cond3548(yes)->io3555
-io3555->e3553
-cond3548(no)->cond3562
-cond3562->op3572
-op3572->cond3575
-cond3575->io3588
-io3588->e3586
+op3607->op3609
+op3609->cond3612
+cond3612->op3622
+op3622->op3624
+op3624->op3626
+op3626->cond3629
+cond3629(yes)->io3636
+io3636->e3634
+cond3629(no)->cond3643
+cond3643->op3653
+op3653->cond3656
+cond3656->io3669
+io3669->e3667
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
