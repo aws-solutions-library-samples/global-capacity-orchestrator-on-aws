@@ -49,6 +49,7 @@ from cli.config import GCOConfig, get_config
 from . import blocks
 from .models import (
     GPU_INSTANCE_SPECS,
+    CapacityCheckError,
     CapacityEstimate,
     InstanceTypeInfo,
     SpotPriceInfo,
@@ -228,7 +229,15 @@ class CapacityChecker:
         return result
 
     def check_instance_available_in_region(self, instance_type: str, region: str) -> bool:
-        """Check if an instance type is offered in a region."""
+        """Check whether an instance type is offered in a region.
+
+        Returns ``True``/``False`` only from a *successful* offerings lookup, so a
+        ``False`` genuinely means "not offered in this region". If the underlying
+        DescribeInstanceTypeOfferings call fails (throttling, expired/invalid
+        credentials, denied permissions, region not opted in) this raises
+        :class:`CapacityCheckError` instead of silently returning ``False`` — a
+        failed check must not be reported to the user as "not available".
+        """
         cache_key = f"{region}"
         if cache_key not in self._offerings_cache:
             try:
@@ -239,14 +248,13 @@ class CapacityChecker:
                     for offering in page["InstanceTypeOfferings"]:
                         offerings.add(offering["InstanceType"])
                 self._offerings_cache[cache_key] = offerings
-            except ClientError as e:
-                logger.debug("Failed to check instance offerings in %s: %s", region, e)
-                return False  # Assume unavailable if we can't check
-            except Exception as e:
-                logger.warning("Unexpected error checking offerings in %s: %s", region, e)
-                return False
+            except (ClientError, BotoCoreError) as e:
+                logger.warning("Failed to check instance offerings in %s: %s", region, e)
+                raise CapacityCheckError(
+                    f"Could not check instance availability in {region}: {e}"
+                ) from e
 
-        return instance_type in self._offerings_cache.get(cache_key, set())
+        return instance_type in self._offerings_cache[cache_key]
 
     def get_availability_zones(self, region: str) -> list[str]:
         """Get availability zones for a region."""
@@ -257,7 +265,7 @@ class CapacityChecker:
             )
             return [az["ZoneName"] for az in response["AvailabilityZones"]]
         except ClientError as e:
-            logger.debug("Failed to get availability zones for %s: %s", region, e)
+            logger.warning("Failed to get availability zones for %s: %s", region, e)
             return []
         except Exception as e:
             logger.warning("Unexpected error getting AZs for %s: %s", region, e)
@@ -286,7 +294,7 @@ class CapacityChecker:
 
             return len(offering_azs) / len(total_azs) if total_azs else None
         except Exception as e:
-            logger.debug("Failed to get AZ coverage for %s in %s: %s", instance_type, region, e)
+            logger.warning("Failed to get AZ coverage for %s in %s: %s", instance_type, region, e)
             return None
 
     def get_spot_placement_score(
@@ -329,7 +337,7 @@ class CapacityChecker:
                 return {}
             raise
         except Exception as e:
-            logger.debug(
+            logger.warning(
                 "Failed to get spot placement scores for %s in %s: %s", instance_type, region, e
             )
             return {}
@@ -444,7 +452,9 @@ class CapacityChecker:
                         return price
 
         except ClientError as e:
-            logger.debug("Failed to get on-demand price for %s in %s: %s", instance_type, region, e)
+            logger.warning(
+                "Failed to get on-demand price for %s in %s: %s", instance_type, region, e
+            )
         except Exception as e:
             logger.warning(
                 "Unexpected error getting pricing for %s in %s: %s", instance_type, region, e

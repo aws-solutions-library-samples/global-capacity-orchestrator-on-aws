@@ -48,6 +48,9 @@ class MultiRegionCapacityChecker:
     def __init__(self, config: GCOConfig | None = None):
         self.config = config or get_config()
         self._session = boto3.Session()
+        # Errors from the most recent get_all_regions_capacity() sweep, so an
+        # empty result can be distinguished as "checks failed" vs "no regions".
+        self._last_region_errors: list[str] = []
 
     def get_region_capacity(self, region: str) -> RegionCapacity:
         """Get capacity information for a single region."""
@@ -137,12 +140,14 @@ class MultiRegionCapacityChecker:
         stacks = aws_client.discover_regional_stacks()
 
         capacities = []
+        self._last_region_errors = []
         for region in stacks:
             try:
                 capacity = self.get_region_capacity(region)
                 capacities.append(capacity)
             except Exception as e:
                 logger.warning("Failed to get capacity for region %s: %s", region, e)
+                self._last_region_errors.append(f"{region}: {e}")
                 continue
 
         return capacities
@@ -174,6 +179,17 @@ class MultiRegionCapacityChecker:
         capacities = self.get_all_regions_capacity()
 
         if not capacities:
+            if self._last_region_errors:
+                # The emptiness is due to underlying AWS failures, not an absence
+                # of configured regions — surface the real error instead of a
+                # benign "no capacity" message that masks it.
+                details = "; ".join(self._last_region_errors)
+                return {
+                    "region": self.config.default_region,
+                    "reason": f"Capacity checks failed for all regions: {details}",
+                    "score": 0,
+                    "error": details,
+                }
             return {
                 "region": self.config.default_region,
                 "reason": "No capacity data available, using default region",

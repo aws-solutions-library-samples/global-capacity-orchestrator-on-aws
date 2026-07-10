@@ -570,3 +570,32 @@ class TestCapacityCmdCancelReservation:
             cli, ["capacity", "cancel-reservation", "-o", "cr-x", "-r", "us-east-1", "-y"]
         )
         assert result.exit_code == 1
+
+
+class TestCapacityCheckError:
+    """A CapacityCheckError from the checker must become a non-zero CLI exit
+    with a detailed error message (which cli_runner.py turns into an MCP
+    ``{"error": ...}`` response) rather than a silent success."""
+
+    @patch("cli.commands.capacity_cmd.get_capacity_checker")
+    @patch("cli.commands.capacity_cmd.get_output_formatter")
+    def test_check_exits_nonzero_on_capacity_check_error(self, mock_fmt_fn, mock_checker_fn):
+        from cli.capacity import CapacityCheckError
+        from cli.main import cli
+
+        formatter = MagicMock()
+        mock_fmt_fn.return_value = formatter
+        mock_checker_fn.return_value.estimate_capacity.side_effect = CapacityCheckError(
+            "Could not check instance availability in eu-west-1: RequestLimitExceeded"
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["capacity", "check", "-i", "g5.xlarge", "-r", "eu-west-1"]
+        )
+
+        assert result.exit_code == 1
+        # The detailed underlying cause is surfaced to the user.
+        (msg,), _ = formatter.print_error.call_args
+        assert "eu-west-1" in msg
+        assert "RequestLimitExceeded" in msg

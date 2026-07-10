@@ -29,6 +29,7 @@ from .history import (
 )
 from .models import (
     GPU_INSTANCE_SPECS,
+    CapacityCheckError,
     CapacityEstimate,
     InstanceTypeInfo,
     SpotPriceInfo,
@@ -45,6 +46,7 @@ __all__ = [
     "GPU_INSTANCE_SPECS",
     "BedrockCapacityAdvisor",
     "BedrockCapacityRecommendation",
+    "CapacityCheckError",
     "CapacityChecker",
     "CapacityEstimate",
     "CapacityHistoryStore",
