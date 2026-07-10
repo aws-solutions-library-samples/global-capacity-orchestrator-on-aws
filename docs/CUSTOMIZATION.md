@@ -193,6 +193,21 @@ Deploy each the usual way (`gco stacks deploy-all` or `cdk deploy --all`); the
 two produce disjoint resource names and tear down independently
 (`destroy-all` on one leaves the other intact).
 
+> **One same-region caveat — ECR image replication.** Every *named* resource is
+> project-scoped and coexists cleanly, but the ECR image-replication
+> configuration created by the global stack is a per-account, per-region
+> **singleton**: AWS allows only one `AWS::ECR::ReplicationConfiguration` per
+> registry per region. So if two deployments place their **global** stack in the
+> same region and both leave image replication on (`images.replication.enabled`,
+> the default), the second stack fails to create it
+> (`...ReplicationConfiguration...already exists`). Resolution: set
+> `images.replication.enabled: false` on all but one same-region deployment (the
+> others still get their own project-scoped `<project>/*` ECR repos — they just
+> don't own that region's cross-region replication), **or** give each deployment
+> a different global region. Deployments in different regions never conflict:
+> each region has its own replication configuration with a project-scoped
+> `<project>/` filter.
+
 ### What `project_name` scopes
 
 Changing `project_name` re-scopes all of the following (shown for
@@ -209,14 +224,15 @@ Changing `project_name` re-scopes all of the following (shown for
 | WAF WebACL + log groups | `acme-api-gateway-waf`, `/aws/apigateway/acme-global`, `aws-waf-logs-acme-api-gateway` |
 | CloudFormation exports | `acme-global-api-endpoint`, `acme-auth-secret-arn`, `acme-waf-webacl-arn`, … |
 | ECR image namespace | repos under `acme/*` (e.g. `acme/dockerhub/…`), ECR replication filter `acme/`, `gco images` / mirror namespace |
+| Global Accelerator | `acme-accelerator` (defaults to `<project>-accelerator` when `global_accelerator.name` is unset in `cdk.json`) |
+| API Gateway names | REST API `acme-global-api`, Studio Cognito authorizer `acme-studio-cognito-authorizer`, request validator `acme-studio-request-validator` |
+| Valkey cache (opt-in) | ElastiCache serverless cache `acme-<region>` |
 | Analytics (opt-in) | Studio bucket `acme-analytics-studio-*`, SageMaker role `AmazonSageMaker-acme-analytics-exec-<region>`, Studio domain `acme-studio-<region>`, EMR app `acme-spark-<region>`, Cognito domain `acme-studio-<account>` |
 
-A handful of names are intentionally **not** re-scoped because they are already
-unique within their own parent and never collide across deployments: the REST
-API name (`gco-global-api`), the Cognito authorizer / request-validator names,
-and in-cluster Kubernetes object names (namespaces such as `gco-jobs` /
-`gco-system`, service accounts, ConfigMaps) — each deployment gets its own EKS
-cluster, so those live in separate Kubernetes API servers.
+The only names intentionally **not** re-scoped are in-cluster Kubernetes object
+names (namespaces such as `gco-jobs` / `gco-system`, service accounts,
+ConfigMaps): each deployment gets its own EKS cluster, so those live in
+separate Kubernetes API servers and never collide across deployments.
 
 ### `project_name` format
 
