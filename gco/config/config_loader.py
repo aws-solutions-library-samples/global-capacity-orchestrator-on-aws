@@ -210,8 +210,11 @@ class ConfigLoader:
         if not ga_config:
             raise ConfigValidationError("global_accelerator configuration is required")
 
+        # ``name`` is intentionally optional: when omitted it defaults to
+        # ``<project_name>-accelerator`` (see get_global_accelerator_config /
+        # GCOGlobalStack) so a second deployment gets a project-scoped name
+        # from the single ``project_name`` knob (#139).
         required_fields = [
-            "name",
             "health_check_grace_period",
             "health_check_interval",
             "health_check_timeout",
@@ -589,7 +592,7 @@ class ConfigLoader:
     def get_global_accelerator_config(self) -> dict[str, Any]:
         """Get Global Accelerator configuration"""
         return self.app.node.try_get_context("global_accelerator") or {
-            "name": "gco-accelerator",
+            "name": f"{self.get_project_name()}-accelerator",
             "health_check_grace_period": 30,
             "health_check_interval": 30,
             "health_check_timeout": 5,

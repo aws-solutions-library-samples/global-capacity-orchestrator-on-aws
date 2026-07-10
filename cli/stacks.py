@@ -1423,13 +1423,23 @@ class StackManager:
         (``deployment_regions.regional``) so no synth is required. Returns a
         de-duplicated, order-stable list.
         """
-        named = {"gco-global", "gco-api-gateway", "gco-monitoring", "gco-analytics"}
+        # Derive the prefix from project_name (#139) so a non-``gco``
+        # deployment's regional stacks (``<project>-<region>``) are still
+        # recognised — otherwise the mirror would silently no-op and the
+        # regional Volcano Helm install would have no images to pull.
+        prefix = f"{self.config.project_name}-"
+        named = {
+            f"{prefix}global",
+            f"{prefix}api-gateway",
+            f"{prefix}monitoring",
+            f"{prefix}analytics",
+        }
         if all_stacks:
             from .config import _load_cdk_json
 
             regional = _load_cdk_json().get("regional") or []
             return list(dict.fromkeys(str(r) for r in regional))
-        if stack_name and stack_name.startswith("gco-") and stack_name not in named:
+        if stack_name and stack_name.startswith(prefix) and stack_name not in named:
             region = self._get_deploy_region(stack_name)
             return [region] if region else []
         return []

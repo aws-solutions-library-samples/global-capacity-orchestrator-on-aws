@@ -260,7 +260,9 @@ class GCOMonitoringStack(Stack):
 
         # Get the actual API name from the api_gateway_stack
         api_name = (
-            self.api_gateway_stack.api.rest_api_name if self.api_gateway_stack else "gco-global-api"
+            self.api_gateway_stack.api.rest_api_name
+            if self.api_gateway_stack
+            else f"{self.project_name}-global-api"
         )
 
         # API Gateway metrics are in the region where the API is deployed
@@ -1189,7 +1191,7 @@ class GCOMonitoringStack(Stack):
         # Build (cache_name, region) pairs. cache_name is the literal
         # ``serverless_cache_name`` the regional stack passes to the
         # CfnServerlessCache.
-        cache_info = [(f"gco-{region}", region) for region in self.regions]
+        cache_info = [(f"{self.project_name}-{region}", region) for region in self.regions]
 
         # ECPU consumption and cache size per region
         for cache_name, region in cache_info:
@@ -1760,7 +1762,9 @@ class GCOMonitoringStack(Stack):
         """Create API Gateway alarms"""
         # Get the actual API name from the api_gateway_stack
         api_name = (
-            self.api_gateway_stack.api.rest_api_name if self.api_gateway_stack else "gco-global-api"
+            self.api_gateway_stack.api.rest_api_name
+            if self.api_gateway_stack
+            else f"{self.project_name}-global-api"
         )
 
         # High 5XX error rate

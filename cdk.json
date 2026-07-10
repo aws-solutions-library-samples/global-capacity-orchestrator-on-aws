@@ -52,7 +52,6 @@
 
     "_comment_global_accelerator": "AWS Global Accelerator front door. health_check_grace_period: seconds before a new endpoint starts being probed. health_check_interval: seconds between probes. health_check_timeout: seconds to wait per probe. health_check_path: HTTP path probed on each regional ALB. client_affinity: 'NONE' (default, spreads connections across endpoints) or 'SOURCE_IP' (pins a client IP to the same endpoint). See https://docs.aws.amazon.com/global-accelerator/latest/dg/about-endpoint-groups-health-check-options.html and https://docs.aws.amazon.com/global-accelerator/latest/dg/about-listeners.html#about-listeners-client-affinity.",
     "global_accelerator": {
-      "name": "gco-accelerator",
       "health_check_grace_period": 30,
       "health_check_interval": 30,
       "health_check_timeout": 5,

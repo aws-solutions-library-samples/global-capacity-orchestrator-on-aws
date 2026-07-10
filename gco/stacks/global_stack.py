@@ -176,8 +176,13 @@ class GCOGlobalStack(Stack):
 
         ga_config = self.config.get_global_accelerator_config()
 
-        # Store the accelerator name for reference by other stacks
-        self.accelerator_name = ga_config["name"]
+        # Store the accelerator name for reference by other stacks. Defaults
+        # to ``<project_name>-accelerator`` when not pinned in cdk.json so a
+        # second deployment gets its own project-scoped name (#139); an explicit
+        # ``global_accelerator.name`` still overrides.
+        self.accelerator_name = (
+            ga_config.get("name") or f"{self.config.get_project_name()}-accelerator"
+        )
 
         # Create DynamoDB tables for templates and webhooks
         self._create_dynamodb_tables()
@@ -1517,7 +1522,7 @@ class GCOGlobalStack(Stack):
         # ECR repository APIs scope by repository name, not ARN, so the
         # ``gco/*`` prefix scope is enforced via the ARN pattern in the
         # policy resource list.
-        repo_arn = f"arn:aws:ecr:*:{self.account}:repository/gco/*"
+        repo_arn = f"arn:aws:ecr:*:{self.account}:repository/{project_name}/*"
 
         self.image_lookup_lambda = lambda_.Function(
             self,
@@ -1597,7 +1602,7 @@ class GCOGlobalStack(Stack):
                         "allowed to touch and nothing else."
                     ),
                     "appliesTo": [
-                        "Resource::arn:aws:ecr:*:<AWS::AccountId>:repository/gco/*",
+                        f"Resource::arn:aws:ecr:*:<AWS::AccountId>:repository/{project_name}/*",
                     ],
                 },
             ],

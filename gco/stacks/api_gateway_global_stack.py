@@ -402,7 +402,9 @@ class GCOApiGatewayGlobalStack(Stack):
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 actions=["ssm:GetParametersByPath", "ssm:GetParameter"],
-                resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/gco/*"],
+                resources=[
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter/{self.project_name}/*"
+                ],
             )
         )
 
@@ -473,7 +475,7 @@ class GCOApiGatewayGlobalStack(Stack):
         api = apigateway.RestApi(
             self,
             "GCOGlobalApi",
-            rest_api_name="gco-global-api",
+            rest_api_name=f"{self.project_name}-global-api",
             description="Global authenticated API for GCO (Global Capacity Orchestrator on AWS) (edge-optimized)",
             endpoint_types=[apigateway.EndpointType.EDGE],
             deploy=True,
@@ -760,7 +762,7 @@ class GCOApiGatewayGlobalStack(Stack):
             self,
             "StudioCognitoAuthorizer",
             cognito_user_pools=[user_pool],
-            authorizer_name="gco-studio-cognito-authorizer",
+            authorizer_name=f"{self.project_name}-studio-cognito-authorizer",
         )
         # The authorizer attaches itself to the RestApi automatically
         # the first time it is passed into ``add_method``. No explicit
@@ -774,7 +776,7 @@ class GCOApiGatewayGlobalStack(Stack):
             self,
             "StudioRequestValidator",
             rest_api=self.api,
-            request_validator_name="gco-studio-request-validator",
+            request_validator_name=f"{self.project_name}-studio-request-validator",
             validate_request_parameters=True,
         )
 

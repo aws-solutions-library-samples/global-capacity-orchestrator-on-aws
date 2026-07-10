@@ -3822,7 +3822,7 @@ class GCORegionalStack(Stack):
             self,
             "ValkeyCache",
             engine="valkey",
-            serverless_cache_name=f"gco-{self.deployment_region}",
+            serverless_cache_name=f"{self.config.get_project_name()}-{self.deployment_region}",
             description=f"GCO K/V cache for {self.deployment_region}",
             major_engine_version="8",
             security_group_ids=[valkey_sg.security_group_id],

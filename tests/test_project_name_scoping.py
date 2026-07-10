@@ -40,7 +40,7 @@ import aws_cdk as cdk
 import pytest
 
 from gco.config.config_loader import ConfigLoader, ConfigValidationError
-from tests._analytics_cdk_overlays import synth_all_stacks
+from tests._analytics_cdk_overlays import build_overlay, synth_all_stacks
 
 # ---------------------------------------------------------------------------
 # Physical-name classification
@@ -471,4 +471,96 @@ class TestMultiRegionDeployment:
         assert not dupes, (
             "these collision-prone names collide between the co-located global and regional "
             f"stacks (global region == regional region): {dupes}"
+        )
+
+
+class TestNoHardcodedProjectPrefixInPolicies:
+    """Regression guard for #139 leaks a resource-*name* scan can't see.
+
+    ``TestNoCollisionsAcrossProjectNames`` inspects physical-name properties,
+    but several #139 leaks hid where that scan never looks:
+
+    * IAM policy **Resource ARNs** — the image-lookup Lambda's
+      ``repository/gco/*`` grant, the cross-region aggregator's
+      ``parameter/gco/*`` grant, and the SageMaker execution role's
+      ``gco-jobs-*`` / ``parameter/gco/cluster-shared-bucket/*`` grants. Where
+      a policy *and* its cdk-nag suppression were both hardcoded to ``gco``
+      they stayed self-consistent, so cdk-nag stayed silent too.
+    * The Valkey ElastiCache ``ServerlessCacheName`` — a feature-flagged
+      resource (``valkey.enabled`` is ``false`` in the stock cdk.json), so it
+      never appeared in the baseline synth the name scan runs against.
+
+    Synthesising the full app under a foreign ``project_name`` (with analytics
+    *and* valkey enabled) turns any surviving lowercase ``gco`` literal into an
+    unambiguous hardcoded leak. ``_render`` resolves only AWS pseudo-parameters
+    and literals — returning ``None`` for logical-id ``Ref``/``Fn::GetAtt`` — so
+    CDK logical ids like ``GCOEksCluster`` never produce a false positive.
+    """
+
+    _PROJECT = "acme"
+    _cache: dict[str, dict[str, Any]] | None = None
+
+    @classmethod
+    def _templates(cls) -> dict[str, dict[str, Any]]:
+        if cls._cache is None:
+            overlay = build_overlay(enabled=True, hyperpod_enabled=False, regions=["us-east-1"])
+            overlay["project_name"] = cls._PROJECT
+            overlay["valkey"] = {"enabled": True}
+            cls._cache = synth_all_stacks(overlay)
+        return cls._cache
+
+    @staticmethod
+    def _policy_resource_arns(
+        templates: dict[str, dict[str, Any]],
+    ) -> list[tuple[str, str, str]]:
+        """(stack, logical_id, rendered_arn) for every IAM policy Resource entry."""
+        out: list[tuple[str, str, str]] = []
+        for stack_name, template in templates.items():
+            for logical_id, resource in (template.get("Resources") or {}).items():
+                rtype = resource.get("Type")
+                props = resource.get("Properties") or {}
+                docs: list[Any] = []
+                if rtype in ("AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"):
+                    docs.append(props.get("PolicyDocument"))
+                elif rtype == "AWS::IAM::Role":
+                    docs.extend(p.get("PolicyDocument") for p in (props.get("Policies") or []))
+                for doc in docs:
+                    for stmt in (doc or {}).get("Statement") or []:
+                        raw = stmt.get("Resource")
+                        values = raw if isinstance(raw, list) else [raw]
+                        for value in values:
+                            rendered = _render(value)
+                            if isinstance(rendered, str):
+                                out.append((stack_name, logical_id, rendered))
+        return out
+
+    def test_no_iam_policy_resource_arn_hardcodes_stock_project(self) -> None:
+        arns = self._policy_resource_arns(self._templates())
+        # Non-vacuity guard: the full app has many IAM policies with concrete
+        # resource ARNs, so an empty list means _render stopped resolving them
+        # (and the offender check below would pass for the wrong reason).
+        assert len(arns) > 20, f"expected many resolved IAM policy ARNs, got {len(arns)}"
+        offenders = [
+            f"{stack}/{logical_id}: {arn}"
+            for stack, logical_id, arn in arns
+            if "gco" in arn.lower()
+        ]
+        assert not offenders, (
+            "IAM policy Resource ARN(s) hardcode the stock 'gco' project under "
+            "project_name='acme' — they must derive from project_name (#139):\n"
+            + "\n".join(sorted(offenders))
+        )
+
+    def test_valkey_serverless_cache_name_is_project_scoped(self) -> None:
+        templates = self._templates()
+        names = [
+            _render((resource.get("Properties") or {}).get("ServerlessCacheName"))
+            for template in templates.values()
+            for resource in (template.get("Resources") or {}).values()
+            if resource.get("Type") == "AWS::ElastiCache::ServerlessCache"
+        ]
+        concrete = [n for n in names if isinstance(n, str)]
+        assert concrete, "expected a Valkey ElastiCache serverless cache in the synth"
+        assert all(n.startswith(f"{self._PROJECT}-") for n in concrete), (
+            f"ElastiCache serverless cache name(s) not scoped to project_name='acme': {concrete}"
         )

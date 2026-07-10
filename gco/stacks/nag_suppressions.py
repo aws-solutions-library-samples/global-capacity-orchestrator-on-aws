@@ -1075,6 +1075,7 @@ def add_sagemaker_suppressions(
     stack: Stack,
     api_gateway_region: str | None = None,
     global_region: str | None = None,
+    project_name: str = "gco",
 ) -> None:
     """Add suppressions for SageMaker Studio Domain + execution role findings.
 
@@ -1103,14 +1104,14 @@ def add_sagemaker_suppressions(
         # SageMaker execution role — SQS submit to any regional queue under
         # the project's ``<project>-jobs-*`` pattern. The SQS queue ARNs
         # are owned by the regional stacks and not directly importable.
-        "Resource::arn:aws:sqs:*:<AWS::AccountId>:gco-jobs-*",
+        f"Resource::arn:aws:sqs:*:<AWS::AccountId>:{project_name}-jobs-*",
         # SageMaker execution role — ``ssm:GetParameter`` on the
         # Cluster_Shared_Bucket metadata parameters under
         # ``/gco/cluster-shared-bucket/*`` in the global region. The path
         # wildcard covers exactly three literal parameter names
         # (name / arn / region) defined by ``GCOGlobalStack``; the rest of
         # the ARN is fully scoped (global region + account).
-        f"Resource::arn:aws:ssm:{gbl_region}:<AWS::AccountId>:parameter/gco/cluster-shared-bucket/*",
+        f"Resource::arn:aws:ssm:{gbl_region}:<AWS::AccountId>:parameter/{project_name}/cluster-shared-bucket/*",
         # SageMaker execution role — execute-api on any REST API id
         # under ``/prod/*/api/v1/*`` and ``/prod/*/inference/*`` in the
         # api-gateway region. The concrete region value is templated in
@@ -1688,6 +1689,7 @@ def apply_all_suppressions(
             stack,
             api_gateway_region=api_gateway_region,
             global_region=global_region,
+            project_name=project_name,
         )
         add_cognito_suppressions(stack)
         add_emr_serverless_suppressions(stack)
