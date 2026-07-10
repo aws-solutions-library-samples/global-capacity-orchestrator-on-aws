@@ -205,36 +205,36 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op643=>operation: "\n        Submit a job to GCO.\n\n        Args:\n            manifests: Path to manifest file/directory or list of manifest dicts\n            namespace: Fallback namespace for manifests that don't declare\n                their own. When set, each manifest's ``metadata.namespace`` is\n                filled in only if missing — existing values are preserved so\n                users who've declared a target namespace in the manifest can\n                rely on it reaching the server untouched. Server-side\n                validation enforces the allowlist.\n            target_region: Force job to specific region\n            dry_run: Validate without applying\n            labels: Additional labels to add to manifests\n\n        Returns:\n            Submission result dictionary\n        "
-op645=>operation: manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
-cond648=>condition: if namespace
-cond653=>condition: for manifest in manifest_list
-cond658=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
-sub668=>subroutine: manifest['metadata'].setdefault('namespace', namespace)
-cond676=>condition: if labels
-cond681=>condition: for manifest in manifest_list
-cond686=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
-cond697=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
-sub707=>subroutine: manifest['metadata']['labels'].update(labels)
-io717=>inputoutput: output: self._aws_client.submit_manifests(manifests=manifest_list, namespace=namespace, target_region=target_region, dry_run=dry_run)
-e715=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op685=>operation: "\n        Submit a job to GCO.\n\n        Args:\n            manifests: Path to manifest file/directory or list of manifest dicts\n            namespace: Fallback namespace for manifests that don't declare\n                their own. When set, each manifest's ``metadata.namespace`` is\n                filled in only if missing — existing values are preserved so\n                users who've declared a target namespace in the manifest can\n                rely on it reaching the server untouched. Server-side\n                validation enforces the allowlist.\n            target_region: Force job to specific region\n            dry_run: Validate without applying\n            labels: Additional labels to add to manifests\n\n        Returns:\n            Submission result dictionary\n        "
+op687=>operation: manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
+cond690=>condition: if namespace
+cond695=>condition: for manifest in manifest_list
+cond700=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
+sub710=>subroutine: manifest['metadata'].setdefault('namespace', namespace)
+cond718=>condition: if labels
+cond723=>condition: for manifest in manifest_list
+cond728=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
+cond739=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
+sub749=>subroutine: manifest['metadata']['labels'].update(labels)
+io759=>inputoutput: output: self._aws_client.submit_manifests(manifests=manifest_list, namespace=namespace, target_region=target_region, dry_run=dry_run)
+e757=>end: end function return
 
-op643->op645
-op645->cond648
-cond648(yes)->cond653
-cond653(yes)->cond658
-cond658->sub668
-sub668(left)->cond653
-cond653(no)->cond676
-cond676(yes)->cond681
-cond681(yes)->cond686
-cond686->cond697
-cond697->sub707
-sub707(left)->cond681
-cond681(no)->io717
-io717->e715
-cond676(no)->io717
-cond648(no)->cond676
+op685->op687
+op687->cond690
+cond690(yes)->cond695
+cond695(yes)->cond700
+cond700->sub710
+sub710(left)->cond695
+cond695(no)->cond718
+cond718(yes)->cond723
+cond723(yes)->cond728
+cond728->cond739
+cond739->sub749
+sub749(left)->cond723
+cond723(no)->io759
+io759->e757
+cond718(no)->io759
+cond690(no)->cond718
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

@@ -205,30 +205,32 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub1723=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op1725=>operation: self.ga_dns = global_accelerator_dns
-op1727=>operation: self.regional_endpoints = regional_endpoints or {}
-op1729=>operation: self.analytics_config: AnalyticsApiConfig | None = analytics_config
-op1731=>operation: self.secret = self._create_secret()
-op1733=>operation: self.proxy_lambda = self._create_proxy_lambda()
-op1735=>operation: self.aggregator_lambda = self._create_aggregator_lambda()
-op1737=>operation: self.api = self._create_api_gateway()
-sub1739=>subroutine: self._create_waf()
-sub1741=>subroutine: self._create_outputs()
-cond1744=>operation: self._wire_studio_routes() if  self.analytics_config is not None
-sub1754=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub1822=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op1824=>operation: self.project_name = project_name
+op1826=>operation: self.ga_dns = global_accelerator_dns
+op1828=>operation: self.regional_endpoints = regional_endpoints or {}
+op1830=>operation: self.analytics_config: AnalyticsApiConfig | None = analytics_config
+op1832=>operation: self.secret = self._create_secret()
+op1834=>operation: self.proxy_lambda = self._create_proxy_lambda()
+op1836=>operation: self.aggregator_lambda = self._create_aggregator_lambda()
+op1838=>operation: self.api = self._create_api_gateway()
+sub1840=>subroutine: self._create_waf()
+sub1842=>subroutine: self._create_outputs()
+cond1845=>operation: self._wire_studio_routes() if  self.analytics_config is not None
+sub1855=>subroutine: self._apply_nag_suppressions()
 
-sub1723->op1725
-op1725->op1727
-op1727->op1729
-op1729->op1731
-op1731->op1733
-op1733->op1735
-op1735->op1737
-op1737->sub1739
-sub1739->sub1741
-sub1741->cond1744
-cond1744->sub1754
+sub1822->op1824
+op1824->op1826
+op1826->op1828
+op1828->op1830
+op1830->op1832
+op1832->op1834
+op1834->op1836
+op1836->op1838
+op1838->sub1840
+sub1840->sub1842
+sub1842->cond1845
+cond1845->sub1855
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

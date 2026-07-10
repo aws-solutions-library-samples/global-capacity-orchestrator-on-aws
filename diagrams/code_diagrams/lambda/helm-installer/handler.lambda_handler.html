@@ -205,11 +205,15 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op517=>operation: 'Main Lambda handler.'
-sub519=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
-op521=>operation: request_type = event['RequestType']
-op523=>operation: physical_id = event.get('PhysicalResourceId', f"helm-{event['LogicalResourceId']}")
-op526=>operation: props = event['ResourceProperties']
+        <div><textarea id="code" style="width: 100%;" rows="11">op527=>operation: 'Main Lambda handler.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the current install path): the event carries an\n      ``Action`` key and is dispatched to :func:`handle_task`, which operates on\n      a single chart and raises on failure.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the whole-chart-set loop below runs.\n    '
+cond530=>condition: if event.get('Action')
+sub534=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
+io539=>inputoutput: output: handle_task(event)
+e537=>end: end function return
+sub545=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
+op547=>operation: request_type = event['RequestType']
+op549=>operation: physical_id = event.get('PhysicalResourceId', f"helm-{event['LogicalResourceId']}")
+op552=>operation: props = event['ResourceProperties']
 cluster_name = props['ClusterName']
 region = props['Region']
 default_config = load_charts_config()
@@ -291,23 +295,27 @@ if failed and request_type != 'Delete':
     send_response(event, context, FAILED, response_data, physical_id, f"Failed charts: {', '.join(failed)}")
 else:
     send_response(event, context, SUCCESS, response_data, physical_id)
-cond525=>condition: exception raised?
-cond528=>condition: except Exception as e
-sub532=>subroutine: logger.error(f'Error: {e}', exc_info=True)
-cond535=>condition: if request_type == 'Delete'
-sub539=>subroutine: send_response(event, context, SUCCESS, {'Status': 'Forced success on delete'}, physical_id)
-sub543=>subroutine: send_response(event, context, FAILED, {}, physical_id, str(e))
+cond551=>condition: exception raised?
+cond554=>condition: except Exception as e
+sub558=>subroutine: logger.error(f'Error: {e}', exc_info=True)
+cond561=>condition: if request_type == 'Delete'
+sub565=>subroutine: send_response(event, context, SUCCESS, {'Status': 'Forced success on delete'}, physical_id)
+sub569=>subroutine: send_response(event, context, FAILED, {}, physical_id, str(e))
 
-op517->sub519
-sub519->op521
-op521->op523
-op523->op526
-op526->cond525
-cond525(yes)->cond528
-cond528(yes)->sub532
-sub532->cond535
-cond535(yes)->sub539
-cond535(no)->sub543
+op527->cond530
+cond530(yes)->sub534
+sub534->io539
+io539->e537
+cond530(no)->sub545
+sub545->op547
+op547->op549
+op549->op552
+op552->cond551
+cond551(yes)->cond554
+cond554(yes)->sub558
+sub558->cond561
+cond561(yes)->sub565
+cond561(no)->sub569
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

@@ -205,12 +205,16 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op551=>operation: 'Main Lambda handler.'
-sub553=>subroutine: print(f"[HANDLER] Received event type: {event.get('RequestType')}")
-sub555=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
-op557=>operation: request_type = event['RequestType']
-op559=>operation: physical_resource_id = event.get('PhysicalResourceId', f"kubectl-{event['LogicalResourceId']}")
-op562=>operation: properties = event['ResourceProperties']
+        <div><textarea id="code" style="width: 100%;" rows="11">op577=>operation: 'Main Lambda handler.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the convergence pipeline): the event carries an\n      ``Action`` key and is dispatched to :func:`handle_task`, which applies the\n      manifests and raises on any failure.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the result is POSTed back to CloudFormation.\n    '
+cond580=>condition: if event.get('Action')
+sub584=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
+io589=>inputoutput: output: handle_task(event)
+e587=>end: end function return
+sub595=>subroutine: print(f"[HANDLER] Received event type: {event.get('RequestType')}")
+sub597=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
+op599=>operation: request_type = event['RequestType']
+op601=>operation: physical_resource_id = event.get('PhysicalResourceId', f"kubectl-{event['LogicalResourceId']}")
+op604=>operation: properties = event['ResourceProperties']
 cluster_name = properties['ClusterName']
 region = properties['Region']
 if request_type == 'Create' or request_type == 'Update':
@@ -225,24 +229,28 @@ elif request_type == 'Delete':
         logger.info('Skipping deletion (SkipDeletionOnStackDelete=true)')
     response_data = {'Status': 'Deleted'}
     send_response(event, context, SUCCESS, response_data, physical_resource_id)
-cond561=>condition: exception raised?
-cond564=>condition: except Exception as e
-sub568=>subroutine: logger.error(f'Error: {e}', exc_info=True)
-cond571=>condition: if request_type == 'Delete'
-sub575=>subroutine: send_response(event, context, SUCCESS, {'Status': 'Forced success on delete'}, physical_resource_id)
-sub579=>subroutine: send_response(event, context, FAILED, {}, physical_resource_id, str(e))
+cond603=>condition: exception raised?
+cond606=>condition: except Exception as e
+sub610=>subroutine: logger.error(f'Error: {e}', exc_info=True)
+cond613=>condition: if request_type == 'Delete'
+sub617=>subroutine: send_response(event, context, SUCCESS, {'Status': 'Forced success on delete'}, physical_resource_id)
+sub621=>subroutine: send_response(event, context, FAILED, {}, physical_resource_id, str(e))
 
-op551->sub553
-sub553->sub555
-sub555->op557
-op557->op559
-op559->op562
-op562->cond561
-cond561(yes)->cond564
-cond564(yes)->sub568
-sub568->cond571
-cond571(yes)->sub575
-cond571(no)->sub579
+op577->cond580
+cond580(yes)->sub584
+sub584->io589
+io589->e587
+cond580(no)->sub595
+sub595->sub597
+sub597->op599
+op599->op601
+op601->op604
+op604->cond603
+cond603(yes)->cond606
+cond606(yes)->sub610
+sub610->cond613
+cond613(yes)->sub617
+cond613(no)->sub621
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

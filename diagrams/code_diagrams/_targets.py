@@ -278,4 +278,31 @@ TARGETS: list[Target] = [
         function="build_engine_dependencies",
         title="Mission engine factory (live vs stub dispatcher, sampling, sandbox wiring)",
     ),
+    # --- project_name / ECR image-namespace scoping (#139) ---------------
+    # These paths make every ECR image namespace derive from
+    # ``project_name`` so multiple GCO deployments can co-exist in one
+    # account/region without colliding. Each carries real control flow
+    # (enable toggles, project-prefix + regex validation, per-region
+    # mirror loop, replication-rule guards), so a flowchart is genuinely
+    # informative for readers auditing the multi-deployment story.
+    Target(
+        source="cli/_image_mirror.py",
+        function="read_mirror_config",
+        title="Volcano image-mirror config read (project-scoped ECR namespace default, #139)",
+    ),
+    Target(
+        source="cli/stacks.py",
+        function="StackManager._mirror_images_if_enabled",
+        title="gco stacks deploy — pre-deploy image mirror gate (regional-only, #139)",
+    ),
+    Target(
+        source="gco/stacks/regional_stack.py",
+        function="GCORegionalStack._get_volcano_image_mirror_config",
+        title="Regional volcano image-mirror config (project-prefix + ECR-path validation, #139)",
+    ),
+    Target(
+        source="gco/stacks/global_stack.py",
+        function="GCOGlobalStack._create_image_replication_rule",
+        title="Global ECR replication rule (project-scoped PREFIX_MATCH filter, #139)",
+    ),
 ]

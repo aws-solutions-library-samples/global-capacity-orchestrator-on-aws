@@ -153,6 +153,10 @@ class _PlaywrightRenderer:
 
         Returns ``True`` on success.
         """
+        # ``Error`` is Playwright's base exception; ``TimeoutError`` subclasses
+        # it. We catch both so a single un-renderable diagram degrades to
+        # HTML-only (``png_path=None``) instead of aborting the whole batch.
+        from playwright.sync_api import Error as PlaywrightError  # pragma: no cover
         from playwright.sync_api import TimeoutError as PwTimeout  # pragma: no cover
 
         page = self._browser.new_page(
@@ -174,6 +178,18 @@ class _PlaywrightRenderer:
         except PwTimeout as exc:
             warnings.warn(
                 f"Playwright timed out rendering {html_path}: {exc}",
+                stacklevel=2,
+            )
+            return False
+        except PlaywrightError as exc:
+            # Most common cause: the flowchart is taller/wider than
+            # Chromium's maximum screenshot dimensions (~32k px), so
+            # ``Page.captureScreenshot`` returns "Unable to capture
+            # screenshot". The interactive HTML is still written and
+            # remains the primary artifact for these large diagrams.
+            warnings.warn(
+                f"Playwright could not screenshot {html_path} "
+                f"(diagram may exceed Chromium's max size): {exc}",
                 stacklevel=2,
             )
             return False

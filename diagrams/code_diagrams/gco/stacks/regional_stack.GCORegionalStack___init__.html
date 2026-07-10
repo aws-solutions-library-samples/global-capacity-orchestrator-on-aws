@@ -205,58 +205,62 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub1758=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op1760=>operation: self.config = config
-op1762=>operation: self.deployment_region = region
-op1764=>operation: self.auth_secret_arn = auth_secret_arn
-op1766=>operation: self.alb_arn: str | None = None
-op1768=>operation: cluster_config = self.config.get_cluster_config(region)
-op1770=>operation: self.cluster_config = cluster_config
-op1772=>operation: self.vpc = ec2.Vpc(self, 'GCOVpc', max_azs=3, nat_gateways=2, subnet_configuration=[ec2.SubnetConfiguration(name='PublicSubnet', subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24), ec2.SubnetConfiguration(name='PrivateSubnet', subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS, cidr_mask=24)])
-sub1774=>subroutine: self._create_vpc_flow_logs()
-sub1776=>subroutine: self._create_sqs_queue()
-sub1778=>subroutine: self._create_container_images()
-sub1780=>subroutine: self._create_aws_custom_resource_role()
-sub1782=>subroutine: self._create_eks_cluster(cluster_config)
-op1784=>operation: self.cluster_shared_identity = self._resolve_cluster_shared_bucket_from_ssm()
-sub1786=>subroutine: self._grant_cluster_shared_bucket_to_job_role(self.cluster_shared_identity)
-sub1788=>subroutine: self._create_efs()
-sub1790=>subroutine: self._create_fsx_lustre()
-sub1792=>subroutine: self._create_valkey_cache()
-sub1794=>subroutine: self._create_aurora_pgvector()
-sub1796=>subroutine: self._create_ga_registration_lambda()
-sub1798=>subroutine: self._create_helm_installer_lambda()
-sub1800=>subroutine: self._apply_kubernetes_manifests()
-sub1802=>subroutine: self._create_drift_detection()
-sub1804=>subroutine: self._create_mcp_role()
-sub1806=>subroutine: self._create_outputs()
-sub1808=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub1859=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op1861=>operation: self.config = config
+op1863=>operation: self.deployment_region = region
+op1865=>operation: self.auth_secret_arn = auth_secret_arn
+op1867=>operation: self.alb_arn: str | None = None
+op1869=>operation: cluster_config = self.config.get_cluster_config(region)
+op1871=>operation: self.cluster_config = cluster_config
+op1873=>operation: self.vpc = ec2.Vpc(self, 'GCOVpc', max_azs=99, nat_gateways=2, subnet_configuration=[ec2.SubnetConfiguration(name='PublicSubnet', subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24), ec2.SubnetConfiguration(name='PrivateSubnet', subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS, cidr_mask=24)])
+sub1875=>subroutine: self._create_vpc_flow_logs()
+sub1877=>subroutine: self._create_sqs_queue()
+sub1879=>subroutine: self._create_container_images()
+sub1881=>subroutine: self._create_aws_custom_resource_role()
+sub1883=>subroutine: self._create_eks_cluster(cluster_config)
+sub1885=>subroutine: self._configure_volcano_image_mirror()
+op1887=>operation: self.cluster_shared_identity = self._resolve_cluster_shared_bucket_from_ssm()
+sub1889=>subroutine: self._grant_cluster_shared_bucket_to_job_role(self.cluster_shared_identity)
+sub1891=>subroutine: self._create_regional_shared_bucket()
+sub1893=>subroutine: self._create_efs()
+sub1895=>subroutine: self._create_fsx_lustre()
+sub1897=>subroutine: self._create_valkey_cache()
+sub1899=>subroutine: self._create_aurora_pgvector()
+sub1901=>subroutine: self._create_ga_registration_lambda()
+sub1903=>subroutine: self._create_helm_installer_lambda()
+sub1905=>subroutine: self._apply_kubernetes_manifests()
+sub1907=>subroutine: self._create_drift_detection()
+sub1909=>subroutine: self._create_mcp_role()
+sub1911=>subroutine: self._create_outputs()
+sub1913=>subroutine: self._apply_nag_suppressions()
 
-sub1758->op1760
-op1760->op1762
-op1762->op1764
-op1764->op1766
-op1766->op1768
-op1768->op1770
-op1770->op1772
-op1772->sub1774
-sub1774->sub1776
-sub1776->sub1778
-sub1778->sub1780
-sub1780->sub1782
-sub1782->op1784
-op1784->sub1786
-sub1786->sub1788
-sub1788->sub1790
-sub1790->sub1792
-sub1792->sub1794
-sub1794->sub1796
-sub1796->sub1798
-sub1798->sub1800
-sub1800->sub1802
-sub1802->sub1804
-sub1804->sub1806
-sub1806->sub1808
+sub1859->op1861
+op1861->op1863
+op1863->op1865
+op1865->op1867
+op1867->op1869
+op1869->op1871
+op1871->op1873
+op1873->sub1875
+sub1875->sub1877
+sub1877->sub1879
+sub1879->sub1881
+sub1881->sub1883
+sub1883->sub1885
+sub1885->op1887
+op1887->sub1889
+sub1889->sub1891
+sub1891->sub1893
+sub1893->sub1895
+sub1895->sub1897
+sub1897->sub1899
+sub1899->sub1901
+sub1901->sub1903
+sub1903->sub1905
+sub1905->sub1907
+sub1907->sub1909
+sub1909->sub1911
+sub1911->sub1913
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

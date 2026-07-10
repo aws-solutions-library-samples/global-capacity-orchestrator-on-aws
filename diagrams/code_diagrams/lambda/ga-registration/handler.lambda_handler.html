@@ -205,35 +205,43 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op469=>operation: 'Lambda handler for GA registration custom resource.\n\n    This is the entry point for the Lambda function, following the standard\n    naming convention used by other Lambda handlers in this project.\n    '
-sub471=>subroutine: logger.info(f'Event: {json.dumps(event)}')
-op473=>operation: request_type = event['RequestType']
-op475=>operation: props = event['ResourceProperties']
-op477=>operation: physical_id = event.get('PhysicalResourceId', f"ga-reg-{props['ClusterName']}")
-cond483=>condition: if request_type == 'Delete'
-sub487=>subroutine: handle_delete(event, context, props, physical_id)
-cond479=>condition: exception raised?
-cond494=>condition: except Exception as e
-sub498=>subroutine: logger.error(f'Error: {e}', exc_info=True)
-cond501=>condition: if request_type == 'Delete'
-sub505=>subroutine: send_response(event, context, 'SUCCESS', {}, physical_id)
-sub509=>subroutine: send_response(event, context, 'FAILED', {}, physical_id, str(e))
-sub491=>subroutine: handle_create_update(event, context, props, physical_id)
+        <div><textarea id="code" style="width: 100%;" rows="11">op463=>operation: "Lambda handler for GA registration.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the convergence pipeline's final step): the event\n      carries an ``Action`` key and is dispatched to :func:`handle_task`.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the result is POSTed back to CloudFormation.\n    "
+cond466=>condition: if event.get('Action')
+sub470=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
+io475=>inputoutput: output: handle_task(event)
+e473=>end: end function return
+sub481=>subroutine: logger.info(f'Event: {json.dumps(event)}')
+op483=>operation: request_type = event['RequestType']
+op485=>operation: props = event['ResourceProperties']
+op487=>operation: physical_id = event.get('PhysicalResourceId', f"ga-reg-{props['ClusterName']}")
+cond493=>condition: if request_type == 'Delete'
+sub497=>subroutine: handle_delete(event, context, props, physical_id)
+cond489=>condition: exception raised?
+cond504=>condition: except Exception as e
+sub508=>subroutine: logger.error(f'Error: {e}', exc_info=True)
+cond511=>condition: if request_type == 'Delete'
+sub515=>subroutine: send_response(event, context, 'SUCCESS', {}, physical_id)
+sub519=>subroutine: send_response(event, context, 'FAILED', {}, physical_id, str(e))
+sub501=>subroutine: handle_create_update(event, context, props, physical_id)
 
-op469->sub471
-sub471->op473
-op473->op475
-op475->op477
-op477->cond483
-cond483(yes)->sub487
-sub487->cond479
-cond479(yes)->cond494
-cond494(yes)->sub498
-sub498->cond501
-cond501(yes)->sub505
-cond501(no)->sub509
-cond483(no)->sub491
-sub491->cond479
+op463->cond466
+cond466(yes)->sub470
+sub470->io475
+io475->e473
+cond466(no)->sub481
+sub481->op483
+op483->op485
+op485->op487
+op487->cond493
+cond493(yes)->sub497
+sub497->cond489
+cond489(yes)->cond504
+cond504(yes)->sub508
+sub508->cond511
+cond511(yes)->sub515
+cond511(no)->sub519
+cond493(no)->sub501
+sub501->cond489
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

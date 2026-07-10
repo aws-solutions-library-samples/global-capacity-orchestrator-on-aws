@@ -205,52 +205,52 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2057=>operation: 'Build a container image and push it to the project\'s ECR repo.\n\n        Args:\n            context: Build context directory.\n            name: Image name (validated; lowercase letters, digits, dashes).\n            tag: Image tag (defaults to git short SHA, else ``latest``).\n            dockerfile: Path to the Dockerfile, relative to ``context``.\n            build_args: Optional ``KEY=value`` build args.\n            platform: ``--platform`` argument for the build (default\n                ``linux/amd64``).\n            retain: When True, mark the repository with ``gco:retain=true``\n                so it survives stack destroys.\n\n        Returns:\n            ``{"image_uri", "digest", "size_bytes", ...}``.\n        '
-op2059=>operation: ctx = self._validate_context(context)
-op2061=>operation: validated_name = self._validate_name(name)
-op2063=>operation: validated_tag = self._validate_tag(tag if tag is not None else self._default_tag())
-op2065=>operation: df_path = (ctx / dockerfile).resolve()
-cond2068=>operation: raise FileNotFoundError(f'Dockerfile not found: {df_path} (relative to {ctx})') if  not df_path.exists() or not df_path.is_file()
-cond2079=>operation: raise ValueError(f'Dockerfile must live inside the build context: {df_path}') if  not str(df_path).startswith(str(ctx))
-op2089=>operation: runtime = self._runtime_or_error()
-sub2091=>subroutine: self.init(name, retain=retain)
-sub2093=>subroutine: self._check_tag_immutable_collision(validated_name, validated_tag)
-sub2095=>subroutine: self._ecr_login(runtime)
-op2097=>operation: full_uri = f'{self._registry_host()}/{_REPO_PREFIX}/{validated_name}:{validated_tag}'
-op2099=>operation: build_cmd: list[str] = [runtime, 'build', '-t', full_uri, '--platform', platform, '-f', str(df_path)]
-cond2102=>operation: build_cmd.extend(['--build-arg', f'{key}={value}']) while  key, value in (build_args or {}).items()
-sub2111=>subroutine: build_cmd.append(str(ctx))
-sub2113=>subroutine: logger.info('Building image: %s', ' '.join(build_cmd))
-sub2115=>subroutine: subprocess.run(build_cmd, check=True, cwd=str(ctx))
-op2117=>operation: push_result = subprocess.run([runtime, 'push', full_uri], capture_output=True, text=True, check=True, cwd=str(ctx))
-op2119=>operation: digest = self._extract_digest((push_result.stdout or '') + (push_result.stderr or ''))
-cond2122=>operation: self._apply_retain_tag(validated_name) if  retain
-op2132=>operation: size_bytes = self._image_size_bytes(validated_name, validated_tag)
-io2137=>inputoutput: output: {'image_uri': full_uri, 'digest': digest, 'size_bytes': size_bytes, 'runtime': runtime, 'repository': f'{_REPO_PREFIX}/{validated_name}', 'tag': validated_tag, 'region': self.region, 'retain': retain}
-e2135=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op2164=>operation: 'Build a container image and push it to the project\'s ECR repo.\n\n        Args:\n            context: Build context directory.\n            name: Image name (validated; lowercase letters, digits, dashes).\n            tag: Image tag (defaults to git short SHA, else ``latest``).\n            dockerfile: Path to the Dockerfile, relative to ``context``.\n            build_args: Optional ``KEY=value`` build args.\n            platform: ``--platform`` argument for the build (default\n                ``linux/amd64``).\n            retain: When True, mark the repository with ``gco:retain=true``\n                so it survives stack destroys.\n\n        Returns:\n            ``{"image_uri", "digest", "size_bytes", ...}``.\n        '
+op2166=>operation: ctx = self._validate_context(context)
+op2168=>operation: validated_name = self._validate_name(name)
+op2170=>operation: validated_tag = self._validate_tag(tag if tag is not None else self._default_tag())
+op2172=>operation: df_path = (ctx / dockerfile).resolve()
+cond2175=>operation: raise FileNotFoundError(f'Dockerfile not found: {df_path} (relative to {ctx})') if  not df_path.exists() or not df_path.is_file()
+cond2186=>operation: raise ValueError(f'Dockerfile must live inside the build context: {df_path}') if  not str(df_path).startswith(str(ctx))
+op2196=>operation: runtime = self._runtime_or_error()
+sub2198=>subroutine: self.init(name, retain=retain)
+sub2200=>subroutine: self._check_tag_immutable_collision(validated_name, validated_tag)
+sub2202=>subroutine: self._ecr_login(runtime)
+op2204=>operation: full_uri = f'{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}'
+op2206=>operation: build_cmd: list[str] = [runtime, 'build', '-t', full_uri, '--platform', platform, '-f', str(df_path)]
+cond2209=>operation: build_cmd.extend(['--build-arg', f'{key}={value}']) while  key, value in (build_args or {}).items()
+sub2218=>subroutine: build_cmd.append(str(ctx))
+sub2220=>subroutine: logger.info('Building image: %s', ' '.join(build_cmd))
+sub2222=>subroutine: subprocess.run(build_cmd, check=True, cwd=str(ctx))
+op2224=>operation: push_result = subprocess.run([runtime, 'push', full_uri], capture_output=True, text=True, check=True, cwd=str(ctx))
+op2226=>operation: digest = self._extract_digest((push_result.stdout or '') + (push_result.stderr or ''))
+cond2229=>operation: self._apply_retain_tag(validated_name) if  retain
+op2239=>operation: size_bytes = self._image_size_bytes(validated_name, validated_tag)
+io2244=>inputoutput: output: {'image_uri': full_uri, 'digest': digest, 'size_bytes': size_bytes, 'runtime': runtime, 'repository': f'{self._repo_prefix}/{validated_name}', 'tag': validated_tag, 'region': self.region, 'retain': retain}
+e2242=>end: end function return
 
-op2057->op2059
-op2059->op2061
-op2061->op2063
-op2063->op2065
-op2065->cond2068
-cond2068->cond2079
-cond2079->op2089
-op2089->sub2091
-sub2091->sub2093
-sub2093->sub2095
-sub2095->op2097
-op2097->op2099
-op2099->cond2102
-cond2102->sub2111
-sub2111->sub2113
-sub2113->sub2115
-sub2115->op2117
-op2117->op2119
-op2119->cond2122
-cond2122->op2132
-op2132->io2137
-io2137->e2135
+op2164->op2166
+op2166->op2168
+op2168->op2170
+op2170->op2172
+op2172->cond2175
+cond2175->cond2186
+cond2186->op2196
+op2196->sub2198
+sub2198->sub2200
+sub2200->sub2202
+sub2202->op2204
+op2204->op2206
+op2206->cond2209
+cond2209->sub2218
+sub2218->sub2220
+sub2220->sub2222
+sub2222->op2224
+op2224->op2226
+op2226->cond2229
+cond2229->op2239
+op2239->io2244
+io2244->e2242
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

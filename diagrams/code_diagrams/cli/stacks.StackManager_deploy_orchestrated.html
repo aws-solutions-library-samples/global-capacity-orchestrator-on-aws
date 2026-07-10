@@ -205,114 +205,114 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op978=>operation: '\n        Deploy all stacks in the correct order.\n\n        Deploys global stacks first, then regional stacks (optionally in parallel),\n        then the monitoring stack (which depends on regional stacks).\n\n        Args:\n            require_approval: Whether to require approval for changes\n            outputs_file: File to write outputs to\n            parameters: CDK parameters\n            tags: Tags to apply to stacks\n            progress: Progress display type\n            on_stack_start: Callback(stack_name) called when starting a stack\n            on_stack_complete: Callback(stack_name, success) called when stack completes\n            parallel: Deploy regional stacks in parallel\n            max_workers: Maximum number of parallel deployments (default: 4)\n\n        Returns:\n            Tuple of (overall_success, successful_stacks, failed_stacks)\n        '
-op980=>operation: stacks = self.list_stacks()
-op982=>operation: ordered_stacks = get_stack_deployment_order(stacks)
-op984=>operation: pre_regional = {'gco-global', 'gco-api-gateway'}
-op986=>operation: post_regional = {'gco-monitoring'}
-op988=>operation: pre_regional_stacks = [s for s in ordered_stacks if s in pre_regional]
-op990=>operation: regional_stacks = [s for s in ordered_stacks if s not in pre_regional and s not in post_regional]
-op992=>operation: post_regional_stacks = [s for s in ordered_stacks if s in post_regional]
-op994=>operation: successful: list[str] = []
-op996=>operation: failed: list[str] = []
-cond999=>condition: for stack_name in pre_regional_stacks
-cond1004=>operation: on_stack_start(stack_name) if  on_stack_start
-op1014=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress)
-cond1017=>condition: if success
-sub1021=>subroutine: successful.append(stack_name)
-cond1029=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
-cond1040=>condition: if not success
-io1047=>inputoutput: output: (False, successful, failed)
-e1045=>end: end function return
-sub1025=>subroutine: failed.append(stack_name)
-cond1056=>condition: if regional_stacks
-cond1061=>condition: if parallel and len(regional_stacks) > 1
-op1065=>operation: successful_regional, failed_regional = self._deploy_stacks_parallel(stacks=regional_stacks, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete, max_workers=max_workers)
-sub1067=>subroutine: successful.extend(successful_regional)
-sub1069=>subroutine: failed.extend(failed_regional)
-cond1072=>condition: if failed_regional
-io1079=>inputoutput: output: (False, successful, failed)
-e1077=>end: end function return
-cond1149=>condition: for stack_name in post_regional_stacks
-cond1154=>operation: on_stack_start(stack_name) if  on_stack_start
-op1164=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, exclusively=True)
-cond1167=>condition: if success
-sub1171=>subroutine: successful.append(stack_name)
-cond1179=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
-cond1190=>condition: if not success
-io1197=>inputoutput: output: (False, successful, failed)
-e1195=>end: end function return
-sub1175=>subroutine: failed.append(stack_name)
-io1208=>inputoutput: output: (len(failed) == 0, successful, failed)
-e1206=>end: end function return
-cond1088=>condition: for stack_name in regional_stacks
-cond1093=>operation: on_stack_start(stack_name) if  on_stack_start
-op1103=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, exclusively=True)
-cond1106=>condition: if success
-sub1110=>subroutine: successful.append(stack_name)
-cond1118=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
-cond1129=>condition: if not success
-io1136=>inputoutput: output: (False, successful, failed)
-e1134=>end: end function return
-sub1114=>subroutine: failed.append(stack_name)
+        <div><textarea id="code" style="width: 100%;" rows="11">op1020=>operation: '\n        Deploy all stacks in the correct order.\n\n        Deploys global stacks first, then regional stacks (optionally in parallel),\n        then the monitoring stack (which depends on regional stacks).\n\n        Args:\n            require_approval: Whether to require approval for changes\n            outputs_file: File to write outputs to\n            parameters: CDK parameters\n            tags: Tags to apply to stacks\n            progress: Progress display type\n            on_stack_start: Callback(stack_name) called when starting a stack\n            on_stack_complete: Callback(stack_name, success) called when stack completes\n            parallel: Deploy regional stacks in parallel\n            max_workers: Maximum number of parallel deployments (default: 4)\n\n        Returns:\n            Tuple of (overall_success, successful_stacks, failed_stacks)\n        '
+op1022=>operation: stacks = self.list_stacks()
+op1024=>operation: ordered_stacks = get_stack_deployment_order(stacks)
+op1026=>operation: pre_regional = {'gco-global', 'gco-api-gateway'}
+op1028=>operation: post_regional = {'gco-monitoring'}
+op1030=>operation: pre_regional_stacks = [s for s in ordered_stacks if s in pre_regional]
+op1032=>operation: regional_stacks = [s for s in ordered_stacks if s not in pre_regional and s not in post_regional]
+op1034=>operation: post_regional_stacks = [s for s in ordered_stacks if s in post_regional]
+op1036=>operation: successful: list[str] = []
+op1038=>operation: failed: list[str] = []
+cond1041=>condition: for stack_name in pre_regional_stacks
+cond1046=>operation: on_stack_start(stack_name) if  on_stack_start
+op1056=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress)
+cond1059=>condition: if success
+sub1063=>subroutine: successful.append(stack_name)
+cond1071=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
+cond1082=>condition: if not success
+io1089=>inputoutput: output: (False, successful, failed)
+e1087=>end: end function return
+sub1067=>subroutine: failed.append(stack_name)
+cond1098=>condition: if regional_stacks
+cond1103=>condition: if parallel and len(regional_stacks) > 1
+op1107=>operation: successful_regional, failed_regional = self._deploy_stacks_parallel(stacks=regional_stacks, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete, max_workers=max_workers)
+sub1109=>subroutine: successful.extend(successful_regional)
+sub1111=>subroutine: failed.extend(failed_regional)
+cond1114=>condition: if failed_regional
+io1121=>inputoutput: output: (False, successful, failed)
+e1119=>end: end function return
+cond1191=>condition: for stack_name in post_regional_stacks
+cond1196=>operation: on_stack_start(stack_name) if  on_stack_start
+op1206=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, exclusively=True)
+cond1209=>condition: if success
+sub1213=>subroutine: successful.append(stack_name)
+cond1221=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
+cond1232=>condition: if not success
+io1239=>inputoutput: output: (False, successful, failed)
+e1237=>end: end function return
+sub1217=>subroutine: failed.append(stack_name)
+io1250=>inputoutput: output: (len(failed) == 0, successful, failed)
+e1248=>end: end function return
+cond1130=>condition: for stack_name in regional_stacks
+cond1135=>operation: on_stack_start(stack_name) if  on_stack_start
+op1145=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, exclusively=True)
+cond1148=>condition: if success
+sub1152=>subroutine: successful.append(stack_name)
+cond1160=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
+cond1171=>condition: if not success
+io1178=>inputoutput: output: (False, successful, failed)
+e1176=>end: end function return
+sub1156=>subroutine: failed.append(stack_name)
 
-op978->op980
-op980->op982
-op982->op984
-op984->op986
-op986->op988
-op988->op990
-op990->op992
-op992->op994
-op994->op996
-op996->cond999
-cond999(yes)->cond1004
-cond1004->op1014
-op1014->cond1017
-cond1017(yes)->sub1021
-sub1021->cond1029
-cond1029->cond1040
-cond1040(yes)->io1047
-io1047->e1045
-cond1040(no)->cond999
-cond1017(no)->sub1025
-sub1025->cond1029
-cond999(no)->cond1056
-cond1056(yes)->cond1061
-cond1061(yes)->op1065
-op1065->sub1067
-sub1067->sub1069
-sub1069->cond1072
-cond1072(yes)->io1079
-io1079->e1077
-cond1072(no)->cond1149
-cond1149(yes)->cond1154
-cond1154->op1164
-op1164->cond1167
-cond1167(yes)->sub1171
-sub1171->cond1179
-cond1179->cond1190
-cond1190(yes)->io1197
-io1197->e1195
-cond1190(no)->cond1149
-cond1167(no)->sub1175
-sub1175->cond1179
-cond1149(no)->io1208
-io1208->e1206
-cond1061(no)->cond1088
-cond1088(yes)->cond1093
-cond1093->op1103
-op1103->cond1106
-cond1106(yes)->sub1110
-sub1110->cond1118
-cond1118->cond1129
-cond1129(yes)->io1136
-io1136->e1134
-cond1129(no)->cond1088
-cond1106(no)->sub1114
-sub1114->cond1118
-cond1088(no)->cond1149
-cond1056(no)->cond1149
+op1020->op1022
+op1022->op1024
+op1024->op1026
+op1026->op1028
+op1028->op1030
+op1030->op1032
+op1032->op1034
+op1034->op1036
+op1036->op1038
+op1038->cond1041
+cond1041(yes)->cond1046
+cond1046->op1056
+op1056->cond1059
+cond1059(yes)->sub1063
+sub1063->cond1071
+cond1071->cond1082
+cond1082(yes)->io1089
+io1089->e1087
+cond1082(no)->cond1041
+cond1059(no)->sub1067
+sub1067->cond1071
+cond1041(no)->cond1098
+cond1098(yes)->cond1103
+cond1103(yes)->op1107
+op1107->sub1109
+sub1109->sub1111
+sub1111->cond1114
+cond1114(yes)->io1121
+io1121->e1119
+cond1114(no)->cond1191
+cond1191(yes)->cond1196
+cond1196->op1206
+op1206->cond1209
+cond1209(yes)->sub1213
+sub1213->cond1221
+cond1221->cond1232
+cond1232(yes)->io1239
+io1239->e1237
+cond1232(no)->cond1191
+cond1209(no)->sub1217
+sub1217->cond1221
+cond1191(no)->io1250
+io1250->e1248
+cond1103(no)->cond1130
+cond1130(yes)->cond1135
+cond1135->op1145
+op1145->cond1148
+cond1148(yes)->sub1152
+sub1152->cond1160
+cond1160->cond1171
+cond1171(yes)->io1178
+io1178->e1176
+cond1171(no)->cond1130
+cond1148(no)->sub1156
+sub1156->cond1160
+cond1130(no)->cond1191
+cond1098(no)->cond1191
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

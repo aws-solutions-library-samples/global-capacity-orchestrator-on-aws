@@ -51,6 +51,8 @@ from gco.stacks.constants import (
 # Flowchart(s) generated from this file:
 #   * ``GCOGlobalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/global_stack.GCOGlobalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/global_stack.GCOGlobalStack___init__.png``)
+#   * ``GCOGlobalStack._create_image_replication_rule`` -> ``diagrams/code_diagrams/gco/stacks/global_stack.GCOGlobalStack__create_image_replication_rule.html``
+#     (PNG: ``diagrams/code_diagrams/gco/stacks/global_stack.GCOGlobalStack__create_image_replication_rule.png``)
 # Regenerate with ``python diagrams/code_diagrams/generate.py``.
 # <pyflowchart-code-diagram> END
 

@@ -205,8 +205,8 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op103=>operation: 'Exchange a Cognito-authorized event for a presigned Studio URL.\n\n    Returns:\n\n    * **HTTP 200** with ``{"url": "...", "expires_in": N}`` when the\n      user profile is ``InService`` and the presigned URL is ready.\n    * **HTTP 202** with ``{"status": "provisioning"}`` when the user\n      profile is still being created.  The CLI should retry after a\n      few seconds.\n    * **HTTP 4xx / 5xx** with ``{"error": "<token>"}`` on failure.\n\n    The Lambda never blocks waiting for profile provisioning.  The CLI\n    is responsible for polling until it receives HTTP 200.\n    '
-op106=>operation: claims = _parse_claims(event)
+        <div><textarea id="code" style="width: 100%;" rows="11">op97=>operation: 'Exchange a Cognito-authorized event for a presigned Studio URL.\n\n    Returns:\n\n    * **HTTP 200** with ``{"url": "...", "expires_in": N}`` when the\n      user profile is ``InService`` and the presigned URL is ready.\n    * **HTTP 202** with ``{"status": "provisioning"}`` when the user\n      profile is still being created.  The CLI should retry after a\n      few seconds.\n    * **HTTP 4xx / 5xx** with ``{"error": "<token>"}`` on failure.\n\n    The Lambda never blocks waiting for profile provisioning.  The CLI\n    is responsible for polling until it receives HTTP 200.\n    '
+op100=>operation: claims = _parse_claims(event)
 username = claims.get('cognito:username') or claims.get('username')
 if not isinstance(username, str) or not username:
     logger.warning('Request missing Cognito username claim')
@@ -222,18 +222,18 @@ _ensure_access_point(username, STUDIO_EFS_ID)
 response = sagemaker.create_presigned_domain_url(DomainId=domain_id, UserProfileName=username, SessionExpirationDurationInSeconds=SESSION_EXPIRES_SECONDS, ExpiresInSeconds=URL_EXPIRES_SECONDS)
 url = response.get('AuthorizedUrl', '')
 return _format_success(url, URL_EXPIRES_SECONDS)
-cond105=>condition: exception raised?
-cond108=>condition: except Exception as exc
-sub112=>subroutine: logger.error('Presigned URL generation failed: %s', exc, exc_info=True)
-io117=>inputoutput: output: _format_error(500, _ERR_GENERIC)
-e115=>end: end function return
+cond99=>condition: exception raised?
+cond102=>condition: except Exception as exc
+sub106=>subroutine: logger.error('Presigned URL generation failed: %s', exc, exc_info=True)
+io111=>inputoutput: output: _format_error(500, _ERR_GENERIC)
+e109=>end: end function return
 
-op103->op106
-op106->cond105
-cond105(yes)->cond108
-cond108(yes)->sub112
-sub112->io117
-io117->e115
+op97->op100
+op100->cond99
+cond99(yes)->cond102
+cond102(yes)->sub106
+sub106->io111
+io111->e109
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

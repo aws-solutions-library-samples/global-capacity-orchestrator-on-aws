@@ -205,38 +205,38 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2142=>operation: "Push an already-built local image to the project's ECR repo.\n\n        Tags ``local_image`` as the project URI before invoking\n        ``<runtime> push``. Skips the build step but otherwise mirrors\n        ``build`` (init repo, login, push, optional retain tag).\n        "
-op2144=>operation: validated_name = self._validate_name(name)
-op2146=>operation: validated_tag = self._validate_tag(tag)
-cond2149=>operation: raise ValueError('local_image must be a non-empty image reference') if  not local_image
-op2159=>operation: runtime = self._runtime_or_error()
-sub2161=>subroutine: self.init(name, retain=retain)
-sub2163=>subroutine: self._check_tag_immutable_collision(validated_name, validated_tag)
-sub2165=>subroutine: self._ecr_login(runtime)
-op2167=>operation: full_uri = f'{self._registry_host()}/{_REPO_PREFIX}/{validated_name}:{validated_tag}'
-sub2169=>subroutine: subprocess.run([runtime, 'tag', local_image, full_uri], check=True)
-op2171=>operation: push_result = subprocess.run([runtime, 'push', full_uri], capture_output=True, text=True, check=True)
-op2173=>operation: digest = self._extract_digest((push_result.stdout or '') + (push_result.stderr or ''))
-cond2176=>operation: self._apply_retain_tag(validated_name) if  retain
-op2186=>operation: size_bytes = self._image_size_bytes(validated_name, validated_tag)
-io2191=>inputoutput: output: {'image_uri': full_uri, 'digest': digest, 'size_bytes': size_bytes, 'runtime': runtime, 'repository': f'{_REPO_PREFIX}/{validated_name}', 'tag': validated_tag, 'region': self.region, 'retain': retain}
-e2189=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op2249=>operation: "Push an already-built local image to the project's ECR repo.\n\n        Tags ``local_image`` as the project URI before invoking\n        ``<runtime> push``. Skips the build step but otherwise mirrors\n        ``build`` (init repo, login, push, optional retain tag).\n        "
+op2251=>operation: validated_name = self._validate_name(name)
+op2253=>operation: validated_tag = self._validate_tag(tag)
+cond2256=>operation: raise ValueError('local_image must be a non-empty image reference') if  not local_image
+op2266=>operation: runtime = self._runtime_or_error()
+sub2268=>subroutine: self.init(name, retain=retain)
+sub2270=>subroutine: self._check_tag_immutable_collision(validated_name, validated_tag)
+sub2272=>subroutine: self._ecr_login(runtime)
+op2274=>operation: full_uri = f'{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}'
+sub2276=>subroutine: subprocess.run([runtime, 'tag', local_image, full_uri], check=True)
+op2278=>operation: push_result = subprocess.run([runtime, 'push', full_uri], capture_output=True, text=True, check=True)
+op2280=>operation: digest = self._extract_digest((push_result.stdout or '') + (push_result.stderr or ''))
+cond2283=>operation: self._apply_retain_tag(validated_name) if  retain
+op2293=>operation: size_bytes = self._image_size_bytes(validated_name, validated_tag)
+io2298=>inputoutput: output: {'image_uri': full_uri, 'digest': digest, 'size_bytes': size_bytes, 'runtime': runtime, 'repository': f'{self._repo_prefix}/{validated_name}', 'tag': validated_tag, 'region': self.region, 'retain': retain}
+e2296=>end: end function return
 
-op2142->op2144
-op2144->op2146
-op2146->cond2149
-cond2149->op2159
-op2159->sub2161
-sub2161->sub2163
-sub2163->sub2165
-sub2165->op2167
-op2167->sub2169
-sub2169->op2171
-op2171->op2173
-op2173->cond2176
-cond2176->op2186
-op2186->io2191
-io2191->e2189
+op2249->op2251
+op2251->op2253
+op2253->cond2256
+cond2256->op2266
+op2266->sub2268
+sub2268->sub2270
+sub2270->sub2272
+sub2272->op2274
+op2274->sub2276
+sub2276->op2278
+op2278->op2280
+op2280->cond2283
+cond2283->op2293
+op2293->io2298
+io2298->e2296
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

@@ -205,66 +205,66 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op371=>operation: 'Run CloudFormation drift detection and publish SNS alerts on drift.\n\n    Args:\n        event: EventBridge scheduled event (payload unused)\n        context: Lambda context\n\n    Returns:\n        Dict with drift detection results for logging/debugging\n    '
-op373=>operation: stack_name = os.environ.get('STACK_NAME')
-op375=>operation: sns_topic_arn = os.environ.get('SNS_TOPIC_ARN')
-op377=>operation: region = os.environ.get('REGION') or os.environ.get('AWS_REGION')
-cond380=>operation: raise ValueError('STACK_NAME environment variable is required') if  not stack_name
-cond391=>operation: raise ValueError('SNS_TOPIC_ARN environment variable is required') if  not sns_topic_arn
-op401=>operation: poll_interval = int(os.environ.get('POLL_INTERVAL_SECONDS', str(DEFAULT_POLL_INTERVAL_SECONDS)))
-op403=>operation: poll_max_attempts = int(os.environ.get('POLL_MAX_ATTEMPTS', str(DEFAULT_POLL_MAX_ATTEMPTS)))
-sub405=>subroutine: logger.info('Starting drift detection for stack=%s region=%s', stack_name, region)
-op407=>operation: cfn = boto3.client('cloudformation', region_name=region)
-op409=>operation: sns = boto3.client('sns', region_name=region)
-op411=>operation: detection_id = cfn.detect_stack_drift(StackName=stack_name)['StackDriftDetectionId']
-sub413=>subroutine: logger.info('Drift detection initiated: detection_id=%s', detection_id)
-op415=>operation: status_response = _poll_detection_status(cfn, detection_id, poll_interval, poll_max_attempts)
-op417=>operation: detection_status = status_response.get('DetectionStatus')
-op419=>operation: stack_drift_status = status_response.get('StackDriftStatus')
-sub421=>subroutine: logger.info('Drift detection finished: detection_status=%s stack_drift_status=%s', detection_status, stack_drift_status)
-cond424=>condition: if detection_status == 'DETECTION_FAILED'
-op428=>operation: reason = status_response.get('DetectionStatusReason', 'Unknown detection failure')
-sub430=>subroutine: _publish_alert(sns, sns_topic_arn, subject=f'[GCO] Drift detection FAILED for {stack_name}', message={'stack_name': stack_name, 'region': region, 'detection_status': detection_status, 'reason': reason})
-io435=>inputoutput: output: {'stack_name': stack_name, 'detection_status': detection_status, 'stack_drift_status': None, 'drift_published': True}
-e433=>end: end function return
-cond442=>condition: if stack_drift_status == 'IN_SYNC'
-sub446=>subroutine: logger.info('Stack %s is IN_SYNC — no alert published', stack_name)
-io451=>inputoutput: output: {'stack_name': stack_name, 'detection_status': detection_status, 'stack_drift_status': stack_drift_status, 'drift_published': False}
-e449=>end: end function return
-op457=>operation: drifted_resources = _list_drifted_resources(cfn, stack_name)
-sub459=>subroutine: _publish_alert(sns, sns_topic_arn, subject=f'[GCO] Drift detected in stack {stack_name}', message={'stack_name': stack_name, 'region': region, 'stack_drift_status': stack_drift_status, 'drifted_resource_count': len(drifted_resources), 'drifted_resources': drifted_resources})
-io464=>inputoutput: output: {'stack_name': stack_name, 'detection_status': detection_status, 'stack_drift_status': stack_drift_status, 'drifted_resource_count': len(drifted_resources), 'drift_published': True}
-e462=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op365=>operation: 'Run CloudFormation drift detection and publish SNS alerts on drift.\n\n    Args:\n        event: EventBridge scheduled event (payload unused)\n        context: Lambda context\n\n    Returns:\n        Dict with drift detection results for logging/debugging\n    '
+op367=>operation: stack_name = os.environ.get('STACK_NAME')
+op369=>operation: sns_topic_arn = os.environ.get('SNS_TOPIC_ARN')
+op371=>operation: region = os.environ.get('REGION') or os.environ.get('AWS_REGION')
+cond374=>operation: raise ValueError('STACK_NAME environment variable is required') if  not stack_name
+cond385=>operation: raise ValueError('SNS_TOPIC_ARN environment variable is required') if  not sns_topic_arn
+op395=>operation: poll_interval = int(os.environ.get('POLL_INTERVAL_SECONDS', str(DEFAULT_POLL_INTERVAL_SECONDS)))
+op397=>operation: poll_max_attempts = int(os.environ.get('POLL_MAX_ATTEMPTS', str(DEFAULT_POLL_MAX_ATTEMPTS)))
+sub399=>subroutine: logger.info('Starting drift detection for stack=%s region=%s', stack_name, region)
+op401=>operation: cfn = boto3.client('cloudformation', region_name=region)
+op403=>operation: sns = boto3.client('sns', region_name=region)
+op405=>operation: detection_id = cfn.detect_stack_drift(StackName=stack_name)['StackDriftDetectionId']
+sub407=>subroutine: logger.info('Drift detection initiated: detection_id=%s', detection_id)
+op409=>operation: status_response = _poll_detection_status(cfn, detection_id, poll_interval, poll_max_attempts)
+op411=>operation: detection_status = status_response.get('DetectionStatus')
+op413=>operation: stack_drift_status = status_response.get('StackDriftStatus')
+sub415=>subroutine: logger.info('Drift detection finished: detection_status=%s stack_drift_status=%s', detection_status, stack_drift_status)
+cond418=>condition: if detection_status == 'DETECTION_FAILED'
+op422=>operation: reason = status_response.get('DetectionStatusReason', 'Unknown detection failure')
+sub424=>subroutine: _publish_alert(sns, sns_topic_arn, subject=f'[GCO] Drift detection FAILED for {stack_name}', message={'stack_name': stack_name, 'region': region, 'detection_status': detection_status, 'reason': reason})
+io429=>inputoutput: output: {'stack_name': stack_name, 'detection_status': detection_status, 'stack_drift_status': None, 'drift_published': True}
+e427=>end: end function return
+cond436=>condition: if stack_drift_status == 'IN_SYNC'
+sub440=>subroutine: logger.info('Stack %s is IN_SYNC — no alert published', stack_name)
+io445=>inputoutput: output: {'stack_name': stack_name, 'detection_status': detection_status, 'stack_drift_status': stack_drift_status, 'drift_published': False}
+e443=>end: end function return
+op451=>operation: drifted_resources = _list_drifted_resources(cfn, stack_name)
+sub453=>subroutine: _publish_alert(sns, sns_topic_arn, subject=f'[GCO] Drift detected in stack {stack_name}', message={'stack_name': stack_name, 'region': region, 'stack_drift_status': stack_drift_status, 'drifted_resource_count': len(drifted_resources), 'drifted_resources': drifted_resources})
+io458=>inputoutput: output: {'stack_name': stack_name, 'detection_status': detection_status, 'stack_drift_status': stack_drift_status, 'drifted_resource_count': len(drifted_resources), 'drift_published': True}
+e456=>end: end function return
 
-op371->op373
-op373->op375
-op375->op377
-op377->cond380
-cond380->cond391
-cond391->op401
+op365->op367
+op367->op369
+op369->op371
+op371->cond374
+cond374->cond385
+cond385->op395
+op395->op397
+op397->sub399
+sub399->op401
 op401->op403
-op403->sub405
-sub405->op407
-op407->op409
+op403->op405
+op405->sub407
+sub407->op409
 op409->op411
-op411->sub413
-sub413->op415
-op415->op417
-op417->op419
-op419->sub421
-sub421->cond424
-cond424(yes)->op428
-op428->sub430
-sub430->io435
-io435->e433
-cond424(no)->cond442
-cond442(yes)->sub446
-sub446->io451
-io451->e449
-cond442(no)->op457
-op457->sub459
-sub459->io464
-io464->e462
+op411->op413
+op413->sub415
+sub415->cond418
+cond418(yes)->op422
+op422->sub424
+sub424->io429
+io429->e427
+cond418(no)->cond436
+cond436(yes)->sub440
+sub440->io445
+io445->e443
+cond436(no)->op451
+op451->sub453
+sub453->io458
+io458->e456
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

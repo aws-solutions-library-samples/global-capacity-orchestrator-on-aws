@@ -205,62 +205,62 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op888=>operation: "GET ``{api_base}/studio/login`` with the Cognito ID token.\n\n    Returns ``(url, expires_in, correlation_id)`` on success. Raises\n    :class:`urllib.error.HTTPError` / :class:`urllib.error.URLError`\n    on transport or HTTP failure; raises ``ValueError`` on malformed\n    response bodies (unexpected JSON shape / missing ``url`` key), or\n    on non-``https://`` ``api_base`` values (guards urllib's\n    ``file://`` / ``ftp://`` scheme support).\n    "
-op890=>operation: import email.message
-op892=>operation: import json as _json
-op894=>operation: import urllib.error
-op896=>operation: import urllib.parse
-op898=>operation: import urllib.request
-op900=>operation: parsed = urllib.parse.urlparse(api_base)
-cond903=>operation: raise ValueError(f'api_base must use https:// scheme (got {parsed.scheme!r}). This guard rejects file:// / ftp:// schemes that urllib would otherwise follow.') if  parsed.scheme != 'https'
-cond914=>operation: raise ValueError(f'api_base is missing a hostname: {api_base!r}') if  not parsed.netloc
-op924=>operation: login_url = api_base.rstrip('/') + '/studio/login'
-op926=>operation: request = urllib.request.Request(login_url, headers={'Authorization': id_token, 'Accept': 'application/json'}, method='GET')
-op928=>operation: with urllib.request.urlopen(request, timeout=30) as response:
+        <div><textarea id="code" style="width: 100%;" rows="11">op930=>operation: "GET ``{api_base}/studio/login`` with the Cognito ID token.\n\n    Returns ``(url, expires_in, correlation_id)`` on success. Raises\n    :class:`urllib.error.HTTPError` / :class:`urllib.error.URLError`\n    on transport or HTTP failure; raises ``ValueError`` on malformed\n    response bodies (unexpected JSON shape / missing ``url`` key), or\n    on non-``https://`` ``api_base`` values (guards urllib's\n    ``file://`` / ``ftp://`` scheme support).\n    "
+op932=>operation: import email.message
+op934=>operation: import json as _json
+op936=>operation: import urllib.error
+op938=>operation: import urllib.parse
+op940=>operation: import urllib.request
+op942=>operation: parsed = urllib.parse.urlparse(api_base)
+cond945=>operation: raise ValueError(f'api_base must use https:// scheme (got {parsed.scheme!r}). This guard rejects file:// / ftp:// schemes that urllib would otherwise follow.') if  parsed.scheme != 'https'
+cond956=>operation: raise ValueError(f'api_base is missing a hostname: {api_base!r}') if  not parsed.netloc
+op966=>operation: login_url = api_base.rstrip('/') + '/studio/login'
+op968=>operation: request = urllib.request.Request(login_url, headers={'Authorization': id_token, 'Accept': 'application/json'}, method='GET')
+op970=>operation: with urllib.request.urlopen(request, timeout=30) as response:
     status = int(response.status)
     body = response.read().decode('utf-8')
     correlation_id = response.headers.get('x-amzn-RequestId') or 'N/A'
-cond931=>condition: if status == 202
-io938=>inputoutput: output: ('', 0, correlation_id)
-e936=>end: end function return
-cond945=>condition: if status != 200
-op949=>operation: headers_msg: email.message.Message = email.message.Message()
-op951=>operation: headers_msg['x-amzn-RequestId'] = correlation_id
-sub953=>subroutine: raise urllib.error.HTTPError(login_url, status, f'Studio login returned HTTP {status}', headers_msg, None)
-op959=>operation: payload = _json.loads(body)
+cond973=>condition: if status == 202
+io980=>inputoutput: output: ('', 0, correlation_id)
+e978=>end: end function return
+cond987=>condition: if status != 200
+op991=>operation: headers_msg: email.message.Message = email.message.Message()
+op993=>operation: headers_msg['x-amzn-RequestId'] = correlation_id
+sub995=>subroutine: raise urllib.error.HTTPError(login_url, status, f'Studio login returned HTTP {status}', headers_msg, None)
+op1001=>operation: payload = _json.loads(body)
 url = str(payload['url'])
 expires_in = int(payload.get('expires_in', 0))
-cond958=>condition: exception raised?
-cond961=>condition: except (ValueError, KeyError) as exc
-sub965=>subroutine: raise ValueError(f'malformed /studio/login response: {exc!r}') from exc
-io973=>inputoutput: output: (url, expires_in, correlation_id)
-e971=>end: end function return
+cond1000=>condition: exception raised?
+cond1003=>condition: except (ValueError, KeyError) as exc
+sub1007=>subroutine: raise ValueError(f'malformed /studio/login response: {exc!r}') from exc
+io1015=>inputoutput: output: (url, expires_in, correlation_id)
+e1013=>end: end function return
 
-op888->op890
-op890->op892
-op892->op894
-op894->op896
-op896->op898
-op898->op900
-op900->cond903
-cond903->cond914
-cond914->op924
-op924->op926
-op926->op928
-op928->cond931
-cond931(yes)->io938
-io938->e936
-cond931(no)->cond945
-cond945(yes)->op949
-op949->op951
-op951->sub953
-cond945(no)->op959
-op959->cond958
-cond958(yes)->cond961
-cond961(yes)->sub965
-cond961(no)->io973
-io973->e971
-cond958(no)->io973
+op930->op932
+op932->op934
+op934->op936
+op936->op938
+op938->op940
+op940->op942
+op942->cond945
+cond945->cond956
+cond956->op966
+op966->op968
+op968->op970
+op970->cond973
+cond973(yes)->io980
+io980->e978
+cond973(no)->cond987
+cond987(yes)->op991
+op991->op993
+op993->sub995
+cond987(no)->op1001
+op1001->cond1000
+cond1000(yes)->cond1003
+cond1003(yes)->sub1007
+cond1003(no)->io1015
+io1015->e1013
+cond1000(no)->io1015
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

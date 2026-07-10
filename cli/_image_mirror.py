@@ -70,6 +70,14 @@ from typing import Any
 import boto3
 import yaml
 
+# <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Flowchart(s) generated from this file:
+#   * ``read_mirror_config`` -> ``diagrams/code_diagrams/cli/_image_mirror.read_mirror_config.html``
+#     (PNG: ``diagrams/code_diagrams/cli/_image_mirror.read_mirror_config.png``)
+# Regenerate with ``python diagrams/code_diagrams/generate.py``.
+# <pyflowchart-code-diagram> END
+
+
 # Repo root is the parent of cli/.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _CHARTS_YAML = _REPO_ROOT / "lambda" / "helm-installer" / "charts.yaml"

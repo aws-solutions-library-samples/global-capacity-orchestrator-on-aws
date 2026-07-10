@@ -121,6 +121,8 @@ from gco.stacks.constants import (
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
+#   * ``GCORegionalStack._get_volcano_image_mirror_config`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack__get_volcano_image_mirror_config.html``
+#     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack__get_volcano_image_mirror_config.png``)
 # Regenerate with ``python diagrams/code_diagrams/generate.py``.
 # <pyflowchart-code-diagram> END
 

@@ -205,20 +205,20 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op870=>operation: 'Authenticate a Cognito user via the ADMIN_USER_PASSWORD_AUTH flow.\n\n    Uses ``admin_initiate_auth`` which sends the password over TLS\n    directly (no client-side SRP math). This requires the user pool\n    client to have ``ALLOW_ADMIN_USER_PASSWORD_AUTH`` enabled and the\n    caller to have ``cognito-idp:AdminInitiateAuth`` permission.\n\n    Returns a dict with ``IdToken``, ``AccessToken``, and\n    ``RefreshToken`` on success. Raises ``botocore.exceptions.ClientError``\n    for Cognito-side failures (``NotAuthorizedException``,\n    ``UserNotFoundException``, etc.).\n    '
-op872=>operation: import boto3
-op874=>operation: cognito = boto3.client('cognito-idp', region_name=region)
-op876=>operation: response = cognito.admin_initiate_auth(UserPoolId=pool_id, ClientId=client_id, AuthFlow='ADMIN_USER_PASSWORD_AUTH', AuthParameters={'USERNAME': username, 'PASSWORD': password})
-op878=>operation: tokens = response.get('AuthenticationResult') or {}
-io883=>inputoutput: output: {'IdToken': str(tokens.get('IdToken', '')), 'AccessToken': str(tokens.get('AccessToken', '')), 'RefreshToken': str(tokens.get('RefreshToken', ''))}
-e881=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op912=>operation: 'Authenticate a Cognito user via the ADMIN_USER_PASSWORD_AUTH flow.\n\n    Uses ``admin_initiate_auth`` which sends the password over TLS\n    directly (no client-side SRP math). This requires the user pool\n    client to have ``ALLOW_ADMIN_USER_PASSWORD_AUTH`` enabled and the\n    caller to have ``cognito-idp:AdminInitiateAuth`` permission.\n\n    Returns a dict with ``IdToken``, ``AccessToken``, and\n    ``RefreshToken`` on success. Raises ``botocore.exceptions.ClientError``\n    for Cognito-side failures (``NotAuthorizedException``,\n    ``UserNotFoundException``, etc.).\n    '
+op914=>operation: import boto3
+op916=>operation: cognito = boto3.client('cognito-idp', region_name=region)
+op918=>operation: response = cognito.admin_initiate_auth(UserPoolId=pool_id, ClientId=client_id, AuthFlow='ADMIN_USER_PASSWORD_AUTH', AuthParameters={'USERNAME': username, 'PASSWORD': password})
+op920=>operation: tokens = response.get('AuthenticationResult') or {}
+io925=>inputoutput: output: {'IdToken': str(tokens.get('IdToken', '')), 'AccessToken': str(tokens.get('AccessToken', '')), 'RefreshToken': str(tokens.get('RefreshToken', ''))}
+e923=>end: end function return
 
-op870->op872
-op872->op874
-op874->op876
-op876->op878
-op878->io883
-io883->e881
+op912->op914
+op914->op916
+op916->op918
+op918->op920
+op920->io925
+io925->e923
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

@@ -208,77 +208,71 @@ function base64ToSvgDocument(base64) {
         <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: '\n    Main application entry point.\n\n    Creates and configures all CDK stacks with proper dependencies:\n    1. Global stack (Global Accelerator) - must be created first\n    2. API Gateway stack - depends on Global Accelerator DNS\n    3. Regional stacks - depend on both global stacks\n    4. Monitoring stack - depends on all regional stacks\n    '
 op4=>operation: app = cdk.App()
 sub6=>subroutine: cdk.Aspects.of(app).add(LambdaTracingAspect())
-sub8=>subroutine: cdk.Aspects.of(app).add(AwsSolutionsChecks(verbose=True))
-sub10=>subroutine: cdk.Aspects.of(app).add(HIPAASecurityChecks(verbose=True))
-sub12=>subroutine: cdk.Aspects.of(app).add(NIST80053R5Checks(verbose=True))
-sub14=>subroutine: cdk.Aspects.of(app).add(PCIDSS321Checks(verbose=True))
-sub16=>subroutine: cdk.Aspects.of(app).add(ServerlessChecks(verbose=True))
-op18=>operation: config = ConfigLoader(app)
-op20=>operation: project_name = config.get_project_name()
-op22=>operation: deployment_regions = config.get_deployment_regions()
-op24=>operation: tags = config.get_tags()
-op26=>operation: global_region = deployment_regions['global']
-op28=>operation: api_gateway_region = deployment_regions['api_gateway']
-op30=>operation: monitoring_region = deployment_regions['monitoring']
-op32=>operation: regional_regions = deployment_regions['regional']
-cond35=>operation: cdk.Tags.of(app).add(key, value) while  key, value in tags.items()
-op44=>operation: global_stack = GCOGlobalStack(app, f'{project_name}-global', config=config, env=cdk.Environment(region=global_region), description='Global resources including AWS Global Accelerator for GCO (Global Capacity Orchestrator on AWS)')
-op46=>operation: api_gateway_stack = GCOApiGatewayGlobalStack(app, f'{project_name}-api-gateway', global_accelerator_dns=global_stack.accelerator.dns_name, env=cdk.Environment(region=api_gateway_region), description='Global API Gateway with IAM authentication')
-sub48=>subroutine: api_gateway_stack.add_dependency(global_stack)
-op50=>operation: regional_stacks = []
-cond53=>condition: for region in regional_regions
-op57=>operation: regional_stack = GCORegionalStack(app, f'{project_name}-{region}', config=config, region=region, auth_secret_arn=api_gateway_stack.secret.secret_arn, env=cdk.Environment(region=region), description=f'Regional resources for {region} - EKS cluster, ALB, and services')
-sub59=>subroutine: regional_stack.add_dependency(global_stack)
-sub61=>subroutine: regional_stack.add_dependency(api_gateway_stack)
-sub63=>subroutine: regional_stacks.append(regional_stack)
-sub65=>subroutine: global_stack.add_regional_endpoint(region, regional_stack.alb_arn)
-op69=>operation: monitoring_stack = GCOMonitoringStack(app, f'{project_name}-monitoring', config=config, global_stack=global_stack, regional_stacks=regional_stacks, api_gateway_stack=api_gateway_stack, env=cdk.Environment(region=monitoring_region), description='Cross-region monitoring and observability for GCO (Global Capacity Orchestrator on AWS)')
-cond72=>operation: monitoring_stack.add_dependency(regional_stack) while  regional_stack in regional_stacks
-cond82=>condition: if config.get_analytics_enabled()
-op86=>operation: analytics_stack = GCOAnalyticsStack(app, f'{project_name}-analytics', config=config, env=cdk.Environment(region=api_gateway_region), description='Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)')
-sub88=>subroutine: analytics_stack.add_dependency(global_stack)
-op90=>operation: analytics_api_config = AnalyticsApiConfig(user_pool_arn=analytics_stack.cognito_pool.user_pool_arn, user_pool_client_id=analytics_stack.cognito_client.user_pool_client_id, presigned_url_lambda=analytics_stack.presigned_url_lambda, studio_domain_name=analytics_stack.studio_domain.domain_name or '', callback_url=f'https://{api_gateway_stack.api.rest_api_id}.execute-api.{api_gateway_region}.amazonaws.com/prod/studio/callback')
-sub92=>subroutine: api_gateway_stack.set_analytics_config(analytics_api_config)
-sub94=>subroutine: api_gateway_stack.add_dependency(analytics_stack)
-sub99=>subroutine: app.synth()
+sub8=>subroutine: cdk.Validations.of(app).add_plugins(*nag_validation_plugins(app, verbose=True))
+op10=>operation: config = ConfigLoader(app)
+op12=>operation: project_name = config.get_project_name()
+op14=>operation: deployment_regions = config.get_deployment_regions()
+op16=>operation: tags = config.get_tags()
+op18=>operation: global_region = deployment_regions['global']
+op20=>operation: api_gateway_region = deployment_regions['api_gateway']
+op22=>operation: monitoring_region = deployment_regions['monitoring']
+op24=>operation: regional_regions = deployment_regions['regional']
+cond27=>operation: cdk.Tags.of(app).add(key, value) while  key, value in tags.items()
+op36=>operation: account = os.environ.get('CDK_DEFAULT_ACCOUNT')
+op38=>operation: global_stack = GCOGlobalStack(app, f'{project_name}-global', config=config, env=cdk.Environment(account=account, region=global_region), description=f'{SOLUTION_DESCRIPTION_PREFIX} - Global resources including AWS Global Accelerator for GCO (Global Capacity Orchestrator on AWS)')
+op40=>operation: api_gateway_stack = GCOApiGatewayGlobalStack(app, f'{project_name}-api-gateway', global_accelerator_dns=global_stack.accelerator.dns_name, project_name=project_name, env=cdk.Environment(account=account, region=api_gateway_region), description='Global API Gateway with IAM authentication')
+sub42=>subroutine: api_gateway_stack.add_dependency(global_stack)
+op44=>operation: regional_stacks = []
+cond47=>condition: for region in regional_regions
+op51=>operation: regional_stack = GCORegionalStack(app, f'{project_name}-{region}', config=config, region=region, auth_secret_arn=api_gateway_stack.secret.secret_arn, env=cdk.Environment(account=account, region=region), description=f'Regional resources for {region} - EKS cluster, ALB, and services')
+sub53=>subroutine: regional_stack.add_dependency(global_stack)
+sub55=>subroutine: regional_stack.add_dependency(api_gateway_stack)
+sub57=>subroutine: regional_stacks.append(regional_stack)
+sub59=>subroutine: global_stack.add_regional_endpoint(region, regional_stack.alb_arn)
+op63=>operation: monitoring_stack = GCOMonitoringStack(app, f'{project_name}-monitoring', config=config, global_stack=global_stack, regional_stacks=regional_stacks, api_gateway_stack=api_gateway_stack, env=cdk.Environment(account=account, region=monitoring_region), description='Cross-region monitoring and observability for GCO (Global Capacity Orchestrator on AWS)')
+cond66=>operation: monitoring_stack.add_dependency(regional_stack) while  regional_stack in regional_stacks
+cond76=>condition: if config.get_analytics_enabled()
+op80=>operation: analytics_stack = GCOAnalyticsStack(app, f'{project_name}-analytics', config=config, env=cdk.Environment(account=account, region=api_gateway_region), description='Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)')
+sub82=>subroutine: analytics_stack.add_dependency(global_stack)
+op84=>operation: analytics_api_config = AnalyticsApiConfig(user_pool_arn=analytics_stack.cognito_pool.user_pool_arn, user_pool_client_id=analytics_stack.cognito_client.user_pool_client_id, presigned_url_lambda=analytics_stack.presigned_url_lambda, studio_domain_name=analytics_stack.studio_domain.domain_name or '', callback_url=f'https://{api_gateway_stack.api.rest_api_id}.execute-api.{api_gateway_region}.amazonaws.com/prod/studio/callback')
+sub86=>subroutine: api_gateway_stack.set_analytics_config(analytics_api_config)
+sub88=>subroutine: api_gateway_stack.add_dependency(analytics_stack)
+sub93=>subroutine: app.synth()
 
 op2->op4
 op4->sub6
 sub6->sub8
-sub8->sub10
-sub10->sub12
-sub12->sub14
-sub14->sub16
-sub16->op18
+sub8->op10
+op10->op12
+op12->op14
+op14->op16
+op16->op18
 op18->op20
 op20->op22
 op22->op24
-op24->op26
-op26->op28
-op28->op30
-op30->op32
-op32->cond35
-cond35->op44
-op44->op46
-op46->sub48
-sub48->op50
-op50->cond53
-cond53(yes)->op57
-op57->sub59
-sub59->sub61
-sub61->sub63
-sub63->sub65
-sub65(left)->cond53
-cond53(no)->op69
-op69->cond72
-cond72->cond82
-cond82(yes)->op86
-op86->sub88
-sub88->op90
-op90->sub92
-sub92->sub94
-sub94->sub99
-cond82(no)->sub99
+op24->cond27
+cond27->op36
+op36->op38
+op38->op40
+op40->sub42
+sub42->op44
+op44->cond47
+cond47(yes)->op51
+op51->sub53
+sub53->sub55
+sub55->sub57
+sub57->sub59
+sub59(left)->cond47
+cond47(no)->op63
+op63->cond66
+cond66->cond76
+cond76(yes)->op80
+op80->sub82
+sub82->op84
+op84->sub86
+sub86->sub88
+sub88->sub93
+cond76(no)->sub93
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

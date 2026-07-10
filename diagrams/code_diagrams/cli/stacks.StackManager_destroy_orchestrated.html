@@ -205,126 +205,126 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1213=>operation: '\n        Destroy all stacks in the correct order.\n\n        Destroys monitoring stack first, then regional stacks (optionally in parallel),\n        then global stacks.\n\n        Args:\n            force: Skip confirmation prompts\n            on_stack_start: Callback(stack_name) called when starting a stack\n            on_stack_complete: Callback(stack_name, success) called when stack completes\n            parallel: Destroy regional stacks in parallel\n            max_workers: Maximum number of parallel destructions (default: 4)\n\n        Returns:\n            Tuple of (overall_success, successful_stacks, failed_stacks)\n        '
-op1215=>operation: stacks = self.list_stacks()
-cond1218=>condition: if not self._image_registry_destroy_preflight(force=force)
-io1225=>inputoutput: output: (False, [], list(stacks))
-e1223=>end: end function return
-sub1231=>subroutine: self._cleanup_backup_vault()
-op1233=>operation: pre_regional = {'gco-global', 'gco-api-gateway'}
-op1235=>operation: post_regional = {'gco-monitoring'}
-op1237=>operation: post_regional_stacks = [s for s in stacks if s in post_regional]
-op1239=>operation: regional_stacks = [s for s in stacks if s not in pre_regional and s not in post_regional]
-op1241=>operation: pre_regional_stacks = [s for s in stacks if s in pre_regional]
-sub1243=>subroutine: regional_stacks.sort(reverse=True)
-op1245=>operation: pre_regional_order = {'gco-api-gateway': 1, 'gco-global': 2}
-sub1247=>subroutine: pre_regional_stacks.sort(key=lambda x: pre_regional_order.get(x, 0))
-op1249=>operation: successful: list[str] = []
-op1251=>operation: failed: list[str] = []
-cond1254=>condition: for stack_name in post_regional_stacks
-cond1259=>operation: on_stack_start(stack_name) if  on_stack_start
-op1269=>operation: success = self.destroy(stack_name=stack_name, force=force)
-cond1272=>condition: if success
-sub1276=>subroutine: successful.append(stack_name)
-cond1284=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
-sub1280=>subroutine: failed.append(stack_name)
-op1296=>operation: watchdog_stops: dict[str, Event] = {}
-op1298=>operation: watchdog_threads: dict[str, Thread] = {}
-cond1301=>condition: for stack_name in regional_stacks
-op1305=>operation: stop_event = Event()
-op1307=>operation: thread = self._start_eks_sg_watchdog(stack_name, stop_event)
-op1309=>operation: watchdog_stops[stack_name] = stop_event
-op1311=>operation: watchdog_threads[stack_name] = thread
-cond1316=>condition: if regional_stacks
-cond1321=>condition: if parallel and len(regional_stacks) > 1
-op1325=>operation: successful_regional, failed_regional = self._destroy_stacks_parallel(stacks=regional_stacks, force=force, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete, max_workers=max_workers)
-sub1327=>subroutine: successful.extend(successful_regional)
-sub1329=>subroutine: failed.extend(failed_regional)
-cond1381=>condition: for stack_name in regional_stacks
-sub1385=>subroutine: watchdog_stops[stack_name].set()
-sub1387=>subroutine: watchdog_threads[stack_name].join(timeout=5)
-sub1389=>subroutine: self._cleanup_eks_security_groups(stack_name)
-cond1394=>condition: for stack_name in pre_regional_stacks
-cond1399=>operation: on_stack_start(stack_name) if  on_stack_start
-op1409=>operation: success = self.destroy(stack_name=stack_name, force=force)
-cond1412=>condition: if success
-sub1416=>subroutine: successful.append(stack_name)
-cond1424=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
-sub1420=>subroutine: failed.append(stack_name)
-io1439=>inputoutput: output: (len(failed) == 0, successful, failed)
-e1437=>end: end function return
-cond1334=>condition: for stack_name in regional_stacks
-cond1339=>operation: on_stack_start(stack_name) if  on_stack_start
-op1349=>operation: success = self.destroy(stack_name=stack_name, force=force)
-cond1352=>condition: if success
-sub1356=>subroutine: successful.append(stack_name)
-cond1364=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
-sub1360=>subroutine: failed.append(stack_name)
+        <div><textarea id="code" style="width: 100%;" rows="11">op1255=>operation: '\n        Destroy all stacks in the correct order.\n\n        Destroys monitoring stack first, then regional stacks (optionally in parallel),\n        then global stacks.\n\n        Args:\n            force: Skip confirmation prompts\n            on_stack_start: Callback(stack_name) called when starting a stack\n            on_stack_complete: Callback(stack_name, success) called when stack completes\n            parallel: Destroy regional stacks in parallel\n            max_workers: Maximum number of parallel destructions (default: 4)\n\n        Returns:\n            Tuple of (overall_success, successful_stacks, failed_stacks)\n        '
+op1257=>operation: stacks = self.list_stacks()
+cond1260=>condition: if not self._image_registry_destroy_preflight(force=force)
+io1267=>inputoutput: output: (False, [], list(stacks))
+e1265=>end: end function return
+sub1273=>subroutine: self._cleanup_backup_vault()
+op1275=>operation: pre_regional = {'gco-global', 'gco-api-gateway'}
+op1277=>operation: post_regional = {'gco-monitoring'}
+op1279=>operation: post_regional_stacks = [s for s in stacks if s in post_regional]
+op1281=>operation: regional_stacks = [s for s in stacks if s not in pre_regional and s not in post_regional]
+op1283=>operation: pre_regional_stacks = [s for s in stacks if s in pre_regional]
+sub1285=>subroutine: regional_stacks.sort(reverse=True)
+op1287=>operation: pre_regional_order = {'gco-api-gateway': 1, 'gco-global': 2}
+sub1289=>subroutine: pre_regional_stacks.sort(key=lambda x: pre_regional_order.get(x, 0))
+op1291=>operation: successful: list[str] = []
+op1293=>operation: failed: list[str] = []
+cond1296=>condition: for stack_name in post_regional_stacks
+cond1301=>operation: on_stack_start(stack_name) if  on_stack_start
+op1311=>operation: success = self.destroy(stack_name=stack_name, force=force)
+cond1314=>condition: if success
+sub1318=>subroutine: successful.append(stack_name)
+cond1326=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
+sub1322=>subroutine: failed.append(stack_name)
+op1338=>operation: watchdog_stops: dict[str, Event] = {}
+op1340=>operation: watchdog_threads: dict[str, Thread] = {}
+cond1343=>condition: for stack_name in regional_stacks
+op1347=>operation: stop_event = Event()
+op1349=>operation: thread = self._start_eks_sg_watchdog(stack_name, stop_event)
+op1351=>operation: watchdog_stops[stack_name] = stop_event
+op1353=>operation: watchdog_threads[stack_name] = thread
+cond1358=>condition: if regional_stacks
+cond1363=>condition: if parallel and len(regional_stacks) > 1
+op1367=>operation: successful_regional, failed_regional = self._destroy_stacks_parallel(stacks=regional_stacks, force=force, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete, max_workers=max_workers)
+sub1369=>subroutine: successful.extend(successful_regional)
+sub1371=>subroutine: failed.extend(failed_regional)
+cond1423=>condition: for stack_name in regional_stacks
+sub1427=>subroutine: watchdog_stops[stack_name].set()
+sub1429=>subroutine: watchdog_threads[stack_name].join(timeout=5)
+sub1431=>subroutine: self._cleanup_eks_security_groups(stack_name)
+cond1436=>condition: for stack_name in pre_regional_stacks
+cond1441=>operation: on_stack_start(stack_name) if  on_stack_start
+op1451=>operation: success = self.destroy(stack_name=stack_name, force=force)
+cond1454=>condition: if success
+sub1458=>subroutine: successful.append(stack_name)
+cond1466=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
+sub1462=>subroutine: failed.append(stack_name)
+io1481=>inputoutput: output: (len(failed) == 0, successful, failed)
+e1479=>end: end function return
+cond1376=>condition: for stack_name in regional_stacks
+cond1381=>operation: on_stack_start(stack_name) if  on_stack_start
+op1391=>operation: success = self.destroy(stack_name=stack_name, force=force)
+cond1394=>condition: if success
+sub1398=>subroutine: successful.append(stack_name)
+cond1406=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
+sub1402=>subroutine: failed.append(stack_name)
 
-op1213->op1215
-op1215->cond1218
-cond1218(yes)->io1225
-io1225->e1223
-cond1218(no)->sub1231
-sub1231->op1233
-op1233->op1235
-op1235->op1237
-op1237->op1239
-op1239->op1241
-op1241->sub1243
-sub1243->op1245
-op1245->sub1247
-sub1247->op1249
-op1249->op1251
-op1251->cond1254
-cond1254(yes)->cond1259
-cond1259->op1269
-op1269->cond1272
-cond1272(yes)->sub1276
-sub1276->cond1284
-cond1284->cond1254
-cond1272(no)->sub1280
-sub1280->cond1284
-cond1254(no)->op1296
-op1296->op1298
-op1298->cond1301
-cond1301(yes)->op1305
-op1305->op1307
-op1307->op1309
-op1309->op1311
-op1311(left)->cond1301
-cond1301(no)->cond1316
-cond1316(yes)->cond1321
-cond1321(yes)->op1325
-op1325->sub1327
-sub1327->sub1329
-sub1329->cond1381
-cond1381(yes)->sub1385
-sub1385->sub1387
-sub1387->sub1389
-sub1389(left)->cond1381
-cond1381(no)->cond1394
-cond1394(yes)->cond1399
-cond1399->op1409
-op1409->cond1412
-cond1412(yes)->sub1416
-sub1416->cond1424
-cond1424->cond1394
-cond1412(no)->sub1420
-sub1420->cond1424
-cond1394(no)->io1439
-io1439->e1437
-cond1321(no)->cond1334
-cond1334(yes)->cond1339
-cond1339->op1349
-op1349->cond1352
-cond1352(yes)->sub1356
-sub1356->cond1364
-cond1364->cond1334
-cond1352(no)->sub1360
-sub1360->cond1364
-cond1334(no)->cond1381
-cond1316(no)->cond1381
+op1255->op1257
+op1257->cond1260
+cond1260(yes)->io1267
+io1267->e1265
+cond1260(no)->sub1273
+sub1273->op1275
+op1275->op1277
+op1277->op1279
+op1279->op1281
+op1281->op1283
+op1283->sub1285
+sub1285->op1287
+op1287->sub1289
+sub1289->op1291
+op1291->op1293
+op1293->cond1296
+cond1296(yes)->cond1301
+cond1301->op1311
+op1311->cond1314
+cond1314(yes)->sub1318
+sub1318->cond1326
+cond1326->cond1296
+cond1314(no)->sub1322
+sub1322->cond1326
+cond1296(no)->op1338
+op1338->op1340
+op1340->cond1343
+cond1343(yes)->op1347
+op1347->op1349
+op1349->op1351
+op1351->op1353
+op1353(left)->cond1343
+cond1343(no)->cond1358
+cond1358(yes)->cond1363
+cond1363(yes)->op1367
+op1367->sub1369
+sub1369->sub1371
+sub1371->cond1423
+cond1423(yes)->sub1427
+sub1427->sub1429
+sub1429->sub1431
+sub1431(left)->cond1423
+cond1423(no)->cond1436
+cond1436(yes)->cond1441
+cond1441->op1451
+op1451->cond1454
+cond1454(yes)->sub1458
+sub1458->cond1466
+cond1466->cond1436
+cond1454(no)->sub1462
+sub1462->cond1466
+cond1436(no)->io1481
+io1481->e1479
+cond1363(no)->cond1376
+cond1376(yes)->cond1381
+cond1381->op1391
+op1391->cond1394
+cond1394(yes)->sub1398
+sub1398->cond1406
+cond1406->cond1376
+cond1394(no)->sub1402
+sub1402->cond1406
+cond1376(no)->cond1423
+cond1358(no)->cond1423
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

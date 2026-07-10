@@ -205,12 +205,12 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op343=>operation: '\n    Handle cross-region aggregation requests.\n\n    Routes:\n        GET /global/jobs - List jobs across all regions\n        GET /global/health - Health status across all regions\n        GET /global/status - Cluster status across all regions\n        DELETE /global/jobs - Bulk delete across all regions\n    '
-op345=>operation: http_method = event.get('httpMethod', 'GET')
-op347=>operation: path = event.get('path', '')
-op349=>operation: query_params = event.get('queryStringParameters') or {}
-op351=>operation: body = event.get('body')
-op354=>operation: if path == '/api/v1/global/jobs' and http_method == 'GET':
+        <div><textarea id="code" style="width: 100%;" rows="11">op337=>operation: '\n    Handle cross-region aggregation requests.\n\n    Routes:\n        GET /global/jobs - List jobs across all regions\n        GET /global/health - Health status across all regions\n        GET /global/status - Cluster status across all regions\n        DELETE /global/jobs - Bulk delete across all regions\n    '
+op339=>operation: http_method = event.get('httpMethod', 'GET')
+op341=>operation: path = event.get('path', '')
+op343=>operation: query_params = event.get('queryStringParameters') or {}
+op345=>operation: body = event.get('body')
+op348=>operation: if path == '/api/v1/global/jobs' and http_method == 'GET':
     result = aggregate_jobs(namespace=query_params.get('namespace'), status=query_params.get('status'), limit=int(query_params.get('limit', '50')))
 elif path == '/api/v1/global/jobs' and http_method == 'DELETE':
     body_data = json.loads(body) if body else {}
@@ -222,20 +222,20 @@ elif path == '/api/v1/global/status':
 else:
     return {'statusCode': 404, 'body': json.dumps({'error': 'Not found', 'path': path})}
 return {'statusCode': 200, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps(result)}
-cond353=>condition: exception raised?
-cond356=>condition: except Exception as e
-io363=>inputoutput: output: {'statusCode': 500, 'body': json.dumps({'error': 'Internal server error', 'detail': str(e)})}
-e361=>end: end function return
+cond347=>condition: exception raised?
+cond350=>condition: except Exception as e
+io357=>inputoutput: output: {'statusCode': 500, 'body': json.dumps({'error': 'Internal server error', 'detail': str(e)})}
+e355=>end: end function return
 
+op337->op339
+op339->op341
+op341->op343
 op343->op345
-op345->op347
-op347->op349
-op349->op351
-op351->op354
-op354->cond353
-cond353(yes)->cond356
-cond356(yes)->io363
-io363->e361
+op345->op348
+op348->cond347
+cond347(yes)->cond350
+cond350(yes)->io357
+io357->e355
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

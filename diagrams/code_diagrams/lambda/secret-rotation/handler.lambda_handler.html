@@ -205,36 +205,36 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op587=>operation: '\n    Handle Secrets Manager rotation request.\n\n    Args:\n        event: Rotation event with Step, SecretId, ClientRequestToken\n        context: Lambda context (unused)\n\n    Raises:\n        ValueError: If the rotation step is invalid\n    '
-op589=>operation: secret_id = event['SecretId']
-op591=>operation: token = event['ClientRequestToken']
-op593=>operation: step = event['Step']
-sub595=>subroutine: logger.info(f"Rotation step '{step}' for secret {secret_id}")
-op597=>operation: client = boto3.client('secretsmanager')
-cond600=>condition: if step == 'createSecret'
-sub604=>subroutine: create_secret(client, secret_id, token)
-cond609=>condition: if step == 'setSecret'
-sub613=>subroutine: set_secret(client, secret_id, token)
-cond618=>condition: if step == 'testSecret'
-sub622=>subroutine: test_secret(client, secret_id, token)
-cond627=>condition: if step == 'finishSecret'
-sub631=>subroutine: finish_secret(client, secret_id, token)
-sub635=>subroutine: raise ValueError(f'Invalid rotation step: {step}')
+        <div><textarea id="code" style="width: 100%;" rows="11">op629=>operation: '\n    Handle Secrets Manager rotation request.\n\n    Args:\n        event: Rotation event with Step, SecretId, ClientRequestToken\n        context: Lambda context (unused)\n\n    Raises:\n        ValueError: If the rotation step is invalid\n    '
+op631=>operation: secret_id = event['SecretId']
+op633=>operation: token = event['ClientRequestToken']
+op635=>operation: step = event['Step']
+sub637=>subroutine: logger.info(f"Rotation step '{step}' for secret {secret_id}")
+op639=>operation: client = boto3.client('secretsmanager')
+cond642=>condition: if step == 'createSecret'
+sub646=>subroutine: create_secret(client, secret_id, token)
+cond651=>condition: if step == 'setSecret'
+sub655=>subroutine: set_secret(client, secret_id, token)
+cond660=>condition: if step == 'testSecret'
+sub664=>subroutine: test_secret(client, secret_id, token)
+cond669=>condition: if step == 'finishSecret'
+sub673=>subroutine: finish_secret(client, secret_id, token)
+sub677=>subroutine: raise ValueError(f'Invalid rotation step: {step}')
 
-op587->op589
-op589->op591
-op591->op593
-op593->sub595
-sub595->op597
-op597->cond600
-cond600(yes)->sub604
-cond600(no)->cond609
-cond609(yes)->sub613
-cond609(no)->cond618
-cond618(yes)->sub622
-cond618(no)->cond627
-cond627(yes)->sub631
-cond627(no)->sub635
+op629->op631
+op631->op633
+op633->op635
+op635->sub637
+sub637->op639
+op639->cond642
+cond642(yes)->sub646
+cond642(no)->cond651
+cond651(yes)->sub655
+cond651(no)->cond660
+cond660(yes)->sub664
+cond660(no)->cond669
+cond669(yes)->sub673
+cond669(no)->sub677
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

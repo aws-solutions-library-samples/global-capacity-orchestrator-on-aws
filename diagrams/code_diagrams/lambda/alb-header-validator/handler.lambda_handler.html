@@ -205,26 +205,26 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op311=>operation: '\n    Validate that request has the correct secret header.\n    Returns 403 if header is missing or invalid.\n\n    Accepts both AWSCURRENT and AWSPENDING tokens for zero-downtime rotation.\n    '
-op313=>operation: request = event['Records'][0]['cf']['request']
-op315=>operation: headers = request['headers']
-op317=>operation: valid_tokens = get_valid_tokens()
-op319=>operation: auth_header = headers.get('x-gco-auth-token', [{}])[0].get('value', '')
-cond322=>condition: if auth_header not in valid_tokens
-io329=>inputoutput: output: {'status': '403', 'statusDescription': 'Forbidden', 'body': json.dumps({'error': 'Unauthorized - requests must come through API Gateway'})}
-e327=>end: end function return
-io338=>inputoutput: output: cast('dict[str, Any]', request)
-e336=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op305=>operation: '\n    Validate that request has the correct secret header.\n    Returns 403 if header is missing or invalid.\n\n    Accepts both AWSCURRENT and AWSPENDING tokens for zero-downtime rotation.\n    '
+op307=>operation: request = event['Records'][0]['cf']['request']
+op309=>operation: headers = request['headers']
+op311=>operation: valid_tokens = get_valid_tokens()
+op313=>operation: auth_header = headers.get('x-gco-auth-token', [{}])[0].get('value', '')
+cond316=>condition: if auth_header not in valid_tokens
+io323=>inputoutput: output: {'status': '403', 'statusDescription': 'Forbidden', 'body': json.dumps({'error': 'Unauthorized - requests must come through API Gateway'})}
+e321=>end: end function return
+io332=>inputoutput: output: cast('dict[str, Any]', request)
+e330=>end: end function return
 
+op305->op307
+op307->op309
+op309->op311
 op311->op313
-op313->op315
-op315->op317
-op317->op319
-op319->cond322
-cond322(yes)->io329
-io329->e327
-cond322(no)->io338
-io338->e336
+op313->cond316
+cond316(yes)->io323
+io323->e321
+cond316(no)->io332
+io332->e330
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

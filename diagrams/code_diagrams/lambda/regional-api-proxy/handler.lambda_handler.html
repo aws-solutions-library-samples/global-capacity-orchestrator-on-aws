@@ -205,32 +205,32 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op273=>operation: '\n    Proxy authenticated API Gateway requests to internal ALB.\n\n    This Lambda runs inside the VPC and can reach the internal ALB directly.\n\n    Args:\n        event: API Gateway proxy event containing HTTP request details\n        context: Lambda context object\n\n    Returns:\n        API Gateway proxy response with status code, headers, and body\n    '
-op275=>operation: alb_endpoint = os.environ['ALB_ENDPOINT']
-op277=>operation: secret_token = get_secret_token()
-op279=>operation: http_method = event['httpMethod']
-op281=>operation: path = event['path']
-op283=>operation: query_string = event.get('queryStringParameters') or {}
-op285=>operation: headers = dict(event.get('headers') or {})
-op287=>operation: body = event.get('body') or ''
-op289=>operation: target_url = build_target_url(alb_endpoint, path, query_string)
-op291=>operation: headers['X-GCO-Auth-Token'] = secret_token
-cond294=>operation: headers.pop(h, None) while  h in ['Host', 'host', 'X-Forwarded-For', 'X-Forwarded-Proto', 'X-Forwarded-Port']
-io306=>inputoutput: output: forward_request(target_url, http_method, headers, body)
-e304=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op267=>operation: '\n    Proxy authenticated API Gateway requests to internal ALB.\n\n    This Lambda runs inside the VPC and can reach the internal ALB directly.\n\n    Args:\n        event: API Gateway proxy event containing HTTP request details\n        context: Lambda context object\n\n    Returns:\n        API Gateway proxy response with status code, headers, and body\n    '
+op269=>operation: alb_endpoint = os.environ['ALB_ENDPOINT']
+op271=>operation: secret_token = get_secret_token()
+op273=>operation: http_method = event['httpMethod']
+op275=>operation: path = event['path']
+op277=>operation: query_string = event.get('queryStringParameters') or {}
+op279=>operation: headers = dict(event.get('headers') or {})
+op281=>operation: body = event.get('body') or ''
+op283=>operation: target_url = build_target_url(alb_endpoint, path, query_string)
+op285=>operation: headers['X-GCO-Auth-Token'] = secret_token
+cond288=>operation: headers.pop(h, None) while  h in ['Host', 'host', 'X-Forwarded-For', 'X-Forwarded-Proto', 'X-Forwarded-Port']
+io300=>inputoutput: output: forward_request(target_url, http_method, headers, body)
+e298=>end: end function return
 
+op267->op269
+op269->op271
+op271->op273
 op273->op275
 op275->op277
 op277->op279
 op279->op281
 op281->op283
 op283->op285
-op285->op287
-op287->op289
-op289->op291
-op291->cond294
-cond294->io306
-io306->e304
+op285->cond288
+cond288->io300
+io300->e298
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

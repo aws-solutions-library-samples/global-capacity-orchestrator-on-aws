@@ -205,30 +205,30 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op245=>operation: '\n    Proxy authenticated API Gateway requests to Global Accelerator.\n\n    Args:\n        event: API Gateway proxy event containing HTTP request details\n        context: Lambda context object\n\n    Returns:\n        API Gateway proxy response with status code, headers, and body\n    '
-op247=>operation: ga_endpoint = os.environ['GLOBAL_ACCELERATOR_ENDPOINT']
-op249=>operation: secret_token = get_secret_token()
-op251=>operation: http_method = event['httpMethod']
-op253=>operation: path = event['path']
-op255=>operation: query_string = event.get('queryStringParameters') or {}
-op257=>operation: headers = dict(event.get('headers') or {})
-op259=>operation: body = event.get('body') or ''
-op261=>operation: target_url = build_target_url(ga_endpoint, path, query_string)
-op263=>operation: headers['X-GCO-Auth-Token'] = secret_token
-io268=>inputoutput: output: forward_request(target_url, http_method, headers, body)
-e266=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op239=>operation: '\n    Proxy authenticated API Gateway requests to Global Accelerator.\n\n    Args:\n        event: API Gateway proxy event containing HTTP request details\n        context: Lambda context object\n\n    Returns:\n        API Gateway proxy response with status code, headers, and body\n    '
+op241=>operation: ga_endpoint = os.environ['GLOBAL_ACCELERATOR_ENDPOINT']
+op243=>operation: secret_token = get_secret_token()
+op245=>operation: http_method = event['httpMethod']
+op247=>operation: path = event['path']
+op249=>operation: query_string = event.get('queryStringParameters') or {}
+op251=>operation: headers = dict(event.get('headers') or {})
+op253=>operation: body = event.get('body') or ''
+op255=>operation: target_url = build_target_url(ga_endpoint, path, query_string)
+op257=>operation: headers['X-GCO-Auth-Token'] = secret_token
+io262=>inputoutput: output: forward_request(target_url, http_method, headers, body)
+e260=>end: end function return
 
+op239->op241
+op241->op243
+op243->op245
 op245->op247
 op247->op249
 op249->op251
 op251->op253
 op253->op255
 op255->op257
-op257->op259
-op259->op261
-op261->op263
-op263->io268
-io268->e266
+op257->io262
+io262->e260
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
