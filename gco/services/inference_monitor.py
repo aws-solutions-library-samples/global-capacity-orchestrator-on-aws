@@ -210,10 +210,28 @@ MOONCAKE_MASTER_READY_TIMEOUT_SECONDS = 600
 # needs no infrastructure (CDK) imports at runtime.
 MOONCAKE_COLD_TIER_KEY_PREFIX = "mooncake-kv"
 
-# SSM namespace publishing the always-on general-purpose regional bucket's
-# discovery values for a region. Mirrors the value the regional stack writes;
-# kept local so the monitor needs no infrastructure (CDK) imports at runtime.
-REGIONAL_SHARED_SSM_PARAMETER_PREFIX = "/gco/regional-shared-bucket"
+# SSM namespace suffix publishing the always-on general-purpose regional
+# bucket's discovery values for a region. The full namespace is
+# ``/<project_name>/regional-shared-bucket`` (see
+# ``constants.regional_shared_ssm_parameter_prefix``); the monitor builds it at
+# runtime from the injected ``PROJECT_NAME`` env var rather than importing the
+# CDK constant, so it needs no infrastructure imports at runtime. Kept as a
+# suffix constant so the ``/name``, ``/arn``, ``/region`` contract stays in one
+# place. See ``_regional_shared_ssm_parameter_prefix``.
+REGIONAL_SHARED_SSM_PARAMETER_SUFFIX = "regional-shared-bucket"
+
+
+def _regional_shared_ssm_parameter_prefix() -> str:
+    """Return this deployment's regional-shared-bucket SSM namespace.
+
+    Built from the ``PROJECT_NAME`` environment variable (default ``"gco"``)
+    so the monitor reads the same project-scoped path the regional stack
+    writes (``/<project_name>/regional-shared-bucket``). Mirrors
+    ``constants.regional_shared_ssm_parameter_prefix`` without importing CDK.
+    """
+    project_name = os.environ.get("PROJECT_NAME", "gco")
+    return f"/{project_name}/{REGIONAL_SHARED_SSM_PARAMETER_SUFFIX}"
+
 
 # Matches an AWS region identifier embedded in an address (host or URI), e.g.
 # ``us-east-1``, ``eu-west-2``, ``ap-southeast-1``, ``us-gov-west-1``. KV
@@ -1612,7 +1630,7 @@ class InferenceMonitor:
         """
         from gco.services.aws_ssm import get_ssm_parameter_optional
 
-        param_name = f"{REGIONAL_SHARED_SSM_PARAMETER_PREFIX}/name"
+        param_name = f"{_regional_shared_ssm_parameter_prefix()}/name"
         try:
             return get_ssm_parameter_optional(param_name, region=self.region)
         except Exception as e:  # noqa: BLE001 - any read failure means "unresolved"

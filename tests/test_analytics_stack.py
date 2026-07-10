@@ -414,7 +414,7 @@ class TestAnalyticsVpc:
 class TestStudioOnlyBucket:
     """Assertions over ``Studio_Only_Bucket`` and its access-logs sidecar.
 
-    Identified by the ``gco-analytics-studio-`` bucket-name prefix (the
+    Identified by the ``gco-test-analytics-studio-`` bucket-name prefix (the
     deny-list anchor for bucket-isolation checks). The access-logs sidecar
     is identified indirectly — as the bucket referenced by
     ``LoggingConfiguration.DestinationBucketName`` on ``Studio_Only_Bucket``
@@ -429,14 +429,14 @@ class TestStudioOnlyBucket:
         The bucket name is emitted as a literal string on this stack because
         ``_synth_analytics`` fixes ``account`` and ``region`` in the
         ``cdk.Environment`` — so the template carries
-        ``gco-analytics-studio-123456789012-us-east-2`` verbatim.
+        ``gco-test-analytics-studio-123456789012-us-east-2`` verbatim.
         """
         buckets = template.find_resources("AWS::S3::Bucket")
         matches = [
             (lid, res)
             for lid, res in buckets.items()
             if isinstance(res["Properties"].get("BucketName"), str)
-            and res["Properties"]["BucketName"].startswith("gco-analytics-studio-")
+            and res["Properties"]["BucketName"].startswith("gco-test-analytics-studio-")
         ]
         assert len(matches) == 1, f"expected exactly one Studio_Only_Bucket, got {len(matches)}"
         return matches[0]
@@ -463,12 +463,12 @@ class TestStudioOnlyBucket:
         return matches[0]
 
     def test_studio_only_bucket_name_prefix(self) -> None:
-        """Bucket name starts with ``gco-analytics-studio-``."""
+        """Bucket name starts with ``gco-test-analytics-studio-``."""
         template = _synth_analytics()
         _, bucket = self._find_studio_only_bucket(template)
         name = bucket["Properties"].get("BucketName")
-        assert isinstance(name, str) and name.startswith("gco-analytics-studio-"), (
-            f"expected BucketName to start with gco-analytics-studio-, got {name!r}"
+        assert isinstance(name, str) and name.startswith("gco-test-analytics-studio-"), (
+            f"expected BucketName to start with gco-test-analytics-studio-, got {name!r}"
         )
 
     def test_studio_only_bucket_is_kms_encrypted_with_analytics_key(self) -> None:
@@ -904,11 +904,13 @@ class TestSageMakerExecutionRole:
         Lets a Studio notebook resolve the shared bucket name/arn/region
         at runtime without a per-user JupyterLab terminal export step.
         The parameters live under
-        ``CLUSTER_SHARED_SSM_PARAMETER_PREFIX = /gco/cluster-shared-bucket``
-        in the global region where ``GCOGlobalStack`` is deployed.
+        ``/<project_name>/cluster-shared-bucket`` in the global region where
+        ``GCOGlobalStack`` is deployed. The analytics test fixture synthesizes
+        with a mock config whose ``project_name`` is ``"gco-test"``.
         """
-        from gco.stacks.constants import CLUSTER_SHARED_SSM_PARAMETER_PREFIX
+        from gco.stacks.constants import cluster_shared_ssm_parameter_prefix
 
+        cluster_shared_prefix = cluster_shared_ssm_parameter_prefix("gco-test")
         template = _synth_analytics()
         role_lid, _ = self._find_sagemaker_role(template)
         statements = self._collect_role_statements(template, role_lid)
@@ -928,14 +930,14 @@ class TestSageMakerExecutionRole:
                 # Expected shape:
                 #   arn:aws:ssm:<global-region>:<account>:parameter/gco/cluster-shared-bucket/*
                 if isinstance(res, str) and (
-                    ":ssm:" in res and f"parameter{CLUSTER_SHARED_SSM_PARAMETER_PREFIX}/*" in res
+                    ":ssm:" in res and f"parameter{cluster_shared_prefix}/*" in res
                 ):
                     matches.append(stmt)
                     break
 
         assert matches, (
             "expected an Allow statement granting ssm:GetParameter on "
-            f"parameter{CLUSTER_SHARED_SSM_PARAMETER_PREFIX}/* in the "
+            f"parameter{cluster_shared_prefix}/* in the "
             f"global region; attached statements={statements!r}"
         )
 

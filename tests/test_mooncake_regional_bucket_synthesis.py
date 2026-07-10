@@ -34,8 +34,8 @@ import aws_cdk as cdk
 from aws_cdk import assertions
 
 from gco.stacks.constants import (
-    REGIONAL_SHARED_BUCKET_NAME_PREFIX,
-    REGIONAL_SHARED_SSM_PARAMETER_PREFIX,
+    regional_shared_bucket_name_prefix,
+    regional_shared_ssm_parameter_prefix,
 )
 from gco.stacks.regional_stack import GCORegionalStack
 
@@ -43,6 +43,12 @@ from gco.stacks.regional_stack import GCORegionalStack
 # stack tests rather than re-implementing a synth fixture.
 from tests.test_regional_stack import MockConfigLoader
 from tests.test_regional_stack import TestRegionalStackSynthesis as _RegionalStackSynthesisFixtures
+
+# Physical-name prefixes the regional stack derives from ``project_name`` (#139).
+# MockConfigLoader.get_project_name() returns "gco-test", so scope to that name.
+_PROJECT_NAME = "gco-test"
+REGIONAL_SHARED_BUCKET_NAME_PREFIX = regional_shared_bucket_name_prefix(_PROJECT_NAME)
+REGIONAL_SHARED_SSM_PARAMETER_PREFIX = regional_shared_ssm_parameter_prefix(_PROJECT_NAME)
 
 _ACCOUNT = "123456789012"
 _REGION = "us-east-1"

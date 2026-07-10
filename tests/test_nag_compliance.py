@@ -197,6 +197,7 @@ def _build_all_stacks(app: cdk.App, account: str | None = None) -> None:
         app,
         f"{project_name}-api-gateway",
         global_accelerator_dns=global_stack.accelerator.dns_name,
+        project_name=project_name,
         env=cdk.Environment(account=account, region=api_gateway_region),
     )
     api_gateway_stack.add_dependency(global_stack)

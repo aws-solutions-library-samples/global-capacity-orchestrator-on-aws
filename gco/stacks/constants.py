@@ -36,25 +36,35 @@ LAMBDA_PYTHON_RUNTIME = "PYTHON_3_14"
 # ``GCOApiGatewayGlobalStack`` (in the ``api_gateway`` region) and read by the
 # regional service-account role and the regional API proxy Lambda.
 
-API_GATEWAY_AUTH_SECRET_NAME = "gco/api-gateway-auth-token"  # nosec B105 — secret path/name, not a credential
-"""Secrets Manager secret name for the API Gateway → ALB auth token.
 
-Single source of truth shared by three call sites that must agree exactly:
+def api_gateway_auth_secret_name(project_name: str) -> str:
+    """Secrets Manager secret name for the API Gateway → ALB auth token.
 
-1. ``GCOApiGatewayGlobalStack._create_secret`` — the ``secret_name`` the
-   secret is actually created with.
-2. ``GCORegionalStack`` — the deterministic IAM ``Resource`` ARN granting the
-   service-account role read access to the secret. Built from this name plus
-   the API Gateway region and account so it renders identically whether the
-   API Gateway stack is cross-region or co-located with the regional stack
-   (see issue #125 — a synthesis-time cross-stack export token used to leak
-   into the ARN and dodge the cdk-nag suppression in single-region topologies).
-3. ``gco.stacks.nag_suppressions.add_iam_suppressions`` — the
-   ``AwsSolutions-IAM5`` acknowledgment scoped to this exact ARN.
+    Derived from ``project_name`` (``<project_name>/api-gateway-auth-token``)
+    so two deployments in the same account+region do not collide on the secret
+    name. For the default ``project_name="gco"`` this renders
+    ``gco/api-gateway-auth-token`` — byte-for-byte identical to the pre-#139
+    literal, so existing deployments see no resource replacement.
 
-The name is a fixed string (not derived from ``project_name``); keep the three
-call sites in lockstep by importing this constant rather than re-typing it.
-"""
+    Single source of truth shared by three call sites that must agree exactly:
+
+    1. ``GCOApiGatewayGlobalStack._create_secret`` — the ``secret_name`` the
+       secret is actually created with.
+    2. ``GCORegionalStack`` — the deterministic IAM ``Resource`` ARN granting
+       the service-account role read access to the secret. Built from this
+       name plus the API Gateway region and account so it renders identically
+       whether the API Gateway stack is cross-region or co-located with the
+       regional stack (see issue #125 — a synthesis-time cross-stack export
+       token used to leak into the ARN and dodge the cdk-nag suppression in
+       single-region topologies).
+    3. ``gco.stacks.nag_suppressions.add_iam_suppressions`` — the
+       ``AwsSolutions-IAM5`` acknowledgment scoped to this exact ARN.
+
+    Keep the three call sites in lockstep by calling this helper with the
+    stack's ``project_name`` rather than re-typing the name.
+    """
+    return f"{project_name}/api-gateway-auth-token"  # nosec B105 — secret path/name, not a credential
+
 
 # ---------------------------------------------------------------------------
 # EKS Add-on Versions
@@ -142,14 +152,21 @@ service-linked trust relationships resolve correctly. Any role name generated
 for ``SageMaker_Execution_Role`` must begin with this prefix.
 """
 
-COGNITO_DOMAIN_PREFIX_DEFAULT = "gco-studio"
-"""Default prefix for the Cognito hosted-UI domain.
 
-The full domain prefix is assembled at synth time by appending the account
-id (e.g. ``gco-studio-123456789012``) so it stays globally unique within
-``cognito.UserPoolDomain``. Operators may override the prefix through the
-``analytics_environment.cognito.domain_prefix`` field in ``cdk.json``.
-"""
+def cognito_domain_prefix_default(project_name: str) -> str:
+    """Default prefix for the Cognito hosted-UI domain.
+
+    Derived from ``project_name`` (``<project_name>-studio``). The full domain
+    prefix is assembled at synth time by appending the account id (e.g.
+    ``gco-studio-123456789012``) so it stays globally unique within
+    ``cognito.UserPoolDomain``. Operators may override the prefix through the
+    ``analytics_environment.cognito.domain_prefix`` field in ``cdk.json``.
+
+    For ``project_name="gco"`` this renders ``gco-studio`` — identical to the
+    pre-#139 literal.
+    """
+    return f"{project_name}-studio"
+
 
 STUDIO_PRESIGNED_URL_EXPIRY_SECONDS = 300
 """Default expiry (in seconds) for SageMaker Studio presigned domain URLs.
@@ -161,51 +178,69 @@ Lambda reads this through the ``URL_EXPIRES_SECONDS`` environment variable
 and callers may override it per-request.
 """
 
-CLUSTER_SHARED_BUCKET_NAME_PREFIX = "gco-cluster-shared"
-"""Name prefix for the always-on ``Cluster_Shared_Bucket`` in ``GCOGlobalStack``.
 
-The full bucket name is ``gco-cluster-shared-<account>-<global-region>``.
-The prefix is what IAM policies and cdk-nag allow-list assertions
-scope against, so it must stay stable across refactors even when the region
-or account suffix changes.
-"""
+def cluster_shared_bucket_name_prefix(project_name: str) -> str:
+    """Name prefix for the always-on ``Cluster_Shared_Bucket`` in ``GCOGlobalStack``.
 
-CLUSTER_SHARED_SSM_PARAMETER_PREFIX = "/gco/cluster-shared-bucket"
-"""SSM parameter namespace for the cluster-shared bucket metadata.
+    Derived from ``project_name``. The full bucket name is
+    ``<project_name>-cluster-shared-<account>-<global-region>``. The prefix is
+    what IAM policies and cdk-nag allow-list assertions scope against, so both
+    the bucket and the assertions must be built from the same ``project_name``.
+    For ``project_name="gco"`` this renders ``gco-cluster-shared`` — identical
+    to the pre-#139 literal.
+    """
+    return f"{project_name}-cluster-shared"
 
-``GCOGlobalStack`` writes ``<prefix>/name``, ``<prefix>/arn``, and
-``<prefix>/region`` under this path; ``GCORegionalStack`` (always) and
-``GCOAnalyticsStack`` (when enabled) read them back via
-``cr.AwsCustomResource`` against the global region. Treat the full paths as
-the contract — this prefix is the single place to change if the namespace
-ever moves.
-"""
 
-REGIONAL_SHARED_BUCKET_NAME_PREFIX = "gco-regional-shared"
-"""Name prefix for the always-on general-purpose regional bucket.
+def cluster_shared_ssm_parameter_prefix(project_name: str) -> str:
+    """SSM parameter namespace for the cluster-shared bucket metadata.
 
-The full bucket name is ``gco-regional-shared-<account>-<region>``. Each
-``GCORegionalStack`` provisions exactly one such bucket per region,
-unconditionally — there is no ``cdk.json`` toggle and no feature flag
-gating its existence. It is general purpose (usable by any in-region
-workload) and is in addition to the always-on central buckets owned by
-``GCOGlobalStack`` (the model bucket and the cluster-shared bucket). The
-prefix is what IAM policies and cdk-nag allow-list assertions scope
-against, so it must stay stable across refactors even when the region or
-account suffix changes.
-"""
+    Derived from ``project_name`` (``/<project_name>/cluster-shared-bucket``).
+    ``GCOGlobalStack`` writes ``<prefix>/name``, ``<prefix>/arn``, and
+    ``<prefix>/region`` under this path; ``GCORegionalStack`` (always) and
+    ``GCOAnalyticsStack`` (when enabled) read them back via
+    ``cr.AwsCustomResource`` against the global region. Treat the full paths as
+    the contract. For ``project_name="gco"`` this renders
+    ``/gco/cluster-shared-bucket``.
+    """
+    return f"/{project_name}/cluster-shared-bucket"
 
-REGIONAL_SHARED_SSM_PARAMETER_PREFIX = "/gco/regional-shared-bucket"
-"""SSM parameter namespace for the regional general-purpose bucket metadata.
 
-Each ``GCORegionalStack`` writes ``<prefix>/name``, ``<prefix>/arn``, and
-``<prefix>/region`` under this path **in its own region's** parameter store,
-exactly as the model bucket and cluster-shared bucket publish theirs. In-region
-workloads (and the regional upload surface) read them back to resolve the
-always-on regional bucket without hardcoding account/region into the name.
-Treat the full paths as the contract — this prefix is the single place to
-change if the namespace ever moves.
-"""
+def regional_shared_bucket_name_prefix(project_name: str) -> str:
+    """Name prefix for the always-on general-purpose regional bucket.
+
+    Derived from ``project_name``. The full bucket name is
+    ``<project_name>-regional-shared-<account>-<region>``. Each
+    ``GCORegionalStack`` provisions exactly one such bucket per region,
+    unconditionally — there is no ``cdk.json`` toggle and no feature flag
+    gating its existence. It is general purpose (usable by any in-region
+    workload) and is in addition to the always-on central buckets owned by
+    ``GCOGlobalStack`` (the model bucket and the cluster-shared bucket). The
+    prefix is what IAM policies and cdk-nag allow-list assertions scope
+    against. For ``project_name="gco"`` this renders ``gco-regional-shared`` —
+    identical to the pre-#139 literal.
+    """
+    return f"{project_name}-regional-shared"
+
+
+def regional_shared_ssm_parameter_prefix(project_name: str) -> str:
+    """SSM parameter namespace for the regional general-purpose bucket metadata.
+
+    Derived from ``project_name`` (``/<project_name>/regional-shared-bucket``).
+    Each ``GCORegionalStack`` writes ``<prefix>/name``, ``<prefix>/arn``, and
+    ``<prefix>/region`` under this path **in its own region's** parameter
+    store, exactly as the model bucket and cluster-shared bucket publish
+    theirs. In-region workloads (and the regional upload surface) read them
+    back to resolve the always-on regional bucket without hardcoding
+    account/region into the name.
+
+    The per-region inference monitor builds the same path at runtime from its
+    injected ``PROJECT_NAME`` environment variable rather than importing this
+    helper (it needs no CDK imports at runtime), so keep the two in lockstep.
+    For ``project_name="gco"`` this renders ``/gco/regional-shared-bucket``.
+    """
+    return f"/{project_name}/regional-shared-bucket"
+
 
 MOONCAKE_COLD_TIER_KEY_PREFIX = "mooncake-kv"
 """Object-key prefix for Mooncake cold-tier KV objects in the regional bucket.

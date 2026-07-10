@@ -175,17 +175,17 @@ class RegionalBucketManager:
     def _get_bucket_name(self, region: str) -> str:
         """Resolve the regional bucket name from the target region's SSM store.
 
-        Reads ``/gco/regional-shared-bucket/name`` from the parameter store in
-        ``region``. The regional bucket is always provisioned, so this
-        parameter is present once the region's stack is deployed. A missing
-        parameter means the region has not been deployed yet and is treated as
-        a hard "bucket not found" failure.
+        Reads ``/<project_name>/regional-shared-bucket/name`` from the
+        parameter store in ``region``. The regional bucket is always
+        provisioned, so this parameter is present once the region's stack is
+        deployed. A missing parameter means the region has not been deployed
+        yet and is treated as a hard "bucket not found" failure.
         """
         from gco.services.aws_ssm import get_ssm_parameter_optional
-        from gco.stacks.constants import REGIONAL_SHARED_SSM_PARAMETER_PREFIX
+        from gco.stacks.constants import regional_shared_ssm_parameter_prefix
 
         name = get_ssm_parameter_optional(
-            f"{REGIONAL_SHARED_SSM_PARAMETER_PREFIX}/name",
+            f"{regional_shared_ssm_parameter_prefix(self.config.project_name)}/name",
             region=region,
         )
         if not name:

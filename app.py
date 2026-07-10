@@ -138,6 +138,7 @@ def main() -> None:
         app,
         f"{project_name}-api-gateway",
         global_accelerator_dns=global_stack.accelerator.dns_name,
+        project_name=project_name,
         env=cdk.Environment(account=account, region=api_gateway_region),
         description="Global API Gateway with IAM authentication",
     )

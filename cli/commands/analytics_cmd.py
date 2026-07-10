@@ -647,7 +647,9 @@ def analytics_doctor(config: Any) -> None:
         )
 
     # 3. SSM cluster-shared-bucket parameters exist
-    ssm_prefix = "/gco/cluster-shared-bucket"
+    from gco.stacks.constants import cluster_shared_ssm_parameter_prefix
+
+    ssm_prefix = cluster_shared_ssm_parameter_prefix(config.project_name)
     for suffix in ("name", "arn", "region"):
         param = f"{ssm_prefix}/{suffix}"
         ok, remediation = check_ssm_parameter(config.global_region, param)

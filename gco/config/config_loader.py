@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, cast
 
 import boto3
@@ -86,6 +87,9 @@ class ConfigLoader:
             if not self.app.node.try_get_context(field):
                 raise ConfigValidationError(f"Required configuration field '{field}' is missing")
 
+        # Validate project_name format before anything consumes it (#139).
+        self._validate_project_name()
+
         # Check for deployment_regions
         deployment_regions = self.app.node.try_get_context("deployment_regions")
         if not deployment_regions:
@@ -119,6 +123,37 @@ class ConfigLoader:
 
         # Validate historical capacity surface config (optional block)
         self._validate_capacity_history_config()
+
+    #: Allowed ``project_name`` format (#139). ``project_name`` is the
+    #: deployment's unique prefix and flows into S3 bucket names, the Cognito
+    #: hosted-UI domain prefix, SSM parameter paths, IAM role names, and
+    #: CloudFormation export names. The tightest of those constraints is S3 /
+    #: Cognito naming (lowercase letters, digits, hyphens; must start with a
+    #: letter), so require: a leading lowercase letter followed by 1–30
+    #: lowercase letters, digits, or hyphens (total length 2–31).
+    PROJECT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
+
+    def _validate_project_name(self) -> None:
+        """Validate ``project_name`` format so misconfigurations fail at synth.
+
+        ``project_name`` is documented as the deployment's unique identifier
+        and is used as the prefix for nearly every physical resource name. If
+        it contains characters that are illegal in S3 bucket names or Cognito
+        domain prefixes (uppercase, underscores, dots, leading digit, etc.),
+        ``cdk synth`` still succeeds but the deploy fails late with an opaque
+        AWS naming error. Catching it here turns that into an actionable
+        message up front.
+        """
+        project_name = self.app.node.try_get_context("project_name")
+        if not isinstance(project_name, str) or not self.PROJECT_NAME_PATTERN.match(project_name):
+            raise ConfigValidationError(
+                f"Invalid project_name {project_name!r}. It must match "
+                f"{self.PROJECT_NAME_PATTERN.pattern} (start with a lowercase letter, then "
+                "2–31 total characters of lowercase letters, digits, or hyphens). "
+                "project_name is the deployment prefix for S3 buckets, the Cognito "
+                "domain, SSM paths, and CloudFormation exports, so it must be a valid "
+                "lowercase DNS-style label."
+            )
 
     def _validate_regions(self) -> None:
         """Validate region configuration"""

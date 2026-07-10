@@ -50,7 +50,7 @@ from aws_cdk import aws_secretsmanager as secretsmanager
 from aws_cdk import aws_wafv2 as wafv2
 from constructs import Construct
 
-from gco.stacks.constants import API_GATEWAY_AUTH_SECRET_NAME, LAMBDA_PYTHON_RUNTIME
+from gco.stacks.constants import LAMBDA_PYTHON_RUNTIME, api_gateway_auth_secret_name
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Flowchart(s) generated from this file:
@@ -126,10 +126,17 @@ class GCOApiGatewayGlobalStack(Stack):
         global_accelerator_dns: str,
         regional_endpoints: dict[str, str] | None = None,
         analytics_config: AnalyticsApiConfig | None = None,
+        project_name: str = "gco",
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
+        # ``project_name`` is the deployment's unique prefix. Every physical
+        # resource name this stack owns (secret, WAF, log groups, CFN exports)
+        # derives from it so two deployments can coexist in one account+region.
+        # Defaults to ``"gco"`` so the rendered names are byte-for-byte
+        # identical to the pre-#139 literals for the stock deployment.
+        self.project_name = project_name
         self.ga_dns = global_accelerator_dns
         self.regional_endpoints = regional_endpoints or {}
         # When analytics is disabled (the default) this stays ``None`` and
@@ -175,7 +182,12 @@ class GCOApiGatewayGlobalStack(Stack):
 
         # API Gateway stack needs global_region for SSM parameter access suppressions
         # The aggregator Lambda reads ALB hostnames from SSM in the global region
-        apply_all_suppressions(self, stack_type="api_gateway", global_region=self.region)
+        apply_all_suppressions(
+            self,
+            stack_type="api_gateway",
+            global_region=self.region,
+            project_name=self.project_name,
+        )
 
     def _create_secret(self) -> secretsmanager.Secret:
         """Create secret token for validating requests from API Gateway.
@@ -188,7 +200,7 @@ class GCOApiGatewayGlobalStack(Stack):
         secret = secretsmanager.Secret(
             self,
             "GCOAuthSecret",
-            secret_name=API_GATEWAY_AUTH_SECRET_NAME,  # nosec B106 — this is the secret path, not a password
+            secret_name=api_gateway_auth_secret_name(self.project_name),  # nosec B106 — this is the secret path, not a password
             description="Secret token for validating requests from API Gateway to ALB (auto-rotated)",
             generate_secret_string=secretsmanager.SecretStringGenerator(
                 secret_string_template=json.dumps({"description": "GCO API Gateway auth token"}),
@@ -414,7 +426,7 @@ class GCOApiGatewayGlobalStack(Stack):
             role=aggregator_role,
             environment={
                 "SECRET_ARN": self.secret.secret_arn,
-                "PROJECT_NAME": "gco",
+                "PROJECT_NAME": self.project_name,
                 "GLOBAL_REGION": self.region,
             },
             log_group=aggregator_log_group,
@@ -451,7 +463,7 @@ class GCOApiGatewayGlobalStack(Stack):
         api_log_group = logs.LogGroup(
             self,
             "ApiGatewayLogs",
-            log_group_name="/aws/apigateway/gco-global",
+            log_group_name=f"/aws/apigateway/{self.project_name}-global",
             retention=logs.RetentionDays.ONE_MONTH,
             removal_policy=RemovalPolicy.DESTROY,
         )
@@ -645,7 +657,7 @@ class GCOApiGatewayGlobalStack(Stack):
             "ApiEndpoint",
             value=self.api.url,
             description="Global API Gateway endpoint (IAM authenticated)",
-            export_name="gco-global-api-endpoint",
+            export_name=f"{self.project_name}-global-api-endpoint",
         )
 
         CfnOutput(
@@ -653,7 +665,7 @@ class GCOApiGatewayGlobalStack(Stack):
             "SecretArn",
             value=self.secret.secret_arn,
             description="Secret ARN for ALB validation",
-            export_name="gco-auth-secret-arn",
+            export_name=f"{self.project_name}-auth-secret-arn",
         )
 
     def set_analytics_config(self, config: AnalyticsApiConfig) -> None:
@@ -853,7 +865,7 @@ class GCOApiGatewayGlobalStack(Stack):
             "CognitoAuthorizerId",
             value=authorizer.authorizer_id,
             description="API Gateway authorizer id for the Studio Cognito authorizer",
-            export_name="gco-studio-cognito-authorizer-id",
+            export_name=f"{self.project_name}-studio-cognito-authorizer-id",
         )
         # ``self.api.url`` already resolves to the deploy-time URL, but
         # it points at the stage root. Use ``Fn.sub`` to append the
@@ -871,7 +883,7 @@ class GCOApiGatewayGlobalStack(Stack):
             "StudioLoginUrl",
             value=studio_login_url,
             description="Concrete URL for the /studio/login route (Cognito-authenticated)",
-            export_name="gco-studio-login-url",
+            export_name=f"{self.project_name}-studio-login-url",
         )
 
     def _create_waf(self) -> None:
@@ -894,7 +906,7 @@ class GCOApiGatewayGlobalStack(Stack):
         waf_log_group = logs.LogGroup(
             self,
             "WafLogGroup",
-            log_group_name="aws-waf-logs-gco-api-gateway",
+            log_group_name=f"aws-waf-logs-{self.project_name}-api-gateway",
             retention=logs.RetentionDays.ONE_MONTH,
             removal_policy=RemovalPolicy.DESTROY,
         )
@@ -913,7 +925,7 @@ class GCOApiGatewayGlobalStack(Stack):
         self.web_acl = wafv2.CfnWebACL(
             self,
             "GCOWebAcl",
-            name="gco-api-gateway-waf",
+            name=f"{self.project_name}-api-gateway-waf",
             description="WAF WebACL for GCO API Gateway with AWS Managed Rules",
             scope="REGIONAL",  # REGIONAL for API Gateway association
             default_action=wafv2.CfnWebACL.DefaultActionProperty(allow={}),
@@ -1077,5 +1089,5 @@ class GCOApiGatewayGlobalStack(Stack):
             "WebAclArn",
             value=self.web_acl.attr_arn,
             description="WAF WebACL ARN for API Gateway protection",
-            export_name="gco-waf-webacl-arn",
+            export_name=f"{self.project_name}-waf-webacl-arn",
         )

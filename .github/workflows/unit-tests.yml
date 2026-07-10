@@ -10,6 +10,7 @@
 #   - unit:bats:shell              — BATS shell tests
 #   - unit:cdk:config-matrix       — tests/test_cdk_synthesis_matrix.py (in-process, -n auto)
 #   - unit:cdk:nag-compliance      — cdk-nag compliance across full config matrix
+#   - unit:cdk:project-name-scoping — #139: per-project_name name-collision + gco backward-compat synth checks
 #   - unit:cdk:synth               — cdk synth of the default config
 #   - unit:cli:smoke               — gco --help and all subcommand help pages
 #   - unit:fresh-install           — pip install from scratch, verify imports
@@ -120,6 +121,7 @@ jobs:
             --ignore=tests/test_integration.py \
             --ignore=tests/test_nag_compliance.py \
             --ignore=tests/test_cdk_synthesis_matrix.py \
+            --ignore=tests/test_project_name_scoping.py \
             --cov=gco --cov=cli --cov=gco_mcp \
             --cov-report=xml --cov-report=html --cov-report=json \
             --cov-report=term-missing \
@@ -244,6 +246,56 @@ jobs:
         # lives in the sibling unit:cdk:nag-compliance job, which fans
         # out one GitHub runner per config.
         run: pytest tests/test_cdk_synthesis_matrix.py -v
+
+  unit-cdk-project-name-scoping:
+    name: "unit:cdk:project-name-scoping"
+    # Issue #139: two GCO deployments must coexist in the same account+region
+    # using a different ``project_name`` alone. This job synthesizes the full
+    # app once per ``project_name`` permutation and asserts:
+    #   (a) the default ``project_name="gco"`` still renders the exact
+    #       pre-#139 physical names — upgrading an existing deployment
+    #       replaces no (stateful) resource; and
+    #   (b) two deployments with different ``project_name`` values share
+    #       ZERO unique physical names (buckets, CFN exports, WAF, secret,
+    #       log groups, SSM params, DynamoDB tables, SageMaker domain, EMR
+    #       app, Cognito domain), plus every unique name embeds its project
+    #       name.
+    # It also checks ``ConfigLoader`` rejects malformed ``project_name`` up
+    # front, so a bad value fails at synth rather than mid-deploy.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AWS_ACCESS_KEY_ID: "fake"
+      AWS_SECRET_ACCESS_KEY: "fake"
+      AWS_DEFAULT_REGION: "us-east-1"
+      CDK_DEFAULT_REGION: "us-east-1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install CDK + test dependencies
+        run: pip install -e ".[cdk,test]"
+      - uses: ./.github/actions/build-lambda-package
+      - name: Verify project_name scoping (#139)
+        # Runs serially (no ``-n auto``) for the same reason as
+        # unit:cdk:config-matrix — each permutation stages the same
+        # lambda/kubectl-applier-simple-build tree into cdk.out/asset.<hash>/
+        # and CDK's in-process asset-staging cache races under xdist.
+        run: pytest tests/test_project_name_scoping.py -v --junitxml=report-project-name-scoping.xml
+      - name: Upload project-name-scoping report
+        if: always()
+        uses: ./.github/actions/upload-artifact-with-retry
+        with:
+          name: project-name-scoping-report
+          path: report-project-name-scoping.xml
+          retention-days: 7
 
   unit-cdk-nag-compliance-matrix:
     name: "unit:cdk:nag-compliance:list"

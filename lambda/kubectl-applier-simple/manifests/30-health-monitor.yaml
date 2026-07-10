@@ -87,6 +87,14 @@ spec:
               value: "{{AUTH_SECRET_ARN}}"
             - name: DYNAMODB_REGION
               value: "{{DYNAMODB_REGION}}"
+            # Deployment prefix + global region so the ALB-hostname sync writes
+            # to /<project>/alb-hostname-<region> in the correct region (#139),
+            # instead of defaulting to /gco/ and colliding with another
+            # deployment in the same account+region.
+            - name: PROJECT_NAME
+              value: "{{PROJECT_NAME}}"
+            - name: GLOBAL_REGION
+              value: "{{GLOBAL_REGION}}"
             - name: AWS_ROLE_ARN
               value: "{{SERVICE_ACCOUNT_ROLE_ARN}}"
             - name: AWS_WEB_IDENTITY_TOKEN_FILE

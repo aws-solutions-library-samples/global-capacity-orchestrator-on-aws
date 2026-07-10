@@ -1125,10 +1125,15 @@ class TestAnalyticsConstants:
         assert SAGEMAKER_ROLE_NAME_PREFIX == "AmazonSageMaker"
 
     def test_cognito_domain_prefix_default(self):
-        """COGNITO_DOMAIN_PREFIX_DEFAULT is the literal 'gco-studio'."""
-        from gco.stacks.constants import COGNITO_DOMAIN_PREFIX_DEFAULT
+        """cognito_domain_prefix_default renders '<project>-studio' (#139).
 
-        assert COGNITO_DOMAIN_PREFIX_DEFAULT == "gco-studio"
+        Defaults to the pre-#139 literal ``gco-studio`` for project_name='gco'
+        and scopes to the project name otherwise.
+        """
+        from gco.stacks.constants import cognito_domain_prefix_default
+
+        assert cognito_domain_prefix_default("gco") == "gco-studio"
+        assert cognito_domain_prefix_default("acme") == "acme-studio"
 
     def test_studio_presigned_url_expiry_seconds_positive_int(self):
         """STUDIO_PRESIGNED_URL_EXPIRY_SECONDS is a positive int."""
@@ -1140,17 +1145,19 @@ class TestAnalyticsConstants:
         assert STUDIO_PRESIGNED_URL_EXPIRY_SECONDS > 0
 
     def test_cluster_shared_bucket_name_prefix(self):
-        """CLUSTER_SHARED_BUCKET_NAME_PREFIX is the literal 'gco-cluster-shared'."""
-        from gco.stacks.constants import CLUSTER_SHARED_BUCKET_NAME_PREFIX
+        """cluster_shared_bucket_name_prefix renders '<project>-cluster-shared' (#139)."""
+        from gco.stacks.constants import cluster_shared_bucket_name_prefix
 
-        assert CLUSTER_SHARED_BUCKET_NAME_PREFIX == "gco-cluster-shared"
+        assert cluster_shared_bucket_name_prefix("gco") == "gco-cluster-shared"
+        assert cluster_shared_bucket_name_prefix("acme") == "acme-cluster-shared"
 
     def test_cluster_shared_ssm_parameter_prefix(self):
-        """CLUSTER_SHARED_SSM_PARAMETER_PREFIX is the documented '/gco/cluster-shared-bucket' path."""
-        from gco.stacks.constants import CLUSTER_SHARED_SSM_PARAMETER_PREFIX
+        """cluster_shared_ssm_parameter_prefix renders '/<project>/cluster-shared-bucket' (#139)."""
+        from gco.stacks.constants import cluster_shared_ssm_parameter_prefix
 
-        assert CLUSTER_SHARED_SSM_PARAMETER_PREFIX == "/gco/cluster-shared-bucket"
-        assert CLUSTER_SHARED_SSM_PARAMETER_PREFIX.startswith("/"), (
-            "CLUSTER_SHARED_SSM_PARAMETER_PREFIX must be an absolute SSM path "
+        assert cluster_shared_ssm_parameter_prefix("gco") == "/gco/cluster-shared-bucket"
+        assert cluster_shared_ssm_parameter_prefix("acme") == "/acme/cluster-shared-bucket"
+        assert cluster_shared_ssm_parameter_prefix("gco").startswith("/"), (
+            "cluster_shared_ssm_parameter_prefix must be an absolute SSM path "
             "(starts with '/') so it composes into valid parameter ARNs"
         )

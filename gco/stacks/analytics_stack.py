@@ -48,11 +48,11 @@ from constructs import Construct
 
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.constants import (
-    CLUSTER_SHARED_SSM_PARAMETER_PREFIX,
-    COGNITO_DOMAIN_PREFIX_DEFAULT,
     EMR_SERVERLESS_RELEASE_LABEL,
     LAMBDA_PYTHON_RUNTIME,
     SAGEMAKER_ROLE_NAME_PREFIX,
+    cluster_shared_ssm_parameter_prefix,
+    cognito_domain_prefix_default,
 )
 from gco.stacks.nag_suppressions import apply_all_suppressions
 
@@ -106,6 +106,7 @@ class GCOAnalyticsStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         self.config = config
+        self.project_name = config.get_project_name()
         # ``api_gateway_secret_arn`` is reserved for future auth wiring;
         # accepted now so the constructor signature is stable.
         self.api_gateway_secret_arn = api_gateway_secret_arn
@@ -288,16 +289,17 @@ class GCOAnalyticsStack(Stack):
     def _create_studio_only_bucket(self) -> None:
         """Create ``Studio_Only_Bucket`` for notebook-private scratch + outputs.
 
-        Named ``gco-analytics-studio-<account>-<region>`` so the cdk-nag
-        deny-list assertion (``arn:aws:s3:::gco-analytics-studio-*``) stays
-        stable. KMS-encrypted with ``self.kms_key``; every access path goes
+        Named ``<project_name>-analytics-studio-<account>-<region>`` so the
+        cdk-nag deny-list assertion (``arn:aws:s3:::<project_name>-analytics-studio-*``)
+        stays in lockstep and two deployments in one account+region do not
+        collide. KMS-encrypted with ``self.kms_key``; every access path goes
         through the ``SageMaker_Execution_Role`` grant — no other principal
         is granted access.
         """
         self.studio_only_bucket = s3.Bucket(
             self,
             "StudioOnlyBucket",
-            bucket_name=f"gco-analytics-studio-{self.account}-{self.region}",
+            bucket_name=f"{self.project_name}-analytics-studio-{self.account}-{self.region}",
             encryption=s3.BucketEncryption.KMS,
             encryption_key=self.kms_key,
             bucket_key_enabled=True,
@@ -430,7 +432,7 @@ class GCOAnalyticsStack(Stack):
         self.sagemaker_execution_role = iam.Role(
             self,
             "SagemakerExecutionRole",
-            role_name=f"{SAGEMAKER_ROLE_NAME_PREFIX}-gco-analytics-exec-{self.region}",
+            role_name=f"{SAGEMAKER_ROLE_NAME_PREFIX}-{self.project_name}-analytics-exec-{self.region}",
             assumed_by=iam.ServicePrincipal("sagemaker.amazonaws.com"),
             description=(
                 "SageMaker_Execution_Role - assumed by notebooks in the Studio "
@@ -509,10 +511,11 @@ class GCOAnalyticsStack(Stack):
         # ssm:GetParameter on the Cluster_Shared_Bucket metadata params. The
         # three parameters (name/arn/region) live in the global region where
         # GCOGlobalStack is deployed, not in the analytics region. Scoping
-        # to the CLUSTER_SHARED_SSM_PARAMETER_PREFIX tree under the global
-        # region means a notebook can fetch the bucket name at runtime via
+        # to the cluster_shared_ssm_parameter_prefix(project_name) tree under
+        # the global region means a notebook can fetch the bucket name at
+        # runtime via
         #   boto3.client('ssm', region_name='<global-region>').get_parameter(
-        #       Name='/gco/cluster-shared-bucket/name')['Parameter']['Value']
+        #       Name='/<project_name>/cluster-shared-bucket/name')['Parameter']['Value']
         # without any JupyterLab-terminal export step.
         global_region = self.config.get_global_region()
         self.sagemaker_execution_role.add_to_policy(
@@ -520,7 +523,7 @@ class GCOAnalyticsStack(Stack):
                 effect=iam.Effect.ALLOW,
                 actions=["ssm:GetParameter", "ssm:GetParameters"],
                 resources=[
-                    f"arn:aws:ssm:{global_region}:{self.account}:parameter{CLUSTER_SHARED_SSM_PARAMETER_PREFIX}/*",
+                    f"arn:aws:ssm:{global_region}:{self.account}:parameter{cluster_shared_ssm_parameter_prefix(self.project_name)}/*",
                 ],
             )
         )
@@ -794,7 +797,7 @@ class GCOAnalyticsStack(Stack):
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         global_region = self.config.get_global_region()
-        parameter_name = f"{CLUSTER_SHARED_SSM_PARAMETER_PREFIX}/arn"
+        parameter_name = f"{cluster_shared_ssm_parameter_prefix(self.project_name)}/arn"
 
         read_cr = cr.AwsCustomResource(
             self,
@@ -974,7 +977,7 @@ class GCOAnalyticsStack(Stack):
             "StudioDomain",
             auth_mode="IAM",
             app_network_access_type="VpcOnly",
-            domain_name=f"gco-studio-{self.region}",
+            domain_name=f"{self.project_name}-studio-{self.region}",
             subnet_ids=[s.subnet_id for s in private_subnets],
             vpc_id=self.vpc.vpc_id,
             kms_key_id=self.kms_key.key_id,
@@ -1190,7 +1193,7 @@ class GCOAnalyticsStack(Stack):
         self.emr_app = emrserverless.CfnApplication(
             self,
             "EmrServerlessApp",
-            name=f"gco-spark-{self.region}",
+            name=f"{self.project_name}-spark-{self.region}",
             release_label=EMR_SERVERLESS_RELEASE_LABEL,
             type="SPARK",
             network_configuration=emrserverless.CfnApplication.NetworkConfigurationProperty(
@@ -1265,15 +1268,15 @@ class GCOAnalyticsStack(Stack):
             enable_token_revocation=True,
         )
 
-        # Domain prefix — default is ``gco-studio-<account>`` (stock default
-        # from constants.COGNITO_DOMAIN_PREFIX_DEFAULT + account suffix).
+        # Domain prefix — default is ``<project_name>-studio-<account>`` (from
+        # constants.cognito_domain_prefix_default(project_name) + account suffix).
         # The override in cdk.json is used verbatim when non-None, without
         # appending the account id, because operators who override the
         # prefix typically want a short memorable value.
         if self._cognito_domain_prefix_override:
             domain_prefix = self._cognito_domain_prefix_override
         else:
-            domain_prefix = f"{COGNITO_DOMAIN_PREFIX_DEFAULT}-{self.account}"
+            domain_prefix = f"{cognito_domain_prefix_default(self.project_name)}-{self.account}"
 
         self.cognito_domain = self.cognito_pool.add_domain(
             "StudioUserPoolDomain",
@@ -1540,4 +1543,5 @@ class GCOAnalyticsStack(Stack):
             regions=None,
             global_region=self.config.get_global_region(),
             api_gateway_region=self.config.get_api_gateway_region(),
+            project_name=self.project_name,
         )

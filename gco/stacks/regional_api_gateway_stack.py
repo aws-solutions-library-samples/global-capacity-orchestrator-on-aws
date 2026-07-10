@@ -101,7 +101,11 @@ class GCORegionalApiGatewayStack(Stack):
         """Apply cdk-nag suppressions for this stack."""
         from gco.stacks.nag_suppressions import apply_all_suppressions
 
-        apply_all_suppressions(self, stack_type="regional_api_gateway")
+        apply_all_suppressions(
+            self,
+            stack_type="regional_api_gateway",
+            project_name=self.config.get_project_name(),
+        )
 
     def _create_vpc_proxy_lambda(self) -> lambda_.Function:
         """Create VPC Lambda that proxies requests to internal ALB."""

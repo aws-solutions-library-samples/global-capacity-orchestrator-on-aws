@@ -39,9 +39,11 @@ spec:
             - name: AWS_WEB_IDENTITY_TOKEN_FILE
               value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
             - name: INFERENCE_ENDPOINTS_TABLE_NAME
-              value: "gco-inference-endpoints"
+              value: "{{INFERENCE_ENDPOINTS_TABLE_NAME}}"
             - name: DYNAMODB_REGION
               value: "{{DYNAMODB_REGION}}"
+            - name: PROJECT_NAME
+              value: "{{PROJECT_NAME}}"
             - name: INFERENCE_NAMESPACE
               value: "gco-inference"
             - name: RECONCILE_INTERVAL_SECONDS

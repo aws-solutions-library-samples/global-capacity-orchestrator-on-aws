@@ -8,6 +8,7 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
   - [Understanding Stack Regions](#understanding-stack-regions)
   - [Configuring Deployment Regions](#configuring-deployment-regions)
   - [Environment Variables](#environment-variables)
+- [Running Multiple Deployments in One Account and Region](#running-multiple-deployments-in-one-account-and-region)
 - [Adding Regions](#adding-regions)
 - [EKS Cluster Configuration](#eks-cluster-configuration)
   - [Endpoint Access Modes](#endpoint-access-modes)
@@ -170,6 +171,79 @@ export GCO_MONITORING_REGION=us-west-2
 2. User config file (`~/.gco/config.yaml`)
 3. Project config (`cdk.json`)
 4. Default values
+
+## Running Multiple Deployments in One Account and Region
+
+`project_name` (in `cdk.json`) is the deployment's unique identifier. Every
+physical resource name that must be unique per account+region — or globally —
+is derived from it, so **changing `project_name` alone yields a fully isolated
+deployment**. This lets you run two GCO deployments (for example `prod` and
+`staging`, a blue/green pair, or per-team sandboxes) in the **same AWS account
+and the same region(s)** without collisions.
+
+```jsonc
+// cdk.json — deployment A (the default)
+{ "context": { "project_name": "gco", "deployment_regions": { "global": "us-east-2", "regional": ["us-east-1"] } } }
+
+// cdk.json — deployment B, same account + same regions, no collision
+{ "context": { "project_name": "gco-staging", "deployment_regions": { "global": "us-east-2", "regional": ["us-east-1"] } } }
+```
+
+Deploy each the usual way (`gco stacks deploy-all` or `cdk deploy --all`); the
+two produce disjoint resource names and tear down independently
+(`destroy-all` on one leaves the other intact).
+
+### What `project_name` scopes
+
+Changing `project_name` re-scopes all of the following (shown for
+`project_name = "acme"`):
+
+| Resource | Name |
+|---|---|
+| CloudFormation stacks | `acme-global`, `acme-api-gateway`, `acme-<region>`, `acme-monitoring` |
+| DynamoDB tables | `acme-jobs`, `acme-job-templates`, `acme-webhooks`, `acme-inference-endpoints`, … |
+| Cluster-shared bucket + SSM | `acme-cluster-shared-<account>-<region>`, `/acme/cluster-shared-bucket/*` |
+| Regional-shared bucket + SSM | `acme-regional-shared-<account>-<region>`, `/acme/regional-shared-bucket/*` |
+| SSM registry | `/acme/jobs-table-name`, `/acme/model-bucket-name`, `/acme/alb-hostname-<region>`, … |
+| API Gateway auth secret | `acme/api-gateway-auth-token` |
+| WAF WebACL + log groups | `acme-api-gateway-waf`, `/aws/apigateway/acme-global`, `aws-waf-logs-acme-api-gateway` |
+| CloudFormation exports | `acme-global-api-endpoint`, `acme-auth-secret-arn`, `acme-waf-webacl-arn`, … |
+| Analytics (opt-in) | Studio bucket `acme-analytics-studio-*`, SageMaker role `AmazonSageMaker-acme-analytics-exec-<region>`, Studio domain `acme-studio-<region>`, EMR app `acme-spark-<region>`, Cognito domain `acme-studio-<account>` |
+
+A handful of names are intentionally **not** re-scoped because they are already
+unique within their own parent and never collide across deployments: the REST
+API name (`gco-global-api`), the Cognito authorizer / request-validator names,
+and in-cluster Kubernetes object names (namespaces such as `gco-jobs` /
+`gco-system`, service accounts, ConfigMaps) — each deployment gets its own EKS
+cluster, so those live in separate Kubernetes API servers.
+
+### `project_name` format
+
+Because the value flows into S3 bucket names and the Cognito domain prefix
+(both lowercase-only, length-limited), it is validated at synth time and must
+match:
+
+```text
+^[a-z][a-z0-9-]{1,30}$
+```
+
+That is: start with a lowercase letter, then 2–31 total characters of lowercase
+letters, digits, or hyphens (e.g. `gco`, `gco-staging`, `acme`, `team-b-prod`).
+Uppercase, underscores, dots, a leading digit, or a leading/trailing hyphen are
+rejected up front with a clear error rather than failing mid-deploy.
+
+### Backward compatibility
+
+The default `project_name` is `gco`, and every derived name renders
+**byte-for-byte identical** to earlier releases for that default. Upgrading an
+existing `gco` deployment therefore renames (and replaces) no resource — verify
+with `cdk diff` before deploying. The per-`project_name` no-collision guarantee
+and the `gco` backward-compat guarantee are both enforced in CI by
+`tests/test_project_name_scoping.py` (see the `unit:cdk:project-name-scoping`
+job).
+
+> Tracking: this scoping was completed in
+> [issue #139](https://github.com/awslabs/global-capacity-orchestrator-on-aws/issues/139).
 
 ## Adding Regions
 

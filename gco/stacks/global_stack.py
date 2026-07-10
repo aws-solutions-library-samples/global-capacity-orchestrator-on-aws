@@ -42,9 +42,9 @@ from constructs import Construct
 
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.constants import (
-    CLUSTER_SHARED_BUCKET_NAME_PREFIX,
-    CLUSTER_SHARED_SSM_PARAMETER_PREFIX,
     LAMBDA_PYTHON_RUNTIME,
+    cluster_shared_bucket_name_prefix,
+    cluster_shared_ssm_parameter_prefix,
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -526,7 +526,9 @@ class GCOGlobalStack(Stack):
         """Apply cdk-nag suppressions for this stack."""
         from gco.stacks.nag_suppressions import apply_all_suppressions
 
-        apply_all_suppressions(self, stack_type="global")
+        apply_all_suppressions(
+            self, stack_type="global", project_name=self.config.get_project_name()
+        )
 
     def _create_endpoint_group(self, region: str) -> None:
         """
@@ -1193,9 +1195,10 @@ class GCOGlobalStack(Stack):
            from ``model_bucket_access_logs`` so cluster-shared-bucket access logs
            are not commingled with model-bucket logs.
         2. ``cluster_shared_bucket`` — the primary bucket named
-           ``gco-cluster-shared-<account>-<global-region>`` (the prefix
-           ``CLUSTER_SHARED_BUCKET_NAME_PREFIX`` is the stable ARN prefix used by
-           IAM policies and nag assertions). KMS-encrypted with
+           ``<project_name>-cluster-shared-<account>-<global-region>`` (the
+           prefix from ``cluster_shared_bucket_name_prefix(project_name)`` is
+           the stable ARN prefix used by IAM policies and nag assertions).
+           KMS-encrypted with
            ``cluster_shared_kms_key``, block-public-access on, SSL enforced,
            versioned, destroy-on-teardown.
 
@@ -1239,14 +1242,17 @@ class GCOGlobalStack(Stack):
             ],
         )
 
-        # Primary Cluster_Shared_Bucket. Name uses the constant prefix so
-        # the IAM allow-list assertion (arn:aws:s3:::gco-cluster-shared-*)
-        # stays stable across refactors. `bucket_key_enabled=True` mirrors the
-        # model_bucket pattern to reduce per-object KMS request costs.
+        # Primary Cluster_Shared_Bucket. Name is derived from ``project_name``
+        # so the bucket and the IAM allow-list assertion
+        # (arn:aws:s3:::<project_name>-cluster-shared-*) stay in lockstep and
+        # two deployments in the same account+region do not collide.
+        # `bucket_key_enabled=True` mirrors the model_bucket pattern to reduce
+        # per-object KMS request costs.
+        project_name = self.config.get_project_name()
         self.cluster_shared_bucket = s3.Bucket(
             self,
             "ClusterSharedBucket",
-            bucket_name=f"{CLUSTER_SHARED_BUCKET_NAME_PREFIX}-{self.account}-{self.region}",
+            bucket_name=f"{cluster_shared_bucket_name_prefix(project_name)}-{self.account}-{self.region}",
             encryption=s3.BucketEncryption.KMS,
             encryption_key=self.cluster_shared_kms_key,
             bucket_key_enabled=True,
@@ -1358,9 +1364,9 @@ class GCOGlobalStack(Stack):
         These parameters are the cross-region contract consumed by
         ``GCORegionalStack._resolve_cluster_shared_bucket_from_ssm`` (always) and by
         ``GCOAnalyticsStack._grant_sagemaker_role_on_cluster_shared_bucket``
-        (conditional on the analytics toggle). The prefix
-        ``CLUSTER_SHARED_SSM_PARAMETER_PREFIX`` is the single source of truth so
-        the namespace can be renamed in exactly one place if needed.
+        (conditional on the analytics toggle). The prefix from
+        ``cluster_shared_ssm_parameter_prefix(project_name)`` is the single
+        source of truth so the namespace can be renamed in exactly one place.
 
         Also emits four ``CfnOutput`` values for discoverability: the three SSM
         values plus the KMS key ARN. Export names follow the existing
@@ -1374,7 +1380,7 @@ class GCOGlobalStack(Stack):
         ssm.StringParameter(
             self,
             "ClusterSharedBucketNameParam",
-            parameter_name=f"{CLUSTER_SHARED_SSM_PARAMETER_PREFIX}/name",
+            parameter_name=f"{cluster_shared_ssm_parameter_prefix(project_name)}/name",
             string_value=self.cluster_shared_bucket.bucket_name,
             description="Name of the always-on Cluster_Shared_Bucket (owned by GCOGlobalStack).",
         )
@@ -1382,7 +1388,7 @@ class GCOGlobalStack(Stack):
         ssm.StringParameter(
             self,
             "ClusterSharedBucketArnParam",
-            parameter_name=f"{CLUSTER_SHARED_SSM_PARAMETER_PREFIX}/arn",
+            parameter_name=f"{cluster_shared_ssm_parameter_prefix(project_name)}/arn",
             string_value=self.cluster_shared_bucket.bucket_arn,
             description="ARN of the always-on Cluster_Shared_Bucket (owned by GCOGlobalStack).",
         )
@@ -1390,7 +1396,7 @@ class GCOGlobalStack(Stack):
         ssm.StringParameter(
             self,
             "ClusterSharedBucketRegionParam",
-            parameter_name=f"{CLUSTER_SHARED_SSM_PARAMETER_PREFIX}/region",
+            parameter_name=f"{cluster_shared_ssm_parameter_prefix(project_name)}/region",
             string_value=self.region,
             description="Home region of the always-on Cluster_Shared_Bucket (the global region).",
         )

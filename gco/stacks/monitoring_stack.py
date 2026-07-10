@@ -145,6 +145,7 @@ class GCOMonitoringStack(Stack):
             stack_type="monitoring",
             regions=self.config.get_regions(),
             global_region=self.config.get_global_region(),
+            project_name=self.project_name,
         )
 
     def _create_alert_topic(self) -> sns.Topic:

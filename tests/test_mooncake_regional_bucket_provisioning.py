@@ -35,8 +35,8 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from gco.stacks.constants import (
-    REGIONAL_SHARED_BUCKET_NAME_PREFIX,
-    REGIONAL_SHARED_SSM_PARAMETER_PREFIX,
+    regional_shared_bucket_name_prefix,
+    regional_shared_ssm_parameter_prefix,
 )
 from gco.stacks.regional_stack import GCORegionalStack
 
@@ -47,6 +47,13 @@ from gco.stacks.regional_stack import GCORegionalStack
 # under its canonical name, because pytest would otherwise re-collect it here.
 from tests.test_regional_stack import MockConfigLoader
 from tests.test_regional_stack import TestRegionalStackSynthesis as _RegionalStackSynthesisFixtures
+
+# Physical-name prefixes the regional stack derives from ``project_name`` (#139).
+# These tests synth with ``MockConfigLoader`` whose ``get_project_name()``
+# returns ``"gco-test"``, so the expected prefixes are scoped to that name.
+_PROJECT_NAME = "gco-test"
+REGIONAL_SHARED_BUCKET_NAME_PREFIX = regional_shared_bucket_name_prefix(_PROJECT_NAME)
+REGIONAL_SHARED_SSM_PARAMETER_PREFIX = regional_shared_ssm_parameter_prefix(_PROJECT_NAME)
 
 _ACCOUNT = "123456789012"
 

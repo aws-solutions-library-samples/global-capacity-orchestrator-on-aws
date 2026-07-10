@@ -5,13 +5,13 @@ Synthesizes ``GCOGlobalStack`` against a minimal ``MockConfigLoader`` and
 asserts that the ``Cluster_Shared_Bucket`` invariants hold in the
 synthesized CloudFormation template:
 
-- exactly one bucket is named with the ``gco-cluster-shared-`` prefix,
+- exactly one bucket is named with the ``gco-test-cluster-shared-`` prefix,
 - the primary bucket is KMS-encrypted with the new ``Cluster_Shared_KMS_Key``,
 - full public-access block and TLS-only posture,
 - ``VersioningConfiguration.Status=Enabled``,
 - destroy-on-teardown for the primary bucket, the access-logs bucket, and
   the KMS key,
-- three SSM parameters at ``/gco/cluster-shared-bucket/{name,arn,region}``,
+- three SSM parameters at ``/gco-test/cluster-shared-bucket/{name,arn,region}``,
 - four ``CfnOutput``s with the documented export names,
 - explicit ``aws:SecureTransport=false`` Deny on the primary bucket policy
   (belt-and-suspenders with ``enforce_ssl=True``),
@@ -84,25 +84,25 @@ def _synth(app: cdk.App, construct_id: str = "test-global-stack") -> assertions.
 
 def _bucket_name_starts_with_cluster_shared(bucket_name: Any) -> bool:
     """Return True if the CFN ``BucketName`` value resolves to a name starting with
-    ``gco-cluster-shared-``.
+    ``gco-test-cluster-shared-``.
 
-    CDK serializes the bucket name as ``Fn::Join["", ["gco-cluster-shared-",
+    CDK serializes the bucket name as ``Fn::Join["", ["gco-test-cluster-shared-",
     {"Ref": "AWS::AccountId"}, "-", {"Ref": "AWS::Region"}]]``, so we inspect
     the Join parts rather than comparing to a literal string.
     """
     if isinstance(bucket_name, str):
-        return bucket_name.startswith("gco-cluster-shared-")
+        return bucket_name.startswith("gco-test-cluster-shared-")
     if isinstance(bucket_name, dict) and "Fn::Join" in bucket_name:
         parts = bucket_name["Fn::Join"][1]
         if parts and isinstance(parts[0], str):
-            return parts[0].startswith("gco-cluster-shared-")
+            return parts[0].startswith("gco-test-cluster-shared-")
     return False
 
 
 def _find_cluster_shared_bucket(template: assertions.Template) -> tuple[str, Mapping[str, Any]]:
     """Return ``(logical_id, resource)`` for the primary ``Cluster_Shared_Bucket``.
 
-    Identified by the ``gco-cluster-shared-`` ``BucketName`` prefix (the
+    Identified by the ``gco-test-cluster-shared-`` ``BucketName`` prefix (the
     stable ARN prefix contract for this bucket).
     """
     buckets = template.find_resources("AWS::S3::Bucket")
@@ -112,7 +112,7 @@ def _find_cluster_shared_bucket(template: assertions.Template) -> tuple[str, Map
         if _bucket_name_starts_with_cluster_shared(res.get("Properties", {}).get("BucketName"))
     ]
     assert len(matches) == 1, (
-        f"Expected exactly one bucket named gco-cluster-shared-*, found {len(matches)}"
+        f"Expected exactly one bucket named gco-test-cluster-shared-*, found {len(matches)}"
     )
     return matches[0]
 
@@ -189,7 +189,7 @@ class TestClusterSharedBucket:
     analytics is enabled)."""
 
     def test_exactly_one_cluster_shared_named_bucket(self):
-        """Exactly one bucket has BucketName prefix ``gco-cluster-shared-``."""
+        """Exactly one bucket has BucketName prefix ``gco-test-cluster-shared-``."""
         template = _synth(cdk.App())
         _find_cluster_shared_bucket(template)  # raises if zero or >1
 
@@ -259,20 +259,20 @@ class TestClusterSharedBucket:
             )
 
     def test_ssm_parameters_published_at_documented_paths(self):
-        """Three SSM parameters exist at ``/gco/cluster-shared-bucket/{name,arn,region}``."""
+        """Three SSM parameters exist at ``/gco-test/cluster-shared-bucket/{name,arn,region}``."""
         template = _synth(cdk.App())
         params = template.find_resources("AWS::SSM::Parameter")
         names = {res["Properties"].get("Name") for res in params.values()}
         expected = {
-            "/gco/cluster-shared-bucket/name",
-            "/gco/cluster-shared-bucket/arn",
-            "/gco/cluster-shared-bucket/region",
+            "/gco-test/cluster-shared-bucket/name",
+            "/gco-test/cluster-shared-bucket/arn",
+            "/gco-test/cluster-shared-bucket/region",
         }
         missing = expected - names
         assert not missing, (
             f"Missing expected SSM parameters: {sorted(missing)}. "
-            f"Present /gco/cluster-shared-bucket/* params: "
-            f"{sorted(n for n in names if isinstance(n, str) and n.startswith('/gco/cluster-shared-bucket/'))}"
+            f"Present /gco-test/cluster-shared-bucket/* params: "
+            f"{sorted(n for n in names if isinstance(n, str) and n.startswith('/gco-test/cluster-shared-bucket/'))}"
         )
 
     def test_cfn_outputs_emitted_with_expected_export_names(self):
