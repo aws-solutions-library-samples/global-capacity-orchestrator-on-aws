@@ -75,6 +75,10 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _CHARTS_YAML = _REPO_ROOT / "lambda" / "helm-installer" / "charts.yaml"
 _CDK_JSON = _REPO_ROOT / "cdk.json"
 
+# Fallback mirror namespace used only when cdk.json can't be read to resolve
+# the project prefix. Normal paths derive ``<project_name>/dockerhub`` from
+# cdk.json's ``project_name`` (see ``read_mirror_config``) so two deployments
+# mirror into isolated ECR namespaces (#139).
 _DEFAULT_NAMESPACE = "gco/dockerhub"
 
 # The Volcano components enabled by default (controller, scheduler, admission),
@@ -217,7 +221,9 @@ def plan_from_sources(
 def read_mirror_config(cdk_json_path: Path = _CDK_JSON) -> dict[str, Any]:
     """Return ``{enabled, ecr_namespace}`` from cdk.json ``volcano_image_mirror``.
 
-    Defaults to disabled / ``gco/dockerhub`` when the block or file is absent.
+    Defaults to disabled / ``<project_name>/dockerhub`` (``gco/dockerhub`` for
+    the stock project) when the block is absent, so a second deployment mirrors
+    into its own ECR namespace (#139).
     Used by the deploy path to decide whether to auto-mirror. (The cdk.json key
     is still named ``volcano_image_mirror`` — Volcano is the only consumer today
     — but the mirror itself is general; see :func:`collect_source_refs`.)
@@ -227,8 +233,12 @@ def read_mirror_config(cdk_json_path: Path = _CDK_JSON) -> dict[str, Any]:
             ctx = json.load(f).get("context", {}) or {}
     except OSError, json.JSONDecodeError:
         return {"enabled": False, "ecr_namespace": _DEFAULT_NAMESPACE}
+    # Default the mirror namespace to the deployment's own project prefix
+    # (``<project_name>/dockerhub``) so a second deployment mirrors into its own
+    # ECR namespace (#139); resolves to ``gco/dockerhub`` for the stock project.
+    default_namespace = f"{ctx.get('project_name') or 'gco'}/dockerhub"
     block = ctx.get("volcano_image_mirror") or {}
-    namespace = str(block.get("ecr_namespace", _DEFAULT_NAMESPACE)).strip("/") or _DEFAULT_NAMESPACE
+    namespace = str(block.get("ecr_namespace", default_namespace)).strip("/") or default_namespace
     return {"enabled": bool(block.get("enabled", False)), "ecr_namespace": namespace}
 
 

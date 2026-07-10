@@ -2954,29 +2954,37 @@ class GCORegionalStack(Stack):
         Volcano pointed at docker.io.
 
         - ``enabled`` (default False) — master toggle.
-        - ``ecr_namespace`` (default ``"gco/dockerhub"``) — the ECR repository
+        - ``ecr_namespace`` (default ``"<project_name>/dockerhub"``, i.e.
+          ``gco/dockerhub`` for the stock project) — the ECR repository
           namespace the mirrored Volcano images live under. Must start with
-          ``gco/`` so it inherits the project's existing ``gco/*`` machinery
-          (node pull access, replication rule, trusted-registry allow-list)
-          with no extra IAM, and must be a valid (possibly nested) ECR
-          repository path.
+          ``<project_name>/`` so it inherits the project's existing
+          ``<project_name>/*`` machinery (node pull access, replication rule,
+          trusted-registry allow-list) with no extra IAM, and must be a valid
+          (possibly nested) ECR repository path.
         """
         raw = self.node.try_get_context("volcano_image_mirror") or {}
         if not isinstance(raw, dict):
             raise ValueError(f"volcano_image_mirror must be a mapping, got {type(raw).__name__}")
 
+        # The mirror namespace lives under this deployment's project prefix
+        # (``<project_name>/``) so it inherits the project's ECR access,
+        # replication rule, and trusted-registry allow-list (#139). Defaults to
+        # ``<project_name>/dockerhub`` — ``gco/dockerhub`` for the stock project.
+        project_prefix = f"{self.config.get_project_name()}/"
         enabled = bool(raw.get("enabled", False))
-        ecr_namespace = str(raw.get("ecr_namespace", "gco/dockerhub")).strip().strip("/")
+        ecr_namespace = (
+            str(raw.get("ecr_namespace", f"{project_prefix}dockerhub")).strip().strip("/")
+        )
 
         if not enabled:
             return {"enabled": False, "ecr_namespace": ecr_namespace}
 
         # Must live under the project prefix and be a valid nested ECR repo
         # path (lowercase alphanumerics + . _ - per segment, slash-separated).
-        if not ecr_namespace.startswith("gco/"):
+        if not ecr_namespace.startswith(project_prefix):
             raise ValueError(
-                "volcano_image_mirror.ecr_namespace must start with 'gco/' so it "
-                "inherits the project's gco/* ECR access/replication, got "
+                f"volcano_image_mirror.ecr_namespace must start with {project_prefix!r} so it "
+                f"inherits the project's {project_prefix}* ECR access/replication, got "
                 f"{ecr_namespace!r}"
             )
         segment = r"[a-z0-9]+(?:[._-][a-z0-9]+)*"

@@ -1484,7 +1484,10 @@ class GCOGlobalStack(Stack):
                         ],
                         repository_filters=[
                             ecr.CfnReplicationConfiguration.RepositoryFilterProperty(
-                                filter="gco/",
+                                # Replicate this deployment's own ECR namespace
+                                # (``<project_name>/*``) — ``gco/`` for the stock
+                                # project — so two deployments don't cross-replicate (#139).
+                                filter=f"{self.config.get_project_name()}/",
                                 filter_type="PREFIX_MATCH",
                             )
                         ],

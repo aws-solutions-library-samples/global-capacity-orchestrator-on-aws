@@ -952,11 +952,13 @@ class StackManager:
             manager = ImageManager(config=self.config)
             repos = manager.list_repos()
             inventory["repo_count"] = len(repos)
+            # Repos this deployment owns live under ``<project_name>/`` (#139).
+            repo_prefix = f"{self.config.project_name}/"
             for repo in repos:
                 repo_name = repo.get("name", "")
-                if not repo_name.startswith("gco/"):
+                if not repo_name.startswith(repo_prefix):
                     continue
-                short = repo_name.removeprefix("gco/")
+                short = repo_name.removeprefix(repo_prefix)
                 try:
                     tags = manager.list_tags(short)
                 except Exception as exc:  # noqa: BLE001

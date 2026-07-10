@@ -71,10 +71,11 @@ _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 # 128 chars max.
 _TAG_RE = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_.\-]{0,127}$")
 
-# Project repository prefix. Every repo this manager creates lives
-# under ``gco/`` so a single replication / lifecycle / removal policy
-# rule can target the whole project.
-_REPO_PREFIX = "gco"
+# Project repository prefix. Every repo this manager creates lives under
+# ``<project_name>/`` (default ``gco/``) so a single replication / lifecycle /
+# removal-policy rule can target the whole deployment, and two deployments in
+# one account+region get isolated ECR namespaces (#139). Resolved per-instance
+# from ``config.project_name`` into ``self._repo_prefix`` in ``__init__``.
 
 # First-party images that GCO builds and ships itself, as opposed to
 # the user images pushed through ``build``/``push``. Each entry pairs
@@ -119,6 +120,11 @@ class ImageManager:
 
     def __init__(self, config: GCOConfig | None = None, region: str | None = None):
         self.config = config or get_config()
+        # ECR repo namespace for this deployment (#139): repos live under
+        # ``<project_name>/`` so two deployments in one account+region don't
+        # share an ECR namespace. Defaults to ``gco`` — byte-identical to the
+        # pre-#139 hardcoded prefix for the stock deployment.
+        self._repo_prefix = self.config.project_name
         self.region = self._resolve_region(region)
         self._account_id_cache: str | None = None
 
@@ -155,7 +161,9 @@ class ImageManager:
 
     def _repo_arn(self, name: str) -> str:
         """Return the full ARN of the repository under the project prefix."""
-        return f"arn:aws:ecr:{self.region}:{self._account_id()}:repository/{_REPO_PREFIX}/{name}"
+        return (
+            f"arn:aws:ecr:{self.region}:{self._account_id()}:repository/{self._repo_prefix}/{name}"
+        )
 
     def _ecr_client(self) -> Any:
         """Return a boto3 ECR client targeting the manager's region."""
@@ -315,7 +323,7 @@ class ImageManager:
         error. Catch this earlier and surface a helpful message.
         """
         ecr = self._ecr_client()
-        repo_name = f"{_REPO_PREFIX}/{name}"
+        repo_name = f"{self._repo_prefix}/{name}"
         try:
             repo_resp = ecr.describe_repositories(repositoryNames=[repo_name])
         except ecr.exceptions.RepositoryNotFoundException:
@@ -406,7 +414,7 @@ class ImageManager:
         self._check_tag_immutable_collision(validated_name, validated_tag)
         self._ecr_login(runtime)
 
-        full_uri = f"{self._registry_host()}/{_REPO_PREFIX}/{validated_name}:{validated_tag}"
+        full_uri = f"{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}"
 
         build_cmd: list[str] = [
             runtime,
@@ -444,7 +452,7 @@ class ImageManager:
             "digest": digest,
             "size_bytes": size_bytes,
             "runtime": runtime,
-            "repository": f"{_REPO_PREFIX}/{validated_name}",
+            "repository": f"{self._repo_prefix}/{validated_name}",
             "tag": validated_tag,
             "region": self.region,
             "retain": retain,
@@ -473,7 +481,7 @@ class ImageManager:
         self._check_tag_immutable_collision(validated_name, validated_tag)
         self._ecr_login(runtime)
 
-        full_uri = f"{self._registry_host()}/{_REPO_PREFIX}/{validated_name}:{validated_tag}"
+        full_uri = f"{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}"
 
         subprocess.run([runtime, "tag", local_image, full_uri], check=True)
         push_result = subprocess.run(
@@ -494,7 +502,7 @@ class ImageManager:
             "digest": digest,
             "size_bytes": size_bytes,
             "runtime": runtime,
-            "repository": f"{_REPO_PREFIX}/{validated_name}",
+            "repository": f"{self._repo_prefix}/{validated_name}",
             "tag": validated_tag,
             "region": self.region,
             "retain": retain,
@@ -505,7 +513,7 @@ class ImageManager:
         ecr = self._ecr_client()
         try:
             resp = ecr.describe_images(
-                repositoryName=f"{_REPO_PREFIX}/{name}",
+                repositoryName=f"{self._repo_prefix}/{name}",
                 imageIds=[{"imageTag": tag}],
             )
             details = resp.get("imageDetails", [])
@@ -528,7 +536,7 @@ class ImageManager:
         for page in paginator.paginate():
             for repo in page.get("repositories", []):
                 repo_name = repo.get("repositoryName", "")
-                if not repo_name.startswith(f"{_REPO_PREFIX}/"):
+                if not repo_name.startswith(f"{self._repo_prefix}/"):
                     continue
                 image_count = self._image_count(repo_name)
                 repos.append(
@@ -563,7 +571,7 @@ class ImageManager:
         rows: list[dict[str, Any]] = []
         paginator = ecr.get_paginator("describe_images")
         for page in paginator.paginate(
-            repositoryName=f"{_REPO_PREFIX}/{validated}",
+            repositoryName=f"{self._repo_prefix}/{validated}",
         ):
             for detail in page.get("imageDetails", []):
                 for tag in detail.get("imageTags", []) or [None]:
@@ -583,7 +591,7 @@ class ImageManager:
         validated_tag = self._validate_tag(tag)
         ecr = self._ecr_client()
         resp = ecr.describe_images(
-            repositoryName=f"{_REPO_PREFIX}/{validated_name}",
+            repositoryName=f"{self._repo_prefix}/{validated_name}",
             imageIds=[{"imageTag": validated_tag}],
         )
         details = resp.get("imageDetails", [])
@@ -591,7 +599,7 @@ class ImageManager:
             return {}
         detail = details[0]
         return {
-            "name": f"{_REPO_PREFIX}/{validated_name}",
+            "name": f"{self._repo_prefix}/{validated_name}",
             "tag": validated_tag,
             "digest": detail.get("imageDigest"),
             "pushed_at": _isoformat(detail.get("imagePushedAt")),
@@ -604,7 +612,7 @@ class ImageManager:
         """Return the full registry URI for ``name:tag``. No API call."""
         validated_name = self._validate_name(name)
         validated_tag = self._validate_tag(tag)
-        return f"{self._registry_host()}/{_REPO_PREFIX}/{validated_name}:{validated_tag}"
+        return f"{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}"
 
     def list_maintained_images(self, tag: str = "latest") -> list[dict[str, Any]]:
         """List the first-party images GCO builds and ships.
@@ -619,7 +627,7 @@ class ImageManager:
             rows.append(
                 {
                     "name": name,
-                    "repository": f"{_REPO_PREFIX}/{name}",
+                    "repository": f"{self._repo_prefix}/{name}",
                     "dockerfile": dockerfile,
                     "uri": self.get_uri(name, tag),
                 }
@@ -639,7 +647,7 @@ class ImageManager:
             raise ValueError(f"Unknown maintained image: {name!r}. Known images: {known}.")
         return {
             "name": name,
-            "repository": f"{_REPO_PREFIX}/{name}",
+            "repository": f"{self._repo_prefix}/{name}",
             "dockerfile": dockerfile,
             "uri": self.get_uri(name, tag),
         }
@@ -724,7 +732,7 @@ class ImageManager:
         the default lifecycle policy and the optional ``gco:retain`` tag.
         """
         validated = self._validate_name(name)
-        repo_name = f"{_REPO_PREFIX}/{validated}"
+        repo_name = f"{self._repo_prefix}/{validated}"
         ecr = self._ecr_client()
 
         created = False
@@ -775,12 +783,12 @@ class ImageManager:
         ecr = self._ecr_client()
         try:
             resp = ecr.get_lifecycle_policy(
-                repositoryName=f"{_REPO_PREFIX}/{validated}",
+                repositoryName=f"{self._repo_prefix}/{validated}",
             )
             policy_text = resp.get("lifecyclePolicyText")
             if policy_text:
                 return {
-                    "name": f"{_REPO_PREFIX}/{validated}",
+                    "name": f"{self._repo_prefix}/{validated}",
                     "policy": json.loads(policy_text),
                 }
         except ecr.exceptions.LifecyclePolicyNotFoundException:
@@ -797,11 +805,11 @@ class ImageManager:
         validated = self._validate_name(name)
         ecr = self._ecr_client()
         resp = ecr.put_lifecycle_policy(
-            repositoryName=f"{_REPO_PREFIX}/{validated}",
+            repositoryName=f"{self._repo_prefix}/{validated}",
             lifecyclePolicyText=json.dumps(policy),
         )
         return {
-            "name": f"{_REPO_PREFIX}/{validated}",
+            "name": f"{self._repo_prefix}/{validated}",
             "registry_id": resp.get("registryId"),
             "policy": policy,
         }
@@ -821,7 +829,9 @@ class ImageManager:
         account = self._account_id()
         rule = {
             "destinations": [{"region": r, "registryId": account} for r in destinations],
-            "repositoryFilters": [{"filter": f"{_REPO_PREFIX}/", "filterType": "PREFIX_MATCH"}],
+            "repositoryFilters": [
+                {"filter": f"{self._repo_prefix}/", "filterType": "PREFIX_MATCH"}
+            ],
         }
         config = {"rules": [rule]} if destinations else {"rules": []}
         resp = ecr.put_replication_configuration(replicationConfiguration=config)
@@ -840,11 +850,11 @@ class ImageManager:
         validated_tag = self._validate_tag(tag)
         ecr = self._ecr_client()
         resp = ecr.batch_delete_image(
-            repositoryName=f"{_REPO_PREFIX}/{validated_name}",
+            repositoryName=f"{self._repo_prefix}/{validated_name}",
             imageIds=[{"imageTag": validated_tag}],
         )
         return {
-            "name": f"{_REPO_PREFIX}/{validated_name}",
+            "name": f"{self._repo_prefix}/{validated_name}",
             "tag": validated_tag,
             "deleted": [
                 {"digest": d.get("imageDigest"), "tag": d.get("imageTag")}
@@ -858,11 +868,11 @@ class ImageManager:
         validated = self._validate_name(name)
         ecr = self._ecr_client()
         resp = ecr.delete_repository(
-            repositoryName=f"{_REPO_PREFIX}/{validated}",
+            repositoryName=f"{self._repo_prefix}/{validated}",
             force=force,
         )
         return {
-            "name": f"{_REPO_PREFIX}/{validated}",
+            "name": f"{self._repo_prefix}/{validated}",
             "deleted": True,
             "registry_id": resp.get("repository", {}).get("registryId"),
         }
@@ -879,7 +889,7 @@ class ImageManager:
         repos: list[str]
         if name:
             validated = self._validate_name(name)
-            repos = [f"{_REPO_PREFIX}/{validated}"]
+            repos = [f"{self._repo_prefix}/{validated}"]
         else:
             repos = [r["name"] for r in self.list_repos()]
 
@@ -1002,7 +1012,7 @@ class ImageManager:
         rows: list[dict[str, Any]] = []
         for repo in self.list_repos():
             repo_name = repo["name"]
-            for tag_row in self.list_tags(repo_name.removeprefix(f"{_REPO_PREFIX}/")):
+            for tag_row in self.list_tags(repo_name.removeprefix(f"{self._repo_prefix}/")):
                 tag = tag_row.get("tag")
                 if not tag:
                     continue

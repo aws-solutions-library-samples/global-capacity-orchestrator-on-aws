@@ -375,6 +375,25 @@ class TestNoCollisionsAcrossProjectNames:
         overlap = sorted(set(_synth("gco")) & set(_synth("acme")))
         assert not overlap, f"project_name='gco' and 'acme' share these stack names: {overlap}"
 
+    def test_ecr_replication_filter_is_project_scoped(self) -> None:
+        # The global-stack ECR replication rule must only replicate this
+        # deployment's own ``<project>/`` image namespace, so two deployments
+        # never cross-replicate each other's repos (#139).
+        templates = _synth("acme", regional=("us-east-1", "us-west-2"))
+        filters: list[str] = []
+        for template in templates.values():
+            for resource in (template.get("Resources") or {}).values():
+                if resource.get("Type") != "AWS::ECR::ReplicationConfiguration":
+                    continue
+                config = (resource.get("Properties") or {}).get("ReplicationConfiguration", {})
+                for rule in config.get("Rules", []):
+                    for filt in rule.get("RepositoryFilters", []):
+                        filters.append(filt.get("Filter"))
+        assert filters, "expected an ECR replication rule with a repository filter in the synth"
+        assert all(f == "acme/" for f in filters), (
+            f"ECR replication filters are not scoped to project_name='acme': {filters}"
+        )
+
     @pytest.mark.parametrize("other", ["acme", "gco-staging", "p1team"])
     def test_two_deployments_same_region_share_no_names(self, other: str) -> None:
         overlap = sorted(

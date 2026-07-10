@@ -208,6 +208,7 @@ Changing `project_name` re-scopes all of the following (shown for
 | API Gateway auth secret | `acme/api-gateway-auth-token` |
 | WAF WebACL + log groups | `acme-api-gateway-waf`, `/aws/apigateway/acme-global`, `aws-waf-logs-acme-api-gateway` |
 | CloudFormation exports | `acme-global-api-endpoint`, `acme-auth-secret-arn`, `acme-waf-webacl-arn`, … |
+| ECR image namespace | repos under `acme/*` (e.g. `acme/dockerhub/…`), ECR replication filter `acme/`, `gco images` / mirror namespace |
 | Analytics (opt-in) | Studio bucket `acme-analytics-studio-*`, SageMaker role `AmazonSageMaker-acme-analytics-exec-<region>`, Studio domain `acme-studio-<region>`, EMR app `acme-spark-<region>`, Cognito domain `acme-studio-<account>` |
 
 A handful of names are intentionally **not** re-scoped because they are already

@@ -18,6 +18,12 @@ Covered runtime writers/readers:
   * ``lambda/cross-region-aggregator`` — scans ``/<project>/`` for ALB hostnames.
   * ``lambda/kubectl-applier-simple`` + ``lambda/helm-installer`` — write
     ``/<project>/addons/<region>/<phase|chart>`` add-on status.
+
+Also covers the CLI-side ECR image namespace, which is account+region-unique and
+must be project-scoped so two deployments don't share an image registry (#139):
+  * ``cli.images.ImageManager`` — repos live under ``<project>/``.
+  * ``cli._image_mirror.read_mirror_config`` — mirror namespace defaults to
+    ``<project>/dockerhub``.
 """
 
 from __future__ import annotations
@@ -164,3 +170,35 @@ class TestAddonStatusPaths:
             os.environ.pop("PROJECT_NAME", None)
             handler._record_phase_status("base-manifests", "success", "ok")
         mock_ssm.put_parameter.assert_not_called()
+
+
+class TestImageRepoNamespace:
+    """ECR repos and the Volcano mirror namespace live under the project prefix."""
+
+    @pytest.mark.parametrize("project", _PROJECTS)
+    def test_image_manager_repo_prefix_is_project(self, project: str) -> None:
+        from cli.images import ImageManager
+
+        config = MagicMock()
+        config.project_name = project
+        # region passed explicitly so construction makes no AWS/STS calls.
+        manager = ImageManager(config=config, region="us-east-2")
+        assert manager._repo_prefix == project
+
+    def test_image_manager_repo_prefix_defaults_to_gco(self) -> None:
+        from cli.config import GCOConfig
+        from cli.images import ImageManager
+
+        config = GCOConfig()  # stock defaults -> project_name == "gco"
+        assert ImageManager(config=config, region="us-east-2")._repo_prefix == "gco"
+
+    @pytest.mark.parametrize("project", _PROJECTS)
+    def test_mirror_default_namespace_is_project_scoped(self, project: str, tmp_path) -> None:
+        import json
+
+        from cli import _image_mirror
+
+        cdk_json = tmp_path / "cdk.json"
+        cdk_json.write_text(json.dumps({"context": {"project_name": project}}))
+        config = _image_mirror.read_mirror_config(cdk_json)
+        assert config["ecr_namespace"] == f"{project}/dockerhub"

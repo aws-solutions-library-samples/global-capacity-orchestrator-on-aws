@@ -197,10 +197,9 @@
       }
     },
 
-    "_comment_volcano_image_mirror": "Optional credential-free fix for Volcano's docker.io-only images (volcanosh/vc-*), which on a cold cluster pull slowly / hit Docker Hub rate limits and can stall Volcano's helm install. When enabled, the regional stack redirects Volcano's basic.image_registry to <account>.dkr.ecr.<region>.amazonaws.com/<ecr_namespace> (which must start with gco/ so it inherits the project's gco/* node-pull access, replication, and trusted-registry allow-list), and 'gco stacks deploy' auto-mirrors the pinned images into that namespace before the regional Helm install (or run 'gco images mirror --region <region>' manually). The copy preserves the full multi-arch manifest list (docker buildx imagetools / Finch --all-platforms / skopeo). Unlike an ECR pull-through cache this needs no Docker Hub secret; it is a static mirror you refresh when the Volcano chart version changes. See docs/IMAGE_MIRROR.md.",
+    "_comment_volcano_image_mirror": "Optional credential-free fix for Volcano's docker.io-only images (volcanosh/vc-*), which on a cold cluster pull slowly / hit Docker Hub rate limits and can stall Volcano's helm install. When enabled, the regional stack redirects Volcano's basic.image_registry to <account>.dkr.ecr.<region>.amazonaws.com/<ecr_namespace> (which defaults to <project_name>/dockerhub and must start with <project_name>/ so it inherits the project's <project_name>/* node-pull access, replication, and trusted-registry allow-list), and 'gco stacks deploy' auto-mirrors the pinned images into that namespace before the regional Helm install (or run 'gco images mirror --region <region>' manually). The copy preserves the full multi-arch manifest list (docker buildx imagetools / Finch --all-platforms / skopeo). Unlike an ECR pull-through cache this needs no Docker Hub secret; it is a static mirror you refresh when the Volcano chart version changes. See docs/IMAGE_MIRROR.md.",
     "volcano_image_mirror": {
-      "enabled": true,
-      "ecr_namespace": "gco/dockerhub"
+      "enabled": true
     },
 
     "_comment_storage": "Optional storage backends (disabled by default; flip enabled then 'gco stacks deploy-all').",

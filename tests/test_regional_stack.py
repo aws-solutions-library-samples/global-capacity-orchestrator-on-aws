@@ -2386,8 +2386,9 @@ class TestRegionalStackVolcanoImageMirror:
 
     Verifies the feature is off by default (no override, and — regression —
     no pull-through-cache/registry-policy resources), that enabling it injects
-    the Volcano ``basic.image_registry`` override pointing at the gco/* ECR
-    mirror, and that a misconfigured ``ecr_namespace`` fails fast at synth.
+    the Volcano ``basic.image_registry`` override pointing at the project's
+    ``<project_name>/*`` ECR mirror, and that a misconfigured ``ecr_namespace``
+    fails fast at synth.
     """
 
     @staticmethod
@@ -2418,7 +2419,9 @@ class TestRegionalStackVolcanoImageMirror:
         return stack
 
     def _enabled_app(self, **overrides):
-        mirror = {"enabled": True, "ecr_namespace": "gco/dockerhub"}
+        # MockConfigLoader.get_project_name() is "gco-test", so the mirror
+        # namespace must live under that project prefix (#139).
+        mirror = {"enabled": True, "ecr_namespace": "gco-test/dockerhub"}
         mirror.update(overrides)
         return cdk.App(context={"volcano_image_mirror": mirror})
 
@@ -2436,7 +2439,7 @@ class TestRegionalStackVolcanoImageMirror:
         stack = self._build(self._enabled_app())
         assert (
             stack.volcano_mirror_registry
-            == "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco/dockerhub"
+            == "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco-test/dockerhub"
         )
         # Still creates no pull-through cache / registry policy resources.
         template = assertions.Template.from_stack(stack)
@@ -2454,7 +2457,7 @@ class TestRegionalStackVolcanoImageMirror:
                         "values": {
                             "basic": {
                                 "image_registry": (
-                                    "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco/dockerhub"
+                                    "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco-test/dockerhub"
                                 )
                             }
                         }
@@ -2464,18 +2467,20 @@ class TestRegionalStackVolcanoImageMirror:
         )
 
     def test_custom_namespace_is_honored(self):
-        stack = self._build(self._enabled_app(ecr_namespace="gco/mirror"))
+        stack = self._build(self._enabled_app(ecr_namespace="gco-test/mirror"))
         assert stack.volcano_mirror_registry == (
-            "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco/mirror"
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco-test/mirror"
         )
 
-    def test_namespace_outside_gco_prefix_raises(self):
+    def test_namespace_outside_project_prefix_raises(self):
+        # A namespace not under the deployment's project prefix (gco-test/) is
+        # rejected so it can't miss the project's ECR replication/allow-list (#139).
         app = self._enabled_app(ecr_namespace="dockerhub")
-        with pytest.raises(ValueError, match="gco/"):
+        with pytest.raises(ValueError, match="gco-test/"):
             self._build(app)
 
     def test_invalid_namespace_path_raises(self):
-        app = self._enabled_app(ecr_namespace="gco/Bad_Seg!")
+        app = self._enabled_app(ecr_namespace="gco-test/Bad_Seg!")
         with pytest.raises(ValueError, match="ecr_namespace"):
             self._build(app)
 
