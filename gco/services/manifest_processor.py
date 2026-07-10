@@ -60,6 +60,48 @@ from gco.services.structured_logging import configure_structured_logging, saniti
 logger = logging.getLogger(__name__)
 
 
+# Accelerator resource keys and their corresponding node taint keys. GCO
+# nodepools taint accelerator nodes with these keys (authoritative list:
+# regional_stack._ADDON_NODE_TOLERATIONS), so a job requesting one of these
+# resources must carry a matching toleration or it will never schedule.
+# Taint key == resource key for all three. Kept in sync with the mirror in
+# gco/services/queue_processor.py::ACCELERATOR_TAINTS.
+ACCELERATOR_TAINTS = ("nvidia.com/gpu", "aws.amazon.com/neuron", "vpc.amazonaws.com/efa")
+
+
+def _positive_quantity(value: Any) -> bool:
+    """True if a K8s resource quantity is present and greater than zero."""
+    if value is None:
+        return False
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        # A non-numeric quantity is still an explicit request.
+        return True
+
+
+def _toleration_matches(tolerations: list[dict[str, Any]], taint_key: str) -> bool:
+    """Return True if *tolerations* tolerates the ``<taint_key>=true:NoSchedule`` taint.
+
+    A toleration matches when its ``key`` equals *taint_key*, its effect is
+    empty (matches all effects) or ``NoSchedule``, and it either uses
+    ``operator: Exists`` or ``operator: Equal`` with ``value: "true"``.
+    Kept in sync with the mirror in queue_processor._toleration_matches.
+    """
+    for tol in tolerations:
+        if not isinstance(tol, dict) or tol.get("key") != taint_key:
+            continue
+        effect = tol.get("effect", "")
+        if effect not in ("", "NoSchedule"):
+            continue
+        operator = tol.get("operator", "Equal")
+        if operator == "Exists":
+            return True
+        if operator == "Equal" and str(tol.get("value")) == "true":
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # YAML Alias Rejection Loader
 # ---------------------------------------------------------------------------
@@ -181,6 +223,12 @@ class ManifestProcessor:
             config_dict.get("max_memory_per_manifest", "32Gi")
         )
         self.max_gpu_per_manifest = int(config_dict.get("max_gpu_per_manifest", 4))
+        self.max_parallelism = int(config_dict.get("max_parallelism", 50))
+        # Hard-reject accelerator jobs that lack a matching node toleration.
+        # Kept in sync with queue_processor.REQUIRE_ACCELERATOR_TOLERATION.
+        self.require_accelerator_toleration = config_dict.get(
+            "require_accelerator_toleration", True
+        )
         self.allowed_namespaces = set(
             config_dict.get("allowed_namespaces", ["default", "gco-jobs"])
         )
@@ -436,6 +484,18 @@ class ManifestProcessor:
                 if not resource_valid:
                     return False, resource_error
 
+            # Enforce the parallelism cap for batch workloads.
+            if kind in ("Job", "CronJob"):
+                par_valid, par_error = self._validate_parallelism(manifest)
+                if not par_valid:
+                    return False, par_error
+
+            # Require accelerator jobs to carry a matching toleration.
+            if self.require_accelerator_toleration:
+                tol_valid, tol_error = self._validate_tolerations(manifest)
+                if not tol_valid:
+                    return False, tol_error
+
             # Security validations
             sec_valid, sec_error = self._validate_security_context(manifest)
             if not sec_valid:
@@ -529,6 +589,78 @@ class ManifestProcessor:
         except Exception as e:
             logger.error(f"Error validating resource limits: {e}")
             return False, f"Resource limit validation error: {e}"
+
+    def _validate_parallelism(self, manifest: dict[str, Any]) -> tuple[bool, str | None]:
+        """Reject Job/CronJob manifests whose parallelism exceeds the cap.
+
+        Reads ``spec.parallelism`` for a Job and ``spec.jobTemplate.spec.parallelism``
+        for a CronJob. Absent parallelism (the K8s default of 1) always passes.
+
+        Returns:
+            Tuple of (is_valid, error_message). error_message is None if valid.
+        """
+        spec = manifest.get("spec", {})
+        if manifest.get("kind") == "CronJob":
+            spec = spec.get("jobTemplate", {}).get("spec", {})
+
+        parallelism = spec.get("parallelism")
+        if parallelism is not None and int(parallelism) > self.max_parallelism:
+            hint = (
+                "To raise the limit, update resource_quotas.max_parallelism in "
+                "cdk.json and redeploy (see examples/README.md#troubleshooting)"
+            )
+            return (
+                False,
+                f"Parallelism {parallelism} exceeds max {self.max_parallelism}. {hint}",
+            )
+        return True, None
+
+    def _validate_tolerations(self, manifest: dict[str, Any]) -> tuple[bool, str | None]:
+        """Require accelerator jobs to carry a matching node toleration.
+
+        GCO nodepools taint accelerator nodes with ``nvidia.com/gpu``,
+        ``aws.amazon.com/neuron``, and ``vpc.amazonaws.com/efa`` (NoSchedule).
+        A pod requesting one of these resources but lacking a matching
+        toleration would stay Pending forever, so we reject it at admission
+        with an actionable message instead.
+
+        Returns:
+            Tuple of (is_valid, error_message). error_message is None if valid.
+        """
+        pod_spec = self._extract_pod_spec(manifest)
+        if not pod_spec:
+            return True, None
+
+        requested = self._requested_accelerators(pod_spec)
+        if not requested:
+            return True, None
+
+        tolerations = pod_spec.get("tolerations", []) or []
+        for taint in requested:
+            if not _toleration_matches(tolerations, taint):
+                hint = (
+                    f"add a matching toleration (e.g. key '{taint}', operator "
+                    "'Exists', effect 'NoSchedule'); see examples/gpu-job.yaml"
+                )
+                return (
+                    False,
+                    f"Job requests accelerator '{taint}' but no matching "
+                    f"toleration for taint {taint}=true:NoSchedule was found. {hint}",
+                )
+        return True, None
+
+    def _requested_accelerators(self, pod_spec: dict[str, Any]) -> set[str]:
+        """Return the set of accelerator taint keys any container requests
+        a nonzero quantity of."""
+        requested: set[str] = set()
+        for _container_type, container in self._get_all_containers(pod_spec):
+            resources = container.get("resources", {}) or {}
+            for section in ("requests", "limits"):
+                values = resources.get(section, {}) or {}
+                for taint in ACCELERATOR_TAINTS:
+                    if _positive_quantity(values.get(taint)):
+                        requested.add(taint)
+        return requested
 
     def _get_all_containers(self, pod_spec: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         """Get all containers from pod spec including init and ephemeral containers.
@@ -1250,6 +1382,11 @@ def create_manifest_processor_from_env() -> ManifestProcessor:
         "max_cpu_per_manifest": os.getenv("MAX_CPU_PER_MANIFEST", "10"),
         "max_memory_per_manifest": os.getenv("MAX_MEMORY_PER_MANIFEST", "32Gi"),
         "max_gpu_per_manifest": int(os.getenv("MAX_GPU_PER_MANIFEST", "4")),
+        "max_parallelism": int(os.getenv("MAX_PARALLELISM", "50")),
+        "require_accelerator_toleration": os.getenv(
+            "REQUIRE_ACCELERATOR_TOLERATION", "true"
+        ).lower()
+        == "true",
         "allowed_namespaces": os.getenv("ALLOWED_NAMESPACES", "default,gco-jobs").split(","),
         "validation_enabled": os.getenv("VALIDATION_ENABLED", "true").lower() == "true",
     }

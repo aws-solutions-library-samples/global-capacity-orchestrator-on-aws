@@ -2418,6 +2418,13 @@ class GCORegionalStack(Stack):
                 job_quotas.get("max_memory_per_manifest", "32Gi")
             ),
             "{{MP_MAX_GPU_PER_MANIFEST}}": str(job_quotas.get("max_gpu_per_manifest", 4)),
+            "{{MP_MAX_PARALLELISM}}": str(job_quotas.get("max_parallelism", 50)),
+            # Require accelerator (GPU/Neuron/EFA) jobs to carry a matching
+            # toleration (shared policy). Mirrored on the SQS path via
+            # {{QP_REQUIRE_ACCELERATOR_TOLERATION}} so neither path is a bypass.
+            "{{MP_REQUIRE_ACCELERATOR_TOLERATION}}": (
+                "true" if job_policy.get("require_accelerator_toleration", True) else "false"
+            ),
             # Manifest processor namespace allowlist (sourced from shared policy).
             # Both the REST manifest processor and the SQS queue processor
             # read from job_validation_policy.allowed_namespaces so a single
@@ -2518,6 +2525,9 @@ class GCORegionalStack(Stack):
             image_replacements["{{QP_MAX_MEMORY_PER_MANIFEST}}"] = str(
                 job_quotas.get("max_memory_per_manifest", "32Gi")
             )
+            image_replacements["{{QP_MAX_PARALLELISM}}"] = str(
+                job_quotas.get("max_parallelism", 50)
+            )
             image_replacements["{{QP_TRUSTED_REGISTRIES}}"] = ",".join(
                 _augment_trusted_registries_with_project_ecr(
                     job_policy.get("trusted_registries", []),
@@ -2561,6 +2571,12 @@ class GCORegionalStack(Stack):
             )
             image_replacements["{{QP_BLOCK_RUN_AS_ROOT}}"] = _policy_str(
                 security_policy.get("block_run_as_root", False)
+            )
+            # Require accelerator (GPU/Neuron/EFA) jobs to carry a matching
+            # toleration — shared with the REST manifest_processor via
+            # {{MP_REQUIRE_ACCELERATOR_TOLERATION}}.
+            image_replacements["{{QP_REQUIRE_ACCELERATOR_TOLERATION}}"] = _policy_str(
+                job_policy.get("require_accelerator_toleration", True)
             )
 
         # Add Valkey endpoint if enabled

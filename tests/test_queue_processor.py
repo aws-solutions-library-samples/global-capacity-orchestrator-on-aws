@@ -69,13 +69,19 @@ def _job(name="test-job", namespace="gco-jobs", gpu=0, privileged=False, escalat
     }
     if privileged:
         c["securityContext"]["privileged"] = True
+    pod_spec: dict = {"restartPolicy": "Never", "containers": [c]}
     if gpu:
         c["resources"]["limits"] = {"nvidia.com/gpu": str(gpu)}
+        # A GPU job must carry a matching toleration or it is rejected before
+        # the resource cap is ever checked (REQUIRE_ACCELERATOR_TOLERATION).
+        pod_spec["tolerations"] = [
+            {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
+        ]
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
         "metadata": {"name": name, "namespace": namespace},
-        "spec": {"template": {"spec": {"restartPolicy": "Never", "containers": [c]}}},
+        "spec": {"template": {"spec": pod_spec}},
     }
 
 
@@ -169,6 +175,10 @@ class TestValidateManifest:
         m["spec"]["template"]["spec"]["containers"][0]["resources"] = {
             "requests": {"nvidia.com/gpu": "8"}
         }
+        # Carry a toleration so the cap (not the toleration rule) is what rejects.
+        m["spec"]["template"]["spec"]["tolerations"] = [
+            {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
+        ]
         ok, r = qp.validate_manifest(m)
         assert not ok and "GPU" in r
 
@@ -608,8 +618,14 @@ def _job_with_init_container(image, init_privileged=False, init_gpu=0):
         "securityContext": init_sc,
         "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}},
     }
+    pod_spec: dict = {"restartPolicy": "Never", "initContainers": [init_container]}
     if init_gpu:
         init_container["resources"]["limits"] = {"nvidia.com/gpu": str(init_gpu)}
+        # Carry a toleration so a GPU init container is judged by the resource
+        # cap, not rejected first by the toleration requirement.
+        pod_spec["tolerations"] = [
+            {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
+        ]
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -617,8 +633,7 @@ def _job_with_init_container(image, init_privileged=False, init_gpu=0):
         "spec": {
             "template": {
                 "spec": {
-                    "restartPolicy": "Never",
-                    "initContainers": [init_container],
+                    **pod_spec,
                     "containers": [
                         {
                             "name": "worker",

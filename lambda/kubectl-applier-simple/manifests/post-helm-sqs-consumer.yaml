@@ -89,6 +89,8 @@ spec:
             value: "{{QP_MAX_CPU_PER_MANIFEST}}"
           - name: MAX_MEMORY_PER_MANIFEST
             value: "{{QP_MAX_MEMORY_PER_MANIFEST}}"
+          - name: MAX_PARALLELISM
+            value: "{{QP_MAX_PARALLELISM}}"
           - name: TRUSTED_REGISTRIES
             value: "{{QP_TRUSTED_REGISTRIES}}"
           - name: TRUSTED_DOCKERHUB_ORGS
@@ -114,6 +116,11 @@ spec:
             value: "{{QP_BLOCK_ADDED_CAPABILITIES}}"
           - name: BLOCK_RUN_AS_ROOT
             value: "{{QP_BLOCK_RUN_AS_ROOT}}"
+          # Require accelerator jobs to carry a matching toleration — mirrored
+          # from cdk.json::job_validation_policy.require_accelerator_toleration
+          # so the SQS path enforces the same policy as the REST path.
+          - name: REQUIRE_ACCELERATOR_TOLERATION
+            value: "{{QP_REQUIRE_ACCELERATOR_TOLERATION}}"
           resources:
             requests:
               cpu: "100m"
