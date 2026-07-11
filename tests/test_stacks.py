@@ -3262,7 +3262,15 @@ class TestAutoMirrorOnDeploy:
     def _manager(self):
         from cli.stacks import StackManager
 
-        return StackManager(MagicMock())
+        # ``_mirror_target_regions`` derives the regional-stack prefix from
+        # ``config.project_name`` (#139) — e.g. ``gco-us-east-1``. A bare
+        # MagicMock would make project_name a Mock object, producing a
+        # garbage prefix that never matches the stack name, so the mirror
+        # would silently no-op. Pin it to the default project so the prefix
+        # is the realistic ``gco-``.
+        config = MagicMock()
+        config.project_name = "gco"
+        return StackManager(config)
 
     _ENABLED = {"enabled": True, "ecr_namespace": "gco/dockerhub"}
     _DISABLED = {"enabled": False, "ecr_namespace": "gco/dockerhub"}
