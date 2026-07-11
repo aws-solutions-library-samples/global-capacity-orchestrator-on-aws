@@ -98,6 +98,7 @@ def generate_odcr_nodepool_manifest(
     max_nodes: int = 100,
     fallback_on_demand: bool = False,
     efa: bool = False,
+    project_name: str = "gco",
 ) -> str:
     """
     Generate a Karpenter NodePool manifest for ODCR-backed capacity.
@@ -129,12 +130,16 @@ def generate_odcr_nodepool_manifest(
             },
         },
         "spec": {
-            "role": "KarpenterNodeRole-gco",
-            "subnetSelectorTerms": [{"tags": {"karpenter.sh/discovery": f"gco-{region}"}}],
-            "securityGroupSelectorTerms": [{"tags": {"karpenter.sh/discovery": f"gco-{region}"}}],
+            "role": f"KarpenterNodeRole-{project_name}",
+            "subnetSelectorTerms": [
+                {"tags": {"karpenter.sh/discovery": f"{project_name}-{region}"}}
+            ],
+            "securityGroupSelectorTerms": [
+                {"tags": {"karpenter.sh/discovery": f"{project_name}-{region}"}}
+            ],
             "capacityReservationSelectorTerms": [{"id": capacity_reservation_id}],
             "tags": {
-                "Name": f"gco-{name}",
+                "Name": f"{project_name}-{name}",
                 "gco.io/nodepool": name,
                 "gco.io/capacity-reservation": capacity_reservation_id,
             },
@@ -264,6 +269,7 @@ def generate_capacity_block_nodepool_manifest(
     max_nodes: int = 100,
     fallback_on_demand: bool = False,
     efa: bool = False,
+    project_name: str = "gco",
 ) -> str:
     """
     Generate a Karpenter NodePool manifest for Capacity Block-backed capacity.
@@ -306,12 +312,16 @@ def generate_capacity_block_nodepool_manifest(
             },
         },
         "spec": {
-            "role": "KarpenterNodeRole-gco",
-            "subnetSelectorTerms": [{"tags": {"karpenter.sh/discovery": f"gco-{region}"}}],
-            "securityGroupSelectorTerms": [{"tags": {"karpenter.sh/discovery": f"gco-{region}"}}],
+            "role": f"KarpenterNodeRole-{project_name}",
+            "subnetSelectorTerms": [
+                {"tags": {"karpenter.sh/discovery": f"{project_name}-{region}"}}
+            ],
+            "securityGroupSelectorTerms": [
+                {"tags": {"karpenter.sh/discovery": f"{project_name}-{region}"}}
+            ],
             "capacityReservationSelectorTerms": [{"id": capacity_reservation_id}],
             "tags": {
-                "Name": f"gco-{name}",
+                "Name": f"{project_name}-{name}",
                 "gco.io/nodepool": name,
                 "gco.io/capacity-block": capacity_reservation_id,
             },

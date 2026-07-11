@@ -217,6 +217,26 @@ def _resolve_global_region() -> str:
         return "us-east-1"
 
 
+def _resolve_default_table_name() -> str:
+    """Resolve the capacity-history table name from the configured project (#139).
+
+    The global stack creates the table as ``{project_name}-capacity-history``
+    (see ``GCOGlobalStack._create_capacity_poller``), so derive the same name
+    from the CLI config (which reads cdk.json / ``GCO_PROJECT_NAME``). Falls
+    back to the default ``gco-capacity-history`` when the config can't be
+    loaded. For the default ``gco`` project this is byte-identical.
+    """
+    try:
+        from cli.config import get_config
+
+        project = get_config().project_name
+        if project:
+            return f"{project}-capacity-history"
+    except Exception:
+        pass
+    return DEFAULT_TABLE_NAME
+
+
 class CapacityHistoryStore:
     """DynamoDB-backed time-series store for capacity snapshots.
 
@@ -233,7 +253,9 @@ class CapacityHistoryStore:
         region: str | None = None,
         retention_days: int | None = None,
     ):
-        self.table_name = table_name or os.getenv("CAPACITY_HISTORY_TABLE_NAME", DEFAULT_TABLE_NAME)
+        self.table_name = (
+            table_name or os.getenv("CAPACITY_HISTORY_TABLE_NAME") or _resolve_default_table_name()
+        )
         self._region = (
             region
             or os.getenv("DYNAMODB_REGION")

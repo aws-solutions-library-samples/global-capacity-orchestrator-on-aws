@@ -33,10 +33,12 @@ from ..output import get_output_formatter
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
 
-_STACK_MISSING_MESSAGE = (
-    "gco-analytics stack not deployed — run `gco analytics enable` then "
-    "`gco stacks deploy gco-analytics`"
-)
+def _stack_missing_message(project_name: str) -> str:
+    """Error text when the analytics stack isn't deployed (#139 project-scoped)."""
+    stack = f"{project_name}-analytics"
+    return (
+        f"{stack} stack not deployed — run `gco analytics enable` then `gco stacks deploy {stack}`"
+    )
 
 
 @click.group()
@@ -120,7 +122,9 @@ def analytics_enable(config: Any, hyperpod: bool, canvas: bool, yes: bool) -> No
             }
         )
         formatter.print_success("Analytics environment enabled in cdk.json")
-        formatter.print_info("Run `gco stacks deploy gco-analytics` to apply changes")
+        formatter.print_info(
+            f"Run `gco stacks deploy {config.project_name}-analytics` to apply changes"
+        )
     except Exception as exc:  # noqa: BLE001 — user-facing error from file I/O
         formatter.print_error(f"Failed to enable analytics environment: {exc}")
         sys.exit(1)
@@ -151,7 +155,9 @@ def analytics_disable(config: Any, yes: bool) -> None:
     try:
         update_analytics_config({"enabled": False})
         formatter.print_success("Analytics environment disabled in cdk.json")
-        formatter.print_info("Run `gco stacks destroy gco-analytics` to tear down resources")
+        formatter.print_info(
+            f"Run `gco stacks destroy {config.project_name}-analytics` to tear down resources"
+        )
     except Exception as exc:  # noqa: BLE001 — user-facing error from file I/O
         formatter.print_error(f"Failed to disable analytics environment: {exc}")
         sys.exit(1)
@@ -176,7 +182,7 @@ def _require_cognito_pool_id(config: Any) -> tuple[str, str]:
     region = config.api_gateway_region
     pool_id = discover_cognito_pool_id(region, config.project_name)
     if not pool_id:
-        formatter.print_error(_STACK_MISSING_MESSAGE)
+        formatter.print_error(_stack_missing_message(config.project_name))
         sys.exit(1)
     return pool_id, region
 
@@ -483,7 +489,7 @@ def studio_login(
     pool_id = discover_cognito_pool_id(region, project_name)
     client_id = discover_cognito_client_id(region, project_name)
     if not pool_id or not client_id:
-        formatter.print_error(_STACK_MISSING_MESSAGE)
+        formatter.print_error(_stack_missing_message(config.project_name))
         sys.exit(1)
 
     api_base = (

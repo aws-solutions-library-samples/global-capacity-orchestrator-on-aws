@@ -13,7 +13,7 @@ from typing import Any
 
 import boto3
 
-from .config import GCOConfig
+from .config import GCOConfig, get_config
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +207,8 @@ class CostTracker:
 
         # Get running pods from EKS
         try:
-            cluster_name = f"gco-{region}"
+            project_name = (self._config or get_config()).project_name
+            cluster_name = f"{project_name}-{region}"
 
             from .kubectl_helpers import update_kubeconfig
 

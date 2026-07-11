@@ -337,7 +337,7 @@ class FileSystemClient:
         import subprocess
 
         # Update kubeconfig for the cluster
-        cluster_name = f"gco-{region}"
+        cluster_name = f"{self.config.project_name}-{region}"
         update_kubeconfig(cluster_name, region)
 
         # Build kubectl cp command
@@ -418,7 +418,7 @@ class FileSystemClient:
         helper_pod_name = f"gco-list-helper-{uuid.uuid4().hex[:8]}"
 
         # Update kubeconfig for the cluster
-        cluster_name = f"gco-{region}"
+        cluster_name = f"{self.config.project_name}-{region}"
         update_kubeconfig(cluster_name, region)
 
         # Create helper pod manifest.
@@ -622,7 +622,7 @@ spec:
         helper_pod_name = f"gco-download-helper-{uuid.uuid4().hex[:8]}"
 
         # Update kubeconfig for the cluster
-        cluster_name = f"gco-{region}"
+        cluster_name = f"{self.config.project_name}-{region}"
         update_kubeconfig(cluster_name, region)
 
         # Create helper pod manifest.

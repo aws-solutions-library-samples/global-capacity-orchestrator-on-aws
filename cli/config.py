@@ -40,6 +40,28 @@ def _load_cdk_json() -> dict[str, Any]:
     return {}
 
 
+def _load_cdk_project_name() -> str | None:
+    """Load ``context.project_name`` from cdk.json if present (#139).
+
+    The CDK reads the deployment's identity from ``context.project_name``
+    (see ``gco/config/config_loader.ConfigLoader.get_project_name``). The CLI
+    must resolve the same value so it addresses the right project-scoped
+    resources — otherwise a non-``gco`` deployment's stacks, EKS clusters, and
+    DynamoDB tables are unreachable from the CLI.
+    """
+    cdk_json_path = Path.cwd() / "cdk.json"
+    if cdk_json_path.exists():
+        try:
+            with open(cdk_json_path, encoding="utf-8") as f:
+                data = json.load(f)
+                value = data.get("context", {}).get("project_name")
+                if isinstance(value, str) and value:
+                    return value
+        except Exception as e:
+            logger.debug("Failed to load project_name from cdk.json: %s", e)
+    return None
+
+
 @dataclass
 class GCOConfig:
     """Configuration for GCO CLI."""
@@ -80,6 +102,26 @@ class GCOConfig:
 
     # API access mode
     use_regional_api: bool = False  # Use regional APIs for private access
+
+    def __post_init__(self) -> None:
+        # The stack names and regional prefix always derive from
+        # project_name (#139) so a non-"gco" deployment addresses its own
+        # stacks/clusters. get_config() re-applies this after merging the
+        # cdk.json / file / env overrides.
+        self._apply_project_scoped_names()
+
+    def _apply_project_scoped_names(self) -> None:
+        """Derive project-scoped stack names from ``project_name`` (#139).
+
+        The global/api-gateway stack names and the regional-stack prefix are
+        not independent knobs — they are always ``<project_name>-global``,
+        ``<project_name>-api-gateway``, and ``<project_name>`` respectively, to
+        match what the CDK deploys. For the default ``gco`` this yields the
+        identical ``gco-*`` names.
+        """
+        self.global_stack_name = f"{self.project_name}-global"
+        self.api_gateway_stack_name = f"{self.project_name}-api-gateway"
+        self.regional_stack_prefix = self.project_name
 
     @classmethod
     def from_file(cls, config_path: str | None = None) -> GCOConfig:
@@ -180,6 +222,12 @@ def get_config() -> GCOConfig:
     # Start with defaults
     config = GCOConfig()
 
+    # cdk.json is the CDK's source of truth for project_name (#139). Load it
+    # first so file/env can still override per the documented precedence.
+    cdk_project = _load_cdk_project_name()
+    if cdk_project:
+        config.project_name = cdk_project
+
     # Load from cdk.json if present
     cdk_regions = _load_cdk_json()
     if cdk_regions:
@@ -227,5 +275,9 @@ def get_config() -> GCOConfig:
         default_value = getattr(GCOConfig(), attr)
         if env_value != default_value:
             setattr(config, attr, env_value)
+
+    # Stack names / regional prefix always track the final project_name (#139),
+    # regardless of which source set it.
+    config._apply_project_scoped_names()
 
     return config

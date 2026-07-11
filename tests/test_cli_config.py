@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import yaml
 
-from cli.config import GCOConfig, _load_cdk_json, get_config
+from cli.config import GCOConfig, _load_cdk_json, _load_cdk_project_name, get_config
 
 
 class TestLoadCdkJson:
@@ -317,3 +317,57 @@ class TestGetConfig:
         ):
             config = get_config()
             assert config.default_region == "ap-southeast-1"
+
+
+class TestProjectScopedNames:
+    """#139: stack names and the regional prefix derive from project_name.
+
+    The default ``gco`` project renders byte-identical to the pre-#139 hard
+    coded names; a non-``gco`` project addresses its own stacks/clusters.
+    """
+
+    def test_default_project_is_byte_identical(self):
+        config = GCOConfig()
+        assert config.global_stack_name == "gco-global"
+        assert config.api_gateway_stack_name == "gco-api-gateway"
+        assert config.regional_stack_prefix == "gco"
+
+    def test_non_gco_project_derives_stack_names(self):
+        config = GCOConfig(project_name="acme")
+        assert config.global_stack_name == "acme-global"
+        assert config.api_gateway_stack_name == "acme-api-gateway"
+        assert config.regional_stack_prefix == "acme"
+
+    def test_load_cdk_project_name_from_context(self, tmp_path):
+        cdk_path = tmp_path / "cdk.json"
+        cdk_path.write_text(json.dumps({"context": {"project_name": "acme"}}))
+        with patch("cli.config.Path.cwd", return_value=tmp_path):
+            assert _load_cdk_project_name() == "acme"
+
+    def test_load_cdk_project_name_absent_returns_none(self, tmp_path):
+        cdk_path = tmp_path / "cdk.json"
+        cdk_path.write_text(json.dumps({"context": {"deployment_regions": {}}}))
+        with patch("cli.config.Path.cwd", return_value=tmp_path):
+            assert _load_cdk_project_name() is None
+
+    def test_get_config_loads_and_derives_from_cdk_json(self, tmp_path, monkeypatch):
+        # Isolate from any ambient GCO_* env so cdk.json is the source of truth.
+        for var in ("GCO_PROJECT_NAME",):
+            monkeypatch.delenv(var, raising=False)
+        cdk_path = tmp_path / "cdk.json"
+        cdk_path.write_text(json.dumps({"context": {"project_name": "acme"}}))
+        with patch("cli.config.Path.cwd", return_value=tmp_path):
+            config = get_config()
+        assert config.project_name == "acme"
+        assert config.global_stack_name == "acme-global"
+        assert config.api_gateway_stack_name == "acme-api-gateway"
+        assert config.regional_stack_prefix == "acme"
+
+    def test_get_config_env_project_name_overrides_and_derives(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GCO_PROJECT_NAME", "acme")
+        # Empty tmp_path (no cdk.json) so only the env var drives project_name.
+        with patch("cli.config.Path.cwd", return_value=tmp_path):
+            config = get_config()
+        assert config.project_name == "acme"
+        assert config.global_stack_name == "acme-global"
+        assert config.api_gateway_stack_name == "acme-api-gateway"

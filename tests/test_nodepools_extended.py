@@ -145,6 +145,31 @@ class TestGenerateOdcrManifestEc2NodeClass:
         subnet_tags = nodeclass["spec"]["subnetSelectorTerms"][0]["tags"]
         assert subnet_tags["karpenter.sh/discovery"] == "gco-eu-west-1"
 
+    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=96)
+    def test_ec2_nodeclass_discovery_tags_project_scoped(self, mock_vcpus):
+        """#139: discovery tags, node role, and Name tag derive from project_name.
+
+        A non-``gco`` deployment's NodeClass must select subnets/SGs tagged for
+        its own cluster (``<project>-<region>``); the default ``gco`` renders
+        byte-identical to the pre-#139 output (see the test above).
+        """
+        manifest = generate_odcr_nodepool_manifest(
+            name="test-pool",
+            region="eu-west-1",
+            capacity_reservation_id="cr-123",
+            project_name="acme",
+        )
+        docs = list(yaml.safe_load_all(manifest))
+        nodeclass = [d for d in docs if d and d.get("kind") == "EC2NodeClass"][0]
+        spec = nodeclass["spec"]
+        assert spec["subnetSelectorTerms"][0]["tags"]["karpenter.sh/discovery"] == "acme-eu-west-1"
+        assert (
+            spec["securityGroupSelectorTerms"][0]["tags"]["karpenter.sh/discovery"]
+            == "acme-eu-west-1"
+        )
+        assert spec["role"] == "KarpenterNodeRole-acme"
+        assert spec["tags"]["Name"] == "acme-test-pool"
+
 
 class TestGenerateOdcrManifestComments:
     """Tests for manifest comment headers."""

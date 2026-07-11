@@ -444,7 +444,7 @@ def stack_outputs(config: Any, stack_name: Any, region: Any) -> None:
 
 
 @stacks.command("access")
-@click.option("--cluster", "-c", help="Cluster name (default: gco-{region})")
+@click.option("--cluster", "-c", help="Cluster name (default: <project_name>-<region>)")
 @click.option("--region", "-r", help="AWS region (default: first deployment region)")
 @pass_config
 def setup_access(config: Any, cluster: Any, region: Any) -> None:
@@ -474,7 +474,7 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
 
     # Determine cluster name
     if not cluster:
-        cluster = f"gco-{region}"
+        cluster = f"{config.project_name}-{region}"
 
     formatter.print_info(f"Setting up access to cluster: {cluster} in region: {region}")
 
@@ -528,7 +528,7 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
                 "To enable kubectl from your laptop or CI runner, set "
                 '``eks_cluster.endpoint_access`` to ``"PUBLIC_AND_PRIVATE"`` in '
                 "``cdk.json`` and redeploy the regional stack: ``gco stacks deploy "
-                f"gco-{region} -y``."
+                f"{config.project_name}-{region} -y``."
             )
         elif public_cidrs:
             # Public access is on but restricted to a CIDR allowlist — the
@@ -680,7 +680,8 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
                     "kubectl could not reach the API server. If the cluster's "
                     "endpoint_access is restricted to a CIDR allowlist, confirm "
                     "your egress IP is covered, or set endpoint_access to "
-                    f'"PUBLIC_AND_PRIVATE" in cdk.json and run: gco stacks deploy gco-{region} -y'
+                    '"PUBLIC_AND_PRIVATE" in cdk.json and run: gco stacks deploy '
+                    f"{config.project_name}-{region} -y"
                 )
             else:
                 formatter.print_warning(
@@ -801,7 +802,9 @@ def fsx_enable(
         update_fsx_config(fsx_settings, region)
         formatter.print_success(f"FSx for Lustre enabled in cdk.json for {scope}")
         if region:
-            formatter.print_info(f"Run 'gco stacks deploy gco-{region}' to apply changes")
+            formatter.print_info(
+                f"Run 'gco stacks deploy {config.project_name}-{region}' to apply changes"
+            )
         else:
             formatter.print_info("Run 'gco stacks deploy' to apply changes")
 
@@ -839,7 +842,9 @@ def fsx_disable(config: Any, region: Any, yes: Any) -> None:
         update_fsx_config({"enabled": False}, region)
         formatter.print_success(f"FSx for Lustre disabled in cdk.json for {scope}")
         if region:
-            formatter.print_info(f"Run 'gco stacks deploy gco-{region}' to apply changes")
+            formatter.print_info(
+                f"Run 'gco stacks deploy {config.project_name}-{region}' to apply changes"
+            )
         else:
             formatter.print_info("Run 'gco stacks deploy' to apply changes")
 
@@ -1240,7 +1245,7 @@ def _addons_install_one(formatter: Any, project: str, region: str) -> bool:
     except Exception as e:
         formatter.print_error(
             f"[{region}] Could not read {input_param}: {e}. "
-            f"Deploy the regional stack at least once first (gco stacks deploy gco-{region} -y)."
+            f"Deploy the regional stack at least once first (gco stacks deploy {project}-{region} -y)."
         )
         return False
 

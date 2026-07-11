@@ -83,6 +83,7 @@ def create_odcr_nodepool(
             max_nodes=max_nodes,
             fallback_on_demand=fallback_on_demand,
             efa=efa,
+            project_name=config.project_name,
         )
 
         if output_file:
@@ -170,6 +171,7 @@ def create_capacity_block_nodepool(
             max_nodes=max_nodes,
             fallback_on_demand=fallback_on_demand,
             efa=efa,
+            project_name=config.project_name,
         )
 
         if output_file:
@@ -190,7 +192,7 @@ def create_capacity_block_nodepool(
 @nodepools.command("delete")
 @click.argument("nodepool_name")
 @click.option("--region", "-r", required=True, help="AWS region")
-@click.option("--cluster", help="EKS cluster name (defaults to gco-<region>)")
+@click.option("--cluster", help="EKS cluster name (defaults to <project_name>-<region>)")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 @pass_config
 def delete_nodepool(config: Any, nodepool_name: Any, region: Any, cluster: Any, yes: Any) -> None:
@@ -212,7 +214,7 @@ def delete_nodepool(config: Any, nodepool_name: Any, region: Any, cluster: Any, 
         click.confirm(f"Delete NodePool '{nodepool_name}' in {region}?", abort=True)
 
     try:
-        cluster_name = cluster or f"gco-{region}"
+        cluster_name = cluster or f"{config.project_name}-{region}"
         deleted = delete_cluster_nodepool(cluster_name, region, nodepool_name)
         formatter.print_success(f"Deleted NodePool {nodepool_name}")
         if deleted.get("ec2nodeclass"):
@@ -224,7 +226,7 @@ def delete_nodepool(config: Any, nodepool_name: Any, region: Any, cluster: Any, 
 
 @nodepools.command("list")
 @click.option("--region", "-r", help="Filter by region")
-@click.option("--cluster", help="EKS cluster name (defaults to gco-<region>)")
+@click.option("--cluster", help="EKS cluster name (defaults to <project_name>-<region>)")
 @pass_config
 def list_nodepools(config: Any, region: Any, cluster: Any) -> None:
     """List NodePools in the cluster.
@@ -242,7 +244,7 @@ def list_nodepools(config: Any, region: Any, cluster: Any) -> None:
             formatter.print_error("Either --region or --cluster is required")
             sys.exit(1)
 
-        cluster_name = cluster or f"gco-{region}"
+        cluster_name = cluster or f"{config.project_name}-{region}"
         nodepools_list = list_cluster_nodepools(cluster_name, region or config.default_region)
 
         if not nodepools_list:
@@ -259,7 +261,7 @@ def list_nodepools(config: Any, region: Any, cluster: Any) -> None:
 @nodepools.command("describe")
 @click.argument("nodepool_name")
 @click.option("--region", "-r", required=True, help="AWS region")
-@click.option("--cluster", help="EKS cluster name (defaults to gco-<region>)")
+@click.option("--cluster", help="EKS cluster name (defaults to <project_name>-<region>)")
 @pass_config
 def describe_nodepool(config: Any, nodepool_name: Any, region: Any, cluster: Any) -> None:
     """Describe a NodePool.
@@ -272,7 +274,7 @@ def describe_nodepool(config: Any, nodepool_name: Any, region: Any, cluster: Any
     formatter = get_output_formatter(config)
 
     try:
-        cluster_name = cluster or f"gco-{region}"
+        cluster_name = cluster or f"{config.project_name}-{region}"
         nodepool = describe_cluster_nodepool(cluster_name, region, nodepool_name)
 
         if not nodepool:
