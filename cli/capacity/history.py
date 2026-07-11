@@ -232,8 +232,8 @@ def _resolve_default_table_name() -> str:
         project = get_config().project_name
         if project:
             return f"{project}-capacity-history"
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Falling back to default capacity history table name: %s", exc)
     return DEFAULT_TABLE_NAME
 
 
