@@ -636,6 +636,7 @@ class TestGetDeployRegion:
 
     def _make_manager(self):
         config = MagicMock()
+        config.project_name = "gco"
         config.global_region = "us-east-2"
         config.api_gateway_region = "us-east-1"
         config.monitoring_region = "us-east-2"

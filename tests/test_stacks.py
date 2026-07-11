@@ -740,6 +740,30 @@ class TestStackDeploymentOrder:
         assert result[3] == "gco-api-gateway"
         assert result[4] == "gco-global"
 
+    def test_deployment_order_non_gco_project(self):
+        """#139: ordering is by suffix, so a non-``gco`` project orders
+        identically. Regression for the hardcoded ``gco-*`` priority dict."""
+        from cli.stacks import get_stack_deployment_order, get_stack_destroy_order
+
+        stacks = [
+            "acme-us-east-1",
+            "acme-global",
+            "acme-us-west-2",
+            "acme-api-gateway",
+            "acme-monitoring",
+        ]
+
+        deploy_order = get_stack_deployment_order(stacks)
+        assert deploy_order == [
+            "acme-global",
+            "acme-api-gateway",
+            "acme-monitoring",
+            "acme-us-east-1",
+            "acme-us-west-2",
+        ]
+        # Destroy is the exact reverse.
+        assert get_stack_destroy_order(stacks) == list(reversed(deploy_order))
+
 
 class TestStackManagerOrchestrated:
     """Tests for orchestrated deploy/destroy methods."""
@@ -2362,6 +2386,7 @@ class TestApiGatewayImportsFromAnalytics:
         from cli.stacks import StackManager
 
         config = MagicMock()
+        config.project_name = "gco"
         config.api_gateway_region = "us-east-2"
 
         mock_cfn = MagicMock()
@@ -2390,6 +2415,7 @@ class TestApiGatewayImportsFromAnalytics:
         from cli.stacks import StackManager
 
         config = MagicMock()
+        config.project_name = "gco"
         config.api_gateway_region = "us-east-2"
 
         mock_cfn = MagicMock()
@@ -2423,6 +2449,7 @@ class TestApiGatewayImportsFromAnalytics:
         from cli.stacks import StackManager
 
         config = MagicMock()
+        config.project_name = "gco"
         config.api_gateway_region = "us-east-2"
 
         mock_cfn = MagicMock()
@@ -2460,6 +2487,7 @@ class TestStackManagerDeployAnalyticsAutoApiGateway:
         from cli.stacks import StackManager
 
         config = MagicMock()
+        config.project_name = "gco"
         config.api_gateway_region = "us-east-2"
 
         with (
@@ -3336,6 +3364,47 @@ class TestAutoMirrorOnDeploy:
         ):
             # Deduplicated, order-stable.
             assert mgr._mirror_target_regions(None, True) == ["us-east-1", "eu-west-1"]
+
+    def test_non_gco_project_regional_stack_mirrors_its_region(self):
+        """#139 regression: a non-``gco`` project's regional stack must still
+        trigger the mirror.
+
+        ``_mirror_target_regions`` -> ``_get_deploy_region`` must resolve the
+        region from the project-scoped stack name (``acme-us-east-1``) rather
+        than a hardcoded ``gco-`` prefix. The original bug returned ``None``
+        for a non-``gco`` regional stack, so the mirror silently no-opped and
+        the regional Volcano Helm install had no images to pull.
+        """
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "acme"
+        mgr = StackManager(config)
+        with (
+            patch(
+                "cli._image_mirror.read_mirror_config",
+                return_value={"enabled": True, "ecr_namespace": "acme/dockerhub"},
+            ),
+            patch("cli._image_mirror.mirror_images") as mock_mirror,
+        ):
+            mgr._mirror_images_if_enabled(stack_name="acme-us-east-1", all_stacks=False)
+        mock_mirror.assert_called_once()
+        assert mock_mirror.call_args.args[0] == "us-east-1"
+        assert mock_mirror.call_args.kwargs["ecr_namespace"] == "acme/dockerhub"
+
+    def test_non_gco_project_named_stacks_skipped(self):
+        """#139 regression: named global/api-gateway/monitoring stacks for a
+        non-``gco`` project are classified by suffix and skipped by the mirror
+        (only regional stacks run the Helm install that needs it)."""
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "acme"
+        mgr = StackManager(config)
+        assert mgr._mirror_target_regions("acme-us-east-1", False) == ["us-east-1"]
+        assert mgr._mirror_target_regions("acme-global", False) == []
+        assert mgr._mirror_target_regions("acme-api-gateway", False) == []
+        assert mgr._mirror_target_regions("acme-monitoring", False) == []
 
 
 class TestStackExistsInCloudFormation:

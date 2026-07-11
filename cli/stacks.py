@@ -755,9 +755,10 @@ class StackManager:
         # imports the Cognito pool ARN and presigned-URL Lambda ARN from
         # the analytics stack).
         if success and stack_name and "analytics" in stack_name and not all_stacks:
-            print("  Updating gco-api-gateway with analytics routes...")
+            api_gateway_stack = f"{self.config.project_name}-api-gateway"
+            print(f"  Updating {api_gateway_stack} with analytics routes...")
             self.deploy(
-                stack_name="gco-api-gateway",
+                stack_name=api_gateway_stack,
                 require_approval=require_approval,
                 exclusively=True,
             )
@@ -791,7 +792,8 @@ class StackManager:
         # default ``retain`` posture is a no-op here. See
         # ``_image_registry_destroy_preflight`` for the exact rules.
         if (
-            stack_name == "gco-global"
+            stack_name is not None
+            and stack_name.endswith("-global")
             and not all_stacks
             and not self._image_registry_destroy_preflight(force=force)
         ):
@@ -818,9 +820,10 @@ class StackManager:
                 # Restore analytics toggle before bailing out.
                 if toggle_restored:
                     self._restore_analytics_disabled()
+                project = self.config.project_name
                 print(
-                    "  Aborting gco-analytics destroy: gco-api-gateway still "
-                    "imports analytics exports. Fix the API gateway and retry."
+                    f"  Aborting {project}-analytics destroy: {project}-api-gateway "
+                    "still imports analytics exports. Fix the API gateway and retry."
                 )
                 return False
 
@@ -1007,9 +1010,9 @@ class StackManager:
 
         if not cfg["empty_on_delete"]:
             print(
-                "Repos under gco/* are not empty and empty_on_delete is "
-                "false. Run 'gco images cleanup --all' first, or set "
-                "images.empty_on_delete: true in cdk.json."
+                f"Repos under {self.config.project_name}/* are not empty and "
+                "empty_on_delete is false. Run 'gco images cleanup --all' "
+                "first, or set images.empty_on_delete: true in cdk.json."
             )
             return False
 
@@ -1027,7 +1030,10 @@ class StackManager:
             return True
 
         try:
-            response = input("Destroy gco-global and delete every gco/* repo? [y/N]: ")
+            response = input(
+                f"Destroy {self.config.project_name}-global and delete every "
+                f"{self.config.project_name}/* repo? [y/N]: "
+            )
         except EOFError, KeyboardInterrupt:
             print("Aborted.")
             return False
@@ -1178,13 +1184,16 @@ class StackManager:
             dropped the imports). False if a consumer of the analytics
             exports still exists and the analytics destroy will fail.
         """
-        # Fast path: if gco-api-gateway doesn't exist (or has already been
-        # deleted/rolled-back into a non-consuming state), there's nothing
-        # importing the analytics exports. Skip the redeploy entirely.
-        if not self._stack_exists_in_cloudformation("gco-api-gateway"):
+        api_gateway_stack = f"{self.config.project_name}-api-gateway"
+        analytics_stack = f"{self.config.project_name}-analytics"
+
+        # Fast path: if the api-gateway stack doesn't exist (or has already
+        # been deleted/rolled-back into a non-consuming state), there's
+        # nothing importing the analytics exports. Skip the redeploy entirely.
+        if not self._stack_exists_in_cloudformation(api_gateway_stack):
             logger.info(
-                "gco-api-gateway does not exist in CloudFormation; "
-                "skipping redeploy before analytics destroy."
+                "%s does not exist in CloudFormation; skipping redeploy before analytics destroy.",
+                api_gateway_stack,
             )
             return True
 
@@ -1193,8 +1202,9 @@ class StackManager:
         # touch it. This happens when analytics was never fully wired up.
         if not self._api_gateway_imports_from_analytics():
             logger.info(
-                "gco-api-gateway does not import any gco-analytics exports; "
-                "skipping redeploy before analytics destroy."
+                "%s does not import any %s exports; skipping redeploy before analytics destroy.",
+                api_gateway_stack,
+                analytics_stack,
             )
             return True
 
@@ -1205,12 +1215,12 @@ class StackManager:
             if was_enabled:
                 update_analytics_config({"enabled": False})
 
-            print("  Updating gco-api-gateway to remove analytics routes...")
+            print(f"  Updating {api_gateway_stack} to remove analytics routes...")
             import tempfile
 
             with tempfile.TemporaryDirectory() as tmp_out:
                 success = self.deploy(
-                    stack_name="gco-api-gateway",
+                    stack_name=api_gateway_stack,
                     require_approval=False,
                     exclusively=True,
                     output_dir=tmp_out,
@@ -1229,17 +1239,20 @@ class StackManager:
                 # can still proceed.
                 if not self._api_gateway_imports_from_analytics():
                     logger.info(
-                        "gco-api-gateway redeploy failed, but the stack no "
-                        "longer imports analytics exports (likely deleted "
-                        "during cleanup). Analytics destroy can proceed."
+                        "%s redeploy failed, but the stack no longer imports "
+                        "analytics exports (likely deleted during cleanup). "
+                        "Analytics destroy can proceed.",
+                        api_gateway_stack,
                     )
                     return True
                 logger.error(
-                    "Failed to redeploy gco-api-gateway to drop analytics "
-                    "imports, and the stack still consumes analytics exports. "
-                    "Destroying gco-analytics will fail with "
-                    "'Export ... cannot be deleted as it is in use'. Fix "
-                    "gco-api-gateway first (see events above) and retry."
+                    "Failed to redeploy %s to drop analytics imports, and the "
+                    "stack still consumes analytics exports. Destroying %s will "
+                    "fail with 'Export ... cannot be deleted as it is in use'. "
+                    "Fix %s first (see events above) and retry.",
+                    api_gateway_stack,
+                    analytics_stack,
+                    api_gateway_stack,
                 )
                 return False
 
@@ -1267,34 +1280,37 @@ class StackManager:
         """
         import boto3
 
-        region = self._get_deploy_region("gco-analytics")
+        analytics_stack = f"{self.config.project_name}-analytics"
+        api_gateway_stack = f"{self.config.project_name}-api-gateway"
+
+        region = self._get_deploy_region(analytics_stack)
         if not region:
             return False
 
         try:
             cfn = boto3.client("cloudformation", region_name=region)
-            # Collect every export whose owning stack is gco-analytics.
+            # Collect every export whose owning stack is the analytics stack.
             analytics_exports: list[str] = []
             paginator = cfn.get_paginator("list_exports")
             for page in paginator.paginate():
                 for export in page.get("Exports", []):
                     owner = export.get("ExportingStackId", "")
                     # ExportingStackId is a full ARN; match by stack name.
-                    if ":stack/gco-analytics/" in owner:
+                    if f":stack/{analytics_stack}/" in owner:
                         analytics_exports.append(export["Name"])
 
             if not analytics_exports:
                 return False
 
-            # For each export, check whether gco-api-gateway is listed
-            # as an importer. ``list_imports`` returns the stack names
-            # that currently import the given export.
+            # For each export, check whether the api-gateway stack is
+            # listed as an importer. ``list_imports`` returns the stack
+            # names that currently import the given export.
             import_paginator = cfn.get_paginator("list_imports")
             for export_name in analytics_exports:
                 try:
                     for page in import_paginator.paginate(ExportName=export_name):
                         for importer in page.get("Imports", []):
-                            if importer == "gco-api-gateway":
+                            if importer == api_gateway_stack:
                                 return True
                 except Exception as exc:
                     # ``list_imports`` raises when an export has zero
@@ -1307,7 +1323,8 @@ class StackManager:
             return False
         except Exception as exc:
             logger.debug(
-                "Failed to check analytics imports for gco-api-gateway: %s",
+                "Failed to check analytics imports for %s: %s",
+                api_gateway_stack,
                 exc,
                 exc_info=True,
             )
@@ -1390,25 +1407,32 @@ class StackManager:
 
         cdk_regions = _load_cdk_json()
 
+        # Named stacks are classified by suffix and regional stacks by the
+        # ``<project>-`` prefix (#139) so a non-``gco`` deployment resolves
+        # regions for its own ``<project>-*`` stacks — otherwise the image
+        # mirror (which calls this to pick a regional stack's region) would
+        # silently no-op. For the default ``gco`` behaviour is unchanged.
         region: str | None
-        if stack_name == "gco-global":
+        if stack_name.endswith("-global"):
             region = cdk_regions.get("global") or self.config.global_region
             return region
-        if stack_name == "gco-api-gateway":
+        if stack_name.endswith("-api-gateway"):
             region = cdk_regions.get("api_gateway") or self.config.api_gateway_region
             return region
-        if stack_name == "gco-monitoring":
+        if stack_name.endswith("-monitoring"):
             region = cdk_regions.get("monitoring") or self.config.monitoring_region
             return region
-        if stack_name == "gco-analytics":
+        if stack_name.endswith("-analytics"):
             # The analytics stack shares the API gateway region so the
             # presigned-URL Lambda can hook into the existing /studio/*
             # routes on the same API Gateway.
             region = cdk_regions.get("api_gateway") or self.config.api_gateway_region
             return region
 
-        # Regional stacks: gco-{region}
-        prefix = "gco-"
+        # Regional stacks: {project}-{region}. The region is whatever
+        # follows the project prefix (regions contain hyphens, so we strip
+        # the known prefix rather than guess a split point).
+        prefix = f"{self.config.project_name}-"
         if stack_name.startswith(prefix):
             return stack_name[len(prefix) :]
 
@@ -1553,18 +1577,17 @@ class StackManager:
         stacks = self.list_stacks()
         ordered_stacks = get_stack_deployment_order(stacks)
 
-        # Separate stacks into three groups:
-        # 1. Pre-regional global stacks (gco-global, gco-api-gateway)
-        # 2. Regional stacks (can be parallelized)
-        # 3. Post-regional stacks (gco-monitoring - depends on regional stacks)
-        pre_regional = {"gco-global", "gco-api-gateway"}
-        post_regional = {"gco-monitoring"}
-
-        pre_regional_stacks = [s for s in ordered_stacks if s in pre_regional]
+        # Separate stacks into three groups by suffix so ordering is
+        # independent of project_name (#139) — a non-``gco`` deployment
+        # (``acme-global`` …) orders identically:
+        # 1. Pre-regional global stacks (<project>-global, <project>-api-gateway)
+        # 2. Regional stacks (<project>-<region>, can be parallelized)
+        # 3. Post-regional stacks (<project>-monitoring - depends on regional)
+        pre_regional_stacks = [s for s in ordered_stacks if s.endswith(("-global", "-api-gateway"))]
         regional_stacks = [
-            s for s in ordered_stacks if s not in pre_regional and s not in post_regional
+            s for s in ordered_stacks if not s.endswith(("-global", "-api-gateway", "-monitoring"))
         ]
-        post_regional_stacks = [s for s in ordered_stacks if s in post_regional]
+        post_regional_stacks = [s for s in ordered_stacks if s.endswith("-monitoring")]
 
         successful: list[str] = []
         failed: list[str] = []
@@ -1787,19 +1810,21 @@ class StackManager:
         # can be deleted cleanly by CloudFormation.
         self._cleanup_backup_vault()
 
-        # Separate stacks into three groups (reverse of deploy order):
-        pre_regional = {"gco-global", "gco-api-gateway"}
-        post_regional = {"gco-monitoring"}
-
-        post_regional_stacks = [s for s in stacks if s in post_regional]
-        regional_stacks = [s for s in stacks if s not in pre_regional and s not in post_regional]
-        pre_regional_stacks = [s for s in stacks if s in pre_regional]
+        # Separate stacks into three groups (reverse of deploy order) by
+        # suffix so a non-``gco`` deployment orders correctly (#139).
+        post_regional_stacks = [s for s in stacks if s.endswith("-monitoring")]
+        regional_stacks = [
+            s for s in stacks if not s.endswith(("-global", "-api-gateway", "-monitoring"))
+        ]
+        pre_regional_stacks = [s for s in stacks if s.endswith(("-global", "-api-gateway"))]
 
         # Sort regional stacks alphabetically (reversed for destroy)
         regional_stacks.sort(reverse=True)
-        # Sort pre-regional stacks in reverse priority order
-        pre_regional_order = {"gco-api-gateway": 1, "gco-global": 2}
-        pre_regional_stacks.sort(key=lambda x: pre_regional_order.get(x, 0))
+        # Sort pre-regional stacks in reverse priority order: api-gateway
+        # (1) before global (2), independent of project_name.
+        pre_regional_stacks.sort(
+            key=lambda x: 1 if x.endswith("-api-gateway") else (2 if x.endswith("-global") else 0)
+        )
 
         successful: list[str] = []
         failed: list[str] = []
@@ -2010,8 +2035,11 @@ class StackManager:
         that block VPC deletion.
         """
         stacks = self.list_stacks()
-        pre_regional = {"gco-global", "gco-api-gateway", "gco-monitoring"}
-        regional_stacks = [s for s in stacks if s not in pre_regional]
+        # Regional stacks are everything that isn't a named global stack;
+        # classify by suffix so this works for any project_name (#139).
+        regional_stacks = [
+            s for s in stacks if not s.endswith(("-global", "-api-gateway", "-monitoring"))
+        ]
         for stack_name in regional_stacks:
             self._cleanup_eks_security_groups(stack_name)
 
@@ -2030,8 +2058,9 @@ class StackManager:
         load balancer is gone, so we report them rather than fight them.
         """
         stacks = self.list_stacks()
-        pre_regional = {"gco-global", "gco-api-gateway", "gco-monitoring"}
-        regional_stacks = [s for s in stacks if s not in pre_regional]
+        regional_stacks = [
+            s for s in stacks if not s.endswith(("-global", "-api-gateway", "-monitoring"))
+        ]
         for stack_name in regional_stacks:
             # Existing behaviour first: clear the EKS cluster SG + its ENIs.
             self._cleanup_eks_security_groups(stack_name)
@@ -2272,23 +2301,36 @@ def get_stack_deployment_order(stacks: list[str]) -> list[str]:
     Get the correct deployment order for stacks.
 
     Order: global stacks first, then regional stacks.
-    Global stacks: gco-global, gco-api-gateway, gco-monitoring
-    Regional stacks: gco-{region} (e.g., gco-us-east-1)
+    Global stacks: <project>-global, <project>-api-gateway,
+    <project>-analytics, <project>-monitoring
+    Regional stacks: <project>-{region} (e.g., gco-us-east-1)
+
+    Named stacks are classified by suffix so ordering is independent of
+    ``project_name`` (#139): a non-``gco`` deployment (``acme-global`` …)
+    orders identically. Regional stacks are ``<project>-<region>`` and match
+    no named suffix, so they fall through to the regional bucket.
     """
     global_stacks = []
     regional_stacks = []
 
-    # Define global stack priority (lower = deploy first)
-    global_priority = {
-        "gco-global": 1,
-        "gco-api-gateway": 2,
-        "gco-analytics": 2.5,
-        "gco-monitoring": 3,
+    # Named (non-regional) stack priority by suffix (lower = deploy first).
+    suffix_priority = {
+        "-global": 1,
+        "-api-gateway": 2,
+        "-analytics": 2.5,
+        "-monitoring": 3,
     }
 
+    def _named_priority(stack: str) -> float | None:
+        for suffix, prio in suffix_priority.items():
+            if stack.endswith(suffix):
+                return prio
+        return None
+
     for stack in stacks:
-        if stack in global_priority:
-            global_stacks.append((global_priority[stack], stack))
+        priority = _named_priority(stack)
+        if priority is not None:
+            global_stacks.append((priority, stack))
         else:
             regional_stacks.append(stack)
 
