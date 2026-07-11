@@ -96,6 +96,7 @@ class TestFileSystemClient:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
                 client = FileSystemClient()
@@ -107,6 +108,7 @@ class TestFileSystemClient:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws_client = MagicMock()
                 mock_aws_client.discover_regional_stacks.return_value = {}
@@ -123,6 +125,7 @@ class TestFileSystemClient:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
 
@@ -155,6 +158,7 @@ class TestFileSystemClient:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
 
@@ -176,6 +180,7 @@ class TestFileSystemClientEFS:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
 
@@ -215,6 +220,7 @@ class TestFileSystemClientEFS:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
 
@@ -238,6 +244,7 @@ class TestFileSystemClientFSx:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
 
@@ -273,6 +280,7 @@ class TestFileSystemClientFSx:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
 
@@ -296,6 +304,7 @@ class TestFileSystemClientAccessPoints:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
 
@@ -329,6 +338,7 @@ class TestFileSystemClientAccessPoints:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
 
@@ -352,6 +362,7 @@ class TestGetFileSystemClient:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
                 client = get_file_system_client()
@@ -378,6 +389,7 @@ class TestFileSystemClientEFSDetailed:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -422,6 +434,7 @@ class TestFileSystemClientFSxDetailed:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -462,6 +475,7 @@ class TestFileSystemClientGetFileSystems:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws_client = MagicMock()
@@ -620,6 +634,7 @@ class TestFileSystemClientDownloadFromPod:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -652,6 +667,7 @@ class TestFileSystemClientDownloadFromPod:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -685,6 +701,7 @@ class TestFileSystemClientDownloadFromPod:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -721,6 +738,7 @@ class TestFileSystemClientDownloadFromPod:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -751,6 +769,7 @@ class TestFileSystemClientDownloadFromPod:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -784,6 +803,7 @@ class TestFileSystemClientDownloadFromPod:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -819,6 +839,7 @@ class TestFileSystemClientDownloadFromStorage:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -853,6 +874,7 @@ class TestFileSystemClientDownloadFromStorage:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -884,6 +906,7 @@ class TestFileSystemClientDownloadFromStorage:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -917,6 +940,7 @@ class TestFileSystemClientDownloadFromStorage:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -946,6 +970,7 @@ class TestFileSystemClientDownloadFromStorage:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -992,6 +1017,7 @@ class TestFileSystemClientListStorageContents:
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -1042,6 +1068,7 @@ drwxr-xr-x 2 root root 4096 Jan  1 00:00 my-job-outputs
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -1079,6 +1106,7 @@ drwxr-xr-x 2 root root 4096 Jan  1 00:00 my-job-outputs
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -1120,6 +1148,7 @@ drwxr-xr-x 2 root root 4096 Jan  1 00:00 my-job-outputs
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
@@ -1162,6 +1191,7 @@ drwxr-xr-x 2 root root 4096 Jan  1 00:00 checkpoints"""
 
         with patch("cli.files.get_config") as mock_config:
             mock_config.return_value = MagicMock()
+            mock_config.return_value.project_name = "gco"
 
             with patch("cli.files.get_aws_client") as mock_aws:
                 mock_aws.return_value = MagicMock()
