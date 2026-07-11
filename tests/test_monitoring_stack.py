@@ -28,8 +28,8 @@ class MockConfigLoader:
       - Aurora pgvector: driven by the regional stack's ``aurora_cluster``
         attribute (see ``create_mock_regional_stack(aurora_enabled=True)``)
       - Valkey Serverless: gated by ``valkey_enabled`` here because the
-        cache name is deterministic (``gco-{region}``) so there's no
-        per-region resource handle to carry
+        cache name is deterministic (``{project_name}-{region}``) so
+        there's no per-region resource handle to carry
 
     Valkey takes a single bool because the monitoring stack builds the
     dimension value from ``get_regions() + literal name template``; no
@@ -520,20 +520,27 @@ class TestMonitoringStackOptionalDataServices:
         # Make sure we did NOT accidentally use the node-based dimension name
         assert "CacheClusterId" not in body
 
-    def test_valkey_widgets_pin_to_gco_named_caches(self):
-        """Widgets use the exact ``gco-{region}`` cache name as dimension.
+    def test_valkey_widgets_pin_to_project_named_caches(self):
+        """Widgets use the exact ``{project_name}-{region}`` cache name.
 
         The monitoring stack no longer uses a SEARCH wildcard — it pins
         each widget to the deterministic cache name the regional stack
-        creates (``serverless_cache_name=f"gco-{region}"``). The JSON
-        body has the name in ``"clusterId":"gco-us-east-1"`` form.
+        creates (``serverless_cache_name=f"{project_name}-{region}"``).
+        The JSON body has the name in ``"clusterId":"gco-test-us-east-1"``
+        form (project-scoped for #139 so multiple deployments coexist).
         """
-        stack = self._build_stack(MockConfigLoader(valkey_enabled=True))
+        config = MockConfigLoader(valkey_enabled=True)
+        stack = self._build_stack(config)
         body = self._dashboard_body(stack)
-        assert "gco-us-east-1" in body
-        assert "gco-us-west-2" in body
-        # Must not contain a SEARCH wildcard any more
-        assert "SEARCH(" not in body or 'clusterId="gco-"' not in body
+        project = config.get_project_name()
+        assert f"{project}-us-east-1" in body
+        assert f"{project}-us-west-2" in body
+        # The Valkey widgets must pin the exact cache name
+        # (``"clusterId":"gco-test-us-east-1"`` form) and must NOT fall
+        # back to a SEARCH wildcard on the cache-name prefix
+        # (``clusterId="gco-test-"``). Other dashboard widgets may
+        # legitimately use SEARCH, so we only forbid the prefix wildcard.
+        assert f'clusterId="{project}-"' not in body
 
     def test_valkey_widgets_use_correct_metric_names(self):
         stack = self._build_stack(MockConfigLoader(valkey_enabled=True))
