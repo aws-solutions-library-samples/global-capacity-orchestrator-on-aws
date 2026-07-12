@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.20
+    rev: v0.15.19
     hooks:
       # Formatter. Run before ``ruff`` so the check sees formatter output.
       - id: ruff-format
