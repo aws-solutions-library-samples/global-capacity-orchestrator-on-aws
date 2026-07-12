@@ -728,3 +728,304 @@ if cands:
     print(cands[-1])
 " "$current" 2>/dev/null
 }
+
+# =============================================================================
+# Expanded coverage helpers
+# =============================================================================
+# The functions below extend the scan to surfaces that live outside the
+# original twelve: CI tooling pins the workflows install by hand, version
+# pins that must move in lockstep across several files, and recurring
+# hygiene checks (suppression expiry, lockfile freshness, base-image
+# security epochs).
+#
+# Every one keeps the same contract as the extractors above: print one
+# record per line to stdout, and print nothing (exit 0) on missing/malformed
+# input so the caller treats an empty result as "skip", never as drift.
+# =============================================================================
+
+# get_latest_github_release_tag <owner/repo>
+#
+# Prints the ``tag_name`` of the latest non-prerelease GitHub Release for
+# ``<owner/repo>`` (e.g. ``v0.70.0``). Generalises the inline release lookups
+# the Dockerfile.dev section already does for moby/moby and docker/buildx so
+# the CI-tooling drift check (Trivy, Helm, kind) can share one code path.
+#
+# Empty output on network failure, a non ``owner/repo`` argument, or a repo
+# with no published Release — callers treat empty as "skip", same as the
+# other lookups here. Unauthenticated: the monthly scan makes a handful of
+# these calls, well under the 60 req/h anonymous GitHub limit.
+get_latest_github_release_tag() {
+  local owner_repo="$1"
+  [ -n "$owner_repo" ] || return 0
+  # Reject anything that isn't exactly ``owner/repo`` (mirrors the guard in
+  # get_latest_precommit_hook_release) so a stray URL or path can't 404.
+  case "$owner_repo" in
+    */*/*) return 0 ;;
+    */*) ;;
+    *) return 0 ;;
+  esac
+  curl -fsSL --max-time 15 \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "https://api.github.com/repos/${owner_repo}/releases/latest" 2>/dev/null \
+    | jq -r '.tag_name // empty' 2>/dev/null
+}
+
+# extract_workflow_env_pin <VAR_NAME> [workflows_dir]
+#
+# Prints the unique value(s) of a ``<VAR_NAME>: "<value>"`` env assignment
+# found across the workflow YAML under <workflows_dir> (default
+# ``.github/workflows``). Used by the CI-tooling drift check to read the
+# pinned ``TRIVY_VERSION`` / ``HELM_VERSION`` / ``KUBECTL_VERSION`` the
+# workflows install their own tooling from — pins Dependabot doesn't watch
+# (they're plain env strings, not ``uses:`` refs or Dockerfile ``FROM``
+# lines).
+#
+# Prints one value per line, de-duplicated and sorted. More than one line
+# means the same tool is pinned to *different* values across files — a
+# lockstep-drift bug the Version Consistency section reports. Empty output
+# when the dir is absent or the var is unset anywhere.
+extract_workflow_env_pin() {
+  local var="$1"
+  local dir="${2:-.github/workflows}"
+  [ -n "$var" ] || return 0
+  [ -d "$dir" ] || return 0
+  grep -rhoE "^[[:space:]]*${var}:[[:space:]]*\"?[A-Za-z0-9._+-]+\"?" "$dir" 2>/dev/null \
+    | sed -E "s/^[[:space:]]*${var}:[[:space:]]*//" \
+    | tr -d '"' \
+    | sort -u
+}
+
+# extract_kind_pins [workflow_file]
+#
+# Prints the kind pins configured on the ``helm/kind-action`` step:
+#   kind|<version>        e.g. kind|v0.32.0        (the kind binary)
+#   kind-node|<image:tag> e.g. kind-node|kindest/node:v1.36.1
+#
+# These live in the action's ``with:`` block, not a top-level ``image:`` or
+# a Dockerfile ``FROM``, so neither the workflow image sweep nor Dependabot's
+# docker ecosystem sees them. The caller checks the kind binary against
+# kubernetes-sigs/kind releases and the node image against its own registry
+# tags within the pinned K8s minor.
+#
+# Empty output if the file or the kind-action step is absent.
+extract_kind_pins() {
+  local file="${1:-.github/workflows/integration-tests.yml}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import sys, yaml
+try:
+    with open(sys.argv[1]) as f:
+        data = yaml.safe_load(f)
+except Exception:
+    sys.exit(0)
+for job in (data or {}).get('jobs', {}).values():
+    for step in (job or {}).get('steps', []) or []:
+        uses = (step or {}).get('uses', '') or ''
+        if uses.startswith('helm/kind-action'):
+            with_ = (step or {}).get('with', {}) or {}
+            ver = with_.get('version', '')
+            node = with_.get('node_image', '')
+            if ver:
+                print(f'kind|{ver}')
+            if node:
+                print(f'kind-node|{node}')
+" "$file" 2>/dev/null
+}
+
+# extract_ruff_pins [pyproject] [precommit] [lint_workflow]
+#
+# Prints the ruff version pinned in each place the project keeps it, one
+# ``source|version`` per line (version normalised without a leading ``v``):
+#   pyproject|0.15.19     ruff==X in [project.optional-dependencies]
+#   precommit|0.15.20     astral-sh/ruff-pre-commit rev in .pre-commit-config.yaml
+#   lint-action|0.15.19   astral-sh/ruff-action version input in lint.yml
+#
+# Ruff is pinned in three spots that must move together (developer install,
+# the pre-commit hook, and the prebuilt-binary CI lint job). The base Python
+# deps check already flags ruff drift vs PyPI, but nothing catches the three
+# local pins silently disagreeing — which is exactly what the Version
+# Consistency section reports.
+extract_ruff_pins() {
+  local pyproject="${1:-pyproject.toml}"
+  local precommit="${2:-.pre-commit-config.yaml}"
+  local lintwf="${3:-.github/workflows/lint.yml}"
+  python3 -c "
+import re, sys
+pyproject, precommit, lintwf = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def norm(v):
+    return v.lstrip('v').strip()
+
+# pyproject: first ruff==X.Y.Z anywhere (the lint + diagrams extras pin the
+# same value; report it once).
+try:
+    with open(pyproject) as f:
+        m = re.search(r'ruff==([0-9.]+)', f.read())
+    if m:
+        print(f'pyproject|{norm(m.group(1))}')
+except OSError:
+    pass
+
+# pre-commit: rev of the astral-sh/ruff-pre-commit repo block.
+try:
+    import yaml
+    with open(precommit) as f:
+        data = yaml.safe_load(f)
+    for entry in (data or {}).get('repos', []) or []:
+        if 'astral-sh/ruff-pre-commit' in ((entry or {}).get('repo', '') or ''):
+            rev = (entry or {}).get('rev', '')
+            if rev:
+                print(f'precommit|{norm(rev)}')
+            break
+except Exception:
+    pass
+
+# lint workflow: version input on the first astral-sh/ruff-action step (the
+# two steps pin the same value). Parse the YAML rather than regex the raw
+# text so a nearby ``python-version:`` can't be mistaken for the action's
+# own ``version:`` input.
+try:
+    import yaml
+    with open(lintwf) as f:
+        wf = yaml.safe_load(f)
+    found = ''
+    for job in (wf or {}).get('jobs', {}).values():
+        for step in (job or {}).get('steps', []) or []:
+            uses = (step or {}).get('uses', '') or ''
+            if uses.startswith('astral-sh/ruff-action'):
+                found = str(((step or {}).get('with', {}) or {}).get('version', '') or '')
+                if found:
+                    break
+        if found:
+            break
+    if found:
+        print(f'lint-action|{norm(found)}')
+except Exception:
+    pass
+" "$pyproject" "$precommit" "$lintwf" 2>/dev/null
+}
+
+# extract_python_version_pins [workflows_dir]
+#
+# Prints one line per ``python-version: "X.Y"`` occurrence across the
+# workflow YAML (value only, e.g. ``3.14``). The caller collapses these to
+# unique values: more than one distinct value, or a value that disagrees
+# with the project's canonical Python (derived from LAMBDA_PYTHON_RUNTIME),
+# means the CI matrix drifted from the runtime the Lambdas actually ship on.
+extract_python_version_pins() {
+  local dir="${1:-.github/workflows}"
+  [ -d "$dir" ] || return 0
+  grep -rhoE "python-version:[[:space:]]*\"?[0-9]+\.[0-9]+\"?" "$dir" 2>/dev/null \
+    | sed -E "s/python-version:[[:space:]]*//" \
+    | tr -d '"'
+}
+
+# parse_suppression_expiries <file>
+#
+# Prints ``ID|YYYY-MM-DD`` for every dated suppression entry in a
+# ``.trivyignore`` / ``.pip-audit-ignore`` file (any non-comment line
+# carrying an ``exp:YYYY-MM-DD`` marker; the ID is the first whitespace-
+# delimited token). The caller computes days-to-expiry and surfaces entries
+# expiring soon so they get renewed *before* the CI expiry validator hard-
+# fails a PR — the report is the early warning, the validator is the gate.
+#
+# Empty output when the file is absent or has no dated entries.
+parse_suppression_expiries() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+with open(sys.argv[1]) as f:
+    for line in f:
+        s = line.strip()
+        if not s or s.startswith('#'):
+            continue
+        m = re.search(r'exp:(\d{4}-\d{2}-\d{2})', s)
+        if not m:
+            continue
+        ident = s.split()[0]
+        print(f'{ident}|{m.group(1)}')
+" "$file" 2>/dev/null
+}
+
+# check_lockfile_freshness [pyproject] [lockfile]
+#
+# Prints one PEP-503-normalised direct-dependency name per line for every
+# dep pinned in ``pyproject.toml`` that is ABSENT from ``requirements-lock.txt``
+# — the signature of "added/renamed a dep but forgot to re-run pip-compile".
+# The lock is compiled with ``--all-extras``, so every direct dep (base *and*
+# every optional-dependencies group) is expected to appear. Deterministic and
+# offline: it checks presence only, never version equality, so it never
+# false-positives on the legitimate transitive pins pip-compile adds.
+#
+# Empty output when either file is missing or every direct dep is present.
+check_lockfile_freshness() {
+  local pyproject="${1:-pyproject.toml}"
+  local lockfile="${2:-requirements-lock.txt}"
+  [ -f "$pyproject" ] || return 0
+  [ -f "$lockfile" ] || return 0
+  python3 -c "
+import re, sys, tomllib
+pyproject, lockfile = sys.argv[1], sys.argv[2]
+try:
+    with open(pyproject, 'rb') as f:
+        data = tomllib.load(f)
+except Exception:
+    sys.exit(0)
+project = data.get('project', {}) or {}
+deps = list(project.get('dependencies', []) or [])
+for group in (project.get('optional-dependencies', {}) or {}).values():
+    deps.extend(group or [])
+
+def norm(name):
+    return re.sub(r'[-_.]+', '-', name).lower()
+
+names = set()
+for spec in deps:
+    if not isinstance(spec, str):
+        continue
+    name = re.split(r'[\\[=!<>;~ ]', spec, maxsplit=1)[0].strip()
+    if not name or name.lower() == 'gco-cli':
+        continue
+    names.add(norm(name))
+
+locked = set()
+with open(lockfile) as f:
+    for line in f:
+        s = line.strip()
+        if not s or s.startswith('#') or s.startswith('-'):
+            continue
+        name = re.split(r'[\\[=!<>;~ ]', s, maxsplit=1)[0].strip()
+        if name:
+            locked.add(norm(name))
+
+for missing in sorted(names - locked):
+    print(missing)
+" "$pyproject" "$lockfile" 2>/dev/null
+}
+
+# extract_security_epochs <dockerfile>
+#
+# Prints ``ARGNAME|YYYY-MM-DD`` for each build-time security-refresh epoch
+# ARG in the given Dockerfile (``APT_SECURITY_EPOCH`` for the Debian service
+# images / dev image, ``DNF_SECURITY_EPOCH`` for the AL2023 helm-installer
+# Lambda). These dates are bumped by hand to bust the CI layer cache and pull
+# freshly-published OS security patches; nothing else reminds anyone to move
+# them, so the report flags an epoch older than the freshness window. Trivy's
+# container scan is the backstop; this is the proactive nudge.
+#
+# Empty output when the file is absent or pins no epoch ARG.
+extract_security_epochs() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+with open(sys.argv[1]) as f:
+    for line in f:
+        stripped = line.split('#', 1)[0]
+        m = re.match(r'^\s*ARG\s+((?:APT|DNF)_SECURITY_EPOCH)=(\d{4}-\d{2}-\d{2})\s*$', stripped)
+        if m:
+            print(f'{m.group(1)}|{m.group(2)}')
+" "$file" 2>/dev/null
+}

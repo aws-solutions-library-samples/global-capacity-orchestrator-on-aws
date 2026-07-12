@@ -169,14 +169,21 @@ Ecosystems tracked:
 | Docker image tags | `image: …:<tag>` references in `.github/workflows/*.yml`, `lambda/kubectl-applier-simple/manifests/`, `examples/`, and `lambda/helm-installer/charts.yaml`, plus the Mooncake default image pinned as `_DISAGGREGATED_DEFAULT_IMAGE` in `cli/images.py` (via `extract_mooncake_default_image`) | Queries the original registry (Docker Hub, Quay, GHCR, GCR, ECR Public, registry.k8s.io) via `skopeo`; only semver tags. The Mooncake image is a Python constant — not a Dockerfile `FROM` or a manifest — so Dependabot doesn't see it; surfacing its drift here is the cue to validate and bump the pin (the `mooncake-image` workflow re-runs the image contract tests against the new tag). |
 | Helm charts | `lambda/helm-installer/charts.yaml` | Uses `helm show chart` for OCI charts and `helm search repo` for traditional repos |
 | EKS add-ons | `addon_name`/`addon_version` pairs extracted from `gco/stacks/constants.py` | Requires AWS credentials (via OIDC). The script pre-flights `sts get-caller-identity`; without valid creds the add-on section is explicitly **skipped** and the report notes why — everything else still runs |
+| EKS Kubernetes version | `kubernetes_version` in `cdk.json` | Requires AWS credentials (via OIDC). Compares against the newest minor still in EKS **standard support** (`eks describe-cluster-versions`) and reports the standard-support end date so upgrade urgency is visible. See [Maintenance](../docs/MAINTENANCE.md#upgrading-the-eks-kubernetes-version) for the upgrade steps |
 | Aurora PostgreSQL engine | `AURORA_POSTGRES_VERSION_DISPLAY` from `gco/stacks/constants.py` | Requires AWS credentials (via OIDC). Queries `rds describe-db-engine-versions` for the latest minor release within the same major line |
+| EMR Serverless | `EMR_SERVERLESS_RELEASE_LABEL` from `gco/stacks/constants.py` | Requires AWS credentials (via OIDC). Lists release labels (`emr list-release-labels`) and reports a newer release in the same major line, or a new major line when one exists |
 | Bedrock default model | `DEFAULT_BEDROCK_MODEL_ID` from `gco_mcp/mission/sampling.py` (mirrored by `cli/capacity/advisor.py`) | Requires AWS credentials (via OIDC). Lists system-defined inference profiles (`bedrock list-inference-profiles`, pinned to us-east-1) and reports drift when a newer release exists in the *same model family*. The id is a Python constant, so Dependabot never sees it |
+| Dockerfile.dev pins | `ARG` pins in `Dockerfile.dev` (Node LTS major, npm, CDK CLI, kubectl, AWS CLI v2, Docker CLI, Buildx) | Public endpoints, no AWS creds. Each ARG resolves against its own upstream (`nodejs/Release`, the npm/CDK registries, `dl.k8s.io`, `aws/aws-cli` tags, `moby/moby`, `docker/buildx`) |
 | Pre-commit hooks | `repo:` / `rev:` blocks in `.pre-commit-config.yaml` | Calls `GET /repos/{owner}/{repo}/tags` on GitHub for each hook and reports drift when our pinned `rev:` is older than the highest semver-shaped tag. Unauthenticated; SHA pins and non-GitHub repos are skipped silently |
 | CDK enum constants | `LAMBDA_PYTHON_RUNTIME` and `AURORA_POSTGRES_VERSION` from `gco/stacks/constants.py` | Introspects the installed `aws-cdk-lib` (the `deps-scan` workflow installs the latest) for `aws_lambda.Runtime.PYTHON_X_Y` and `aws_rds.AuroraPostgresEngineVersion.VER_X_Y` and reports drift when our pinned enum is older than the highest member exposed by the library. Skipped with a note when `aws-cdk-lib` isn't importable |
 | Python release | `LAMBDA_PYTHON_RUNTIME` (the major Python version we standardise on across Lambdas) | Queries `https://endoflife.date/api/python.json` for the highest currently-supported stable cycle and reports drift compared to the `LAMBDA_PYTHON_RUNTIME` constant. Public endpoint, no AWS creds |
-| Pre-commit hooks | `repo:` / `rev:` pairs in `.pre-commit-config.yaml` | Queries `api.github.com/repos/<owner>/<repo>/tags` for each hook and compares against the pinned `rev:`. Uses `GITHUB_TOKEN` for the authenticated rate limit when CI runs the workflow. SHA-pinned hooks and non-GitHub repos are silently skipped — no false drift |
+| CI tooling | `TRIVY_VERSION` (`cve-scan.yml` / `security.yml`), `HELM_VERSION` and `KUBECTL_VERSION` (`deps-scan.yml`), and the kind binary + node image (`integration-tests.yml`) | Public endpoints, no AWS creds. Compares each hand-installed CI tool against its upstream (GitHub Releases for Trivy/Helm/kind, `dl.k8s.io` for kubectl, registry tags within the pinned minor for the kind node image). These are plain env / `with:` pins Dependabot doesn't watch — a stale Trivy silently weakens the CVE scan |
+| Version consistency | ruff (pyproject / pre-commit / `lint.yml`), `python-version` across workflows vs the project runtime, and each `*_VERSION` env pin across workflow files | No network. Reports when copies of a pin that must move together disagree |
+| Base-image security epochs | `APT_SECURITY_EPOCH` / `DNF_SECURITY_EPOCH` ARGs in `Dockerfile.dev`, `dockerfiles/*`, and `lambda/helm-installer/Dockerfile` | No network. Flags an epoch older than `SECURITY_EPOCH_STALE_DAYS` (default 45) so a stale cache-bust date masking new OS patches gets bumped |
+| Suppression expiries | `exp:` markers in `.github/config/.trivyignore` and `.pip-audit-ignore` | No network. Surfaces entries expiring within `SUPPRESSION_EXPIRY_WARN_DAYS` (default 30) so they're renewed before the CI validator hard-fails a build on the expiry date |
+| Lockfile freshness | `pyproject.toml` direct deps vs `requirements-lock.txt` | No network. Reports direct dependencies missing from the lock — the sign of a stale `pip-compile` |
 
-Images matching `gco/*` are skipped (we build those). Non-semver tags (`latest`, branch names, SHAs) are ignored.
+Images matching `gco/*` are skipped (we build those). Non-semver tags (`latest`, branch names, SHAs) are ignored. Acting on a drift report is documented in the [Maintenance guide](../docs/MAINTENANCE.md).
 
 #### Inputs
 
@@ -192,10 +199,12 @@ The script writes a Markdown report to a temp file and, when invoked from a work
 
 | Output | Value |
 |--------|-------|
-| `has_drift` | `true` when any of the four surfaces reported drift, else `false` |
+| `has_drift` | `true` when any scanned surface reported drift, else `false` |
 | `report_path` | Path to the Markdown report (only set when `has_drift=true`) |
 
-Exit code is `0` in both cases — drift is a signal, not a failure. The `deps-scan` workflow turns `has_drift=true` into a new GitHub issue labeled `dependencies, automated`.
+The report opens with a summary table (every surface, its status, and an urgency hint) linking to per-surface detail sections; skipped checks collapse into a single `<details>` block. When run in CI the script also mirrors the report — or an "up to date" line — into `$GITHUB_STEP_SUMMARY`, so results show on the workflow run page even when no issue is opened.
+
+Exit code is `0` in both cases — drift is a signal, not a failure. When `has_drift=true` the `deps-scan` workflow opens **or refreshes** a single rolling GitHub issue labeled `dependencies, automated`; a stable, date-free title means the same issue is updated each month rather than a new one piling up. See the [Maintenance guide](../docs/MAINTENANCE.md) for how to act on a report.
 
 #### Running it locally
 
@@ -217,6 +226,9 @@ The console output shows each surface's drift inline. To trigger the exact workf
 - **New pre-commit hook** — nothing to change; `extract_precommit_hooks` walks every `repo:` block in `.pre-commit-config.yaml` and the GitHub-tags lookup picks up the hook automatically (as long as the upstream lives on GitHub and tags semver-shaped releases).
 - **New CDK enum constant** — add the constant in `gco/stacks/constants.py`, then add a comparison block in `dependency-scan.sh`'s "Checking CDK enum constants" section that calls a new `get_latest_<name>` helper from `lib_dependency_scan.sh`. Pattern-match the existing `LAMBDA_PYTHON_RUNTIME` and `AURORA_POSTGRES_VERSION` blocks.
 - **New default Bedrock model** — bump `DEFAULT_BEDROCK_MODEL_ID` in `gco_mcp/mission/sampling.py` and `BedrockCapacityAdvisor.DEFAULT_MODEL` in `cli/capacity/advisor.py` (kept identical by `tests/test_default_bedrock_model_consistency.py`); the "Checking Bedrock default model" section then tracks the new model family automatically. If the new model has no captured scaffold fixture yet, run `python scripts/capture_scaffold_fixtures.py --model <id>`.
+- **New CI tool pin** — add a `check_github_tool <name> <pin> <owner/repo> <url>` call in the "Checking CI tooling pins" section (or a `dl.k8s.io` / registry lookup for non-GitHub tools), reading the current pin via `extract_workflow_env_pin` or `extract_kind_pins` from `lib_dependency_scan.sh`.
+- **New consistency check** — add an extractor to `lib_dependency_scan.sh` and a comparison block in the "Checking version consistency" section that records disagreeing copies to `CONSISTENCY_RESULTS`.
+- **New recurring-hygiene check** (suppression file, base-image epoch, lockfile, …) — add a parser to `lib_dependency_scan.sh` and a section that filters by the shared thresholds (`SUPPRESSION_EXPIRY_WARN_DAYS`, `SECURITY_EPOCH_STALE_DAYS`). Remember to wire the new `*_COUNT` into the summary, the all-zero `has_drift` gate, and both `rm -f` cleanup lines.
 
 #### Failure modes & debugging
 

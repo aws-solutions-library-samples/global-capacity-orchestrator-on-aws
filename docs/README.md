@@ -27,6 +27,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 | [Cluster Shared Bucket](CLUSTER_SHARED_BUCKET.md) | Operators | Always-on cross-region S3 bucket shared across all regional clusters and the analytics environment |
 | [Troubleshooting](TROUBLESHOOTING.md) | Operators | Common issues and solutions for deployment, networking, pods, and storage |
 | [Operational Runbooks](RUNBOOKS.md) | Operators | Step-by-step incident response procedures for common failure scenarios |
+| [Maintenance](MAINTENANCE.md) | Maintainers | Routine upkeep: adding instance types, EKS version upgrades, base-image and CVE-suppression refreshes, dependency bumps |
 
 ## Schedulers & Orchestrators
 
@@ -67,3 +68,4 @@ If you're customizing or operating:
 6. [Schedulers Overview](SCHEDULERS.md) — configure scheduling tools
 7. [Troubleshooting](TROUBLESHOOTING.md) — fix issues
 8. [Operational Runbooks](RUNBOOKS.md) — incident response procedures
+9. [Maintenance](MAINTENANCE.md) — keep instance types, the EKS version, and pinned tooling current

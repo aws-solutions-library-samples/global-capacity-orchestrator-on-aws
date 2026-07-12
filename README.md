@@ -452,6 +452,7 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 | Respond to incidents | [Operational Runbooks](docs/RUNBOOKS.md) |
 | Run interactive notebook analytics | [Analytics Guide](docs/ANALYTICS.md) |
 | Drive a goal-directed iteration loop | [Mission Guide](docs/MISSION.md) |
+| Perform routine maintenance & upgrades | [Maintenance Guide](docs/MAINTENANCE.md) |
 
 **Customization and development:**
 

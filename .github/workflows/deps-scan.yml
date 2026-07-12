@@ -26,9 +26,16 @@
 #   - CDK enum constants in gco/stacks/constants.py compared against the
 #     latest aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, AURORA_POSTGRES_VERSION)
 #   - Latest stable Python release from endoflife.date
+#   - CI tooling installed by hand across the workflows (Trivy, Helm, kubectl,
+#     kind + node image) — public endpoints, no AWS creds
+#   - Version consistency: pins that must move together (ruff across
+#     pyproject/pre-commit/lint.yml, python-version, duplicated *_VERSION env)
+#   - Base-image security epochs, suppression expiries, and lockfile freshness
+#     (all offline hygiene checks)
 #
-# If any are outdated, opens a GitHub issue with the details. Uses the
-# built-in GITHUB_TOKEN with `issues: write` — no long-lived PAT needed.
+# If any are outdated, opens (or refreshes) a single rolling GitHub issue with
+# the details and mirrors the report into the workflow run's job summary. Uses
+# the built-in GITHUB_TOKEN with `issues: write` — no long-lived PAT needed.
 #
 # =============================================================================
 
@@ -110,7 +117,7 @@ jobs:
         env:
           WORKFLOWS_DIR: .github/workflows
         run: bash .github/scripts/dependency-scan.sh
-      - name: Open issue if drift detected
+      - name: Open or refresh the drift issue
         if: steps.scan.outputs.has_drift == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -122,8 +129,27 @@ jobs:
           # `gh label create --force` creates-or-updates idempotently.
           gh label create dependencies --color "0366d6" --description "Dependency updates" --force
           gh label create automated    --color "ededed" --description "Opened by an automated workflow" --force
-          title="[Automated] Dependency Updates Available ($(date -u +%Y-%m-%d))"
-          gh issue create \
-            --title "$title" \
-            --label "dependencies,automated" \
-            --body-file "$REPORT_PATH"
+
+          # Use a stable, date-free title so we keep ONE rolling issue rather
+          # than accumulating a fresh one every month. Look for an existing
+          # open issue with this exact title carrying both labels: refresh its
+          # body (and drop a dated comment) if found, otherwise open it. The
+          # jq exact-title match guards against a partial server-side search.
+          title="[Automated] Dependency updates available"
+          today="$(date -u +%Y-%m-%d)"
+          existing="$(gh issue list \
+            --state open --label dependencies --label automated --limit 100 \
+            --json number,title \
+            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file "$REPORT_PATH"
+            gh issue comment "$existing" \
+              --body "Refreshed by the scheduled deps-scan on ${today}. The report in the issue body above is now current."
+            echo "Refreshed existing issue #${existing}"
+          else
+            gh issue create \
+              --title "$title" \
+              --label "dependencies,automated" \
+              --body-file "$REPORT_PATH"
+          fi

@@ -25,6 +25,18 @@
 #   - CDK enum constants from gco/stacks/constants.py compared against the
 #     installed aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, AURORA_POSTGRES_VERSION)
 #   - Latest stable Python release from endoflife.date — public endpoint
+#   - CI tooling the workflows install by hand: Trivy (TRIVY_VERSION), Helm and
+#     kubectl (HELM_VERSION / KUBECTL_VERSION), and kind + its node image —
+#     public endpoints, no AWS creds
+#   - Version consistency: ruff (pyproject / pre-commit / lint workflow),
+#     python-version across workflows, and any *_VERSION env pin that resolves
+#     to different values across workflow files
+#   - Base-image security epochs (APT_SECURITY_EPOCH / DNF_SECURITY_EPOCH)
+#     older than SECURITY_EPOCH_STALE_DAYS
+#   - Suppression expiries: .trivyignore / .pip-audit-ignore entries expiring
+#     within SUPPRESSION_EXPIRY_WARN_DAYS (before the CI validator hard-fails)
+#   - Lockfile freshness: direct deps in pyproject.toml missing from
+#     requirements-lock.txt
 #
 # Ports the `.dependency-scan-script` YAML anchor from the retired
 # GitLab pipeline into a standalone shell script. Two behavior changes:
@@ -53,6 +65,95 @@ REPORT_FILE="$(mktemp -t dep-scan-XXXXXX.md 2>/dev/null || mktemp --suffix=.md)"
 SCAN_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=.github/scripts/lib_dependency_scan.sh
 source "${SCAN_SCRIPT_DIR}/lib_dependency_scan.sh"
+
+# ---------------------------------------------------------------------------
+# Report helpers
+#
+# Small Markdown emitters shared by every section of the drift report so the
+# table formatting lives in one place — previously each section hand-rolled
+# its own ``| … |`` header + separator, which drifted as sections were added.
+# ``emit_md_table`` turns a pipe-delimited results file into a GitHub table;
+# ``md_anchor`` builds the in-page heading slug the top-of-report summary
+# links to.
+#
+# Thresholds for the recurring-hygiene checks. Tunable in one place:
+#   SUPPRESSION_EXPIRY_WARN_DAYS  surface .trivyignore/.pip-audit-ignore
+#                                 entries expiring within this many days
+#                                 (the CI validator still hard-fails on the
+#                                 day itself — this is the early warning).
+#   SECURITY_EPOCH_STALE_DAYS     flag a Dockerfile APT/DNF security epoch
+#                                 older than this many days.
+# ---------------------------------------------------------------------------
+SUPPRESSION_EXPIRY_WARN_DAYS="${SUPPRESSION_EXPIRY_WARN_DAYS:-30}"
+SECURITY_EPOCH_STALE_DAYS="${SECURITY_EPOCH_STALE_DAYS:-45}"
+
+# md_anchor <title> — GitHub heading slug (lowercase, punctuation dropped,
+# spaces → hyphens). Close enough to GitHub's own algorithm for the
+# summary-table links to resolve.
+md_anchor() {
+  printf '%s' "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9 -]//g; s/ /-/g'
+}
+
+# emit_md_table <header> <results-file> [wrap]
+#
+#   <header>       pipe-delimited column labels, e.g. "Package|Current|Latest"
+#   <results-file> file of pipe-delimited rows with the same column count
+#   [wrap]         when "code", every non-empty cell is wrapped in backticks
+#
+# Prints a GitHub-flavoured Markdown table. With no wrap, cells are emitted
+# verbatim, so a caller that wants a link in a cell just writes the
+# ``[text](url)`` markdown straight into the results file.
+emit_md_table() {
+  local header="$1" file="$2" wrap="${3:-}"
+  local -a cells cols
+  IFS='|' read -r -a cells <<< "$header"
+  local head="|" sep="|" c
+  for c in "${cells[@]}"; do
+    head+=" ${c} |"
+    sep+="---|"
+  done
+  printf '%s\n%s\n' "$head" "$sep"
+  while IFS='|' read -r -a cols; do
+    [ "${#cols[@]}" -eq 0 ] && continue
+    local row="|" cell
+    for cell in "${cols[@]}"; do
+      if [ "$wrap" = "code" ] && [ -n "$cell" ]; then
+        row+=" \`${cell}\` |"
+      else
+        row+=" ${cell} |"
+      fi
+    done
+    printf '%s\n' "$row"
+  done < "$file"
+}
+
+# days_until <YYYY-MM-DD> — integer days from today to the given date
+# (negative when the date is in the past). Empty output on a malformed date.
+days_until() {
+  python3 -c "
+import datetime, sys
+try:
+    d = datetime.date.fromisoformat(sys.argv[1])
+except Exception:
+    sys.exit(0)
+print((d - datetime.date.today()).days)
+" "$1" 2>/dev/null
+}
+
+# days_since <YYYY-MM-DD> — integer days from the given date to today
+# (negative when the date is in the future). Empty output on a malformed date.
+days_since() {
+  python3 -c "
+import datetime, sys
+try:
+    d = datetime.date.fromisoformat(sys.argv[1])
+except Exception:
+    sys.exit(0)
+print((datetime.date.today() - d).days)
+" "$1" 2>/dev/null
+}
 
 # ---------------------------------------------------------------------------
 # Python packages
@@ -839,6 +940,224 @@ PYTHON_RELEASE_COUNT="$(wc -l < "$PYTHON_RELEASE_RESULTS" 2>/dev/null | tr -d ' 
 [ -z "$PYTHON_RELEASE_COUNT" ] && PYTHON_RELEASE_COUNT=0
 
 # ---------------------------------------------------------------------------
+# CI tooling pins (public endpoints — no AWS creds)
+#
+# The workflows install their own pinned tooling — Trivy (cve-scan.yml /
+# security.yml) and Helm + kubectl (deps-scan.yml) — from plain ``*_VERSION``
+# env strings, and the integration-tests workflow pins kind + its node image
+# on the ``helm/kind-action`` step. None of these are ``uses:`` refs or
+# Dockerfile ``FROM`` lines, so Dependabot never sees them and a stale scanner
+# or tool goes unnoticed. Compare each against its upstream latest.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking CI tooling pins ==="
+
+CI_TOOLING_RESULTS="$(mktemp)"
+
+# check_github_tool <display-name> <current-pin> <owner/repo> <ref-url>
+# Records drift when the pinned semver is behind the latest GitHub Release.
+check_github_tool() {
+  local name="$1" current="$2" repo="$3" url="$4" latest=""
+  [ -n "$current" ] || return 0
+  latest="$(get_latest_github_release_tag "$repo")"
+  [ -z "$latest" ] && return 0
+  if [ "$current" != "$latest" ] \
+     && [ "$(compare_semver "$current" "$latest")" = "newer" ]; then
+    echo "  - ${name}: ${current} -> ${latest}"
+    echo "${name}|${current}|${latest}|${url}" >> "$CI_TOOLING_RESULTS"
+  fi
+}
+
+# Trivy (aquasecurity/trivy) — TRIVY_VERSION in the security workflows.
+TRIVY_PIN="$(extract_workflow_env_pin TRIVY_VERSION | head -1)"
+check_github_tool "Trivy (TRIVY_VERSION)" "$TRIVY_PIN" "aquasecurity/trivy" \
+  "https://github.com/aquasecurity/trivy/releases"
+
+# Helm (helm/helm) — HELM_VERSION the deps-scan workflow installs.
+HELM_PIN="$(extract_workflow_env_pin HELM_VERSION | head -1)"
+check_github_tool "Helm (HELM_VERSION)" "$HELM_PIN" "helm/helm" \
+  "https://github.com/helm/helm/releases"
+
+# kind (kubernetes-sigs/kind) — the kind binary on the kind-action step.
+KIND_PIN="$(extract_kind_pins | awk -F'|' '$1=="kind"{print $2}')"
+check_github_tool "kind" "$KIND_PIN" "kubernetes-sigs/kind" \
+  "https://github.com/kubernetes-sigs/kind/releases"
+
+# kubectl (workflow env) — compare against the stable release for its own
+# minor line (dl.k8s.io), the same source the Dockerfile.dev kubectl pin uses.
+KUBECTL_WF_PIN="$(extract_workflow_env_pin KUBECTL_VERSION | head -1)"
+if [ -n "$KUBECTL_WF_PIN" ]; then
+  kubectl_minor="$(echo "${KUBECTL_WF_PIN#v}" | cut -d. -f1-2)"
+  kubectl_latest="$(curl -fsSL --max-time 15 \
+    "https://dl.k8s.io/release/stable-${kubectl_minor}.txt" 2>/dev/null | tr -d '[:space:]')" || true
+  if [ -n "$kubectl_latest" ] && [ "$KUBECTL_WF_PIN" != "$kubectl_latest" ] \
+     && [ "$(compare_semver "$KUBECTL_WF_PIN" "$kubectl_latest")" = "newer" ]; then
+    echo "  - kubectl (KUBECTL_VERSION): ${KUBECTL_WF_PIN} -> ${kubectl_latest}"
+    echo "kubectl (KUBECTL_VERSION)|${KUBECTL_WF_PIN}|${kubectl_latest}|https://kubernetes.io/releases/" >> "$CI_TOOLING_RESULTS"
+  fi
+fi
+
+# kind node image (kindest/node) — report a newer PATCH within the pinned K8s
+# minor only. Jumping minors is governed by the kind release, not free drift,
+# so scoping to the same minor avoids false "upgrade" noise.
+KIND_NODE_PIN="$(extract_kind_pins | awk -F'|' '$1=="kind-node"{print $2}')"
+if [ -n "$KIND_NODE_PIN" ]; then
+  node_tag="${KIND_NODE_PIN##*:}"
+  node_minor="$(echo "${node_tag#v}" | cut -d. -f1-2)"
+  node_latest="$(skopeo list-tags "docker://docker.io/kindest/node" 2>/dev/null \
+    | jq -r '.Tags[]' 2>/dev/null \
+    | grep -E "^v?${node_minor}\.[0-9]+$" \
+    | sort -V | tail -1)" || true
+  if [ -n "$node_latest" ] && [ "$node_tag" != "$node_latest" ] \
+     && [ "$(compare_semver "$node_tag" "$node_latest")" = "newer" ]; then
+    echo "  - kind node image (kindest/node): ${node_tag} -> ${node_latest}"
+    echo "kind node image (kindest/node)|${node_tag}|${node_latest}|https://hub.docker.com/r/kindest/node/tags" >> "$CI_TOOLING_RESULTS"
+  fi
+fi
+
+CI_TOOLING_COUNT="$(wc -l < "$CI_TOOLING_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$CI_TOOLING_COUNT" ] && CI_TOOLING_COUNT=0
+
+# ---------------------------------------------------------------------------
+# Version consistency (no network)
+#
+# Some versions are pinned in more than one place and must move together.
+# The other sections answer "is this pin behind upstream?"; this one answers
+# "do the copies of this pin agree with each other?" — a class of drift that
+# otherwise only surfaces when a formatter/linter behaves differently in CI
+# than it does locally.
+#
+#   - ruff: pyproject (dev install) vs the pre-commit hook vs the prebuilt-
+#     binary ruff-action step in lint.yml.
+#   - python-version across the workflows vs the project's canonical Python
+#     (the LAMBDA_PYTHON_RUNTIME the Lambdas ship on).
+#   - the same tool env pin (TRIVY_VERSION/HELM_VERSION/KUBECTL_VERSION)
+#     resolving to different values in different workflow files.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking version consistency ==="
+
+CONSISTENCY_RESULTS="$(mktemp)"
+
+RUFF_PINS="$(extract_ruff_pins)"
+if [ -n "$RUFF_PINS" ]; then
+  ruff_distinct="$(echo "$RUFF_PINS" | cut -d'|' -f2 | sort -u | grep -c .)"
+  if [ "$ruff_distinct" -gt 1 ]; then
+    detail="$(echo "$RUFF_PINS" | awk -F'|' '{printf "%s=%s ", $1, $2}' | sed 's/ *$//')"
+    echo "  - ruff pins disagree: $detail"
+    echo "ruff (pyproject / pre-commit / lint action)|${detail}" >> "$CONSISTENCY_RESULTS"
+  fi
+fi
+
+CANON_PY="$(echo "${LAMBDA_RT_CURRENT:-}" | sed -E 's/^PYTHON_([0-9]+)_([0-9]+)$/\1.\2/')"
+[ -z "$CANON_PY" ] && CANON_PY="$(extract_constant_value LAMBDA_PYTHON_RUNTIME | sed -E 's/^PYTHON_([0-9]+)_([0-9]+)$/\1.\2/')"
+PY_PINS_UNIQUE="$(extract_python_version_pins | sort -u)"
+if [ -n "$PY_PINS_UNIQUE" ]; then
+  py_distinct="$(echo "$PY_PINS_UNIQUE" | grep -c .)"
+  py_list="$(echo "$PY_PINS_UNIQUE" | paste -sd',' -)"
+  if [ "$py_distinct" -gt 1 ] || { [ -n "$CANON_PY" ] && [ "$py_list" != "$CANON_PY" ]; }; then
+    echo "  - python-version pins: ${py_list} (project runtime: ${CANON_PY:-unknown})"
+    echo "python-version (CI vs runtime)|CI: ${py_list}; runtime: ${CANON_PY:-unknown}" >> "$CONSISTENCY_RESULTS"
+  fi
+fi
+
+for consistency_var in TRIVY_VERSION HELM_VERSION KUBECTL_VERSION; do
+  cvals="$(extract_workflow_env_pin "$consistency_var")"
+  cnum="$(echo "$cvals" | grep -c .)"
+  if [ "$cnum" -gt 1 ]; then
+    clist="$(echo "$cvals" | paste -sd',' -)"
+    echo "  - ${consistency_var} disagrees across workflows: ${clist}"
+    echo "${consistency_var} (across workflows)|${clist}" >> "$CONSISTENCY_RESULTS"
+  fi
+done
+
+CONSISTENCY_COUNT="$(wc -l < "$CONSISTENCY_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$CONSISTENCY_COUNT" ] && CONSISTENCY_COUNT=0
+
+# ---------------------------------------------------------------------------
+# Base-image security epochs (no network)
+#
+# The service images (Debian) and the helm-installer Lambda (AL2023) pull OS
+# security patches at build time behind a hand-bumped ``*_SECURITY_EPOCH``
+# ARG that busts the CI layer cache. Nothing else reminds anyone to move the
+# date, so a stale epoch silently reuses an old upgrade layer. Trivy's
+# container scan is the backstop; this flags an epoch older than the window
+# as the proactive nudge. Only the real Dockerfiles are scanned — the
+# generated ``*-build`` staging copies are skipped.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking base-image security epochs ==="
+
+EPOCH_RESULTS="$(mktemp)"
+EPOCH_FILES=(dockerfiles/*-dockerfile Dockerfile.dev lambda/helm-installer/Dockerfile)
+for df in "${EPOCH_FILES[@]}"; do
+  [ -f "$df" ] || continue
+  extract_security_epochs "$df" | while IFS='|' read -r epoch_arg epoch_date; do
+    [ -z "$epoch_date" ] && continue
+    epoch_age="$(days_since "$epoch_date")"
+    [ -z "$epoch_age" ] && continue
+    if [ "$epoch_age" -gt "$SECURITY_EPOCH_STALE_DAYS" ]; then
+      echo "  - ${df} (${epoch_arg}): ${epoch_date} (${epoch_age} days old)"
+      echo "${df}|${epoch_arg}|${epoch_date}|${epoch_age}" >> "$EPOCH_RESULTS"
+    fi
+  done
+done
+
+EPOCH_COUNT="$(wc -l < "$EPOCH_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$EPOCH_COUNT" ] && EPOCH_COUNT=0
+
+# ---------------------------------------------------------------------------
+# Suppression expiries (no network)
+#
+# ``.trivyignore`` / ``.pip-audit-ignore`` entries carry an ``exp:YYYY-MM-DD``
+# marker. The CI validator hard-fails a PR on the day an entry expires; this
+# surfaces entries expiring *soon* so they get re-evaluated (fixed upstream?
+# extend with a new justification?) before they break a build.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking suppression expiries ==="
+
+SUPPRESSION_RESULTS="$(mktemp)"
+for supfile in .github/config/.trivyignore .github/config/.pip-audit-ignore; do
+  [ -f "$supfile" ] || continue
+  supbase="$(basename "$supfile")"
+  parse_suppression_expiries "$supfile" | while IFS='|' read -r sup_id sup_date; do
+    [ -z "$sup_date" ] && continue
+    sup_left="$(days_until "$sup_date")"
+    [ -z "$sup_left" ] && continue
+    if [ "$sup_left" -le "$SUPPRESSION_EXPIRY_WARN_DAYS" ]; then
+      echo "  - ${supbase}: ${sup_id} expires ${sup_date} (${sup_left} days)"
+      echo "${supbase}|${sup_id}|${sup_date}|${sup_left}" >> "$SUPPRESSION_RESULTS"
+    fi
+  done
+done
+
+SUPPRESSION_COUNT="$(wc -l < "$SUPPRESSION_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$SUPPRESSION_COUNT" ] && SUPPRESSION_COUNT=0
+
+# ---------------------------------------------------------------------------
+# Lockfile freshness (no network)
+#
+# ``requirements-lock.txt`` is compiled from ``pyproject.toml`` with
+# ``pip-compile --all-extras``. A direct dependency present in pyproject but
+# absent from the lock means someone added/renamed a dep without re-running
+# pip-compile — the lock is stale. Presence-only check: never flags the
+# legitimate transitive pins the lock adds.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking lockfile freshness ==="
+
+LOCKFILE_RESULTS="$(mktemp)"
+check_lockfile_freshness pyproject.toml requirements-lock.txt | while IFS= read -r lock_missing; do
+  [ -z "$lock_missing" ] && continue
+  echo "  - direct dep missing from requirements-lock.txt: ${lock_missing}"
+  echo "${lock_missing}" >> "$LOCKFILE_RESULTS"
+done
+
+LOCKFILE_COUNT="$(wc -l < "$LOCKFILE_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$LOCKFILE_COUNT" ] && LOCKFILE_COUNT=0
+
+# ---------------------------------------------------------------------------
 # Summary + Markdown report
 # ---------------------------------------------------------------------------
 echo ""
@@ -883,6 +1202,11 @@ if [ -n "$PYTHON_RELEASE_SKIP_REASON" ]; then
 else
   echo "Python release:           $PYTHON_RELEASE_COUNT"
 fi
+echo "CI tooling pins:          $CI_TOOLING_COUNT"
+echo "Version consistency:      $CONSISTENCY_COUNT"
+echo "Base-image epochs:        $EPOCH_COUNT"
+echo "Suppression expiries:     $SUPPRESSION_COUNT"
+echo "Lockfile freshness:       $LOCKFILE_COUNT"
 
 if [ "$PYTHON_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 0 ] \
    && [ "$HELM_COUNT" -eq 0 ] && [ "$ADDON_COUNT" -eq 0 ] \
@@ -892,7 +1216,12 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 0 ] \
    && [ "$PRECOMMIT_COUNT" -eq 0 ] \
    && [ "$CDK_ENUM_COUNT" -eq 0 ] \
    && [ "$PYTHON_RELEASE_COUNT" -eq 0 ] \
-   && [ "$BEDROCK_MODEL_COUNT" -eq 0 ]; then
+   && [ "$BEDROCK_MODEL_COUNT" -eq 0 ] \
+   && [ "$CI_TOOLING_COUNT" -eq 0 ] \
+   && [ "$CONSISTENCY_COUNT" -eq 0 ] \
+   && [ "$EPOCH_COUNT" -eq 0 ] \
+   && [ "$SUPPRESSION_COUNT" -eq 0 ] \
+   && [ "$LOCKFILE_COUNT" -eq 0 ]; then
   echo ""
   SKIP_NOTES=""
   if [ -n "$ADDON_SKIP_REASON" ]; then
@@ -927,151 +1256,153 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 0 ] \
   else
     echo "All dependencies are up to date."
   fi
-  rm -f "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS"
+  rm -f "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      echo "# Dependency Update Report"
+      echo ""
+      echo "All scanned surfaces are up to date."
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "has_drift=false" >> "$GITHUB_OUTPUT"
   fi
   exit 0
 fi
 
+# summary_row <title> <count> <skip_reason> <urgency>
+# Emits one row of the top-of-report TL;DR table. Surfaces with drift link to
+# their detailed section; skipped surfaces are marked and get no urgency.
+summary_row() {
+  local title="$1" count="$2" skip="$3" urgency="$4"
+  local anchor label
+  anchor="$(md_anchor "$title")"
+  if [ -n "$skip" ]; then
+    label="skipped"
+    urgency="—"
+  elif [ "$count" -gt 0 ]; then
+    label="${count} update(s)"
+    title="[${title}](#${anchor})"
+  else
+    label="up to date"
+    urgency="—"
+  fi
+  echo "| ${title} | ${label} | ${urgency} |"
+}
+
 {
   echo "# Dependency Update Report"
+  echo ""
+  echo "_Generated $(date -u '+%Y-%m-%d %H:%M UTC') by the \`deps-scan\` workflow._"
+  echo ""
+
+  # ----- TL;DR summary -----
+  echo "## Summary"
+  echo ""
+  echo "| Surface | Status | Urgency |"
+  echo "|---------|--------|---------|"
+  summary_row "Python Packages"          "$PYTHON_COUNT"         ""                          "routine"
+  summary_row "Docker Images"            "$DOCKER_COUNT"         ""                          "routine"
+  summary_row "Helm Charts"              "$HELM_COUNT"           ""                          "routine"
+  summary_row "EKS Add-ons"              "$ADDON_COUNT"          "$ADDON_SKIP_REASON"        "routine"
+  summary_row "EKS Kubernetes Version"   "$EKS_K8S_COUNT"        "$EKS_K8S_SKIP_REASON"      "act soon"
+  summary_row "Aurora PostgreSQL Engine" "$AURORA_COUNT"         "$AURORA_SKIP_REASON"       "routine"
+  summary_row "EMR Serverless"           "$EMR_COUNT"            "$EMR_SKIP_REASON"          "routine"
+  summary_row "Bedrock Default Model"    "$BEDROCK_MODEL_COUNT"  "$BEDROCK_MODEL_SKIP_REASON" "routine"
+  summary_row "Dockerfile.dev Pins"      "$DOCKERFILE_COUNT"     ""                          "routine"
+  summary_row "Pre-commit Hooks"         "$PRECOMMIT_COUNT"      ""                          "routine"
+  summary_row "CDK Enum Constants"       "$CDK_ENUM_COUNT"       "$CDK_ENUM_SKIP_REASON"     "routine"
+  summary_row "Python Release"           "$PYTHON_RELEASE_COUNT" "$PYTHON_RELEASE_SKIP_REASON" "informational"
+  summary_row "CI Tooling"               "$CI_TOOLING_COUNT"     ""                          "act soon"
+  summary_row "Version Consistency"      "$CONSISTENCY_COUNT"    ""                          "routine"
+  summary_row "Base-image Security Epochs" "$EPOCH_COUNT"        ""                          "act soon"
+  summary_row "Suppression Expiries"     "$SUPPRESSION_COUNT"    ""                          "act soon"
+  summary_row "Lockfile Freshness"       "$LOCKFILE_COUNT"       ""                          "routine"
+  echo ""
+  echo "_Urgency is a hint: **act soon** = security or a support/cost deadline;"
+  echo "**routine** = bump at leisure; **informational** = no action yet. Only"
+  echo "surfaces with drift have a detailed section below._"
   echo ""
 
   if [ "$PYTHON_COUNT" -gt 0 ]; then
     echo "## Python Packages"
     echo ""
-    echo "Direct dependencies pinned in \`pyproject.toml\`"
-    echo "(transitive-only drift is excluded because those versions are"
-    echo "controlled by upstream pins and bumping them ourselves either"
-    echo "no-ops or breaks the resolver)."
+    echo "Direct dependencies pinned in \`pyproject.toml\` (transitive-only drift"
+    echo "is excluded — those versions are controlled by upstream pins and bumping"
+    echo "them ourselves either no-ops or breaks the resolver)."
     echo ""
-    echo "| Package | Current | Latest |"
-    echo "|---------|---------|--------|"
-    echo "$PYTHON_OUTDATED" | jq -r '.[] | "| \(.name) | \(.version) | \(.latest_version) |"'
+    echo "| Package | Current | Latest | Ref |"
+    echo "|---------|---------|--------|-----|"
+    echo "$PYTHON_OUTDATED" | jq -r '.[] | "| \(.name) | \(.version) | \(.latest_version) | [PyPI](https://pypi.org/project/\(.name)/) |"'
     echo ""
   fi
 
   if [ "$DOCKER_COUNT" -gt 0 ]; then
     echo "## Docker Images"
     echo ""
-    echo "| Image | Current | Latest |"
-    echo "|-------|---------|--------|"
-    while IFS='|' read -r img cur lat; do
-      echo "| $img | $cur | $lat |"
-    done < "$DOCKER_RESULTS"
+    emit_md_table "Image|Current|Latest" "$DOCKER_RESULTS"
     echo ""
   fi
 
   if [ "$HELM_COUNT" -gt 0 ]; then
     echo "## Helm Charts"
     echo ""
-    echo "| Chart | Name | Current | Latest |"
-    echo "|-------|------|---------|--------|"
+    helm_disp="$(mktemp)"
     while IFS='|' read -r cname chart cur lat; do
-      echo "| $cname | $chart | $cur | $lat |"
-    done < "$HELM_RESULTS"
+      echo "${cname}|${chart}|${cur}|${lat}|[ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=${chart})"
+    done < "$HELM_RESULTS" > "$helm_disp"
+    emit_md_table "Chart|Name|Current|Latest|Ref" "$helm_disp"
+    rm -f "$helm_disp"
     echo ""
   fi
 
   if [ "$ADDON_COUNT" -gt 0 ]; then
     echo "## EKS Add-ons"
     echo ""
-    echo "| Add-on | Current | Latest |"
-    echo "|--------|---------|--------|"
-    while IFS='|' read -r addon cur lat; do
-      echo "| $addon | $cur | $lat |"
-    done < "$ADDON_RESULTS"
-    echo ""
-  fi
-
-  if [ -n "$ADDON_SKIP_REASON" ]; then
-    echo "## EKS Add-ons (skipped)"
-    echo ""
-    echo "> $ADDON_SKIP_REASON"
+    emit_md_table "Add-on|Current|Latest" "$ADDON_RESULTS"
     echo ""
   fi
 
   if [ "$EKS_K8S_COUNT" -gt 0 ]; then
     echo "## EKS Kubernetes Version"
     echo ""
-    echo "The Kubernetes minor pinned in \`cdk.json::kubernetes_version\`"
-    echo "is behind the latest release still in EKS **standard support**."
-    echo "Upgrade before standard support ends to avoid the extended-"
-    echo "support pricing uplift."
+    echo "The Kubernetes minor pinned in \`cdk.json::kubernetes_version\` is behind"
+    echo "the latest release still in EKS **standard support**. Upgrade before"
+    echo "standard support ends to avoid the extended-support pricing uplift."
     echo ""
-    echo "| Pin | Current | Latest (standard support) | Std support ends |"
-    echo "|-----|---------|---------------------------|------------------|"
+    eks_disp="$(mktemp)"
     while IFS='|' read -r pin cur lat eos; do
-      echo "| \`$pin\` | $cur | $lat | $eos |"
-    done < "$EKS_K8S_RESULTS"
-    echo ""
-  fi
-
-  if [ -n "$EKS_K8S_SKIP_REASON" ]; then
-    echo "## EKS Kubernetes Version (skipped)"
-    echo ""
-    echo "> $EKS_K8S_SKIP_REASON"
+      echo "\`${pin}\`|${cur}|${lat}|${eos}"
+    done < "$EKS_K8S_RESULTS" > "$eks_disp"
+    emit_md_table "Pin|Current|Latest (standard support)|Std support ends" "$eks_disp"
+    rm -f "$eks_disp"
     echo ""
   fi
 
   if [ "$AURORA_COUNT" -gt 0 ]; then
     echo "## Aurora PostgreSQL Engine"
     echo ""
-    echo "| Engine | Current | Latest |"
-    echo "|--------|---------|--------|"
-    while IFS='|' read -r engine cur lat; do
-      echo "| $engine | $cur | $lat |"
-    done < "$AURORA_RESULTS"
-    echo ""
-  fi
-
-  if [ -n "$AURORA_SKIP_REASON" ]; then
-    echo "## Aurora PostgreSQL Engine (skipped)"
-    echo ""
-    echo "> $AURORA_SKIP_REASON"
+    emit_md_table "Engine|Current|Latest" "$AURORA_RESULTS"
     echo ""
   fi
 
   if [ "$EMR_COUNT" -gt 0 ]; then
     echo "## EMR Serverless"
     echo ""
-    echo "| Release | Current | Latest |"
-    echo "|---------|---------|--------|"
-    while IFS='|' read -r release cur lat; do
-      echo "| $release | $cur | $lat |"
-    done < "$EMR_RESULTS"
-    echo ""
-  fi
-
-  if [ -n "$EMR_SKIP_REASON" ]; then
-    echo "## EMR Serverless (skipped)"
-    echo ""
-    echo "> $EMR_SKIP_REASON"
+    emit_md_table "Release|Current|Latest" "$EMR_RESULTS"
     echo ""
   fi
 
   if [ "$BEDROCK_MODEL_COUNT" -gt 0 ]; then
     echo "## Bedrock Default Model"
     echo ""
-    echo "The default Bedrock model id pinned in gco_mcp/mission/sampling.py"
-    echo "(DEFAULT_BEDROCK_MODEL_ID, mirrored by cli/capacity/advisor.py) is"
+    echo "The default Bedrock model id pinned in \`gco_mcp/mission/sampling.py\`"
+    echo "(\`DEFAULT_BEDROCK_MODEL_ID\`, mirrored by \`cli/capacity/advisor.py\`) is"
     echo "behind a newer system-defined inference profile in the same model"
-    echo "family. Bump the constant in both files, then re-capture the"
-    echo "scaffold fixture (scripts/capture_scaffold_fixtures.py)."
+    echo "family. Bump the constant in both files, then re-capture the scaffold"
+    echo "fixture (\`scripts/capture_scaffold_fixtures.py\`)."
     echo ""
-    echo "| Constant | Current | Latest |"
-    echo "|----------|---------|--------|"
-    while IFS='|' read -r const cur lat; do
-      echo "| $const | $cur | $lat |"
-    done < "$BEDROCK_MODEL_RESULTS"
-    echo ""
-  fi
-
-  if [ -n "$BEDROCK_MODEL_SKIP_REASON" ]; then
-    echo "## Bedrock Default Model (skipped)"
-    echo ""
-    echo "> $BEDROCK_MODEL_SKIP_REASON"
+    emit_md_table "Constant|Current|Latest" "$BEDROCK_MODEL_RESULTS"
     echo ""
   fi
 
@@ -1080,94 +1411,174 @@ fi
     echo ""
     echo "Tooling versions pinned as build-time ARGs in \`Dockerfile.dev\`."
     echo ""
-    echo "| Pin | Current | Latest |"
-    echo "|-----|---------|--------|"
+    dockerfile_disp="$(mktemp)"
     while IFS='|' read -r pin cur lat; do
-      echo "| \`$pin\` | $cur | $lat |"
-    done < "$DOCKERFILE_RESULTS"
+      echo "\`${pin}\`|${cur}|${lat}"
+    done < "$DOCKERFILE_RESULTS" > "$dockerfile_disp"
+    emit_md_table "Pin|Current|Latest" "$dockerfile_disp"
+    rm -f "$dockerfile_disp"
     echo ""
   fi
 
   if [ "$PRECOMMIT_COUNT" -gt 0 ]; then
     echo "## Pre-commit Hooks"
     echo ""
-    echo "Hook \`rev:\` pins in \`.pre-commit-config.yaml\` are behind the"
-    echo "latest tag published by their upstream repos. Bump in"
-    echo "\`.pre-commit-config.yaml\`, then run \`pre-commit autoupdate\`"
-    echo "locally (or edit by hand) and verify the hooks still pass."
+    echo "Hook \`rev:\` pins in \`.pre-commit-config.yaml\` are behind the latest"
+    echo "tag published by their upstream repos. Bump in \`.pre-commit-config.yaml\`,"
+    echo "then run \`pre-commit autoupdate\` locally (or edit by hand) and verify"
+    echo "the hooks still pass."
     echo ""
-    echo "| Repo | Current | Latest |"
-    echo "|------|---------|--------|"
+    precommit_disp="$(mktemp)"
     while IFS='|' read -r repo cur lat; do
-      echo "| $repo | \`$cur\` | \`$lat\` |"
-    done < "$PRECOMMIT_RESULTS"
+      echo "${repo}|\`${cur}\`|\`${lat}\`|[releases](${repo}/releases)"
+    done < "$PRECOMMIT_RESULTS" > "$precommit_disp"
+    emit_md_table "Repo|Current|Latest|Ref" "$precommit_disp"
+    rm -f "$precommit_disp"
     echo ""
   fi
 
   if [ "$CDK_ENUM_COUNT" -gt 0 ]; then
     echo "## CDK Enum Constants"
     echo ""
-    echo "Enum-name constants in \`gco/stacks/constants.py\` are behind"
-    echo "the highest enum member exposed by the installed \`aws-cdk-lib\`."
-    echo "Update the constant in \`constants.py\` (and any related"
-    echo "deployment notes) so new stacks construct the latest CDK enum."
+    echo "Enum-name constants in \`gco/stacks/constants.py\` are behind the highest"
+    echo "enum member exposed by the installed \`aws-cdk-lib\`. Update the constant"
+    echo "in \`constants.py\` (and any related deployment notes) so new stacks"
+    echo "construct the latest CDK enum."
     echo ""
-    echo "| Constant | CDK enum class | Current | Latest |"
-    echo "|----------|----------------|---------|--------|"
-    while IFS='|' read -r const cls cur lat; do
-      echo "| \`$const\` | \`$cls\` | \`$cur\` | \`$lat\` |"
-    done < "$CDK_ENUM_RESULTS"
-    echo ""
-  fi
-
-  if [ -n "$CDK_ENUM_SKIP_REASON" ]; then
-    echo "## CDK Enum Constants (skipped)"
-    echo ""
-    echo "> $CDK_ENUM_SKIP_REASON"
+    emit_md_table "Constant|CDK enum class|Current|Latest" "$CDK_ENUM_RESULTS" code
     echo ""
   fi
 
   if [ "$PYTHON_RELEASE_COUNT" -gt 0 ]; then
     echo "## Python Release"
     echo ""
-    echo "A newer stable Python release is available on python.org than"
-    echo "the version encoded by \`LAMBDA_PYTHON_RUNTIME\`. AWS Lambda may"
-    echo "lag the upstream release by a few months — wait for the matching"
-    echo "\`Runtime.PYTHON_X_Y\` enum to appear in \`aws-cdk-lib\` (tracked"
-    echo "by the **CDK Enum Constants** section above) before bumping."
+    echo "A newer stable Python release is available on python.org than the version"
+    echo "encoded by \`LAMBDA_PYTHON_RUNTIME\`. AWS Lambda may lag the upstream"
+    echo "release by a few months — wait for the matching \`Runtime.PYTHON_X_Y\`"
+    echo "enum to appear in \`aws-cdk-lib\` (tracked by the **CDK Enum Constants**"
+    echo "section above) before bumping. See <https://www.python.org/downloads/>."
     echo ""
-    echo "| Surface | Current | Latest |"
-    echo "|---------|---------|--------|"
-    while IFS='|' read -r surface cur lat; do
-      echo "| $surface | $cur | $lat |"
-    done < "$PYTHON_RELEASE_RESULTS"
+    emit_md_table "Surface|Current|Latest" "$PYTHON_RELEASE_RESULTS"
     echo ""
   fi
 
-  if [ -n "$PYTHON_RELEASE_SKIP_REASON" ]; then
-    echo "## Python Release (skipped)"
+  # ----- New coverage surfaces -----
+
+  if [ "$CI_TOOLING_COUNT" -gt 0 ]; then
+    echo "## CI Tooling"
     echo ""
-    echo "> $PYTHON_RELEASE_SKIP_REASON"
+    echo "Tool versions the workflows install by hand — not \`uses:\` refs or"
+    echo "Dockerfile \`FROM\` lines, so Dependabot doesn't watch them. A stale"
+    echo "**Trivy** in particular means the CVE scan silently misses newer"
+    echo "detections; bump the \`*_VERSION\` env / kind-action inputs in lockstep."
+    echo ""
+    ci_disp="$(mktemp)"
+    while IFS='|' read -r name cur lat url; do
+      echo "${name}|\`${cur}\`|\`${lat}\`|[releases](${url})"
+    done < "$CI_TOOLING_RESULTS" > "$ci_disp"
+    emit_md_table "Tool|Current|Latest|Ref" "$ci_disp"
+    rm -f "$ci_disp"
+    echo ""
+  fi
+
+  if [ "$CONSISTENCY_COUNT" -gt 0 ]; then
+    echo "## Version Consistency"
+    echo ""
+    echo "These versions are pinned in more than one place and must move together."
+    echo "The copies below disagree — reconcile them so local installs, the"
+    echo "pre-commit hooks, and CI all use the same version."
+    echo ""
+    emit_md_table "What|Pinned values" "$CONSISTENCY_RESULTS"
+    echo ""
+  fi
+
+  if [ "$EPOCH_COUNT" -gt 0 ]; then
+    echo "## Base-image Security Epochs"
+    echo ""
+    echo "The build-time \`*_SECURITY_EPOCH\` ARGs bust the CI layer cache so a"
+    echo "fresh OS-security-upgrade layer is built. An epoch older than"
+    echo "${SECURITY_EPOCH_STALE_DAYS} days may be reusing a stale upgrade layer —"
+    echo "bump the date to force a rebuild that pulls current patches."
+    echo ""
+    epoch_disp="$(mktemp)"
+    while IFS='|' read -r df arg edate eage; do
+      echo "\`${df}\`|\`${arg}\`|${edate}|${eage}"
+    done < "$EPOCH_RESULTS" > "$epoch_disp"
+    emit_md_table "Dockerfile|ARG|Epoch|Age (days)" "$epoch_disp"
+    rm -f "$epoch_disp"
+    echo ""
+  fi
+
+  if [ "$SUPPRESSION_COUNT" -gt 0 ]; then
+    echo "## Suppression Expiries"
+    echo ""
+    echo "\`.trivyignore\` / \`.pip-audit-ignore\` entries expiring within"
+    echo "${SUPPRESSION_EXPIRY_WARN_DAYS} days (the CI validator hard-fails a PR on"
+    echo "the expiry date). Re-evaluate each: drop it if the CVE is fixed upstream,"
+    echo "or extend with a fresh justification if not."
+    echo ""
+    sup_disp="$(mktemp)"
+    while IFS='|' read -r sbase sid sdate sleft; do
+      echo "\`${sbase}\`|\`${sid}\`|${sdate}|${sleft}"
+    done < "$SUPPRESSION_RESULTS" > "$sup_disp"
+    emit_md_table "File|ID|Expires|Days left" "$sup_disp"
+    rm -f "$sup_disp"
+    echo ""
+  fi
+
+  if [ "$LOCKFILE_COUNT" -gt 0 ]; then
+    echo "## Lockfile Freshness"
+    echo ""
+    echo "Direct dependencies pinned in \`pyproject.toml\` but missing from"
+    echo "\`requirements-lock.txt\` — the lock is stale. Regenerate it with"
+    echo "\`pip-compile --all-extras --strip-extras -o requirements-lock.txt pyproject.toml\`."
+    echo ""
+    emit_md_table "Missing direct dependency" "$LOCKFILE_RESULTS" code
+    echo ""
+  fi
+
+  # ----- Skipped checks (collapsed) -----
+  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}" ]; then
+    echo "<details>"
+    echo "<summary>Skipped checks</summary>"
+    echo ""
+    [ -n "$ADDON_SKIP_REASON" ]         && echo "- **EKS Add-ons:** $ADDON_SKIP_REASON"
+    [ -n "$EKS_K8S_SKIP_REASON" ]       && echo "- **EKS Kubernetes Version:** $EKS_K8S_SKIP_REASON"
+    [ -n "$AURORA_SKIP_REASON" ]        && echo "- **Aurora PostgreSQL Engine:** $AURORA_SKIP_REASON"
+    [ -n "$EMR_SKIP_REASON" ]           && echo "- **EMR Serverless:** $EMR_SKIP_REASON"
+    [ -n "$BEDROCK_MODEL_SKIP_REASON" ] && echo "- **Bedrock Default Model:** $BEDROCK_MODEL_SKIP_REASON"
+    [ -n "$CDK_ENUM_SKIP_REASON" ]      && echo "- **CDK Enum Constants:** $CDK_ENUM_SKIP_REASON"
+    [ -n "$PYTHON_RELEASE_SKIP_REASON" ] && echo "- **Python Release:** $PYTHON_RELEASE_SKIP_REASON"
+    echo ""
+    echo "</details>"
     echo ""
   fi
 
   echo "## Action Required"
   echo ""
-  echo "1. Review changelogs for breaking changes"
-  echo "2. Update versions in \`pyproject.toml\`, manifests, or \`charts.yaml\`"
+  echo "1. Review changelogs for breaking changes (see the per-row **Ref** links)"
+  echo "2. Update versions in \`pyproject.toml\`, manifests, \`charts.yaml\`, or the"
+  echo "   pinned \`*_VERSION\` env / ARG values"
   echo "3. Regenerate \`requirements-lock.txt\` if Python deps changed"
-  echo "4. Run tests locally to verify compatibility"
-  echo "5. Open a PR with the updates"
+  echo "4. Reconcile any **Version Consistency** rows so every copy of a pin agrees"
+  echo "5. Run tests locally to verify compatibility, then open a PR"
   echo ""
   echo "---"
   echo "_Automatically created by the \`deps-scan\` workflow._"
 } > "$REPORT_FILE"
 
-rm -f "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS"
+rm -f "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   echo "has_drift=true"            >> "$GITHUB_OUTPUT"
   echo "report_path=$REPORT_FILE"  >> "$GITHUB_OUTPUT"
+fi
+
+# Mirror the report into the workflow run's job summary so results are visible
+# on the Actions run page even for workflow_dispatch runs and regardless of
+# whether an issue is opened.
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  cat "$REPORT_FILE" >> "$GITHUB_STEP_SUMMARY"
 fi
 
 echo ""

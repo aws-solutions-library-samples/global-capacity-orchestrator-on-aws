@@ -1162,3 +1162,320 @@ SHIM
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
+
+# ── get_latest_github_release_tag ───────────────────────────────────────────
+#
+# Same split as get_latest_precommit_hook_release: the owner/repo guard
+# branches run without network and are where a regression would bite; the
+# happy path is exercised with a curl shim so the suite stays offline.
+
+@test "get_latest_github_release_tag: empty for empty input" {
+    run get_latest_github_release_tag ""
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "get_latest_github_release_tag: empty for a non owner/repo argument" {
+    run get_latest_github_release_tag "not-a-repo"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "get_latest_github_release_tag: empty for a deeper path" {
+    run get_latest_github_release_tag "owner/repo/extra"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "get_latest_github_release_tag: parses tag_name from a shimmed release response" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/curl" <<'SHIM'
+#!/usr/bin/env bash
+# Emit a releases/latest-shaped JSON regardless of args.
+cat <<'JSON'
+{"tag_name": "v0.71.0", "name": "Trivy v0.71.0"}
+JSON
+SHIM
+    chmod +x "$tmpdir/curl"
+    PATH="$tmpdir:$PATH" run get_latest_github_release_tag "aquasecurity/trivy"
+    [ "$status" -eq 0 ]
+    [ "$output" = "v0.71.0" ]
+    rm -rf "$tmpdir"
+}
+
+# ── extract_workflow_env_pin ────────────────────────────────────────────────
+
+@test "extract_workflow_env_pin: reads TRIVY_VERSION from the security workflows" {
+    run extract_workflow_env_pin TRIVY_VERSION
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+@test "extract_workflow_env_pin: reads the deps-scan HELM_VERSION and KUBECTL_VERSION" {
+    run extract_workflow_env_pin HELM_VERSION
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^v[0-9] ]]
+    run extract_workflow_env_pin KUBECTL_VERSION
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^v1\. ]]
+}
+
+@test "extract_workflow_env_pin: empty for an unset var" {
+    run extract_workflow_env_pin NONEXISTENT_VERSION_XYZ
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_workflow_env_pin: empty for a missing directory" {
+    run extract_workflow_env_pin TRIVY_VERSION /nonexistent/dir
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_workflow_env_pin: dedups and surfaces multiple distinct values" {
+    tmpdir="$(mktemp -d)"
+    printf 'env:\n  FOO_VERSION: "v1.0.0"\n' > "$tmpdir/a.yml"
+    printf 'env:\n  FOO_VERSION: "v2.0.0"\n' > "$tmpdir/b.yml"
+    printf 'env:\n  FOO_VERSION: "v1.0.0"\n' > "$tmpdir/c.yml"
+    run extract_workflow_env_pin FOO_VERSION "$tmpdir"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c .)" -eq 2 ]
+    [[ "$output" == *"v1.0.0"* ]]
+    [[ "$output" == *"v2.0.0"* ]]
+    rm -rf "$tmpdir"
+}
+
+# ── extract_kind_pins ───────────────────────────────────────────────────────
+
+@test "extract_kind_pins: reads kind + node image from integration-tests.yml" {
+    run extract_kind_pins ".github/workflows/integration-tests.yml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"kind|v"* ]]
+    [[ "$output" == *"kind-node|kindest/node:"* ]]
+}
+
+@test "extract_kind_pins: empty for a missing file" {
+    run extract_kind_pins "/nonexistent/integration-tests.yml"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_kind_pins: empty when no kind-action step is present" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v7
+EOF
+    run extract_kind_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_kind_pins: parses a synthetic kind-action step" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+jobs:
+  e2e:
+    steps:
+      - uses: helm/kind-action@v1.14.0
+        with:
+          version: "v0.99.0"
+          node_image: "kindest/node:v1.40.0"
+EOF
+    run extract_kind_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"kind|v0.99.0"* ]]
+    [[ "$output" == *"kind-node|kindest/node:v1.40.0"* ]]
+    rm -f "$tmpfile"
+}
+
+# ── extract_ruff_pins ───────────────────────────────────────────────────────
+
+@test "extract_ruff_pins: reports all three sources from the real repo" {
+    run extract_ruff_pins
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"pyproject|"* ]]
+    [[ "$output" == *"precommit|"* ]]
+    [[ "$output" == *"lint-action|"* ]]
+    # Every value is normalised (no leading v, digit-dotted).
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        val="${line#*|}"
+        [[ "$val" =~ ^[0-9]+\.[0-9]+ ]]
+    done <<< "$output"
+}
+
+@test "extract_ruff_pins: normalises a v-prefixed pre-commit rev and reads the action version" {
+    # Synthetic files keep the assertion stable across ruff bumps and prove
+    # the lint-action value comes from the ruff-action step (not a nearby
+    # python-version).
+    tmpdir="$(mktemp -d)"
+    printf '[project.optional-dependencies]\nlint = ["ruff==9.9.9"]\n' > "$tmpdir/pyproject.toml"
+    cat > "$tmpdir/pre-commit.yaml" <<'EOF'
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v9.9.10
+    hooks:
+      - id: ruff
+EOF
+    cat > "$tmpdir/lint.yml" <<'EOF'
+jobs:
+  lint:
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/ruff-action@v4.0.0
+        with:
+          version: "9.9.9"
+EOF
+    run extract_ruff_pins "$tmpdir/pyproject.toml" "$tmpdir/pre-commit.yaml" "$tmpdir/lint.yml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"pyproject|9.9.9"* ]]
+    [[ "$output" == *"precommit|9.9.10"* ]]
+    [[ "$output" == *"lint-action|9.9.9"* ]]
+    rm -rf "$tmpdir"
+}
+
+# ── extract_python_version_pins ─────────────────────────────────────────────
+
+@test "extract_python_version_pins: finds the repo's python-version pins" {
+    run extract_python_version_pins
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        [[ "$line" =~ ^[0-9]+\.[0-9]+$ ]]
+    done <<< "$output"
+}
+
+@test "extract_python_version_pins: empty for a missing directory" {
+    run extract_python_version_pins /nonexistent/dir
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_python_version_pins: emits one line per occurrence for uniq counting" {
+    tmpdir="$(mktemp -d)"
+    printf 'jobs:\n  a:\n    steps:\n      - with:\n          python-version: "3.14"\n' > "$tmpdir/a.yml"
+    printf 'jobs:\n  b:\n    steps:\n      - with:\n          python-version: "3.14"\n' > "$tmpdir/b.yml"
+    run extract_python_version_pins "$tmpdir"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^3\.14$')" -eq 2 ]
+    rm -rf "$tmpdir"
+}
+
+# ── parse_suppression_expiries ──────────────────────────────────────────────
+
+@test "parse_suppression_expiries: parses ID|date pairs from the real .trivyignore" {
+    run parse_suppression_expiries ".github/config/.trivyignore"
+    [ "$status" -eq 0 ]
+    # Each non-empty line is ID|YYYY-MM-DD (the file may have zero active
+    # entries, in which case output is empty and the loop is a no-op).
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        [[ "$line" =~ ^[^|]+\|[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+    done <<< "$output"
+}
+
+@test "parse_suppression_expiries: empty for a missing file" {
+    run parse_suppression_expiries "/nonexistent/.trivyignore"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "parse_suppression_expiries: skips comments/blanks and keeps dated entries" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+# a comment mentioning exp:2099-01-01 that must be ignored
+
+CVE-2026-0001 exp:2026-12-31
+CVE-2026-0002 exp:2027-01-15
+EOF
+    run parse_suppression_expiries "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c .)" -eq 2 ]
+    [[ "$output" == *"CVE-2026-0001|2026-12-31"* ]]
+    [[ "$output" == *"CVE-2026-0002|2027-01-15"* ]]
+    rm -f "$tmpfile"
+}
+
+# ── check_lockfile_freshness ────────────────────────────────────────────────
+
+@test "check_lockfile_freshness: the real repo lock has no missing direct deps" {
+    run check_lockfile_freshness pyproject.toml requirements-lock.txt
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "check_lockfile_freshness: reports a direct dep missing from the lock" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/pyproject.toml" <<'EOF'
+[project]
+name = "demo"
+dependencies = ["boto3==1.0.0", "totally-missing-pkg==2.0.0"]
+EOF
+    printf 'boto3==1.0.0\n' > "$tmpdir/lock.txt"
+    run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"totally-missing-pkg"* ]]
+    [[ "$output" != *"boto3"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "check_lockfile_freshness: normalises names before comparing (no false positive)" {
+    # A dep written with '.'/'_' in pyproject and '-' in the lock (PEP 503)
+    # must be treated as present.
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/pyproject.toml" <<'EOF'
+[project]
+name = "demo"
+dependencies = ["types_PyYAML==1.0.0"]
+EOF
+    printf 'types-pyyaml==1.0.0\n' > "$tmpdir/lock.txt"
+    run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "check_lockfile_freshness: empty for missing files" {
+    run check_lockfile_freshness /nonexistent/pyproject.toml /nonexistent/lock.txt
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# ── extract_security_epochs ─────────────────────────────────────────────────
+
+@test "extract_security_epochs: reads APT_SECURITY_EPOCH from a service Dockerfile" {
+    run extract_security_epochs "dockerfiles/health-monitor-dockerfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^APT_SECURITY_EPOCH\|[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+}
+
+@test "extract_security_epochs: reads DNF_SECURITY_EPOCH from the helm-installer Dockerfile" {
+    run extract_security_epochs "lambda/helm-installer/Dockerfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^DNF_SECURITY_EPOCH\|[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+}
+
+@test "extract_security_epochs: empty for a missing file" {
+    run extract_security_epochs "/nonexistent/Dockerfile"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_security_epochs: ignores a commented epoch and parses the live one" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+# ARG APT_SECURITY_EPOCH=1999-01-01
+ARG APT_SECURITY_EPOCH=2026-06-25
+EOF
+    run extract_security_epochs "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$output" = "APT_SECURITY_EPOCH|2026-06-25" ]
+    rm -f "$tmpfile"
+}
