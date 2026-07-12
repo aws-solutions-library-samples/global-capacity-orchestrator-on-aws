@@ -15,6 +15,7 @@ Helper scripts invoked by GitHub Actions workflows. Separated from the workflows
 | `dependency-scan.sh` | `deps-scan.yml` (monthly) | Checks for outdated Python packages, Docker images, Helm charts, EKS add-on, and Bedrock default-model versions. Writes a Markdown report and sets `has_drift=true` on `$GITHUB_OUTPUT` if any are outdated. |
 | `lib_dependency_scan.sh` | `dependency-scan.sh` | Sourceable helper functions — image registry parsing (`parse_image_registry`), semver comparison (`compare_semver`), tag filtering (`is_semver_tag`, `is_project_image`), and Bedrock model-family/version helpers (`bedrock_model_family`, `compare_bedrock_model`, `get_latest_bedrock_model`). Extracted so BATS tests can exercise the logic without running the full scan. |
 | `check_pip_audit_ignore.py` | `security.yml` (`security:pip-audit:deps`) | Validates the project-local `.github/config/.pip-audit-ignore` suppression file. Fails the workflow when any entry's `exp:YYYY-MM-DD` marker is on-or-before today (inclusive) or when an entry is missing the marker entirely. Importable as a module (`check_file()`, `main()`) so it can be exercised by pytest fixtures rather than only ever run end-to-end through CI. |
+| `validate_helm_charts.py` | `integration-tests.yml` (`integration:helm:charts-valid`) | Validates every `(chart, version)` pinned in `lambda/helm-installer/charts.yaml`. Structural checks run always (required fields, SemVer version, `oci://`/`use_oci` consistency); `--mode online` additionally resolves each chart at its exact pinned version (`helm show chart`) and renders it (`helm template`) so a typo'd name or a version that never shipped fails in CI rather than mid-deploy. Every entry is checked, including `enabled: false` charts. Importable (`validate_structure()`, `build_refs()`, `validate_online()`, `main()`) for pytest. |
 | `run-semgrep.sh` | `security.yml` (`security:semgrep:sast`) | Runs `semgrep scan --config auto --error` with repo-wide rule suppressions loaded from `.github/config/semgrep-excluded-rules.txt` — each non-comment, non-blank line becomes a `--exclude-rule` flag, so the suppression list lives in a reviewable data file instead of being hardwired into the workflow. POSIX `sh` (the semgrep container image is not guaranteed to ship bash). Tested by `tests/BATS/test_run_semgrep.bats`. |
 | `dev_alias_live.sh` | `integration-tests.yml` (`integration:dev-alias:{docker,finch,podman,none}`) | Live proof that `scripts/setup-dev-alias.sh` builds the image and generates a working `gco` shell function. Drives `setup-dev-alias.sh` to build the real `gco-dev` image from `Dockerfile.dev` and install the generated function into a throwaway rc, sources it in a fresh shell, and proves through it: `gco --version` (the real CLI runs) and `gco dag validate ci-dag.yaml` (an offline command that reads a relative-path file from the mounted workspace, proving arg-forwarding, the `$PWD` -> `/workspace` bind mount, and `cwd=/workspace`). `--skip-build` reuses an existing image (and tells `setup-dev-alias.sh` to skip its build); `--no-runtime` proves the script refuses cleanly (non-zero exit, no rc block) when no runtime answers. |
 
@@ -33,6 +34,22 @@ Python helpers ship with pytest tests under `tests/`:
 ```bash
 # Validator coverage
 pytest tests/test_pip_audit_ignore_validator.py -v
+pytest tests/test_helm_charts_validation.py -v
+```
+
+`validate_helm_charts.py` also has an opt-in online tier that pulls and renders
+every chart with the real `helm` binary. It is skipped by default (and in the
+normal unit job); enable it locally with a `helm` on `PATH`:
+
+```bash
+# Structural checks only (no helm/network needed):
+python3 .github/scripts/validate_helm_charts.py --mode offline
+
+# Full resolve + render of every pinned chart (needs helm + network):
+python3 .github/scripts/validate_helm_charts.py --mode online --verbose
+
+# Same, via the opt-in pytest tier:
+GCO_HELM_CHART_VALIDATION=1 pytest tests/test_helm_charts_validation.py -v
 ```
 
 `dev_alias_live.sh` is itself a live test — it exercises the onboarding alias

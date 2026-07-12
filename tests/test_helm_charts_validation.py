@@ -1,0 +1,412 @@
+"""Tests for ``.github/scripts/validate_helm_charts.py``.
+
+The validator gates a CI job (``integration:helm:charts-valid`` in
+``integration-tests.yml``) that proves every ``(chart, version)`` pinned in
+``lambda/helm-installer/charts.yaml`` is a real, installable Helm chart. These
+tests pin the offline behavior so a refactor can't quietly relax the rules, and
+add an opt-in online test that exercises the real ``helm`` resolve/render path.
+
+The script is loaded by file path because ``.github/scripts/`` isn't on
+``sys.path`` and shouldn't be turned into a package just to support tests —
+same posture as ``tests/test_pip_audit_ignore_validator.py``.
+
+Two tiers:
+
+* **Offline** (always run): structural checks, reference construction, and
+  ``main()`` exit codes against in-memory dicts and temp files. No network,
+  no ``helm`` binary — these run in the normal unit job.
+* **Online** (opt-in): gated behind ``GCO_HELM_CHART_VALIDATION=1`` *and* a
+  ``helm`` binary on ``PATH``, so the ~30s network pass never runs in the
+  normal unit job. The dedicated CI job sets the env var.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import shutil
+import sys
+from pathlib import Path
+
+import pytest
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT_PATH = PROJECT_ROOT / ".github" / "scripts" / "validate_helm_charts.py"
+LIVE_CHARTS = PROJECT_ROOT / "lambda" / "helm-installer" / "charts.yaml"
+
+
+def _load_validator():
+    """Load the validator module by file path.
+
+    ``.github/scripts`` is intentionally not a Python package, so import by
+    path rather than adding an ``__init__.py`` — mirrors the pip-audit / trivy
+    validator tests.
+    """
+    spec = importlib.util.spec_from_file_location("validate_helm_charts", SCRIPT_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+validator = _load_validator()
+
+
+def _classic(**overrides) -> dict:
+    """A minimal well-formed classic (HTTP) chart entry, with overrides."""
+    base = {
+        "enabled": True,
+        "repo_name": "kedacore",
+        "repo_url": "https://kedacore.github.io/charts",
+        "chart": "keda",
+        "version": "2.20.1",
+        "namespace": "keda",
+    }
+    base.update(overrides)
+    return base
+
+
+def _oci(**overrides) -> dict:
+    """A minimal well-formed OCI chart entry, with overrides."""
+    base = {
+        "enabled": True,
+        "repo_url": "oci://registry.k8s.io/kueue/charts",
+        "chart": "kueue",
+        "version": "0.18.2",
+        "namespace": "kueue-system",
+        "use_oci": True,
+    }
+    base.update(overrides)
+    return base
+
+
+# ── validate_structure: happy paths ──────────────────────────────────────────
+
+
+class TestValidateStructureHappyPath:
+    def test_well_formed_classic_and_oci_pass(self) -> None:
+        charts = {"keda": _classic(), "kueue": _oci()}
+        assert validator.validate_structure(charts) == []
+
+    def test_leading_v_version_is_accepted(self) -> None:
+        # cert-manager / aws-efa tag their charts as v1.20.3 / v0.5.29.
+        charts = {"cert-manager": _classic(version="v1.20.3")}
+        assert validator.validate_structure(charts) == []
+
+    def test_two_component_version_is_accepted(self) -> None:
+        charts = {"x": _classic(version="1.8")}
+        assert validator.validate_structure(charts) == []
+
+    def test_disabled_charts_are_still_validated_by_default(self) -> None:
+        # Disabled charts can be toggled on via cdk.json, so a broken pin must
+        # still fail by default.
+        charts = {"slurm": _oci(enabled=False, version="not-a-version")}
+        errors = validator.validate_structure(charts)
+        assert any("slurm" in e for e in errors)
+
+    def test_enabled_only_skips_disabled_charts(self) -> None:
+        charts = {"slurm": _oci(enabled=False, version="not-a-version")}
+        assert validator.validate_structure(charts, enabled_only=True) == []
+
+
+# ── validate_structure: failure cases ────────────────────────────────────────
+
+
+class TestValidateStructureFailures:
+    def test_missing_version(self) -> None:
+        charts = {"x": _classic()}
+        del charts["x"]["version"]
+        errors = validator.validate_structure(charts)
+        assert errors == ["x: missing or empty 'version'"]
+
+    def test_empty_chart_name(self) -> None:
+        errors = validator.validate_structure({"x": _classic(chart="  ")})
+        assert any("missing or empty 'chart'" in e for e in errors)
+
+    def test_missing_repo_url(self) -> None:
+        charts = {"x": _classic()}
+        del charts["x"]["repo_url"]
+        errors = validator.validate_structure(charts)
+        assert any("missing or empty 'repo_url'" in e for e in errors)
+
+    def test_non_semver_version_flagged(self) -> None:
+        errors = validator.validate_structure({"x": _classic(version="latest")})
+        assert any("not a valid SemVer" in e for e in errors)
+
+    def test_oci_url_without_use_oci_flag(self) -> None:
+        charts = {"x": _classic(repo_url="oci://ghcr.io/x/charts")}
+        errors = validator.validate_structure(charts)
+        assert any("use_oci is not set to true" in e for e in errors)
+
+    def test_use_oci_true_but_http_url(self) -> None:
+        errors = validator.validate_structure({"x": _oci(repo_url="https://example.com/charts")})
+        assert any("not an oci:// URL" in e for e in errors)
+
+    def test_classic_url_bad_scheme(self) -> None:
+        errors = validator.validate_structure({"x": _classic(repo_url="ftp://example.com")})
+        assert any("must be http(s):// or oci://" in e for e in errors)
+
+    def test_classic_missing_repo_name(self) -> None:
+        charts = {"x": _classic()}
+        del charts["x"]["repo_name"]
+        errors = validator.validate_structure(charts)
+        assert any("needs a 'repo_name'" in e for e in errors)
+
+    def test_entry_not_a_mapping(self) -> None:
+        errors = validator.validate_structure({"x": ["not", "a", "dict"]})
+        assert errors == ["x: entry is not a mapping"]
+
+    def test_empty_charts_mapping(self) -> None:
+        errors = validator.validate_structure({})
+        assert errors == ["charts.yaml contains no chart entries under 'charts:'"]
+
+    def test_all_problems_reported_in_one_pass(self) -> None:
+        # Operators shouldn't have to fix-and-rerun to find every problem.
+        charts = {
+            "a": _classic(version="nope"),
+            "b": _classic(repo_url="oci://ghcr.io/b/charts"),
+        }
+        errors = validator.validate_structure(charts)
+        assert len(errors) == 2
+
+
+# ── build_refs + ChartRef.reference ──────────────────────────────────────────
+
+
+class TestBuildRefs:
+    def test_classic_reference_shape(self) -> None:
+        (ref,) = validator.build_refs({"keda": _classic()})
+        assert ref.use_oci is False
+        assert ref.reference() == "kedacore/keda"
+
+    def test_oci_reference_shape(self) -> None:
+        (ref,) = validator.build_refs({"kueue": _oci()})
+        assert ref.use_oci is True
+        # OCI ref is repo_url + "/" + chart — exactly what handler.install_chart builds.
+        assert ref.reference() == "oci://registry.k8s.io/kueue/charts/kueue"
+
+    def test_malformed_entries_are_skipped(self) -> None:
+        # build_refs only yields entries resolvable by helm; validate_structure
+        # is what reports the malformed ones.
+        charts = {
+            "good": _classic(),
+            "no-version": {"repo_name": "r", "repo_url": "https://x", "chart": "c"},
+        }
+        refs = validator.build_refs(charts)
+        assert [r.name for r in refs] == ["good"]
+
+    def test_classic_without_repo_name_is_skipped(self) -> None:
+        charts = {"x": _classic()}
+        del charts["x"]["repo_name"]
+        assert validator.build_refs(charts) == []
+
+    def test_enabled_only_filter(self) -> None:
+        charts = {"on": _classic(enabled=True), "off": _classic(enabled=False)}
+        refs = validator.build_refs(charts, enabled_only=True)
+        assert [r.name for r in refs] == ["on"]
+
+    def test_values_default_to_empty_dict(self) -> None:
+        (ref,) = validator.build_refs({"keda": _classic()})
+        assert ref.values == {}
+
+
+# ── load_charts ───────────────────────────────────────────────────────────────
+
+
+class TestLoadCharts:
+    def test_loads_charts_mapping(self, tmp_path: Path) -> None:
+        path = tmp_path / "charts.yaml"
+        path.write_text("charts:\n  keda:\n    chart: keda\n    version: '2.20.1'\n")
+        loaded = validator.load_charts(path)
+        assert "keda" in loaded
+
+    def test_missing_file_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError):
+            validator.load_charts(tmp_path / "nope.yaml")
+
+    def test_missing_charts_key_raises_value_error(self, tmp_path: Path) -> None:
+        path = tmp_path / "charts.yaml"
+        path.write_text("something_else: true\n")
+        with pytest.raises(ValueError, match="charts:"):
+            validator.load_charts(path)
+
+
+# ── helper functions ──────────────────────────────────────────────────────────
+
+
+class TestHelpers:
+    def test_chart_version_from_show(self) -> None:
+        out = "apiVersion: v2\nname: keda\nversion: 2.20.1\n"
+        assert validator._chart_version_from_show(out) == "2.20.1"
+
+    def test_chart_version_from_show_handles_garbage(self) -> None:
+        assert validator._chart_version_from_show("::: not yaml :::") in (None, "")
+
+    def test_versions_match_ignores_leading_v(self) -> None:
+        assert validator._versions_match("v1.20.3", "1.20.3")
+        assert validator._versions_match("1.20.3", "v1.20.3")
+        assert not validator._versions_match("1.20.3", "1.20.4")
+
+    def test_tail_truncates_long_text(self) -> None:
+        assert validator._tail("x" * 1000, limit=100).startswith("...")
+        assert validator._tail("short") == "short"
+
+
+# ── main(): exit codes ────────────────────────────────────────────────────────
+
+
+class TestMainExitCodes:
+    def _write(self, tmp_path: Path, body: str) -> Path:
+        path = tmp_path / "charts.yaml"
+        path.write_text(body)
+        return path
+
+    def test_offline_clean_returns_zero(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        path = self._write(
+            tmp_path,
+            "charts:\n"
+            "  keda:\n"
+            "    repo_name: kedacore\n"
+            "    repo_url: https://kedacore.github.io/charts\n"
+            "    chart: keda\n"
+            "    version: '2.20.1'\n"
+            "    namespace: keda\n",
+        )
+        rc = validator.main(["--charts", str(path), "--mode", "offline"])
+        assert rc == 0
+        assert "structurally valid" in capsys.readouterr().out
+
+    def test_offline_bad_returns_one_and_names_chart(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        path = self._write(
+            tmp_path,
+            "charts:\n"
+            "  broken:\n"
+            "    repo_name: r\n"
+            "    repo_url: https://x/charts\n"
+            "    chart: c\n"
+            "    version: not-a-version\n",
+        )
+        rc = validator.main(["--charts", str(path), "--mode", "offline"])
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "broken" in out
+
+    def test_missing_file_returns_two(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = validator.main(["--charts", str(tmp_path / "nope.yaml"), "--mode", "offline"])
+        assert rc == 2
+        assert "not found" in capsys.readouterr().err
+
+    def test_online_without_helm_binary_returns_two(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # --mode online must fail loudly when the requested helm binary is
+        # absent, rather than silently degrading to a structural-only pass.
+        path = self._write(
+            tmp_path,
+            "charts:\n"
+            "  keda:\n"
+            "    repo_name: kedacore\n"
+            "    repo_url: https://kedacore.github.io/charts\n"
+            "    chart: keda\n"
+            "    version: '2.20.1'\n",
+        )
+        rc = validator.main(
+            [
+                "--charts",
+                str(path),
+                "--mode",
+                "online",
+                "--helm-binary",
+                "helm-does-not-exist-xyz",
+            ]
+        )
+        assert rc == 2
+        assert "requires the" in capsys.readouterr().err
+
+    def test_auto_without_helm_runs_structural_only(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        path = self._write(
+            tmp_path,
+            "charts:\n"
+            "  keda:\n"
+            "    repo_name: kedacore\n"
+            "    repo_url: https://kedacore.github.io/charts\n"
+            "    chart: keda\n"
+            "    version: '2.20.1'\n",
+        )
+        rc = validator.main(
+            ["--charts", str(path), "--mode", "auto", "--helm-binary", "helm-does-not-exist-xyz"]
+        )
+        assert rc == 0
+        assert "structural checks only" in capsys.readouterr().out
+
+
+# ── live charts.yaml (offline) ────────────────────────────────────────────────
+
+
+class TestLiveChartsOffline:
+    """The committed charts.yaml must be structurally valid and fully resolvable-in-principle."""
+
+    def test_committed_charts_yaml_is_structurally_valid(self) -> None:
+        charts = validator.load_charts(LIVE_CHARTS)
+        errors = validator.validate_structure(charts)
+        assert errors == [], "charts.yaml structural validation failed:\n" + "\n".join(errors)
+
+    def test_every_live_chart_builds_a_reference(self) -> None:
+        # If a real entry silently fails to build a ref, the online pass would
+        # skip it — guard against that.
+        charts = validator.load_charts(LIVE_CHARTS)
+        assert len(validator.build_refs(charts)) == len(charts)
+
+    def test_main_offline_on_live_charts_returns_zero(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = validator.main(["--charts", str(LIVE_CHARTS), "--mode", "offline"])
+        assert rc == 0
+
+
+# ── live charts.yaml (online, opt-in) ─────────────────────────────────────────
+
+_HELM = shutil.which("helm")
+_ONLINE_ENABLED = os.environ.get("GCO_HELM_CHART_VALIDATION") == "1" and _HELM is not None
+
+
+@pytest.mark.helm_online
+@pytest.mark.skipif(
+    not _ONLINE_ENABLED,
+    reason="opt-in: set GCO_HELM_CHART_VALIDATION=1 and install helm to run the online checks",
+)
+class TestLiveChartsOnline:
+    """Real ``helm`` resolve/render of every pinned chart. Opt-in, network-bound."""
+
+    def test_all_live_charts_resolve_and_render(self) -> None:
+        charts = validator.load_charts(LIVE_CHARTS)
+        refs = validator.build_refs(charts)
+        errors = validator.validate_online(refs)
+        assert errors == [], "Helm resolve/render failed:\n" + "\n".join(errors)
+
+    def test_online_detects_a_bogus_version(self) -> None:
+        # Give the check a version that cannot exist and confirm it fails —
+        # proves the online gate has teeth against a mistyped pin.
+        bogus = validator.ChartRef(
+            name="keda",
+            chart="keda",
+            version="99.99.99",
+            repo_name="kedacore",
+            repo_url="https://kedacore.github.io/charts",
+            use_oci=False,
+            namespace="keda",
+            enabled=True,
+            values={},
+        )
+        errors = validator.validate_online([bogus])
+        assert errors
+        assert any("99.99.99" in e for e in errors)

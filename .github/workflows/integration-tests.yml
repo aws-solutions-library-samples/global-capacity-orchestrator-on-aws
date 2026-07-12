@@ -17,6 +17,7 @@
 #   - integration:docker:inference-monitor   — build + import-based liveness
 #   - integration:docker:manifest-processor  — build + /healthz + /readyz
 #   - integration:docker:queue-processor     — build + startup-banner check
+#   - integration:helm:charts-valid          — every charts.yaml (chart,version) resolves + renders with helm
 #   - integration:k8s:manifest-schema        — YAML validation + required kinds
 #   - integration:kind:cluster-e2e           — kind + Calico + services + RBAC + NetworkPolicy + ResourceQuota
 #   - integration:lambda:imports             — import each Lambda handler
@@ -41,6 +42,41 @@ permissions:
   contents: read
 
 jobs:
+  integration-helm-charts-valid:
+    name: "integration:helm:charts-valid"
+    # Proves every (chart, version) pinned in lambda/helm-installer/charts.yaml
+    # is a real, installable Helm chart. The helm-installer Lambda trusts these
+    # pins blindly at deploy time, so a typo'd chart name or a version that
+    # never shipped would otherwise only surface as a failed
+    # `helm upgrade --install` mid-deploy. `--mode online` resolves each chart
+    # at its exact pinned version (`helm show chart`) and renders it to
+    # manifests (`helm template`) with the values charts.yaml ships — no
+    # cluster required. Every entry is checked, including enabled: false charts
+    # (those are toggled on via cdk.json, so their pins must be valid too).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install project (provides PyYAML for the validator)
+        run: pip install -e .
+      - name: Install Helm
+        # Pin to the SAME helm the installer Lambda ships (see
+        # lambda/helm-installer/Dockerfile) so CI validates against the exact
+        # binary that performs the real install. Bump both in lockstep.
+        run: |
+          set -euo pipefail
+          curl -fsSL https://get.helm.sh/helm-v4.2.1-linux-amd64.tar.gz | tar xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          rm -rf linux-amd64
+          helm version --short
+      - name: Validate charts.yaml (resolve + render every pinned chart)
+        run: python3 .github/scripts/validate_helm_charts.py --mode online --verbose
+
   integration-k8s-manifest-schema:
     name: "integration:k8s:manifest-schema"
     runs-on: ubuntu-latest
