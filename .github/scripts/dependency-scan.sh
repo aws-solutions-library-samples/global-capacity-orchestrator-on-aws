@@ -979,7 +979,7 @@ check_github_tool "Helm (HELM_VERSION)" "$HELM_PIN" "helm/helm" \
   "https://github.com/helm/helm/releases"
 
 # kind (kubernetes-sigs/kind) — the kind binary on the kind-action step.
-KIND_PIN="$(extract_kind_pins | awk -F'|' '$1=="kind"{print $2}')"
+KIND_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind"{print $2}')"
 check_github_tool "kind" "$KIND_PIN" "kubernetes-sigs/kind" \
   "https://github.com/kubernetes-sigs/kind/releases"
 
@@ -1000,7 +1000,7 @@ fi
 # kind node image (kindest/node) — report a newer PATCH within the pinned K8s
 # minor only. Jumping minors is governed by the kind release, not free drift,
 # so scoping to the same minor avoids false "upgrade" noise.
-KIND_NODE_PIN="$(extract_kind_pins | awk -F'|' '$1=="kind-node"{print $2}')"
+KIND_NODE_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}')"
 if [ -n "$KIND_NODE_PIN" ]; then
   node_tag="${KIND_NODE_PIN##*:}"
   node_minor="$(echo "${node_tag#v}" | cut -d. -f1-2)"
@@ -1039,7 +1039,7 @@ echo "=== Checking version consistency ==="
 
 CONSISTENCY_RESULTS="$(mktemp)"
 
-RUFF_PINS="$(extract_ruff_pins)"
+RUFF_PINS="$(extract_ruff_pins pyproject.toml .pre-commit-config.yaml .github/workflows/lint.yml)"
 if [ -n "$RUFF_PINS" ]; then
   ruff_distinct="$(echo "$RUFF_PINS" | cut -d'|' -f2 | sort -u | grep -c .)"
   if [ "$ruff_distinct" -gt 1 ]; then
@@ -1051,7 +1051,7 @@ fi
 
 CANON_PY="$(echo "${LAMBDA_RT_CURRENT:-}" | sed -E 's/^PYTHON_([0-9]+)_([0-9]+)$/\1.\2/')"
 [ -z "$CANON_PY" ] && CANON_PY="$(extract_constant_value LAMBDA_PYTHON_RUNTIME | sed -E 's/^PYTHON_([0-9]+)_([0-9]+)$/\1.\2/')"
-PY_PINS_UNIQUE="$(extract_python_version_pins | sort -u)"
+PY_PINS_UNIQUE="$(extract_python_version_pins "$WORKFLOWS_DIR" | sort -u)"
 if [ -n "$PY_PINS_UNIQUE" ]; then
   py_distinct="$(echo "$PY_PINS_UNIQUE" | grep -c .)"
   py_list="$(echo "$PY_PINS_UNIQUE" | paste -sd',' -)"

@@ -18,6 +18,7 @@ this runbook.
 - [Refreshing base-image security patches](#refreshing-base-image-security-patches)
 - [Renewing CVE suppressions](#renewing-cve-suppressions)
 - [Routine dependency bumps](#routine-dependency-bumps)
+- [Maintaining the MCP server](#maintaining-the-mcp-server)
 
 ## Maintenance at a glance
 
@@ -235,3 +236,28 @@ Python dependencies are intentionally not tracked by Dependabot — they are
 pinned through `requirements-lock.txt` with `pip-compile` and reviewed
 deliberately. GitHub Actions and Docker base images *are* tracked by Dependabot;
 see [Dependabot](../.github/CI.md#dependabot) for the split.
+
+## Maintaining the MCP server
+
+The in-tree MCP server (`gco_mcp/`) exposes the docs, example manifests, and
+`gco` operations to agents. A few catalogs must stay in sync with the rest of
+the repo or CI fails — most of this is "when you add X, register it in Y":
+
+| When you… | Update | Guard |
+|-----------|--------|-------|
+| Add a `docs/*.md` guide | `DOC_METADATA` in `gco_mcp/resources/docs.py` (keep `topics` from the existing small vocabulary; every `related` entry must reference a real key) | `tests/test_mcp_docs_index.py` |
+| Add an `examples/*.yaml` manifest | `EXAMPLE_METADATA` in `gco_mcp/resources/docs.py` | `find_examples` discovery |
+| Add a package README meant for agents | `PACKAGE_DOC_METADATA` in `gco_mcp/resources/docs.py` | `tests/test_mcp_docs_index.py` |
+| Add or rename an MCP tool | the Tool Reference table (and the per-module count) in `gco_mcp/tools/README.md` | `tests/test_docs_coverage.py` |
+| Gate a tool behind a feature flag | `gco_mcp/feature_flags.py`, and document the flag in `gco_mcp/README.md` | — |
+
+Notes:
+
+- **Version** — the MCP server version tracks the project `VERSION` through
+  `gco_mcp/version.py`; there is no separate MCP version to bump.
+- **Dependency** — `fastmcp` is pinned in `pyproject.toml` and covered by the
+  monthly dependency scan (Python packages) and the weekly CVE scan. After
+  bumping it, re-run the MCP install smoke (`unit:mcp:install`) to confirm the
+  server still launches and registers its tools.
+- This guide is itself registered in `DOC_METADATA`, so `find_docs` surfaces it
+  to agents — the same step every new guide needs.
