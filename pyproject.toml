@@ -79,7 +79,7 @@ diagrams = [
     # the CI lint gate).
     "pyflowchart==0.6.0",
     "playwright==1.60.0",
-    "ruff==0.15.19",
+    "ruff==0.15.21",
 ]
 inference-monitor = [
     "boto3==1.43.38",
@@ -94,7 +94,7 @@ mcp = [
     "fastmcp[tasks,code-mode]==3.4.2",
 ]
 lint = [
-    "ruff==0.15.19",
+    "ruff==0.15.21",
     "yamllint==1.38.0",
 ]
 typecheck = [
