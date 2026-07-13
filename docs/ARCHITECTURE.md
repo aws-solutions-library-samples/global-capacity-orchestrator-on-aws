@@ -34,6 +34,8 @@
 
 GCO (Global Capacity Orchestrator on AWS) is a multi-region Kubernetes platform built on AWS EKS Auto Mode, designed for AI/ML workload orchestration with GPU support.
 
+> **Looking for the *why*?** This document describes *what* the architecture is. The reasoning behind significant decisions — the trade-offs, the alternatives, and the context that forced each choice — is recorded in the [Architecture Decision Records](adr/README.md).
+
 ## Components
 
 ### 1. Global Layer

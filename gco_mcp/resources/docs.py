@@ -1,5 +1,6 @@
 """Documentation resources (docs:// scheme) for the GCO MCP server."""
 
+import re
 from pathlib import Path
 
 from server import mcp
@@ -7,6 +8,7 @@ from server import mcp
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 DOCS_DIR = PROJECT_ROOT / "docs"
 EXAMPLES_DIR = PROJECT_ROOT / "examples"
+ADR_DIR = DOCS_DIR / "adr"
 
 # ---------------------------------------------------------------------------
 # Example metadata — used by both the index and the per-example resource to
@@ -1078,6 +1080,16 @@ def docs_index() -> str:
     for f in sorted(DOCS_DIR.glob("*.md")):
         sections.append(f"- `docs://gco/docs/{f.stem}` — {f.stem}")
 
+    sections.append("\n## Architecture Decision Records")
+    sections.append(
+        "Append-only log of significant architectural decisions — the context, "
+        "the decision, and its consequences."
+    )
+    sections.append("- `docs://gco/adr/index` — every ADR with its status (directory-driven)")
+    sections.append("- `docs://gco/adr/README` — when to write an ADR and the authoring process")
+    sections.append("- `docs://gco/adr/template` — the blank ADR template")
+    sections.append("- `docs://gco/adr/{id}` — read one ADR by four-digit id (e.g. `0001`)")
+
     sections.append("\n## Package Internals")
     sections.append(
         "Developer-facing guides to the code packages under `gco_mcp/` — structure and "
@@ -1493,3 +1505,112 @@ def docs_by_related_resource(doc_name: str) -> str:
             meta = DOC_METADATA.get(ref, {})
             lines.append(f"- `docs://gco/docs/{ref}` — {meta.get('summary', '')}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Architecture Decision Records (ADRs) — docs://gco/adr/*
+#
+# The ADR catalog under ``docs/adr/`` is directory-driven: both the index and
+# the per-record resource derive everything from the files on disk, so
+# recording a new decision needs no change here. ``NNNN-title.md`` files are the
+# records; ``README.md`` (process guide) and ``template.md`` (blank form) are
+# guides, not records, and are excluded from the record listing.
+# ---------------------------------------------------------------------------
+
+_ADR_ID_RE = re.compile(r"^\d{4}-")
+_ADR_TITLE_PREFIX_RE = re.compile(r"^\d+\.\s*")
+
+
+def _adr_record_files() -> list[Path]:
+    """Return the numbered ADR record files (``NNNN-*.md``), sorted by id."""
+    if not ADR_DIR.is_dir():
+        return []
+    return sorted(p for p in ADR_DIR.glob("*.md") if _ADR_ID_RE.match(p.name))
+
+
+def _parse_adr(path: Path) -> dict[str, str]:
+    """Extract ``id``, ``title``, and ``status`` from an ADR markdown file.
+
+    Title is the first level-1 heading with any ``NNNN.`` numeric prefix
+    stripped; status is read from the ``- **Status:** ...`` metadata line. Both
+    fall back to sensible defaults so a malformed file still lists rather than
+    breaking the index.
+    """
+    title = ""
+    status = ""
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not title and line.startswith("# "):
+            title = _ADR_TITLE_PREFIX_RE.sub("", line[2:].strip())
+            continue
+        if not status:
+            # Normalize "- **Status:** Accepted" to "status: accepted" so the
+            # label is matched regardless of list marker or emphasis.
+            plain = line.lstrip("-* ").replace("*", "")
+            if plain.lower().startswith("status"):
+                status = plain[len("status") :].lstrip(": ").strip().rstrip(".")
+    return {
+        "id": path.stem,
+        "title": title or path.stem,
+        "status": status or "Unknown",
+    }
+
+
+def _resolve_adr(adr_id: str) -> Path | None:
+    """Resolve an ADR request to a file under ``docs/adr/``, or ``None``.
+
+    Accepts a full filename stem (``0001-record-architecture-decisions``,
+    ``README``, ``template``) or a numeric id in any zero-padding (``1`` ->
+    ``0001``). Rejects anything containing a path separator or ``..`` so a
+    crafted id cannot escape the directory; because the sanitized candidate has
+    no separators, the joined path is always a direct child of ``docs/adr/``.
+    """
+    candidate = adr_id.strip()
+    if not candidate or "/" in candidate or "\\" in candidate or ".." in candidate:
+        return None
+    if candidate.isdigit():
+        want = candidate.zfill(4)
+        return next((p for p in _adr_record_files() if p.name[:4] == want), None)
+    path = ADR_DIR / f"{candidate}.md"
+    return path if path.is_file() else None
+
+
+@mcp.resource("docs://gco/adr/index")
+def adr_index_resource() -> str:
+    """List every Architecture Decision Record with its id, title, and status.
+
+    Directory-driven: scans ``docs/adr/`` for numbered ``NNNN-title.md`` records
+    at read time, so a newly added ADR appears here with no code change. The
+    process guide and the blank template are available at
+    ``docs://gco/adr/README`` and ``docs://gco/adr/template``.
+    """
+    lines = ["# Architecture Decision Records\n"]
+    lines.append(
+        "Append-only log of significant architectural decisions (context, "
+        "decision, consequences). Read the process at `docs://gco/adr/README` "
+        "and start a new record from `docs://gco/adr/template`.\n"
+    )
+    files = _adr_record_files()
+    if not files:
+        lines.append("_No ADRs have been recorded yet._")
+        return "\n".join(lines)
+    for path in files:
+        meta = _parse_adr(path)
+        lines.append(f"- `docs://gco/adr/{path.name[:4]}` — {meta['title']} ({meta['status']})")
+    return "\n".join(lines)
+
+
+@mcp.resource("docs://gco/adr/{adr_id}")
+def adr_resource(adr_id: str) -> str:
+    """Read a single ADR by id, filename stem, or guide name.
+
+    Accepts a four-digit id (``0001``), a full stem
+    (``0001-record-architecture-decisions``), or the ``README`` / ``template``
+    guides. An unknown id returns the literal ``ADR 'X' not found. Available:
+    ...`` string listing the numeric ids so callers can recover.
+    """
+    path = _resolve_adr(adr_id)
+    if path is None:
+        available = ", ".join(p.name[:4] for p in _adr_record_files()) or "none"
+        return f"ADR '{adr_id}' not found. Available: {available}"
+    return path.read_text(encoding="utf-8")

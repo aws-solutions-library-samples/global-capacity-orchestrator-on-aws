@@ -45,6 +45,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 
 | Directory | Description |
 |-----------|-------------|
+| [adr/](adr/) | Architecture Decision Records — the append-only log of significant architectural decisions and the *why* behind them |
 | [client-examples/](client-examples/) | API client examples in Python, curl, and AWS CLI |
 | [iam-policies/](iam-policies/) | IAM policy templates for different access levels |
 

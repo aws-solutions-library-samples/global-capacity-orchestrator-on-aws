@@ -532,7 +532,12 @@ gco stacks destroy-all -y
 - `docs/CUSTOMIZATION.md`: How to customize
 - `docs/TROUBLESHOOTING.md`: Common issues
 - `docs/RUNBOOKS.md`: Operational runbooks for incident response
+- `docs/adr/`: Architecture Decision Records — the append-only log of significant architectural decisions
 - `CONTRIBUTING.md`: This file
+
+### Architecture Decision Records
+
+Record architecturally significant decisions — ones that are expensive to reverse or that shape the system in ways future contributors must understand — as an [Architecture Decision Record](docs/adr/README.md). Copy `docs/adr/template.md` to the next `docs/adr/NNNN-title.md`, fill in the context, decision, and consequences, then add a row to the ADR index. See [docs/adr/README.md](docs/adr/README.md) for when to write one and the full process.
 
 ### Documentation Style
 

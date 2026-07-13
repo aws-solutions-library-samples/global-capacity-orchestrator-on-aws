@@ -579,12 +579,19 @@ order:
 | Tests | `tests/README.md` |
 | Scripts / examples / diagrams | `scripts/README.md`, `examples/README.md`, `diagrams/README.md` |
 
-### Where decisions and tribal knowledge live today
+### Where decisions and tribal knowledge live
 
-There is no formal decision-record directory. The reasoning behind non-obvious
-choices lives in (a) PR history and the categorized GitHub Release notes, and
-(b) unusually thorough inline rationale — [`.github/CI.md`](../.github/CI.md),
-the justification strings in `gco/stacks/nag_suppressions.py`, and the comment
+Architecturally significant decisions are recorded as
+[Architecture Decision Records](adr/README.md) under `docs/adr/` — an
+append-only log of the context, decision, and consequences behind each choice.
+Record a new one (copy `docs/adr/template.md`) whenever you make a decision that
+is expensive to reverse or that shapes the system in a way future maintainers
+must understand; see [`docs/adr/README.md`](adr/README.md) for when and how.
+
+Rationale that does not rise to the level of an ADR still lives close to the
+code: PR history and the categorized GitHub Release notes, and unusually
+thorough inline comments — [`.github/CI.md`](../.github/CI.md), the
+justification strings in `gco/stacks/nag_suppressions.py`, and the comment
 headers on the workflows and `pyproject.toml`. When you make a non-obvious
 change, add the "why" in those same places.
 
