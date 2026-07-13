@@ -154,9 +154,13 @@ shipping a skew.
    - `Dockerfile.dev` (`ARG KUBECTL_VERSION`)
    - `lambda/helm-installer/Dockerfile` (the `dl.k8s.io/release/...` URL)
    - `.github/workflows/deps-scan.yml` (`KUBECTL_VERSION` env)
-6. Helm pins — bump `HELM_VERSION` / the `get.helm.sh` URL in the same
-   `deps-scan.yml` and `lambda/helm-installer/Dockerfile` if a new Helm is
-   needed for the minor.
+6. Helm pins — if a new Helm is needed for the minor, bump the `HELM_VERSION`
+   env in both `.github/workflows/deps-scan.yml` and
+   `.github/workflows/integration-tests.yml` (the `integration:helm:charts-valid`
+   job) and the `get.helm.sh` URL in `lambda/helm-installer/Dockerfile`. The
+   `deps-scan` **Version Consistency** check flags the two workflow env pins if
+   they drift apart; the Dockerfile copy is a hardcoded `RUN` line it can't see,
+   so keep that one in lockstep by hand.
 7. `.github/workflows/integration-tests.yml` — bump the kind `node_image`
    (`kindest/node:v<minor>.<patch>`) so CI exercises the new control plane.
 8. `.github/config/.trivyignore` — revisit any suppressions tied to the old

@@ -1220,6 +1220,15 @@ SHIM
     [[ "$output" =~ ^v1\. ]]
 }
 
+@test "extract_workflow_env_pin: reads the KUBECONFORM_VERSION pin from integration-tests.yml" {
+    # The integration:k8s:manifest-schema job pins kubeconform as a job-level
+    # env var so the "CI tooling" drift check in dependency-scan.sh can track
+    # it. This proves the pin is present and shaped like a version tag.
+    run extract_workflow_env_pin KUBECONFORM_VERSION
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^v[0-9] ]]
+}
+
 @test "extract_workflow_env_pin: empty for an unset var" {
     run extract_workflow_env_pin NONEXISTENT_VERSION_XYZ
     [ "$status" -eq 0 ]

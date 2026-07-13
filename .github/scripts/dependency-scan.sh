@@ -26,8 +26,9 @@
 #     installed aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, AURORA_POSTGRES_VERSION)
 #   - Latest stable Python release from endoflife.date — public endpoint
 #   - CI tooling the workflows install by hand: Trivy (TRIVY_VERSION), Helm and
-#     kubectl (HELM_VERSION / KUBECTL_VERSION), and kind + its node image —
-#     public endpoints, no AWS creds
+#     kubectl (HELM_VERSION / KUBECTL_VERSION), kubeconform
+#     (KUBECONFORM_VERSION), and kind + its node image — public endpoints,
+#     no AWS creds
 #   - Version consistency: ruff (pyproject / pre-commit / lint workflow),
 #     python-version across workflows, and any *_VERSION env pin that resolves
 #     to different values across workflow files
@@ -943,11 +944,12 @@ PYTHON_RELEASE_COUNT="$(wc -l < "$PYTHON_RELEASE_RESULTS" 2>/dev/null | tr -d ' 
 # CI tooling pins (public endpoints — no AWS creds)
 #
 # The workflows install their own pinned tooling — Trivy (cve-scan.yml /
-# security.yml) and Helm + kubectl (deps-scan.yml) — from plain ``*_VERSION``
-# env strings, and the integration-tests workflow pins kind + its node image
-# on the ``helm/kind-action`` step. None of these are ``uses:`` refs or
-# Dockerfile ``FROM`` lines, so Dependabot never sees them and a stale scanner
-# or tool goes unnoticed. Compare each against its upstream latest.
+# security.yml), Helm + kubectl (deps-scan.yml), and kubeconform
+# (integration-tests.yml) — from plain ``*_VERSION`` env strings, and the
+# integration-tests workflow also pins kind + its node image on the
+# ``helm/kind-action`` step. None of these are ``uses:`` refs or Dockerfile
+# ``FROM`` lines, so Dependabot never sees them and a stale scanner or tool
+# goes unnoticed. Compare each against its upstream latest.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Checking CI tooling pins ==="
@@ -977,6 +979,14 @@ check_github_tool "Trivy (TRIVY_VERSION)" "$TRIVY_PIN" "aquasecurity/trivy" \
 HELM_PIN="$(extract_workflow_env_pin HELM_VERSION | head -1)"
 check_github_tool "Helm (HELM_VERSION)" "$HELM_PIN" "helm/helm" \
   "https://github.com/helm/helm/releases"
+
+# kubeconform (yannh/kubeconform) — KUBECONFORM_VERSION the
+# integration:k8s:manifest-schema job installs to schema-validate the K8s
+# manifests. Plain env pin Dependabot doesn't watch; a stale kubeconform
+# silently validates against outdated Kubernetes schemas.
+KUBECONFORM_PIN="$(extract_workflow_env_pin KUBECONFORM_VERSION | head -1)"
+check_github_tool "kubeconform (KUBECONFORM_VERSION)" "$KUBECONFORM_PIN" "yannh/kubeconform" \
+  "https://github.com/yannh/kubeconform/releases"
 
 # kind (kubernetes-sigs/kind) — the kind binary on the kind-action step.
 KIND_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind"{print $2}')"

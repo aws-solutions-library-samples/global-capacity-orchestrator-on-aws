@@ -18,7 +18,7 @@
 #   - integration:docker:manifest-processor  — build + /healthz + /readyz
 #   - integration:docker:queue-processor     — build + startup-banner check
 #   - integration:helm:charts-valid          — every charts.yaml (chart,version) resolves + renders with helm
-#   - integration:k8s:manifest-schema        — YAML validation + required kinds
+#   - integration:k8s:manifest-schema        — kubeconform schema validation + YAML/required-kinds/DAG checks
 #   - integration:kind:cluster-e2e           — kind + Calico + services + RBAC + NetworkPolicy + ResourceQuota
 #   - integration:lambda:imports             — import each Lambda handler
 #   - integration:mcp:server                 — pytest tests/test_mcp_integration.py
@@ -55,6 +55,15 @@ jobs:
     # (those are toggled on via cdk.json, so their pins must be valid too).
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # Declared as an env pin (not inline in the curl below) so the
+      # "version consistency" section of dependency-scan.sh can compare it
+      # against the HELM_VERSION deps-scan.yml installs — a drift that was
+      # previously invisible while this copy was hardcoded. Keep this in
+      # lockstep with the helm the installer Lambda ships
+      # (lambda/helm-installer/Dockerfile); that copy is a hardcoded RUN
+      # line and isn't caught by the consistency check.
+      HELM_VERSION: "v4.2.1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -70,7 +79,7 @@ jobs:
         # binary that performs the real install. Bump both in lockstep.
         run: |
           set -euo pipefail
-          curl -fsSL https://get.helm.sh/helm-v4.2.1-linux-amd64.tar.gz | tar xz
+          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | tar xz
           sudo mv linux-amd64/helm /usr/local/bin/helm
           rm -rf linux-amd64
           helm version --short
@@ -81,6 +90,13 @@ jobs:
     name: "integration:k8s:manifest-schema"
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # Scoped to this job: kubeconform is a lint-time-only tool, used
+      # exclusively by the schema-validation step below, so it's installed
+      # and pinned here rather than globally. Tracked for drift by the
+      # "CI tooling" section of dependency-scan.sh, the same way
+      # TRIVY_VERSION / HELM_VERSION are.
+      KUBECONFORM_VERSION: "v0.8.0"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -91,6 +107,26 @@ jobs:
       - name: Install project
         run: |
           pip install -e .
+      - name: Install pinned kubeconform
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            -o /tmp/kubeconform.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
+          sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+          rm -f /tmp/kubeconform.tar.gz
+          kubeconform -v
+      - name: Validate Kubernetes manifest schemas (kubeconform)
+        # Schema-level validation, not just YAML syntax: renders {{PLACEHOLDER}}
+        # template tokens to schema-shaped stubs, then runs kubeconform -strict
+        # against lambda/kubectl-applier-simple/manifests/ and examples/ with
+        # the community CRD catalog as a schema-location fallback for Karpenter
+        # NodePool, EKS Auto Mode IngressClassParams, Kueue, and KEDA CRDs.
+        # See .github/scripts/validate_k8s_manifests.py for the full rationale
+        # (including the two CRDs — KubeRay RayCluster, Volcano Job — that
+        # catalog doesn't cover yet, and are intentionally -skip'd by GVK).
+        run: |
+          python3 .github/scripts/validate_k8s_manifests.py --verbose
       - name: Validate Kubernetes manifest YAML syntax
         # Port of integration:k8s from the retired GitLab pipeline.
         # Files containing `{{ template }}` placeholders are skipped because

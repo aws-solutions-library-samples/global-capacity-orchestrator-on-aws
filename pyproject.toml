@@ -271,6 +271,7 @@ markers = [
     "mission_e2e: mark test as a Mission end-to-end test (full session through the engine)",
     "mooncake_image: Mooncake vLLM image contract test (opt-in via GCO_MOONCAKE_IMAGE_TEST=1; pulls/runs the ~9GB image)",
     "helm_online: Helm chart resolve/render check (opt-in via GCO_HELM_CHART_VALIDATION=1; needs helm + network)",
+    "kubeconform_online: K8s manifest schema validation (opt-in via GCO_KUBECONFORM_VALIDATION=1; needs kubeconform + network)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",
