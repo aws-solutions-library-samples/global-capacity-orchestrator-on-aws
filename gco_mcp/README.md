@@ -172,7 +172,7 @@ Then point any stdio MCP client at that same command. For Kiro (`~/.kiro/setting
 ```
 
 > The `@v3.2.0` pin in JSON is a floor, not a ceiling — any release `>= v3.2.0` works, so bump the tag as newer ones ship. (Shell snippets can interpolate `${GCO_REF}`; JSON cannot, so the tag is written inline.)
-
+>
 > **Heads-up on `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` (shown above):** a bare `uvx` install runs the AWS-facing cluster tools, but the infra/stack tools this flag gates also need the CDK toolchain and a checkout. On a base install they register and then fail fast with an actionable error — to actually deploy, use the [Deploy-capable setup](#deploy-capable-setup-infrastructure-tools).
 
 The identical `command` / `args` pair works in Claude Desktop, Claude Code, and Cursor — drop the `env` block if you do not need any [feature flags](#feature-flags), or use `@main` to track the latest. `uv` caches the build so subsequent launches start quickly.
@@ -180,7 +180,7 @@ The identical `command` / `args` pair works in Claude Desktop, Claude Code, and 
 What this install covers, and what still needs a checkout:
 
 - **Works out of the box, no separate CLI setup** — `uv` installs the `gco` CLI and the `gco-mcp` server together (both are console scripts of the single `gco-cli` package), and the server shells out to its own bundled, version-matched `gco` — so there is nothing extra to install and no dev container needed. Every AWS-facing tool (jobs, capacity, costs, inference, images, queues, nodepools, …) works once your AWS credentials are configured.
-- **Needs a local clone _and_ the `[cdk]` extra** — CDK/stack lifecycle operations (`deploy_*`, `destroy_*`, `bootstrap_cdk`, `stack_synth`/`diff`/`list`) plus the resources that read the project tree (`docs://`, `source://`, `k8s://`, `infra://`, `ci://`, …). The base `uvx`/`pip` install does **not** ship `aws-cdk-lib`/`cdk-nag`, so those tools need the CDK toolchain in the same environment as `gco` (the `[cdk]` extra) and a checkout providing `app.py`/`cdk.json` — otherwise they fail fast with an actionable error. See [Deploy-capable setup](#deploy-capable-setup-infrastructure-tools).
+- **Needs a local clone *and* the `[cdk]` extra** — CDK/stack lifecycle operations (`deploy_*`, `destroy_*`, `bootstrap_cdk`, `stack_synth`/`diff`/`list`) plus the resources that read the project tree (`docs://`, `source://`, `k8s://`, `infra://`, `ci://`, …). The base `uvx`/`pip` install does **not** ship `aws-cdk-lib`/`cdk-nag`, so those tools need the CDK toolchain in the same environment as `gco` (the `[cdk]` extra) and a checkout providing `app.py`/`cdk.json` — otherwise they fail fast with an actionable error. See [Deploy-capable setup](#deploy-capable-setup-infrastructure-tools).
 
 The per-client sections below also include a **secondary, clone-based** config (`python3 gco_mcp/run_mcp.py`) for development or when you want the full resource and CDK surface.
 
