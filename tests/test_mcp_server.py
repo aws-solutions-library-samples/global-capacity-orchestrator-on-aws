@@ -1053,7 +1053,8 @@ class TestResourceRegistration:
     def test_static_resource_count(self):
         resources = asyncio.run(run_mcp.mcp.list_resources())
         # docs://index, docs://README, docs://QUICKSTART, docs://CONTRIBUTING,
-        # docs://examples/README, docs://examples/guide, source://index,
+        # docs://examples/README, docs://examples/guide, docs://adr/index,
+        # source://index,
         # k8s://manifests/index, iam://policies/index,
         # infra://index, infra://helm/charts.yaml,
         # demos://index, clients://index, scripts://index,
@@ -1062,7 +1063,7 @@ class TestResourceRegistration:
         # images://index, images://replication/status,
         # plus three always-on self-introspection resources:
         # mcp://gco/tools/index, mcp://gco/resources/index, mcp://gco/feature-flags.
-        assert len(resources) == 25
+        assert len(resources) == 26
 
     def test_static_resource_uris(self):
         resources = asyncio.run(run_mcp.mcp.list_resources())
@@ -1073,6 +1074,7 @@ class TestResourceRegistration:
         assert "docs://gco/CONTRIBUTING" in uris
         assert "docs://gco/examples/README" in uris
         assert "docs://gco/examples/guide" in uris
+        assert "docs://gco/adr/index" in uris
         assert "source://gco/index" in uris
         assert "k8s://gco/manifests/index" in uris
         assert "iam://gco/policies/index" in uris
@@ -1092,7 +1094,7 @@ class TestResourceRegistration:
     def test_resource_template_count(self):
         templates = asyncio.run(run_mcp.mcp.list_resource_templates())
         # docs/{doc_name}, docs/by-topic/{topic}, docs/by-related/{doc_name},
-        # docs/packages/{package_name},
+        # docs/packages/{package_name}, docs/adr/{adr_id},
         # examples/{example_name}, examples/by-category/{category},
         # examples/by-use-case/{use_case}, config/{filename}, file/{filepath},
         # k8s/manifests/{filename}, iam/policies/{filename}, infra/dockerfiles/{filename},
@@ -1109,13 +1111,14 @@ class TestResourceRegistration:
         # GCO_ENABLE_MISSION (or the umbrella flag) is set; accept either count
         # to avoid coupling this assertion to whichever gating env the rest of
         # the suite happens to leave behind.
-        assert len(templates) in (32, 35)
+        assert len(templates) in (33, 36)
 
     def test_resource_template_uris(self):
         templates = asyncio.run(run_mcp.mcp.list_resource_templates())
         uris = {t.uri_template for t in templates}
         assert "docs://gco/docs/{doc_name}" in uris
         assert "docs://gco/packages/{package_name}" in uris
+        assert "docs://gco/adr/{adr_id}" in uris
         assert "docs://gco/examples/{example_name}" in uris
         assert "source://gco/config/{filename}" in uris
         assert "source://gco/file/{filepath*}" in uris
