@@ -342,6 +342,7 @@ The inference_monitor in each target region automatically creates the Kubernetes
 
 ## Next Steps
 
+- Follow the [Learning Path](docs/LEARNING_PATH.md) for a staged, guided route from here to productive
 - Read [README.md](README.md) for full documentation
 - See [docs/INFERENCE.md](docs/INFERENCE.md) for inference serving guide
 - See [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md) for customization options

@@ -473,6 +473,7 @@ See [Inference Guide](INFERENCE.md) for the full guide including model weight ma
 
 **Next Steps:**
 
+- [Learning Path](LEARNING_PATH.md) - Follow the guided, staged path from here to productive
 - [Quick Start Guide](../QUICKSTART.md) - Get running in under 60 minutes
 - [Architecture Details](ARCHITECTURE.md) - Deep dive into the system
 - [CLI Reference](CLI.md) - Complete command documentation
