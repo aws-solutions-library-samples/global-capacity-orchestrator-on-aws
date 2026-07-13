@@ -16,6 +16,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 | Document | Audience | Description |
 |----------|----------|-------------|
 | [Core Concepts](CONCEPTS.md) | New users | What GCO is, the problems it solves, and how the key components work together |
+| [Learning Path](LEARNING_PATH.md) | New users / new to Kubernetes | A staged, hands-on path from zero to productive, with a Kubernetes primer and role-based tracks |
 | [Architecture](ARCHITECTURE.md) | Engineers | Deep dive into the multi-region infrastructure, security layers, data flow, and scale characteristics |
 | [Quick Start](../QUICKSTART.md) | New users | Get running in under 60 minutes — install, deploy, submit your first job |
 | [CLI Reference](CLI.md) | Operators | Complete command reference for all `gco` CLI commands |
@@ -53,11 +54,12 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 
 If you're new to GCO:
 
-1. [Core Concepts](CONCEPTS.md) — understand what it does
-2. [Quick Start](../QUICKSTART.md) — get it running
-3. [CLI Reference](CLI.md) — learn the commands
-4. [Inference Guide](INFERENCE.md) — deploy inference endpoints
-5. [Schedulers Overview](SCHEDULERS.md) — pick the right scheduler for your workload
+1. [Learning Path](LEARNING_PATH.md) — the guided route through the docs below, with a Kubernetes primer for newcomers
+2. [Core Concepts](CONCEPTS.md) — understand what it does
+3. [Quick Start](../QUICKSTART.md) — get it running
+4. [CLI Reference](CLI.md) — learn the commands
+5. [Inference Guide](INFERENCE.md) — deploy inference endpoints
+6. [Schedulers Overview](SCHEDULERS.md) — pick the right scheduler for your workload
 
 If you're customizing or operating:
 

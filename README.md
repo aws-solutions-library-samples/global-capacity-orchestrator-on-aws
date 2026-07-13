@@ -437,6 +437,7 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 | Your Goal | Read This |
 |-----------|-----------|
 | Understand what GCO does | [Core Concepts](docs/CONCEPTS.md) |
+| Follow a guided learning path (new to GCO or Kubernetes) | [Learning Path](docs/LEARNING_PATH.md) |
 | Get running in under 60 minutes | [Quick Start Guide](QUICKSTART.md) |
 | Learn the architecture | [Architecture Details](docs/ARCHITECTURE.md) |
 | Browse every guide in one place | [Documentation Index](docs/README.md) |
