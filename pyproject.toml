@@ -246,17 +246,31 @@ disallow_untyped_decorators = false
 check_untyped_defs = true
 
 [tool.pytest.ini_options]
+# Single source of truth for pytest configuration. This block previously
+# coexisted with a top-level pytest.ini, which took precedence and caused the
+# two to silently drift (pytest printed "ignoring pytest config in
+# pyproject.toml"). pytest.ini has been removed and its settings merged here.
 minversion = "7.0"
-addopts = "-ra -q --strict-markers"
+# -v + short tracebacks match the prior effective (pytest.ini) behavior;
+# --strict-markers turns a typo'd/unregistered marker into an error instead of
+# a silent skip (every marker used in the suite is registered below).
+addopts = "-v --tb=short --strict-markers"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+# Async tests run under pytest-asyncio's auto mode — an async def test_* needs
+# no explicit marker. Required by the ~400 async tests in the suite.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
+    "asyncio: mark test as async (pytest-asyncio auto mode)",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "mission_e2e: mark test as a Mission end-to-end test (full session through the engine)",
+    "mooncake_image: Mooncake vLLM image contract test (opt-in via GCO_MOONCAKE_IMAGE_TEST=1; pulls/runs the ~9GB image)",
+    "helm_online: Helm chart resolve/render check (opt-in via GCO_HELM_CHART_VALIDATION=1; needs helm + network)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",

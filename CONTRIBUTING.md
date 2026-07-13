@@ -623,7 +623,7 @@ git push origin v1.2.3
 gh release create v1.2.3 --generate-notes
 ```
 
-After releasing, update CHANGELOG.md and deploy to production environments.
+After releasing, confirm the auto-generated GitHub Release notes read well (they are categorized by PR label per `.github/release.yml`), then deploy to production environments. The GitHub Releases page is GCO's changelog — there is no separate `CHANGELOG.md` to maintain.
 
 ### Dependency Updates
 
