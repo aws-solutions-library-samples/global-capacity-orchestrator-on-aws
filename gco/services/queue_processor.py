@@ -202,7 +202,7 @@ def _positive_quantity(value: Any) -> bool:
         return False
     try:
         return float(value) > 0
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return True
 
 

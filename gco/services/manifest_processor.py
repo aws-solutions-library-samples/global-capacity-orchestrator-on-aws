@@ -75,7 +75,7 @@ def _positive_quantity(value: Any) -> bool:
         return False
     try:
         return float(value) > 0
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         # A non-numeric quantity is still an explicit request.
         return True
 
