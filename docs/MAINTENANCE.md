@@ -22,6 +22,7 @@ this runbook.
 - [Refreshing base-image security patches](#refreshing-base-image-security-patches)
 - [Renewing CVE suppressions](#renewing-cve-suppressions)
 - [Routine dependency bumps](#routine-dependency-bumps)
+- [Refreshing the Bedrock default model](#refreshing-the-bedrock-default-model)
 - [Maintaining the MCP server](#maintaining-the-mcp-server)
 - [Dependency management policy](#dependency-management-policy)
 - [Testing and CI hygiene](#testing-and-ci-hygiene)
@@ -39,6 +40,7 @@ this runbook.
 | When the scan flags EKS standard-support ending (or ~yearly) | Upgrade the EKS Kubernetes minor | `deps-scan` **EKS Kubernetes Version** row |
 | When the scan flags an epoch older than 45 days (or Trivy finds an OS CVE) | Bump the base-image security epoch | `deps-scan` **Base-image Security Epochs** row |
 | ~30 days before a suppression `exp:` date | Renew or drop the CVE suppression | `deps-scan` **Suppression Expiries** row |
+| When the scan flags a newer same-family model | Bump the Bedrock default model pin | `deps-scan` **Bedrock default model** row |
 | Weekly | Check the `cve-scan` result and act on new findings | Monday `cve-scan` run |
 | Every PR | Keep coverage ≥ 90% and label the PR so release notes categorize | Opening a pull request |
 | Every release | Bump the version and confirm the generated GitHub Release notes | Cutting a version |
@@ -251,6 +253,49 @@ pinned through `requirements-lock.txt` with `pip-compile` and reviewed
 deliberately. GitHub Actions and Docker base images *are* tracked by Dependabot;
 see [Dependabot](../.github/CI.md#dependabot) for the split.
 
+## Refreshing the Bedrock default model
+
+GCO's two optional, advisory Bedrock features — Mission sampling (`gco mission
+...`) and the capacity advisor (`gco capacity ai-recommend` / `predict` and the
+`ai_recommend` MCP tool) — default to **Amazon Nova Pro**
+(`us.amazon.nova-pro-v1:0`). That id is pinned as a Python constant in two
+places, kept byte-identical by a CI test:
+
+| File | Constant | Guard |
+|------|----------|-------|
+| `gco_mcp/mission/sampling.py` | `DEFAULT_BEDROCK_MODEL_ID` | `tests/test_default_bedrock_model_consistency.py` |
+| `cli/capacity/advisor.py` | `BedrockCapacityAdvisor.DEFAULT_MODEL` | (same test) |
+
+Because it is a Python constant — not a `pyproject.toml` entry, a Dockerfile
+`FROM`, or a manifest — Dependabot never sees it. The monthly
+[`deps-scan`](../.github/CI.md#dependency-scan-script) closes that gap: its
+**Bedrock default model** check reads `DEFAULT_BEDROCK_MODEL_ID`, lists the
+system-defined inference profiles in `us-east-1`, and flags a newer release **in
+the same model family** — a future Nova Pro generation, never a jump to a
+different tier or provider (that is a choice, not drift). The check needs AWS
+credentials via OIDC; without them the scan skips it with a noted reason, so a
+credential-less run is not a false "up to date".
+
+When the scan flags a newer same-family model (or you decide to move the default
+deliberately):
+
+1. Bump **both** constants to the new id — keep them identical or
+   `test_default_bedrock_model_consistency.py` fails. The id must be a
+   system-defined **inference profile** (`us.` / `eu.` / `apac.` prefix), not a
+   bare model id, so requests route cross-Region.
+2. If the new model has no captured scaffolder fixture yet, refresh the replay
+   corpus: `python scripts/capture_scaffold_fixtures.py --model <id>`.
+3. Run the Mission and capacity suites, then open a PR.
+
+Picking a *different* model — for regulatory, data-residency, model-governance,
+or cost reasons — rather than tracking Nova Pro releases is an operator choice,
+not routine maintenance; the override paths (per-call flag,
+`GCO_MISSION_BEDROCK_MODEL_ID`, or changing the default) live in
+[Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). Both
+features are advisory and degrade gracefully: when no model is reachable Mission
+falls back to deterministic templates and the advisor surfaces a clear error, so
+a stale pin never blocks core orchestration.
+
 ## Maintaining the MCP server
 
 The in-tree MCP server (`gco_mcp/`) exposes the docs, example manifests, and
@@ -290,8 +335,11 @@ resolved lockfile, so a clean checkout installs the same graph CI ran.
   `pip-compile`.
 - Versions that live outside `pyproject.toml` — workflow `*_VERSION` env pins,
   Dockerfile `ARG`s, `lambda/helm-installer/charts.yaml`,
-  `gco/stacks/constants.py`, and the Python-constant image/model pins. These
-  are tracked by the monthly scan rather than Dependabot.
+  `gco/stacks/constants.py`, and the Python-constant image/model pins (the
+  Mooncake default image in `cli/images.py`, and the Bedrock default model
+  `DEFAULT_BEDROCK_MODEL_ID` in `gco_mcp/mission/sampling.py` — see
+  [Refreshing the Bedrock default model](#refreshing-the-bedrock-default-model)).
+  These are tracked by the monthly scan rather than Dependabot.
 
 No open ranges. If a local `pip install` needs a range to resolve, the venv is
 dirty — fix the environment, don't loosen the pin.
