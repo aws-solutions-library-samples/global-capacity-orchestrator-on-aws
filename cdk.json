@@ -121,8 +121,7 @@
       "resource_quotas": {
         "max_cpu_per_manifest": "10",
         "max_memory_per_manifest": "32Gi",
-        "max_gpu_per_manifest": 4,
-        "max_parallelism": 50
+        "max_gpu_per_manifest": 4
       },
       "require_accelerator_toleration": true,
       "trusted_registries": [

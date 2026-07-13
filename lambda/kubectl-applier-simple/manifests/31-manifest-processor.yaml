@@ -117,8 +117,6 @@ spec:
               value: "{{MP_MAX_MEMORY_PER_MANIFEST}}"
             - name: MAX_GPU_PER_MANIFEST
               value: "{{MP_MAX_GPU_PER_MANIFEST}}"
-            - name: MAX_PARALLELISM
-              value: "{{MP_MAX_PARALLELISM}}"
             # Require accelerator jobs to carry a matching toleration — shared
             # with the queue processor via
             # cdk.json::job_validation_policy.require_accelerator_toleration.

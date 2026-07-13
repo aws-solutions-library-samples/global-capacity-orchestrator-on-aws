@@ -2418,7 +2418,6 @@ class GCORegionalStack(Stack):
                 job_quotas.get("max_memory_per_manifest", "32Gi")
             ),
             "{{MP_MAX_GPU_PER_MANIFEST}}": str(job_quotas.get("max_gpu_per_manifest", 4)),
-            "{{MP_MAX_PARALLELISM}}": str(job_quotas.get("max_parallelism", 50)),
             # Require accelerator (GPU/Neuron/EFA) jobs to carry a matching
             # toleration (shared policy). Mirrored on the SQS path via
             # {{QP_REQUIRE_ACCELERATOR_TOLERATION}} so neither path is a bypass.
@@ -2524,9 +2523,6 @@ class GCORegionalStack(Stack):
             )
             image_replacements["{{QP_MAX_MEMORY_PER_MANIFEST}}"] = str(
                 job_quotas.get("max_memory_per_manifest", "32Gi")
-            )
-            image_replacements["{{QP_MAX_PARALLELISM}}"] = str(
-                job_quotas.get("max_parallelism", 50)
             )
             image_replacements["{{QP_TRUSTED_REGISTRIES}}"] = ",".join(
                 _augment_trusted_registries_with_project_ecr(

@@ -33,7 +33,6 @@ class TestResourceQuotaTemplateVars:
             "{{MP_MAX_CPU_PER_MANIFEST}}": "96",
             "{{MP_MAX_MEMORY_PER_MANIFEST}}": "192Gi",
             "{{MP_MAX_GPU_PER_MANIFEST}}": "8",
-            "{{MP_MAX_PARALLELISM}}": "50",
             "{{MP_REQUIRE_ACCELERATOR_TOLERATION}}": "true",
             "{{MP_MAX_REQUEST_BODY_BYTES}}": "1048576",
             "{{MP_ALLOWED_NAMESPACES}}": "default,gco-jobs",

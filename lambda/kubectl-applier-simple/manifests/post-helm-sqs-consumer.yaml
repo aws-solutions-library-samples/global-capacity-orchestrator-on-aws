@@ -89,8 +89,6 @@ spec:
             value: "{{QP_MAX_CPU_PER_MANIFEST}}"
           - name: MAX_MEMORY_PER_MANIFEST
             value: "{{QP_MAX_MEMORY_PER_MANIFEST}}"
-          - name: MAX_PARALLELISM
-            value: "{{QP_MAX_PARALLELISM}}"
           - name: TRUSTED_REGISTRIES
             value: "{{QP_TRUSTED_REGISTRIES}}"
           - name: TRUSTED_DOCKERHUB_ORGS

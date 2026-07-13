@@ -223,7 +223,6 @@ class ManifestProcessor:
             config_dict.get("max_memory_per_manifest", "32Gi")
         )
         self.max_gpu_per_manifest = int(config_dict.get("max_gpu_per_manifest", 4))
-        self.max_parallelism = int(config_dict.get("max_parallelism", 50))
         # Hard-reject accelerator jobs that lack a matching node toleration.
         # Kept in sync with queue_processor.REQUIRE_ACCELERATOR_TOLERATION.
         self.require_accelerator_toleration = config_dict.get(
@@ -484,12 +483,6 @@ class ManifestProcessor:
                 if not resource_valid:
                     return False, resource_error
 
-            # Enforce the parallelism cap for batch workloads.
-            if kind in ("Job", "CronJob"):
-                par_valid, par_error = self._validate_parallelism(manifest)
-                if not par_valid:
-                    return False, par_error
-
             # Require accelerator jobs to carry a matching toleration.
             if self.require_accelerator_toleration:
                 tol_valid, tol_error = self._validate_tolerations(manifest)
@@ -589,31 +582,6 @@ class ManifestProcessor:
         except Exception as e:
             logger.error(f"Error validating resource limits: {e}")
             return False, f"Resource limit validation error: {e}"
-
-    def _validate_parallelism(self, manifest: dict[str, Any]) -> tuple[bool, str | None]:
-        """Reject Job/CronJob manifests whose parallelism exceeds the cap.
-
-        Reads ``spec.parallelism`` for a Job and ``spec.jobTemplate.spec.parallelism``
-        for a CronJob. Absent parallelism (the K8s default of 1) always passes.
-
-        Returns:
-            Tuple of (is_valid, error_message). error_message is None if valid.
-        """
-        spec = manifest.get("spec", {})
-        if manifest.get("kind") == "CronJob":
-            spec = spec.get("jobTemplate", {}).get("spec", {})
-
-        parallelism = spec.get("parallelism")
-        if parallelism is not None and int(parallelism) > self.max_parallelism:
-            hint = (
-                "To raise the limit, update resource_quotas.max_parallelism in "
-                "cdk.json and redeploy (see examples/README.md#troubleshooting)"
-            )
-            return (
-                False,
-                f"Parallelism {parallelism} exceeds max {self.max_parallelism}. {hint}",
-            )
-        return True, None
 
     def _validate_tolerations(self, manifest: dict[str, Any]) -> tuple[bool, str | None]:
         """Require accelerator jobs to carry a matching node toleration.
@@ -1382,7 +1350,6 @@ def create_manifest_processor_from_env() -> ManifestProcessor:
         "max_cpu_per_manifest": os.getenv("MAX_CPU_PER_MANIFEST", "10"),
         "max_memory_per_manifest": os.getenv("MAX_MEMORY_PER_MANIFEST", "32Gi"),
         "max_gpu_per_manifest": int(os.getenv("MAX_GPU_PER_MANIFEST", "4")),
-        "max_parallelism": int(os.getenv("MAX_PARALLELISM", "50")),
         "require_accelerator_toleration": os.getenv(
             "REQUIRE_ACCELERATOR_TOLERATION", "true"
         ).lower()

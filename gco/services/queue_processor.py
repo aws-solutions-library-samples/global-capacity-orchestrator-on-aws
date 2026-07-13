@@ -141,7 +141,6 @@ ALLOWED_NAMESPACES = set(os.environ.get("ALLOWED_NAMESPACES", "default,gco-jobs"
 MAX_CPU = _parse_cpu_string(os.environ.get("MAX_CPU_PER_MANIFEST", "10000"))  # millicores
 MAX_MEMORY = _parse_memory_string(os.environ.get("MAX_MEMORY_PER_MANIFEST", "32Gi"))  # bytes
 MAX_GPU = int(os.environ.get("MAX_GPU_PER_MANIFEST", "4"))
-MAX_PARALLELISM = int(os.environ.get("MAX_PARALLELISM", "50"))
 
 # Accelerator resource keys and their node taint keys (taint key == resource
 # key for all three). Kept in sync with the mirror in
@@ -352,20 +351,6 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
     ns = meta.get("namespace", "default")
     if ns not in ALLOWED_NAMESPACES:
         return False, f"namespace '{ns}' not in allowed list {ALLOWED_NAMESPACES}"
-
-    # Enforce the parallelism cap for batch workloads. Mirrors
-    # manifest_processor._validate_parallelism.
-    if kind in ("Job", "CronJob"):
-        par_spec = m.get("spec", {})
-        if kind == "CronJob":
-            par_spec = par_spec.get("jobTemplate", {}).get("spec", {})
-        parallelism = par_spec.get("parallelism")
-        if parallelism is not None and int(parallelism) > MAX_PARALLELISM:
-            hint = (
-                "To raise the limit, update resource_quotas.max_parallelism in "
-                "cdk.json and redeploy (see examples/README.md#troubleshooting)"
-            )
-            return False, f"Parallelism {parallelism} exceeds max {MAX_PARALLELISM}. {hint}"
 
     # Get pod spec for security and resource checks.
     # Handle multiple resource shapes, matching manifest_processor._get_all_containers:

@@ -1,8 +1,7 @@
 """
-Job submission validation tests for the accelerator-toleration requirement
-and the parallelism cap.
+Job submission validation tests for the accelerator-toleration requirement.
 
-These two checks are INTENTIONALLY duplicated in the REST ``ManifestProcessor``
+This check is INTENTIONALLY duplicated in the REST ``ManifestProcessor``
 (``gco/services/manifest_processor.py``) and the SQS ``queue_processor``
 (``gco/services/queue_processor.py``) so the SQS path cannot be used to bypass
 admission control. Every scenario here is exercised against BOTH processors so
@@ -45,7 +44,6 @@ def manifest_processor(mock_k8s_config):
                 "max_cpu_per_manifest": "100",
                 "max_memory_per_manifest": "256Gi",
                 "max_gpu_per_manifest": 8,
-                "max_parallelism": 50,
                 "require_accelerator_toleration": True,
                 "allowed_namespaces": ["default", "gco-jobs"],
                 "validation_enabled": True,
@@ -62,7 +60,6 @@ _QP_ENV = {
     "MAX_CPU_PER_MANIFEST": "100",
     "MAX_MEMORY_PER_MANIFEST": "256Gi",
     "MAX_GPU_PER_MANIFEST": "8",
-    "MAX_PARALLELISM": "50",
     "REQUIRE_ACCELERATOR_TOLERATION": "true",
 }
 
@@ -82,7 +79,7 @@ def qp(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _job(pod_spec_overrides=None, container_overrides=None, spec_overrides=None):
+def _job(pod_spec_overrides=None, container_overrides=None):
     container = {"name": "worker", "image": "python:3.14"}
     if container_overrides:
         container.update(container_overrides)
@@ -90,8 +87,6 @@ def _job(pod_spec_overrides=None, container_overrides=None, spec_overrides=None)
     if pod_spec_overrides:
         pod_spec.update(pod_spec_overrides)
     spec = {"template": {"spec": pod_spec}}
-    if spec_overrides:
-        spec.update(spec_overrides)
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -199,70 +194,3 @@ def test_wrong_effect_toleration_rejected(manifest_processor, qp):
 
     assert mp_ok is False
     assert qp_ok is False
-
-
-# ===========================================================================
-# Parallelism cap (item 5)
-# ===========================================================================
-
-
-def test_parallelism_above_cap_rejected(manifest_processor, qp):
-    """A Job with parallelism above the cap is rejected by both paths."""
-    manifest = _job(spec_overrides={"parallelism": 51})
-
-    (mp_ok, mp_err), (qp_ok, qp_err) = _validate_both(manifest_processor, qp, manifest)
-
-    assert mp_ok is False
-    assert qp_ok is False
-    assert "51" in mp_err and "50" in mp_err
-    assert "51" in qp_err and "50" in qp_err
-
-
-def test_parallelism_at_cap_admitted(manifest_processor, qp):
-    """A Job with parallelism exactly at the cap is admitted."""
-    manifest = _job(spec_overrides={"parallelism": 50})
-
-    (mp_ok, _), (qp_ok, _) = _validate_both(manifest_processor, qp, manifest)
-
-    assert mp_ok is True
-    assert qp_ok is True
-
-
-def test_no_parallelism_admitted(manifest_processor, qp):
-    """A Job without a parallelism field (K8s default 1) is admitted."""
-    manifest = _job()
-
-    (mp_ok, _), (qp_ok, _) = _validate_both(manifest_processor, qp, manifest)
-
-    assert mp_ok is True
-    assert qp_ok is True
-
-
-def test_cronjob_parallelism_above_cap_rejected(manifest_processor, qp):
-    """A CronJob whose jobTemplate parallelism exceeds the cap is rejected."""
-    manifest = {
-        "apiVersion": "batch/v1",
-        "kind": "CronJob",
-        "metadata": {"name": "cron", "namespace": "default"},
-        "spec": {
-            "schedule": "* * * * *",
-            "jobTemplate": {
-                "spec": {
-                    "parallelism": 99,
-                    "template": {
-                        "spec": {
-                            "restartPolicy": "Never",
-                            "containers": [{"name": "worker", "image": "python:3.14"}],
-                        }
-                    },
-                }
-            },
-        },
-    }
-
-    (mp_ok, mp_err), (qp_ok, qp_err) = _validate_both(manifest_processor, qp, manifest)
-
-    assert mp_ok is False
-    assert qp_ok is False
-    assert "99" in mp_err
-    assert "99" in qp_err
