@@ -762,6 +762,30 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "related": ["SCHEDULERS", "VOLCANO", "YUNIKORN"],
     },
+    "LEARNING_PATH": {
+        "summary": "Staged, hands-on onboarding path for users new to GCO or Kubernetes — a Kubernetes primer, cost-boundary milestones, and role-based tracks that sequence the other guides.",
+        "topics": [
+            "concepts",
+            "quickstart",
+            "cli",
+            "jobs",
+            "inference",
+            "schedulers",
+        ],
+        "keywords": [
+            "learning path",
+            "onboarding",
+            "getting started",
+            "tutorial",
+            "curriculum",
+            "new user",
+            "beginner",
+            "kubernetes",
+            "first job",
+            "role based",
+        ],
+        "related": ["CONCEPTS", "CLI", "SCHEDULERS"],
+    },
     "MAINTENANCE": {
         "summary": "Routine upkeep — adding instance types to the nodepool lists, EKS Kubernetes version upgrades, base-image security-epoch refreshes, CVE-suppression renewals, and acting on the monthly dependency scan.",
         "topics": [
