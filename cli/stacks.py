@@ -34,6 +34,7 @@ Environment Variables:
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 import shutil
@@ -66,6 +67,24 @@ if TYPE_CHECKING:
     from .config import GCOConfig
 
 logger = logging.getLogger(__name__)
+
+# Python packages ``app.py`` imports at CDK synth time. They ship in the
+# optional ``[cdk]`` extra (see pyproject.toml), NOT the base install, so a
+# lightweight ``uvx`` / ``pip install`` of ``gco-cli`` that skips the extra
+# cannot synthesize or deploy. ``StackManager._ensure_cdk_toolchain`` checks
+# for these before invoking ``cdk`` so a missing toolchain is actionable.
+_CDK_TOOLCHAIN_MODULES = ("aws_cdk", "cdk_nag")
+
+
+class CdkToolchainError(RuntimeError):
+    """The CDK Python toolchain (``aws-cdk-lib`` / ``cdk-nag``) is not
+    importable in the environment that will run ``cdk``.
+
+    Raised before shelling out to ``cdk`` so operators get a clear install
+    hint instead of the cryptic ``ImportError: cannot import name 'App' from
+    'aws_cdk'`` that the ``python3 app.py`` synth subprocess would otherwise
+    emit from a base (extra-less) install.
+    """
 
 
 @dataclass
@@ -487,6 +506,36 @@ class StackManager:
 
         return os.pathsep.join(all_paths)
 
+    def _ensure_cdk_toolchain(self) -> None:
+        """Preflight the CDK Python toolchain before invoking ``cdk``.
+
+        Infra operations run ``python3 app.py`` (via the Node ``cdk`` CLI),
+        which imports ``aws_cdk`` and ``cdk_nag``. Those ship in the optional
+        ``[cdk]`` extra — a base ``uvx`` / ``pip`` install of ``gco-cli`` does
+        not include them, so the synth subprocess fails with a cryptic
+        ``ImportError: cannot import name 'App' from 'aws_cdk'``. Detect the
+        missing toolchain up front and raise :class:`CdkToolchainError` with an
+        actionable install hint instead.
+        """
+        missing = [m for m in _CDK_TOOLCHAIN_MODULES if importlib.util.find_spec(m) is None]
+        if not missing:
+            return
+        raise CdkToolchainError(
+            "CDK toolchain not available: cannot import "
+            + ", ".join(missing)
+            + ".\nInfrastructure operations (deploy / synth / diff / list / destroy / "
+            "bootstrap) need the CDK Python packages installed in the SAME "
+            "environment as the `gco` CLI, plus a repository checkout providing "
+            "`app.py` and `cdk.json`.\n"
+            "Install the `[cdk]` extra one of these ways:\n"
+            '  - uv:  uv tool install "gco-cli[cdk] @ '
+            'git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@<tag>"\n'
+            '  - pip: pip install -e ".[cdk,mcp]"   (from a clone)\n'
+            "  - or use the dev container (see QUICKSTART.md), which bundles the "
+            "full toolchain.\n"
+            "See gco_mcp/README.md (Setup) for the deploy-capable configuration."
+        )
+
     def _run_cdk(
         self,
         command: list[str],
@@ -510,6 +559,12 @@ class StackManager:
                 post-delete polling loop hanging after CloudFormation has
                 already finished) can't block the orchestrator forever.
         """
+        # Fail fast with an actionable message when the CDK Python toolchain
+        # isn't importable (e.g. a base uvx/pip install without the [cdk]
+        # extra), instead of letting the ``python3 app.py`` subprocess surface
+        # a cryptic ImportError.
+        self._ensure_cdk_toolchain()
+
         full_env = os.environ.copy()
 
         # Inject PYTHONPATH so CDK's python3 subprocess can find aws_cdk

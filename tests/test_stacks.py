@@ -3480,3 +3480,90 @@ class TestDestroyReconciliationDeleteFailed:
             result = manager.destroy(stack_name="gco-us-east-1", force=True)
 
         assert result is False
+
+
+class TestCdkToolchainPreflight:
+    """Preflight guard: infra ops raise an actionable ``CdkToolchainError``
+    when the CDK Python toolchain (aws-cdk-lib / cdk-nag) isn't importable,
+    instead of a cryptic ImportError from the ``python3 app.py`` synth
+    subprocess.
+
+    Regression coverage for the out-of-the-box failure where a base
+    ``uvx`` / ``pip`` install of ``gco-cli`` (no ``[cdk]`` extra) runs
+    ``deploy`` / ``synth`` / ``list`` and the CDK subprocess dies importing
+    ``aws_cdk``.
+    """
+
+    @staticmethod
+    def _find_spec_missing(*missing):
+        """A ``find_spec`` side effect: ``None`` for the named modules, a
+        truthy sentinel for everything else."""
+
+        def _side_effect(name, *args, **kwargs):
+            return None if name in missing else object()
+
+        return _side_effect
+
+    def test_missing_toolchain_raises_actionable_error(self):
+        from cli.stacks import CdkToolchainError, StackManager
+
+        manager = StackManager(MagicMock())
+
+        with (
+            patch(
+                "importlib.util.find_spec",
+                side_effect=self._find_spec_missing("aws_cdk", "cdk_nag"),
+            ),
+            pytest.raises(CdkToolchainError) as exc,
+        ):
+            manager._ensure_cdk_toolchain()
+
+        msg = str(exc.value)
+        assert "aws_cdk" in msg
+        assert "cdk_nag" in msg
+        assert "[cdk]" in msg  # names the extra to install
+        assert "pip install" in msg  # actionable install hint
+
+    def test_partial_missing_toolchain_raises(self):
+        from cli.stacks import CdkToolchainError, StackManager
+
+        manager = StackManager(MagicMock())
+
+        # Only cdk_nag missing (aws_cdk present) must still raise.
+        with (
+            patch(
+                "importlib.util.find_spec",
+                side_effect=self._find_spec_missing("cdk_nag"),
+            ),
+            pytest.raises(CdkToolchainError, match="cdk_nag"),
+        ):
+            manager._ensure_cdk_toolchain()
+
+    def test_present_toolchain_passes(self):
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+
+        with patch(
+            "importlib.util.find_spec",
+            side_effect=self._find_spec_missing(),  # nothing missing
+        ):
+            assert manager._ensure_cdk_toolchain() is None
+
+    def test_run_cdk_preflights_before_spawning_cdk(self):
+        """``_run_cdk`` must raise the toolchain error BEFORE spawning cdk."""
+        from cli.stacks import CdkToolchainError, StackManager
+
+        manager = StackManager(MagicMock())
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch(
+                "importlib.util.find_spec",
+                side_effect=self._find_spec_missing("aws_cdk", "cdk_nag"),
+            ),
+            pytest.raises(CdkToolchainError),
+        ):
+            manager._run_cdk(["list"], capture_output=True)
+
+        mock_run.assert_not_called()

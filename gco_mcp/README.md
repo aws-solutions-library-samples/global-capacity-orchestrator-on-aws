@@ -117,16 +117,18 @@ The MCP server wraps the `gco` CLI, exposing 109 tools by default (up to 144 wit
 
 The quickest way to *run* the server — no clone, no manual dependency install — is [`uv`](https://docs.astral.sh/uv/). Install it once with the [official uv installation guide](https://docs.astral.sh/uv/getting-started/installation/) (`uvx` ships with `uv`), then jump to [Install with `uv` (recommended)](#install-with-uv-recommended) below; `uv` resolves the pinned GCO dependencies into an isolated environment for you.
 
-For **development** — or when you need the local-clone-only resources (`docs://`, `source://`, `k8s://`, `infra://`, …) and CDK/stack lifecycle operations — work from a checkout instead. The GCO [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container) is the smoothest path here: it ships the `gco` CLI and the `[mcp]` extras (including `fastmcp`) pre-installed at the right versions, so you only point your MCP client at `python3 gco_mcp/run_mcp.py` running inside the container. This sidesteps the dependency-resolver issues that often hit users layering the many pinned GCO packages onto an existing Python environment.
+For **development** — or when you need the local-clone-only resources (`docs://`, `source://`, `k8s://`, `infra://`, …) and CDK/stack lifecycle operations — work from a checkout instead. The GCO [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container) is the smoothest path here: it ships the `gco` CLI and the `.[dev,mcp]` extras (including `fastmcp` **and** the `[cdk]` CDK toolchain, plus the Node CDK CLI, `kubectl`, Docker + Buildx, and the AWS CLI) pre-installed at the right versions, so you only point your MCP client at `python3 gco_mcp/run_mcp.py` running inside the container. This sidesteps the dependency-resolver issues that often hit users layering the many pinned GCO packages onto an existing Python environment.
 
 To set up that clone on your host instead:
 
 - Python 3.14+
 - GCO CLI installed (`pipx install -e .` from the project root)
 - AWS credentials configured (the CLI handles SigV4 auth)
-- `fastmcp` package (`pip install -e ".[mcp]"` from the project root, in a fresh venv if possible)
+- Dependencies installed from the project root, in a fresh venv if possible:
+  - `pip install -e ".[mcp]"` for the base tool surface (jobs, capacity, costs, inference, …).
+  - `pip install -e ".[cdk,mcp]"` if you also want the CDK/stack lifecycle tools (`deploy_*`, `destroy_*`, `bootstrap_cdk`, `stack_synth`/`diff`/`list`). The `[cdk]` extra pulls `aws-cdk-lib` + `cdk-nag`; without it those tools fail fast with an actionable error. See [Deploy-capable setup](#deploy-capable-setup-infrastructure-tools).
 
-> If `pip install -e ".[mcp]"` errors out with `ResolutionImpossible`, see [Troubleshooting → Installation Issues](../docs/TROUBLESHOOTING.md#pip-install-fails-with-dependency-conflicts).
+> If `pip install -e ".[cdk,mcp]"` errors out with `ResolutionImpossible`, see [Troubleshooting → Installation Issues](../docs/TROUBLESHOOTING.md#pip-install-fails-with-dependency-conflicts).
 
 ## Setup
 
@@ -171,14 +173,47 @@ Then point any stdio MCP client at that same command. For Kiro (`~/.kiro/setting
 
 > The `@v3.2.0` pin in JSON is a floor, not a ceiling — any release `>= v3.2.0` works, so bump the tag as newer ones ship. (Shell snippets can interpolate `${GCO_REF}`; JSON cannot, so the tag is written inline.)
 
+> **Heads-up on `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` (shown above):** a bare `uvx` install runs the AWS-facing cluster tools, but the infra/stack tools this flag gates also need the CDK toolchain and a checkout. On a base install they register and then fail fast with an actionable error — to actually deploy, use the [Deploy-capable setup](#deploy-capable-setup-infrastructure-tools).
+
 The identical `command` / `args` pair works in Claude Desktop, Claude Code, and Cursor — drop the `env` block if you do not need any [feature flags](#feature-flags), or use `@main` to track the latest. `uv` caches the build so subsequent launches start quickly.
 
 What this install covers, and what still needs a checkout:
 
 - **Works out of the box, no separate CLI setup** — `uv` installs the `gco` CLI and the `gco-mcp` server together (both are console scripts of the single `gco-cli` package), and the server shells out to its own bundled, version-matched `gco` — so there is nothing extra to install and no dev container needed. Every AWS-facing tool (jobs, capacity, costs, inference, images, queues, nodepools, …) works once your AWS credentials are configured.
-- **Needs a local clone** — resources that read the project tree (`docs://`, `source://`, `k8s://`, `infra://`, `ci://`, …) and CDK/stack lifecycle operations. For those, use a clone-based setup (below) or the [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container).
+- **Needs a local clone _and_ the `[cdk]` extra** — CDK/stack lifecycle operations (`deploy_*`, `destroy_*`, `bootstrap_cdk`, `stack_synth`/`diff`/`list`) plus the resources that read the project tree (`docs://`, `source://`, `k8s://`, `infra://`, `ci://`, …). The base `uvx`/`pip` install does **not** ship `aws-cdk-lib`/`cdk-nag`, so those tools need the CDK toolchain in the same environment as `gco` (the `[cdk]` extra) and a checkout providing `app.py`/`cdk.json` — otherwise they fail fast with an actionable error. See [Deploy-capable setup](#deploy-capable-setup-infrastructure-tools).
 
 The per-client sections below also include a **secondary, clone-based** config (`python3 gco_mcp/run_mcp.py`) for development or when you want the full resource and CDK surface.
+
+### Deploy-capable setup (infrastructure tools)
+
+The `deploy_*`, `destroy_*`, `bootstrap_cdk`, and `stack_synth`/`diff`/`list` tools shell out to the CDK, which imports `aws-cdk-lib` + `cdk-nag` and reads `app.py`/`cdk.json`. A base `uvx`/`pip` install has neither, so those tools fail fast with an actionable error until you use one of the setups below. (The AWS-facing cluster tools — jobs, capacity, costs, inference, … — need none of this.)
+
+**Option 1 — dev container (turnkey, recommended for infra).** The [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container) bundles everything: the `.[dev,mcp]` Python extras (which include `[cdk]`) plus the Node CDK CLI, `kubectl`, Docker + Buildx, and the AWS CLI. Point your client at `python3 gco_mcp/run_mcp.py` inside the container.
+
+**Option 2 — `uv`, with the `[cdk]` extra, from a clone.** Put the `[cdk]` extra in the `--from` spec so the CDK toolchain lands in the server's environment, and set `cwd` to your checkout so `app.py`/`cdk.json` resolve:
+
+```json
+{
+  "mcpServers": {
+    "gco": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "gco-cli[cdk] @ git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.13.3",
+        "gco-mcp"
+      ],
+      "cwd": "/path/to/global-capacity-orchestrator-on-aws",
+      "env": { "GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "true" }
+    }
+  }
+}
+```
+
+**Option 3 — `pip`, from a clone.** In a fresh venv at the repo root run `pip install -e ".[cdk,mcp]"`, then point the client at `python3 gco_mcp/run_mcp.py` (add `cwd` on Kiro).
+
+All three also need the non-Python tooling the CDK drives: **Node.js + the AWS CDK CLI** (`cdk`), **`kubectl`**, a **container runtime** (Docker/Finch/Podman, plus Buildx for image builds and CDK Lambda bundling), and the **AWS CLI** with credentials configured. The dev container ships all of these; on a host, install them yourself.
+
+> **Optional metric-file formats.** Reading Parquet or TensorBoard `tfevents` metric files (via `metrics_from_shared_storage_file` / `metrics_from_local_file`) needs extra libraries, added the same way: `.[metrics-parquet]` (pandas + pyarrow), `.[metrics-tfevents]` (tbparse + tensorboard), or `.[metrics]` for both — e.g. `pip install -e ".[cdk,metrics,mcp]"`, or `gco-cli[cdk,metrics] @ git+…@v3.13.3` for the `uvx` form. Every other metric source (CloudWatch, job logs, and JSON/CSV/JSONL/YAML/HF-Trainer-state files) works without them.
 
 ### Kiro
 
@@ -371,6 +406,8 @@ Set environment variables on the launching shell to enable any feature flags (se
 ## Feature Flags
 
 A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, delete data, or run for tens of minutes at a time. Those tools are disabled by default and gated behind environment-variable feature flags so an LLM can't reach them through a stray prompt — you opt in only the categories you actually want enabled for a given client. Each flag is opt-in, defaults off, and is read fresh from the environment at server startup.
+
+> **A few flags need more than a base install.** `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` and `GCO_ENABLE_INFRASTRUCTURE_DESTROY` require the CDK toolchain (the `[cdk]` extra) plus a repository checkout — see [Deploy-capable setup](#deploy-capable-setup-infrastructure-tools) — and `GCO_ENABLE_IMAGE_PUBLISH` needs a container runtime (Docker/Finch/Podman). On a bare `uvx`/`pip` install these tools still register, but they fail fast with an actionable error until the prerequisites are present. Every other flag works on a base install once AWS credentials are configured.
 
 | Flag | Default | Tools Gated | Why It's Gated |
 |------|---------|-------------|----------------|

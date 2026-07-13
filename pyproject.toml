@@ -86,6 +86,27 @@ inference-monitor = [
     "kubernetes==36.0.2",
     "pyyaml==6.0.3",
 ]
+# Optional metric-reader file formats. The readers in
+# gco_mcp/metric_readers/files.py lazy-import these and, when they are
+# absent, return a FORMAT_DEPENDENCY_UNAVAILABLE envelope instead of
+# crashing -- so they are deliberately opt-in, NOT base dependencies.
+# Install only the format(s) you actually read.
+metrics-parquet = [
+    # Parquet metric files (pandas.read_parquet + its pyarrow engine).
+    "pandas==3.0.3",
+    "pyarrow==25.0.0",
+]
+metrics-tfevents = [
+    # TensorBoard ``tfevents`` metric files. ``tbparse`` pulls in
+    # ``tensorboard`` (grpcio / protobuf / werkzeug / pillow / ...), a large
+    # transitive tree kept out of the base install and the lighter
+    # ``metrics-parquet`` extra on purpose.
+    "tbparse==0.0.9",
+]
+metrics = [
+    # Umbrella: every optional metric-reader file format at once.
+    "gco-cli[metrics-parquet,metrics-tfevents]",
+]
 mcp = [
     # Kept as an alias of the base ``fastmcp[tasks,code-mode]`` dependency
     # so the documented ``pip install -e ".[mcp]"`` install path keeps

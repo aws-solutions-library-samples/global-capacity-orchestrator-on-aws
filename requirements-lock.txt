@@ -4,6 +4,8 @@
 #
 #    pip-compile --all-extras --no-emit-index-url --output-file=requirements-lock.txt --strip-extras pyproject.toml
 #
+absl-py==2.5.0
+    # via tensorboard
 aiofile==3.9.0
     # via py-key-value-aio
 aiohappyeyeballs==2.6.2
@@ -160,6 +162,8 @@ greenlet==3.5.0
     # via playwright
 griffelib==2.0.2
     # via fastmcp-slim
+grpcio==1.82.1
+    # via tensorboard
 h11==0.16.0
     # via
     #   httpcore
@@ -242,6 +246,8 @@ lazy-object-proxy==1.12.0
     # via openapi-spec-validator
 librt==0.11.0
     # via mypy
+markdown==3.10.2
+    # via tensorboard
 markdown-it-py==4.0.0
     # via rich
 markupsafe==3.0.3
@@ -271,7 +277,10 @@ mypy-extensions==1.1.0
 nodeenv==1.10.0
     # via pre-commit
 numpy==2.4.6
-    # via rank-bm25
+    # via
+    #   pandas
+    #   rank-bm25
+    #   tensorboard
 oauthlib==3.3.1
     # via requests-oauthlib
 openapi-pydantic==0.5.1
@@ -291,13 +300,21 @@ packaging==26.2
     #   build
     #   fastmcp-slim
     #   pytest
+    #   tensorboard
     #   wheel
+pandas==3.0.3
+    # via
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
+    #   tbparse
 pathable==0.6.0
     # via jsonschema-path
 pathspec==1.1.1
     # via
     #   mypy
     #   yamllint
+pillow==12.3.0
+    # via tensorboard
 pip-tools==7.5.3
     # via
     #   gco-cli
@@ -326,6 +343,8 @@ propcache==0.5.2
     # via
     #   aiohttp
     #   yarl
+protobuf==7.35.1
+    # via tensorboard
 psutil==7.2.2
     # via pytest-xdist
 publication==0.0.3
@@ -341,6 +360,10 @@ py-key-value-aio==0.4.4
     # via
     #   fastmcp-slim
     #   pydocket
+pyarrow==25.0.0
+    # via
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
 pycparser==3.0
     # via cffi
 pydantic==2.13.4
@@ -413,6 +436,7 @@ python-dateutil==2.9.0.post0
     #   botocore
     #   jsii
     #   kubernetes
+    #   pandas
 python-discovery==1.2.2
     # via virtualenv
 python-dotenv==1.2.2
@@ -505,6 +529,14 @@ starlette==1.3.1
     #   sse-starlette
 stevedore==5.7.0
     # via bandit
+tbparse==0.0.9
+    # via
+    #   gco-cli
+    #   gco-cli (pyproject.toml)
+tensorboard==2.21.0
+    # via tbparse
+tensorboard-data-server==0.7.2
+    # via tensorboard
 typeguard==2.13.3
     # via
     #   aws-cdk-asset-awscli-v1
@@ -527,6 +559,7 @@ typing-extensions==4.15.0
     #   cattrs
     #   fastapi
     #   fastmcp-slim
+    #   grpcio
     #   jsii
     #   mcp
     #   mypy
@@ -572,7 +605,9 @@ websocket-client==1.9.0
 websockets==16.0
     # via fastmcp-slim
 werkzeug==3.1.8
-    # via moto
+    # via
+    #   moto
+    #   tensorboard
 wheel==0.47.0
     # via pip-tools
 xmltodict==1.0.4
