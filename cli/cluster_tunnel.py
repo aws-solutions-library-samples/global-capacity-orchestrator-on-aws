@@ -169,6 +169,18 @@ def resolve_region(config: Any, region: str | None) -> str:
     return str(config.default_region or "us-east-1")
 
 
+def _project_name_from_cluster(cluster: str, region: str) -> str:
+    """Recover the project key from a ``{project_name}-{region}`` cluster name.
+
+    Cluster names are built as ``f"{config.project_name}-{region}"`` (cli/config.py),
+    so stripping the ``-{region}`` suffix yields the project key the bastion's IAM
+    role / instance profile are scoped to — matching the deployment's other
+    project-scoped resources without threading a second config value down here.
+    """
+    suffix = f"-{region}"
+    return cluster[: -len(suffix)] if cluster.endswith(suffix) else cluster
+
+
 def private_endpoint_guidance(cluster: str, region: str) -> str:
     """Actionable message when the API endpoint is private and no tunnel is set up."""
     return (
@@ -184,13 +196,19 @@ def private_endpoint_guidance(cluster: str, region: str) -> str:
 
 
 def provision_bastion(
-    formatter: Any, cluster: str, region: str, ttl_minutes: int, assume_yes: bool
+    formatter: Any,
+    cluster: str,
+    region: str,
+    ttl_minutes: int,
+    assume_yes: bool,
+    project_name: str = ephemeral_bastion.DEFAULT_PROJECT_NAME,
 ) -> str:
     """Provision an ephemeral SSM bastion for the tunnel; return its instance id.
 
     Prompts for confirmation (it launches a billable EC2 instance) unless
     ``assume_yes``. The instance self-terminates after ``ttl_minutes`` and is
-    torn down by :func:`teardown_bastion` when the tunnel closes.
+    torn down by :func:`teardown_bastion` when the tunnel closes. Its IAM role /
+    instance profile are named for ``project_name``.
     """
     if not assume_yes:
         formatter.print_warning(
@@ -206,17 +224,22 @@ def provision_bastion(
         "(waiting for it to register with SSM; this takes a minute)..."
     )
     instance_id = ephemeral_bastion.create_ephemeral_bastion(
-        cluster, region, ttl_minutes=ttl_minutes
+        cluster, region, project_name=project_name, ttl_minutes=ttl_minutes
     )
     formatter.print_success(f"Ephemeral bastion {instance_id} is online.")
     return instance_id
 
 
-def teardown_bastion(formatter: Any, instance_id: str, region: str) -> None:
+def teardown_bastion(
+    formatter: Any,
+    instance_id: str,
+    region: str,
+    project_name: str = ephemeral_bastion.DEFAULT_PROJECT_NAME,
+) -> None:
     """Tear down an ephemeral bastion; on failure, print the orphan-check command."""
     try:
         formatter.print_info(f"Tearing down ephemeral bastion {instance_id}...")
-        ephemeral_bastion.destroy_ephemeral_bastion(instance_id, region)
+        ephemeral_bastion.destroy_ephemeral_bastion(instance_id, region, project_name=project_name)
         formatter.print_success(f"Ephemeral bastion {instance_id} terminated.")
     except Exception as exc:  # noqa: BLE001 — never crash teardown; guide the operator
         formatter.print_error(
@@ -261,6 +284,9 @@ def open_api_server_tunnel(
     """
     if bastion_ttl_minutes is None:
         bastion_ttl_minutes = ephemeral_bastion.DEFAULT_TTL_MINUTES
+    # The bastion's IAM role/profile are scoped to the deployment's project key,
+    # recovered from the cluster name (which is f"{project_name}-{region}").
+    project_name = _project_name_from_cluster(cluster, region)
 
     try:
         plan = resolve_tunnel_plan(cluster, region, local_port=local_port)
@@ -285,7 +311,7 @@ def open_api_server_tunnel(
             instance_id = via_ssm
             if via_ssm == AUTO_BASTION:
                 created_bastion = provision_bastion(
-                    formatter, cluster, region, bastion_ttl_minutes, assume_yes
+                    formatter, cluster, region, bastion_ttl_minutes, assume_yes, project_name
                 )
                 instance_id = created_bastion
 
@@ -309,4 +335,4 @@ def open_api_server_tunnel(
         if tunnel is not None:
             tunnel.terminate()
         if created_bastion is not None:
-            teardown_bastion(formatter, created_bastion, region)
+            teardown_bastion(formatter, created_bastion, region, project_name)

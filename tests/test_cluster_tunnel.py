@@ -272,7 +272,7 @@ class TestOpenApiServerTunnel:
         proc = _FakeTunnel()
         torn: list[str] = []
         monkeypatch.setattr(ct, "provision_bastion", lambda *a, **k: "i-0aaaaaaaaaaaaaaaa")
-        monkeypatch.setattr(ct, "teardown_bastion", lambda fmt, iid, r: torn.append(iid))
+        monkeypatch.setattr(ct, "teardown_bastion", lambda fmt, iid, r, project: torn.append(iid))
         monkeypatch.setattr(ct.ssm_tunnel, "start_api_tunnel", lambda *a, **k: proc)
         fmt = _FakeFormatter()
         with ct.open_api_server_tunnel(
@@ -318,7 +318,7 @@ class TestOpenApiServerTunnel:
         )
         torn: list[str] = []
         monkeypatch.setattr(ct, "provision_bastion", lambda *a, **k: "i-0aaaaaaaaaaaaaaaa")
-        monkeypatch.setattr(ct, "teardown_bastion", lambda fmt, iid, r: torn.append(iid))
+        monkeypatch.setattr(ct, "teardown_bastion", lambda fmt, iid, r, project: torn.append(iid))
 
         def _boom(*a: object, **k: object) -> None:
             raise RuntimeError("tunnel failed")
@@ -505,9 +505,7 @@ class TestClusterTunnelInteractive:
         assert res.exit_code == 1
         assert "kubeconfig failed" in res.output
 
-    def test_tunnel_failure_exits(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_tunnel_failure_exits(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: None)
         monkeypatch.setattr(
             "cli.kubectl_helpers.describe_cluster_access",
@@ -565,3 +563,44 @@ class TestMonitoringOpenAutoBastion:
         # Port-forward routed through the SSM tunnel (server override present).
         assert "--server" in captured["cmd"]
         assert "https://localhost:8443" in captured["cmd"]
+
+
+# ---------------------------------------------------------------------------
+# Project-name derivation (bastion IAM naming is project-scoped)
+# ---------------------------------------------------------------------------
+
+
+class TestProjectNameDerivation:
+    def test_project_name_from_cluster(self) -> None:
+        assert ct._project_name_from_cluster("gco-us-east-1", "us-east-1") == "gco"
+        assert ct._project_name_from_cluster("acme-corp-eu-west-1", "eu-west-1") == "acme-corp"
+        # No matching region suffix → returned unchanged.
+        assert ct._project_name_from_cluster("weird", "us-east-1") == "weird"
+
+    def test_open_tunnel_passes_derived_project(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            ct.kubectl_helpers,
+            "describe_cluster_access",
+            lambda c, r: {"endpoint": PRIVATE_ENDPOINT, "public": False, "private": True},
+        )
+        seen: dict[str, object] = {}
+        monkeypatch.setattr(
+            ct,
+            "provision_bastion",
+            lambda fmt, c, r, ttl, yes, project: (
+                seen.__setitem__("prov", project) or "i-0aaaaaaaaaaaaaaaa"
+            ),
+        )
+        monkeypatch.setattr(
+            ct, "teardown_bastion", lambda fmt, iid, r, project: seen.__setitem__("tear", project)
+        )
+        monkeypatch.setattr(ct.ssm_tunnel, "start_api_tunnel", lambda *a, **k: _FakeTunnel())
+        fmt = _FakeFormatter()
+        with ct.open_api_server_tunnel(
+            fmt, cluster="acme-us-east-1", region="us-east-1", via_ssm="auto", assume_yes=True
+        ):
+            pass
+        # The project key recovered from the cluster name flows to both the
+        # provision and teardown paths (so IAM naming stays project-scoped).
+        assert seen["prov"] == "acme"
+        assert seen["tear"] == "acme"

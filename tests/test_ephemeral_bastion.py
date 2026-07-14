@@ -500,3 +500,81 @@ class TestCreateDestroyLifecycle:
         with eb.ephemeral_bastion("gco-us-east-1", "us-east-1") as iid:
             assert iid == "i-0123456789abcdef0"
         assert destroyed == ["i-0123456789abcdef0"]
+
+
+# ---------------------------------------------------------------------------
+# Project-scoped naming (role / instance-profile / Name tag)
+# ---------------------------------------------------------------------------
+
+
+class TestProjectScopedNaming:
+    def test_default_project_matches_constants(self) -> None:
+        assert eb.bastion_role_name() == eb.BASTION_ROLE_NAME == "gco-ephemeral-bastion-role"
+        assert (
+            eb.bastion_profile_name() == eb.BASTION_PROFILE_NAME == "gco-ephemeral-bastion-profile"
+        )
+        assert eb.bastion_instance_name() == eb.BASTION_NAME == "gco-ephemeral-ssm-bastion"
+
+    def test_custom_project_scopes_names(self) -> None:
+        assert eb.bastion_role_name("acme") == "acme-ephemeral-bastion-role"
+        assert eb.bastion_profile_name("acme") == "acme-ephemeral-bastion-profile"
+        assert eb.bastion_instance_name("acme") == "acme-ephemeral-ssm-bastion"
+
+    @pytest.mark.parametrize("bad", ["", "-bad", "bad name", "a/b", "x" * 64])
+    def test_rejects_bad_project(self, bad: str) -> None:
+        with pytest.raises(ValueError):
+            eb.bastion_role_name(bad)
+
+    def test_ensure_iam_uses_project_scoped_role(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[list[str]] = []
+        monkeypatch.setattr(eb, "_run_aws", lambda cmd, **k: calls.append(cmd) or "")
+        eb.ensure_bastion_iam("acme")
+        create = calls[0]  # create-role is first
+        assert create[create.index("--role-name") + 1] == "acme-ephemeral-bastion-role"
+
+    def test_run_instances_uses_project_scoped_name_tag(self) -> None:
+        cmd = eb.build_run_instances_command(
+            ami_id="ami-0123456789abcdef0",
+            instance_type="t3.micro",
+            subnet_id="subnet-0123456789abcdef0",
+            security_group_id="sg-0123456789abcdef0",
+            profile_name="acme-ephemeral-bastion-profile",
+            region="us-east-1",
+            user_data="x",
+            instance_name="acme-ephemeral-ssm-bastion",
+        )
+        tagspec = cmd[cmd.index("--tag-specifications") + 1]
+        assert "Key=Name,Value=acme-ephemeral-ssm-bastion" in tagspec
+
+    def test_destroy_deletes_project_scoped_role(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[list[str]] = []
+        monkeypatch.setattr(eb, "_run_aws", lambda cmd, **k: calls.append(cmd) or "")
+        eb.destroy_ephemeral_bastion("i-0123456789abcdef0", "us-east-1", project_name="acme")
+        delete_role = next(c for c in calls if c[2] == "delete-role")
+        assert delete_role[delete_role.index("--role-name") + 1] == "acme-ephemeral-bastion-role"
+
+    def test_create_threads_project_to_iam_and_launch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(eb, "resolve_bastion_ami", lambda region: "ami-0123456789abcdef0")
+        monkeypatch.setattr(
+            eb,
+            "resolve_bastion_network",
+            lambda c, r: eb.BastionNetwork(
+                "vpc-0123456789abcdef0", "subnet-0123456789abcdef0", "sg-0123456789abcdef0", True
+            ),
+        )
+        seen: dict[str, object] = {}
+        monkeypatch.setattr(
+            eb, "ensure_bastion_iam", lambda project: seen.__setitem__("iam", project)
+        )
+        monkeypatch.setattr(
+            eb,
+            "launch_bastion",
+            lambda **k: seen.__setitem__("launch", k.get("project_name")) or "i-0123456789abcdef0",
+        )
+        monkeypatch.setattr(eb, "wait_until_ssm_online", lambda *a, **k: None)
+        out = eb.create_ephemeral_bastion("acme-us-east-1", "us-east-1", project_name="acme")
+        assert out == "i-0123456789abcdef0"
+        assert seen["iam"] == "acme"
+        assert seen["launch"] == "acme"

@@ -43,11 +43,20 @@ logger = logging.getLogger(__name__)
 # Constants — the fixed identity of the ephemeral bastion.
 # --------------------------------------------------------------------------
 
-BASTION_ROLE_NAME = "gco-ephemeral-bastion-role"
-BASTION_PROFILE_NAME = "gco-ephemeral-bastion-profile"
+# The bastion's IAM role, instance profile, and Name tag are scoped to the
+# deployment's project key (cdk.json context.project_name, default "gco" — the
+# same key cli/config.py derives cluster and stack names from), so a non-default
+# deployment addresses its own resources and two differently named deployments in
+# one account don't collide on a shared name. See bastion_role_name() below.
+DEFAULT_PROJECT_NAME = "gco"
+_ROLE_NAME_SUFFIX = "-ephemeral-bastion-role"
+_PROFILE_NAME_SUFFIX = "-ephemeral-bastion-profile"
+_INSTANCE_NAME_SUFFIX = "-ephemeral-ssm-bastion"
+
+# AmazonSSMManagedInstanceCore is an AWS-managed policy — a fixed global ARN, not
+# a resource GCO names — so it is intentionally not project-scoped.
 SSM_MANAGED_POLICY_ARN = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 
-BASTION_NAME = "gco-ephemeral-ssm-bastion"
 BASTION_INSTANCE_TYPE = "t3.micro"
 
 # Public SSM parameter that always resolves to the latest Amazon Linux 2023
@@ -109,6 +118,37 @@ def _validate_ttl(ttl_minutes: int) -> int:
     if not 5 <= value <= 1440:
         raise ValueError(f"Invalid ttl-minutes {value}: must be between 5 and 1440")
     return value
+
+
+# Project keys follow the cdk.json context.project_name shape (alnum + hyphen).
+_PROJECT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]{0,40}$")
+
+
+def _validate_project(project_name: str) -> str:
+    return _validate(project_name, _PROJECT_RE, "project name")
+
+
+def bastion_role_name(project_name: str = DEFAULT_PROJECT_NAME) -> str:
+    """IAM role name for ``project_name``'s ephemeral bastion."""
+    return f"{_validate_project(project_name)}{_ROLE_NAME_SUFFIX}"
+
+
+def bastion_profile_name(project_name: str = DEFAULT_PROJECT_NAME) -> str:
+    """Instance-profile name for ``project_name``'s ephemeral bastion."""
+    return f"{_validate_project(project_name)}{_PROFILE_NAME_SUFFIX}"
+
+
+def bastion_instance_name(project_name: str = DEFAULT_PROJECT_NAME) -> str:
+    """EC2 ``Name`` tag for ``project_name``'s ephemeral bastion."""
+    return f"{_validate_project(project_name)}{_INSTANCE_NAME_SUFFIX}"
+
+
+# Back-compat convenience constants for the default project. The helpers above
+# are the source of truth; these are the default-project values that the builder
+# defaults (and tests) reference.
+BASTION_ROLE_NAME = bastion_role_name()
+BASTION_PROFILE_NAME = bastion_profile_name()
+BASTION_NAME = bastion_instance_name()
 
 
 @dataclass(frozen=True)
@@ -259,10 +299,10 @@ def build_add_role_to_profile_command(
     ]
 
 
-def _tag_specification(ttl_minutes: int) -> str:
+def _tag_specification(ttl_minutes: int, instance_name: str = BASTION_NAME) -> str:
     """Build the ``--tag-specifications`` value stamping the ephemeral markers."""
     tags = (
-        f"{{Key=Name,Value={BASTION_NAME}}},"
+        f"{{Key=Name,Value={instance_name}}},"
         f"{{Key={TAG_EPHEMERAL_KEY},Value=true}},"
         f"{{Key={TAG_PURPOSE_KEY},Value={BASTION_PURPOSE}}},"
         f"{{Key={TAG_TTL_KEY},Value={ttl_minutes}}}"
@@ -281,6 +321,7 @@ def build_run_instances_command(
     user_data: str,
     ttl_minutes: int = DEFAULT_TTL_MINUTES,
     associate_public_ip: bool = True,
+    instance_name: str = BASTION_NAME,
 ) -> list[str]:
     """Build the validated ``aws ec2 run-instances`` argv, safeguards included.
 
@@ -326,7 +367,7 @@ def build_run_instances_command(
         user_data,
         # Orphan safeguard #3: greppable ephemeral tags.
         "--tag-specifications",
-        _tag_specification(ttl),
+        _tag_specification(ttl, instance_name),
     ]
     if associate_public_ip:
         cmd.append("--associate-public-ip-address")
@@ -496,10 +537,10 @@ def resolve_bastion_network(cluster: str, region: str) -> BastionNetwork:
     return BastionNetwork(vpc, fallback, sg, False)
 
 
-def ensure_bastion_iam(
-    role_name: str = BASTION_ROLE_NAME, profile_name: str = BASTION_PROFILE_NAME
-) -> None:
+def ensure_bastion_iam(project_name: str = DEFAULT_PROJECT_NAME) -> None:
     """Idempotently create the bastion role + instance profile and wire them up."""
+    role_name = bastion_role_name(project_name)
+    profile_name = bastion_profile_name(project_name)
     _run_aws(build_create_role_command(role_name), allow_exists=True)
     _run_aws(build_attach_role_policy_command(role_name), allow_exists=True)
     _run_aws(build_create_instance_profile_command(profile_name), allow_exists=True)
@@ -512,7 +553,7 @@ def launch_bastion(
     ami_id: str,
     region: str,
     ttl_minutes: int,
-    profile_name: str = BASTION_PROFILE_NAME,
+    project_name: str = DEFAULT_PROJECT_NAME,
     instance_type: str = BASTION_INSTANCE_TYPE,
 ) -> str:
     """Run the instance, retrying briefly while the instance profile propagates."""
@@ -521,11 +562,12 @@ def launch_bastion(
         instance_type=instance_type,
         subnet_id=network.subnet_id,
         security_group_id=network.security_group_id,
-        profile_name=profile_name,
+        profile_name=bastion_profile_name(project_name),
         region=region,
         user_data=render_user_data(ttl_minutes),
         ttl_minutes=ttl_minutes,
         associate_public_ip=network.public_subnet,
+        instance_name=bastion_instance_name(project_name),
     )
     last_error: Exception | None = None
     for attempt in range(_PROFILE_PROPAGATION_RETRIES):
@@ -576,18 +618,26 @@ def create_ephemeral_bastion(
     cluster: str,
     region: str,
     *,
+    project_name: str = DEFAULT_PROJECT_NAME,
     ttl_minutes: int = DEFAULT_TTL_MINUTES,
     wait_online: bool = True,
 ) -> str:
-    """Provision a self-terminating SSM bastion in the cluster VPC. Returns its id."""
+    """Provision a self-terminating SSM bastion in the cluster VPC. Returns its id.
+
+    The IAM role / instance profile are named for ``project_name`` (default
+    ``gco``) so they match the deployment's other project-scoped resources.
+    """
     _validate(cluster, _CLUSTER_RE, "cluster name")
     _validate(region, _REGION_RE, "region")
+    _validate_project(project_name)
     ttl = _validate_ttl(ttl_minutes)
 
     ami_id = resolve_bastion_ami(region)
     network = resolve_bastion_network(cluster, region)
-    ensure_bastion_iam()
-    instance_id = launch_bastion(network=network, ami_id=ami_id, region=region, ttl_minutes=ttl)
+    ensure_bastion_iam(project_name)
+    instance_id = launch_bastion(
+        network=network, ami_id=ami_id, region=region, ttl_minutes=ttl, project_name=project_name
+    )
     logger.info("Launched ephemeral bastion %s in %s (%s).", instance_id, region, network.subnet_id)
     if wait_online:
         try:
@@ -597,7 +647,7 @@ def create_ephemeral_bastion(
             # fails to register with SSM. The self-terminate user-data is only a
             # last-resort backstop, not the normal cleanup path.
             try:
-                destroy_ephemeral_bastion(instance_id, region)
+                destroy_ephemeral_bastion(instance_id, region, project_name=project_name)
             except Exception:  # pragma: no cover - best effort
                 logger.exception(
                     "Failed to clean up bastion %s after online-wait failure", instance_id
@@ -610,23 +660,29 @@ def destroy_ephemeral_bastion(
     instance_id: str,
     region: str,
     *,
+    project_name: str = DEFAULT_PROJECT_NAME,
     delete_iam: bool = True,
 ) -> None:
     """Terminate the bastion and (best-effort) delete its IAM role + profile.
 
     Termination is the cost-critical step and is always attempted. IAM cleanup is
     best-effort: a leftover role/instance-profile costs nothing and is greppable
-    by its ``gco:ephemeral`` tag, so a failure here is logged, not raised.
+    by its ``gco:ephemeral`` tag, so a failure here is logged, not raised. The
+    role / profile deleted are the ones named for ``project_name``.
     """
     _validate(instance_id, _INSTANCE_RE, "instance id")
     _validate(region, _REGION_RE, "region")
+    _validate_project(project_name)
 
     _run_aws(build_terminate_instances_command(instance_id, region))
     logger.info("Terminating ephemeral bastion %s.", instance_id)
 
     if not delete_iam:
         return
-    for step in build_iam_teardown_commands():
+    teardown = build_iam_teardown_commands(
+        bastion_role_name(project_name), bastion_profile_name(project_name)
+    )
+    for step in teardown:
         try:
             _run_aws(step, allow_exists=True)
         except RuntimeError as exc:  # best-effort — never mask the termination
@@ -638,11 +694,14 @@ def ephemeral_bastion(
     cluster: str,
     region: str,
     *,
+    project_name: str = DEFAULT_PROJECT_NAME,
     ttl_minutes: int = DEFAULT_TTL_MINUTES,
 ) -> Iterator[str]:
     """Context manager: create a bastion, yield its id, guarantee teardown."""
-    instance_id = create_ephemeral_bastion(cluster, region, ttl_minutes=ttl_minutes)
+    instance_id = create_ephemeral_bastion(
+        cluster, region, project_name=project_name, ttl_minutes=ttl_minutes
+    )
     try:
         yield instance_id
     finally:
-        destroy_ephemeral_bastion(instance_id, region)
+        destroy_ephemeral_bastion(instance_id, region, project_name=project_name)
