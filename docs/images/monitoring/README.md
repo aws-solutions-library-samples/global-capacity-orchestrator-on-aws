@@ -5,6 +5,11 @@ Screenshots of the curated GCO Grafana dashboards used by
 against a live cluster rather than committed by hand, so this directory ships
 only this README until an operator regenerates the images.
 
+## Table of Contents
+
+- [Regenerate](#regenerate)
+- [Images](#images)
+
 ## Regenerate
 
 Grafana is private (`ClusterIP`, no public endpoint), so first port-forward it,
