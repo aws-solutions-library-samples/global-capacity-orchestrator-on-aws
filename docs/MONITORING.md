@@ -26,6 +26,7 @@ stock deployment installs it in each region; operators opt out with
 - [Managing Grafana users](#managing-grafana-users)
 - [Admin credential rotation](#admin-credential-rotation)
 - [Curated dashboards](#curated-dashboards)
+- [Dashboard screenshots](#dashboard-screenshots)
 
 ## Relationship to the CloudWatch monitoring stack
 
@@ -191,3 +192,21 @@ kube-prometheus-stack cluster/node/pod dashboards:
 - **GCO KEDA Autoscaling** — active scalers and scaler errors.
 - **GCO Services** — request rate and p95 latency per GCO service, plus inference
   monitor reconcile/error counts.
+
+## Dashboard screenshots
+
+Screenshots of these dashboards live under
+[`docs/images/monitoring/`](images/monitoring/). Because Grafana is private and
+the dashboards render live data, the images are generated on demand rather than
+committed by hand — regenerate them after a dashboard change with the Playwright
+capture script:
+
+```bash
+gco monitoring open --region us-east-1 --via-ssm i-0123456789abcdef0   # one shell
+playwright install chromium                                            # once
+python scripts/capture_monitoring_screenshots.py \
+    --username admin --password "$GCO_GRAFANA_ADMIN_PASSWORD"
+```
+
+See [`docs/images/monitoring/README.md`](images/monitoring/README.md) for the
+per-dashboard file list.
