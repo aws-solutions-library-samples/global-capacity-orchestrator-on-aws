@@ -215,26 +215,26 @@ activity. They demonstrate the panels and layout you get out of the box.
 
 ### GCO GPU (DCGM)
 
-![GCO GPU (DCGM) dashboard — per-GPU utilization, framebuffer, temperature, and power panels, all showing No data on a cluster with no GPU nodes](images/monitoring/grafana-gpu-dcgm.png)
+![GCO GPU (DCGM) dashboard — per-GPU utilization, framebuffer, temperature, and power panels, all showing No data on a cluster with no GPU nodes](../images/grafana-gpu-dcgm.png)
 
 Per-GPU utilization, framebuffer memory, temperature, and power draw. "No data"
 is expected when the cluster has no GPU nodes.
 
 ### GCO Schedulers & Queues
 
-![GCO Schedulers and Queues dashboard — pending pods, Kueue pending workloads, and active Jobs](images/monitoring/grafana-schedulers.png)
+![GCO Schedulers and Queues dashboard — pending pods, Kueue pending workloads, and active Jobs](../images/grafana-schedulers.png)
 
 Pending pods (cluster-wide), Kueue pending workloads, and active Jobs.
 
 ### GCO KEDA Autoscaling
 
-![GCO KEDA Autoscaling dashboard — active scalers and scaler errors](images/monitoring/grafana-keda.png)
+![GCO KEDA Autoscaling dashboard — active scalers and scaler errors](../images/grafana-keda.png)
 
 Active scalers and scaler errors.
 
 ### GCO Services
 
-![GCO Services dashboard — request rate and p95 latency per service, plus inference-monitor reconcile counts](images/monitoring/grafana-services.png)
+![GCO Services dashboard — request rate and p95 latency per service, plus inference-monitor reconcile counts](../images/grafana-services.png)
 
 Request rate and p95 latency per GCO service, plus inference-monitor
 reconcile/error counts.
@@ -251,5 +251,5 @@ python scripts/capture_monitoring_screenshots.py \
     --username admin --password "$GCO_GRAFANA_ADMIN_PASSWORD"
 ```
 
-See [`docs/images/monitoring/README.md`](images/monitoring/README.md) for the
-per-dashboard file list.
+The four PNGs above are written to the repo's [`images/`](../images/) directory
+(one per curated dashboard) by the capture script.

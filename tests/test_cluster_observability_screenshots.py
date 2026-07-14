@@ -1,6 +1,6 @@
 """
 Tests for the monitoring dashboard screenshot tooling
-(scripts/capture_monitoring_screenshots.py + docs/images/monitoring/).
+(scripts/capture_monitoring_screenshots.py + the repo ``images/`` directory).
 
 Real Grafana screenshots need a live cluster, so instead of asserting binary
 images exist, this pins the invariants that keep the doc assets honest:
@@ -8,8 +8,8 @@ images exist, this pins the invariants that keep the doc assets honest:
 - the capture script's target dashboards stay in lockstep with the dashboard
   ConfigMaps actually shipped (add a dashboard and this fails until the script
   is updated),
-- every output path is a ``.png`` under ``docs/images/monitoring/``,
-- the docs reference the script and the images directory exists with a README.
+- every output path is a ``.png`` under the repo ``images/`` directory,
+- the docs reference both the capture script and the captured images.
 
 ``main()`` is exercised with the Playwright-driven ``capture`` mocked out, so
 the CLI wiring is covered without a browser.
@@ -34,7 +34,7 @@ DASHBOARDS_MANIFEST = (
     / "manifests"
     / "post-helm-grafana-dashboards.yaml"
 )
-IMAGES_DIR = PROJECT_ROOT / "docs" / "images" / "monitoring"
+IMAGES_DIR = PROJECT_ROOT / "images"
 MONITORING_DOC = PROJECT_ROOT / "docs" / "MONITORING.md"
 
 
@@ -84,14 +84,10 @@ def test_screenshot_filenames_are_unique(script) -> None:
     assert len(filenames) == len(set(filenames))
 
 
-def test_images_dir_has_readme() -> None:
-    assert (IMAGES_DIR / "README.md").is_file()
-
-
 def test_docs_reference_the_capture_script() -> None:
     text = MONITORING_DOC.read_text()
     assert "scripts/capture_monitoring_screenshots.py" in text
-    assert "images/monitoring" in text
+    assert "images/grafana-gpu-dcgm.png" in text
 
 
 def test_main_returns_zero_on_success(script, monkeypatch: pytest.MonkeyPatch) -> None:

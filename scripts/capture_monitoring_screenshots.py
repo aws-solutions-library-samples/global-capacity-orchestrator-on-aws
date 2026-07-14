@@ -1,6 +1,6 @@
 """Capture Grafana dashboard screenshots for the monitoring docs.
 
-Renders each curated GCO dashboard to ``docs/images/monitoring/`` using a
+Renders each curated GCO dashboard to the repo's ``images/`` directory using a
 headless Chromium via Playwright (the same rendering dependency the code-diagram
 generator uses). It drives a live Grafana reached through a
 ``gco monitoring open`` port-forward, so regenerating the doc assets after a
@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-IMAGES_DIR = PROJECT_ROOT / "docs" / "images" / "monitoring"
+IMAGES_DIR = PROJECT_ROOT / "images"
 DEFAULT_GRAFANA_URL = "http://localhost:3000"
 
 # How long to let a dashboard's panels finish rendering before the screenshot.
