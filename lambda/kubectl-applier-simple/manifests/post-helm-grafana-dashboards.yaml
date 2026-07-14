@@ -1,0 +1,218 @@
+# Curated GCO Grafana dashboards, imported by the Grafana sidecar
+#
+# Each ConfigMap carries the grafana_dashboard="1" label the kube-prometheus
+# -stack Grafana sidecar watches, so the dashboards load automatically. They
+# live in the monitoring namespace (created by the chart), so they are applied
+# in the post-Helm pass, and are gated on {{CLUSTER_OBSERVABILITY_ENABLED}} so
+# the file is skipped when observability is disabled. The stock kube-prometheus
+# -stack dashboards already cover cluster/node/pod/workload views; these add the
+# GCO-specific views (GPU/DCGM, schedulers, KEDA, and GCO service RED metrics).
+# Panels use the default Prometheus datasource that the chart provisions.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-dashboard-gpu
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+data:
+  gco-gpu-dcgm.json: |
+    {
+      "title": "GCO GPU (DCGM)",
+      "uid": "gco-gpu-dcgm",
+      "tags": ["gco", "gpu"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "time": {"from": "now-6h", "to": "now"},
+      "panels": [
+        {
+          "id": 1,
+          "title": "GPU Utilization (%)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [
+            {"expr": "DCGM_FI_DEV_GPU_UTIL", "legendFormat": "{{Hostname}} gpu{{gpu}}"}
+          ]
+        },
+        {
+          "id": 2,
+          "title": "GPU Framebuffer Memory Used (MiB)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [
+            {"expr": "DCGM_FI_DEV_FB_USED", "legendFormat": "{{Hostname}} gpu{{gpu}}"}
+          ]
+        },
+        {
+          "id": 3,
+          "title": "GPU Temperature (C)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "targets": [
+            {"expr": "DCGM_FI_DEV_GPU_TEMP", "legendFormat": "{{Hostname}} gpu{{gpu}}"}
+          ]
+        },
+        {
+          "id": 4,
+          "title": "GPU Power Draw (W)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [
+            {"expr": "DCGM_FI_DEV_POWER_USAGE", "legendFormat": "{{Hostname}} gpu{{gpu}}"}
+          ]
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-dashboard-schedulers
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+data:
+  gco-schedulers.json: |
+    {
+      "title": "GCO Schedulers & Queues",
+      "uid": "gco-schedulers",
+      "tags": ["gco", "scheduler"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "time": {"from": "now-6h", "to": "now"},
+      "panels": [
+        {
+          "id": 1,
+          "title": "Pending pods (cluster-wide)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [
+            {"expr": "sum(kube_pod_status_phase{phase=\"Pending\"})", "legendFormat": "pending"}
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Kueue pending workloads",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [
+            {"expr": "sum by (queue) (kueue_pending_workloads)", "legendFormat": "{{queue}}"}
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Active Jobs",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+          "targets": [
+            {"expr": "sum(kube_job_status_active)", "legendFormat": "active jobs"}
+          ]
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-dashboard-keda
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+data:
+  gco-keda.json: |
+    {
+      "title": "GCO KEDA Autoscaling",
+      "uid": "gco-keda",
+      "tags": ["gco", "keda"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "time": {"from": "now-6h", "to": "now"},
+      "panels": [
+        {
+          "id": 1,
+          "title": "Active scalers",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [
+            {"expr": "sum by (scaledObject) (keda_scaler_active)", "legendFormat": "{{scaledObject}}"}
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Scaler errors",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [
+            {"expr": "sum by (scaledObject) (rate(keda_scaler_errors[5m]))", "legendFormat": "{{scaledObject}}"}
+          ]
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-dashboard-services
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+data:
+  gco-services.json: |
+    {
+      "title": "GCO Services",
+      "uid": "gco-services",
+      "tags": ["gco", "services"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "time": {"from": "now-6h", "to": "now"},
+      "panels": [
+        {
+          "id": 1,
+          "title": "Request rate by service",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [
+            {"expr": "sum by (service) (rate(gco_http_requests_total[5m]))", "legendFormat": "{{service}}"}
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Request p95 latency by service",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (service, le) (rate(gco_http_request_duration_seconds_bucket[5m])))",
+              "legendFormat": "{{service}}"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Inference monitor reconciles",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+          "targets": [
+            {"expr": "gco_inference_monitor_metric{name=\"reconcile_count\"}", "legendFormat": "reconciles"},
+            {"expr": "gco_inference_monitor_metric{name=\"errors_count\"}", "legendFormat": "errors"}
+          ]
+        }
+      ]
+    }
