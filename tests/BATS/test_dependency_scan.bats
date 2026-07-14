@@ -358,6 +358,67 @@ for m in re.finditer(r\"addon_name=\\\"([^\\\"]+)\\\".*?addon_version=\\\"([^\\\
     [ -z "$output" ]
 }
 
+# ── extract_helm_charts ──────────────────────────────────────────────────────
+
+@test "extract_helm_charts: finds kube-prometheus-stack in the real charts.yaml" {
+    run extract_helm_charts "lambda/helm-installer/charts.yaml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"name": "kube-prometheus-stack"'* ]]
+    [[ "$output" == *'"chart": "kube-prometheus-stack"'* ]]
+}
+
+@test "extract_helm_charts: reports a non-empty version for kube-prometheus-stack" {
+    # Assert the pin is present and shaped like a chart version, without
+    # hardcoding the exact value so a legitimate bump doesn't break the test.
+    run extract_helm_charts "lambda/helm-installer/charts.yaml"
+    [ "$status" -eq 0 ]
+    kp_line="$(printf '%s\n' "$output" | grep '"name": "kube-prometheus-stack"')"
+    [ -n "$kp_line" ]
+    version="$(printf '%s' "$kp_line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+@test "extract_helm_charts: includes the mandatory keda chart" {
+    run extract_helm_charts "lambda/helm-installer/charts.yaml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"name": "keda"'* ]]
+}
+
+@test "extract_helm_charts: every entry is valid JSON carrying the expected keys" {
+    run extract_helm_charts "lambda/helm-installer/charts.yaml"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | python3 -c "
+import json, sys
+lines = [ln for ln in sys.stdin if ln.strip()]
+assert lines, 'no chart entries emitted'
+for ln in lines:
+    obj = json.loads(ln)
+    assert {'name', 'repo_url', 'chart', 'version', 'use_oci'} <= set(obj), ln
+"
+}
+
+@test "extract_helm_charts: parses a minimal charts.yaml fixture" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+charts:
+  demo-chart:
+    repo_url: https://example.com/charts
+    chart: demo
+    version: "1.2.3"
+EOF
+    run extract_helm_charts "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"name": "demo-chart"'* ]]
+    [[ "$output" == *'"version": "1.2.3"'* ]]
+    rm -f "$tmpfile"
+}
+
+@test "extract_helm_charts: returns empty for a missing file" {
+    run extract_helm_charts "/nonexistent/charts.yaml"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 # ── extract_dockerfile_pins ──────────────────────────────────────────────────
 
 @test "extract_dockerfile_pins: finds all seven pins in Dockerfile.dev" {

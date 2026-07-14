@@ -331,19 +331,9 @@ HELM_RESULTS="$(mktemp)"
 CHARTS_FILE="lambda/helm-installer/charts.yaml"
 
 if [ -f "$CHARTS_FILE" ]; then
-  python3 - "$CHARTS_FILE" <<'PY' | while IFS= read -r entry; do
-import json, sys, yaml
-with open(sys.argv[1]) as f:
-    data = yaml.safe_load(f)
-for name, cfg in (data or {}).get('charts', {}).items():
-    print(json.dumps({
-        'name':     name,
-        'repo_url': cfg.get('repo_url', ''),
-        'chart':    cfg.get('chart', ''),
-        'version':  cfg.get('version', ''),
-        'use_oci':  cfg.get('use_oci', False),
-    }))
-PY
+  # Chart entries come from the shared extractor (also covered by BATS) so a
+  # newly-added chart is discovered automatically — one record per entry.
+  extract_helm_charts "$CHARTS_FILE" | while IFS= read -r entry; do
     chart_name="$(echo "$entry" | jq -r '.name')"
     repo_url="$(echo "$entry" | jq -r '.repo_url')"
     chart="$(echo "$entry" | jq -r '.chart')"

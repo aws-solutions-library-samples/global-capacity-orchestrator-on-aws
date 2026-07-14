@@ -219,6 +219,40 @@ except ImportError:
 " "$file" 2>/dev/null
 }
 
+# extract_helm_charts [charts_yaml_path]
+#
+# Reads ``lambda/helm-installer/charts.yaml`` and prints one JSON object per
+# chart entry: ``{name, repo_url, chart, version, use_oci}``. Extracted from
+# dependency-scan.sh so BATS can exercise the real charts.yaml parse — the
+# driver sources this helper and pipes its output into the version-drift loop
+# (``helm search repo`` / ``helm show chart`` per entry). Because it iterates
+# every entry, a newly-added chart (e.g. kube-prometheus-stack) is picked up
+# automatically with no change here.
+#
+# Prints nothing (exit 0) when the file is missing or unparseable, matching the
+# other extractors in this file so the caller treats empty as "skip".
+extract_helm_charts() {
+  local file="${1:-lambda/helm-installer/charts.yaml}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import json, sys, yaml
+try:
+    with open(sys.argv[1]) as f:
+        data = yaml.safe_load(f)
+except Exception:
+    sys.exit(0)
+for name, cfg in (data or {}).get('charts', {}).items():
+    cfg = cfg or {}
+    print(json.dumps({
+        'name':     name,
+        'repo_url': cfg.get('repo_url', ''),
+        'chart':    cfg.get('chart', ''),
+        'version':  cfg.get('version', ''),
+        'use_oci':  cfg.get('use_oci', False),
+    }))
+" "$file" 2>/dev/null
+}
+
 # extract_k8s_version [cdk_json_path]
 #
 # Reads the kubernetes_version from cdk.json. Falls back to "1.36".
