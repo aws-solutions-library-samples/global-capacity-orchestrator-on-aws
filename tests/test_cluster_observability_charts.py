@@ -219,3 +219,38 @@ def test_no_admin_password_literal_in_values(kps_entry) -> None:
     assert "adminPassword" not in blob
     assert "admin_password" not in blob
     assert "existingSecret" not in blob
+
+
+def test_secure_cookies_enabled(kps_entry) -> None:
+    security = kps_entry["values"]["grafana"]["grafana.ini"]["security"]
+    assert security["cookie_secure"] is True
+    assert security["cookie_samesite"] == "lax"
+
+
+def test_no_component_is_internet_facing(kps_entry) -> None:
+    # Private-only: every component Service is ClusterIP and Grafana has no
+    # Ingress, so enabling observability creates no public endpoint.
+    values = kps_entry["values"]
+    assert values["grafana"]["service"]["type"] == "ClusterIP"
+    assert values["grafana"]["ingress"]["enabled"] is False
+    assert values["prometheus"]["service"]["type"] == "ClusterIP"
+    assert values["alertmanager"]["service"]["type"] == "ClusterIP"
+
+
+def test_no_loadbalancer_anywhere_in_entry(kps_entry) -> None:
+    # Belt-and-suspenders CP-3 check: the entire entry never asks for a
+    # LoadBalancer or a NodePort Service, and never enables an Ingress.
+    blob = yaml.safe_dump(kps_entry)
+    assert "LoadBalancer" not in blob
+    assert "NodePort" not in blob
+
+
+def test_no_credential_literal_anywhere_in_entry(kps_entry) -> None:
+    # CP-4 across the whole entry, not just the grafana sub-block.
+    blob = yaml.safe_dump(kps_entry).lower()
+    for needle in ("adminpassword", "admin_password", "existingsecret", "password:"):
+        assert needle not in blob, needle
+
+
+def test_grafana_persistence_enabled(kps_entry) -> None:
+    assert kps_entry["values"]["grafana"]["persistence"]["enabled"] is True

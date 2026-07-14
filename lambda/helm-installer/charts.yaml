@@ -503,6 +503,10 @@ charts:
       grafana:
         service:
           type: ClusterIP
+        # Private only: no Ingress/ALB. Access is via `gco monitoring open`
+        # (kubectl port-forward) against the PRIVATE EKS endpoint.
+        ingress:
+          enabled: false
         # The Grafana subchart auto-generates the <release>-grafana Secret
         # (admin-user/admin-password) because admin.existingSecret is unset.
         grafana.ini:
@@ -531,6 +535,8 @@ charts:
       # Prometheus: discover ServiceMonitors/PodMonitors cluster-wide (not just
       # ones labeled with this release) so GCO component monitors are scraped.
       prometheus:
+        service:
+          type: ClusterIP
         prometheusSpec:
           serviceMonitorSelectorNilUsesHelmValues: false
           podMonitorSelectorNilUsesHelmValues: false
@@ -545,6 +551,8 @@ charts:
             annotations:
               karpenter.sh/do-not-disrupt: "true"
       alertmanager:
+        service:
+          type: ClusterIP
         alertmanagerSpec:
           storage:
             volumeClaimTemplate:
