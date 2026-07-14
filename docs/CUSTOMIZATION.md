@@ -397,6 +397,25 @@ For direct kubectl access with private endpoints, you need network connectivity 
 - **Bastion Host**: EC2 instance in the VPC with kubectl configured
 - **AWS Cloud9**: IDE in the VPC with kubectl access
 
+The `gco cluster tunnel` command automates the SSM path end-to-end — it opens an
+`AWS-StartPortForwardingSessionToRemoteHost` tunnel to the private API endpoint
+and prints the `kubectl` flags to use with it. `--via-ssm auto` even provisions a
+self-terminating ephemeral bastion for the session (no new security group, no
+inbound ports) and tears it down on exit:
+
+```bash
+# Auto-provision an ephemeral bastion, tunnel to the private API, and hold it open:
+gco cluster tunnel --region us-east-1 --via-ssm auto
+
+# In another shell, kubectl through the tunnel:
+kubectl --server https://localhost:8443 --tls-server-name <endpoint-host> apply -f job.yaml
+
+# Prefer to run it yourself? Print the exact commands (no changes made):
+gco cluster tunnel --region us-east-1 --print
+```
+
+Or do it manually against your own SSM-managed instance:
+
 ```bash
 # Example: Using SSM to port-forward to the cluster
 aws ssm start-session --target i-bastion-instance-id
@@ -405,6 +424,9 @@ aws ssm start-session --target i-bastion-instance-id
 aws eks update-kubeconfig --name gco-us-east-1 --region us-east-1
 kubectl apply -f job.yaml
 ```
+
+See [`docs/CLI.md`](CLI.md#gco-cluster-tunnel) for the full `gco cluster tunnel`
+reference.
 
 ## Configuring GPU Nodepools
 

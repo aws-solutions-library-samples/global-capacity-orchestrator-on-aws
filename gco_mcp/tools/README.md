@@ -29,6 +29,7 @@ flag-to-tool mapping.
 | `nodepools.py` | 5 | `nodepools_list`, `nodepools_describe`, `nodepools_create_odcr`, `nodepools_create_capacity_block`, `delete_nodepool` (gated) |
 | `analytics.py` | 7 | `analytics_doctor`, `analytics_login_url`, `analytics_users_list`, `enable_analytics`, `disable_analytics`, `analytics_user_add`, `analytics_user_remove` (gated) |
 | `monitoring.py` | 6 | `monitoring_status`, `monitoring_users_list`, `enable_monitoring`, `disable_monitoring`, `monitoring_user_add`, `monitoring_user_remove` (gated) |
+| `cluster.py` | 1 | `cluster_tunnel_command` |
 | `templates.py` | 5 | `templates_list`, `templates_get`, `templates_create`, `templates_run`, `delete_template` (gated) |
 | `webhooks.py` | 4 | `webhooks_list`, `webhooks_get`, `webhooks_create`, `delete_webhook` (gated) |
 | `queue.py` | 5 | `queue_list`, `queue_get`, `queue_stats`, `queue_submit`, `cancel_queue_job` (gated) |
@@ -190,6 +191,12 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `disable_monitoring` | `gco monitoring disable` — flip cluster observability off in cdk.json. |
 | `monitoring_user_add` | `gco monitoring users add` — create a Grafana user via the admin API. |
 | `monitoring_user_remove` | `gco monitoring users remove` — delete a Grafana user (gated). |
+
+### `cluster.py`
+
+| Tool | Description |
+|------|-------------|
+| `cluster_tunnel_command` | `gco cluster tunnel --print` — return the connection plan (the `aws ssm start-session` tunnel command + `kubectl` flags) for reaching a cluster's private EKS API endpoint. Read-only; does not open a tunnel. |
 
 ### `templates.py`
 

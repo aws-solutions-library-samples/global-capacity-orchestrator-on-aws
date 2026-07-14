@@ -114,15 +114,28 @@ the SSM tunnel for you:
 gco monitoring open --region us-east-1
 
 # From a laptop with no VPC route: tunnel to the private API endpoint through an
-# SSM-managed instance in the VPC, then port-forward Grafana over that tunnel.
+# existing SSM-managed instance, then port-forward Grafana over that tunnel.
 gco monitoring open --region us-east-1 --via-ssm i-0123456789abcdef0
+
+# No SSM instance handy? Let the CLI provision a self-terminating ephemeral
+# bastion for the session and tear it down when you stop the forward.
+gco monitoring open --region us-east-1 --via-ssm auto
 ```
 
-`--via-ssm` opens an `AWS-StartPortForwardingSessionToRemoteHost` session to the
-cluster's API endpoint on a local port, then runs `kubectl port-forward` against
-`https://localhost:8443` with the real endpoint as the TLS server name. It
-requires the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+`--via-ssm <id>` opens an `AWS-StartPortForwardingSessionToRemoteHost` session to
+the cluster's API endpoint on a local port, then runs `kubectl port-forward`
+against `https://localhost:8443` with the real endpoint as the TLS server name.
+It requires the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
 locally and an SSM-managed instance in the VPC that can reach the endpoint.
+
+`--via-ssm auto` provisions that instance for you: a minimal `t3.micro` in the
+cluster VPC that reuses the cluster security group (no new security group, and
+**no inbound ports** — SSM is agent-initiated outbound only), requires IMDSv2,
+self-terminates after `--bastion-ttl-minutes` (default 120), and is tagged
+`gco:ephemeral=true`. It is torn down automatically when you stop the forward,
+and on a teardown failure the command prints the exact orphan-check command. The
+same ephemeral-bastion tunnelling is available for general `kubectl` access via
+[`gco cluster tunnel`](CLI.md#gco-cluster-tunnel).
 
 Other components:
 
@@ -202,8 +215,8 @@ committed by hand — regenerate them after a dashboard change with the Playwrig
 capture script:
 
 ```bash
-gco monitoring open --region us-east-1 --via-ssm i-0123456789abcdef0   # one shell
-playwright install chromium                                            # once
+gco monitoring open --region us-east-1 --via-ssm auto   # one shell (auto bastion)
+playwright install chromium                             # once
 python scripts/capture_monitoring_screenshots.py \
     --username admin --password "$GCO_GRAFANA_ADMIN_PASSWORD"
 ```

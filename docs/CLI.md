@@ -3260,6 +3260,71 @@ gco monitoring users remove --username alice --yes
 
 ---
 
+### Cluster Commands
+
+Reach a cluster's **PRIVATE** EKS API endpoint from outside the VPC over an AWS
+Systems Manager tunnel, so `kubectl` works without a VPN or a standing bastion.
+`gco cluster tunnel` is the general form of the SSM tunnelling that
+`gco monitoring open` uses for Grafana; the MCP `cluster_tunnel_command` tool
+(see [`gco_mcp/tools/README.md`](../gco_mcp/tools/README.md)) returns the same
+connection plan for agents.
+
+<details>
+<summary>All <code>gco cluster</code> commands (1) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco cluster tunnel`](#gco-cluster-tunnel) | Open (or `--print`) an SSM tunnel to the private EKS API endpoint, optionally auto-provisioning a self-terminating ephemeral bastion. |
+
+</details>
+
+#### `gco cluster tunnel`
+
+Open an SSM Session Manager tunnel to the cluster's private API endpoint and hold
+it open in the foreground (Ctrl-C to stop), printing the `kubectl` flags to use
+in another shell. With `--print` it instead emits the ready-to-run tunnel +
+`kubectl` commands (a connection plan) without opening anything — JSON under
+`gco --output json`, copy-paste shell commands otherwise.
+
+```bash
+gco cluster tunnel [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--via-ssm INSTANCE_ID\|auto` | Tunnel through an existing SSM-managed instance, or `auto` to provision a self-terminating ephemeral bastion and tear it down on exit. |
+| `--local-port` | Local port to bind for the API tunnel (default `8443`). |
+| `--print` | Print the tunnel + `kubectl` connection plan instead of opening the tunnel. |
+| `--bastion-ttl-minutes` | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`). |
+| `--yes` / `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
+
+The `auto` bastion is a minimal `t3.micro` in the cluster VPC that reuses the
+cluster security group (no new security group, and **no inbound ports** — SSM is
+outbound-only), requires IMDSv2, self-terminates after `--bastion-ttl-minutes`,
+and is tagged `gco:ephemeral=true`. It is torn down automatically when the tunnel
+closes; if teardown ever fails, the command prints the exact orphan-check
+command.
+
+**Example:**
+
+```bash
+# Auto-provision an ephemeral bastion, tunnel, and hold it open:
+gco cluster tunnel --region us-east-1 --via-ssm auto
+
+# In another shell, run kubectl through the tunnel:
+kubectl --server https://localhost:8443 \
+    --tls-server-name <endpoint-host> get nodes
+
+# Or just print the connection plan (no changes made, JSON for scripting):
+gco cluster tunnel --region us-east-1 --print
+gco --output json cluster tunnel --region us-east-1 --via-ssm i-0123456789abcdef0 --print
+```
+
+---
+
 ### Analytics Commands
 
 Manage the optional GCO analytics environment (SageMaker Studio + EMR

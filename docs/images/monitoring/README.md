@@ -16,8 +16,10 @@ Grafana is private (`ClusterIP`, no public endpoint), so first port-forward it,
 then run the capture script:
 
 ```bash
-# 1. Port-forward Grafana (tunnel through SSM if the API endpoint is private):
-gco monitoring open --region us-east-1 --via-ssm i-0123456789abcdef0
+# 1. Port-forward Grafana. The API endpoint is private, so tunnel through SSM —
+#    `--via-ssm auto` provisions a self-terminating ephemeral bastion and tears
+#    it down when you stop the forward (or pass an existing `--via-ssm <id>`):
+gco monitoring open --region us-east-1 --via-ssm auto
 
 # 2. In another shell, capture the dashboards (Chromium fetched once):
 playwright install chromium

@@ -727,6 +727,12 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 | `monitoring_user_add` | Add a Grafana user via the admin API | low-risk | — |
 | `monitoring_user_remove` | Remove a Grafana user (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 
+### Cluster
+
+| Tool | Description | Risk Tier | Gated By |
+|------|-------------|-----------|----------|
+| `cluster_tunnel_command` | Return the SSM tunnel + `kubectl` connection plan for reaching a cluster's private EKS API endpoint (read-only; does not open a tunnel) | safe | — |
+
 ### Config
 
 | Tool | Description | Risk Tier | Gated By |

@@ -6,9 +6,11 @@ generator uses). It drives a live Grafana reached through a
 ``gco monitoring open`` port-forward, so regenerating the doc assets after a
 dashboard change is a two-step, on-demand flow:
 
-    # 1. In one shell, port-forward Grafana (tunnelling through SSM if the
-    #    cluster's API endpoint is private):
-    gco monitoring open --region us-east-1 --via-ssm i-0123456789abcdef0
+    # 1. In one shell, port-forward Grafana. The cluster's API endpoint is
+    #    private, so tunnel through SSM; ``--via-ssm auto`` provisions a
+    #    self-terminating ephemeral bastion and tears it down on exit (or pass
+    #    an existing instance with ``--via-ssm <instance-id>``):
+    gco monitoring open --region us-east-1 --via-ssm auto
 
     # 2. In another, capture the dashboards (Chromium fetched once with
     #    ``playwright install chromium``):

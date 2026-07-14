@@ -12,6 +12,7 @@ def register_all_tools() -> None:
     from tools import (  # noqa: F401
         analytics,
         capacity,
+        cluster,
         config,
         costs,
         dag,

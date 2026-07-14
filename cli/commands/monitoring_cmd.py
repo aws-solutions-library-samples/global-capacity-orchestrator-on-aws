@@ -52,8 +52,10 @@ _SERVICES: dict[str, dict[str, Any]] = {
 _MONITORING_NAMESPACE = "monitoring"
 _GRAFANA_SECRET = "kube-prometheus-stack-grafana"
 
-# Local port kubectl uses to reach the API server through the SSM tunnel.
-_SSM_API_LOCAL_PORT = 8443
+# Default self-terminate backstop for an `--via-ssm auto` bastion.
+# Mirrors cli.ephemeral_bastion.DEFAULT_TTL_MINUTES (kept literal to avoid an
+# import at module load; the ephemeral_bastion module validates the range).
+_DEFAULT_BASTION_TTL_MINUTES = 120
 
 
 @click.group()
@@ -150,31 +152,6 @@ def monitoring_disable(config: Any, yes: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _private_endpoint_guidance(cluster: str, region: str) -> str:
-    """Actionable message when the API endpoint is private and no tunnel is set up."""
-    return (
-        f"Cluster {cluster!r} has a PRIVATE API endpoint, so kubectl cannot reach it from "
-        "outside the VPC. Either:\n"
-        "  - re-run with `--via-ssm <instance-id>` to tunnel through an SSM-managed instance "
-        "in the VPC, or\n"
-        "  - connect over a VPN / bastion / AWS SSM session first (see docs/MONITORING.md), or\n"
-        f"  - set eks_cluster.endpoint_access to PUBLIC_AND_PRIVATE and redeploy {region}.\n"
-        "Attempting the port-forward anyway in case you already have VPC connectivity."
-    )
-
-
-def _resolve_region(config: Any, region: str | None) -> str:
-    """Pick the target region: explicit flag, else first cdk.json regional, else default."""
-    if region:
-        return str(region)
-    from ..config import _load_cdk_json
-
-    cdk = _load_cdk_json()
-    if isinstance(cdk, dict) and cdk.get("regional"):
-        return str(cdk["regional"][0])
-    return str(config.default_region or "us-east-1")
-
-
 @monitoring.command("open")
 @click.option(
     "--service",
@@ -188,8 +165,26 @@ def _resolve_region(config: Any, region: str | None) -> str:
 @click.option(
     "--via-ssm",
     "via_ssm",
-    metavar="INSTANCE_ID",
-    help="Tunnel to the private API endpoint through this SSM-managed instance id.",
+    metavar="INSTANCE_ID|auto",
+    help=(
+        "Tunnel to the private API endpoint through an SSM-managed instance. "
+        "Pass an instance id to use an existing one, or 'auto' to provision a "
+        "self-terminating ephemeral bastion and tear it down when the forward stops."
+    ),
+)
+@click.option(
+    "--bastion-ttl-minutes",
+    type=int,
+    default=_DEFAULT_BASTION_TTL_MINUTES,
+    show_default=True,
+    help="Self-terminate backstop (minutes) for an `--via-ssm auto` bastion.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    "assume_yes",
+    is_flag=True,
+    help="Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion.",
 )
 @pass_config
 def monitoring_open(
@@ -198,22 +193,23 @@ def monitoring_open(
     region: str | None,
     local_port: int | None,
     via_ssm: str | None,
+    bastion_ttl_minutes: int,
+    assume_yes: bool,
 ) -> None:
     """Port-forward to a monitoring component over the private EKS endpoint.
 
     Runs in the foreground; press Ctrl-C to stop. On a private-endpoint cluster
-    (the default) pass ``--via-ssm <instance-id>`` to tunnel to the API server
-    through an SSM-managed instance in the VPC.
+    (the default) pass ``--via-ssm <instance-id>`` to tunnel through an existing
+    SSM-managed instance, or ``--via-ssm auto`` to have the CLI provision a
+    minimal, self-terminating ephemeral bastion for the session and tear it down
+    on exit.
     """
-    from ..kubectl_helpers import (
-        build_port_forward_command,
-        describe_cluster_access,
-        update_kubeconfig,
-    )
+    from ..cluster_tunnel import open_api_server_tunnel, resolve_region
+    from ..kubectl_helpers import build_port_forward_command, update_kubeconfig
 
     formatter = get_output_formatter(config)
     svc = _SERVICES[service]
-    target_region = _resolve_region(config, region)
+    target_region = resolve_region(config, region)
     cluster = f"{config.project_name}-{target_region}"
     bind_port = local_port or svc["default_local_port"]
 
@@ -223,63 +219,40 @@ def monitoring_open(
         formatter.print_error(str(exc))
         sys.exit(1)
 
-    # Endpoint posture drives whether a plain port-forward can reach the API.
-    server: str | None = None
-    tls_server_name: str | None = None
-    tunnel: subprocess.Popen[bytes] | None = None
+    # The shared context manager detects the endpoint posture, optionally
+    # provisions an ephemeral bastion (`--via-ssm auto`), opens the SSM tunnel,
+    # and guarantees teardown of both the tunnel and any bastion on exit.
     try:
-        access = describe_cluster_access(cluster, target_region)
-    except RuntimeError as exc:
-        formatter.print_warning(f"Could not determine endpoint access mode: {exc}")
-        access = {"public": True, "endpoint": ""}
-
-    if not access.get("public"):
-        if via_ssm:
-            from ..ssm_tunnel import endpoint_host, start_api_tunnel
-
-            endpoint = str(access.get("endpoint") or "")
-            try:
+        with open_api_server_tunnel(
+            formatter,
+            cluster=cluster,
+            region=target_region,
+            via_ssm=via_ssm,
+            bastion_ttl_minutes=bastion_ttl_minutes,
+            assume_yes=assume_yes,
+        ) as session:
+            cmd = build_port_forward_command(
+                _MONITORING_NAMESPACE,
+                svc["target"],
+                bind_port,
+                svc["remote_port"],
+                server=session.server,
+                tls_server_name=session.tls_server_name,
+            )
+            url = f"http://localhost:{bind_port}"
+            formatter.print_success(f"Forwarding {service} → {url} (Ctrl-C to stop)")
+            if service == "grafana":
                 formatter.print_info(
-                    f"Opening SSM tunnel to the private API endpoint via {via_ssm}..."
+                    "Log in with the Grafana admin credential from the "
+                    f"{_GRAFANA_SECRET} Secret (monitoring namespace)."
                 )
-                tunnel = start_api_tunnel(via_ssm, endpoint, _SSM_API_LOCAL_PORT, target_region)
-                server = f"https://localhost:{_SSM_API_LOCAL_PORT}"
-                tls_server_name = endpoint_host(endpoint)
-            except (RuntimeError, ValueError) as exc:
-                formatter.print_error(str(exc))
-                sys.exit(1)
-        else:
-            formatter.print_warning(_private_endpoint_guidance(cluster, target_region))
-
-    try:
-        cmd = build_port_forward_command(
-            _MONITORING_NAMESPACE,
-            svc["target"],
-            bind_port,
-            svc["remote_port"],
-            server=server,
-            tls_server_name=tls_server_name,
-        )
-    except ValueError as exc:
+            try:
+                _exec_port_forward(cmd)
+            except KeyboardInterrupt:  # pragma: no cover - interactive Ctrl-C
+                return
+    except (RuntimeError, ValueError) as exc:
         formatter.print_error(str(exc))
-        if tunnel is not None:
-            tunnel.terminate()
         sys.exit(1)
-
-    url = f"http://localhost:{bind_port}"
-    formatter.print_success(f"Forwarding {service} → {url} (Ctrl-C to stop)")
-    if service == "grafana":
-        formatter.print_info(
-            "Log in with the Grafana admin credential from the "
-            f"{_GRAFANA_SECRET} Secret (monitoring namespace)."
-        )
-    try:
-        _exec_port_forward(cmd)
-    except KeyboardInterrupt:  # pragma: no cover - interactive Ctrl-C
-        pass
-    finally:
-        if tunnel is not None:
-            tunnel.terminate()
 
 
 def _exec_port_forward(cmd: list[str]) -> None:

@@ -182,13 +182,15 @@ class TestToolRegistration:
         # mission_history, mission_list) add 9 when GCO_ENABLE_MISSION=true.
         # Five unconditional cluster-observability tools (monitoring_status,
         # monitoring_users_list, enable_monitoring, disable_monitoring,
-        # monitoring_user_add) bring the base to 114.
+        # monitoring_user_add) bring the base to 114, and the unconditional,
+        # read-only cluster_tunnel_command (SSM tunnel connection-plan) brings
+        # it to 115.
         # With every flag enabled the ceiling is
-        # 114 + 2 + 3 + 14 + 1 + 3 + 2 + 1 + 1 + 9 = 150.
-        # (114 base includes the unconditional find_capacity_blocks and
+        # 115 + 2 + 3 + 14 + 1 + 3 + 2 + 1 + 1 + 9 = 151.
+        # (115 base includes the unconditional find_capacity_blocks and
         # find_capacity_reservations sweep tools plus the
         # nodepools_create_capacity_block generator.)
-        base_count = 114
+        base_count = 115
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -351,6 +353,8 @@ class TestToolRegistration:
             "enable_monitoring",
             "disable_monitoring",
             "monitoring_user_add",
+            # Cluster connectivity (SSM tunnel) — read-only
+            "cluster_tunnel_command",
             # Config
             "config_get",
             # Examples discovery
