@@ -2901,9 +2901,7 @@ class TestWeightedRecommendRegion:
                 ]
                 return []
 
-            with patch.object(
-                checker, "get_all_regions_capacity", side_effect=_fail_sweep
-            ):
+            with patch.object(checker, "get_all_regions_capacity", side_effect=_fail_sweep):
                 result = checker.recommend_region_for_job()
 
             assert result["region"] == "us-east-1"

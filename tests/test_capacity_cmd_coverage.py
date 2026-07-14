@@ -590,9 +590,7 @@ class TestCapacityCheckError:
         )
 
         runner = CliRunner()
-        result = runner.invoke(
-            cli, ["capacity", "check", "-i", "g5.xlarge", "-r", "eu-west-1"]
-        )
+        result = runner.invoke(cli, ["capacity", "check", "-i", "g5.xlarge", "-r", "eu-west-1"])
 
         assert result.exit_code == 1
         # The detailed underlying cause is surfaced to the user.
