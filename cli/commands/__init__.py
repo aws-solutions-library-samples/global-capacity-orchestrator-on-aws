@@ -16,6 +16,7 @@ from .inference_cmd import inference
 from .jobs_cmd import jobs
 from .mission_cmd import mission_cmd
 from .models_cmd import models
+from .monitoring_cmd import monitoring
 from .nodepools_cmd import nodepools
 from .queue_cmd import queue
 from .stacks_cmd import stacks
@@ -35,6 +36,7 @@ __all__ = [
     "jobs",
     "mission_cmd",
     "models",
+    "monitoring",
     "nodepools",
     "queue",
     "stacks",

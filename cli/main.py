@@ -33,6 +33,7 @@ from .commands import (
     jobs,
     mission_cmd,
     models,
+    monitoring,
     nodepools,
     queue,
     stacks,
@@ -147,6 +148,7 @@ cli.add_command(stacks)
 cli.add_command(files)
 cli.add_command(config_cmd)
 cli.add_command(analytics)
+cli.add_command(monitoring)
 cli.add_command(tasks)
 cli.add_command(mission_cmd)
 

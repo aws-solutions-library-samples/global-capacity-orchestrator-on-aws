@@ -2626,3 +2626,46 @@ def update_analytics_config(settings: dict[str, Any]) -> None:
     ``cognito.removal_policy``.
     """
     _update_feature_config("analytics_environment", settings, _ANALYTICS_DEFAULTS)
+
+
+# =============================================================================
+# Cluster observability configuration
+# =============================================================================
+
+# Mirrors the on-by-default cdk.json cluster_observability block. Unlike the
+# other feature toggles this one defaults to enabled=True: a stock deploy
+# installs kube-prometheus-stack on every regional cluster and operators opt
+# out. The CDK side reads/validates the same block via
+# ConfigLoader.get_cluster_observability_config.
+_CLUSTER_OBSERVABILITY_DEFAULTS: dict[str, Any] = {
+    "enabled": True,
+    "grafana": {
+        "persistence_size": "10Gi",
+        "admin_user": "admin",
+        "admin_password_rotation_schedule": "0 4 1 * *",
+    },
+    "prometheus": {"persistence_size": "50Gi", "retention": "15d"},
+    "alertmanager": {"enabled": True, "persistence_size": "5Gi"},
+}
+
+
+def get_cluster_observability_config() -> dict[str, Any]:
+    """Get the cluster observability configuration from cdk.json.
+
+    Observability is per-region (installed on every regional cluster) but the
+    toggle itself is global, so this takes no region argument. Returns the
+    defaults merged with any operator overrides from the
+    ``context.cluster_observability`` block.
+    """
+    return _get_feature_config("cluster_observability", _CLUSTER_OBSERVABILITY_DEFAULTS)
+
+
+def update_cluster_observability_config(settings: dict[str, Any]) -> None:
+    """Update the cluster observability toggle in cdk.json.
+
+    ``gco monitoring enable`` / ``disable`` pass ``{"enabled": True/False}``;
+    the grafana/prometheus/alertmanager sub-blocks are left untouched so an
+    operator's sizing/retention/rotation overrides survive a disable/enable
+    cycle.
+    """
+    _update_feature_config("cluster_observability", settings, _CLUSTER_OBSERVABILITY_DEFAULTS)
