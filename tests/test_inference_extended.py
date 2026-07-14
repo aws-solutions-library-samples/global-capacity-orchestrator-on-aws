@@ -854,6 +854,13 @@ class TestDeploymentHelpers:
 class TestMainFunction:
     """Tests for the main() async entry point."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_metrics_server(self):
+        # main() starts a Prometheus metrics HTTP server; entry-point unit tests
+        # must not bind a real socket, so stub it out for the whole class.
+        with patch("gco.services.service_metrics.start_metrics_server"):
+            yield
+
     @pytest.mark.asyncio
     async def test_main_keyboard_interrupt(self):
         from gco.services.inference_monitor import main

@@ -77,18 +77,32 @@ def test_fastapi_services_register_metrics_route(module_name: str) -> None:
     assert "/metrics" in paths
 
 
-def test_start_metrics_server_registers_collector_and_serves(monkeypatch) -> None:
+def test_start_metrics_server_serves_collector_on_dedicated_registry(monkeypatch) -> None:
     import prometheus_client
 
     import gco.services.service_metrics as sm
 
-    registered: list[object] = []
-    served: list[int] = []
-    monkeypatch.setattr(prometheus_client.REGISTRY, "register", registered.append)
-    monkeypatch.setattr(prometheus_client, "start_http_server", served.append)
+    served: list[tuple[int, object]] = []
+    monkeypatch.setattr(
+        prometheus_client,
+        "start_http_server",
+        lambda port, registry=None: served.append((port, registry)),
+    )
 
     sm.start_metrics_server(9099, "inference-monitor", lambda: {"reconcile_count": 1})
 
-    assert served == [9099]
-    assert len(registered) == 1
-    assert isinstance(registered[0], sm._CallableCollector)
+    assert len(served) == 1
+    port, registry = served[0]
+    assert port == 9099
+    # A dedicated registry (not the default one) so the collector's own
+    # gco_service_info liveness series cannot collide with the module-level
+    # _INFO gauge that mount_metrics registers in the default registry.
+    assert registry is not prometheus_client.REGISTRY
+    collectors = list(registry._collector_to_names)
+    assert len(collectors) == 1
+    assert isinstance(collectors[0], sm._CallableCollector)
+    # The dedicated registry exposes both the liveness marker and the service's
+    # own numeric-metric family.
+    family_names = {family.name for family in registry.collect()}
+    assert "gco_service_info" in family_names
+    assert "gco_inference_monitor_metric" in family_names

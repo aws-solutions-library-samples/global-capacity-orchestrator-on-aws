@@ -141,11 +141,20 @@ def start_metrics_server(
 ) -> None:
     """Start a standalone Prometheus metrics HTTP server for a loop-based service.
 
-    Registers a scrape-time collector backed by ``metrics_fn`` (e.g. the
-    inference monitor's ``get_metrics``) on the default registry and serves it
-    on ``port``. Idempotent per process for the same collector name.
-    """
-    from prometheus_client import REGISTRY, start_http_server
+    Serves a scrape-time collector backed by ``metrics_fn`` (e.g. the inference
+    monitor's ``get_metrics``) on ``port``.
 
-    REGISTRY.register(_CallableCollector(service_name, metrics_fn))
-    start_http_server(port)
+    The collector is registered on its own ``CollectorRegistry`` rather than the
+    default one. The collector emits its own ``gco_service_info`` liveness series
+    (so a loop service that never calls ``mount_metrics`` still reports
+    liveness), which would collide with the module-level ``_INFO`` gauge if both
+    lived in the default registry. A dedicated registry keeps the loop service's
+    exposition to exactly its own series and lets the function be called more
+    than once per process (e.g. across tests) without tripping the default
+    registry's duplicate-name guard.
+    """
+    from prometheus_client import CollectorRegistry, start_http_server
+
+    registry = CollectorRegistry()
+    registry.register(_CallableCollector(service_name, metrics_fn))
+    start_http_server(port, registry=registry)
