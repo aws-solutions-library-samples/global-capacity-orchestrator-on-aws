@@ -102,6 +102,7 @@ _VPC_RE = re.compile(r"^vpc-[0-9a-f]{8}([0-9a-f]{9})?$")
 _SUBNET_RE = re.compile(r"^subnet-[0-9a-f]{8}([0-9a-f]{9})?$")
 _SG_RE = re.compile(r"^sg-[0-9a-f]{8}([0-9a-f]{9})?$")
 _AMI_RE = re.compile(r"^ami-[0-9a-f]{8}([0-9a-f]{9})?$")
+_INSTANCE_TYPE_RE = re.compile(r"^[a-z0-9]+\.[a-z0-9]+$")
 
 
 def _validate(value: str, pattern: re.Pattern[str], what: str) -> str:
@@ -335,7 +336,7 @@ def build_run_instances_command(
     _validate(profile_name, _CLUSTER_RE, "instance-profile name")
     _validate(region, _REGION_RE, "region")
     ttl = _validate_ttl(ttl_minutes)
-    if not re.match(r"^[a-z0-9]+\.[a-z0-9]+$", instance_type):
+    if not _INSTANCE_TYPE_RE.match(instance_type):
         raise ValueError(f"Invalid instance type {instance_type!r}")
 
     cmd = [
