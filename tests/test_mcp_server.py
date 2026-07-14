@@ -163,10 +163,11 @@ class TestToolRegistration:
         # GCO_ENABLE_CAPACITY_PURCHASE=true.
         # Image-publish-gated tools (images_build, images_push, images_mirror)
         # add 3 when GCO_ENABLE_IMAGE_PUBLISH=true. Destructive-gated tools add
-        # 13 when GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true: delete_job,
+        # 14 when GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true: delete_job,
         # delete_inference, delete_template, delete_webhook, delete_model,
-        # delete_nodepool, analytics_user_remove, cancel_queue_job,
-        # cancel_reservation (nine non-image), plus images_cleanup, images_prune,
+        # delete_nodepool, analytics_user_remove, monitoring_user_remove,
+        # cancel_queue_job,
+        # cancel_reservation (ten non-image), plus images_cleanup, images_prune,
         # images_delete_tag, images_delete_repo (four image variants). Model-upload-gated
         # models_upload adds 1 when GCO_ENABLE_MODEL_UPLOAD=true.
         # Infrastructure-deploy gated tools (deploy_stack, deploy_all,
@@ -179,12 +180,15 @@ class TestToolRegistration:
         # The nine mission_* tools (mission_start, mission_status, mission_iterate,
         # mission_checkpoint, mission_complete, mission_abort, mission_resume,
         # mission_history, mission_list) add 9 when GCO_ENABLE_MISSION=true.
+        # Five unconditional cluster-observability tools (monitoring_status,
+        # monitoring_users_list, enable_monitoring, disable_monitoring,
+        # monitoring_user_add) bring the base to 114.
         # With every flag enabled the ceiling is
-        # 109 + 2 + 3 + 13 + 1 + 3 + 2 + 1 + 1 + 9 = 144.
-        # (109 base includes the unconditional find_capacity_blocks and
+        # 114 + 2 + 3 + 14 + 1 + 3 + 2 + 1 + 1 + 9 = 150.
+        # (114 base includes the unconditional find_capacity_blocks and
         # find_capacity_reservations sweep tools plus the
         # nodepools_create_capacity_block generator.)
-        base_count = 109
+        base_count = 114
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -196,9 +200,10 @@ class TestToolRegistration:
         if "images_mirror" in tool_names:
             expected += 1  # images_mirror (also GCO_ENABLE_IMAGE_PUBLISH-gated)
         if "delete_job" in tool_names:
-            # All nine destructive-gated non-image tools register together with
-            # the four destructive image variants — thirteen total under the flag.
-            expected += 13
+            # The destructive-gated non-image tools register together with the
+            # four destructive image variants. Adding monitoring_user_remove
+            # brings the set to fourteen under the flag.
+            expected += 14
         if "models_upload" in tool_names:
             expected += 1
         if "deploy_stack" in tool_names:
@@ -338,6 +343,14 @@ class TestToolRegistration:
             "enable_analytics",
             "disable_analytics",
             "analytics_user_add",
+            # Cluster observability (monitoring)
+            # Read-only
+            "monitoring_status",
+            "monitoring_users_list",
+            # Mutating
+            "enable_monitoring",
+            "disable_monitoring",
+            "monitoring_user_add",
             # Config
             "config_get",
             # Examples discovery
@@ -409,6 +422,7 @@ class TestToolRegistration:
                     "delete_model",
                     "delete_nodepool",
                     "analytics_user_remove",
+                    "monitoring_user_remove",
                     "cancel_queue_job",
                     "cancel_reservation",
                 }

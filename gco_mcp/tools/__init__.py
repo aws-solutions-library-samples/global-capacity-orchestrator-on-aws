@@ -23,6 +23,7 @@ def register_all_tools() -> None:
         metrics,
         mission,
         models,
+        monitoring,
         nodepools,
         queue,
         semantic_progress,

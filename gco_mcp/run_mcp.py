@@ -172,6 +172,13 @@ from tools.metrics import (  # noqa: E402, F401
     metrics_from_shared_storage_file,
 )
 from tools.models import get_model_uri, list_models  # noqa: E402, F401
+from tools.monitoring import (  # noqa: E402, F401
+    disable_monitoring,
+    enable_monitoring,
+    monitoring_status,
+    monitoring_user_add,
+    monitoring_users_list,
+)
 from tools.nodepools import (  # noqa: E402, F401
     nodepools_create_capacity_block,
     nodepools_create_odcr,
@@ -257,6 +264,9 @@ with _contextlib.suppress(ImportError):
 
 with _contextlib.suppress(ImportError):
     from tools.analytics import analytics_user_remove  # noqa: F401
+
+with _contextlib.suppress(ImportError):
+    from tools.monitoring import monitoring_user_remove  # noqa: F401
 
 with _contextlib.suppress(ImportError):
     from tools.queue import cancel_queue_job  # noqa: F401
@@ -482,11 +492,13 @@ __all__ = [
     "disable_analytics",
     "disable_aurora",
     "disable_fsx",
+    "disable_monitoring",
     "disable_valkey",
     "emit_startup_log",
     "enable_analytics",
     "enable_aurora",
     "enable_fsx",
+    "enable_monitoring",
     "enable_valkey",
     "files_access_points",
     "files_get",
@@ -547,6 +559,10 @@ __all__ = [
     "mission_start",
     "mission_status",
     "models_upload",
+    "monitoring_status",
+    "monitoring_user_add",
+    "monitoring_user_remove",
+    "monitoring_users_list",
     "mooncake_topology_status",
     "nodepools_create_capacity_block",
     "nodepools_create_odcr",
