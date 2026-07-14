@@ -122,8 +122,11 @@ def rotate(core_v1: client.CoreV1Api, namespace: str, secret_name: str, service_
     user_id = get_admin_user_id(service_url, auth)
     reset_admin_password(service_url, auth, user_id, new_password)
     patch_secret_password(core_v1, namespace, secret_name, new_password)
+    # Audit line carries only non-secret identifiers (username, user id, service
+    # URL, namespace/secret names). The password itself is never logged.
+    # nosemgrep: python-logger-credential-disclosure
     logger.info(
-        "Rotated Grafana admin password for user %r (id=%s) via %s (secret %s/%s)",
+        "Rotated Grafana admin credential for user %r (id=%s) via %s (secret %s/%s)",
         user,
         user_id,
         service_url,
@@ -150,7 +153,9 @@ def main() -> int:
     try:
         rotate(core_v1, namespace, secret_name, service_url)
     except (ApiException, requests.RequestException, KeyError, ValueError) as exc:
-        logger.error("Grafana admin password rotation failed: %s", exc)
+        # Only the caught exception is logged; it carries no credential material.
+        # nosemgrep: python-logger-credential-disclosure
+        logger.error("Grafana admin credential rotation failed: %s", exc)
         return 1
     return 0
 

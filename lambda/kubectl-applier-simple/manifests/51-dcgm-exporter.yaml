@@ -2,9 +2,18 @@
 #
 # Runs as a DaemonSet on GPU nodes only (nodeSelector workload-type=gpu, which
 # the GPU NodePools set) and tolerates the nvidia.com/gpu taint. Exposes GPU
-# utilization, memory, temperature, power, and per-pod attribution on :9400
-# /metrics for the DCGM ServiceMonitor (post-helm-monitoring-servicemonitors)
-# to scrape and the GPU dashboard to render.
+# utilization, memory, temperature, and power on :9400 /metrics for the DCGM
+# ServiceMonitor (post-helm-monitoring-servicemonitors) to scrape and the GPU
+# dashboard to render.
+#
+# Security posture: the curated GPU dashboard reads only device-level fields
+# (DCGM_FI_DEV_*), which NVML serves without the SYS_ADMIN-gated profiling
+# module (DCGM_FI_PROF_*). So this runs with NO added capabilities (drop: ALL),
+# privilege escalation off, and RuntimeDefault seccomp — matching the platform's
+# own job-admission policy, which rejects SYS_ADMIN outright. The residual
+# checkov skips below are the handful inherent to any GPU metrics DaemonSet
+# (root for /dev/nvidia* access, writable rootfs for the embedded DCGM engine),
+# mirroring 50-nvidia-device-plugin.yaml.
 #
 # Only applied when cdk.json cluster_observability.enabled = true: GCORegional
 # Stack substitutes {{CLUSTER_OBSERVABILITY_ENABLED}} only then, so when
@@ -26,6 +35,16 @@ metadata:
     project: gco
   annotations:
     gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+    # Checkov suppressions — inherent NVIDIA DCGM exporter GPU requirements.
+    # Everything hardenable without breaking NVML/GPU access already is
+    # (SYS_ADMIN dropped, all caps dropped, privesc off, RuntimeDefault seccomp,
+    # liveness/readiness probes, SA token off, pinned pull policy).
+    checkov.io/skip1: CKV_K8S_43=NVIDIA publishes DCGM by version tag; pinned tag preferred over digest for maintainability
+    checkov.io/skip2: CKV_K8S_23=DCGM reads GPU counters through NVML and must run as root to open /dev/nvidia* device nodes
+    checkov.io/skip3: CKV_K8S_40=Root UID required for GPU device access; a high UID cannot open the NVIDIA device nodes
+    checkov.io/skip4: CKV_K8S_28=False positive - all Linux capabilities are dropped (drop ALL), so NET_RAW is not granted
+    checkov.io/skip5: CKV_K8S_22=Embedded DCGM host engine writes runtime state, so the root filesystem cannot be read-only
+    checkov.io/skip6: CKV2_K8S_6=kube-system DaemonSet scraped only by the in-cluster Prometheus; no NetworkPolicy needed
 spec:
   selector:
     matchLabels:
@@ -46,9 +65,16 @@ spec:
         - key: nvidia.com/gpu
           operator: Exists
           effect: NoSchedule
+      # DCGM talks to the driver through NVML and never calls the Kubernetes
+      # API, so don't project a ServiceAccount token into the pod.
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: dcgm-exporter
           image: nvcr.io/nvidia/k8s/dcgm-exporter:4.0.0-4.0.1-ubuntu22.04
+          imagePullPolicy: Always
           ports:
             - name: metrics
               containerPort: 9400
@@ -58,11 +84,32 @@ spec:
               value: ":9400"
             - name: DCGM_EXPORTER_KUBERNETES
               value: "true"
+            # Expose every GPU on the node to NVML without requesting a GPU
+            # slice, and enable only the "utility" driver capability NVML needs
+            # to read metrics (not compute).
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "utility"
           securityContext:
-            runAsNonRoot: false
+            # Device-level metrics need only NVML, not the SYS_ADMIN-gated
+            # profiling module, so add no capabilities and forbid escalation.
+            allowPrivilegeEscalation: false
             capabilities:
-              add:
-                - SYS_ADMIN
+              drop:
+                - ALL
+          livenessProbe:
+            # DCGM serves HTTP on 9400; a TCP check avoids assuming a health
+            # path across exporter versions while still catching a dead server.
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 15
           resources:
             requests:
               cpu: 100m
