@@ -172,20 +172,26 @@ def _compute_kubectl_cluster_shared_replacements(
 _OBSERVABILITY_STORAGE_CLASS = "gco-observability-gp3"
 
 
-def _compute_kubectl_observability_replacements(enabled: bool) -> dict[str, str]:
-    """Build the kubectl-applier replacement that gates the observability manifests.
+def _compute_kubectl_observability_replacements(
+    enabled: bool, *, grafana_admin_password_rotation_schedule: str = ""
+) -> dict[str, str]:
+    """Build the kubectl-applier replacements that gate the observability manifests.
 
     Pure helper kept at module scope so presence/absence can be asserted
     without synthesizing a full regional stack. When observability is enabled
     the ``{{CLUSTER_OBSERVABILITY_ENABLED}}`` gate resolves to ``"true"`` so the
-    gp3 StorageClass manifest (and, later, the ServiceMonitors / dashboards)
-    render and apply. When disabled the dict is empty, so those manifests keep
-    an unreplaced ``{{...}}`` token and the applier skips them — the same
-    optional-feature gating FSx and Valkey already rely on.
+    gp3 StorageClass, ServiceMonitors, dashboards, and credential-rotation
+    CronJob render and apply, and ``{{GRAFANA_ADMIN_PASSWORD_ROTATION_SCHEDULE}}``
+    resolves to the configured cron. When disabled the dict is empty, so those
+    manifests keep an unreplaced ``{{...}}`` token and the applier skips them —
+    the same optional-feature gating FSx and Valkey already rely on.
     """
     if not enabled:
         return {}
-    return {"{{CLUSTER_OBSERVABILITY_ENABLED}}": "true"}
+    return {
+        "{{CLUSTER_OBSERVABILITY_ENABLED}}": "true",
+        "{{GRAFANA_ADMIN_PASSWORD_ROTATION_SCHEDULE}}": grafana_admin_password_rotation_schedule,
+    }
 
 
 def _augment_trusted_registries_with_project_ecr(
@@ -2512,9 +2518,13 @@ class GCORegionalStack(Stack):
         # placeholders resolve so those manifests apply; when disabled the keys
         # are absent, so the manifests keep an unreplaced placeholder and the
         # applier skips them (same mechanism FSx/Valkey use).
+        _obs_config = self.config.get_cluster_observability_config()
         image_replacements.update(
             _compute_kubectl_observability_replacements(
-                self.config.get_cluster_observability_enabled()
+                bool(_obs_config["enabled"]),
+                grafana_admin_password_rotation_schedule=str(
+                    _obs_config["grafana"]["admin_password_rotation_schedule"]
+                ),
             )
         )
 

@@ -111,6 +111,7 @@ def test_absent_block_returns_full_default_shape() -> None:
     cfg = _loader().get_cluster_observability_config()
     assert cfg["grafana"]["persistence_size"] == "10Gi"
     assert cfg["grafana"]["admin_user"] == "admin"
+    assert cfg["grafana"]["admin_password_rotation_schedule"] == "0 4 1 * *"
     assert cfg["prometheus"]["persistence_size"] == "50Gi"
     assert cfg["prometheus"]["retention"] == "15d"
     assert cfg["alertmanager"]["enabled"] is True
@@ -170,6 +171,29 @@ def test_non_bool_alertmanager_enabled_is_rejected() -> None:
         ConfigValidationError, match="cluster_observability.alertmanager.enabled must be a bool"
     ):
         _loader({"alertmanager": {"enabled": 1}})
+
+
+def test_custom_rotation_schedule_passes_validation() -> None:
+    cfg = _loader(
+        {"grafana": {"admin_password_rotation_schedule": "30 2 * * 0"}}
+    ).get_cluster_observability_config()
+    assert cfg["grafana"]["admin_password_rotation_schedule"] == "30 2 * * 0"
+    # Partial override keeps the other grafana defaults.
+    assert cfg["grafana"]["admin_user"] == "admin"
+
+
+def test_non_five_field_rotation_schedule_is_rejected() -> None:
+    with pytest.raises(
+        ConfigValidationError, match="admin_password_rotation_schedule must be a 5-field cron"
+    ):
+        _loader({"grafana": {"admin_password_rotation_schedule": "0 4 1 *"}})
+
+
+def test_non_string_rotation_schedule_is_rejected() -> None:
+    with pytest.raises(
+        ConfigValidationError, match="admin_password_rotation_schedule must be a 5-field cron"
+    ):
+        _loader({"grafana": {"admin_password_rotation_schedule": 12345}})
 
 
 def test_wellformed_block_passes_validation() -> None:

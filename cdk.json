@@ -262,12 +262,13 @@
       }
     },
 
-    "_comment_cluster_observability": "Self-hosted in-cluster observability (kube-prometheus-stack: Prometheus + Alertmanager + Grafana) installed on every regional EKS cluster via the Helm installer. enabled: master toggle, ON BY DEFAULT (set false to opt out). Grafana uses native auth (no self sign-up, no anonymous) and is reachable privately via 'gco monitoring open' (kubectl port-forward to a ClusterIP service — no public endpoint; the EKS API is PRIVATE, so a VPN/SSM/bastion path is required). grafana/prometheus/alertmanager.persistence_size: EBS PVC sizes. prometheus.retention: TSDB retention window. This is complementary to the CloudWatch gco-monitoring stack; see docs/MONITORING.md.",
+    "_comment_cluster_observability": "Self-hosted in-cluster observability (kube-prometheus-stack: Prometheus + Alertmanager + Grafana) installed on every regional EKS cluster via the Helm installer. enabled: master toggle, ON BY DEFAULT (set false to opt out). Grafana uses native auth (no self sign-up, no anonymous) and is reachable privately via 'gco monitoring open' (kubectl port-forward to a ClusterIP service — no public endpoint; the EKS API is PRIVATE, so a VPN/SSM/bastion path is required). grafana/prometheus/alertmanager.persistence_size: EBS PVC sizes. prometheus.retention: TSDB retention window. grafana.admin_password_rotation_schedule: cron for the in-cluster CronJob that rotates the chart-generated Grafana admin password (default monthly, 04:00 on the 1st). This is complementary to the CloudWatch gco-monitoring stack; see docs/MONITORING.md.",
     "cluster_observability": {
       "enabled": true,
       "grafana": {
         "persistence_size": "10Gi",
-        "admin_user": "admin"
+        "admin_user": "admin",
+        "admin_password_rotation_schedule": "0 4 1 * *"
       },
       "prometheus": {
         "persistence_size": "50Gi",

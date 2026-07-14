@@ -492,6 +492,19 @@ class ConfigLoader:
                     f"string, got {value!r}"
                 )
 
+        # `grafana.admin_password_rotation_schedule`: the cron for the in-cluster
+        # CronJob that rotates the Grafana admin password. Validate the 5-field
+        # cron shape so a typo fails at synth rather than yielding an
+        # un-schedulable CronJob in every region.
+        grafana_ctx = obs_ctx.get("grafana")
+        if isinstance(grafana_ctx, dict) and "admin_password_rotation_schedule" in grafana_ctx:
+            schedule = grafana_ctx["admin_password_rotation_schedule"]
+            if not isinstance(schedule, str) or len(schedule.split()) != 5:
+                raise ConfigValidationError(
+                    "cluster_observability.grafana.admin_password_rotation_schedule must be "
+                    f"a 5-field cron expression string, got {schedule!r}"
+                )
+
         # `alertmanager.enabled` must be a bool if the sub-block carries it.
         alertmanager_ctx = obs_ctx.get("alertmanager")
         if (
@@ -1000,6 +1013,9 @@ class ConfigLoader:
               - admin_user: Grafana admin username; the password is
                 chart-generated in the <release>-grafana Secret, never
                 authored here (default: "admin")
+              - admin_password_rotation_schedule: 5-field cron for the
+                in-cluster CronJob that rotates the chart-generated admin
+                password (default: "0 4 1 * *", monthly)
             - prometheus: Prometheus sub-block
               - persistence_size: EBS PVC size for the Prometheus TSDB
                 (default: "50Gi")
@@ -1010,7 +1026,13 @@ class ConfigLoader:
         """
         default_config: dict[str, Any] = {
             "enabled": True,
-            "grafana": {"persistence_size": "10Gi", "admin_user": "admin"},
+            "grafana": {
+                "persistence_size": "10Gi",
+                "admin_user": "admin",
+                # Monthly (04:00 on the 1st) rotation of the chart-generated
+                # Grafana admin password, run by an in-cluster CronJob.
+                "admin_password_rotation_schedule": "0 4 1 * *",
+            },
             "prometheus": {"persistence_size": "50Gi", "retention": "15d"},
             "alertmanager": {"enabled": True, "persistence_size": "5Gi"},
         }

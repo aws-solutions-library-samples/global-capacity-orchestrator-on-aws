@@ -80,14 +80,31 @@ def _stub(context: dict[str, Any], *, enabled: bool, observability: dict[str, An
 
 
 def test_gate_helper_populates_placeholder_when_enabled() -> None:
-    assert _compute_kubectl_observability_replacements(True) == {
-        "{{CLUSTER_OBSERVABILITY_ENABLED}}": "true"
+    assert _compute_kubectl_observability_replacements(
+        True, grafana_admin_password_rotation_schedule="0 4 1 * *"
+    ) == {
+        "{{CLUSTER_OBSERVABILITY_ENABLED}}": "true",
+        "{{GRAFANA_ADMIN_PASSWORD_ROTATION_SCHEDULE}}": "0 4 1 * *",
     }
 
 
+def test_gate_helper_carries_rotation_schedule_verbatim() -> None:
+    # The configured cron flows straight into the CronJob schedule placeholder.
+    repl = _compute_kubectl_observability_replacements(
+        True, grafana_admin_password_rotation_schedule="15 3 * * 0"
+    )
+    assert repl["{{GRAFANA_ADMIN_PASSWORD_ROTATION_SCHEDULE}}"] == "15 3 * * 0"
+
+
 def test_gate_helper_empty_when_disabled() -> None:
-    # Empty dict -> the manifest keeps its unreplaced placeholder -> skipped.
+    # Empty dict -> the manifests keep their unreplaced placeholders -> skipped.
     assert _compute_kubectl_observability_replacements(False) == {}
+    assert (
+        _compute_kubectl_observability_replacements(
+            False, grafana_admin_password_rotation_schedule="0 4 1 * *"
+        )
+        == {}
+    )
 
 
 # --- chart-enable membership -------------------------------------------------
