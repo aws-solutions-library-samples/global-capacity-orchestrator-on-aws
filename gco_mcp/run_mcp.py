@@ -116,6 +116,7 @@ from tools.capacity import (  # noqa: E402, F401
     reservation_check,
     spot_prices,
 )
+from tools.cluster import cluster_tunnel_command  # noqa: E402, F401
 from tools.config import config_get  # noqa: E402, F401
 from tools.costs import cost_by_region, cost_forecast, cost_summary, cost_trend  # noqa: E402, F401
 from tools.dag import dag_run, dag_validate  # noqa: E402, F401
@@ -475,6 +476,7 @@ __all__ = [
     "chat_inference",
     "check_capacity",
     "cluster_health",
+    "cluster_tunnel_command",
     "config_get",
     "cost_by_region",
     "cost_forecast",
