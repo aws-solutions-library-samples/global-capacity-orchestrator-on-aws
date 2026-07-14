@@ -35,6 +35,7 @@ import base64
 import json
 import logging
 import os
+import re
 from datetime import UTC
 from typing import Any
 
@@ -63,6 +64,17 @@ _eks_client = None
 # CloudFormation response status constants
 SUCCESS = "SUCCESS"
 FAILED = "FAILED"
+
+# Feature-gate placeholders follow an UPPER_SNAKE token convention
+# ({{CLUSTER_OBSERVABILITY_ENABLED}}, {{FSX_FILE_SYSTEM_ID}}, {{VALKEY_ENDPOINT}},
+# ...). A manifest that still contains one *after* substitution belongs to a
+# feature that is turned off, so the file is skipped. The character class is
+# deliberately restricted to A-Z/0-9/_ so the check never matches lower- or
+# mixed-case double-brace tokens that are legitimate *content* in an applied
+# manifest — e.g. Grafana dashboard legend fields ({{gpu}}, {{service}},
+# {{Hostname}}) in the observability dashboard ConfigMaps, which must survive
+# substitution untouched and be applied verbatim.
+_UNRESOLVED_PLACEHOLDER_RE = re.compile(r"\{\{[A-Z0-9_]+\}\}")
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -455,10 +467,16 @@ def apply_manifests(
         for key, value in replacements.items():
             content = content.replace(key, value)
 
-        # Skip files that still have unreplaced placeholders (e.g., FSx manifest when FSx is disabled)
-        if "{{" in content and "}}" in content:
+        # Skip files that still have an unreplaced feature-gate placeholder
+        # (e.g. the FSx manifest when FSx is disabled). Matches only the
+        # UPPER_SNAKE token convention so lower/mixed-case double-brace content
+        # that is meant to be applied verbatim (Grafana dashboard legends) is
+        # left alone. See _UNRESOLVED_PLACEHOLDER_RE.
+        unresolved = _UNRESOLVED_PLACEHOLDER_RE.search(content)
+        if unresolved:
             logger.info(
-                f"Skipping {filename} - contains unreplaced placeholders (feature not enabled)"
+                f"Skipping {filename} - contains unreplaced placeholder "
+                f"{unresolved.group(0)} (feature not enabled)"
             )
             skipped.append(f"{filename}:unreplaced-placeholders")
             continue
@@ -839,6 +857,27 @@ def apply_manifests(
                         group = "keda.sh"
                         version = api_version.split("/")[-1] if "/" in api_version else "v1alpha1"
                         plural = "scaledobjects"
+                        try:
+                            custom_api.create_namespaced_custom_object(
+                                group, version, namespace, plural, body=doc
+                            )
+                        except ApiException as e:
+                            if e.status == 409:
+                                custom_api.patch_namespaced_custom_object(
+                                    group, version, namespace, plural, name, body=doc
+                                )
+                            else:
+                                raise
+
+                    elif kind in ("ServiceMonitor", "PodMonitor"):
+                        # Prometheus Operator CRDs registered by the
+                        # kube-prometheus-stack chart, so these land in the
+                        # post-Helm pass. GCO uses ServiceMonitors for
+                        # components fronted by a Service (schedulers, DCGM)
+                        # and PodMonitors for its own multi-replica services.
+                        group = "monitoring.coreos.com"
+                        version = api_version.split("/")[-1] if "/" in api_version else "v1"
+                        plural = "servicemonitors" if kind == "ServiceMonitor" else "podmonitors"
                         try:
                             custom_api.create_namespaced_custom_object(
                                 group, version, namespace, plural, body=doc
