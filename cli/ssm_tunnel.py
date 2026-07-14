@@ -69,10 +69,7 @@ def endpoint_host(endpoint: str) -> str:
     lowercases the host — EKS endpoint IDs are case-sensitive in the server
     certificate SAN, and this value becomes kubectl's ``--tls-server-name``.
     """
-    if "://" in endpoint:
-        netloc = urlparse(endpoint).netloc
-    else:
-        netloc = endpoint
+    netloc = urlparse(endpoint).netloc if "://" in endpoint else endpoint
     # Strip any userinfo and :port, preserving original case.
     host = netloc.split("@")[-1].split(":")[0]
     if not host:

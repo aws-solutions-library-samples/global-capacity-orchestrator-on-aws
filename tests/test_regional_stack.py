@@ -140,6 +140,23 @@ class MockConfigLoader:
             "enabled_regions": [],
         }
 
+    def get_cluster_observability_config(self):
+        # Mirrors the on-by-default cdk.json cluster_observability defaults so
+        # regional synth exercises the real (enabled) observability path.
+        return {
+            "enabled": True,
+            "grafana": {
+                "persistence_size": "10Gi",
+                "admin_user": "admin",
+                "admin_password_rotation_schedule": "0 4 1 * *",
+            },
+            "prometheus": {"persistence_size": "50Gi", "retention": "15d"},
+            "alertmanager": {"enabled": True, "persistence_size": "5Gi"},
+        }
+
+    def get_cluster_observability_enabled(self):
+        return bool(self.get_cluster_observability_config()["enabled"])
+
 
 class TestRegionalStackImports:
     """Tests for regional stack imports and class structure."""
@@ -2429,7 +2446,10 @@ class TestRegionalStackVolcanoImageMirror:
         """No context -> no registry override, and (regression) no PTC resources."""
         stack = self._build(cdk.App())
         assert stack.volcano_mirror_registry is None
-        assert stack._helm_chart_value_overrides() == {}
+        # Observability is on by default, so the override map carries its
+        # kube-prometheus-stack entry; this suite only cares that the *volcano*
+        # image-registry override is absent when the mirror is off.
+        assert "volcano" not in stack._helm_chart_value_overrides()
         template = assertions.Template.from_stack(stack)
         # The mirror approach creates no pull-through cache / registry policy.
         template.resource_count_is("AWS::ECR::PullThroughCacheRule", 0)

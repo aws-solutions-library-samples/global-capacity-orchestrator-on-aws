@@ -268,6 +268,7 @@ class TestKubernetesManifests:
             "resource.k8s.io/v1beta1",
             "apiregistration.k8s.io/v1",
             "keda.sh/v1alpha1",
+            "monitoring.coreos.com/v1",
         }
 
         for filepath in manifest_files:
