@@ -121,6 +121,9 @@ class ConfigLoader:
         # Validate analytics environment config (optional block)
         self._validate_analytics_environment_config()
 
+        # Validate cluster observability config (optional block)
+        self._validate_cluster_observability_config()
+
         # Validate historical capacity surface config (optional block)
         self._validate_capacity_history_config()
 
@@ -445,6 +448,62 @@ class ConfigLoader:
                     f"analytics_environment.{sub_block}.removal_policy must be one of "
                     f"{sorted(valid_removal_policies)}, got {removal_policy!r}"
                 )
+
+    def _validate_cluster_observability_config(self) -> None:
+        """Validate the optional cluster_observability block in cdk.json.
+
+        The block is entirely optional; absence means the on-by-default
+        defaults apply and nothing needs validating. When present, we check:
+
+        - ``enabled``: must be a bool if present (defaults to True via merge —
+          in-cluster observability is on unless explicitly disabled).
+        - ``grafana``/``prometheus``/``alertmanager`` sub-block ``persistence_size``
+          and ``prometheus.retention``: must be non-empty strings if present
+          (they are passed verbatim to Helm chart values as Kubernetes
+          quantity / duration strings).
+        - ``alertmanager.enabled``: must be a bool if present.
+        """
+        obs_ctx = self.app.node.try_get_context("cluster_observability")
+        if not isinstance(obs_ctx, dict):
+            # Block is absent or malformed — defaults apply, nothing to validate.
+            return
+
+        if "enabled" in obs_ctx and not isinstance(obs_ctx["enabled"], bool):
+            raise ConfigValidationError(
+                f"cluster_observability.enabled must be a bool, got "
+                f"{type(obs_ctx['enabled']).__name__}: {obs_ctx['enabled']!r}"
+            )
+
+        # Non-empty-string checks for the size / retention knobs.
+        string_fields = (
+            ("grafana", "persistence_size"),
+            ("prometheus", "persistence_size"),
+            ("prometheus", "retention"),
+            ("alertmanager", "persistence_size"),
+        )
+        for sub_block, field in string_fields:
+            sub_ctx = obs_ctx.get(sub_block)
+            if not isinstance(sub_ctx, dict) or field not in sub_ctx:
+                continue
+            value = sub_ctx[field]
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigValidationError(
+                    f"cluster_observability.{sub_block}.{field} must be a non-empty "
+                    f"string, got {value!r}"
+                )
+
+        # `alertmanager.enabled` must be a bool if the sub-block carries it.
+        alertmanager_ctx = obs_ctx.get("alertmanager")
+        if (
+            isinstance(alertmanager_ctx, dict)
+            and "enabled" in alertmanager_ctx
+            and not isinstance(alertmanager_ctx["enabled"], bool)
+        ):
+            raise ConfigValidationError(
+                f"cluster_observability.alertmanager.enabled must be a bool, got "
+                f"{type(alertmanager_ctx['enabled']).__name__}: "
+                f"{alertmanager_ctx['enabled']!r}"
+            )
 
     def _validate_capacity_history_config(self) -> None:
         """Validate the optional ``historical`` block in cdk.json.
@@ -916,6 +975,67 @@ class ConfigLoader:
         merged dict.
         """
         return bool(self.get_analytics_config()["enabled"])
+
+    def get_cluster_observability_config(self) -> dict[str, Any]:
+        """Get the in-cluster observability configuration.
+
+        Returns the fully-merged cluster_observability block from cdk.json
+        layered on top of the defaults below. Sub-blocks (``grafana``,
+        ``prometheus``, ``alertmanager``) are deep-merged so a user who
+        overrides a single nested key (e.g. ``prometheus.retention``) does not
+        inadvertently wipe the sub-block's other defaults — mirroring the
+        nested-merge pattern used by ``get_analytics_config``.
+
+        Unlike most optional features, this one is **on by default**: a stock
+        deployment installs kube-prometheus-stack on every regional cluster.
+        Operators opt out by setting ``cluster_observability.enabled = false``.
+
+        Returns:
+            Cluster observability configuration dictionary with the keys:
+            - enabled: Whether kube-prometheus-stack is installed per region
+              (default: True)
+            - grafana: Grafana sub-block
+              - persistence_size: EBS PVC size for Grafana's user database
+                and dashboards (default: "10Gi")
+              - admin_user: Grafana admin username; the password is
+                chart-generated in the <release>-grafana Secret, never
+                authored here (default: "admin")
+            - prometheus: Prometheus sub-block
+              - persistence_size: EBS PVC size for the Prometheus TSDB
+                (default: "50Gi")
+              - retention: Prometheus retention window (default: "15d")
+            - alertmanager: Alertmanager sub-block
+              - enabled: Whether Alertmanager is deployed (default: True)
+              - persistence_size: EBS PVC size for Alertmanager (default: "5Gi")
+        """
+        default_config: dict[str, Any] = {
+            "enabled": True,
+            "grafana": {"persistence_size": "10Gi", "admin_user": "admin"},
+            "prometheus": {"persistence_size": "50Gi", "retention": "15d"},
+            "alertmanager": {"enabled": True, "persistence_size": "5Gi"},
+        }
+        obs_ctx = self.app.node.try_get_context("cluster_observability")
+        obs_config: dict[str, Any] = obs_ctx if isinstance(obs_ctx, dict) else {}
+        merged_config: dict[str, Any] = {**default_config, **obs_config}
+
+        # Deep-merge each nested sub-block so a partial override does not
+        # drop the other defaults in the same sub-block.
+        for sub_block in ("grafana", "prometheus", "alertmanager"):
+            override = obs_config.get(sub_block)
+            if isinstance(override, dict):
+                default_sub = cast(dict[str, Any], default_config[sub_block])
+                merged_config[sub_block] = {**default_sub, **override}
+
+        return merged_config
+
+    def get_cluster_observability_enabled(self) -> bool:
+        """Return whether in-cluster observability is enabled (default True).
+
+        Thin wrapper around ``get_cluster_observability_config()["enabled"]``
+        so call sites (the regional stack's chart-enable and value-override
+        methods, the CLI) do not have to index into the merged dict.
+        """
+        return bool(self.get_cluster_observability_config()["enabled"])
 
     def get_capacity_history_config(self) -> dict[str, Any]:
         """Get the optional historical capacity surface configuration.

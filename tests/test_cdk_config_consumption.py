@@ -192,6 +192,7 @@ def test_discovery_finds_expected_blocks() -> None:
         "valkey",
         "aurora_pgvector",
         "analytics_environment",
+        "cluster_observability",
         "helm",
         "inference_monitor",
         "mcp_server",

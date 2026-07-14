@@ -262,6 +262,23 @@
       }
     },
 
+    "_comment_cluster_observability": "Self-hosted in-cluster observability (kube-prometheus-stack: Prometheus + Alertmanager + Grafana) installed on every regional EKS cluster via the Helm installer. enabled: master toggle, ON BY DEFAULT (set false to opt out). Grafana uses native auth (no self sign-up, no anonymous) and is reachable privately via 'gco monitoring open' (kubectl port-forward to a ClusterIP service — no public endpoint; the EKS API is PRIVATE, so a VPN/SSM/bastion path is required). grafana/prometheus/alertmanager.persistence_size: EBS PVC sizes. prometheus.retention: TSDB retention window. This is complementary to the CloudWatch gco-monitoring stack; see docs/MONITORING.md.",
+    "cluster_observability": {
+      "enabled": true,
+      "grafana": {
+        "persistence_size": "10Gi",
+        "admin_user": "admin"
+      },
+      "prometheus": {
+        "persistence_size": "50Gi",
+        "retention": "15d"
+      },
+      "alertmanager": {
+        "enabled": true,
+        "persistence_size": "5Gi"
+      }
+    },
+
     "_comment_helm": "Helm chart installation toggles. Each key maps to one or more charts in lambda/helm-installer/charts.yaml; flip enabled=false to skip a chart. Charts install in dependency order with kueue last (its mutating webhook intercepts every Job/Deployment). Cross-scheduler coexistence is documented in docs/SCHEDULERS.md.",
     "helm": {
       "_comment_keda": "KEDA — Kubernetes Event-Driven Autoscaling. MANDATORY platform component (no toggle): it backs GCO's built-in SQS queue processor and is the metrics bridge (keda-metrics-apiserver serves external.metrics.k8s.io) that lets autoscalers consume GPU/CloudWatch metrics. KEDA is always installed and is intentionally not listed below — see docs/KEDA.md.",
