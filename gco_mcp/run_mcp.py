@@ -403,6 +403,12 @@ if _DESTRUCTIVE_FLAG_ON:
     if hasattr(_q_mod, "cancel_queue_job"):
         globals()["cancel_queue_job"] = _q_mod.cancel_queue_job
 
+    from tools import monitoring as _mon_mod  # noqa: E402
+
+    _importlib.reload(_mon_mod)
+    if hasattr(_mon_mod, "monitoring_user_remove"):
+        globals()["monitoring_user_remove"] = _mon_mod.monitoring_user_remove
+
 # tools.models is reloaded if either the destructive flag (delete_model)
 # or the model-upload flag (models_upload) is set, so do it once here
 # regardless of which (or both) flipped.
