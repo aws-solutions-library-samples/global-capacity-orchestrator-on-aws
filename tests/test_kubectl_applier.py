@@ -368,6 +368,96 @@ class TestPrometheusOperatorCRDs:
         assert patch_args[4] == "gco-kueue"
 
 
+class TestCronJobApply:
+    """batch/v1 CronJob is applied via BatchV1Api.
+
+    Regression guard mirroring the ServiceMonitor/PodMonitor fix: the Grafana
+    admin-password rotation CronJob (observability post-Helm pass) had no
+    dedicated apply branch, so it fell through to the "unsupported kind" skip
+    and was never created — its RBAC applied but the rotation CronJob did not.
+    Caught in live us-east-1 verification.
+    """
+
+    def test_cronjob_applied_via_batch_v1(self, handler_module, tmp_path):
+        (tmp_path / "post-helm-grafana-credential-rotation.yaml").write_text(
+            yaml.dump(
+                {
+                    "apiVersion": "batch/v1",
+                    "kind": "CronJob",
+                    "metadata": {
+                        "name": "gco-grafana-admin-password-rotation",
+                        "namespace": "monitoring",
+                    },
+                    "spec": {"schedule": "0 4 1 * *"},
+                }
+            )
+        )
+
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch("handler.client") as mock_client,
+        ):
+            mock_client.CoreV1Api.return_value = MagicMock()
+            mock_client.AppsV1Api.return_value = MagicMock()
+            mock_client.RbacAuthorizationV1Api.return_value = MagicMock()
+            mock_client.NetworkingV1Api.return_value = MagicMock()
+            mock_client.CustomObjectsApi.return_value = MagicMock()
+            mock_batch = MagicMock()
+            mock_client.BatchV1Api.return_value = mock_batch
+
+            result = handler_module.apply_manifests(
+                "c", "us-east-1", str(tmp_path), {}, post_helm=True
+            )
+
+        assert result["AppliedCount"] == 1
+        assert result["FailedCount"] == 0
+        assert "CronJob/gco-grafana-admin-password-rotation" not in result["Skipped"]
+        mock_batch.create_namespaced_cron_job.assert_called_once()
+        assert mock_batch.create_namespaced_cron_job.call_args.args[0] == "monitoring"
+
+    def test_cronjob_patched_on_conflict(self, handler_module, tmp_path):
+        """A 409 on create falls back to patch (idempotent re-apply)."""
+        from kubernetes.client.rest import ApiException
+
+        (tmp_path / "post-helm-grafana-credential-rotation.yaml").write_text(
+            yaml.dump(
+                {
+                    "apiVersion": "batch/v1",
+                    "kind": "CronJob",
+                    "metadata": {
+                        "name": "gco-grafana-admin-password-rotation",
+                        "namespace": "monitoring",
+                    },
+                    "spec": {"schedule": "0 4 1 * *"},
+                }
+            )
+        )
+
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch("handler.client") as mock_client,
+        ):
+            mock_client.CoreV1Api.return_value = MagicMock()
+            mock_client.AppsV1Api.return_value = MagicMock()
+            mock_client.RbacAuthorizationV1Api.return_value = MagicMock()
+            mock_client.NetworkingV1Api.return_value = MagicMock()
+            mock_client.CustomObjectsApi.return_value = MagicMock()
+            mock_batch = MagicMock()
+            mock_batch.create_namespaced_cron_job.side_effect = ApiException(status=409)
+            mock_client.BatchV1Api.return_value = mock_batch
+
+            result = handler_module.apply_manifests(
+                "c", "us-east-1", str(tmp_path), {}, post_helm=True
+            )
+
+        assert result["AppliedCount"] == 1
+        assert result["FailedCount"] == 0
+        mock_batch.patch_namespaced_cron_job.assert_called_once()
+        patch_args = mock_batch.patch_namespaced_cron_job.call_args.args
+        assert patch_args[0] == "gco-grafana-admin-password-rotation"
+        assert patch_args[1] == "monitoring"
+
+
 class TestPersistentVolumeHandling:
     """Tests for PV smart recreate logic."""
 

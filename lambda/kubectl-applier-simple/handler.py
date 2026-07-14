@@ -567,6 +567,18 @@ def apply_manifests(
                             else:
                                 raise
 
+                    elif kind == "CronJob":
+                        # batch/v1 CronJob (e.g. the Grafana admin-password
+                        # rotation job in the observability post-Helm pass).
+                        batch_v1 = client.BatchV1Api()
+                        try:
+                            batch_v1.create_namespaced_cron_job(namespace, body=doc)
+                        except ApiException as e:
+                            if e.status == 409:
+                                batch_v1.patch_namespaced_cron_job(name, namespace, body=doc)
+                            else:
+                                raise
+
                     elif kind == "PodDisruptionBudget":
                         policy_v1 = client.PolicyV1Api()
                         try:
