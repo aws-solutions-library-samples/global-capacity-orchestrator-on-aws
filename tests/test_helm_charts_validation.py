@@ -412,52 +412,20 @@ class TestLiveChartsOnline:
         assert any("99.99.99" in e for e in errors)
 
 
-# ── transient-network retry guard (offline) ──────────────────────────────────
+# ── fixed-count network retry guard (offline) ────────────────────────────────
 #
-# These pin the behavior added to ride out intermittent registry blips (the
-# kind that used to force a manual rerun of integration:helm:charts-valid)
-# without masking a genuinely bad pin. All offline: _run, time.sleep and
-# random.uniform are monkeypatched so nothing sleeps or touches the network.
-
-
-class TestIsTransientError:
-    @pytest.mark.parametrize(
-        "stderr",
-        [
-            "Error: dial tcp 140.82.113.3:443: i/o timeout",
-            'Get "https://ghcr.io/v2/": net/http: TLS handshake timeout',
-            "Error: failed to fetch https://.../index.yaml : 503 Service Unavailable",
-            "Error: unexpected status from GET request: 429 Too Many Requests",
-            "read tcp 10.0.0.2:5000->1.2.3.4:443: connection reset by peer",
-            "Error: lookup registry.k8s.io on 10.0.0.2:53: no such host",
-            "Error: context deadline exceeded",
-            "timeout: command exceeded 120s",
-            "Error: Get ...: net/http: request canceled (Client.Timeout exceeded)",
-        ],
-    )
-    def test_transient_signatures_detected(self, stderr: str) -> None:
-        assert validator._is_transient_error(stderr) is True
-
-    @pytest.mark.parametrize(
-        "stderr",
-        [
-            'Error: chart "keda" matching 99.99.99 not found in kedacore index',
-            "Error: no cached repo found. (try 'helm repo update')",
-            "Error: failed to render: template: parse error at line 3",
-            "Error: values do not meet the specifications of the schema",
-            "",
-        ],
-    )
-    def test_deterministic_failures_not_transient(self, stderr: str) -> None:
-        assert validator._is_transient_error(stderr) is False
+# These pin the retry behavior added to ride out intermittent registry blips
+# (the kind that used to force a manual rerun of integration:helm:charts-valid):
+# a network-touching helm call is retried a fixed number of times and the first
+# success wins. All offline: _run and time.sleep are monkeypatched so nothing
+# sleeps or touches the network.
 
 
 class TestRunWithRetry:
     @pytest.fixture(autouse=True)
     def _no_real_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Retry tests must never actually sleep or jitter.
+        # Retry tests must never actually sleep.
         monkeypatch.setattr(validator.time, "sleep", lambda *_a, **_k: None)
-        monkeypatch.setattr(validator.random, "uniform", lambda *_a, **_k: 0.0)
 
     def _script(self, monkeypatch: pytest.MonkeyPatch, results: list[tuple]) -> dict:
         """Make validator._run return successive (rc, out, err) tuples, counting calls.
@@ -481,65 +449,45 @@ class TestRunWithRetry:
         assert rc == 0 and out == "ok"
         assert calls["n"] == 1
 
-    def test_transient_then_success_recovers(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The whole point: a blip that clears on a later attempt returns success
-        # rather than propagating a failure that would fail CI.
+    def test_first_success_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Any single successful attempt counts as success, no matter how many
+        # attempts failed before it.
         calls = self._script(
             monkeypatch,
-            [(1, "", "i/o timeout"), (1, "", "TLS handshake timeout"), (0, "ok", "")],
+            [(1, "", "boom"), (1, "", "still boom"), (0, "ok", "")],
         )
-        rc, _out, _err = validator._run_with_retry(["helm", "x"], {})
+        rc, _out, _err = validator._run_with_retry(["helm", "x"], {}, attempts=4)
         assert rc == 0
-        assert calls["n"] == 3
+        assert calls["n"] == 3  # stopped as soon as it succeeded
 
-    def test_persistent_transient_uses_transient_budget(
+    def test_retries_exactly_attempts_times_then_gives_up(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        calls = self._script(monkeypatch, [(1, "", "connection reset by peer")])
-        rc, _out, _err = validator._run_with_retry(
-            ["helm", "x"], {}, attempts=3, transient_attempts=5
-        )
+        # A persistent failure is attempted exactly `attempts` times (regardless
+        # of the failure text) and then the last result is returned.
+        calls = self._script(monkeypatch, [(1, "", "whatever")])
+        rc, _out, _err = validator._run_with_retry(["helm", "x"], {}, attempts=4)
         assert rc == 1
-        assert calls["n"] == 5  # exhausts the higher transient budget
-
-    def test_persistent_non_transient_uses_base_budget(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # A genuinely bad pin isn't transient, so it fails fast on the base
-        # budget instead of burning the full transient retry allowance.
-        calls = self._script(monkeypatch, [(1, "", "chart version 9.9.9 not found")])
-        rc, _out, _err = validator._run_with_retry(
-            ["helm", "x"], {}, attempts=3, transient_attempts=5
-        )
-        assert rc == 1
-        assert calls["n"] == 3
-
-    def test_timeout_is_treated_as_transient(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # _run reports a subprocess timeout as (-1, "", "timeout: ..."); that
-        # must get the transient budget so a stalled pull is retried.
-        calls = self._script(monkeypatch, [(-1, "", "timeout: command exceeded 120s")])
-        validator._run_with_retry(["helm", "x"], {}, attempts=2, transient_attempts=4)
         assert calls["n"] == 4
 
+    def test_attempts_one_means_no_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._script(monkeypatch, [(1, "", "boom")])
+        validator._run_with_retry(["helm", "x"], {}, attempts=1)
+        assert calls["n"] == 1
+
     def test_backoff_is_exponential(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._script(monkeypatch, [(1, "", "i/o timeout")])
+        self._script(monkeypatch, [(1, "", "boom")])
         sleeps: list[float] = []
         monkeypatch.setattr(validator.time, "sleep", lambda s: sleeps.append(s))
-        monkeypatch.setattr(validator.random, "uniform", lambda *_a, **_k: 0.0)
-        validator._run_with_retry(
-            ["helm", "x"], {}, transient_attempts=4, base_delay=2.0, max_delay=100.0
-        )
-        # 3 sleeps between 4 attempts: 2, 4, 8 (jitter stubbed to 0).
+        validator._run_with_retry(["helm", "x"], {}, attempts=4, base_delay=2.0, max_delay=100.0)
+        # 3 sleeps between 4 attempts: 2, 4, 8.
         assert sleeps == [2.0, 4.0, 8.0]
 
     def test_backoff_capped_at_max_delay(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._script(monkeypatch, [(1, "", "i/o timeout")])
+        self._script(monkeypatch, [(1, "", "boom")])
         sleeps: list[float] = []
         monkeypatch.setattr(validator.time, "sleep", lambda s: sleeps.append(s))
-        monkeypatch.setattr(validator.random, "uniform", lambda *_a, **_k: 0.0)
-        validator._run_with_retry(
-            ["helm", "x"], {}, transient_attempts=5, base_delay=10.0, max_delay=15.0
-        )
+        validator._run_with_retry(["helm", "x"], {}, attempts=5, base_delay=10.0, max_delay=15.0)
         assert sleeps == [10.0, 15.0, 15.0, 15.0]
 
 

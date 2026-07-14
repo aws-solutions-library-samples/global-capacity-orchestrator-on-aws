@@ -28,11 +28,10 @@ Two layers, matching what each CI stage can afford:
         the values ``charts.yaml`` ships.
 
     Every network-touching helm call (repo add/update, show chart, template)
-    is issued through ``_run_with_retry``, which retries transient registry
-    failures — timeouts, connection resets, TLS handshake errors, 5xx/429 —
-    with exponential backoff. An intermittent blip is ridden out in-process
-    instead of forcing a manual job rerun, while a genuinely bad pin fails on
-    every attempt and still surfaces.
+    is issued through ``_run_with_retry``, which retries a fixed number of
+    times with exponential backoff and takes the first success. An intermittent
+    registry blip is ridden out in-process instead of forcing a manual job
+    rerun, while a genuinely bad pin fails on every attempt and still surfaces.
 
 By default *every* chart in the file is validated, including entries with
 ``enabled: false``: those are toggled on via ``cdk.json``, so their pinned
@@ -70,7 +69,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
-import random
 import re
 import shutil
 import subprocess  # nosec B404 - used only to invoke the pinned `helm` binary with fixed argv
@@ -260,121 +258,45 @@ def _run(cmd: list[str], env: dict[str, str], *, timeout: int = 120) -> tuple[in
     return proc.returncode, proc.stdout, proc.stderr
 
 
-# Substrings that mark a helm failure as a transient network / registry blip
-# rather than a genuinely bad pin. Matched case-insensitively against helm's
-# stderr. A mistyped chart name or a version that never shipped fails
-# deterministically with a "not found" / "no chart version" style message that
-# matches none of these, so it is not granted the extra transient retries and
-# still surfaces quickly. Keep this list broad: misclassifying a transient
-# error as permanent costs a spurious CI failure and a manual rerun — exactly
-# what this guard exists to prevent — whereas misclassifying a permanent error
-# as transient only costs a few seconds of backoff before it fails anyway.
-_TRANSIENT_ERROR_SIGNATURES: tuple[str, ...] = (
-    "timeout",
-    "timed out",
-    "deadline exceeded",
-    "connection refused",
-    "connection reset",
-    "broken pipe",
-    "network is unreachable",
-    "no route to host",
-    "i/o timeout",
-    "dial tcp",
-    "eof",
-    "tls handshake",
-    "handshake failure",
-    "temporary failure in name resolution",
-    "no such host",
-    "could not resolve host",
-    "server misbehaving",
-    "service unavailable",
-    "bad gateway",
-    "gateway timeout",
-    "too many requests",
-    "internal server error",
-    "temporarily unavailable",
-    "try again",
-    "request canceled",
-    "client timeout",
-)
-
-
-def _is_transient_error(stderr: str) -> bool:
-    """Heuristic: does this helm stderr look like a transient network blip?
-
-    Registries (ghcr.io, public.ecr.aws, artifacthub-backed HTTP repos)
-    intermittently return timeouts, connection resets, TLS handshake failures
-    and 5xx/429 responses. Those clear on their own given a moment, so they are
-    worth retrying harder; a deterministic bad-pin failure is not.
-    """
-    low = (stderr or "").lower()
-    return any(sig in low for sig in _TRANSIENT_ERROR_SIGNATURES)
-
-
-def _backoff_delay(attempt: int, *, base_delay: float, max_delay: float) -> float:
-    """Exponential backoff (``base_delay * 2**(attempt-1)``), capped, plus jitter.
-
-    ``attempt`` is the 1-based number of the attempt that just failed. Jitter
-    spreads retries from concurrent CI runs so they don't stampede a registry
-    that is only just coming back.
-    """
-    delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
-    # Full jitter on top of the capped delay. `random` is fine here: this only
-    # perturbs a retry sleep — nothing security-sensitive depends on it.
-    delay += random.uniform(0, min(1.0, delay / 4))  # nosec B311
-    return delay
-
-
 def _run_with_retry(
     cmd: list[str],
     env: dict[str, str],
     *,
-    attempts: int = 3,
-    transient_attempts: int = 5,
+    attempts: int = 4,
     base_delay: float = 2.0,
     max_delay: float = 20.0,
     timeout: int = 120,
     verbose: bool = False,
     description: str = "",
 ) -> tuple[int, str, str]:
-    """Run a network-touching helm command, retrying transient failures with backoff.
+    """Run a network-touching helm command up to ``attempts`` times; first success wins.
 
-    Every failure is retried up to ``attempts`` times; failures whose stderr
-    looks like a transient network / registry blip (see ``_is_transient_error``)
-    are retried further, up to ``transient_attempts``. Between tries we sleep an
-    exponentially growing, jittered delay (``base_delay`` doubling each round,
-    capped at ``max_delay``).
+    The command is retried on any non-zero exit, regardless of why it failed:
+    the first attempt that succeeds (rc 0) is returned immediately, and if none
+    do, the last failure is returned. Between attempts we sleep an exponentially
+    growing delay (``base_delay`` doubling each round, capped at ``max_delay``)
+    to give a blipping registry a moment to recover.
 
-    This is the guard against the intermittent registry timeouts that otherwise
-    force a manual rerun of the ``integration:helm:charts-valid`` job: a blip is
-    ridden out in-process, while a genuinely bad pin fails on every attempt and
-    still surfaces (just a few seconds later). A subprocess timeout is reported
-    by ``_run`` as ``"timeout: ..."``, which the classifier treats as transient,
-    so a stalled pull is retried too.
+    This is the guard against intermittent registry failures (timeouts, resets,
+    5xx) that otherwise force a manual rerun of the ``integration:helm:charts-valid``
+    job. A genuinely bad pin fails on every attempt and still surfaces, just a
+    few seconds later.
     """
     result: tuple[int, str, str] = (1, "", "")
-    attempt = 0
-    while True:
-        attempt += 1
+    for attempt in range(1, attempts + 1):
         result = _run(cmd, env, timeout=timeout)
-        rc, _out, err = result
-        if rc == 0:
+        if result[0] == 0:
             return result
-
-        transient = _is_transient_error(err)
-        limit = transient_attempts if transient else attempts
-        if attempt >= limit:
-            return result
-
-        delay = _backoff_delay(attempt, base_delay=base_delay, max_delay=max_delay)
-        if verbose:
-            label = description or " ".join(cmd)
-            kind = "transient" if transient else "error"
-            print(
-                f"  retry {attempt}/{limit - 1} after {kind} failure "
-                f"(sleep {delay:.1f}s) — {label}: {_tail(err, 200)}"
-            )
-        time.sleep(delay)
+        if attempt < attempts:
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            if verbose:
+                label = description or " ".join(cmd)
+                print(
+                    f"  attempt {attempt}/{attempts} failed, retrying in "
+                    f"{delay:.1f}s — {label}: {_tail(result[2], 200)}"
+                )
+            time.sleep(delay)
+    return result
 
 
 def _helm_env(helm_home: Path) -> dict[str, str]:
