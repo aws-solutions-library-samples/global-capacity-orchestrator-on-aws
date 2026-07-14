@@ -22,6 +22,7 @@ import sys
 from typing import Any
 
 import click
+import requests
 
 from ..config import GCOConfig
 from ..output import get_output_formatter
@@ -286,3 +287,157 @@ def _exec_port_forward(cmd: list[str]) -> None:
     subprocess.run(
         cmd, check=False
     )  # nosemgrep: dangerous-subprocess-use-audit - argv built by build_port_forward_command; list form, no shell=True
+
+
+# ---------------------------------------------------------------------------
+# users subgroup — Grafana native users over the admin HTTP API
+# ---------------------------------------------------------------------------
+
+
+def _grafana_conn_options(func: Any) -> Any:
+    """Shared --grafana-url / --admin-user / --admin-password options."""
+    from ..monitoring_user_mgmt import DEFAULT_GRAFANA_URL
+
+    func = click.option(
+        "--grafana-url",
+        default=DEFAULT_GRAFANA_URL,
+        show_default=True,
+        help="Grafana base URL (reachable via `gco monitoring open`).",
+    )(func)
+    func = click.option(
+        "--admin-user",
+        help="Grafana admin username (default: read from the Grafana Secret).",
+    )(func)
+    func = click.option(
+        "--admin-password",
+        envvar="GCO_GRAFANA_ADMIN_PASSWORD",
+        help=(
+            "Grafana admin password (also $GCO_GRAFANA_ADMIN_PASSWORD; "
+            "default: read from the Grafana Secret)."
+        ),
+    )(func)
+    return func
+
+
+def _resolve_grafana_auth(admin_user: str | None, admin_password: str | None) -> tuple[str, str]:
+    """Return ``(user, password)`` from the flags, else from the Grafana Secret."""
+    if admin_password:
+        return (admin_user or "admin", admin_password)
+    from ..monitoring_user_mgmt import read_grafana_admin_credentials
+
+    return read_grafana_admin_credentials()
+
+
+@monitoring.group("users")
+@pass_config
+def users_cmd(config: Any) -> None:
+    """Manage Grafana users via the admin API (over `gco monitoring open`)."""
+
+
+@users_cmd.command("add")
+@click.option("--username", required=True, help="Grafana login for the new user.")
+@click.option("--email", help="Email address for the new user (optional).")
+@click.option("--password", help="Set this password. Mutually exclusive with --generate-password.")
+@click.option(
+    "--generate-password",
+    is_flag=True,
+    help="Generate a strong random password and print it once.",
+)
+@_grafana_conn_options
+@pass_config
+def users_add(
+    config: Any,
+    username: str,
+    email: str | None,
+    password: str | None,
+    generate_password: bool,
+    grafana_url: str,
+    admin_user: str | None,
+    admin_password: str | None,
+) -> None:
+    """Create a Grafana user via the admin HTTP API."""
+    from ..monitoring_user_mgmt import create_user
+    from ..monitoring_user_mgmt import generate_password as _gen
+
+    formatter = get_output_formatter(config)
+    if password and generate_password:
+        formatter.print_error("--password and --generate-password are mutually exclusive")
+        sys.exit(1)
+    if not password and not generate_password:
+        formatter.print_error("Pass --password or --generate-password")
+        sys.exit(1)
+
+    final_password = password or _gen()
+    try:
+        auth = _resolve_grafana_auth(admin_user, admin_password)
+        user_id = create_user(
+            grafana_url, auth, login=username, password=final_password, email=email
+        )
+    except (requests.RequestException, RuntimeError, ValueError) as exc:
+        formatter.print_error(f"Failed to create Grafana user {username!r}: {exc}")
+        sys.exit(1)
+
+    formatter.print_success(f"Created Grafana user {username!r} (id={user_id})")
+    if generate_password:
+        formatter.print_info(f"Generated password (printed exactly once): {final_password}")
+
+
+@users_cmd.command("list")
+@click.option("--as-json", "as_json", is_flag=True, help="Emit JSON instead of a table.")
+@_grafana_conn_options
+@pass_config
+def users_list(
+    config: Any,
+    as_json: bool,
+    grafana_url: str,
+    admin_user: str | None,
+    admin_password: str | None,
+) -> None:
+    """List Grafana organisation users."""
+    from ..monitoring_user_mgmt import list_users
+
+    formatter = get_output_formatter(config)
+    try:
+        auth = _resolve_grafana_auth(admin_user, admin_password)
+        users = list_users(grafana_url, auth)
+    except (requests.RequestException, RuntimeError, ValueError) as exc:
+        formatter.print_error(f"Failed to list Grafana users: {exc}")
+        sys.exit(1)
+
+    if as_json:
+        import json
+
+        print(json.dumps(users, indent=2))
+        return
+    formatter.print(users)
+
+
+@users_cmd.command("remove")
+@click.option("--username", required=True, help="Grafana login/email to remove.")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@_grafana_conn_options
+@pass_config
+def users_remove(
+    config: Any,
+    username: str,
+    yes: bool,
+    grafana_url: str,
+    admin_user: str | None,
+    admin_password: str | None,
+) -> None:
+    """Delete a Grafana user by login or email."""
+    from ..monitoring_user_mgmt import delete_user, lookup_user_id
+
+    formatter = get_output_formatter(config)
+    if not yes:
+        click.confirm(f"Delete Grafana user '{username}'?", abort=True)
+
+    try:
+        auth = _resolve_grafana_auth(admin_user, admin_password)
+        user_id = lookup_user_id(grafana_url, auth, username)
+        delete_user(grafana_url, auth, user_id)
+    except (requests.RequestException, RuntimeError, ValueError) as exc:
+        formatter.print_error(f"Failed to remove Grafana user {username!r}: {exc}")
+        sys.exit(1)
+
+    formatter.print_success(f"Deleted Grafana user {username!r}")
