@@ -22,6 +22,8 @@ from typing import Any
 
 import pytest
 import yaml
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.regional_stack import (
@@ -174,6 +176,96 @@ def test_node_exporter_tolerates_accelerator_taints(valid_cdk_context) -> None:
     keys = {t.get("key") for t in tolerations}
     assert "nvidia.com/gpu" in keys
     assert "aws.amazon.com/neuron" in keys
+
+
+# --- property: chart + gp3 StorageClass invariant (CP-2) ---------------------
+
+
+# The test deep-copies valid_cdk_context before mutating it, so the shared
+# function-scoped fixture is never corrupted across generated inputs.
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    enabled=st.booleans(),
+    regions=st.lists(
+        st.sampled_from(["us-east-1", "us-east-2", "us-west-2", "eu-west-1", "ap-southeast-1"]),
+        min_size=1,
+        max_size=4,
+        unique=True,
+    ),
+    grafana_size=st.integers(min_value=1, max_value=500).map(lambda n: f"{n}Gi"),
+    prometheus_size=st.integers(min_value=1, max_value=2000).map(lambda n: f"{n}Gi"),
+    alertmanager_size=st.integers(min_value=1, max_value=100).map(lambda n: f"{n}Gi"),
+    retention=st.integers(min_value=1, max_value=365).map(lambda n: f"{n}d"),
+)
+def test_chart_and_storageclass_invariant_across_region_sets(
+    valid_cdk_context,
+    enabled: bool,
+    regions: list[str],
+    grafana_size: str,
+    prometheus_size: str,
+    alertmanager_size: str,
+    retention: str,
+) -> None:
+    """CP-2: kube-prometheus-stack and its gp3-backed persistence are wired in
+    exactly when observability is enabled, and that wiring is invariant to the
+    deployment's region topology and to the configured sizes/retention.
+
+    The chart-enable and value-override seams are per-stack and region-agnostic,
+    so varying ``deployment_regions.regional`` must never change the outcome;
+    the sizes/retention the operator sets must flow through verbatim.
+    """
+    ctx = copy.deepcopy(valid_cdk_context)
+    ctx["deployment_regions"]["regional"] = regions
+    stub = _stub(
+        ctx,
+        enabled=enabled,
+        observability={
+            "grafana": {"persistence_size": grafana_size},
+            "prometheus": {"persistence_size": prometheus_size, "retention": retention},
+            "alertmanager": {"persistence_size": alertmanager_size},
+        },
+    )
+
+    charts = RS._get_enabled_helm_charts(stub)
+    overrides = RS._helm_chart_value_overrides(stub)
+
+    # Enabled-invariant: present iff enabled, for any region set.
+    assert ("kube-prometheus-stack" in charts) is enabled
+    assert ("kube-prometheus-stack" in overrides) is enabled
+
+    if not enabled:
+        return
+
+    values = overrides["kube-prometheus-stack"]["values"]
+    prom_spec = values["prometheus"]["prometheusSpec"]
+    am_spec = values["alertmanager"]["alertmanagerSpec"]
+
+    # The gp3 StorageClass backs all three stateful components.
+    assert values["grafana"]["persistence"]["storageClassName"] == _OBSERVABILITY_STORAGE_CLASS
+    assert (
+        prom_spec["storageSpec"]["volumeClaimTemplate"]["spec"]["storageClassName"]
+        == _OBSERVABILITY_STORAGE_CLASS
+    )
+    assert (
+        am_spec["storage"]["volumeClaimTemplate"]["spec"]["storageClassName"]
+        == _OBSERVABILITY_STORAGE_CLASS
+    )
+
+    # Configured sizes/retention flow through unchanged.
+    assert values["grafana"]["persistence"]["size"] == grafana_size
+    assert prom_spec["retention"] == retention
+    assert (
+        prom_spec["storageSpec"]["volumeClaimTemplate"]["spec"]["resources"]["requests"]["storage"]
+        == prometheus_size
+    )
+    assert (
+        am_spec["storage"]["volumeClaimTemplate"]["spec"]["resources"]["requests"]["storage"]
+        == alertmanager_size
+    )
 
 
 # --- gp3 StorageClass manifest -----------------------------------------------
