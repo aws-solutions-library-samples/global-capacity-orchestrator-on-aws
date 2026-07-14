@@ -254,3 +254,54 @@ def test_no_credential_literal_anywhere_in_entry(kps_entry) -> None:
 
 def test_grafana_persistence_enabled(kps_entry) -> None:
     assert kps_entry["values"]["grafana"]["persistence"]["enabled"] is True
+
+
+# --- ServiceMonitors for scheduler/operator components -----------------------
+
+_SERVICEMONITORS = (
+    _REPO_ROOT
+    / "lambda"
+    / "kubectl-applier-simple"
+    / "manifests"
+    / "post-helm-monitoring-servicemonitors.yaml"
+)
+
+
+@pytest.fixture
+def servicemonitor_docs() -> list[dict[str, Any]]:
+    return [doc for doc in yaml.safe_load_all(_SERVICEMONITORS.read_text(encoding="utf-8")) if doc]
+
+
+def test_servicemonitors_is_post_helm() -> None:
+    # ServiceMonitor CRDs are installed by the chart, so the monitors must be
+    # applied in the post-Helm pass — encoded by the post-helm- filename prefix.
+    assert _SERVICEMONITORS.name.startswith("post-helm-")
+
+
+def test_servicemonitors_cover_the_native_schedulers(servicemonitor_docs) -> None:
+    kinds = {doc["kind"] for doc in servicemonitor_docs}
+    assert kinds == {"ServiceMonitor"}
+    covered_namespaces = {
+        ns for doc in servicemonitor_docs for ns in doc["spec"]["namespaceSelector"]["matchNames"]
+    }
+    assert {
+        "keda",
+        "volcano-system",
+        "kueue-system",
+        "ray-system",
+        "yunikorn",
+    } <= covered_namespaces
+
+
+def test_servicemonitors_are_gated_and_well_formed(servicemonitor_docs) -> None:
+    assert servicemonitor_docs, "expected at least one ServiceMonitor"
+    for doc in servicemonitor_docs:
+        annotations = doc["metadata"]["annotations"]
+        assert (
+            annotations["gco.io/cluster-observability-enabled"]
+            == "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+        )
+        assert doc["metadata"]["namespace"] == "monitoring"
+        # A selector and at least one scrape endpoint make it a usable monitor.
+        assert doc["spec"]["selector"]["matchLabels"]
+        assert doc["spec"]["endpoints"]

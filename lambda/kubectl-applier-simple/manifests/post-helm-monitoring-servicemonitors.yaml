@@ -1,0 +1,132 @@
+# ServiceMonitors for GCO scheduler/operator components (post-Helm pass)
+#
+# ServiceMonitor is a CRD owned by kube-prometheus-stack's Prometheus Operator,
+# so these are applied in the POST-Helm pass (after the chart installs its
+# CRDs). The chart's Prometheus is configured with
+# serviceMonitorSelectorNilUsesHelmValues=false, so it discovers every
+# ServiceMonitor in the cluster regardless of release label.
+#
+# Only applied when cdk.json cluster_observability.enabled = true: GCORegional
+# Stack substitutes {{CLUSTER_OBSERVABILITY_ENABLED}} only then, so when
+# observability is disabled these placeholders stay unreplaced and the
+# kubectl-applier skips this file (the ServiceMonitor CRD would not exist).
+#
+# Selectors target each chart's standard component labels. A component that is
+# toggled off (e.g. YuniKorn, off by default) or relabeled simply yields no
+# scrape targets rather than an error, so this file is safe to apply whole.
+#
+# GCO's own services (health-monitor, manifest-processor, inference-monitor)
+# emit CloudWatch metrics and are covered at the pod/container level by the
+# chart's kube-state-metrics + cAdvisor scraping; Prometheus-format app-level
+# instrumentation of those services is a separate follow-up and intentionally
+# not scraped here.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gco-keda
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  namespaceSelector:
+    matchNames:
+      - keda
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: keda-operator
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gco-volcano
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  namespaceSelector:
+    matchNames:
+      - volcano-system
+  selector:
+    matchLabels:
+      app: volcano-scheduler
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gco-kueue
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  namespaceSelector:
+    matchNames:
+      - kueue-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kueue
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gco-kuberay
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  namespaceSelector:
+    matchNames:
+      - ray-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kuberay-operator
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gco-yunikorn
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  namespaceSelector:
+    matchNames:
+      - yunikorn
+  selector:
+    matchLabels:
+      app: yunikorn
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
