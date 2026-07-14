@@ -13,8 +13,8 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 109 tools; with every flag enabled the
-ceiling is 144. See [Feature Flags](../README.md#feature-flags) for the
+default registration the server exposes 114 tools; with every flag enabled the
+ceiling is 150. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
@@ -28,6 +28,7 @@ flag-to-tool mapping.
 | `models.py` | 4 | `list_models`, `get_model_uri`, `models_upload` (gated), `delete_model` (gated) |
 | `nodepools.py` | 5 | `nodepools_list`, `nodepools_describe`, `nodepools_create_odcr`, `nodepools_create_capacity_block`, `delete_nodepool` (gated) |
 | `analytics.py` | 7 | `analytics_doctor`, `analytics_login_url`, `analytics_users_list`, `enable_analytics`, `disable_analytics`, `analytics_user_add`, `analytics_user_remove` (gated) |
+| `monitoring.py` | 6 | `monitoring_status`, `monitoring_users_list`, `enable_monitoring`, `disable_monitoring`, `monitoring_user_add`, `monitoring_user_remove` (gated) |
 | `templates.py` | 5 | `templates_list`, `templates_get`, `templates_create`, `templates_run`, `delete_template` (gated) |
 | `webhooks.py` | 4 | `webhooks_list`, `webhooks_get`, `webhooks_create`, `delete_webhook` (gated) |
 | `queue.py` | 5 | `queue_list`, `queue_get`, `queue_stats`, `queue_submit`, `cancel_queue_job` (gated) |
@@ -178,6 +179,17 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `analytics_users_list` | `gco analytics users list` — list Cognito users in the analytics user pool. |
 | `disable_analytics` | `gco analytics disable` — flip the analytics environment off in cdk.json. |
 | `enable_analytics` | `gco analytics enable` — flip the analytics environment on in cdk.json. |
+
+### `monitoring.py`
+
+| Tool | Description |
+|------|-------------|
+| `monitoring_status` | `gco monitoring status` — show the cluster observability toggle + config. |
+| `monitoring_users_list` | `gco monitoring users list` — list Grafana users via the admin API. |
+| `enable_monitoring` | `gco monitoring enable` — flip cluster observability on in cdk.json. |
+| `disable_monitoring` | `gco monitoring disable` — flip cluster observability off in cdk.json. |
+| `monitoring_user_add` | `gco monitoring users add` — create a Grafana user via the admin API. |
+| `monitoring_user_remove` | `gco monitoring users remove` — delete a Grafana user (gated). |
 
 ### `templates.py`
 

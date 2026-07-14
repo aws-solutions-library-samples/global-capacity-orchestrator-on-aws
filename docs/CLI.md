@@ -20,6 +20,7 @@ Complete command-line interface documentation for GCO (Global Capacity Orchestra
   - [images](#images-commands)
   - [files](#files-commands)
   - [nodepools](#nodepools-commands)
+  - [monitoring](#monitoring-commands)
   - [analytics](#analytics-commands)
   - [config-cmd](#config-cmd-commands)
   - [tasks](#tasks-commands)
@@ -3156,6 +3157,105 @@ gco nodepools delete NODEPOOL_NAME [OPTIONS]
 ```bash
 gco nodepools delete gpu-reserved -r us-east-1
 gco nodepools delete gpu-reserved -r us-east-1 -y
+```
+
+---
+
+### Monitoring Commands
+
+Manage in-cluster observability (`kube-prometheus-stack`: Prometheus + Grafana +
+Alertmanager). Unlike most features this one is **on by default** on every
+regional cluster. See the [Monitoring Guide](MONITORING.md) for the cost model,
+private-endpoint access, and credential rotation.
+
+Grafana has no public endpoint, so `gco monitoring open` port-forwards over the
+PRIVATE EKS API endpoint and can tunnel through an SSM-managed instance with
+`--via-ssm`. The `users` subcommands drive Grafana's admin HTTP API over that
+port-forward.
+
+<details>
+<summary>All <code>gco monitoring</code> commands (7) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco monitoring status`](#gco-monitoring-status) | Show the current `cluster_observability.*` toggle state from `cdk.json`. |
+| [`gco monitoring enable`](#gco-monitoring-enable) | Flip `cluster_observability.enabled` to `true` in `cdk.json`. |
+| [`gco monitoring disable`](#gco-monitoring-disable) | Flip `cluster_observability.enabled` to `false` in `cdk.json`. |
+| [`gco monitoring open`](#gco-monitoring-open) | Port-forward Grafana / Prometheus / Alertmanager over the private endpoint (optionally via an SSM tunnel). |
+| [`gco monitoring users add`](#gco-monitoring-users) | Create a Grafana user via the admin API. |
+| [`gco monitoring users list`](#gco-monitoring-users) | List Grafana organisation users. |
+| [`gco monitoring users remove`](#gco-monitoring-users) | Delete a Grafana user. |
+
+</details>
+
+#### `gco monitoring status`
+
+Show the merged `cluster_observability` config (toggle plus grafana / prometheus
+/ alertmanager sub-blocks) from `cdk.json`.
+
+```bash
+gco monitoring status
+```
+
+#### `gco monitoring enable`
+
+Flip `cluster_observability.enabled` to `true` in `cdk.json` (it is already on by
+default). Takes effect on the next `gco stacks deploy`.
+
+```bash
+gco monitoring enable [-y]
+```
+
+#### `gco monitoring disable`
+
+Flip `cluster_observability.enabled` to `false`. The grafana / prometheus /
+alertmanager sub-blocks are left untouched so preferences survive a
+disable/enable cycle. The in-cluster stack and its EBS volumes are removed on the
+next deploy.
+
+```bash
+gco monitoring disable [-y]
+```
+
+#### `gco monitoring open`
+
+Port-forward a monitoring component over the private EKS API endpoint. Runs in
+the foreground; press Ctrl-C to stop.
+
+```bash
+gco monitoring open [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--service` | `grafana` (default, `localhost:3000`), `prometheus` (`:9090`), or `alertmanager` (`:9093`). |
+| `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--local-port` | Override the local bind port. |
+| `--via-ssm INSTANCE_ID` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). |
+
+**Example:**
+
+```bash
+# From inside the VPC:
+gco monitoring open --region us-east-1
+
+# From a laptop, tunnelling through an SSM-managed instance:
+gco monitoring open --region us-east-1 --via-ssm i-0123456789abcdef0
+```
+
+#### `gco monitoring users`
+
+Manage Grafana users through the admin HTTP API, over an active
+`gco monitoring open` port-forward (default `http://localhost:3000`). Admin
+credentials are read from the `kube-prometheus-stack-grafana` Secret, or passed
+with `--admin-password` / `$GCO_GRAFANA_ADMIN_PASSWORD`.
+
+```bash
+gco monitoring users add --username alice --email alice@example.com --generate-password
+gco monitoring users list [--as-json]
+gco monitoring users remove --username alice --yes
 ```
 
 ---

@@ -24,6 +24,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 | [API Reference](API.md) | Developers | REST API documentation for manifest submission, job management, and webhooks |
 | [Customization](CUSTOMIZATION.md) | Platform teams | Add regions, tune nodepools, enable FSx/Valkey/EFA, configure queue processor |
 | [Analytics Environment](ANALYTICS.md) | Data scientists / ML engineers | Optional SageMaker Studio + EMR Serverless environment for interactive analysis of cluster data |
+| [Cluster Observability](MONITORING.md) | Operators | Self-hosted per-cluster Prometheus + Grafana + Alertmanager (on by default), private port-forward access, and the `gco monitoring` CLI |
 | [Mission](MISSION.md) | Operators | GCO's goal-directed iteration loop that runs five-phase iterations against machine-checkable success criteria until a verdict is reached |
 | [Cluster Shared Bucket](CLUSTER_SHARED_BUCKET.md) | Operators | Always-on cross-region S3 bucket shared across all regional clusters and the analytics environment |
 | [Troubleshooting](TROUBLESHOOTING.md) | Operators | Common issues and solutions for deployment, networking, pods, and storage |

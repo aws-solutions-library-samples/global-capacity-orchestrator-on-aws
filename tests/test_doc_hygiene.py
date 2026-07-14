@@ -121,6 +121,19 @@ _FEATURES: tuple[_Feature, ...] = (
         # breadcrumb. The hard breadcrumb patterns stay enforced.
         allow_labels=frozenset({"spec-prose"}),
     ),
+    _Feature(
+        feature_id="cluster-observability",
+        paths=(
+            _REPO_ROOT / "gco" / "services" / "grafana_rotator.py",
+            _REPO_ROOT / "gco" / "services" / "service_metrics.py",
+            _REPO_ROOT / "cli" / "commands" / "monitoring_cmd.py",
+            _REPO_ROOT / "cli" / "monitoring_user_mgmt.py",
+            _REPO_ROOT / "cli" / "ssm_tunnel.py",
+            _REPO_ROOT / "gco_mcp" / "tools" / "monitoring.py",
+            _TESTS_DIR,
+        ),
+        test_prefix="test_cluster_observability_",
+    ),
 )
 
 

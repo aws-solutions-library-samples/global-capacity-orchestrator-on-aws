@@ -32,6 +32,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
   - [DAG Pipelines](#dag-pipelines)
   - [NodePools](#nodepools)
   - [Analytics](#analytics)
+  - [Monitoring](#monitoring)
   - [Config](#config)
   - [Image Registry](#image-registry)
   - [Examples Discovery](#examples-discovery)
@@ -60,7 +61,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server wraps the `gco` CLI, exposing 109 tools by default (up to 144 with all flags enabled) that cover the full lifecycle of GPU workload management:
+The MCP server wraps the `gco` CLI, exposing 114 tools by default (up to 150 with all flags enabled) that cover the full lifecycle of GPU workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -417,7 +418,7 @@ A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, de
 | `GCO_ENABLE_IMAGE_PUBLISH` | `false` | `images_build`, `images_push`, `images_mirror` | Builds, publishes, and mirrors container images to ECR. `images_build` / `images_push` run a long-running build (FastMCP background task) and push binaries that get replicated across every deployed region; `images_mirror` copies third-party images (Volcano's docker.io images) into the project's `gco/*` ECR. |
 | `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` | `false` | `deploy_stack`, `deploy_all`, `bootstrap_cdk` | Creates or updates CloudFormation stacks. A full `deploy_all` runs 30-60 minutes wall-clock and can provision EKS clusters, NodePools, and storage that incur ongoing charges. |
 | `GCO_ENABLE_INFRASTRUCTURE_DESTROY` | `false` | `destroy_stack`, `destroy_all` | Tears down CloudFormation stacks. Cancellation mid-flight can leave partial state behind that has to be cleaned up by hand. |
-| `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` | `false` | `delete_job`, `delete_inference`, `delete_template`, `delete_webhook`, `delete_model`, `delete_nodepool`, `analytics_user_remove`, `cancel_queue_job`, `cancel_reservation`, `images_cleanup`, `images_prune`, `images_delete_tag`, `images_delete_repo` | Delete operations are irreversible — once data, jobs, models, images, or capacity reservations are removed they can't be recovered without a backup. |
+| `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` | `false` | `delete_job`, `delete_inference`, `delete_template`, `delete_webhook`, `delete_model`, `delete_nodepool`, `analytics_user_remove`, `monitoring_user_remove`, `cancel_queue_job`, `cancel_reservation`, `images_cleanup`, `images_prune`, `images_delete_tag`, `images_delete_repo` | Delete operations are irreversible — once data, jobs, models, images, or capacity reservations are removed they can't be recovered without a backup. |
 | `GCO_ENABLE_MISSION` | `false` | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list` | Runs an autonomous goal-directed loop that can call any tool in its allowlist. Gated to prevent unattended autonomous execution. |
 
 ### Enabling a Flag
@@ -714,6 +715,17 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 | `enable_analytics` | Toggle the analytics stack on in `cdk.json` (apply with `gco stacks deploy-all`) | low-risk | — |
 | `disable_analytics` | Toggle the analytics stack off in `cdk.json` | low-risk | — |
 | `analytics_user_remove` | Remove an analytics user (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
+
+### Monitoring
+
+| Tool | Description | Risk Tier | Gated By |
+|------|-------------|-----------|----------|
+| `monitoring_status` | Show the cluster observability toggle + config from `cdk.json` | safe | — |
+| `monitoring_users_list` | List Grafana users via the admin API | safe | — |
+| `enable_monitoring` | Toggle cluster observability on in `cdk.json` | low-risk | — |
+| `disable_monitoring` | Toggle cluster observability off in `cdk.json` | low-risk | — |
+| `monitoring_user_add` | Add a Grafana user via the admin API | low-risk | — |
+| `monitoring_user_remove` | Remove a Grafana user (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 
 ### Config
 

@@ -549,6 +549,13 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_cli_config.py` | Tests for cli/config.py. |
 | `test_cli_inference_models.py` | Tests for the inference and models CLI subgroups in cli/main.py. |
 | `test_cloudwatch_logs_fallback.py` | Tests for JobManager.get_job_logs CloudWatch Logs fallback. |
+| `test_cluster_observability_charts.py` | Regional-stack wiring for kube-prometheus-stack — chart-enable membership, value overrides, the gp3 StorageClass manifest, and the pure `_compute_kubectl_observability_replacements` gate helper. |
+| `test_cluster_observability_cli.py` | The `gco monitoring` CLI (status/enable/disable/open) plus the validated `kubectl port-forward` and SSM remote-host tunnel argv builders, including private-endpoint detection and the `--via-ssm` path. |
+| `test_cluster_observability_config.py` | `ConfigLoader.get_cluster_observability_config` defaults/merge and `_validate_cluster_observability_config` (enabled/persistence/retention/rotation-schedule validation), with a Hypothesis toggle round-trip. |
+| `test_cluster_observability_dashboards.py` | The curated Grafana dashboard ConfigMaps — four dashboards, the `grafana_dashboard` sidecar label, the observability gate annotation, valid dashboard JSON, and the UPPER_SNAKE-only placeholder guard. |
+| `test_cluster_observability_rotation.py` | The Grafana admin-password rotation module (`gco/services/grafana_rotator.py`) with mocked k8s client + HTTP, plus the gated rotation CronJob + least-privilege RBAC manifest assertions. |
+| `test_cluster_observability_service_metrics.py` | The GCO-service Prometheus instrumentation in `gco/services/service_metrics.py` (RED metrics + the scrape-time collector). |
+| `test_cluster_observability_users.py` | Grafana user management (`cli/monitoring_user_mgmt.py`) over the admin HTTP API and the `gco monitoring users` subcommands, with mocked requests + kubectl. |
 | `test_costs.py` | Tests for the cost-visibility feature in cli/costs.py. |
 | `test_costs_cmd_extended.py` | Extended tests for cli/commands/costs_cmd.py. |
 | `test_cross_region_aggregator_extended.py` | Extended coverage tests for the cross-region aggregator Lambda. |

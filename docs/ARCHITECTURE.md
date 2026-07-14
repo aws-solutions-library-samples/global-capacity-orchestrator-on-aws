@@ -353,6 +353,19 @@ All compliance checks run during `cdk synth` and deployment. Suppressions are do
 - **ECR**: Lifecycle policies for image cleanup
 - **Logs**: Retention policies to control costs
 
+### Observability Costs
+
+- **Cluster observability is on by default** — each regional cluster runs
+  `kube-prometheus-stack`, whose standing cost is the gp3 EBS volumes backing
+  Prometheus (default `50Gi`), Grafana (`10Gi`), and Alertmanager (`5Gi`).
+- **Retention-bounded**: `cluster_observability.prometheus.retention` (default
+  `15d`) caps how much of the TSDB volume fills; persistence sizes are
+  configurable per component.
+- **No load balancer**: Grafana is private (`ClusterIP`, no ALB), so there are no
+  load-balancer hours — access is via `gco monitoring open` port-forward.
+- **Opt out** with `gco monitoring disable` to remove the stack and its volumes.
+  See [`docs/MONITORING.md`](MONITORING.md#cost) for the full breakdown.
+
 ## Disaster Recovery
 
 ### Backup Strategy
