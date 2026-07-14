@@ -1,9 +1,10 @@
 # Monitoring dashboard screenshots
 
 Screenshots of the curated GCO Grafana dashboards used by
-[`docs/MONITORING.md`](../../MONITORING.md). They are **generated on demand**
-against a live cluster rather than committed by hand, so this directory ships
-only this README until an operator regenerates the images.
+[`docs/MONITORING.md`](../../MONITORING.md). They are committed here and
+**regenerated on demand** against a live cluster after a dashboard change (see
+[Regenerate](#regenerate)). The committed set was captured from a largely idle
+cluster with no GPU nodes, so it is intentionally light on data.
 
 ## Table of Contents
 
@@ -31,12 +32,12 @@ python scripts/capture_monitoring_screenshots.py \
 
 The script writes one PNG per curated dashboard:
 
-| File | Dashboard |
-|------|-----------|
-| `grafana-gpu-dcgm.png` | GCO GPU (DCGM) |
-| `grafana-schedulers.png` | GCO Schedulers & Queues |
-| `grafana-keda.png` | GCO KEDA Autoscaling |
-| `grafana-services.png` | GCO Services |
+| File | Dashboard | Preview |
+|------|-----------|---------|
+| `grafana-gpu-dcgm.png` | GCO GPU (DCGM) | ![GCO GPU (DCGM)](grafana-gpu-dcgm.png) |
+| `grafana-schedulers.png` | GCO Schedulers & Queues | ![GCO Schedulers & Queues](grafana-schedulers.png) |
+| `grafana-keda.png` | GCO KEDA Autoscaling | ![GCO KEDA Autoscaling](grafana-keda.png) |
+| `grafana-services.png` | GCO Services | ![GCO Services](grafana-services.png) |
 
 The dashboard set is kept in sync with
 `lambda/kubectl-applier-simple/manifests/post-helm-grafana-dashboards.yaml` by

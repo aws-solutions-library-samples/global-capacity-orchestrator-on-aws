@@ -208,10 +208,40 @@ kube-prometheus-stack cluster/node/pod dashboards:
 
 ## Dashboard screenshots
 
-Screenshots of these dashboards live under
-[`docs/images/monitoring/`](images/monitoring/). Because Grafana is private and
-the dashboards render live data, the images are generated on demand rather than
-committed by hand — regenerate them after a dashboard change with the Playwright
+The four curated dashboards, captured from a live regional cluster. The cluster
+was largely idle with no GPU nodes, so these are intentionally light on data —
+GPU panels honestly show "No data" and the others show modest control-plane
+activity. They demonstrate the panels and layout you get out of the box.
+
+### GCO GPU (DCGM)
+
+![GCO GPU (DCGM) dashboard — per-GPU utilization, framebuffer, temperature, and power panels, all showing No data on a cluster with no GPU nodes](images/monitoring/grafana-gpu-dcgm.png)
+
+Per-GPU utilization, framebuffer memory, temperature, and power draw. "No data"
+is expected when the cluster has no GPU nodes.
+
+### GCO Schedulers & Queues
+
+![GCO Schedulers and Queues dashboard — pending pods, Kueue pending workloads, and active Jobs](images/monitoring/grafana-schedulers.png)
+
+Pending pods (cluster-wide), Kueue pending workloads, and active Jobs.
+
+### GCO KEDA Autoscaling
+
+![GCO KEDA Autoscaling dashboard — active scalers and scaler errors](images/monitoring/grafana-keda.png)
+
+Active scalers and scaler errors.
+
+### GCO Services
+
+![GCO Services dashboard — request rate and p95 latency per service, plus inference-monitor reconcile counts](images/monitoring/grafana-services.png)
+
+Request rate and p95 latency per GCO service, plus inference-monitor
+reconcile/error counts.
+
+These images are regenerated on demand after a dashboard change. Grafana is
+private, so first port-forward it — `gco monitoring open` can auto-provision a
+self-terminating ephemeral bastion (`--via-ssm auto`) — then run the Playwright
 capture script:
 
 ```bash

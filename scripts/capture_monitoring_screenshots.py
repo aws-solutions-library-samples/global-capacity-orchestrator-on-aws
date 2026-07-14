@@ -27,6 +27,7 @@ the test fails until it is added to ``SCREENSHOTS`` below.
 from __future__ import annotations
 
 import argparse
+import base64
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,7 +37,9 @@ IMAGES_DIR = PROJECT_ROOT / "docs" / "images" / "monitoring"
 DEFAULT_GRAFANA_URL = "http://localhost:3000"
 
 # How long to let a dashboard's panels finish rendering before the screenshot.
-_PANEL_RENDER_WAIT_MS = 2500
+# Generous because the SPA has to initialise, fetch the dashboard, and run its
+# panel queries — each a round trip that, over an SSM tunnel, carries latency.
+_PANEL_RENDER_WAIT_MS = 4000
 
 
 @dataclass(frozen=True)
@@ -64,7 +67,16 @@ def expected_output_paths(images_dir: Path = IMAGES_DIR) -> list[Path]:
 
 
 def capture(grafana_url: str, username: str, password: str, output_dir: Path) -> list[Path]:
-    """Log in to Grafana and screenshot each dashboard. Returns written paths.
+    """Authenticate to Grafana and screenshot each dashboard. Returns written paths.
+
+    Authentication sends an HTTP basic-auth ``Authorization`` header on every
+    request (Grafana's ``auth.basic`` is enabled by default). The header is set
+    proactively rather than via Playwright's ``http_credentials`` because Grafana
+    redirects an unauthenticated browser navigation to ``/login`` (a 302) instead
+    of issuing a 401 challenge — so ``http_credentials``, which only answers a
+    401, would never send the header and the capture would screenshot the login
+    page. Setting the header outright mirrors ``curl -u`` and keeps the SPA
+    authenticated, so no login form is driven.
 
     Playwright is imported lazily so this module can be imported (and its
     metadata inspected by tests) without the browser being installed.
@@ -74,19 +86,21 @@ def capture(grafana_url: str, username: str, password: str, output_dir: Path) ->
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     base = grafana_url.rstrip("/")
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         try:
-            context = browser.new_context(viewport={"width": 1600, "height": 900})
+            context = browser.new_context(
+                viewport={"width": 1600, "height": 900},
+                extra_http_headers={"Authorization": f"Basic {token}"},
+            )
             page = context.new_page()
-            page.goto(f"{base}/login", wait_until="networkidle")
-            page.fill("input[name='user']", username)
-            page.fill("input[name='password']", password)
-            page.click("button[type='submit']")
-            page.wait_for_load_state("networkidle")
             for shot in SCREENSHOTS:
                 # ``kiosk`` hides Grafana chrome so the screenshot is just panels.
-                page.goto(f"{base}/d/{shot.dashboard_uid}?kiosk", wait_until="networkidle")
+                # Wait for ``load`` (not ``networkidle``) — a live dashboard's
+                # periodic queries can keep the network busy indefinitely — then
+                # give the panels a fixed moment to finish rendering.
+                page.goto(f"{base}/d/{shot.dashboard_uid}?kiosk", wait_until="load")
                 page.wait_for_timeout(_PANEL_RENDER_WAIT_MS)
                 out = output_dir / shot.filename
                 page.screenshot(path=str(out), full_page=True)
