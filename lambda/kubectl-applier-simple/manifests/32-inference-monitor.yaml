@@ -29,6 +29,10 @@ spec:
       containers:
         - name: inference-monitor
           image: {{INFERENCE_MONITOR_IMAGE}}
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
           env:
             - name: CLUSTER_NAME
               value: "{{CLUSTER_NAME}}"
@@ -48,6 +52,11 @@ spec:
               value: "gco-inference"
             - name: RECONCILE_INTERVAL_SECONDS
               value: "15"
+            # Prometheus metrics port scraped by the cluster-observability
+            # PodMonitor (gco-inference-monitor). Matches METRICS_PORT read by
+            # gco/services/service_metrics.start_metrics_server.
+            - name: METRICS_PORT
+              value: "9090"
             # Default image for the shared per-region Mooncake master
             # StatefulSet. This upstream vLLM image bundles the
             # mooncake-transfer-engine, so the mooncake_master binary is on

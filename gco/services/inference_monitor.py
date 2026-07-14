@@ -3975,6 +3975,15 @@ async def main() -> None:
     monitor = create_inference_monitor_from_env()
     logger.info("Inference monitor initialized: %s", monitor.get_metrics())
 
+    # Expose Prometheus metrics on a dedicated port for the in-cluster
+    # observability scrape. A scrape-time collector reflects the monitor's live
+    # counters (reconcile_count, errors_count, running), so no push from the
+    # reconcile loop is needed.
+    from gco.services.service_metrics import start_metrics_server
+
+    metrics_port = int(os.getenv("METRICS_PORT", "9090"))
+    start_metrics_server(metrics_port, "inference-monitor", monitor.get_metrics)
+
     while True:
         try:
             await monitor.start()

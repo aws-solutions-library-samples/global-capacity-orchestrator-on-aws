@@ -278,11 +278,17 @@ def test_servicemonitors_is_post_helm() -> None:
     assert _SERVICEMONITORS.name.startswith("post-helm-")
 
 
-def test_servicemonitors_cover_the_native_schedulers(servicemonitor_docs) -> None:
-    kinds = {doc["kind"] for doc in servicemonitor_docs}
-    assert kinds == {"ServiceMonitor"}
-    covered_namespaces = {
-        ns for doc in servicemonitor_docs for ns in doc["spec"]["namespaceSelector"]["matchNames"]
+def test_monitors_cover_schedulers_dcgm_and_gco_services(servicemonitor_docs) -> None:
+    by_kind: dict[str, list[dict[str, Any]]] = {}
+    for doc in servicemonitor_docs:
+        by_kind.setdefault(doc["kind"], []).append(doc)
+
+    # Prometheus-native scheduler/operator components + DCGM front their metrics
+    # with a Service, so they are scraped via ServiceMonitors.
+    sm_namespaces = {
+        ns
+        for doc in by_kind.get("ServiceMonitor", [])
+        for ns in doc["spec"]["namespaceSelector"]["matchNames"]
     }
     assert {
         "keda",
@@ -290,12 +296,23 @@ def test_servicemonitors_cover_the_native_schedulers(servicemonitor_docs) -> Non
         "kueue-system",
         "ray-system",
         "yunikorn",
-    } <= covered_namespaces
+        "kube-system",
+    } <= sm_namespaces
+
+    # GCO's own multi-replica services are scraped per-pod via PodMonitors.
+    pm_apps = {
+        value
+        for doc in by_kind.get("PodMonitor", [])
+        for key, value in doc["spec"]["selector"]["matchLabels"].items()
+        if key == "app"
+    }
+    assert {"health-monitor", "manifest-processor", "inference-monitor"} <= pm_apps
 
 
-def test_servicemonitors_are_gated_and_well_formed(servicemonitor_docs) -> None:
-    assert servicemonitor_docs, "expected at least one ServiceMonitor"
+def test_monitors_are_gated_and_well_formed(servicemonitor_docs) -> None:
+    assert servicemonitor_docs, "expected at least one monitor"
     for doc in servicemonitor_docs:
+        assert doc["kind"] in {"ServiceMonitor", "PodMonitor"}
         annotations = doc["metadata"]["annotations"]
         assert (
             annotations["gco.io/cluster-observability-enabled"]
@@ -304,4 +321,5 @@ def test_servicemonitors_are_gated_and_well_formed(servicemonitor_docs) -> None:
         assert doc["metadata"]["namespace"] == "monitoring"
         # A selector and at least one scrape endpoint make it a usable monitor.
         assert doc["spec"]["selector"]["matchLabels"]
-        assert doc["spec"]["endpoints"]
+        endpoints = doc["spec"].get("endpoints") or doc["spec"].get("podMetricsEndpoints")
+        assert endpoints

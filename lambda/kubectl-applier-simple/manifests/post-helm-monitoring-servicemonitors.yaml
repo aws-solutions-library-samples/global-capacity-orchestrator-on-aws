@@ -130,3 +130,97 @@ spec:
     - port: metrics
       interval: 30s
       path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gco-dcgm-exporter
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  namespaceSelector:
+    matchNames:
+      - kube-system
+  selector:
+    matchLabels:
+      app: dcgm-exporter
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+---
+# GCO's own services expose Prometheus /metrics (see gco/services/service_metrics
+# .py). They run with multiple replicas, so PodMonitors scrape each pod directly
+# rather than round-robining one pod through a Service. health-monitor and
+# manifest-processor serve /metrics on their existing http port (the auth
+# middleware exempts /metrics); the inference monitor serves it on a dedicated
+# metrics port.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: gco-health-monitor
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  namespaceSelector:
+    matchNames:
+      - gco-system
+  selector:
+    matchLabels:
+      app: health-monitor
+  podMetricsEndpoints:
+    - port: http
+      interval: 30s
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: gco-manifest-processor
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  namespaceSelector:
+    matchNames:
+      - gco-system
+  selector:
+    matchLabels:
+      app: manifest-processor
+  podMetricsEndpoints:
+    - port: http
+      interval: 30s
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: gco-inference-monitor
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  namespaceSelector:
+    matchNames:
+      - gco-system
+  selector:
+    matchLabels:
+      app: inference-monitor
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics

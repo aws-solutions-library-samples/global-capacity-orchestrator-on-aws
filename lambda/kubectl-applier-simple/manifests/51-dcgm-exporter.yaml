@@ -1,0 +1,92 @@
+# NVIDIA DCGM exporter — per-GPU Prometheus metrics (DCGM_FI_DEV_*)
+#
+# Runs as a DaemonSet on GPU nodes only (nodeSelector workload-type=gpu, which
+# the GPU NodePools set) and tolerates the nvidia.com/gpu taint. Exposes GPU
+# utilization, memory, temperature, power, and per-pod attribution on :9400
+# /metrics for the DCGM ServiceMonitor (post-helm-monitoring-servicemonitors)
+# to scrape and the GPU dashboard to render.
+#
+# Only applied when cdk.json cluster_observability.enabled = true: GCORegional
+# Stack substitutes {{CLUSTER_OBSERVABILITY_ENABLED}} only then, so when
+# observability is disabled the placeholder is left unreplaced and the
+# kubectl-applier skips this file (same gating FSx/Valkey use).
+#
+# Lives in kube-system (created at cluster bootstrap) so it can apply in the
+# base pass; its ServiceMonitor lives in monitoring and applies post-Helm once
+# the Prometheus Operator CRDs exist. If the NVIDIA GPU Operator is adopted
+# later it bundles DCGM and supersedes this DaemonSet (see docs/EKS_ADDONS.md).
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  namespace: kube-system
+  labels:
+    app: dcgm-exporter
+    project: gco
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  selector:
+    matchLabels:
+      app: dcgm-exporter
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: dcgm-exporter
+        project: gco
+    spec:
+      # GPU nodes only — the GPU NodePools label nodes workload-type=gpu and
+      # taint them nvidia.com/gpu, so restrict scheduling and tolerate the taint.
+      nodeSelector:
+        workload-type: gpu
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: dcgm-exporter
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:4.0.0-4.0.1-ubuntu22.04
+          ports:
+            - name: metrics
+              containerPort: 9400
+              protocol: TCP
+          env:
+            - name: DCGM_EXPORTER_LISTEN
+              value: ":9400"
+            - name: DCGM_EXPORTER_KUBERNETES
+              value: "true"
+          securityContext:
+            runAsNonRoot: false
+            capabilities:
+              add:
+                - SYS_ADMIN
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dcgm-exporter
+  namespace: kube-system
+  labels:
+    app: dcgm-exporter
+    project: gco
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  type: ClusterIP
+  selector:
+    app: dcgm-exporter
+  ports:
+    - name: metrics
+      port: 9400
+      targetPort: metrics
+      protocol: TCP

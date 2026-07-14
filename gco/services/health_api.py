@@ -131,6 +131,13 @@ app = FastAPI(
 # Add authentication middleware
 app.add_middleware(AuthenticationMiddleware)
 
+# Expose Prometheus /metrics for the in-cluster observability scrape. The auth
+# middleware exempts /metrics, so the cluster Prometheus reaches it over the
+# existing service port without credentials.
+from gco.services.service_metrics import mount_metrics  # noqa: E402
+
+mount_metrics(app, "health-monitor")
+
 
 async def background_health_monitor() -> None:
     """

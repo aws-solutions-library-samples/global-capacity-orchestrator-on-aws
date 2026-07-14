@@ -186,6 +186,13 @@ app.add_middleware(AuthenticationMiddleware)
 _max_body_bytes = int(os.getenv("MAX_REQUEST_BODY_BYTES", str(DEFAULT_MAX_REQUEST_BODY_BYTES)))
 app.add_middleware(RequestSizeLimitMiddleware, max_body_bytes=_max_body_bytes)
 
+# Expose Prometheus /metrics for the in-cluster observability scrape. The auth
+# middleware exempts /metrics, so the cluster Prometheus reaches it over the
+# existing service port without credentials.
+from gco.services.service_metrics import mount_metrics  # noqa: E402
+
+mount_metrics(app, "manifest-processor")
+
 # Include domain routers
 from gco.services.api_routes.jobs import router as jobs_router  # noqa: E402
 from gco.services.api_routes.manifests import router as manifests_router  # noqa: E402
