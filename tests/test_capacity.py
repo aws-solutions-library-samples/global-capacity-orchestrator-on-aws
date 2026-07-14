@@ -744,22 +744,25 @@ class TestCapacityCheckerNewMethods:
                 assert result is False
 
     def test_check_instance_available_in_region_error(self):
-        """Test checking instance availability when API fails."""
-        from cli.capacity import CapacityChecker
+        """An AWS API failure must raise CapacityCheckError, not mask as False."""
+        from botocore.exceptions import ClientError
+
+        from cli.capacity import CapacityChecker, CapacityCheckError
 
         with patch("cli.capacity.checker.get_config") as mock_config:
             mock_config.return_value = MagicMock()
 
             with patch("boto3.Session") as mock_session:
                 mock_ec2 = MagicMock()
-                mock_ec2.get_paginator.side_effect = Exception("API Error")
+                mock_ec2.get_paginator.side_effect = ClientError(
+                    {"Error": {"Code": "RequestLimitExceeded", "Message": "slow"}},
+                    "DescribeInstanceTypeOfferings",
+                )
                 mock_session.return_value.client.return_value = mock_ec2
 
                 checker = CapacityChecker()
-                result = checker.check_instance_available_in_region("g4dn.xlarge", "us-east-1")
-
-                # Should return False when we can't check
-                assert result is False
+                with pytest.raises(CapacityCheckError, match="us-east-1"):
+                    checker.check_instance_available_in_region("g4dn.xlarge", "us-east-1")
 
     def test_get_availability_zones_success(self):
         """Test getting availability zones."""
@@ -2880,6 +2883,31 @@ class TestWeightedRecommendRegion:
 
                 assert result["region"] == "us-east-1"
                 assert "No capacity data" in result["reason"]
+
+    def test_recommend_region_surfaces_underlying_errors(self):
+        """Empty capacities due to AWS failures surface the real error, not a
+        benign 'no capacity' message that masks throttling / auth failures."""
+        from cli.capacity import MultiRegionCapacityChecker
+
+        with patch("cli.capacity.multi_region.get_config") as mock_config:
+            mock_config.return_value = MagicMock(default_region="us-east-1")
+
+            checker = MultiRegionCapacityChecker()
+
+            def _fail_sweep():
+                checker._last_region_errors = [
+                    "us-east-1: RequestLimitExceeded",
+                    "us-west-2: AuthFailure",
+                ]
+                return []
+
+            with patch.object(checker, "get_all_regions_capacity", side_effect=_fail_sweep):
+                result = checker.recommend_region_for_job()
+
+            assert result["region"] == "us-east-1"
+            assert "failed" in result["reason"].lower()
+            assert "RequestLimitExceeded" in result["reason"]
+            assert result["error"]
 
     def test_weighted_recommend_with_spot_pricing(self):
         """Weighted scoring should factor in spot pricing data."""

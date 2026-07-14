@@ -14,7 +14,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from botocore.exceptions import ClientError
 
-from cli.capacity import CapacityChecker, CapacityEstimate, InstanceTypeInfo, SpotPriceInfo
+from cli.capacity import (
+    CapacityChecker,
+    CapacityCheckError,
+    CapacityEstimate,
+    InstanceTypeInfo,
+    SpotPriceInfo,
+)
 
 
 def _make_checker():
@@ -65,7 +71,8 @@ def test_get_instance_info_client_error_returns_none():
     assert checker.get_instance_info("x9.unknown") is None
 
 
-def test_check_instance_available_client_error_returns_false():
+def test_check_instance_available_client_error_raises():
+    """An API failure must raise CapacityCheckError, not mask itself as False."""
     checker = _make_checker()
     mock_ec2 = MagicMock()
     mock_ec2.get_paginator.side_effect = ClientError(
@@ -73,7 +80,8 @@ def test_check_instance_available_client_error_returns_false():
         "DescribeInstanceTypeOfferings",
     )
     checker._session.client = MagicMock(return_value=mock_ec2)
-    assert checker.check_instance_available_in_region("g5.xlarge", "us-east-1") is False
+    with pytest.raises(CapacityCheckError, match="us-east-1"):
+        checker.check_instance_available_in_region("g5.xlarge", "us-east-1")
 
 
 def test_get_availability_zones_client_error_returns_empty():
@@ -443,3 +451,74 @@ def test_assess_high_az_coverage_no_scarcity():
         "g5.xlarge", None, 1.0, spot_placement_scores={"a": 9}, spot_prices=[], az_coverage=0.8
     )
     assert avail == "high"
+
+
+# ---------------------------------------------------------------------------
+# CapacityCheckError propagation: an AWS API failure in the primary
+# availability check must surface as a typed error, not a benign
+# "unavailable" result that masks throttling / auth / opt-in failures.
+# ---------------------------------------------------------------------------
+
+
+def _offerings_paginator(instance_types):
+    paginator = MagicMock()
+    paginator.paginate.return_value = [
+        {"InstanceTypeOfferings": [{"InstanceType": it} for it in instance_types]}
+    ]
+    return paginator
+
+
+def test_check_instance_available_genuinely_not_offered_returns_false():
+    """A successful lookup that omits the type still returns False (no regression)."""
+    checker = _make_checker()
+    mock_ec2 = MagicMock()
+    mock_ec2.get_paginator.return_value = _offerings_paginator(["m5.large", "c5.large"])
+    checker._session.client = MagicMock(return_value=mock_ec2)
+    assert checker.check_instance_available_in_region("p5.48xlarge", "us-east-1") is False
+
+
+def test_check_instance_available_offered_returns_true():
+    checker = _make_checker()
+    mock_ec2 = MagicMock()
+    mock_ec2.get_paginator.return_value = _offerings_paginator(["g5.xlarge", "m5.large"])
+    checker._session.client = MagicMock(return_value=mock_ec2)
+    assert checker.check_instance_available_in_region("g5.xlarge", "us-east-1") is True
+
+
+@pytest.mark.parametrize("code", ["RequestLimitExceeded", "AuthFailure", "OptInRequired"])
+def test_check_instance_available_raises_on_api_failure(code):
+    checker = _make_checker()
+    mock_ec2 = MagicMock()
+    mock_ec2.get_paginator.side_effect = ClientError(
+        {"Error": {"Code": code, "Message": code}}, "DescribeInstanceTypeOfferings"
+    )
+    checker._session.client = MagicMock(return_value=mock_ec2)
+    with pytest.raises(CapacityCheckError) as exc:
+        checker.check_instance_available_in_region("g5.xlarge", "eu-west-1")
+    # Message carries region and underlying error for a detailed MCP response.
+    assert "eu-west-1" in str(exc.value)
+    assert code in str(exc.value)
+
+
+def test_estimate_capacity_propagates_capacity_check_error():
+    """estimate_capacity must not swallow a raised CapacityCheckError."""
+    checker = _make_checker()
+    mock_ec2 = MagicMock()
+    mock_ec2.get_paginator.side_effect = ClientError(
+        {"Error": {"Code": "RequestLimitExceeded", "Message": "slow"}},
+        "DescribeInstanceTypeOfferings",
+    )
+    checker._session.client = MagicMock(return_value=mock_ec2)
+    with pytest.raises(CapacityCheckError):
+        checker.estimate_capacity("g5.xlarge", "us-east-1")
+
+
+def test_estimate_capacity_genuinely_unavailable_no_regression():
+    """A genuinely not-offered type still yields availability='unavailable'."""
+    checker = _make_checker()
+    mock_ec2 = MagicMock()
+    mock_ec2.get_paginator.return_value = _offerings_paginator(["m5.large"])
+    checker._session.client = MagicMock(return_value=mock_ec2)
+    estimates = checker.estimate_capacity("p5.48xlarge", "us-east-1")
+    assert len(estimates) == 1
+    assert estimates[0].availability == "unavailable"

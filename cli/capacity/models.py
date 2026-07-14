@@ -6,6 +6,17 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+class CapacityCheckError(Exception):
+    """A primary capacity availability check failed at the AWS API level.
+
+    Raised when an availability lookup (e.g. DescribeInstanceTypeOfferings)
+    fails due to throttling, expired/invalid credentials, denied permissions,
+    or a region that isn't opted in. This is distinct from a *successful* lookup
+    that reports an instance type as genuinely not offered — masking such
+    failures as "unavailable" hides real, actionable errors from the caller.
+    """
+
+
 @dataclass
 class InstanceTypeInfo:
     """Information about an EC2 instance type."""
@@ -50,6 +61,7 @@ class CapacityEstimate:
     price_per_hour: float | None = None
     recommendation: str = ""
     details: dict[str, Any] = field(default_factory=dict)
+    error: str | None = None  # Explicit error string for partial/degraded results
 
 
 # GPU instance type specifications (common types)
