@@ -1,0 +1,31 @@
+# gp3 block-storage StorageClass for in-cluster observability
+# Prometheus, Grafana, and Alertmanager (kube-prometheus-stack) request block
+# PersistentVolumeClaims. EKS Auto Mode manages the EBS CSI capability but does
+# NOT create a StorageClass for you, so this class binds those PVCs using the
+# Auto Mode provisioner (ebs.csi.eks.amazonaws.com). WaitForFirstConsumer defers
+# provisioning until a pod schedules, so the volume lands in the pod's AZ.
+#
+# Only applied when cdk.json cluster_observability.enabled = true. GCORegional
+# Stack substitutes {{CLUSTER_OBSERVABILITY_ENABLED}} only then; when
+# observability is disabled the placeholder is left unreplaced and the
+# kubectl-applier skips this file (same gating FSx and Valkey use). The
+# StorageClass name is kept static (a placeholder in metadata.name would fail
+# k8s schema validation) and mirrors _OBSERVABILITY_STORAGE_CLASS in
+# gco/stacks/regional_stack.py; a synth test asserts the two stay in lockstep.
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gco-observability-gp3
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+provisioner: ebs.csi.eks.amazonaws.com
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+parameters:
+  type: gp3
+  encrypted: "true"

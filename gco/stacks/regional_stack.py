@@ -163,6 +163,31 @@ def _compute_kubectl_cluster_shared_replacements(
     }
 
 
+#: StorageClass name for in-cluster observability PVCs (Prometheus, Grafana,
+#: Alertmanager). The value overrides reference this name, and the gated gp3
+#: StorageClass manifest (24-storage-observability-gp3.yaml) declares it. A
+#: synth test asserts the two stay in lockstep. The manifest keeps this name
+#: static (a placeholder in ``metadata.name`` would fail k8s schema
+#: validation), so the toggle gate lives in an annotation value instead.
+_OBSERVABILITY_STORAGE_CLASS = "gco-observability-gp3"
+
+
+def _compute_kubectl_observability_replacements(enabled: bool) -> dict[str, str]:
+    """Build the kubectl-applier replacement that gates the observability manifests.
+
+    Pure helper kept at module scope so presence/absence can be asserted
+    without synthesizing a full regional stack. When observability is enabled
+    the ``{{CLUSTER_OBSERVABILITY_ENABLED}}`` gate resolves to ``"true"`` so the
+    gp3 StorageClass manifest (and, later, the ServiceMonitors / dashboards)
+    render and apply. When disabled the dict is empty, so those manifests keep
+    an unreplaced ``{{...}}`` token and the applier skips them — the same
+    optional-feature gating FSx and Valkey already rely on.
+    """
+    if not enabled:
+        return {}
+    return {"{{CLUSTER_OBSERVABILITY_ENABLED}}": "true"}
+
+
 def _augment_trusted_registries_with_project_ecr(
     base: list[str],
     *,
@@ -2482,6 +2507,17 @@ class GCORegionalStack(Stack):
             _compute_kubectl_cluster_shared_replacements(self.cluster_shared_identity)
         )
 
+        # Cluster observability (on by default): gate the gp3 StorageClass and
+        # the ServiceMonitors/dashboards on the toggle. When enabled the gating
+        # placeholders resolve so those manifests apply; when disabled the keys
+        # are absent, so the manifests keep an unreplaced placeholder and the
+        # applier skips them (same mechanism FSx/Valkey use).
+        image_replacements.update(
+            _compute_kubectl_observability_replacements(
+                self.config.get_cluster_observability_enabled()
+            )
+        )
+
         # Add queue processor replacements if enabled
         qp_config = self.node.try_get_context("queue_processor") or {}
 
@@ -3051,25 +3087,95 @@ class GCORegionalStack(Stack):
 
         Returned dict is forwarded verbatim as the ``Charts`` property of the
         ``HelmInstallCharts`` custom resource; the installer deep-merges each
-        chart's ``values`` over ``charts.yaml``. Currently used only to point
-        Volcano's ``basic.image_registry`` at the project's ECR image mirror
-        when enabled, so every Volcano image (controller, scheduler, admission
-        webhook, and the pre-install admission-init hook — all of which render
-        from ``basic.image_registry``) resolves from ECR instead of docker.io.
-        The upstream image names (``volcanosh/vc-*``) are preserved, so each
-        resolves to ``<mirror_registry>/volcanosh/vc-*`` — matching where
-        ``gco images mirror`` pushes them. Returns ``{}`` when
-        the mirror is disabled, preserving the prior behavior.
+        chart's ``values`` over ``charts.yaml``. Two charts get overrides:
+
+        - ``volcano``: point ``basic.image_registry`` at the project's ECR
+          image mirror when enabled, so every Volcano image (controller,
+          scheduler, admission webhook, and the pre-install admission-init
+          hook) resolves from ECR instead of docker.io. The upstream names
+          (``volcanosh/vc-*``) are preserved, so each resolves to
+          ``<mirror_registry>/volcanosh/vc-*``.
+        - ``kube-prometheus-stack``: inject the ``cdk.json``-derived dynamic
+          values (Grafana/Prometheus/Alertmanager persistence sizes, Prometheus
+          retention, the gp3 ``storageClassName``, and the GPU/Neuron/EFA
+          node-exporter tolerations) over the static hardening values in
+          ``charts.yaml`` when ``cluster_observability.enabled`` is true.
+
+        Returns ``{}`` when neither override applies, preserving prior behavior.
         """
-        if not getattr(self, "volcano_mirror_registry", None):
-            return {}
-        return {
-            "volcano": {
+        overrides: dict[str, Any] = {}
+
+        if getattr(self, "volcano_mirror_registry", None):
+            overrides["volcano"] = {
                 "values": {
                     "basic": {
                         "image_registry": self.volcano_mirror_registry,
                     }
                 }
+            }
+
+        if self.config.get_cluster_observability_enabled():
+            overrides["kube-prometheus-stack"] = self._observability_chart_values()
+
+        return overrides
+
+    def _observability_chart_values(self) -> dict[str, Any]:
+        """Build the kube-prometheus-stack value overrides from cdk.json.
+
+        Sizes/retention come from ``cluster_observability`` in ``cdk.json``; the
+        gp3 ``storageClassName`` is the shared ``_OBSERVABILITY_STORAGE_CLASS``
+        (also the name of the gated StorageClass manifest), and the
+        node-exporter tolerations reuse the shared accelerator-node tolerations
+        so the DaemonSet schedules on tainted GPU/Neuron/EFA nodes. Deep-merged
+        by the installer over the static hardening values in ``charts.yaml``.
+        """
+        obs = self.config.get_cluster_observability_config()
+        storage_class = _OBSERVABILITY_STORAGE_CLASS
+        return {
+            "values": {
+                "grafana": {
+                    "persistence": {
+                        "storageClassName": storage_class,
+                        "size": obs["grafana"]["persistence_size"],
+                    },
+                },
+                "prometheus": {
+                    "prometheusSpec": {
+                        "retention": obs["prometheus"]["retention"],
+                        "storageSpec": {
+                            "volumeClaimTemplate": {
+                                "spec": {
+                                    "storageClassName": storage_class,
+                                    "resources": {
+                                        "requests": {
+                                            "storage": obs["prometheus"]["persistence_size"],
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                "alertmanager": {
+                    "enabled": obs["alertmanager"]["enabled"],
+                    "alertmanagerSpec": {
+                        "storage": {
+                            "volumeClaimTemplate": {
+                                "spec": {
+                                    "storageClassName": storage_class,
+                                    "resources": {
+                                        "requests": {
+                                            "storage": obs["alertmanager"]["persistence_size"],
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                "prometheus-node-exporter": {
+                    "tolerations": GCORegionalStack._ADDON_NODE_TOLERATIONS,
+                },
             }
         }
 
@@ -3109,6 +3215,15 @@ class GCORegionalStack(Stack):
             chart_config = helm_config.get(config_key, {})
             if config_key in mandatory_chart_keys or chart_config.get("enabled", True):
                 enabled_charts.extend(chart_names)
+
+        # kube-prometheus-stack is driven by the separate on-by-default
+        # cluster_observability toggle (not the helm block), so include it here
+        # when enabled. Its install order comes from its file position in
+        # charts.yaml (before kueue), not from where it sits in this list — the
+        # installer runs one task per chart in charts.yaml order and skips any
+        # task whose chart is absent from this enabled set.
+        if self.config.get_cluster_observability_enabled():
+            enabled_charts.append("kube-prometheus-stack")
 
         return enabled_charts
 
