@@ -66,7 +66,14 @@ def expected_output_paths(images_dir: Path = IMAGES_DIR) -> list[Path]:
     return [images_dir / shot.filename for shot in SCREENSHOTS]
 
 
-def capture(grafana_url: str, username: str, password: str, output_dir: Path) -> list[Path]:
+def capture(
+    grafana_url: str,
+    username: str,
+    password: str,
+    output_dir: Path,
+    time_from: str | None = None,
+    time_to: str | None = None,
+) -> list[Path]:
     """Authenticate to Grafana and screenshot each dashboard. Returns written paths.
 
     Authentication sends an HTTP basic-auth ``Authorization`` header on every
@@ -78,6 +85,13 @@ def capture(grafana_url: str, username: str, password: str, output_dir: Path) ->
     page. Setting the header outright mirrors ``curl -u`` and keeps the SPA
     authenticated, so no login form is driven.
 
+    ``time_from`` / ``time_to`` optionally override each dashboard's saved time
+    range via the ``from``/``to`` URL params (e.g. ``now-30m`` / ``now``). The
+    curated dashboards save a 6h default; when a capture follows a short burst of
+    live load, zooming to the active window (``now-30m``) makes the panels read
+    as a full curve rather than a sliver at the right edge. When unset, the
+    dashboard's own range is used.
+
     Playwright is imported lazily so this module can be imported (and its
     metadata inspected by tests) without the browser being installed.
     """
@@ -87,6 +101,11 @@ def capture(grafana_url: str, username: str, password: str, output_dir: Path) ->
     written: list[Path] = []
     base = grafana_url.rstrip("/")
     token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    query = "?kiosk"
+    if time_from:
+        query += f"&from={time_from}"
+    if time_to:
+        query += f"&to={time_to}"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         try:
@@ -100,7 +119,7 @@ def capture(grafana_url: str, username: str, password: str, output_dir: Path) ->
                 # Wait for ``load`` (not ``networkidle``) — a live dashboard's
                 # periodic queries can keep the network busy indefinitely — then
                 # give the panels a fixed moment to finish rendering.
-                page.goto(f"{base}/d/{shot.dashboard_uid}?kiosk", wait_until="load")
+                page.goto(f"{base}/d/{shot.dashboard_uid}{query}", wait_until="load")
                 page.wait_for_timeout(_PANEL_RENDER_WAIT_MS)
                 out = output_dir / shot.filename
                 page.screenshot(path=str(out), full_page=True)
@@ -118,10 +137,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--username", default="admin")
     parser.add_argument("--password", required=True)
     parser.add_argument("--output-dir", type=Path, default=IMAGES_DIR)
+    parser.add_argument(
+        "--from",
+        dest="time_from",
+        default=None,
+        help="Grafana time-range start (e.g. now-30m). Defaults to each dashboard's saved range.",
+    )
+    parser.add_argument(
+        "--to",
+        dest="time_to",
+        default=None,
+        help="Grafana time-range end (e.g. now). Defaults to each dashboard's saved range.",
+    )
     args = parser.parse_args(argv)
 
     try:
-        written = capture(args.grafana_url, args.username, args.password, args.output_dir)
+        written = capture(
+            args.grafana_url,
+            args.username,
+            args.password,
+            args.output_dir,
+            time_from=args.time_from,
+            time_to=args.time_to,
+        )
     except Exception as exc:  # noqa: BLE001 — surface any Playwright/login failure
         print(f"screenshot capture failed: {exc}", file=sys.stderr)
         return 1
