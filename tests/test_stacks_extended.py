@@ -17,7 +17,7 @@ import json
 import os
 import subprocess
 import tempfile
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -914,8 +914,9 @@ class TestDeployTimeoutAndReconciliation:
         assert mock_run.call_args.kwargs["timeout"] == 300.0
 
     def test_deploy_treats_complete_stack_status_as_success_after_cdk_failure(self):
-        """If cdk exits non-zero but CFN says CREATE_COMPLETE, the deploy
-        actually succeeded — cdk's polling loop just gave up early."""
+        """cdk exits non-zero but CFN shows a *fresh* CREATE_COMPLETE (its
+        last-operation time is newer than when the deploy started): cdk's
+        polling loop merely gave up early, so the deploy actually succeeded."""
         from cli.stacks import StackManager
 
         config = MagicMock()
@@ -926,6 +927,11 @@ class TestDeployTimeoutAndReconciliation:
             patch.object(StackManager, "ensure_bootstrapped", return_value=True),
             patch.object(StackManager, "_run_cdk") as mock_run,
             patch.object(StackManager, "_get_stack_status", return_value="CREATE_COMPLETE"),
+            patch.object(
+                StackManager,
+                "_get_stack_last_update_time",
+                return_value=datetime(2999, 1, 1, tzinfo=UTC),
+            ),
             patch.object(StackManager, "_diagnose_deploy_failure"),
         ):
             mock_run.return_value = MagicMock(returncode=1)
@@ -933,7 +939,8 @@ class TestDeployTimeoutAndReconciliation:
             assert manager.deploy("gco-global", require_approval=False) is True
 
     def test_deploy_treats_update_complete_as_success_after_timeout(self):
-        """Same reconciliation after a cdk timeout."""
+        """Same reconciliation after a cdk timeout: a fresh UPDATE_COMPLETE
+        (last-operation time newer than the deploy start) is a real success."""
         import subprocess
 
         from cli.stacks import StackManager
@@ -946,11 +953,70 @@ class TestDeployTimeoutAndReconciliation:
             patch.object(StackManager, "ensure_bootstrapped", return_value=True),
             patch.object(StackManager, "_run_cdk") as mock_run,
             patch.object(StackManager, "_get_stack_status", return_value="UPDATE_COMPLETE"),
+            patch.object(
+                StackManager,
+                "_get_stack_last_update_time",
+                return_value=datetime(2999, 1, 1, tzinfo=UTC),
+            ),
             patch.object(StackManager, "_diagnose_deploy_failure"),
         ):
             mock_run.side_effect = subprocess.TimeoutExpired(cmd=["cdk"], timeout=3600)
             manager = StackManager(config)
             assert manager.deploy("gco-global", require_approval=False) is True
+
+    def test_deploy_failure_with_stale_complete_is_not_masked(self):
+        """Regression: cdk exits non-zero *before* touching CloudFormation
+        (e.g. a cloud-assembly schema mismatch or a failed asset/image build).
+        The stack is left in the CREATE_COMPLETE of a *previous* deploy — its
+        last-operation time predates this attempt — so the stale terminal state
+        must NOT be reported as a fresh success."""
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+
+        with (
+            patch("cli.stacks._detect_container_runtime", return_value="docker"),
+            patch.object(StackManager, "_check_and_fix_stuck_stack"),
+            patch.object(StackManager, "ensure_bootstrapped", return_value=True),
+            patch.object(StackManager, "_run_cdk") as mock_run,
+            patch.object(StackManager, "_get_stack_status", return_value="CREATE_COMPLETE"),
+            patch.object(
+                StackManager,
+                "_get_stack_last_update_time",
+                return_value=datetime(2000, 1, 1, tzinfo=UTC),
+            ),
+            patch.object(StackManager, "_diagnose_deploy_failure"),
+        ):
+            mock_run.return_value = MagicMock(returncode=1)
+            manager = StackManager(config)
+            assert manager.deploy("gco-global", require_approval=False) is False
+
+    def test_deploy_timeout_with_stale_complete_is_not_masked(self):
+        """A cdk timeout while the stack sits in a *prior* deploy's terminal
+        UPDATE_COMPLETE (last-operation time predates this attempt) is a real
+        failure, not a reconciled success."""
+        import subprocess
+
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+
+        with (
+            patch("cli.stacks._detect_container_runtime", return_value="docker"),
+            patch.object(StackManager, "_check_and_fix_stuck_stack"),
+            patch.object(StackManager, "ensure_bootstrapped", return_value=True),
+            patch.object(StackManager, "_run_cdk") as mock_run,
+            patch.object(StackManager, "_get_stack_status", return_value="UPDATE_COMPLETE"),
+            patch.object(
+                StackManager,
+                "_get_stack_last_update_time",
+                return_value=datetime(2000, 1, 1, tzinfo=UTC),
+            ),
+            patch.object(StackManager, "_diagnose_deploy_failure"),
+        ):
+            mock_run.side_effect = subprocess.TimeoutExpired(cmd=["cdk"], timeout=3600)
+            manager = StackManager(config)
+            assert manager.deploy("gco-global", require_approval=False) is False
 
     def test_deploy_returns_false_when_cdk_fails_and_status_is_not_complete(self):
         """When cdk fails AND CFN reports a non-complete status (or the

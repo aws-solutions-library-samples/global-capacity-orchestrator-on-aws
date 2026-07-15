@@ -20,6 +20,7 @@ Two behaviours land here:
    fought.
 """
 
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -95,6 +96,16 @@ class TestDeployFailureReconcileWaitsForSettle:
             patch.object(StackManager, "ensure_bootstrapped", return_value=True),
             patch.object(StackManager, "_run_cdk") as mock_run,
             patch.object(StackManager, "_get_stack_status", get_status),
+            # Default the last-operation marker to well before the deploy
+            # started, modelling a stack sitting in a *prior* deploy's terminal
+            # state. The "already terminal" tests rely on this to prove a stale
+            # COMPLETE reads as a failure; the in-progress tests settle via
+            # _wait_for_stack_settle and never consult it.
+            patch.object(
+                StackManager,
+                "_get_stack_last_update_time",
+                return_value=datetime(2000, 1, 1, tzinfo=UTC),
+            ),
             patch.object(StackManager, "_diagnose_deploy_failure"),
             patch("time.sleep") as mock_sleep,
         ):
@@ -123,12 +134,26 @@ class TestDeployFailureReconcileWaitsForSettle:
         )
         assert result is False
 
-    def test_already_complete_does_not_wait(self):
-        """Terminal on the first read → no settle wait (time.sleep never called)."""
-        result, get_status, mock_sleep = self._deploy(["CREATE_COMPLETE", "CREATE_COMPLETE"])
-        assert result is True
+    def test_already_complete_without_in_progress_is_failure(self):
+        """cdk exits non-zero while the stack is already terminal *_COMPLETE:
+        CloudFormation ran no operation for this attempt (cdk failed *before*
+        touching it — a synth error, a cloud-assembly schema mismatch, or an
+        asset/image build failure). The stale COMPLETE left by a prior deploy
+        must NOT be reported as success, and there is nothing to wait on."""
+        result, get_status, mock_sleep = self._deploy(["CREATE_COMPLETE"])
+        assert result is False
         mock_sleep.assert_not_called()
-        assert get_status.call_count == 2
+        assert get_status.call_count == 1
+
+    def test_update_complete_from_prior_deploy_is_not_masked(self):
+        """Regression: a cdk build/synth failure (e.g. a cloud-assembly schema
+        mismatch, or a missing container runtime during asset build) leaves the
+        stack in the UPDATE_COMPLETE state of the *previous* deploy. The wrapper
+        must surface the failure instead of reporting the stale terminal state
+        as a fresh successful deploy."""
+        result, _, mock_sleep = self._deploy(["UPDATE_COMPLETE"])
+        assert result is False
+        mock_sleep.assert_not_called()
 
     def test_unknown_status_keeps_cdk_failure(self):
         """A None status (lookup failed / transient) leaves cdk's failure intact."""
