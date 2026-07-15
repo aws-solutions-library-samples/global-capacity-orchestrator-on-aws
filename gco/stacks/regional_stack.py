@@ -165,7 +165,7 @@ def _compute_kubectl_cluster_shared_replacements(
 
 #: StorageClass name for in-cluster observability PVCs (Prometheus, Grafana,
 #: Alertmanager). The value overrides reference this name, and the gated gp3
-#: StorageClass manifest (24-storage-observability-gp3.yaml) declares it. A
+#: StorageClass manifest (25-storage-observability-gp3.yaml) declares it. A
 #: synth test asserts the two stay in lockstep. The manifest keeps this name
 #: static (a placeholder in ``metadata.name`` would fail k8s schema
 #: validation), so the toggle gate lives in an annotation value instead.
@@ -1313,8 +1313,8 @@ class GCORegionalStack(Stack):
         #   - lambda/kubectl-applier-simple/manifests/02-rbac.yaml
         #     (gco-health-monitor-sa, gco-manifest-processor-sa,
         #      gco-inference-monitor-sa)
-        #   - lambda/kubectl-applier-simple/manifests/04a-jobs-serviceaccount.yaml
-        #     (gco-service-account in gco-jobs)
+        #   - lambda/kubectl-applier-simple/manifests/01-serviceaccounts.yaml
+        #     (gco-service-account in gco-jobs and gco-inference)
         self.service_account_role = GCORegionalStack._create_irsa_role(
             self,
             "ServiceAccountRole",

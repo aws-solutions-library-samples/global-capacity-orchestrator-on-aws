@@ -814,18 +814,10 @@ jobs:
             exit 1
           fi
           echo "NetworkPolicies accepted by apiserver: $count"
-      - name: Apply jobs ServiceAccount
-        # 04a creates the gco-service-account SA in gco-jobs with
-        # automountServiceAccountToken: false. Stub the IRSA annotation.
-        run: |
-          set -euo pipefail
-          sed 's|{{SERVICE_ACCOUNT_ROLE_ARN}}|arn:aws:iam::000000000000:role/ci-stub|g' \
-            lambda/kubectl-applier-simple/manifests/04a-jobs-serviceaccount.yaml \
-            | kubectl apply -f -
-          kubectl -n gco-jobs get sa gco-service-account
-          echo "Jobs ServiceAccount created"
       - name: Apply ResourceQuotas and LimitRanges
-        # 06-resource-quotas.yaml defines namespace-level resource governance.
+        # 04-resource-quotas.yaml defines namespace-level resource governance.
+        # The gco-service-account SA it governs is already created by the
+        # "Apply namespaces + RBAC" step (01-serviceaccounts.yaml).
         # Substitute template variables with reasonable CI values.
         # The YAML already quotes the placeholders, so values must be unquoted.
         run: |
@@ -837,7 +829,7 @@ jobs:
               -e 's|{{LIMIT_MAX_CPU}}|16|g' \
               -e 's|{{LIMIT_MAX_MEMORY}}|64Gi|g' \
               -e 's|{{LIMIT_MAX_GPU}}|4|g' \
-            lambda/kubectl-applier-simple/manifests/06-resource-quotas.yaml \
+            lambda/kubectl-applier-simple/manifests/04-resource-quotas.yaml \
             | kubectl apply -f -
           kubectl -n gco-jobs get resourcequota gco-jobs-quota
           kubectl -n gco-jobs get limitrange gco-jobs-limits

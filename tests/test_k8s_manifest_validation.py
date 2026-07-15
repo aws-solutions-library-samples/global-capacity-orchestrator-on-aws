@@ -103,7 +103,7 @@ class TestRenderPlaceholders:
             "03-network-policies.yaml",  # the structural VPC CIDR placeholder
             "30-health-monitor.yaml",  # bare image: placeholder + quoted values
             "post-helm-sqs-consumer.yaml",  # the bare integer placeholders
-            "06-resource-quotas.yaml",  # quoted-string placeholders only
+            "04-resource-quotas.yaml",  # quoted-string placeholders only
         ],
     )
     def test_real_templated_manifest_renders_to_parseable_yaml(self, manifest_name: str) -> None:

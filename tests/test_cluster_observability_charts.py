@@ -41,7 +41,7 @@ _GP3_MANIFEST = (
     / "lambda"
     / "kubectl-applier-simple"
     / "manifests"
-    / "24-storage-observability-gp3.yaml"
+    / "25-storage-observability-gp3.yaml"
 )
 
 

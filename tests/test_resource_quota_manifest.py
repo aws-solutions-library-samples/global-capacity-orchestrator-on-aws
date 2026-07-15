@@ -1,6 +1,6 @@
 """
 Tests for the ResourceQuota + LimitRange manifest
-(lambda/kubectl-applier-simple/manifests/06-resource-quotas.yaml).
+(lambda/kubectl-applier-simple/manifests/04-resource-quotas.yaml).
 
 Renders the manifest by replacing {{QUOTA_*}} and {{LIMIT_*}}
 placeholders with the default values from cdk.json, then asserts the
@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-MANIFEST_PATH = Path("lambda/kubectl-applier-simple/manifests/06-resource-quotas.yaml")
+MANIFEST_PATH = Path("lambda/kubectl-applier-simple/manifests/04-resource-quotas.yaml")
 CDK_JSON_PATH = Path("cdk.json")
 REGIONAL_STACK_PATH = Path("gco/stacks/regional_stack.py")
 
