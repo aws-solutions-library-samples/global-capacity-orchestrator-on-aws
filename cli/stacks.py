@@ -1924,7 +1924,14 @@ class StackManager:
         if not self._image_registry_destroy_preflight(force=force):
             return False, [], list(stacks)
 
-        # Phase 0: Clean up backup vault recovery points so the global stack
+        # Phase 0a: The CLI creates SSM bastions outside CloudFormation. A
+        # crashed tunnel process can therefore leave an instance (and its
+        # primary ENI) in a regional VPC, which blocks VPC deletion. Terminate
+        # every project-scoped ephemeral bastion and wait for its ENIs before
+        # asking CloudFormation to delete anything.
+        self.cleanup_orphaned_bastions(stacks)
+
+        # Phase 0b: Clean up backup vault recovery points so the global stack
         # can be deleted cleanly by CloudFormation.
         self._cleanup_backup_vault()
 
@@ -2145,6 +2152,221 @@ class StackManager:
 
         except Exception as e:
             print(f"  Warning: Backup vault cleanup failed (non-fatal): {e}")
+
+    def cleanup_orphaned_bastions(self, stacks: list[str] | None = None) -> int:
+        """Terminate CLI-managed ephemeral bastions before regional teardown.
+
+        The bastion is intentionally outside CloudFormation, so a crashed
+        tunnel process can leave its EC2 instance and primary ENI in a stack's
+        VPC. This sweep is scoped by the regional stack's VPC plus the
+        ``gco:ephemeral`` / purpose / project tags. It runs before every
+        ``destroy-all`` attempt and waits for both instance termination and ENI
+        release so VPC deletion does not race EC2 cleanup.
+
+        Returns the number of instances for which termination was requested.
+        All AWS errors are non-fatal: CloudFormation still gets a chance to
+        delete the stack and the destroy-all retry loop will run this sweep
+        again if necessary.
+        """
+        if stacks is None:
+            stacks = self.list_stacks()
+        regional_stacks = [
+            stack
+            for stack in stacks
+            if not stack.endswith(("-global", "-api-gateway", "-monitoring", "-analytics"))
+        ]
+
+        if not regional_stacks:
+            return 0
+        if len(regional_stacks) == 1:
+            terminated = self._cleanup_orphaned_bastions(regional_stacks[0])
+        else:
+            # Each region has independent EC2 waiters. Run them concurrently so
+            # one slow termination does not add its full timeout to every other
+            # region before CloudFormation can start deleting stacks.
+            with ThreadPoolExecutor(max_workers=min(4, len(regional_stacks))) as executor:
+                terminated = sum(executor.map(self._cleanup_orphaned_bastions, regional_stacks))
+        if terminated:
+            print(
+                f"  Requested termination for {terminated} orphaned ephemeral "
+                "SSM bastion(s) before stack deletion."
+            )
+        return terminated
+
+    def _cleanup_orphaned_bastions(self, stack_name: str) -> int:
+        """Terminate this regional stack's tagged bastions and release their ENIs."""
+        import boto3
+
+        from .ephemeral_bastion import (
+            BASTION_PURPOSE,
+            TAG_EPHEMERAL_KEY,
+            TAG_PROJECT_KEY,
+            TAG_PURPOSE_KEY,
+            bastion_instance_name,
+        )
+
+        region = self._get_deploy_region(stack_name)
+        if not region:
+            return 0
+
+        project_name = str(self.config.project_name)
+        expected_name = bastion_instance_name(project_name)
+        try:
+            ec2 = boto3.client("ec2", region_name=region)
+            vpcs = ec2.describe_vpcs(
+                Filters=[{"Name": "tag:aws:cloudformation:stack-name", "Values": [stack_name]}]
+            ).get("Vpcs", [])
+        except Exception as exc:  # noqa: BLE001 - destroy cleanup is best-effort
+            print(f"  Warning: Bastion cleanup could not inspect {stack_name}: {exc}")
+            return 0
+
+        instance_ids: list[str] = []
+        eni_ids: list[str] = []
+        for vpc in vpcs:
+            vpc_id = vpc.get("VpcId")
+            if not vpc_id:
+                continue
+            try:
+                reservations = ec2.describe_instances(
+                    Filters=[
+                        {"Name": "vpc-id", "Values": [vpc_id]},
+                        {"Name": f"tag:{TAG_EPHEMERAL_KEY}", "Values": ["true"]},
+                        {"Name": f"tag:{TAG_PURPOSE_KEY}", "Values": [BASTION_PURPOSE]},
+                        {
+                            "Name": "instance-state-name",
+                            "Values": [
+                                "pending",
+                                "running",
+                                "stopping",
+                                "stopped",
+                                "shutting-down",
+                            ],
+                        },
+                    ]
+                ).get("Reservations", [])
+            except Exception as exc:  # noqa: BLE001 - continue with other VPCs
+                logger.warning("Bastion lookup failed in %s (%s): %s", stack_name, vpc_id, exc)
+                continue
+
+            for reservation in reservations:
+                for instance in reservation.get("Instances", []):
+                    tags = {
+                        str(tag.get("Key")): str(tag.get("Value"))
+                        for tag in instance.get("Tags", [])
+                        if tag.get("Key") is not None
+                    }
+                    tagged_project = tags.get(TAG_PROJECT_KEY)
+                    # New bastions carry gco:project. For bastions created by an
+                    # older CLI, use the project-scoped Name tag as the safe
+                    # backwards-compatible ownership check.
+                    if tagged_project != project_name and not (
+                        tagged_project is None and tags.get("Name") == expected_name
+                    ):
+                        continue
+                    instance_id = instance.get("InstanceId")
+                    if instance_id:
+                        instance_ids.append(str(instance_id))
+                    for interface in instance.get("NetworkInterfaces", []):
+                        attachment = interface.get("Attachment") or {}
+                        # Only the primary ENI is owned by the ephemeral
+                        # instance lifecycle. Never delete an operator-attached
+                        # secondary ENI, even if it later becomes detached.
+                        if not (
+                            attachment.get("DeviceIndex") == 0
+                            and attachment.get("DeleteOnTermination") is True
+                        ):
+                            continue
+                        eni_id = interface.get("NetworkInterfaceId")
+                        if eni_id:
+                            eni_ids.append(str(eni_id))
+
+        instance_ids = list(dict.fromkeys(instance_ids))
+        eni_ids = list(dict.fromkeys(eni_ids))
+        if not instance_ids:
+            return 0
+
+        try:
+            ec2.terminate_instances(InstanceIds=instance_ids)
+        except Exception as exc:  # noqa: BLE001 - report and let destroy retry
+            print(f"  Warning: Failed to terminate ephemeral bastion(s) in {stack_name}: {exc}")
+            return 0
+
+        print(
+            f"  Terminating {len(instance_ids)} ephemeral SSM bastion(s) in "
+            f"{stack_name}: {', '.join(instance_ids)}"
+        )
+        try:
+            ec2.get_waiter("instance_terminated").wait(
+                InstanceIds=instance_ids,
+                WaiterConfig={"Delay": 5, "MaxAttempts": 60},
+            )
+        except Exception as exc:  # noqa: BLE001 - ENI polling below may still succeed
+            logger.warning("Timed out waiting for bastion termination in %s: %s", stack_name, exc)
+
+        remaining_enis = self._wait_for_bastion_network_interfaces(ec2, eni_ids)
+        if remaining_enis:
+            print(
+                f"  Warning: {len(remaining_enis)} bastion network interface(s) in "
+                f"{stack_name} have not released yet: {', '.join(sorted(remaining_enis))}. "
+                "The destroy retry will check again."
+            )
+        return len(instance_ids)
+
+    @staticmethod
+    def _wait_for_bastion_network_interfaces(
+        ec2: Any,
+        eni_ids: list[str],
+        *,
+        timeout_seconds: float = 120.0,
+        poll_interval_seconds: float = 2.0,
+    ) -> set[str]:
+        """Wait for terminated bastion ENIs, deleting detached leftovers.
+
+        EC2 normally deletes a primary ENI with its instance. If it becomes
+        detached instead, it is safe to delete here because its owning instance
+        was selected by the project/VPC bastion filters and termination has
+        already been requested.
+        """
+        import time as _time
+
+        remaining = set(eni_ids)
+        deadline = _time.monotonic() + timeout_seconds
+        while remaining:
+            for eni_id in tuple(remaining):
+                try:
+                    response = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni_id])
+                except ClientError as exc:
+                    code = exc.response.get("Error", {}).get("Code")
+                    if code == "InvalidNetworkInterfaceID.NotFound":
+                        remaining.discard(eni_id)
+                        continue
+                    logger.warning("Could not inspect bastion ENI %s: %s", eni_id, exc)
+                    return remaining
+                except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+                    logger.warning("Could not inspect bastion ENI %s: %s", eni_id, exc)
+                    return remaining
+
+                interfaces = response.get("NetworkInterfaces", [])
+                if not interfaces:
+                    remaining.discard(eni_id)
+                    continue
+                if interfaces[0].get("Status") == "available":
+                    try:
+                        ec2.delete_network_interface(NetworkInterfaceId=eni_id)
+                        remaining.discard(eni_id)
+                    except ClientError as exc:
+                        code = exc.response.get("Error", {}).get("Code")
+                        if code == "InvalidNetworkInterfaceID.NotFound":
+                            remaining.discard(eni_id)
+                        else:
+                            logger.debug("Delete of bastion ENI %s failed: %s", eni_id, exc)
+                    except Exception as exc:  # noqa: BLE001 - retry until timeout
+                        logger.debug("Delete of bastion ENI %s failed: %s", eni_id, exc)
+
+            if not remaining or _time.monotonic() >= deadline:
+                break
+            _time.sleep(poll_interval_seconds)
+        return remaining
 
     def cleanup_eks_security_groups(self) -> None:
         """Clean up EKS-managed security groups across all regional stacks.

@@ -24,6 +24,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from botocore.exceptions import ClientError
+
 
 class TestDeploySuccessStateVerification:
     """deploy() reconciles a cdk 'success' against the real CloudFormation status."""
@@ -474,3 +476,187 @@ class TestCleanupOrphanedNetworkInterfaces:
         for stack in ("gco-us-east-1", "gco-eu-west-1"):
             mock_sg.assert_any_call(stack)
             mock_summarize.assert_any_call(stack)
+
+
+class TestCleanupOrphanedBastions:
+    """Destroy-all removes CLI-managed bastions before CloudFormation runs."""
+
+    @staticmethod
+    def _manager():
+        from cli.stacks import StackManager
+
+        manager = StackManager.__new__(StackManager)
+        manager.config = MagicMock(project_name="gco")
+        manager.project_root = Path(".")
+        return manager
+
+    @staticmethod
+    def _tags(**overrides):
+        tags = {
+            "gco:ephemeral": "true",
+            "gco:purpose": "cluster-observability",
+            "gco:project": "gco",
+            "Name": "gco-ephemeral-ssm-bastion",
+        }
+        tags.update(overrides)
+        return [{"Key": key, "Value": value} for key, value in tags.items()]
+
+    def test_terminates_current_and_legacy_project_bastions(self):
+        from cli.stacks import StackManager
+
+        manager = self._manager()
+        mock_ec2 = MagicMock()
+        mock_ec2.describe_vpcs.return_value = {"Vpcs": [{"VpcId": "vpc-1"}]}
+        legacy_tags = [tag for tag in self._tags() if tag["Key"] != "gco:project"]
+        mock_ec2.describe_instances.return_value = {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            "InstanceId": "i-current",
+                            "Tags": self._tags(),
+                            "NetworkInterfaces": [
+                                {
+                                    "NetworkInterfaceId": "eni-current",
+                                    "Attachment": {
+                                        "DeviceIndex": 0,
+                                        "DeleteOnTermination": True,
+                                    },
+                                },
+                                {
+                                    "NetworkInterfaceId": "eni-secondary",
+                                    "Attachment": {
+                                        "DeviceIndex": 1,
+                                        "DeleteOnTermination": False,
+                                    },
+                                },
+                            ],
+                        },
+                        {
+                            "InstanceId": "i-legacy",
+                            "Tags": legacy_tags,
+                            "NetworkInterfaces": [
+                                {
+                                    "NetworkInterfaceId": "eni-legacy",
+                                    "Attachment": {
+                                        "DeviceIndex": 0,
+                                        "DeleteOnTermination": True,
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "InstanceId": "i-other-project",
+                            "Tags": self._tags(**{"gco:project": "other"}),
+                            "NetworkInterfaces": [
+                                {
+                                    "NetworkInterfaceId": "eni-other",
+                                    "Attachment": {
+                                        "DeviceIndex": 0,
+                                        "DeleteOnTermination": True,
+                                    },
+                                }
+                            ],
+                        },
+                    ]
+                }
+            ]
+        }
+
+        with (
+            patch("boto3.client", return_value=mock_ec2),
+            patch.object(
+                StackManager, "_wait_for_bastion_network_interfaces", return_value=set()
+            ) as wait_for_enis,
+        ):
+            count = manager._cleanup_orphaned_bastions("gco-us-east-1")
+
+        assert count == 2
+        mock_ec2.terminate_instances.assert_called_once_with(InstanceIds=["i-current", "i-legacy"])
+        mock_ec2.get_waiter.return_value.wait.assert_called_once_with(
+            InstanceIds=["i-current", "i-legacy"],
+            WaiterConfig={"Delay": 5, "MaxAttempts": 60},
+        )
+        wait_for_enis.assert_called_once_with(mock_ec2, ["eni-current", "eni-legacy"])
+        filters = mock_ec2.describe_instances.call_args.kwargs["Filters"]
+        assert {"Name": "vpc-id", "Values": ["vpc-1"]} in filters
+        assert {"Name": "tag:gco:ephemeral", "Values": ["true"]} in filters
+
+    def test_no_stack_vpc_is_a_noop(self):
+        manager = self._manager()
+        mock_ec2 = MagicMock()
+        mock_ec2.describe_vpcs.return_value = {"Vpcs": []}
+
+        with patch("boto3.client", return_value=mock_ec2):
+            assert manager._cleanup_orphaned_bastions("gco-us-east-1") == 0
+
+        mock_ec2.describe_instances.assert_not_called()
+        mock_ec2.terminate_instances.assert_not_called()
+
+    def test_public_sweep_only_visits_regional_stacks(self):
+        from cli.stacks import StackManager
+
+        manager = self._manager()
+        stacks = [
+            "gco-global",
+            "gco-api-gateway",
+            "gco-monitoring",
+            "gco-analytics",
+            "gco-us-east-1",
+            "gco-eu-west-1",
+        ]
+        with patch.object(StackManager, "_cleanup_orphaned_bastions", return_value=1) as cleanup:
+            assert manager.cleanup_orphaned_bastions(stacks) == 2
+
+        assert cleanup.call_count == 2
+        cleanup.assert_any_call("gco-us-east-1")
+        cleanup.assert_any_call("gco-eu-west-1")
+
+
+class TestWaitForBastionNetworkInterfaces:
+    """Bastion ENI release waits for EC2 and clears detached leftovers."""
+
+    def test_deletes_available_interface(self):
+        from cli.stacks import StackManager
+
+        ec2 = MagicMock()
+        ec2.describe_network_interfaces.return_value = {
+            "NetworkInterfaces": [{"NetworkInterfaceId": "eni-1", "Status": "available"}]
+        }
+
+        remaining = StackManager._wait_for_bastion_network_interfaces(
+            ec2, ["eni-1"], timeout_seconds=0
+        )
+
+        assert remaining == set()
+        ec2.delete_network_interface.assert_called_once_with(NetworkInterfaceId="eni-1")
+
+    def test_not_found_means_interface_is_released(self):
+        from cli.stacks import StackManager
+
+        ec2 = MagicMock()
+        ec2.describe_network_interfaces.side_effect = ClientError(
+            {"Error": {"Code": "InvalidNetworkInterfaceID.NotFound", "Message": "gone"}},
+            "DescribeNetworkInterfaces",
+        )
+
+        remaining = StackManager._wait_for_bastion_network_interfaces(
+            ec2, ["eni-gone"], timeout_seconds=0
+        )
+
+        assert remaining == set()
+
+    def test_in_use_interface_remains_at_timeout(self):
+        from cli.stacks import StackManager
+
+        ec2 = MagicMock()
+        ec2.describe_network_interfaces.return_value = {
+            "NetworkInterfaces": [{"NetworkInterfaceId": "eni-1", "Status": "in-use"}]
+        }
+
+        remaining = StackManager._wait_for_bastion_network_interfaces(
+            ec2, ["eni-1"], timeout_seconds=0
+        )
+
+        assert remaining == {"eni-1"}
+        ec2.delete_network_interface.assert_not_called()

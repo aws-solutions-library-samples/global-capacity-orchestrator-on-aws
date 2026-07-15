@@ -16,10 +16,11 @@ teardown must never leave a paid instance running):
 * the CLI tears it down in a ``finally:`` block.
 
 Network posture: the instance reuses the cluster's own security group (which is
-self-referencing, so it can reach the private API endpoint) and is placed in a
-public subnet with a public IP purely so the SSM agent can reach the Systems
-Manager service. **No inbound ports are opened** — SSM is agent-initiated
-outbound only — so the public IP is not an ingress surface.
+self-referencing, so it can reach the private API endpoint) and is placed in one
+of the cluster's private subnets **without a public IP**. GCO private subnets
+have NAT egress, which lets the SSM agent reach Systems Manager over HTTPS while
+keeping the instance unreachable from the internet. No inbound ports are opened;
+SSM is agent-initiated outbound only.
 
 Style matches :mod:`cli.ssm_tunnel`: pure, validated argv builders (list form,
 never a shell string) that are fully unit-testable, plus thin runtime wrappers
@@ -69,6 +70,7 @@ AL2023_AMI_SSM_PARAMETER = "/aws/service/ami-amazon-linux-latest/al2023-ami-kern
 #               Name=instance-state-name,Values=running,pending
 TAG_EPHEMERAL_KEY = "gco:ephemeral"
 TAG_PURPOSE_KEY = "gco:purpose"
+TAG_PROJECT_KEY = "gco:project"
 TAG_TTL_KEY = "gco:ttl-minutes"
 BASTION_PURPOSE = "cluster-observability"
 
@@ -154,13 +156,11 @@ BASTION_NAME = bastion_instance_name()
 
 @dataclass(frozen=True)
 class BastionNetwork:
-    """The VPC placement an ephemeral bastion needs to reach the private API."""
+    """Private VPC placement for an ephemeral bastion."""
 
     vpc_id: str
     subnet_id: str
     security_group_id: str
-    # True when ``subnet_id`` auto-assigns public IPs (SSM egress over the IGW).
-    public_subnet: bool
 
 
 # --------------------------------------------------------------------------
@@ -218,9 +218,13 @@ def build_describe_cluster_network_command(cluster: str, region: str) -> list[st
     ]
 
 
-def build_describe_public_subnet_command(vpc_id: str, region: str) -> list[str]:
-    """``aws ec2 describe-subnets`` argv for the first public subnet in ``vpc_id``."""
-    _validate(vpc_id, _VPC_RE, "vpc id")
+def build_describe_private_cluster_subnet_command(subnet_ids: list[str], region: str) -> list[str]:
+    """Find the first private subnet among the EKS control-plane subnets."""
+    if not subnet_ids:
+        raise ValueError("At least one cluster subnet id is required")
+    validated_subnets = [
+        _validate(subnet_id, _SUBNET_RE, "cluster subnet id") for subnet_id in subnet_ids
+    ]
     _validate(region, _REGION_RE, "region")
     return [
         "aws",
@@ -228,9 +232,10 @@ def build_describe_public_subnet_command(vpc_id: str, region: str) -> list[str]:
         "describe-subnets",
         "--region",
         region,
+        "--subnet-ids",
+        *validated_subnets,
         "--filters",
-        f"Name=vpc-id,Values={vpc_id}",
-        "Name=map-public-ip-on-launch,Values=true",
+        "Name=map-public-ip-on-launch,Values=false",
         "--query",
         "Subnets[0].SubnetId",
         "--output",
@@ -300,12 +305,18 @@ def build_add_role_to_profile_command(
     ]
 
 
-def _tag_specification(ttl_minutes: int, instance_name: str = BASTION_NAME) -> str:
+def _tag_specification(
+    ttl_minutes: int,
+    instance_name: str = BASTION_NAME,
+    project_name: str = DEFAULT_PROJECT_NAME,
+) -> str:
     """Build the ``--tag-specifications`` value stamping the ephemeral markers."""
+    project = _validate_project(project_name)
     tags = (
         f"{{Key=Name,Value={instance_name}}},"
         f"{{Key={TAG_EPHEMERAL_KEY},Value=true}},"
         f"{{Key={TAG_PURPOSE_KEY},Value={BASTION_PURPOSE}}},"
+        f"{{Key={TAG_PROJECT_KEY},Value={project}}},"
         f"{{Key={TAG_TTL_KEY},Value={ttl_minutes}}}"
     )
     return f"ResourceType=instance,Tags=[{tags}]"
@@ -321,8 +332,8 @@ def build_run_instances_command(
     region: str,
     user_data: str,
     ttl_minutes: int = DEFAULT_TTL_MINUTES,
-    associate_public_ip: bool = True,
     instance_name: str = BASTION_NAME,
+    project_name: str = DEFAULT_PROJECT_NAME,
 ) -> list[str]:
     """Build the validated ``aws ec2 run-instances`` argv, safeguards included.
 
@@ -368,12 +379,9 @@ def build_run_instances_command(
         user_data,
         # Orphan safeguard #3: greppable ephemeral tags.
         "--tag-specifications",
-        _tag_specification(ttl, instance_name),
+        _tag_specification(ttl, instance_name, project_name),
     ]
-    if associate_public_ip:
-        cmd.append("--associate-public-ip-address")
-    else:
-        cmd.append("--no-associate-public-ip-address")
+    cmd.append("--no-associate-public-ip-address")
     # Ask only for the instance id back.
     cmd += ["--query", "Instances[0].InstanceId", "--output", "text"]
     return cmd
@@ -493,7 +501,13 @@ def _run_aws(cmd: list[str], *, allow_exists: bool = False) -> str:
         ) from exc
     if result.returncode != 0:
         stderr = result.stderr or ""
-        if allow_exists and ("EntityAlreadyExists" in stderr or "already exists" in stderr):
+        if allow_exists and (
+            "EntityAlreadyExists" in stderr
+            or "already exists" in stderr
+            # IAM reports an idempotent add-role-to-instance-profile call as
+            # this quota error when the profile already contains its one role.
+            or "Cannot exceed quota for InstanceSessionsPerInstanceProfile" in stderr
+        ):
             return result.stdout or ""
         raise RuntimeError(f"AWS CLI command failed ({' '.join(cmd[:3])}): {stderr.strip()}")
     return result.stdout or ""
@@ -506,11 +520,12 @@ def resolve_bastion_ami(region: str) -> str:
 
 
 def resolve_bastion_network(cluster: str, region: str) -> BastionNetwork:
-    """Discover the VPC, a usable subnet, and the cluster SG for the bastion.
+    """Discover private VPC placement for the bastion.
 
-    Prefers a public subnet (auto-assigned public IP for SSM egress). Falls back
-    to the first cluster subnet (assumes NAT or SSM VPC endpoints) when the VPC
-    exposes no public subnet.
+    GCO gives EKS private control-plane subnets with NAT egress. We select one
+    of those subnets and refuse a public-subnet fallback, ensuring the bastion
+    never receives a public IP. A deployment without NAT can provide Systems
+    Manager interface VPC endpoints instead.
     """
     vpc, sg, subnets = parse_cluster_network(
         _run_aws(build_describe_cluster_network_command(cluster, region))
@@ -518,24 +533,22 @@ def resolve_bastion_network(cluster: str, region: str) -> BastionNetwork:
     _validate(vpc, _VPC_RE, "cluster vpc id")
     _validate(sg, _SG_RE, "cluster security group id")
 
-    public_subnet = _clean_scalar(_run_aws(build_describe_public_subnet_command(vpc, region)))
-    if public_subnet:
-        return BastionNetwork(
-            vpc, _validate(public_subnet, _SUBNET_RE, "public subnet id"), sg, True
-        )
-
     if not subnets:
         raise RuntimeError(
-            f"No public subnet and no cluster subnets found in VPC {vpc}; cannot place a bastion."
+            f"No cluster subnets found in VPC {vpc}; cannot place a private bastion."
         )
-    fallback = _validate(str(subnets[0]), _SUBNET_RE, "fallback subnet id")
-    logger.warning(
-        "No public subnet in %s; using cluster subnet %s without a public IP "
-        "(requires NAT or SSM VPC endpoints for the agent to connect).",
-        vpc,
-        fallback,
+    private_subnet = _clean_scalar(
+        _run_aws(build_describe_private_cluster_subnet_command(list(subnets), region))
     )
-    return BastionNetwork(vpc, fallback, sg, False)
+    if not private_subnet:
+        raise RuntimeError(
+            f"No private EKS subnet found in VPC {vpc}; refusing to launch a public bastion."
+        )
+    return BastionNetwork(
+        vpc,
+        _validate(private_subnet, _SUBNET_RE, "private cluster subnet id"),
+        sg,
+    )
 
 
 def ensure_bastion_iam(project_name: str = DEFAULT_PROJECT_NAME) -> None:
@@ -567,8 +580,8 @@ def launch_bastion(
         region=region,
         user_data=render_user_data(ttl_minutes),
         ttl_minutes=ttl_minutes,
-        associate_public_ip=network.public_subnet,
         instance_name=bastion_instance_name(project_name),
+        project_name=project_name,
     )
     last_error: Exception | None = None
     for attempt in range(_PROFILE_PROPAGATION_RETRIES):
@@ -610,8 +623,8 @@ def wait_until_ssm_online(
         time.sleep(poll_interval_seconds)
     raise RuntimeError(
         f"Instance {instance_id} did not come Online in SSM within "
-        f"{int(timeout_seconds)}s. Check that the instance can reach the SSM service "
-        "(public subnet with egress, or SSM VPC endpoints)."
+        f"{int(timeout_seconds)}s. Check that the private subnet can reach the SSM service "
+        "through NAT egress or Systems Manager interface VPC endpoints."
     )
 
 

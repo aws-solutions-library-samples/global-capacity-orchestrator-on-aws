@@ -80,11 +80,13 @@ class TestBuilders:
         query = cmd[cmd.index("--query") + 1]
         assert "vpcId" in query and "clusterSecurityGroupId" in query and "subnetIds" in query
 
-    def test_describe_public_subnet_command(self) -> None:
-        cmd = eb.build_describe_public_subnet_command("vpc-0123456789abcdef0", "us-east-1")
+    def test_describe_private_cluster_subnet_command(self) -> None:
+        cmd = eb.build_describe_private_cluster_subnet_command(
+            ["subnet-0123456789abcdef0"], "us-east-1"
+        )
         assert cmd[:3] == ["aws", "ec2", "describe-subnets"]
-        assert "Name=vpc-id,Values=vpc-0123456789abcdef0" in cmd
-        assert "Name=map-public-ip-on-launch,Values=true" in cmd
+        assert "subnet-0123456789abcdef0" in cmd
+        assert "Name=map-public-ip-on-launch,Values=false" in cmd
 
     def test_create_role_command_has_trust_and_tags(self) -> None:
         cmd = eb.build_create_role_command()
@@ -117,7 +119,6 @@ class TestBuilders:
             region="us-east-1",
             user_data=eb.render_user_data(120),
             ttl_minutes=120,
-            associate_public_ip=True,
         )
         assert cmd[:3] == ["aws", "ec2", "run-instances"]
         # IMDSv2 required.
@@ -133,12 +134,14 @@ class TestBuilders:
         assert "ResourceType=instance" in tagspec
         assert f"Key={eb.TAG_EPHEMERAL_KEY},Value=true" in tagspec
         assert f"Key={eb.TAG_PURPOSE_KEY},Value={eb.BASTION_PURPOSE}" in tagspec
+        assert f"Key={eb.TAG_PROJECT_KEY},Value={eb.DEFAULT_PROJECT_NAME}" in tagspec
         assert f"Key={eb.TAG_TTL_KEY},Value=120" in tagspec
         # Network placement.
         assert cmd[cmd.index("--iam-instance-profile") + 1] == f"Name={eb.BASTION_PROFILE_NAME}"
         assert "subnet-0123456789abcdef0" in cmd
         assert "sg-0123456789abcdef0" in cmd
-        assert "--associate-public-ip-address" in cmd
+        assert "--no-associate-public-ip-address" in cmd
+        assert "--associate-public-ip-address" not in cmd
         assert cmd[-2:] == ["--output", "text"]
 
     def test_run_instances_no_public_ip_variant(self) -> None:
@@ -150,7 +153,6 @@ class TestBuilders:
             profile_name=eb.BASTION_PROFILE_NAME,
             region="us-east-1",
             user_data="x",
-            associate_public_ip=False,
         )
         assert "--no-associate-public-ip-address" in cmd
         assert "--associate-public-ip-address" not in cmd
@@ -257,6 +259,20 @@ class TestRunAws:
         # Does not raise; returns (empty) stdout.
         assert eb._run_aws(["aws", "iam", "create-role"], allow_exists=True) == ""
 
+    def test_allow_exists_swallows_attached_role_quota_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            eb.subprocess,
+            "run",
+            lambda *a, **k: _FakeCompleted(
+                255,
+                "",
+                "LimitExceeded: Cannot exceed quota for InstanceSessionsPerInstanceProfile: 1",
+            ),
+        )
+        assert eb._run_aws(["aws", "iam", "add-role-to-instance-profile"], allow_exists=True) == ""
+
     def test_missing_cli_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _boom(*a: object, **k: object) -> None:
             raise FileNotFoundError
@@ -271,27 +287,7 @@ class TestResolveHelpers:
         monkeypatch.setattr(eb, "_run_aws", lambda cmd, **k: "ami-0fd6240f599091088\n")
         assert eb.resolve_bastion_ami("us-east-1") == "ami-0fd6240f599091088"
 
-    def test_resolve_network_prefers_public_subnet(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def _fake(cmd: list[str], **k: object) -> str:
-            if "describe-cluster" in cmd:
-                return json.dumps(
-                    {
-                        "vpc": "vpc-0123456789abcdef0",
-                        "sg": "sg-0123456789abcdef0",
-                        "subnets": ["subnet-0aaaaaaaaaaaaaaaa"],
-                    }
-                )
-            if "describe-subnets" in cmd:
-                return "subnet-0bbbbbbbbbbbbbbbb"
-            raise AssertionError(cmd)
-
-        monkeypatch.setattr(eb, "_run_aws", _fake)
-        net = eb.resolve_bastion_network("gco-us-east-1", "us-east-1")
-        assert net.subnet_id == "subnet-0bbbbbbbbbbbbbbbb"
-        assert net.public_subnet is True
-        assert net.security_group_id == "sg-0123456789abcdef0"
-
-    def test_resolve_network_falls_back_to_cluster_subnet(
+    def test_resolve_network_uses_private_cluster_subnet(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def _fake(cmd: list[str], **k: object) -> str:
@@ -303,12 +299,32 @@ class TestResolveHelpers:
                         "subnets": ["subnet-0aaaaaaaaaaaaaaaa"],
                     }
                 )
-            return "None"  # no public subnet
+            if "describe-subnets" in cmd:
+                return "subnet-0aaaaaaaaaaaaaaaa"
+            raise AssertionError(cmd)
 
         monkeypatch.setattr(eb, "_run_aws", _fake)
         net = eb.resolve_bastion_network("gco-us-east-1", "us-east-1")
         assert net.subnet_id == "subnet-0aaaaaaaaaaaaaaaa"
-        assert net.public_subnet is False
+        assert net.security_group_id == "sg-0123456789abcdef0"
+
+    def test_resolve_network_refuses_public_only_subnets(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fake(cmd: list[str], **k: object) -> str:
+            if "describe-cluster" in cmd:
+                return json.dumps(
+                    {
+                        "vpc": "vpc-0123456789abcdef0",
+                        "sg": "sg-0123456789abcdef0",
+                        "subnets": ["subnet-0aaaaaaaaaaaaaaaa"],
+                    }
+                )
+            return "None"
+
+        monkeypatch.setattr(eb, "_run_aws", _fake)
+        with pytest.raises(RuntimeError, match="refusing to launch a public bastion"):
+            eb.resolve_bastion_network("gco-us-east-1", "us-east-1")
 
     def test_resolve_network_no_subnets_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _fake(cmd: list[str], **k: object) -> str:
@@ -319,7 +335,7 @@ class TestResolveHelpers:
             return "None"
 
         monkeypatch.setattr(eb, "_run_aws", _fake)
-        with pytest.raises(RuntimeError, match="cannot place a bastion"):
+        with pytest.raises(RuntimeError, match="cannot place a private bastion"):
             eb.resolve_bastion_network("gco-us-east-1", "us-east-1")
 
     def test_ensure_iam_runs_four_idempotent_steps(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -349,7 +365,6 @@ class TestLaunchBastion:
             vpc_id="vpc-0123456789abcdef0",
             subnet_id="subnet-0123456789abcdef0",
             security_group_id="sg-0123456789abcdef0",
-            public_subnet=True,
         )
 
     def test_launch_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -413,7 +428,7 @@ class TestCreateDestroyLifecycle:
             eb,
             "resolve_bastion_network",
             lambda c, r: eb.BastionNetwork(
-                "vpc-0123456789abcdef0", "subnet-0123456789abcdef0", "sg-0123456789abcdef0", True
+                "vpc-0123456789abcdef0", "subnet-0123456789abcdef0", "sg-0123456789abcdef0"
             ),
         )
         monkeypatch.setattr(eb, "ensure_bastion_iam", lambda *a, **k: None)
@@ -427,7 +442,7 @@ class TestCreateDestroyLifecycle:
             eb,
             "resolve_bastion_network",
             lambda c, r: eb.BastionNetwork(
-                "vpc-0123456789abcdef0", "subnet-0123456789abcdef0", "sg-0123456789abcdef0", True
+                "vpc-0123456789abcdef0", "subnet-0123456789abcdef0", "sg-0123456789abcdef0"
             ),
         )
         monkeypatch.setattr(eb, "ensure_bastion_iam", lambda *a, **k: None)
@@ -452,7 +467,7 @@ class TestCreateDestroyLifecycle:
             eb,
             "resolve_bastion_network",
             lambda c, r: eb.BastionNetwork(
-                "vpc-0123456789abcdef0", "subnet-0123456789abcdef0", "sg-0123456789abcdef0", True
+                "vpc-0123456789abcdef0", "subnet-0123456789abcdef0", "sg-0123456789abcdef0"
             ),
         )
         monkeypatch.setattr(eb, "ensure_bastion_iam", lambda *a, **k: None)
@@ -542,9 +557,11 @@ class TestProjectScopedNaming:
             region="us-east-1",
             user_data="x",
             instance_name="acme-ephemeral-ssm-bastion",
+            project_name="acme",
         )
         tagspec = cmd[cmd.index("--tag-specifications") + 1]
         assert "Key=Name,Value=acme-ephemeral-ssm-bastion" in tagspec
+        assert f"Key={eb.TAG_PROJECT_KEY},Value=acme" in tagspec
 
     def test_destroy_deletes_project_scoped_role(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[list[str]] = []
@@ -561,7 +578,7 @@ class TestProjectScopedNaming:
             eb,
             "resolve_bastion_network",
             lambda c, r: eb.BastionNetwork(
-                "vpc-0123456789abcdef0", "subnet-0123456789abcdef0", "sg-0123456789abcdef0", True
+                "vpc-0123456789abcdef0", "subnet-0123456789abcdef0", "sg-0123456789abcdef0"
             ),
         )
         seen: dict[str, object] = {}
