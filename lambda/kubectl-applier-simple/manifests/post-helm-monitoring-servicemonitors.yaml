@@ -90,8 +90,9 @@ spec:
     # Kueue serves controller-runtime metrics over HTTPS on the port named
     # "https" (8443) behind authn/authz — not a plain "metrics" port. Prometheus
     # authenticates with its ServiceAccount bearer token (bound to the
-    # kueue-metrics-reader ClusterRole by the ClusterRoleBinding at the end of
-    # this file) and skips serving-cert verification (self-signed cert).
+    # kueue-metrics-reader ClusterRole by the ClusterRoleBinding in
+    # post-helm-monitoring-kueue-rbac.yaml) and skips serving-cert verification
+    # (self-signed cert).
     - port: https
       scheme: https
       interval: 30s
@@ -237,29 +238,3 @@ spec:
     - port: metrics
       interval: 30s
       path: /metrics
----
-# Lets the kube-prometheus-stack Prometheus scrape Kueue's controller-manager
-# metrics endpoint. Kueue exposes metrics over HTTPS behind controller-runtime's
-# authn/authz filter, which authorizes callers via a SubjectAccessReview for
-# GET on the /metrics non-resource URL. The Kueue chart ships that permission as
-# the cluster-scoped `kueue-metrics-reader` ClusterRole; this binds Prometheus's
-# ServiceAccount to it so the gco-kueue ServiceMonitor's bearer-token scrape is
-# authorized. Applied post-Helm (needs both the Kueue and kube-prometheus-stack
-# ServiceAccounts/roles) and gated on {{CLUSTER_OBSERVABILITY_ENABLED}}.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: gco-prometheus-kueue-metrics
-  labels:
-    project: gco
-    app: gco-observability
-  annotations:
-    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: kueue-metrics-reader
-subjects:
-  - kind: ServiceAccount
-    name: kube-prometheus-stack-prometheus
-    namespace: monitoring
