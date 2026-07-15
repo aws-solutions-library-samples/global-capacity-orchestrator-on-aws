@@ -139,4 +139,3 @@ on Auto Mode; the feature remains gated and off by default.
 - `../../tests/test_cluster_observability_charts.py` — chart wiring + the
   DaemonSet `do-not-disrupt` regression guards
 - `../MONITORING.md` — operator guide for the observability stack
-- `../../.kiro/specs/cluster-observability/` — the feature's requirements/design
