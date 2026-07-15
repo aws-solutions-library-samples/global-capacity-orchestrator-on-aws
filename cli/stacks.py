@@ -1201,7 +1201,8 @@ class StackManager:
             cfn = boto3.client("cloudformation", region_name=region)
             resp = cfn.describe_stacks(StackName=stack_name)
             stack = resp["Stacks"][0]
-            return stack.get("LastUpdatedTime") or stack.get("CreationTime")
+            last_op = stack.get("LastUpdatedTime") or stack.get("CreationTime")
+            return last_op if isinstance(last_op, datetime) else None
         except Exception:
             return None
 
