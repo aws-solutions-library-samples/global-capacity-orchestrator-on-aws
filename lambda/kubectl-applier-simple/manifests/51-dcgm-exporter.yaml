@@ -84,8 +84,8 @@ metadata:
     checkov.io/skip5: CKV_K8S_22=Embedded DCGM host engine writes runtime state, so the root filesystem cannot be read-only
     checkov.io/skip6: CKV2_K8S_6=kube-system DaemonSet scraped only by the in-cluster Prometheus; no NetworkPolicy needed
     checkov.io/skip7: CKV_K8S_25=SYS_ADMIN is required for NVML driver-library injection on EKS Auto Mode (see file header)
-    checkov.io/skip8: CKV_K8S_15=Pinned immutable tag; IfNotPresent avoids re-pulling the multi-GB DCGM image on every restart and works in air-gapped mirrors (matches 50-nvidia-device-plugin.yaml)
-    checkov.io/skip9: CKV_K8S_39=CAP_SYS_ADMIN is required for NVML driver-library injection on EKS Auto Mode (see file header); NET_RAW and all other capabilities are dropped
+    checkov.io/skip8: CKV_K8S_15=Pinned immutable tag; IfNotPresent avoids re-pulling the multi-GB image (see 50-nvidia-device-plugin.yaml)
+    checkov.io/skip9: CKV_K8S_39=CAP_SYS_ADMIN required for NVML injection on EKS Auto Mode (see header); NET_RAW and other caps dropped
 spec:
   selector:
     matchLabels:
