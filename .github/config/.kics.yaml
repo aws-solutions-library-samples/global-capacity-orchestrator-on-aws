@@ -25,6 +25,11 @@ exclude-queries:
   - 302736f4-b16c-41b8-befe-c0baffa0bd9d  # Container Host Path Volume Mount
   - 5308a7a8-06f8-45ac-bf10-791fe21de46e  # Workload Mounting With Sensitive OS Directory
   - b7652612-de4e-4466-a0bf-1cd81f0c6063  # Volume Mount With OS Directory Write Permissions
+  # NVIDIA DCGM exporter requires CAP_SYS_ADMIN for NVML driver-library injection on
+  # EKS Auto Mode (matches AWS's own amazon-cloudwatch-observability dcgm-exporter).
+  # It is the only GCO workload that adds SYS_ADMIN; NET_RAW and every other capability
+  # are dropped. See lambda/kubectl-applier-simple/manifests/51-dcgm-exporter.yaml.
+  - 235236ee-ad78-4065-bd29-61b061f28ce0  # Containers With Sys Admin Capabilities
   # RBAC wildcards for CRD API groups - required to manage all resources in these groups
   # These are scoped to specific API groups (kueue, ray, volcano, keda), not cluster-wide
   - 6b896afb-ca07-467a-b256-1a0077a1c08e  # RBAC Wildcard In Rule

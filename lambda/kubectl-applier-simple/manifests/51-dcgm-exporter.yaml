@@ -6,14 +6,27 @@
 # ServiceMonitor (post-helm-monitoring-servicemonitors) to scrape and the GPU
 # dashboard to render.
 #
-# Security posture: the curated GPU dashboard reads only device-level fields
-# (DCGM_FI_DEV_*), which NVML serves without the SYS_ADMIN-gated profiling
-# module (DCGM_FI_PROF_*). So this runs with NO added capabilities (drop: ALL),
-# privilege escalation off, and RuntimeDefault seccomp — matching the platform's
-# own job-admission policy, which rejects SYS_ADMIN outright. The residual
-# checkov skips below are the handful inherent to any GPU metrics DaemonSet
-# (root for /dev/nvidia* access, writable rootfs for the embedded DCGM engine),
-# mirroring 50-nvidia-device-plugin.yaml.
+# EKS Auto Mode specifics (learned from a live g4dn/T4 node):
+#   - NVML injection. On Auto Mode the NVIDIA driver libraries are injected into
+#     the container at runtime under /usr/local/nvidia/lib[64]. The exporter only
+#     finds NVML (libnvidia-ml) when the container advertises the full driver
+#     capability set (NVIDIA_DRIVER_CAPABILITIES=all), carries SYS_ADMIN, and has
+#     those paths on LD_LIBRARY_PATH. Drop any one and DCGM logs
+#     "Cannot init NVML library; err: ERROR_LIBRARY_NOT_FOUND" and collects zero
+#     GPU series. AWS's own amazon-cloudwatch-observability dcgm-exporter runs
+#     with the same SYS_ADMIN posture on these nodes, so this is inherent to the
+#     platform, not a hardening regression we can avoid.
+#   - Device-only metrics. DCGM_EXPORTER_COLLECTORS points at the curated
+#     device-counters.csv below (DCGM_FI_DEV_* only). Those fields come straight
+#     from NVML and do NOT need the SYS_ADMIN-gated DCP profiling module
+#     (DCGM_FI_PROF_*). The stock counter file enables profiling fields, which on
+#     a shared/concurrent GPU make the exporter's GPU collector fail to
+#     initialize ("the third-party Profiling module returned an unrecoverable
+#     error"); scoping to device fields keeps the dashboard's four panels while
+#     side-stepping that failure.
+#   - Image. Pinned to a 4.5.x build (nvcr.io). The older 4.0.0-4.0.1 image
+#     segfaults on Auto Mode while enumerating CPU topology (GetCpuHierarchy),
+#     independent of the metrics selected.
 #
 # Only applied when cdk.json cluster_observability.enabled = true: GCORegional
 # Stack substitutes {{CLUSTER_OBSERVABILITY_ENABLED}} only then, so when
@@ -24,6 +37,29 @@
 # base pass; its ServiceMonitor lives in monitoring and applies post-Helm once
 # the Prometheus Operator CRDs exist. If the NVIDIA GPU Operator is adopted
 # later it bundles DCGM and supersedes this DaemonSet (see docs/EKS_ADDONS.md).
+---
+# Curated device-level counter set (DCGM_FI_DEV_*). Kept minimal and profiling
+# -free on purpose — see the NVML/device-only notes in the file header.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dcgm-device-counters
+  namespace: kube-system
+  labels:
+    app: dcgm-exporter
+    project: gco
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+data:
+  device-counters.csv: |
+    DCGM_FI_DEV_GPU_UTIL,        gauge, GPU utilization (in %).
+    DCGM_FI_DEV_MEM_COPY_UTIL,   gauge, Memory-copy utilization (in %).
+    DCGM_FI_DEV_FB_USED,         gauge, Framebuffer memory used (in MiB).
+    DCGM_FI_DEV_FB_FREE,         gauge, Framebuffer memory free (in MiB).
+    DCGM_FI_DEV_GPU_TEMP,        gauge, GPU temperature (in C).
+    DCGM_FI_DEV_POWER_USAGE,     gauge, Power draw (in W).
+    DCGM_FI_DEV_SM_CLOCK,        gauge, SM clock frequency (in MHz).
+    DCGM_FI_DEV_MEM_CLOCK,       gauge, Memory clock frequency (in MHz).
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -36,15 +72,20 @@ metadata:
   annotations:
     gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
     # Checkov suppressions — inherent NVIDIA DCGM exporter GPU requirements.
-    # Everything hardenable without breaking NVML/GPU access already is
-    # (SYS_ADMIN dropped, all caps dropped, privesc off, RuntimeDefault seccomp,
-    # liveness/readiness probes, SA token off, pinned pull policy).
+    # SYS_ADMIN is deliberate here (CKV_K8S_25 + CKV_K8S_39): on EKS Auto Mode DCGM cannot
+    # initialize NVML without it (see the file header), matching AWS's own
+    # dcgm-exporter posture. NET_RAW and every other capability are still
+    # dropped (drop: ALL), root + writable rootfs are inherent to opening the
+    # NVIDIA device nodes and running the embedded DCGM host engine.
     checkov.io/skip1: CKV_K8S_43=NVIDIA publishes DCGM by version tag; pinned tag preferred over digest for maintainability
     checkov.io/skip2: CKV_K8S_23=DCGM reads GPU counters through NVML and must run as root to open /dev/nvidia* device nodes
     checkov.io/skip3: CKV_K8S_40=Root UID required for GPU device access; a high UID cannot open the NVIDIA device nodes
-    checkov.io/skip4: CKV_K8S_28=False positive - all Linux capabilities are dropped (drop ALL), so NET_RAW is not granted
+    checkov.io/skip4: CKV_K8S_28=Only SYS_ADMIN is added (required for NVML on EKS Auto Mode); NET_RAW and all others are dropped
     checkov.io/skip5: CKV_K8S_22=Embedded DCGM host engine writes runtime state, so the root filesystem cannot be read-only
     checkov.io/skip6: CKV2_K8S_6=kube-system DaemonSet scraped only by the in-cluster Prometheus; no NetworkPolicy needed
+    checkov.io/skip7: CKV_K8S_25=SYS_ADMIN is required for NVML driver-library injection on EKS Auto Mode (see file header)
+    checkov.io/skip8: CKV_K8S_15=Pinned immutable tag; IfNotPresent avoids re-pulling the multi-GB DCGM image on every restart and works in air-gapped mirrors (matches 50-nvidia-device-plugin.yaml)
+    checkov.io/skip9: CKV_K8S_39=CAP_SYS_ADMIN is required for NVML driver-library injection on EKS Auto Mode (see file header); NET_RAW and all other capabilities are dropped
 spec:
   selector:
     matchLabels:
@@ -73,8 +114,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: dcgm-exporter
-          image: nvcr.io/nvidia/k8s/dcgm-exporter:4.0.0-4.0.1-ubuntu22.04
-          imagePullPolicy: Always
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:4.5.2-4.8.1-ubuntu22.04
+          imagePullPolicy: IfNotPresent
           ports:
             - name: metrics
               containerPort: 9400
@@ -84,20 +125,30 @@ spec:
               value: ":9400"
             - name: DCGM_EXPORTER_KUBERNETES
               value: "true"
-            # Expose every GPU on the node to NVML without requesting a GPU
-            # slice, and enable only the "utility" driver capability NVML needs
-            # to read metrics (not compute).
+            # Scope collection to the curated device-only counter file so the
+            # SYS_ADMIN-gated profiling module is never engaged.
+            - name: DCGM_EXPORTER_COLLECTORS
+              value: "/etc/dcgm-gco/device-counters.csv"
+            # Expose every GPU on the node to NVML and request the full driver
+            # capability set. On EKS Auto Mode the runtime injects the driver
+            # libraries under /usr/local/nvidia/lib[64]; both the capability set
+            # and LD_LIBRARY_PATH are required for NVML to load (see header).
             - name: NVIDIA_VISIBLE_DEVICES
               value: "all"
             - name: NVIDIA_DRIVER_CAPABILITIES
-              value: "utility"
+              value: "all"
+            - name: LD_LIBRARY_PATH
+              value: "/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
           securityContext:
-            # Device-level metrics need only NVML, not the SYS_ADMIN-gated
-            # profiling module, so add no capabilities and forbid escalation.
+            # SYS_ADMIN is required for NVML driver-library injection on EKS Auto
+            # Mode (see file header). Everything else is dropped and privilege
+            # escalation is forbidden.
             allowPrivilegeEscalation: false
             capabilities:
               drop:
                 - ALL
+              add:
+                - SYS_ADMIN
           livenessProbe:
             # DCGM serves HTTP on 9400; a TCP check avoids assuming a health
             # path across exporter versions while still catching a dead server.
@@ -116,7 +167,15 @@ spec:
               memory: 128Mi
             limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 768Mi
+          volumeMounts:
+            - name: device-counters
+              mountPath: /etc/dcgm-gco
+              readOnly: true
+      volumes:
+        - name: device-counters
+          configMap:
+            name: dcgm-device-counters
 ---
 apiVersion: v1
 kind: Service
