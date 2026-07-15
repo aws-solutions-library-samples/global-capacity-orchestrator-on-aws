@@ -24,9 +24,13 @@
 #     initialize ("the third-party Profiling module returned an unrecoverable
 #     error"); scoping to device fields keeps the dashboard's four panels while
 #     side-stepping that failure.
-#   - Image. Pinned to a 4.5.x build (nvcr.io). The older 4.0.0-4.0.1 image
-#     segfaults on Auto Mode while enumerating CPU topology (GetCpuHierarchy),
-#     independent of the metrics selected.
+#   - Image. Pinned to the plain-semver ``4.8.3`` tag (nvcr.io) — a multi-arch
+#     (amd64/arm64) distroless build, validated on a live T4 on this platform.
+#     The older 4.0.0-4.0.1 image segfaulted on Auto Mode enumerating CPU
+#     topology (GetCpuHierarchy); 4.8.3 is well past that. The bare-semver tag
+#     is deliberate: it lets the monthly dependency scan (dependency-scan.sh)
+#     track this image for drift through its generic image check — the earlier
+#     compound ``X.Y.Z-A.B.C-ubuntu22.04`` tag was invisible to that scan.
 #
 # Only applied when cdk.json cluster_observability.enabled = true: GCORegional
 # Stack substitutes {{CLUSTER_OBSERVABILITY_ENABLED}} only then, so when
@@ -84,7 +88,7 @@ metadata:
     checkov.io/skip5: CKV_K8S_22=Embedded DCGM host engine writes runtime state, so the root filesystem cannot be read-only
     checkov.io/skip6: CKV2_K8S_6=kube-system DaemonSet scraped only by the in-cluster Prometheus; no NetworkPolicy needed
     checkov.io/skip7: CKV_K8S_25=SYS_ADMIN is required for NVML driver-library injection on EKS Auto Mode (see file header)
-    checkov.io/skip8: CKV_K8S_15=Pinned immutable tag; IfNotPresent avoids re-pulling the multi-GB image (see 50-nvidia-device-plugin.yaml)
+    checkov.io/skip8: CKV_K8S_15=Pinned immutable tag; IfNotPresent avoids re-pulling the image on restart (see 50-nvidia-device-plugin.yaml)
     checkov.io/skip9: CKV_K8S_39=CAP_SYS_ADMIN required for NVML injection on EKS Auto Mode (see header); NET_RAW and other caps dropped
 spec:
   selector:
@@ -114,7 +118,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: dcgm-exporter
-          image: nvcr.io/nvidia/k8s/dcgm-exporter:4.5.2-4.8.1-ubuntu22.04
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:4.8.3
           imagePullPolicy: IfNotPresent
           ports:
             - name: metrics
