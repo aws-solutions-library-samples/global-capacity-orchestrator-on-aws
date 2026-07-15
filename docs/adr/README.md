@@ -83,3 +83,4 @@ it built this way?" questions can be answered from the decision log:
 | ADR | Title | Status |
 |-----|-------|--------|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
+| [0002](0002-cluster-observability-on-eks-auto-mode.md) | Cluster observability on EKS Auto Mode | Proposed |
