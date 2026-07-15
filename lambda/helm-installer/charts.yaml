@@ -564,9 +564,16 @@ charts:
               karpenter.sh/do-not-disrupt: "true"
       # node-exporter tolerations are injected by GCORegionalStack so the
       # DaemonSet schedules on tainted GPU/Neuron/EFA nodes.
-      prometheus-node-exporter:
-        podAnnotations:
-          karpenter.sh/do-not-disrupt: "true"
+      #
+      # Intentionally NO karpenter.sh/do-not-disrupt on node-exporter. Unlike the
+      # singleton/stateful components above, node-exporter is a DaemonSet that runs
+      # on EVERY node, so the annotation would pin every node against graceful
+      # termination until the NodePool terminationGracePeriod (24h) elapses —
+      # Karpenter/EKS Auto Mode holds the node the whole time, blocking
+      # consolidation, scale-down, spot reclaim, and even manual NodeClaim
+      # deletion. do-not-disrupt belongs only on singleton pods you don't want
+      # voluntarily consolidated, never on a DaemonSet. The upstream chart still
+      # sets cluster-autoscaler.kubernetes.io/safe-to-evict=true, which is correct.
       kube-state-metrics:
         podAnnotations:
           karpenter.sh/do-not-disrupt: "true"

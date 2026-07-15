@@ -432,3 +432,60 @@ def test_monitors_are_gated_and_well_formed(servicemonitor_docs) -> None:
         assert doc["spec"]["selector"]["matchLabels"]
         endpoints = doc["spec"].get("endpoints") or doc["spec"].get("podMetricsEndpoints")
         assert endpoints
+
+
+# --- regression guard: DaemonSets must never be karpenter do-not-disrupt ------
+#
+# Incident: idle GPU nodes sat un-terminated for hours and would have stayed up
+# for the full 24h NodePool terminationGracePeriod. Root cause: charts.yaml set
+# ``karpenter.sh/do-not-disrupt: "true"`` on the kube-prometheus-stack
+# node-exporter. node-exporter is a DaemonSet that runs on EVERY node, so the
+# annotation pins every node against graceful termination — blocking
+# consolidation, scale-down, spot reclaim, and even manual NodeClaim deletion
+# (Karpenter/EKS Auto Mode holds the node until the grace period elapses).
+# do-not-disrupt is only for singleton pods you don't want voluntarily
+# consolidated (Prometheus, Alertmanager, kube-state-metrics, the operator),
+# never for a DaemonSet. These guards keep the annotation off every DaemonSet.
+
+_DO_NOT_DISRUPT = "karpenter.sh/do-not-disrupt"
+_MANIFESTS_DIR = _REPO_ROOT / "lambda" / "kubectl-applier-simple" / "manifests"
+
+
+def test_node_exporter_is_not_marked_do_not_disrupt(kps_entry) -> None:
+    # node-exporter is the one DaemonSet in kube-prometheus-stack; it must stay
+    # disruptible or it blocks graceful termination of every node in the cluster.
+    node_exporter = kps_entry["values"].get("prometheus-node-exporter", {})
+    annotations = node_exporter.get("podAnnotations", {})
+    assert _DO_NOT_DISRUPT not in annotations, (
+        "node-exporter is a DaemonSet; karpenter.sh/do-not-disrupt on it pins "
+        "every node against graceful termination until the NodePool "
+        "terminationGracePeriod. Remove it from prometheus-node-exporter in "
+        "charts.yaml (see the comment there)."
+    )
+
+
+def test_no_daemonset_manifest_is_marked_do_not_disrupt() -> None:
+    # Same hazard applied to the manifests GCO ships (nvidia-device-plugin,
+    # dcgm-exporter, ...): a DaemonSet must never carry do-not-disrupt.
+    offenders: list[str] = []
+    for path in sorted(_MANIFESTS_DIR.glob("*.yaml")):
+        text = path.read_text(encoding="utf-8")
+        # Only parse files that actually declare a DaemonSet. Some manifests
+        # (e.g. 03-network-policies.yaml) carry structural {{PLACEHOLDER}} tokens
+        # that aren't valid YAML until the applier renders them; skipping
+        # non-DaemonSet files avoids that and keeps the guard render-free.
+        if "kind: DaemonSet" not in text:
+            continue
+        for doc in yaml.safe_load_all(text):
+            if not doc or doc.get("kind") != "DaemonSet":
+                continue
+            template_annotations = (
+                doc.get("spec", {}).get("template", {}).get("metadata", {}).get("annotations")
+                or {}
+            )
+            if _DO_NOT_DISRUPT in template_annotations:
+                offenders.append(f"{path.name}:{doc.get('metadata', {}).get('name')}")
+    assert not offenders, (
+        "DaemonSet(s) carry karpenter.sh/do-not-disrupt, which blocks graceful "
+        f"node termination on every node they run on: {offenders}"
+    )
