@@ -17,6 +17,7 @@ Complete command-line interface documentation for GCO (Global Capacity Orchestra
   - [capacity](#capacity-commands)
   - [inference](#inference-commands)
   - [models](#models-commands)
+  - [storage](#storage-commands)
   - [images](#images-commands)
   - [files](#files-commands)
   - [nodepools](#nodepools-commands)
@@ -2539,6 +2540,163 @@ gco models uri MODEL_NAME
 gco models uri llama3-8b
 # Output: s3://gco-models-xxx/models/llama3-8b
 ```
+
+---
+
+### Storage Commands
+
+Discover and transfer data between the user-facing S3 buckets created by GCO
+and local storage without needing to know generated physical bucket names.
+Bucket names are resolved from the SSM parameters and CloudFormation metadata
+published by the deployed stacks; GCO does not guess or reconstruct them.
+
+<details>
+<summary>All <code>gco storage</code> commands (2) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco storage list`](#gco-storage-list) | List deployed user-facing buckets and their stable aliases. |
+| [`gco storage sync`](#gco-storage-sync) | Incrementally download from or upload to a bucket or prefix. |
+
+</details>
+
+#### Bucket aliases
+
+| Alias | Scope | Purpose | Discovery source |
+|-------|-------|---------|------------------|
+| `cluster-shared` | Global | Cross-region cluster job artifacts and shared data | Global-region SSM parameters |
+| `model-weights` | Global | Central model weights used by inference endpoints | Global-region SSM parameter |
+| `regional-shared:REGION` | Regional | General-purpose data for workloads in one region | That region's SSM parameters |
+| `analytics-studio` | Optional analytics region | SageMaker Studio private scratch data and outputs | `PROJECT-analytics` CloudFormation resources |
+
+`regional-shared` is also accepted with `--region REGION`. When exactly one
+regional deployment is configured, the region may be omitted; multi-region
+deployments must use `--region` or the canonical region-qualified alias. The
+four dedicated access-log buckets are intentionally excluded because they are
+internal compliance sinks, not workload storage.
+
+#### `gco storage list`
+
+List deployed user-facing buckets with alias, scope, home region, physical name,
+purpose, and S3 URI. `--region` limits regional-bucket discovery to one region;
+global and optional analytics buckets are still included.
+
+```bash
+gco storage list [OPTIONS]
+```
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | Limit regional-bucket discovery to one region |
+
+```bash
+gco storage list
+gco storage list --region us-east-1
+gco --output json storage list
+```
+
+#### `gco storage sync`
+
+Incrementally transfer files in one explicit direction: from a bucket or key
+prefix to a local directory, or from a local file or directory to a bucket
+prefix. Download remains the default for backward compatibility.
+
+```bash
+gco storage sync BUCKET_ALIAS LOCAL_PATH [OPTIONS]
+```
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--direction` | | Transfer direction: `download` (default) or `upload` |
+| `--region` | `-r` | Region for the unqualified `regional-shared` alias |
+| `--prefix` | | Remote source prefix for download or destination prefix for upload |
+| `--dry-run` | | Summarize the planned transfer without writing local files or S3 objects |
+| `--force` | | Transfer every file even when the destination appears current |
+
+```bash
+# Download is the default; these two commands are equivalent
+gco storage sync cluster-shared ./downloads/cluster
+gco storage sync cluster-shared ./downloads/cluster --direction download
+
+# Download one regional bucket (equivalent alias forms)
+gco storage sync regional-shared:us-east-1 ./downloads/us-east-1
+gco storage sync regional-shared ./downloads/us-east-1 --region us-east-1
+
+# Download only one model prefix
+gco storage sync model-weights ./downloads/llama3 --prefix models/llama3
+
+# Upload a directory's contents beneath a remote prefix
+gco storage sync cluster-shared ./results --direction upload --prefix runs/experiment-42
+
+# Upload one file as checkpoints/latest.bin
+gco storage sync model-weights ./latest.bin --direction upload --prefix checkpoints
+
+# Inspect an upload plan without writing any S3 objects
+gco storage sync analytics-studio ./studio-output --direction upload --dry-run
+```
+
+**Sync semantics and safety:**
+
+- Each invocation uses exactly one direction. `download` is the default and is
+  backward-compatible with earlier invocations; `upload` must be selected
+  explicitly. There is intentionally no automatic `both` mode, conflict merge,
+  or winner selection.
+- Neither direction deletes destination-only data. Downloads never remove local
+  files, uploads never remove remote objects, and `s3:DeleteObject` permission
+  is not required.
+- For downloads, `LOCAL_PATH` is a directory. Existing files are skipped when
+  their size and modification time indicate they are current. Downloaded files
+  receive the S3 `LastModified` time.
+- For uploads, `LOCAL_PATH` must be an existing regular file or directory. A
+  directory's contents are mapped recursively beneath `--prefix`; the source
+  directory name itself is not added. A single file maps to
+  `PREFIX/<file-name>`.
+- Upload incrementality uses a SHA-256 digest stored as S3 user metadata named
+  `gco-sync-sha256`. The same precomputed whole-file digest is sent as the
+  base64 `ChecksumSHA256`, so S3 rejects an upload whose received bytes differ
+  from the file that was planned. A remote object is skipped only when its size
+  and digest metadata match the local file; skipped objects are checked again
+  before a successful non-dry-run result. ETags are intentionally not used
+  because multipart and SSE-KMS ETags are not reliable whole-file digests.
+  Existing objects without this metadata are uploaded once to establish it.
+- Upload planning rejects top-level or descendant symlinks, non-regular files,
+  and unsafe relative names before the first PUT. It hashes every source file
+  during planning and rejects a file if its identity, size, or timestamps
+  change before or during upload. Planning issues `HeadObject` only for the
+  generated destination keys; it does not list or materialize the remote
+  prefix.
+- `--prefix` behaves as a directory prefix in both directions: leading `/`
+  characters are removed and a trailing `/` is added before remote operations.
+- Every matching S3 key is validated before the first download. Absolute,
+  traversal (`..`), empty-segment, NUL, backslash-based escape, non-empty
+  trailing-slash, and local file/directory collision keys are rejected rather
+  than written outside or ambiguously within the destination. On Windows,
+  Win32 reserved names, forbidden or control characters, and names ending in a
+  dot or space are also rejected, with conservative case-insensitive collision
+  detection.
+- `--force` bypasses the current-file check in the selected direction.
+  `--dry-run` performs discovery and planning but writes neither local files nor
+  S3 objects.
+- A failed transfer can leave files or objects written earlier in that
+  invocation. Rerun the same command to continue incrementally; the command
+  never rolls back by deleting data.
+
+**Required IAM permissions:**
+
+- `ssm:GetParameter` on the project's model, cluster-shared, and regional-shared
+  parameter paths used by the selected alias.
+- `cloudformation:ListStackResources` on the analytics stack when listing or
+  syncing `analytics-studio`.
+- Downloads require `s3:ListBucket` on the selected bucket and `s3:GetObject`
+  on its objects. SSE-KMS downloads also require `kms:Decrypt` on the key.
+- Uploads probe only generated destination keys and require `s3:GetObject`
+  (for `HeadObject` metadata checks), `s3:PutObject`, and
+  `s3:AbortMultipartUpload`; they do not require `s3:ListBucket`. SSE-KMS
+  uploads require `kms:GenerateDataKey` and commonly `kms:Decrypt`, especially
+  for multipart upload.
+- Neither direction requires `s3:DeleteObject`. The `analytics-studio` stack
+  grants bucket access to its SageMaker role by default, so a human operator
+  needs a separate IAM grant before syncing it directly.
 
 ---
 

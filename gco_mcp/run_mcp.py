@@ -208,6 +208,7 @@ from tools.storage import (  # noqa: E402, F401
     files_access_points,
     files_get,
     list_file_systems,
+    list_storage_buckets,
     list_storage_contents,
     upload_to_regional_bucket,
 )
@@ -287,6 +288,9 @@ with _contextlib.suppress(ImportError):
 # against exactly that cross-test registration leak).
 with _contextlib.suppress(ImportError):
     from tools.metrics import metrics_from_local_file  # noqa: F401
+
+with _contextlib.suppress(ImportError):
+    from tools.storage import sync_storage_bucket  # noqa: F401
 
 with _contextlib.suppress(ImportError):
     from tools.semantic_progress import metrics_semantic_progress  # noqa: F401
@@ -550,6 +554,7 @@ __all__ = [
     "list_models",
     "list_reservations",
     "list_stacks",
+    "list_storage_buckets",
     "list_storage_contents",
     "mcp",
     "metrics_cloudwatch_get",
@@ -599,6 +604,7 @@ __all__ = [
     "stop_inference",
     "submit_job_api",
     "submit_job_sqs",
+    "sync_storage_bucket",
     "task_status",
     "task_tail",
     "templates_create",

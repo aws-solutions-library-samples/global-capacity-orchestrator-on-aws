@@ -26,6 +26,8 @@ FLAG_MISSION = "GCO_ENABLE_MISSION"
 # never mutate AWS state. They are full members of the registry like any
 # other per-tool flag.
 FLAG_LOCAL_METRICS = "GCO_ENABLE_LOCAL_METRICS"
+# Reads from or writes to the MCP host and can upload data to S3.
+FLAG_LOCAL_STORAGE_SYNC = "GCO_ENABLE_LOCAL_STORAGE_SYNC"
 FLAG_SEMANTIC_PROGRESS = "GCO_ENABLE_SEMANTIC_PROGRESS"
 
 # Per-tool flags. The umbrella is intentionally not in this tuple — callers
@@ -40,6 +42,7 @@ ALL_FLAGS = (
     FLAG_DESTRUCTIVE_OPERATIONS,
     FLAG_MISSION,
     FLAG_LOCAL_METRICS,
+    FLAG_LOCAL_STORAGE_SYNC,
     FLAG_SEMANTIC_PROGRESS,
 )
 

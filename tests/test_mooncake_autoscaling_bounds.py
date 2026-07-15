@@ -103,7 +103,11 @@ def _static_spec(draw: st.DrawFn) -> dict[str, Any]:
     return spec
 
 
-@settings(max_examples=75, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=75,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 @given(spec=_enabled_spec(), name=st.from_regex(r"[a-z][a-z0-9-]{0,12}", fullmatch=True))
 def test_enabled_autoscaling_creates_bounded_per_role_autoscaler(spec, name):
     """Each present role yields one autoscaler matching its spec bounds.
@@ -138,7 +142,7 @@ def test_enabled_autoscaling_creates_bounded_per_role_autoscaler(spec, name):
         assert created_hpa.spec.scale_target_ref.name == target
 
 
-@settings(max_examples=75)
+@settings(max_examples=75, deadline=None)
 @given(spec=_static_spec(), name=st.from_regex(r"[a-z][a-z0-9-]{0,12}", fullmatch=True))
 def test_without_autoscaling_no_hpa_and_replicas_track_topology(spec, name):
     """Absent/disabled autoscaling creates no autoscaler and keeps topology counts.

@@ -21,6 +21,7 @@ from .monitoring_cmd import monitoring
 from .nodepools_cmd import nodepools
 from .queue_cmd import queue
 from .stacks_cmd import stacks
+from .storage_cmd import storage
 from .tasks_cmd import tasks
 from .templates_cmd import templates
 from .webhooks_cmd import webhooks
@@ -42,6 +43,7 @@ __all__ = [
     "nodepools",
     "queue",
     "stacks",
+    "storage",
     "tasks",
     "templates",
     "webhooks",

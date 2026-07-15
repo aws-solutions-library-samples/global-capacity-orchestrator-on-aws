@@ -32,6 +32,7 @@ This separation keeps the Click wiring thin and the business logic testable with
 | `webhooks_cmd.py` | `gco webhooks list`, `create`, `delete`, `test` | Webhook registration |
 | `nodepools_cmd.py` | `gco nodepools list`, `describe` | Nodepool inspection |
 | `models_cmd.py` | `gco models upload`, `list`, `uri`, `delete` | Model weight management |
+| `storage_cmd.py` | `gco storage list`, `sync` | Human-friendly S3 bucket discovery and explicit download/upload sync |
 | `dag_cmd.py` | `gco dag run`, `validate`, `status` | DAG pipeline execution |
 | `config_cmd.py` | `gco config show`, `set` | CLI configuration |
 | `__init__.py` | — | Registers all command groups on the root CLI |

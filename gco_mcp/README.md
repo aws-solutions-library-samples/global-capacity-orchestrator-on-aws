@@ -1,6 +1,6 @@
 # GCO MCP Server
 
-Some MCP tools are disabled by default and gated behind environment-variable feature flags — see [Feature Flags](#feature-flags) before enabling deploys, destroys, capacity purchases, model uploads, image publishes, or destructive operations.
+Some MCP tools are disabled by default and gated behind environment-variable feature flags — see [Feature Flags](#feature-flags) before enabling deploys, destroys, capacity purchases, model uploads, image publishes, local filesystem writes, or destructive operations.
 
 An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestrator (GCO) CLI as tools for LLM interaction. This lets you manage your multi-region EKS infrastructure through natural language in an AI-powered IDE with MCP support like [Kiro](https://kiro.dev).
 
@@ -61,7 +61,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server wraps the `gco` CLI, exposing 115 tools by default (up to 151 with all flags enabled) that cover the full lifecycle of GPU workload management:
+The MCP server wraps the `gco` CLI, exposing 116 tools by default (up to 153 with all flags enabled) that cover the full lifecycle of GPU workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -420,6 +420,7 @@ A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, de
 | `GCO_ENABLE_INFRASTRUCTURE_DESTROY` | `false` | `destroy_stack`, `destroy_all` | Tears down CloudFormation stacks. Cancellation mid-flight can leave partial state behind that has to be cleaned up by hand. |
 | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` | `false` | `delete_job`, `delete_inference`, `delete_template`, `delete_webhook`, `delete_model`, `delete_nodepool`, `analytics_user_remove`, `monitoring_user_remove`, `cancel_queue_job`, `cancel_reservation`, `images_cleanup`, `images_prune`, `images_delete_tag`, `images_delete_repo` | Delete operations are irreversible — once data, jobs, models, images, or capacity reservations are removed they can't be recovered without a backup. |
 | `GCO_ENABLE_MISSION` | `false` | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list` | Runs an autonomous goal-directed loop that can call any tool in its allowlist. Gated to prevent unattended autonomous execution. |
+| `GCO_ENABLE_LOCAL_STORAGE_SYNC` | `false` | `sync_storage_bucket` | Reads from or writes to the MCP host and can upload objects to S3. A large or unintended sync can consume local disk or S3 storage and network capacity, so the operator must opt in and confine local paths with `GCO_STORAGE_LOCAL_ROOT`. |
 
 ### Enabling a Flag
 
@@ -506,6 +507,7 @@ These environment variables tune the MCP server's behaviour but **do not gate an
 | Variable | Values | Default | What It Does |
 |----------|--------|---------|--------------|
 | `GCO_MCP_TOOL_SEARCH` | `off` \| `bm25` \| `regex` \| `code_mode` | `bm25` | Selects the catalog-replacement transform. `bm25` (default) replaces `list_tools()` with a BM25-ranked `search_tools` plus a small set of always-visible entry-point tools. `regex` swaps in a regex-based search. `code_mode` is experimental and exposes Code Mode meta-tools (`search` / `get_schemas` / `execute`). `off` returns the legacy full catalog. An unknown value falls back to `bm25`. |
+| `GCO_STORAGE_LOCAL_ROOT` | Directory path | — | Root directory allowed for `sync_storage_bucket`. The local path—download destination or upload source—must resolve inside this root; relative paths are resolved beneath it. Required when `GCO_ENABLE_LOCAL_STORAGE_SYNC=true`. POSIX hosts only; unsupported hosts fail closed. Prefer an absolute path. |
 | `FASTMCP_DOCKET_URL` | URL | `memory://` | Controls where FastMCP's background-task store lives. The default `memory://` keeps task state in-process for the lifetime of the server. Set to e.g. `redis://localhost:6379` to persist task state across restarts and share it with other consumers. |
 
 ### Breaking Change in This Version
@@ -644,8 +646,84 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 |------|-------------|-----------|----------|
 | `list_storage_contents` | List contents of shared EFS storage | safe | — |
 | `list_file_systems` | List EFS and FSx file systems | safe | — |
-| `files_get` | Fetch a single file from shared storage | safe | — |
+| `list_storage_buckets` | Discover user-facing GCO S3 buckets and their stable aliases | safe | — |
+| `files_get` | Get EFS or FSx file-system details for a region | safe | — |
 | `files_access_points` | List EFS access points | safe | — |
+| `upload_to_regional_bucket` | Upload local files to a region's shared S3 bucket | low-risk | — |
+| `sync_storage_bucket` | Incrementally download from or upload to a GCO S3 bucket or prefix | low-risk | `GCO_ENABLE_LOCAL_STORAGE_SYNC` |
+
+`list_storage_buckets` is available by default and returns the canonical aliases
+`cluster-shared`, `model-weights`, `regional-shared:<region>`, and the optional
+`analytics-studio`. Generated physical bucket names are resolved from the
+SSM parameters and CloudFormation resources published by the deployment.
+Dedicated access-log buckets are intentionally excluded.
+
+`sync_storage_bucket` is deliberately opt-in because it reads from or writes to
+the MCP host and upload mode writes S3. A bucket or local tree may also be
+large. Configure both the gate and a confinement root in the MCP client's
+environment, then restart or reconnect the server:
+
+```json
+{
+  "env": {
+    "GCO_ENABLE_LOCAL_STORAGE_SYNC": "true",
+    "GCO_STORAGE_LOCAL_ROOT": "/absolute/path/to/gco-storage"
+  }
+}
+```
+
+Call it with a local path relative to that root; an absolute path is accepted
+only when it resolves inside the root. Confined MCP sync currently requires a
+POSIX host with descriptor-relative no-follow filesystem support and fails
+closed elsewhere; direct `gco storage sync` remains available on Windows. The
+MCP wrapper passes the resolved root's filesystem identity to hidden CLI
+plumbing, and the CLI pins that root for the transfer while traversing
+components without following symlinks. Symlink, rename-race, and `..` escapes
+are rejected. Upload sources must already exist; download destinations may be
+created beneath the pinned root.
+
+```text
+list_storage_buckets(region="us-east-1")
+
+# Download is the backward-compatible default.
+sync_storage_bucket(
+  bucket_alias="regional-shared:us-east-1",
+  local_dir="training-data",
+  prefix="datasets/current",
+  dry_run=true
+)
+
+# Upload a confined local file or directory explicitly.
+sync_storage_bucket(
+  bucket_alias="cluster-shared",
+  local_dir="results/run-42",
+  direction="upload",
+  prefix="runs/run-42",
+  dry_run=true
+)
+```
+
+Each call transfers in exactly one direction: `download` (the default) or
+`upload`. There is no automatic `both` mode or conflict merge, and neither
+direction deletes destination-only data. Downloads use size and modification
+time to skip current local files. Uploads map directory contents beneath the
+remote prefix, map a single file to `PREFIX/<file-name>`, and skip only
+same-size objects whose `gco-sync-sha256` metadata matches the local SHA-256;
+the same digest is sent as S3 `ChecksumSHA256`, and skipped objects are
+revalidated before success. Objects without the metadata upload once. Upload
+preflight securely enumerates and opens sources without following symlinks and
+rejects non-regular files and unsafe names before the first PUT. Upload probes
+only the generated destination keys with `HeadObject` and does not require
+`s3:ListBucket`. S3 ETags are not used as content digests.
+
+The tool supports `force`, validates every matching object key before the first
+download, allows up to one hour for the CLI subprocess, and sends SIGTERM on
+cancellation. The CLI converts that signal into cooperative transfer
+cancellation and gets a grace period to unwind managed multipart work before
+MCP escalates to a kill. The MCP server's AWS identity needs the SSM,
+CloudFormation, S3, and (for SSE-KMS objects) KMS permissions documented in
+[`gco storage sync`](../docs/CLI.md#gco-storage-sync). Neither direction
+requires `s3:DeleteObject`, and upload does not require `s3:ListBucket`.
 
 ### Metrics
 
@@ -985,7 +1063,7 @@ gco_mcp/
 │   ├── inference.py       — Inference deployment, scaling, canary, invocation, chat
 │   ├── costs.py           — Cost tracking and forecasting
 │   ├── stacks.py          — CDK stack management (incl. long-running deploy/destroy)
-│   ├── storage.py         — EFS/FSx file operations
+│   ├── storage.py         — EFS/FSx operations plus S3 bucket discovery and local sync
 │   ├── models.py          — Model weight management (incl. gated upload)
 │   ├── images.py          — Image registry (build/push/lifecycle/replication/cleanup)
 │   ├── templates.py       — Job templates
@@ -1201,7 +1279,7 @@ Here's a `~/.kiro/settings/mcp.json` that wires up the GCO MCP server alongside 
 
 If a tool you expect to see is missing from your client's tool list, check these in order:
 
-1. **Feature flag not set.** Many tools are disabled by default. The most common cause of a "missing" tool is that the feature flag gating it isn't set in the client's `env` block. See [Feature Flags](#feature-flags) for the flag-to-tool mapping. If you're looking for `delete_job`, `delete_inference`, or any other destructive operation, set `GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true`. For `deploy_stack` / `destroy_stack`, set `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` / `GCO_ENABLE_INFRASTRUCTURE_DESTROY`. For `reserve_capacity`, set `GCO_ENABLE_CAPACITY_PURCHASE`. For `models_upload`, set `GCO_ENABLE_MODEL_UPLOAD`. For `images_build` / `images_push`, set `GCO_ENABLE_IMAGE_PUBLISH`.
+1. **Feature flag not set.** Many tools are disabled by default. The most common cause of a "missing" tool is that the feature flag gating it isn't set in the client's `env` block. See [Feature Flags](#feature-flags) for the flag-to-tool mapping. If you're looking for `delete_job`, `delete_inference`, or any other destructive operation, set `GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true`. For `deploy_stack` / `destroy_stack`, set `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` / `GCO_ENABLE_INFRASTRUCTURE_DESTROY`. For `reserve_capacity`, set `GCO_ENABLE_CAPACITY_PURCHASE`. For `models_upload`, set `GCO_ENABLE_MODEL_UPLOAD`. For `images_build` / `images_push`, set `GCO_ENABLE_IMAGE_PUBLISH`. For `sync_storage_bucket`, set `GCO_ENABLE_LOCAL_STORAGE_SYNC=true` and configure `GCO_STORAGE_LOCAL_ROOT`.
 2. **Tool search mode is hiding it.** The default `GCO_MCP_TOOL_SEARCH=bm25` replaces the full tool listing with a search-based catalog and a small set of always-visible entry-point tools (`find_examples`, `find_docs`, `list_jobs`, `submit_job_sqs`, `list_inference_endpoints`, `check_capacity`, `task_status`). Every other tool is reachable through the synthetic `search_tools` tool — ask your agent to call `search_tools` with a query that matches the tool you want, and it will surface the candidates. To disable the search catalog and see the full list directly, set `GCO_MCP_TOOL_SEARCH=off` (legacy listing).
 
 ### Tools returning errors

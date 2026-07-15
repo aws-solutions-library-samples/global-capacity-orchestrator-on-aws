@@ -54,6 +54,7 @@ from feature_flags import (
     FLAG_IMAGE_PUBLISH,
     FLAG_INFRASTRUCTURE_DEPLOY,
     FLAG_INFRASTRUCTURE_DESTROY,
+    FLAG_LOCAL_STORAGE_SYNC,
     FLAG_MISSION,
     FLAG_MODEL_UPLOAD,
 )
@@ -89,6 +90,8 @@ _TOOL_GATING_TABLE: dict[str, str] = {
     "bootstrap_cdk": FLAG_INFRASTRUCTURE_DEPLOY,
     "destroy_stack": FLAG_INFRASTRUCTURE_DESTROY,
     "destroy_all": FLAG_INFRASTRUCTURE_DESTROY,
+    # gco_mcp/tools/storage.py — local filesystem transfer
+    "sync_storage_bucket": FLAG_LOCAL_STORAGE_SYNC,
     # gco_mcp/tools/mission.py — module-level gate
     "mission_start": FLAG_MISSION,
     "mission_status": FLAG_MISSION,

@@ -38,6 +38,7 @@ from .commands import (
     nodepools,
     queue,
     stacks,
+    storage,
     tasks,
     templates,
     webhooks,
@@ -147,6 +148,7 @@ cli.add_command(models)
 cli.add_command(nodepools)
 cli.add_command(costs)
 cli.add_command(stacks)
+cli.add_command(storage)
 cli.add_command(files)
 cli.add_command(config_cmd)
 cli.add_command(analytics)

@@ -184,13 +184,15 @@ class TestToolRegistration:
         # monitoring_users_list, enable_monitoring, disable_monitoring,
         # monitoring_user_add) bring the base to 114, and the unconditional,
         # read-only cluster_tunnel_command (SSM tunnel connection-plan) brings
-        # it to 115.
+        # it to 115. The unconditional list_storage_buckets discovery tool
+        # brings the default registry to 116.
         # With every flag enabled the ceiling is
-        # 115 + 2 + 3 + 14 + 1 + 3 + 2 + 1 + 1 + 9 = 151.
-        # (115 base includes the unconditional find_capacity_blocks and
+        # 116 + 2 + 3 + 14 + 1 + 3 + 2 + 1 + 1 + 1 + 9 = 153; the additional
+        # 1 is sync_storage_bucket under GCO_ENABLE_LOCAL_STORAGE_SYNC.
+        # (116 base includes the unconditional find_capacity_blocks and
         # find_capacity_reservations sweep tools plus the
         # nodepools_create_capacity_block generator.)
-        base_count = 115
+        base_count = 116
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -216,6 +218,8 @@ class TestToolRegistration:
             expected += 1  # gated by GCO_ENABLE_LOCAL_METRICS
         if "metrics_semantic_progress" in tool_names:
             expected += 1  # gated by GCO_ENABLE_SEMANTIC_PROGRESS
+        if "sync_storage_bucket" in tool_names:
+            expected += 1  # gated by GCO_ENABLE_LOCAL_STORAGE_SYNC
         if "mission_start" in tool_names:
             # The nine mission_* tools register together under GCO_ENABLE_MISSION.
             expected += 9
@@ -287,6 +291,7 @@ class TestToolRegistration:
             # ── Storage (all read-only) ──
             "list_storage_contents",
             "list_file_systems",
+            "list_storage_buckets",
             # ── Model weights (all read-only) ──
             "list_models",
             "get_model_uri",
@@ -448,6 +453,9 @@ class TestToolRegistration:
         # Semantic-progress judge registers under GCO_ENABLE_SEMANTIC_PROGRESS.
         if "metrics_semantic_progress" in names:
             expected.add("metrics_semantic_progress")
+        # Local S3 transfer registers under GCO_ENABLE_LOCAL_STORAGE_SYNC.
+        if "sync_storage_bucket" in names:
+            expected.add("sync_storage_bucket")
         # The nine mission_* tools register together under GCO_ENABLE_MISSION.
         if "mission_start" in names:
             expected.update(

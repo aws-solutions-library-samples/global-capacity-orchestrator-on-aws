@@ -19,6 +19,7 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | `jobs.py` | Job submission, listing, logs, and lifecycle management |
 | `inference.py` | Inference endpoint deployment, scaling, canary, and invocation |
 | `models.py` | Model weight upload, listing, and S3 URI management |
+| `storage.py` | Human-friendly GCO S3 bucket discovery and incremental download/upload sync |
 | `stacks.py` | CDK stack deployment, destruction, and status |
 | `costs.py` | Cost tracking via AWS Cost Explorer |
 | `dag.py` | DAG pipeline execution with dependency ordering |
@@ -40,6 +41,7 @@ Click command definitions that wire CLI flags to the business logic above.
 | `inference_cmd.py` | `gco inference deploy`, `list`, `status`, `scale`, `invoke`, `canary`, etc. |
 | `jobs_cmd.py` | `gco jobs submit`, `submit-sqs`, `submit-direct`, `list`, `logs`, `delete` |
 | `models_cmd.py` | `gco models upload`, `list`, `uri`, `delete` |
+| `storage_cmd.py` | `gco storage list`, `sync` |
 | `nodepools_cmd.py` | `gco nodepools list`, `describe` |
 | `queue_cmd.py` | `gco queue submit`, `list`, `get`, `stats` |
 | `stacks_cmd.py` | `gco stacks deploy`, `deploy-all`, `destroy-all`, `list`, `bootstrap` |
