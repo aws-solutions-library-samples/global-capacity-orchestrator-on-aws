@@ -480,8 +480,7 @@ def test_no_daemonset_manifest_is_marked_do_not_disrupt() -> None:
             if not doc or doc.get("kind") != "DaemonSet":
                 continue
             template_annotations = (
-                doc.get("spec", {}).get("template", {}).get("metadata", {}).get("annotations")
-                or {}
+                doc.get("spec", {}).get("template", {}).get("metadata", {}).get("annotations") or {}
             )
             if _DO_NOT_DISRUPT in template_annotations:
                 offenders.append(f"{path.name}:{doc.get('metadata', {}).get('name')}")
