@@ -135,6 +135,7 @@ _FEATURE_RESOURCE_INVENTORY: dict[
             for name in (
                 "gco-health-monitor",
                 "gco-manifest-processor",
+                "gco-inference-proxy",
                 "gco-inference-monitor",
             )
         ),
@@ -439,6 +440,7 @@ def _verify_workload_credentials(apps_v1: Any) -> list[str]:
     expected_deployments = [
         ("gco-system", "health-monitor", "gco-health-monitor-sa"),
         ("gco-system", "manifest-processor", "gco-manifest-processor-sa"),
+        ("gco-system", "inference-proxy", "gco-inference-proxy-sa"),
         ("gco-system", "inference-monitor", "gco-inference-monitor-sa"),
     ]
 
@@ -1066,7 +1068,12 @@ def apply_manifests(
 
     # Restart deployments in gco-system namespace to pick up new images
     # This ensures that any updated container images are actually deployed
-    gco_deployments = ["health-monitor", "manifest-processor", "inference-monitor"]
+    gco_deployments = [
+        "health-monitor",
+        "manifest-processor",
+        "inference-monitor",
+        "inference-proxy",
+    ]
     logger.info(f"Restarting deployments in gco-system: {gco_deployments}")
     restart_result = restart_deployments("gco-system", gco_deployments)
 

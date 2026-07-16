@@ -1,11 +1,11 @@
 """Prometheus metrics for the in-cluster GCO services.
 
-Exposes a Prometheus ``/metrics`` surface for the three long-running GCO
-services so the self-hosted cluster Prometheus can scrape them:
+Exposes a Prometheus ``/metrics`` surface for the long-running GCO services so
+the self-hosted cluster Prometheus can scrape them:
 
 - ``mount_metrics(app, name)`` adds a ``GET /metrics`` endpoint and request
   instrumentation (request count + latency) to a FastAPI app. Used by the
-  health-monitor and manifest-processor API services. The services' auth
+  health-monitor, manifest-processor, and inference-proxy API services. Their auth
   middleware already treats ``/metrics`` as unauthenticated, so the in-cluster
   Prometheus scrapes it over the existing service port without credentials.
 - ``start_metrics_server(port, name, metrics_fn)`` starts a standalone metrics
@@ -15,7 +15,8 @@ services so the self-hosted cluster Prometheus can scrape them:
 
 ``prometheus-client`` is already a project dependency, so instrumenting these
 services pulls no new package into their container images. All series carry a
-``service`` label so a single Prometheus scrapes all three without collision.
+``service`` label so one Prometheus deployment can scrape all four GCO services
+without metric-name collisions.
 """
 
 from __future__ import annotations

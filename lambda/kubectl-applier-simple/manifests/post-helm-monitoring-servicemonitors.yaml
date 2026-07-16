@@ -15,11 +15,10 @@
 # toggled off (e.g. YuniKorn, off by default) or relabeled simply yields no
 # scrape targets rather than an error, so this file is safe to apply whole.
 #
-# GCO's own services (health-monitor, manifest-processor, inference-monitor)
-# emit CloudWatch metrics and are covered at the pod/container level by the
-# chart's kube-state-metrics + cAdvisor scraping; Prometheus-format app-level
-# instrumentation of those services is a separate follow-up and intentionally
-# not scraped here.
+# GCO's own services (health-monitor, manifest-processor, inference-proxy, and
+# inference-monitor) expose Prometheus-format application metrics. The
+# PodMonitors at the end of this file scrape each replica directly; chart-level
+# kube-state-metrics and cAdvisor additionally cover pod/container resources.
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -171,8 +170,8 @@ spec:
 # .py). They run with multiple replicas, so PodMonitors scrape each pod directly
 # rather than round-robining one pod through a Service. health-monitor and
 # manifest-processor serve /metrics on their existing http port (the auth
-# middleware exempts /metrics); the inference monitor serves it on a dedicated
-# metrics port.
+# middleware exempts /metrics); the inference proxy does the same on its HTTP
+# port, while the inference monitor serves metrics on a dedicated port.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
@@ -212,6 +211,28 @@ spec:
   selector:
     matchLabels:
       app: manifest-processor
+  podMetricsEndpoints:
+    - port: http
+      interval: 30s
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: gco-inference-proxy
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  namespaceSelector:
+    matchNames:
+      - gco-system
+  selector:
+    matchLabels:
+      app: inference-proxy
   podMetricsEndpoints:
     - port: http
       interval: 30s

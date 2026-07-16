@@ -83,7 +83,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | File | Contents |
 |------|----------|
 | `10-ingressclass.yaml` | `IngressClassParams` (ALB group) + `IngressClass` |
-| `11-ingress.yaml` | `gco-ingress` routing to health-monitor and manifest-processor |
+| `11-ingress.yaml` | `gco-ingress` routing control traffic to manifest-processor and `/inference` traffic to inference-proxy |
 
 ### Storage (20–29)
 
@@ -103,6 +103,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `30-health-monitor.yaml` | `Deployment` + `PodDisruptionBudget` + `Service` |
 | `31-manifest-processor.yaml` | `Deployment` + `PodDisruptionBudget` + `Service` |
 | `32-inference-monitor.yaml` | `Deployment` + `PodDisruptionBudget` |
+| `33-inference-proxy.yaml` | Dedicated inference `Deployment` + `PodDisruptionBudget` + `Service` |
 
 ### NodePools (40–49)
 
@@ -128,7 +129,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | File | Contents |
 |------|----------|
 | `post-helm-sqs-consumer.yaml` | KEDA `ScaledJob` for the SQS queue processor — **skipped when queue_processor disabled** |
-| `post-helm-monitoring-servicemonitors.yaml` | `ServiceMonitor`s (schedulers/operators + DCGM) and `PodMonitor`s (GCO services) — **skipped when observability disabled** |
+| `post-helm-monitoring-servicemonitors.yaml` | `ServiceMonitor`s (schedulers/operators + DCGM) and `PodMonitor`s (GCO services, including inference-proxy) — **skipped when observability disabled** |
 | `post-helm-monitoring-kueue-rbac.yaml` | `ClusterRoleBinding` letting Prometheus scrape Kueue's authenticated metrics endpoint — **skipped when observability disabled** |
 | `post-helm-grafana-dashboards.yaml` | Curated GCO Grafana dashboard `ConfigMap`s (GPU/DCGM, schedulers, KEDA, services) — **skipped when observability disabled** |
 | `post-helm-grafana-credential-rotation.yaml` | `CronJob` (+ `ServiceAccount`/`Role`/`RoleBinding`) that rotates the Grafana admin password — **skipped when observability disabled** |

@@ -326,6 +326,41 @@ class TestGCOAWSClientRequests:
 
                 assert response.status_code == 200
                 mock_request.assert_called_once()
+                assert mock_request.call_args.kwargs["stream"] is False
+
+    def test_make_authenticated_request_streams_response_body(self):
+        """Streaming requests leave the body unbuffered and allow regional idle gaps."""
+        from cli.aws_client import ApiEndpoint, GCOAWSClient
+
+        with patch("cli.aws_client.get_config") as mock_config:
+            mock_config.return_value = MagicMock(cache_ttl_seconds=300)
+
+            with (
+                patch("boto3.Session") as mock_session,
+                patch("requests.request") as mock_request,
+                patch("cli.aws_client.SigV4Auth"),
+            ):
+                mock_session.return_value.get_credentials.return_value = MagicMock()
+                mock_request.return_value = MagicMock(status_code=200)
+
+                client = GCOAWSClient()
+                client._api_endpoint_cache = ApiEndpoint(
+                    url="https://api.example.com/prod",
+                    region="us-east-1",
+                    api_id="test",
+                )
+                client._cache_timestamp = time.time()
+
+                response = client.make_authenticated_request(
+                    "POST",
+                    "/inference/ep/v1/completions",
+                    body={"prompt": "hello", "stream": True},
+                    stream=True,
+                )
+
+                assert response.status_code == 200
+                assert mock_request.call_args.kwargs["stream"] is True
+                assert mock_request.call_args.kwargs["timeout"] == (10, 310)
 
     def test_submit_manifests(self):
         """Test submitting manifests."""

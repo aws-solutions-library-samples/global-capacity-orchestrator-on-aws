@@ -84,13 +84,15 @@ _TAG_RE = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_.\-]{0,127}$")
 # produces it. Listing these here lets callers enumerate the shipped
 # images and resolve any one of them to its registry URI by name,
 # the same way the platform services (health-monitor,
-# manifest-processor, queue-processor, inference-monitor) are built
-# from their matching ``dockerfiles/<name>-dockerfile``.
+# manifest-processor, queue-processor, inference-monitor,
+# inference-proxy) are built from their matching
+# ``dockerfiles/<name>-dockerfile``.
 _MAINTAINED_IMAGES: dict[str, str] = {
     "health-monitor": "dockerfiles/health-monitor-dockerfile",
     "manifest-processor": "dockerfiles/manifest-processor-dockerfile",
     "queue-processor": "dockerfiles/queue-processor-dockerfile",
     "inference-monitor": "dockerfiles/inference-monitor-dockerfile",
+    "inference-proxy": "dockerfiles/inference-proxy-dockerfile",
 }
 
 # Default image served by disaggregated prefill/decode deployments when the

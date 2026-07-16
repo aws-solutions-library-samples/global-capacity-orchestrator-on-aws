@@ -1,6 +1,8 @@
 """Inference endpoint commands."""
 
+import codecs
 import sys
+from email.message import Message
 from typing import Any
 
 import click
@@ -654,8 +656,9 @@ def inference_update_image(config: Any, endpoint_name: Any, image: Any) -> None:
 )
 @click.option(
     "--stream/--no-stream",
-    default=False,
-    help="Request streaming (unsupported: API Gateway and Lambda buffer responses)",
+    default=None,
+    help="Enable or disable incremental response streaming. Raw JSON with "
+    "'stream': true enables streaming automatically.",
 )
 @pass_config
 def inference_invoke(
@@ -691,11 +694,6 @@ def inference_invoke(
     if not prompt and not data:
         formatter.print_error("Provide --prompt (-p) or --data (-d)")
         sys.exit(1)
-    if stream:
-        formatter.print_error(
-            "--stream is not supported: API Gateway and Lambda buffer inference responses"
-        )
-        sys.exit(1)
 
     try:
         # Look up the endpoint's stored API prefix and serving spec. The record
@@ -711,12 +709,30 @@ def inference_invoke(
         spec = endpoint.get("spec", {})
         image = spec.get("image", "") if isinstance(spec, dict) else ""
 
-        # Auto-detect the API sub-path based on the container image
+        parsed_data: dict[str, Any] | None = None
+        if data:
+            parsed_json = _json.loads(data)
+            if not isinstance(parsed_json, dict):
+                raise ValueError("--data must contain a JSON object")
+            parsed_data = parsed_json
+
+        # An explicit flag wins over the body. Without a flag, raw OpenAI JSON
+        # can opt into streamed transport by carrying its normal stream field.
+        if stream is None:
+            stream_response = parsed_data is not None and parsed_data.get("stream") is True
+        else:
+            stream_response = bool(stream)
+        if parsed_data is not None and stream is not None:
+            parsed_data["stream"] = stream_response
+
+        # Auto-detect the API sub-path based on the container image. TGI uses a
+        # distinct route for streamed token delivery; OpenAI-compatible servers
+        # use the same route and select streaming in the JSON body.
         if api_path is None:
             if "vllm" in image:
                 api_path = "/v1/completions"
             elif "text-generation-inference" in image or "tgi" in image:
-                api_path = "/generate"
+                api_path = "/generate_stream" if stream_response else "/generate"
             elif "tritonserver" in image or "triton" in image:
                 api_path = "/v2/models"
             else:
@@ -724,25 +740,18 @@ def inference_invoke(
 
         full_path = f"{endpoint_path}{api_path}"
 
-        # Build the request body
-        body_str: str | None = None
-        if data:
-            parsed_data = _json.loads(data)
-            if not isinstance(parsed_data, dict):
-                raise ValueError("--data must contain a JSON object")
-            if parsed_data.get("stream") is True:
-                raise ValueError(
-                    "Streaming requests are not supported: API Gateway and Lambda buffer responses"
-                )
-            body_str = _json.dumps(parsed_data)
-        elif prompt:
-            # Build a sensible default body based on framework
+        # Build the request body.
+        body: dict[str, Any]
+        if parsed_data is not None:
+            body = parsed_data
+        else:
+            assert prompt is not None
             if "generate" in api_path:
-                # TGI format
-                body_dict = {"inputs": prompt, "parameters": {"max_new_tokens": max_tokens}}
+                # TGI format; /generate_stream controls response streaming.
+                body = {"inputs": prompt, "parameters": {"max_new_tokens": max_tokens}}
             elif "/v2/" in api_path:
-                # Triton — just list models, prompt not used for this path
-                body_dict = {}
+                # Triton — just list models, prompt not used for this path.
+                body = {}
             else:
                 # OpenAI-compatible (vLLM, etc.)
                 # Determine model name for OpenAI-compatible request
@@ -773,26 +782,71 @@ def inference_invoke(
                                     model_name = models_data[0]["id"]
                         except Exception:
                             pass  # Fall through to endpoint_name as model
-                body_dict = {
+                body = {
                     "model": model_name,
                     "prompt": prompt,
                     "max_tokens": max_tokens,
-                    "stream": False,
+                    "stream": stream_response,
                 }
-            body_str = _json.dumps(body_dict)
 
-        formatter.print_info(f"POST {full_path}")
+        if stream_response:
+            # Keep streamed stdout byte-for-byte pipeline-friendly; request
+            # metadata belongs on stderr when the response itself is streamed.
+            print(f"ℹ POST {full_path}", file=sys.stderr)
+        else:
+            formatter.print_info(f"POST {full_path}")
 
-        # Make the authenticated request
+        # Make the authenticated request. ``stream=True`` prevents requests
+        # from preloading the body so chunks can reach stdout as they arrive.
         client = get_aws_client(config)
         response = client.make_authenticated_request(
-            method="POST" if body_str else "GET",
+            method="POST",
             path=full_path,
-            body=_json.loads(body_str) if body_str else None,
+            body=body,
             target_region=region,
+            stream=stream_response,
         )
 
-        # Print the response
+        if stream_response:
+            try:
+                if not response.ok:
+                    formatter.print_error(f"HTTP {response.status_code}: {response.text[:500]}")
+                    sys.exit(1)
+
+                # Requests assumes ISO-8859-1 for text/* without a declared
+                # charset. Model token streams are UTF-8 in practice, so honor
+                # only an explicit response charset and otherwise use UTF-8.
+                content_type = response.headers.get("content-type", "")
+                encoding = "utf-8"
+                if isinstance(content_type, str):
+                    parsed_content_type = Message()
+                    parsed_content_type["content-type"] = content_type
+                    declared_charset = parsed_content_type.get_content_charset()
+                    if declared_charset is not None:
+                        try:
+                            codecs.lookup(declared_charset)
+                        except LookupError:
+                            pass
+                        else:
+                            encoding = declared_charset
+
+                decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+                for chunk in response.iter_content(chunk_size=8192, decode_unicode=False):
+                    if not chunk:
+                        continue
+                    output = chunk if isinstance(chunk, str) else decoder.decode(chunk)
+                    if output:
+                        sys.stdout.write(output)
+                        sys.stdout.flush()
+                remainder = decoder.decode(b"", final=True)
+                if remainder:
+                    sys.stdout.write(remainder)
+                    sys.stdout.flush()
+            finally:
+                response.close()
+            return
+
+        # Buffered responses retain the friendly extraction used by the CLI.
         if response.ok:
             try:
                 resp_json = response.json()

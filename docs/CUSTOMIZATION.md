@@ -614,7 +614,7 @@ The value is validated at synth time — anything other than `NONE` or `SOURCE_I
 
 #### Inference Health Watchdog
 
-The inference monitor tracks how long each endpoint has zero ready replicas. Inference traffic uses the shared authenticated manifest-processor proxy, so an individual model does not own an ALB target group and the watchdog never changes shared ALB rules.
+The inference monitor tracks how long each endpoint has zero ready replicas. Inference traffic uses the shared Ingress but terminates at the dedicated authenticated inference-proxy service, so an individual model does not own an ALB target group and the watchdog never changes shared ALB rules.
 
 Configure in `cdk.json`:
 
@@ -634,7 +634,7 @@ Before the threshold, the monitor records the start of the outage. After the thr
 
 #### ALB Architecture
 
-GCO uses one internal application ALB per region. A shared platform Ingress routes health, manifest, job, and `/inference/*` requests to platform services. The manifest processor authenticates and validates an inference route before proxying it to the selected endpoint's ClusterIP Service, so endpoint Deployments and Services do not create public or endpoint-specific Ingresses.
+GCO uses one internal application ALB per region. A shared platform Ingress routes health and control-plane traffic to their platform services and `/inference/*` to the dedicated inference proxy. The proxy authenticates and validates an inference route before streaming from the selected endpoint's ClusterIP Service, so endpoint Deployments and Services do not create public or endpoint-specific Ingresses.
 
 The GA registration Lambda verifies the load balancer's account, region, EKS-cluster tags, platform-Ingress tags, type (`application`), and scheme (`internal`) before publishing its hostname and registering it. It also removes stale Global Accelerator endpoint attachments so only the current verified platform ALB remains registered.
 

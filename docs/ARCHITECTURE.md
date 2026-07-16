@@ -94,9 +94,9 @@ Each region contains:
 - Regional REST API uses AWS-managed TLS and IAM authentication (SigV4)
 - Its resource policy always admits the exact aggregator role
 - `api_gateway.regional_api_enabled=true` additionally admits IAM-authorized principals from the deployment account for direct region-pinned access; it does not control bridge deployment
-- VPC Lambda resolves and verifies the internal ALB from `/<project>/alb-hostname-<region>`
-- The Lambda signs the request with HMAC and uses private-root TLS to the ALB
-- Proxies `/api/v1/*` and `/inference/*` without a VPC Link or Network Load Balancer
+- The buffered Python VPC Lambda resolves and verifies the internal ALB from `/<project>/alb-hostname-<region>` for `/api/v1/*`
+- A separate Node.js 22 VPC Lambda applies the same HMAC, private-root TLS, and ALB-ownership controls while streaming `/inference/*` responses
+- Neither path requires a VPC Link or Network Load Balancer
 
 **Amazon EFS (Elastic File System)**
 
@@ -122,8 +122,9 @@ Each region contains:
 
 - Single authenticated entry point for all regions
 - IAM authentication (SigV4) required for all requests
-- Lambda proxy signs each exact backend request with a short-lived HMAC envelope
-- Forwards requests to Global Accelerator
+- Buffered Python Lambda proxy handles `/api/v1/*`
+- Dedicated Node.js 22 Lambda streams `/inference/*` responses through the 15-minute REST API streaming integration
+- Both proxy paths sign the exact backend request with a short-lived HMAC envelope and forward through Global Accelerator
 
 **Lambda Proxy**
 
@@ -147,8 +148,9 @@ Each region contains:
 
 **Namespaces:**
 
-- `gco-system`: All platform services (health monitor, manifest processor) run here
-- `gco-jobs`: User workloads submitted via the API are deployed here
+- `gco-system`: Platform services (health monitor, manifest processor, inference monitor, and inference proxy)
+- `gco-jobs`: User batch and training workloads submitted through the control API
+- `gco-inference`: Managed model-serving workloads reconciled by the inference monitor
 
 **Health Monitor Service**
 
@@ -168,11 +170,21 @@ Each region contains:
 - Queues manifests for application
 - Tracks manifest lifecycle
 
-**Service Account & RBAC**
+**Inference Proxy Service**
 
-- `gco-service-account`: Used by all platform services
-- `gco-cluster-role`: Cluster-wide permissions
-- Least-privilege access model
+- 3 replicas and a PodDisruptionBudget with at least 2 available
+- Own image, ServiceAccount, IAM role, NetworkPolicies, and ClusterIP Service
+- Validates the HMAC envelope and serving-path allowlist
+- Reads only the exact endpoint record from DynamoDB and streams model responses
+- Has no Kubernetes RoleBinding and shares no worker lifecycle with the manifest processor
+
+**Service Accounts & RBAC**
+
+- `gco-health-monitor-sa`: Read-only cluster health plus narrowly named self-healing resources
+- `gco-manifest-processor-sa`: Job-namespace Kubernetes writes and control-plane table access
+- `gco-inference-monitor-sa`: Inference-namespace reconciliation permissions
+- `gco-inference-proxy-sa`: Exact AWS secret/endpoint-read access and no Kubernetes RBAC binding
+- `gco-service-account`: General job and inference workload identity
 
 ### 5. Lambda Layer
 
@@ -221,6 +233,15 @@ User → API Gateway (IAM Auth, AWS-managed TLS) → Lambda Proxy
   → Kubernetes API → Workload Scheduled → Node Provisioned
 ```
 
+### Inference Invocation
+
+```text
+User → API Gateway (IAM Auth, AWS-managed TLS) → Streaming Inference Lambda
+  → Global Accelerator (TCP/443 pass-through) → Internal Regional ALB (private-root TLS)
+  → Kubernetes Ingress → Dedicated Inference Proxy Pod (HTTP target group)
+  → Endpoint ClusterIP Service → Model Pod → streamed response
+```
+
 ### Authentication Flow
 
 ```text
@@ -229,7 +250,7 @@ User Request (SigV4 signed) → API Gateway (AWS-managed TLS + IAM Auth)
   → Lambda signs the exact backend request with a short-lived envelope
   → Private-root TLS traverses Global Accelerator unchanged to the ALB
   → Backend middleware validates freshness, integrity, body digest, and nonce replay
-  → Manifest Processor processes request
+  → Manifest Processor handles `/api/v1/*`; Inference Proxy handles `/inference/*`
 ```
 
 For `/api/v1/global/*`, the API invokes the aggregator instead. The aggregator

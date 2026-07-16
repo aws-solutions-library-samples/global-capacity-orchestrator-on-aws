@@ -53,6 +53,33 @@ def _methods_for_child_resource(
     }
 
 
+def _integrations_for_child_resource(
+    template: assertions.Template,
+    parent_path_part: str,
+    child_path_part: str,
+) -> list[dict]:
+    """Return integrations attached to one exact parent/child API resource path."""
+    resources = template.find_resources("AWS::ApiGateway::Resource")
+    parent_ids = [
+        logical_id
+        for logical_id, resource in resources.items()
+        if resource.get("Properties", {}).get("PathPart") == parent_path_part
+    ]
+    assert len(parent_ids) == 1
+    child_ids = [
+        logical_id
+        for logical_id, resource in resources.items()
+        if resource.get("Properties", {}).get("PathPart") == child_path_part
+        and resource.get("Properties", {}).get("ParentId") == {"Ref": parent_ids[0]}
+    ]
+    assert len(child_ids) == 1
+    return [
+        resource["Properties"]["Integration"]
+        for resource in template.find_resources("AWS::ApiGateway::Method").values()
+        if resource.get("Properties", {}).get("ResourceId") == {"Ref": child_ids[0]}
+    ]
+
+
 class TestRegionalApiGatewayStack:
     """Test cases for GCORegionalApiGatewayStack."""
 
@@ -142,6 +169,17 @@ class TestRegionalApiGatewayStack:
             "HEAD",
             "POST",
         }
+        inference_integrations = _integrations_for_child_resource(template, "inference", "{proxy+}")
+        assert len(inference_integrations) == 3
+        assert all(
+            integration["ResponseTransferMode"] == "STREAM"
+            and integration["TimeoutInMillis"] == 900000
+            for integration in inference_integrations
+        )
+        control_integrations = _integrations_for_child_resource(template, "v1", "{proxy+}")
+        assert control_integrations
+        assert all("ResponseTransferMode" not in item for item in control_integrations)
+        assert all(item["TimeoutInMillis"] == 29000 for item in control_integrations)
 
     def test_regional_api_gateway_has_lambda(self, app, mock_config, vpc):
         """Test that the regional API gateway has a VPC Lambda."""
@@ -168,6 +206,33 @@ class TestRegionalApiGatewayStack:
                 "FunctionName": "gco-regional-proxy-us-east-1",
                 "Runtime": "python3.14",
                 "Handler": "handler.lambda_handler",
+                "Timeout": 29,
+            },
+        )
+        template.has_resource_properties(
+            "AWS::Lambda::Function",
+            {
+                "FunctionName": "gco-regional-inference-proxy-us-east-1",
+                "Runtime": "nodejs22.x",
+                "Handler": "index.handler",
+                "Timeout": 900,
+                "Environment": {
+                    "Variables": assertions.Match.object_like(
+                        {
+                            "ROUTING_MODE": "regional",
+                            "TARGET_REGION": "us-east-1",
+                            "REGISTRY_REGION": "us-east-2",
+                        }
+                    )
+                },
+                "VpcConfig": assertions.Match.object_like(
+                    {
+                        "SecurityGroupIds": assertions.Match.array_with(
+                            [assertions.Match.any_value()]
+                        ),
+                        "SubnetIds": assertions.Match.array_with([assertions.Match.any_value()]),
+                    }
+                ),
             },
         )
 
@@ -193,7 +258,7 @@ class TestRegionalApiGatewayStack:
         template.has_resource_properties(
             "AWS::EC2::SecurityGroup",
             {
-                "GroupDescription": "Security group for regional API proxy Lambda",
+                "GroupDescription": "Security group for regional API proxy Lambdas",
             },
         )
 
@@ -279,7 +344,7 @@ class TestRegionalApiGatewayStack:
         template = assertions.Template.from_stack(stack)
 
         # Verify log groups are created
-        template.resource_count_is("AWS::Logs::LogGroup", 2)
+        template.resource_count_is("AWS::Logs::LogGroup", 3)
 
     def test_regional_api_gateway_has_output(self, app, mock_config, vpc):
         """Test that the regional API gateway exports its endpoint."""

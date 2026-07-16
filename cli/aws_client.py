@@ -351,6 +351,7 @@ class GCOAWSClient:
         body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         target_region: str | None = None,
+        stream: bool = False,
     ) -> requests.Response:
         """
         Make an authenticated request to the GCO API.
@@ -368,6 +369,7 @@ class GCOAWSClient:
             headers: Additional headers
             target_region: Exact region for the request. When set, the request
                 uses that region's API Gateway directly.
+            stream: Leave the response body unbuffered for incremental consumption.
 
         Returns:
             requests.Response object
@@ -426,7 +428,8 @@ class GCOAWSClient:
                 url=url,
                 headers=dict(aws_request.headers),
                 data=body_str,
-                timeout=30,
+                timeout=(10, 310) if stream else 30,
+                stream=stream,
             )
             last_response = response
 
@@ -447,6 +450,7 @@ class GCOAWSClient:
                 if credentials is None:
                     return response  # No credentials available, return the 403
                 SigV4Auth(credentials, "execute-api", endpoint.region).add_auth(aws_request)
+                response.close()
                 continue
 
             if response.status_code not in _RETRYABLE_STATUS_CODES or not retryable_method:
@@ -463,6 +467,7 @@ class GCOAWSClient:
                     attempt + 1,
                     max_attempts,
                 )
+                response.close()
                 time.sleep(wait_time)
 
                 # Re-sign the request for the retry (credentials/time may have changed)

@@ -20,16 +20,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
-from starlette.types import ASGIApp
 
 from gco.services.auth_middleware import AuthenticationMiddleware
 from gco.services.central_queue_worker import CentralQueueWorker
@@ -38,6 +35,10 @@ from gco.services.manifest_processor import (
     create_manifest_processor_from_env,
 )
 from gco.services.metrics_publisher import ManifestProcessorMetrics
+from gco.services.request_size_middleware import (
+    DEFAULT_MAX_REQUEST_BODY_BYTES,
+    RequestSizeLimitMiddleware,
+)
 from gco.services.structured_logging import configure_structured_logging
 from gco.services.template_store import (
     JobStore,
@@ -60,68 +61,6 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Request Size Limit Middleware
-# ---------------------------------------------------------------------------
-
-# Default max request body size: 1MB
-DEFAULT_MAX_REQUEST_BODY_BYTES = 1_048_576
-
-
-class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
-    """
-    Middleware to enforce request body size limits.
-
-    Rejects requests that exceed the configured maximum body size with HTTP 413
-    (Payload Too Large). Checks the Content-Length header first for an early
-    rejection without reading the body. For requests without Content-Length,
-    reads up to limit + 1 byte and rejects if exceeded.
-    """
-
-    def __init__(self, app: ASGIApp, max_body_bytes: int = DEFAULT_MAX_REQUEST_BODY_BYTES) -> None:
-        super().__init__(app)
-        self.max_body_bytes = max_body_bytes
-
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        # Skip size checks for GET, HEAD, OPTIONS, DELETE (typically no body)
-        if request.method in ("GET", "HEAD", "OPTIONS", "DELETE"):
-            return await call_next(request)
-
-        # Check Content-Length header for early rejection
-        content_length = request.headers.get("content-length")
-        if content_length:
-            try:
-                if int(content_length) > self.max_body_bytes:
-                    return JSONResponse(
-                        status_code=413,
-                        content={
-                            "detail": f"Request body exceeds maximum size of {self.max_body_bytes} bytes"
-                        },
-                    )
-            except ValueError, TypeError:
-                # Invalid Content-Length header — let the request proceed
-                # and let downstream validation handle it
-                pass
-
-        # For requests without Content-Length (chunked transfer), read up to
-        # limit + 1 byte to detect oversized bodies
-        if not content_length:
-            body = await request.body()
-            if len(body) > self.max_body_bytes:
-                return JSONResponse(
-                    status_code=413,
-                    content={
-                        "detail": f"Request body exceeds maximum size of {self.max_body_bytes} bytes"
-                    },
-                )
-
-        return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +196,6 @@ from gco.services.service_metrics import mount_metrics  # noqa: E402
 mount_metrics(app, "manifest-processor")
 
 # Include domain routers
-from gco.services.api_routes.inference_proxy import router as inference_proxy_router  # noqa: E402
 from gco.services.api_routes.jobs import router as jobs_router  # noqa: E402
 from gco.services.api_routes.manifests import router as manifests_router  # noqa: E402
 from gco.services.api_routes.queue import router as queue_router  # noqa: E402
@@ -269,7 +207,6 @@ app.include_router(jobs_router)
 app.include_router(templates_router)
 app.include_router(webhooks_router)
 app.include_router(queue_router)
-app.include_router(inference_proxy_router)
 
 
 # =============================================================================

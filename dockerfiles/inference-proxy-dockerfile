@@ -1,0 +1,68 @@
+# Dockerfile for Inference Proxy Service
+# Routes authenticated inference requests to regional inference endpoints.
+# Runs as a Deployment in gco-system behind the shared platform ingress.
+FROM python:3.14.6-slim
+
+# Set working directory
+WORKDIR /app
+
+# Apply Debian security patches at build time, then install runtime deps.
+# APT_SECURITY_EPOCH busts the CI layer cache so a freshly-published
+# trixie-security patch isn't masked by a stale cached upgrade layer;
+# bump the date when a new fix needs pulling.
+ARG APT_SECURITY_EPOCH=2026-07-12
+RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
+    && apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
+        curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user with the UID/GID enforced by the pod security context
+RUN groupadd -r -g 1000 gco && useradd -r -g gco -u 1000 gco
+
+# Copy project metadata and install Python dependencies
+# Use the lockfile for reproducible transitive dependency versions,
+# then install the project itself without re-resolving.
+#
+# pip flags + bash retry loop guard against transient PyPI/CDN drops
+# (see Dockerfile.dev for the rationale; same pattern across every
+# image build in the repo).
+COPY requirements-lock.txt ./
+COPY pyproject.toml ./
+COPY gco/ ./gco/
+COPY cli/ ./cli/
+RUN for attempt in 1 2 3; do \
+        if pip install --no-cache-dir \
+            --retries 10 --timeout 120 --resume-retries 5 \
+            -r requirements-lock.txt; then \
+            break; \
+        fi; \
+        if [ "${attempt}" -eq 3 ]; then \
+            echo "pip install failed after ${attempt} attempts" >&2; \
+            exit 1; \
+        fi; \
+        echo "pip install attempt ${attempt} failed; retrying in 10s..."; \
+        sleep 10; \
+    done \
+    && pip install --no-cache-dir --no-deps .
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Create tmp directory for the non-root process and its read-only root filesystem
+RUN mkdir -p /tmp && chown gco:gco /tmp
+
+# Switch to non-root user
+USER gco
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8080/healthz || exit 1
+
+# Run the application
+CMD ["python", "-m", "gco.services.inference_api"]

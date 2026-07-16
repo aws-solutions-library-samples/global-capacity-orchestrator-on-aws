@@ -2228,10 +2228,12 @@ gco inference invoke ENDPOINT_NAME [OPTIONS]
 | `--path` | | API sub-path (default: auto-detected from image) |
 | `--region` | `-r` | Target region for the request |
 | `--max-tokens` | | Max tokens to generate (default: 100) |
-| `--stream/--no-stream` | | Compatibility flag only; `--stream` is rejected because API Gateway and Lambda buffer responses |
+| `--stream/--no-stream` | | Enable or disable incremental response streaming; when omitted, raw JSON with `"stream": true` enables it automatically |
 
-> Inference responses are buffered. `--stream` and raw JSON bodies containing
-> `"stream": true` fail before an outbound request is made.
+`--stream` forces the OpenAI-compatible `"stream": true` field and prints bytes
+as they arrive. `--no-stream` forces buffered model output even if raw JSON asks
+for streaming. TGI streaming automatically uses `/generate_stream`; request
+bodies remain buffered because API Gateway supports response streaming only.
 
 **Example:**
 
@@ -2244,6 +2246,12 @@ gco inference invoke my-llm -p "Explain Kubernetes" --max-tokens 200
 
 # Raw JSON body
 gco inference invoke my-llm -d '{"prompt": "Hello", "max_tokens": 50}'
+
+# Stream OpenAI-compatible output incrementally
+gco inference invoke my-llm -p "Hello" --stream
+
+# Raw JSON can opt in automatically when the explicit flag is omitted
+gco inference invoke my-llm -d '{"prompt": "Hello", "stream": true}'
 
 # Explicit API path
 gco inference invoke my-llm -p "Hello" --path /v1/chat/completions

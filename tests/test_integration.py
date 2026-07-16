@@ -383,6 +383,7 @@ class TestKubernetesManifests:
             "gco-health-monitor-sa",
             "gco-manifest-processor-sa",
             "gco-inference-monitor-sa",
+            "gco-inference-proxy-sa",
         }
         gco_deployments_checked = 0
 
@@ -436,8 +437,8 @@ class TestKubernetesManifests:
                         "missing AWS_WEB_IDENTITY_TOKEN_FILE env var for IRSA"
                     )
 
-        assert gco_deployments_checked >= 3, (
-            f"Expected at least 3 GCO deployments with dedicated service accounts, "
+        assert gco_deployments_checked >= 4, (
+            f"Expected at least 4 GCO deployments with dedicated service accounts, "
             f"found {gco_deployments_checked}"
         )
 
@@ -464,6 +465,7 @@ class TestKubernetesManifests:
             ("gco-system", "gco-health-monitor-sa"),
             ("gco-system", "gco-manifest-processor-sa"),
             ("gco-system", "gco-inference-monitor-sa"),
+            ("gco-system", "gco-inference-proxy-sa"),
         }
         # User workload SAs
         required_workload_sas = {
@@ -484,6 +486,7 @@ class TestKubernetesManifests:
             "gco-health-monitor-sa",
             "gco-manifest-processor-sa",
             "gco-inference-monitor-sa",
+            "gco-inference-proxy-sa",
             "gco-service-account",
         }
         for filepath in manifest_files:

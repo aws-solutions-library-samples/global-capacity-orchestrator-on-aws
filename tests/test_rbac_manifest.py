@@ -21,6 +21,12 @@ RBAC_MANIFEST_PATH = Path("lambda/kubectl-applier-simple/manifests/02-rbac.yaml"
 READ_ONLY_VERBS = {"get", "list", "watch"}
 WRITE_VERBS = {"create", "update", "patch", "delete", "deletecollection"}
 
+ROLE_ANNOTATION = "eks.amazonaws.com/role-arn"
+SHARED_ROLE_ANNOTATION_VALUE = "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+MANIFEST_PROCESSOR_ROLE_ANNOTATION_VALUE = "{{MANIFEST_PROCESSOR_ROLE_ARN}}"
+INFERENCE_PROXY_ROLE_ANNOTATION_VALUE = "{{INFERENCE_PROXY_ROLE_ARN}}"
+HEALTH_ROLE_ANNOTATION_VALUE = "{{HEALTH_MONITOR_ROLE_ARN}}"
+
 
 @pytest.fixture(scope="module")
 def rbac_docs():
@@ -385,6 +391,16 @@ class TestRoleBindings:
         assert subjects[0]["name"] == "gco-inference-monitor-sa"
         assert subjects[0]["namespace"] == "gco-system"
 
+    def test_inference_proxy_has_no_kubernetes_role_binding(self, bindings):
+        """The data-plane proxy uses AWS APIs and HTTP, never the Kubernetes API."""
+        bound_service_accounts = {
+            subject["name"]
+            for binding in bindings
+            for subject in binding.get("subjects", [])
+            if subject.get("kind") == "ServiceAccount"
+        }
+        assert "gco-inference-proxy-sa" not in bound_service_accounts
+
     def test_each_binding_references_correct_role(self, rbac_docs):
         """Each binding's roleRef should point to the matching role name."""
         expected_bindings = {
@@ -460,6 +476,7 @@ class TestDedicatedServiceAccounts:
         "gco-health-monitor-sa",
         "gco-manifest-processor-sa",
         "gco-inference-monitor-sa",
+        "gco-inference-proxy-sa",
     ]
 
     def test_all_dedicated_sas_exist(self, service_accounts):
@@ -483,12 +500,29 @@ class TestDedicatedServiceAccounts:
                     f"SA {sa['metadata']['name']} missing project=gco label"
                 )
 
-    def test_health_monitor_uses_dedicated_role_annotation(self, service_accounts):
-        health_sa = next(
-            sa for sa in service_accounts if sa["metadata"]["name"] == "gco-health-monitor-sa"
+    @pytest.mark.parametrize(
+        ("service_account_name", "expected_annotation"),
+        [
+            ("gco-health-monitor-sa", HEALTH_ROLE_ANNOTATION_VALUE),
+            ("gco-manifest-processor-sa", MANIFEST_PROCESSOR_ROLE_ANNOTATION_VALUE),
+            ("gco-inference-monitor-sa", SHARED_ROLE_ANNOTATION_VALUE),
+            ("gco-inference-proxy-sa", INFERENCE_PROXY_ROLE_ANNOTATION_VALUE),
+        ],
+    )
+    def test_service_accounts_use_matching_role_annotations(
+        self, service_accounts, service_account_name, expected_annotation
+    ):
+        service_account = next(
+            sa for sa in service_accounts if sa["metadata"]["name"] == service_account_name
         )
-        annotations = health_sa["metadata"].get("annotations") or {}
-        assert annotations[ROLE_ANNOTATION] == HEALTH_ROLE_ANNOTATION_VALUE
+        annotations = service_account["metadata"].get("annotations") or {}
+        assert annotations[ROLE_ANNOTATION] == expected_annotation
+
+    def test_inference_proxy_disables_default_token_automount(self, service_accounts):
+        proxy_sa = next(
+            sa for sa in service_accounts if sa["metadata"]["name"] == "gco-inference-proxy-sa"
+        )
+        assert proxy_sa["automountServiceAccountToken"] is False
 
 
 # ── IRSA trust policy regression tests ─────────────────────────────────────
@@ -498,13 +532,9 @@ class TestDedicatedServiceAccounts:
 # health monitor intentionally uses a dedicated role so its narrowly-scoped
 # SSM write cannot be assumed by general platform/job workloads.
 #
-# These tests pin both trust domains and prevent either annotation from
-# drifting away from its matching `service_account_names` list.
+# These tests pin every trust domain and prevent an annotation from drifting
+# away from its matching `service_account_names` list.
 
-
-ROLE_ANNOTATION = "eks.amazonaws.com/role-arn"
-SHARED_ROLE_ANNOTATION_VALUE = "{{SERVICE_ACCOUNT_ROLE_ARN}}"
-HEALTH_ROLE_ANNOTATION_VALUE = "{{HEALTH_MONITOR_ROLE_ARN}}"
 
 # SAs that the CDK stack declares as trusted for each IRSA role. Keep in
 # sync with gco/stacks/regional_stack.py::_create_service_account_role.
@@ -512,10 +542,11 @@ CDK_TRUSTED_SAS_BY_ANNOTATION = {
     SHARED_ROLE_ANNOTATION_VALUE: frozenset(
         {
             "gco-service-account",
-            "gco-manifest-processor-sa",
             "gco-inference-monitor-sa",
         }
     ),
+    MANIFEST_PROCESSOR_ROLE_ANNOTATION_VALUE: frozenset({"gco-manifest-processor-sa"}),
+    INFERENCE_PROXY_ROLE_ANNOTATION_VALUE: frozenset({"gco-inference-proxy-sa"}),
     HEALTH_ROLE_ANNOTATION_VALUE: frozenset({"gco-health-monitor-sa"}),
 }
 CDK_TRUSTED_SAS = frozenset().union(*CDK_TRUSTED_SAS_BY_ANNOTATION.values())

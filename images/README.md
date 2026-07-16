@@ -4,8 +4,17 @@ Screenshots and visual assets for GCO (Global Capacity Orchestrator on AWS) docu
 
 ## Table of Contents
 
+- [Reference Architecture Diagrams](#reference-architecture-diagrams)
 - [MCP Server Screenshots](#mcp-server-screenshots)
 - [SageMaker Studio Screenshots](#sagemaker-studio-screenshots)
+
+## Reference Architecture Diagrams
+
+These curated reference views complement the generated infrastructure diagrams and preserve the platform story at three levels:
+
+- [Part 1 — Multi-region reference architecture](gco_ref_architecture_part1.png)
+- [Part 2 — Regional EKS architecture](gco_ref_architecture_part2.png)
+- [Part 3 — Security controls and request flow](gco_ref_architecture_part3.png)
 
 ## MCP Server Screenshots
 

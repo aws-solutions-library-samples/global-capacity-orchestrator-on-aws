@@ -8,8 +8,8 @@ pods. The front door has two enforced boundaries:
   ``{name}-proxy`` app label and proxy role marker, so it never fans traffic out
   to prefill or decode role pods in the same namespace.
 - There is no endpoint-specific Ingress. The shared ``gco-system/gco-ingress``
-  sends every ``/inference`` request to the authenticated manifest processor,
-  which validates the API proxy envelope before forwarding an allowlisted
+  sends every ``/inference`` request to the dedicated authenticated inference
+  proxy, which validates the API proxy envelope before forwarding an allowlisted
   serving path to the internal ClusterIP Service. Reconciliation removes both
   historical direct-Ingress names.
 
@@ -91,8 +91,8 @@ def test_proxy_service_selects_only_proxy_pods(monitor):
     assert len(service.spec.ports) == 1
 
 
-def test_shared_ingress_routes_inference_through_manifest_processor():
-    """The one public inference prefix terminates at the authenticated API."""
+def test_shared_ingress_routes_inference_through_dedicated_proxy():
+    """The one public inference prefix terminates at the dedicated proxy API."""
     manifest_path = (
         Path(__file__).parents[1]
         / "lambda"
@@ -107,7 +107,7 @@ def test_shared_ingress_routes_inference_through_manifest_processor():
     assert len(inference_paths) == 1
     route = inference_paths[0]
     assert route["pathType"] == "Prefix"
-    assert route["backend"]["service"]["name"] == "manifest-processor"
+    assert route["backend"]["service"]["name"] == "inference-proxy"
     assert route["backend"]["service"]["port"]["number"] == 80
 
 

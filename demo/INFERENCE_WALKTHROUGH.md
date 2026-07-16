@@ -72,8 +72,8 @@ gco inference deploy vllm-spot \
 
 The inference_monitor in each region picks up the DynamoDB record and creates
 the Kubernetes Deployment and ClusterIP Service. The existing shared platform
-Ingress sends `/inference/*` through the authenticated manifest processor; the
-endpoint never receives a direct ALB rule.
+Ingress sends `/inference/*` through the dedicated authenticated inference
+proxy; the endpoint never receives a direct ALB rule.
 
 Watch status until all regions show "running", then list every endpoint:
 
@@ -114,9 +114,19 @@ gco inference invoke vllm-demo \
   -d '{"model": "facebook/opt-125m", "prompt": "Hello!", "max_tokens": 30}'
 ```
 
-Inference responses are buffered. Do not pass `--stream` or include
-`"stream": true` in a raw JSON body: API Gateway and Lambda buffer this route,
-so the CLI rejects streaming requests before making an outbound call.
+Stream OpenAI-compatible output as it is generated:
+
+```bash
+gco inference invoke vllm-demo \
+  -p "Write a haiku about Kubernetes." \
+  --max-tokens 50 \
+  --stream
+```
+
+Raw JSON with `"stream": true` also enables incremental transport when no
+explicit flag is present. `--no-stream` overrides it and keeps the friendly
+buffered JSON/text rendering. TGI images automatically switch from `/generate`
+to `/generate_stream`. Request bodies remain buffered; only responses stream.
 
 ## Step 5: Scale the Endpoint
 
@@ -368,16 +378,16 @@ Authenticated request plane
                                       shared gco-system/gco-ingress
                                                     |
                                                     v
-                                  authenticated manifest processor
+                                  authenticated inference proxy
                                                     |
                                                     v
                                   endpoint ClusterIP Service -> pod
 ```
 
 Each region has one shared internal ALB registered with Global Accelerator.
-The shared Ingress owns `/inference/*`; the manifest processor validates the
-request-bound HMAC envelope and allowlisted serving path before it derives and
-contacts the endpoint Service. There are no endpoint-specific Ingresses or
+The shared Ingress owns `/inference/*`; the dedicated inference proxy validates
+the request-bound HMAC envelope and allowlisted serving path before it derives
+and contacts the endpoint Service. There are no endpoint-specific Ingresses or
 public model Services.
 
 The inference_monitor continuously reconciles DynamoDB desired state with the
@@ -394,6 +404,7 @@ recreated.
 | `gco inference list` | List all endpoints |
 | `gco inference status NAME` | Per-region status |
 | `gco inference invoke NAME -p "..."` | Send a buffered prompt |
+| `gco inference invoke NAME -p "..." --stream` | Stream model output incrementally |
 | `gco inference scale NAME --replicas N` | Set replica count |
 | `gco inference update-image NAME -i IMG` | Rolling update |
 | `gco inference canary NAME -i IMG --weight 10` | Start canary deployment |

@@ -38,8 +38,9 @@ def test_service_dockerfiles_are_discovered():
     names = {f.name for f in _service_dockerfiles()}
     assert "Dockerfile.dev" in names
     service = {n for n in names if n.endswith("-dockerfile")}
-    # health-monitor, inference-monitor, manifest-processor, queue-processor.
-    assert len(service) >= 4, f"expected >=4 service Dockerfiles, found {service}"
+    # health-monitor, inference-monitor, inference-proxy, manifest-processor,
+    # and queue-processor.
+    assert len(service) >= 5, f"expected >=5 service Dockerfiles, found {service}"
 
 
 def test_all_service_dockerfiles_share_one_pinned_python_tag():

@@ -55,16 +55,16 @@ Client (SigV4)
 edge-optimized API Gateway (AWS-managed TLS + SigV4)
       │
       ▼
-global proxy Lambda (request-bound HMAC) → Global Accelerator (TCP/443 pass-through)
+global inference-streaming Lambda (request-bound HMAC) → Global Accelerator (TCP/443)
                                                 │
                                                 ▼
                                   internal regional ALB (private-root TLS)
                                                 │ HTTP after termination
                                                 ▼
-                                              authenticated manifest processor
-                                                                │
-                                                                ▼
-                                               endpoint ClusterIP Service → pod
+                                      authenticated inference proxy
+                                                │ streamed response
+                                                ▼
+                               endpoint ClusterIP Service → pod
 ```
 
 ### How It Works
@@ -80,15 +80,15 @@ global proxy Lambda (request-bound HMAC) → Global Accelerator (TCP/443 pass-th
    recreating them. The shared `gco-system/gco-ingress` is the only ALB route
    for inference traffic.
 5. API Gateway authenticates the client with IAM over AWS-managed TLS. The
-   global Lambda binds the method, target, body digest, timestamp, and nonce
-   into a short-lived HMAC envelope, then uses strict private-root TLS through
-   Global Accelerator to a healthy regional ALB. Global Accelerator forwards
-   TCP/443 and never terminates TLS; the ALB forwards HTTP to the manifest
-   processor after termination.
-6. The manifest processor validates that envelope, checks endpoint state and an
-   allowlist of serving paths, then forwards to a strictly derived in-cluster
-   Service name. Mooncake admin, metrics, debug, and documentation paths are
-   never forwarded.
+   inference-only Node.js Lambda binds the method, target, body digest,
+   timestamp, and nonce into a short-lived HMAC envelope, then uses strict
+   private-root TLS through Global Accelerator to a healthy regional ALB.
+   Global Accelerator forwards TCP/443 and never terminates TLS; the ALB
+   forwards HTTP to the dedicated inference proxy after termination.
+6. The inference proxy validates that envelope, checks endpoint state and an
+   allowlist of serving paths, then streams the response from a strictly derived
+   in-cluster Service name. Mooncake admin, metrics, debug, and documentation
+   paths are never forwarded.
 
 ### Shared Internal ALB
 
@@ -99,7 +99,7 @@ identity through explicit SNI while connecting to the accelerator DNS name.
 This keeps the public boundary narrow:
 
 - The ALB exposes the platform `gco-ingress`, not one Ingress per model.
-- `/inference/*` first reaches the authenticated manifest processor.
+- `/inference/*` first reaches the dedicated authenticated inference proxy.
 - Plain endpoints resolve to `<name>.gco-inference.svc.cluster.local`; split
   Mooncake endpoints resolve to `<name>-proxy` in the same namespace.
 - No ExternalName bridge, endpoint-specific target group, direct Global
@@ -379,8 +379,8 @@ The `store` and `both` modes enable the shared KV-cache store automatically — 
 ### Architecture
 
 ```text
-API Gateway (AWS TLS + SigV4) → HMAC proxy → Global Accelerator (TCP/443)
-  → internal ALB (private-root TLS) → authenticated manifest processor (HTTP)
+API Gateway (AWS TLS + SigV4) → streaming HMAC proxy → Global Accelerator (TCP/443)
+  → internal ALB (private-root TLS) → authenticated inference proxy (HTTP)
                                                           │
                                                           ▼
                                                 {name}-proxy Service
@@ -548,7 +548,7 @@ How it works:
 
 - `canary` stores the canary config (image, weight, replicas) in the endpoint spec in DynamoDB
 - The inference_monitor creates a second deployment (`{name}-canary`) and service in each target region
-- The authenticated manifest-processor proxy samples the configured weight
+- The authenticated inference proxy samples the configured weight
   only after the local canary status reports the expected image and every
   desired canary replica Ready; otherwise all requests stay on the primary
   Service.
@@ -620,13 +620,25 @@ gco inference invoke my-llm -p "Hello" --path /v1/completions
 
 # Raw JSON body for full control
 gco inference invoke my-llm -d '{"model": "meta-llama/Llama-3.1-8B-Instruct", "prompt": "Hello", "max_tokens": 50}'
+
+# Stream chunks to stdout as the model emits them
+gco inference invoke my-llm -p "Explain Kubernetes" --stream
+
+# Raw OpenAI-compatible JSON opts in automatically when no flag overrides it
+gco inference invoke my-llm -d '{"prompt": "Hello", "stream": true}'
 ```
 
 The CLI auto-detects the serving framework from the container image and builds the appropriate request body:
 
-- **vLLM** → `/v1/completions` (OpenAI-compatible)
-- **TGI** → `/generate` (HuggingFace format)
+- **vLLM** → `/v1/completions` (OpenAI-compatible; `--stream` sets `"stream": true`)
+- **TGI** → `/generate`, or `/generate_stream` when streaming
 - **Triton** → `/v2/models` (Triton HTTP API)
+
+`--no-stream` explicitly forces buffered output, including when raw JSON contains
+`"stream": true`. Response streaming can continue for up to the 15-minute
+Lambda/API Gateway integration limit while data is flowing. The edge/global
+path has a 30-second idle timeout and direct regional APIs have a 5-minute idle
+timeout. API Gateway does not stream request bodies.
 
 ### Chat Conversations
 
@@ -676,9 +688,10 @@ The MCP server exposes four inference interaction tools so AI agents can use you
 | `inference_health` | Health check with latency reporting |
 | `list_endpoint_models` | Discover loaded models via `/v1/models` |
 
-Both `invoke_inference` and `chat_inference` return buffered responses. They do
-not expose a `stream` parameter because API Gateway and Lambda buffer this
-request path rather than providing end-to-end response streaming.
+Both `invoke_inference` and `chat_inference` currently return buffered
+strings because the MCP runner does not expose an incremental output channel.
+The underlying API route does support end-to-end response streaming; use
+`gco inference invoke --stream` when incremental output is required.
 
 ## Valkey K/V Cache
 

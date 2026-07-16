@@ -40,7 +40,7 @@ Resources Created:
 
     Container Images:
         - ECR repositories + Docker image builds for health-monitor, manifest-processor,
-          inference-monitor, queue-processor
+          inference-proxy, inference-monitor, queue-processor
 
     SQS:
         - Regional job queue + dead letter queue (for gco jobs submit-sqs)
@@ -801,6 +801,24 @@ class GCORegionalStack(Stack):
             platform=ecr_assets.Platform.LINUX_AMD64,
         )
 
+        # Create and build the inference-only data-plane proxy image. Keeping
+        # this separate from manifest-processor prevents model traffic from
+        # sharing its Kubernetes API/RBAC and queue-worker process surface.
+        self.inference_proxy_repo = ecr.Repository(
+            self,
+            "InferenceProxyRepo",
+            removal_policy=RemovalPolicy.DESTROY,
+            empty_on_delete=True,
+            image_scan_on_push=True,
+        )
+        self.inference_proxy_image = ecr_assets.DockerImageAsset(
+            self,
+            "InferenceProxyImage",
+            directory=".",
+            file="dockerfiles/inference-proxy-dockerfile",
+            platform=ecr_assets.Platform.LINUX_AMD64,
+        )
+
         # Output image URIs for reference
         CfnOutput(
             self,
@@ -814,6 +832,13 @@ class GCORegionalStack(Stack):
             "ManifestProcessorImageUri",
             value=self.manifest_processor_image.image_uri,
             description="Manifest Processor Docker image URI",
+        )
+
+        CfnOutput(
+            self,
+            "InferenceProxyImageUri",
+            value=self.inference_proxy_image.image_uri,
+            description="Inference Proxy Docker image URI",
         )
 
         # Build and push inference monitor Docker image
@@ -1370,6 +1395,15 @@ class GCORegionalStack(Stack):
             namespaces=["gco-system"],
         )
 
+        self.inference_proxy_role = GCORegionalStack._create_irsa_role(
+            self,
+            "InferenceProxyRole",
+            oidc_provider_arn=self.oidc_provider.open_id_connect_provider_arn,
+            oidc_issuer_url=self.cluster.cluster_open_id_connect_issuer_url,
+            service_account_names=["gco-inference-proxy-sa"],
+            namespaces=["gco-system"],
+        )
+
         self.health_monitor_role = GCORegionalStack._create_irsa_role(
             self,
             "HealthMonitorRole",
@@ -1406,6 +1440,16 @@ class GCORegionalStack(Stack):
             f":{self.account}:secret:{api_gateway_auth_secret_name(self.config.get_project_name())}*"
         )
         self.manifest_processor_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "secretsmanager:GetSecretValue",
+                    "secretsmanager:DescribeSecret",
+                ],
+                resources=[auth_secret_resource],
+            )
+        )
+        self.inference_proxy_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 actions=[
@@ -1683,8 +1727,6 @@ class GCORegionalStack(Stack):
                     f"{manifest_table_prefix}-job-templates/index/*",
                     f"{manifest_table_prefix}-webhooks",
                     f"{manifest_table_prefix}-webhooks/index/*",
-                    f"{manifest_table_prefix}-inference-endpoints",
-                    f"{manifest_table_prefix}-inference-endpoints/index/*",
                 ],
             )
         )
@@ -1703,6 +1745,30 @@ class GCORegionalStack(Stack):
                     f"{manifest_table_prefix}-jobs/index/*",
                 ],
             )
+        )
+
+        # The inference proxy needs only point reads of endpoint state. It has
+        # no write, scan, index, S3, Kubernetes, or queue permissions.
+        self.inference_proxy_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["dynamodb:GetItem"],
+                resources=[f"{manifest_table_prefix}-inference-endpoints"],
+            )
+        )
+        acknowledge_nag_findings(
+            self.inference_proxy_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "InferenceProxyRole uses one wildcard only for the random "
+                        "Secrets Manager ARN suffix. DynamoDB access is an exact-table "
+                        "GetItem grant, and the role has no Kubernetes, queue, or write access."
+                    ),
+                    "appliesTo": ["Resource::*"],
+                }
+            ],
         )
 
         # The inference monitor still owns desired-state reconciliation, but
@@ -1880,6 +1946,18 @@ class GCORegionalStack(Stack):
             role_arn=self.manifest_processor_role.role_arn,
         )
         self._pod_identity_associations.append(manifest_assoc)
+
+        # Inference data plane — exact secret + endpoint-table read role, with
+        # no Kubernetes RBAC binding.
+        inference_proxy_assoc = eks_l1.CfnPodIdentityAssociation(
+            self,
+            "PodIdentity-inference-proxy",
+            cluster_name=self.cluster.cluster_name,
+            namespace="gco-system",
+            service_account="gco-inference-proxy-sa",
+            role_arn=self.inference_proxy_role.role_arn,
+        )
+        self._pod_identity_associations.append(inference_proxy_assoc)
 
         # Shared GCO service account for general platform/job workloads.
         for namespace in ["gco-system", "gco-jobs", "gco-inference"]:
@@ -2619,6 +2697,7 @@ class GCORegionalStack(Stack):
             "{{BACKEND_TLS_CERTIFICATE_ARN}}": self.backend_tls_certificate_arn,
             "{{HEALTH_MONITOR_IMAGE}}": self.health_monitor_image.image_uri,
             "{{MANIFEST_PROCESSOR_IMAGE}}": self.manifest_processor_image.image_uri,
+            "{{INFERENCE_PROXY_IMAGE}}": self.inference_proxy_image.image_uri,
             "{{INFERENCE_MONITOR_IMAGE}}": self.inference_monitor_image.image_uri,
             # External, pinned upstream image for the shared Mooncake master
             # (bundles the mooncake_master binary). Same default as disaggregated
@@ -2629,6 +2708,7 @@ class GCORegionalStack(Stack):
             "{{AUTH_SECRET_ARN}}": self.auth_secret_arn,
             "{{SERVICE_ACCOUNT_ROLE_ARN}}": self.service_account_role.role_arn,
             "{{MANIFEST_PROCESSOR_ROLE_ARN}}": self.manifest_processor_role.role_arn,
+            "{{INFERENCE_PROXY_ROLE_ARN}}": self.inference_proxy_role.role_arn,
             "{{HEALTH_MONITOR_ROLE_ARN}}": self.health_monitor_role.role_arn,
             "{{EFS_FILE_SYSTEM_ID}}": self.efs_file_system.file_system_id,
             "{{EFS_ACCESS_POINT_ID}}": self.efs_access_point.access_point_id,
@@ -2698,6 +2778,11 @@ class GCORegionalStack(Stack):
             # Manifest processor request body size cap (HTTP 413 middleware).
             # Lives at cdk.json::manifest_processor.max_request_body_bytes.
             "{{MP_MAX_REQUEST_BODY_BYTES}}": str(
+                mp_config.get("max_request_body_bytes", 1_048_576)
+            ),
+            # Inference request bodies use the same operator-configured cap,
+            # but retain a service-specific placeholder for future tuning.
+            "{{INFERENCE_PROXY_MAX_REQUEST_BODY_BYTES}}": str(
                 mp_config.get("max_request_body_bytes", 1_048_576)
             ),
             # Regional worker for the DynamoDB-backed global queue. Multiple API

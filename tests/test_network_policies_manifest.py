@@ -234,6 +234,49 @@ class TestDefaultDenyIngress:
         assert not policy["spec"].get("ingress")
 
 
+# ─── Dedicated Inference Proxy Boundaries ───────────────────────────
+
+
+class TestInferenceProxyPolicies:
+    """Only the dedicated proxy may bridge ALB traffic to model pods."""
+
+    def test_alb_ingress_targets_only_inference_proxy(self, netpol_docs):
+        policy = _find_netpol(netpol_docs, "allow-alb-to-inference-proxy", "gco-system")
+        assert policy is not None
+        assert policy["spec"]["podSelector"] == {"matchLabels": {"app": "inference-proxy"}}
+        assert policy["spec"]["podSelector"] != {"matchLabels": {"app": "manifest-processor"}}
+
+    def test_cross_namespace_egress_selects_only_inference_proxy(self, netpol_docs):
+        policy = _find_netpol(netpol_docs, "allow-inference-proxy-to-inference", "gco-system")
+        assert policy is not None
+        assert policy["spec"]["podSelector"] == {"matchLabels": {"app": "inference-proxy"}}
+        peers = policy["spec"]["egress"][0]["to"]
+        assert peers == [
+            {
+                "namespaceSelector": {
+                    "matchLabels": {"kubernetes.io/metadata.name": "gco-inference"}
+                },
+                "podSelector": {"matchLabels": {"gco.io/type": "inference"}},
+            }
+        ]
+
+    def test_model_ingress_accepts_only_inference_proxy(self, netpol_docs):
+        policy = _find_netpol(netpol_docs, "allow-inference-proxy-ingress", "gco-inference")
+        assert policy is not None
+        assert policy["spec"]["podSelector"] == {"matchLabels": {"gco.io/type": "inference"}}
+        peers = policy["spec"]["ingress"][0]["from"]
+        assert peers == [
+            {
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "gco-system"}},
+                "podSelector": {"matchLabels": {"app": "inference-proxy"}},
+            }
+        ]
+        assert all(
+            peer.get("podSelector", {}).get("matchLabels", {}).get("app") != "manifest-processor"
+            for peer in peers
+        )
+
+
 # ─── CDK Substitution Logic ─────────────────────────────────────────
 
 

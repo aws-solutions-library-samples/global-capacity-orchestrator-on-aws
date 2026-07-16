@@ -1,0 +1,181 @@
+# Inference Proxy — authenticates and streams managed model traffic.
+# Deployment + PodDisruptionBudget + Service consolidated in one file.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-proxy
+  namespace: gco-system
+  labels:
+    app: inference-proxy
+    component: inference-data-plane
+    project: gco
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: inference-proxy
+  template:
+    metadata:
+      labels:
+        app: inference-proxy
+        component: inference-data-plane
+        project: gco
+      annotations:
+        gco.aws/deployment-timestamp: "{{DEPLOYMENT_TIMESTAMP}}"
+    spec:
+      serviceAccountName: gco-inference-proxy-sa
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: inference-proxy
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: inference-proxy
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: inference-proxy
+                topologyKey: kubernetes.io/hostname
+            - weight: 50
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: inference-proxy
+                topologyKey: topology.kubernetes.io/zone
+      containers:
+        - name: inference-proxy
+          image: {{INFERENCE_PROXY_IMAGE}}
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: REGION
+              value: "{{REGION}}"
+            - name: AUTH_SECRET_ARN
+              value: "{{AUTH_SECRET_ARN}}"
+            - name: AWS_ROLE_ARN
+              value: "{{INFERENCE_PROXY_ROLE_ARN}}"
+            - name: AWS_WEB_IDENTITY_TOKEN_FILE
+              value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
+            - name: AWS_STS_REGIONAL_ENDPOINTS
+              value: regional
+            - name: INFERENCE_ENDPOINTS_TABLE_NAME
+              value: "{{INFERENCE_ENDPOINTS_TABLE_NAME}}"
+            - name: DYNAMODB_REGION
+              value: "{{DYNAMODB_REGION}}"
+            - name: INFERENCE_NAMESPACE
+              value: gco-inference
+            - name: MAX_REQUEST_BODY_BYTES
+              value: "{{INFERENCE_PROXY_MAX_REQUEST_BODY_BYTES}}"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: aws-iam-token
+              mountPath: /var/run/secrets/eks.amazonaws.com/serviceaccount
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: aws-iam-token
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  audience: sts.amazonaws.com
+                  expirationSeconds: 86400
+                  path: token
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: inference-proxy-pdb
+  namespace: gco-system
+  labels:
+    app: inference-proxy
+    project: gco
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: inference-proxy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-proxy
+  namespace: gco-system
+  labels:
+    app: inference-proxy
+    project: gco
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: inference-proxy

@@ -132,7 +132,8 @@ class GCOApiGatewayGlobalStack(Stack):
 
     Attributes:
         secret: Secrets Manager secret containing the backend HMAC signing key
-        proxy_lambda: Lambda function that proxies requests to Global Accelerator
+        proxy_lambda: Buffered Lambda proxy for the control-plane API
+        inference_proxy_lambda: Response-streaming Lambda for `/inference/*`
         aggregator_lambda: Lambda function for cross-region aggregation
         api: REST API with IAM authentication
     """
@@ -224,8 +225,10 @@ class GCOApiGatewayGlobalStack(Stack):
         # Create the shared backend HMAC signing key.
         self.secret = self._create_secret()
 
-        # Create proxy Lambda
+        # Keep control-plane requests on the established buffered Python
+        # proxy; inference gets a separate Node.js response-streaming runtime.
         self.proxy_lambda = self._create_proxy_lambda()
+        self.inference_proxy_lambda = self._create_inference_proxy_lambda()
 
         # Create cross-region aggregator Lambda
         self.aggregator_lambda = self._create_aggregator_lambda()
@@ -826,6 +829,82 @@ class GCOApiGatewayGlobalStack(Stack):
 
         return proxy_lambda
 
+    def _create_inference_proxy_lambda(self) -> lambda_.Function:
+        """Create the inference-only Lambda response-streaming proxy."""
+        role = iam.Role(
+            self,
+            "InferenceStreamingProxyRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                )
+            ],
+        )
+        self.secret.grant_read(role)
+        root_ca_parameter_arn = (
+            f"arn:{self.partition}:ssm:{self.registry_region}:{self.account}:"
+            f"parameter/{self.backend_tls_root_ca_parameter_name.lstrip('/')}"
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["ssm:GetParameter"],
+                resources=[root_ca_parameter_arn],
+            )
+        )
+
+        log_group = logs.LogGroup(
+            self,
+            "InferenceStreamingProxyLogGroup",
+            retention=logs.RetentionDays.ONE_WEEK,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        function = lambda_.Function(
+            self,
+            "InferenceStreamingProxyFunction",
+            runtime=lambda_.Runtime.NODEJS_22_X,
+            handler="index.handler",
+            code=lambda_.Code.from_asset("lambda/inference-streaming-proxy"),
+            timeout=Duration.minutes(15),
+            memory_size=256,
+            role=role,
+            environment={
+                "ROUTING_MODE": "global",
+                "GLOBAL_ACCELERATOR_ENDPOINT": self.ga_dns,
+                "SECRET_ARN": self.secret.secret_arn,
+                "BACKEND_TLS_SERVER_NAME": self.backend_tls_server_name,
+                "BACKEND_TLS_ROOT_CA_PARAMETER": self.backend_tls_root_ca_parameter_name,
+                "BACKEND_TLS_ROOT_CA_REGION": self.registry_region,
+                "BACKEND_TLS_CA_CACHE_TTL_SECONDS": str(
+                    self.backend_tls_config["trust_cache_ttl_seconds"]
+                ),
+                "BACKEND_TLS_CA_MAX_STALE_SECONDS": str(
+                    self.backend_tls_config["trust_cache_max_stale_seconds"]
+                ),
+            },
+            log_group=log_group,
+            tracing=lambda_.Tracing.ACTIVE,
+            description="Streams authenticated inference responses through Global Accelerator",
+        )
+
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        acknowledge_nag_findings(
+            role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "Active X-Ray tracing requires write APIs on Resource::*; secret and "
+                        "SSM reads remain scoped to this deployment's exact resources."
+                    ),
+                    "appliesTo": ["Resource::*"],
+                }
+            ],
+        )
+        return function
+
     def _create_aggregator_lambda(self) -> lambda_.Function:
         """Create the SigV4 regional-API aggregation Lambda.
 
@@ -1044,9 +1123,15 @@ class GCOApiGatewayGlobalStack(Stack):
         # Create global aggregation routes
         self._create_global_routes(api, v1_resource)
 
-        # Create inference proxy route
-        # /inference/{proxy+} → proxy Lambda → GA → ALB → K8s Ingress
-        self._create_inference_routes(api, lambda_integration)
+        # `/inference/*` uses a dedicated InvokeWithResponseStream
+        # integration; request bodies remain buffered by API Gateway.
+        inference_integration = apigateway.LambdaIntegration(
+            self.inference_proxy_lambda,
+            proxy=True,
+            timeout=Duration.minutes(15),
+            response_transfer_mode=apigateway.ResponseTransferMode.STREAM,
+        )
+        self._create_inference_routes(api, inference_integration)
 
         return api
 
@@ -1115,11 +1200,10 @@ class GCOApiGatewayGlobalStack(Stack):
         """Create proxy route for inference endpoints.
 
         Routes:
-            GET|HEAD|POST /inference/{proxy+} → proxy Lambda → GA → ALB → manifest API
+            GET|HEAD|POST /inference/{proxy+} → streaming Lambda → GA → ALB → inference proxy
 
-        This allows authenticated inference requests to flow through the
-        API Gateway with IAM auth, then get proxied to the regional manifest
-        API, which enforces the serving-path allowlist before reaching a model.
+        The dedicated in-cluster service enforces endpoint state and the serving-
+        path allowlist before opening a streaming connection to a model server.
         """
         inference_resource = api.root.add_resource("inference")
         inference_proxy = inference_resource.add_resource("{proxy+}")

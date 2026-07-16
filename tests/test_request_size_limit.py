@@ -1,11 +1,11 @@
 """
 Tests for the RequestSizeLimitMiddleware on the Manifest API.
 
-Verifies the middleware rejects POST/PUT/PATCH requests whose
-Content-Length exceeds DEFAULT_MAX_REQUEST_BODY_BYTES (1 MiB) with 413,
-rejects chunked/no-Content-Length requests whose body grows past the
-limit while streaming, and leaves GET/HEAD/OPTIONS/DELETE requests
-untouched. Uses a TestClient fixture with the manifest processor mocked
+Verifies the middleware rejects POST/PUT/PATCH requests whose declared
+or actual body exceeds DEFAULT_MAX_REQUEST_BODY_BYTES (1 MiB) with 413,
+including chunked, missing, and deliberately under-reported Content-Length
+requests, and leaves GET/HEAD/OPTIONS/DELETE requests untouched. Uses a
+TestClient fixture with the manifest processor mocked
 and backend signature verification bypassed; includes a Hypothesis sweep
 over Content-Length values around the boundary.
 """
@@ -95,6 +95,17 @@ class TestRequestSizeLimitContentLength:
         )
         # Should not be 413 — may be 400/422 due to validation, but not size-limited
         assert response.status_code != 413
+
+    def test_rejects_body_larger_than_underreported_content_length(self, client):
+        """Actual received bytes remain authoritative when the header lies."""
+        oversized_body = b"x" * (DEFAULT_MAX_REQUEST_BODY_BYTES + 1)
+        response = client.post(
+            "/api/v1/manifests/validate",
+            content=oversized_body,
+            headers={**_AUTH_HEADERS, "content-length": "1"},
+        )
+        assert response.status_code == 413
+        assert "exceeds maximum size" in response.json()["detail"]
 
     def test_rejects_request_at_exact_boundary(self, client):
         """Request with Content-Length exactly 1 byte over limit should get 413."""

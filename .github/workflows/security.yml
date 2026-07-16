@@ -17,7 +17,7 @@
 #   - security:semgrep:sast              — semgrep scan --config auto
 #   - security:trivy:filesystem          — trivy fs on the source tree
 #   - security:trivy:container-scan      — trivy image on each built image
-#                                          (4 service images + helm-installer
+#                                          (5 service images + helm-installer
 #                                          + Dockerfile.dev)
 #   - security:trufflehog:secrets        — trufflehog filesystem scan
 #
@@ -191,6 +191,8 @@ jobs:
             dockerfile: dockerfiles/manifest-processor-dockerfile
           - image: inference-monitor
             dockerfile: dockerfiles/inference-monitor-dockerfile
+          - image: inference-proxy
+            dockerfile: dockerfiles/inference-proxy-dockerfile
           - image: queue-processor
             dockerfile: dockerfiles/queue-processor-dockerfile
           - image: helm-installer

@@ -1,9 +1,10 @@
 """Authenticated reverse proxy for managed inference endpoints.
 
-All public inference traffic terminates at the manifest processor, whose
-``AuthenticationMiddleware`` validates the proxy's short-lived HMAC envelope
-(timestamp, nonce, method, target, and body digest). The proxy then forwards to
-one strictly derived in-cluster Service name. This removes the historical
+All public inference traffic terminates at the dedicated inference-proxy
+service, whose ``AuthenticationMiddleware`` validates the Lambda proxy's
+short-lived HMAC envelope (timestamp, nonce, method, target, and body digest).
+The service then forwards to one strictly derived in-cluster Service name. This
+keeps model traffic out of the manifest processor and removes the historical
 direct ALB target groups that allowed callers to bypass API Gateway through
 Global Accelerator.
 """

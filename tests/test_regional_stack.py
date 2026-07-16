@@ -817,8 +817,8 @@ class TestRegionalStackSynthesis:
             )
 
             template = assertions.Template.from_stack(stack)
-            # Should have 2 ECR repositories (health monitor and manifest processor)
-            template.resource_count_is("AWS::ECR::Repository", 2)
+            # Dedicated repositories for health, manifest, and inference proxy services.
+            template.resource_count_is("AWS::ECR::Repository", 3)
 
     def test_regional_stack_creates_efs(self):
         """Test that RegionalStack creates EFS file system."""
@@ -1048,6 +1048,90 @@ class TestRegionalStackSynthesis:
                 references_jobs
                 and {"dynamodb:PutItem", "dynamodb:UpdateItem"}.intersection(actions)
             )
+
+    def test_inference_proxy_role_and_manifest_replacements_are_exact(self):
+        """The inference data plane gets only secret and endpoint point-read access."""
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-inference-proxy-iam",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn=(
+                    "arn:aws:secretsmanager:us-east-2:123456789012:secret:"
+                    "gco-test/api-gateway-auth-token"
+                ),
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+        resources = assertions.Template.from_stack(stack).to_json()["Resources"]
+        proxy_role_id = next(
+            logical_id
+            for logical_id, resource in resources.items()
+            if logical_id.startswith("InferenceProxyRole") and resource["Type"] == "AWS::IAM::Role"
+        )
+        proxy_statements = [
+            statement
+            for logical_id, policy in resources.items()
+            if logical_id.startswith("InferenceProxyRoleDefaultPolicy")
+            and policy["Type"] == "AWS::IAM::Policy"
+            for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+        ]
+        by_actions = {}
+        for statement in proxy_statements:
+            actions = statement["Action"]
+            if isinstance(actions, str):
+                actions = [actions]
+            by_actions[frozenset(actions)] = statement["Resource"]
+
+        assert set(by_actions) == {
+            frozenset({"secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"}),
+            frozenset({"dynamodb:GetItem"}),
+        }
+        assert by_actions[frozenset({"dynamodb:GetItem"})] == {
+            "Fn::Join": [
+                "",
+                [
+                    "arn:",
+                    {"Ref": "AWS::Partition"},
+                    ":dynamodb:us-east-2:123456789012:table/gco-test-inference-endpoints",
+                ],
+            ]
+        }
+        assert by_actions[
+            frozenset({"secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"})
+        ] == {
+            "Fn::Join": [
+                "",
+                [
+                    "arn:",
+                    {"Ref": "AWS::Partition"},
+                    ":secretsmanager:us-east-2:123456789012:secret:"
+                    "gco-test/api-gateway-auth-token*",
+                ],
+            ]
+        }
+
+        replacements = resources["HelmInstallCharts"]["Properties"]["ImageReplacements"]
+        assert replacements["{{INFERENCE_PROXY_IMAGE}}"] == mock_image.image_uri
+        assert replacements["{{INFERENCE_PROXY_ROLE_ARN}}"] == {
+            "Fn::GetAtt": [proxy_role_id, "Arn"]
+        }
+        assert replacements["{{INFERENCE_PROXY_MAX_REQUEST_BODY_BYTES}}"] == "1048576"
 
     def test_regional_stack_creates_lambda_functions(self):
         """Test that RegionalStack creates Lambda functions."""

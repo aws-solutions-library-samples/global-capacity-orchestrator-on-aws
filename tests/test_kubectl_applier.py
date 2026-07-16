@@ -1074,9 +1074,10 @@ class TestMainPassRestartsAddonControllers:
         deploy_calls = {
             (call.args[0], tuple(call.args[1])) for call in mock_restart_deploy.call_args_list
         }
-        assert ("gco-system", ("health-monitor", "manifest-processor", "inference-monitor")) in (
-            deploy_calls
-        )
+        assert (
+            "gco-system",
+            ("health-monitor", "manifest-processor", "inference-monitor", "inference-proxy"),
+        ) in deploy_calls
         assert ("kube-system", ("efs-csi-controller", "fsx-csi-controller")) in deploy_calls
 
     def test_main_pass_restarts_csi_and_cloudwatch_daemonsets(self, handler_module, tmp_path):

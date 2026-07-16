@@ -1,6 +1,6 @@
 # API Routes
 
-FastAPI route modules for the GCO manifest API. Each module declares its own complete path or router prefix and is mounted by `manifest_api.py` without an additional prefix.
+FastAPI route modules for GCO's in-cluster APIs. Management modules are mounted by `manifest_api.py`; the inference router is mounted only by the dedicated `inference_api.py` service. Each module declares its complete path or router prefix, without an additional application-level prefix.
 
 ## Table of Contents
 
@@ -21,12 +21,12 @@ FastAPI route modules for the GCO manifest API. Each module declares its own com
 
 ## Route Prefixes
 
-The management APIs use `/api/v1`. Managed model-serving traffic uses `/inference/{endpoint_name}` so OpenAI-, Triton-, and native runtime paths can follow the endpoint name. Router modules own these prefixes; `manifest_api.py` mounts each router directly.
+The management APIs use `/api/v1` and are mounted by `manifest_api.py`. Managed model-serving traffic uses `/inference/{endpoint_name}` and is mounted only by `inference_api.py`, so it does not share the manifest processor's Kubernetes RBAC, queue worker, or replica capacity. OpenAI-, TGI-, Triton-, and native runtime paths follow the endpoint name. Router modules own these prefixes directly.
 
 ## Adding a New Route Module
 
 1. Create a module with an `APIRouter` whose decorators include the complete public path or whose router declares a prefix.
 2. Define the endpoints on that router.
-3. Import and mount it in `manifest_api.py` with `app.include_router(router)`.
+3. Import and mount it in the appropriate service entry point: `manifest_api.py` for `/api/v1` control-plane routes or `inference_api.py` for inference data-plane routes.
 4. Document the exact methods and paths in this table.
 5. Add or update the relevant existing tests under `tests/`.

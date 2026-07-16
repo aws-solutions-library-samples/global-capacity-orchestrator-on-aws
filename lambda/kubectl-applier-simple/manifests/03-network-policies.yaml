@@ -95,6 +95,25 @@ spec:
         - protocol: TCP
           port: 8080
 ---
+# Allow ALB to reach the dedicated inference proxy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-alb-to-inference-proxy
+  namespace: gco-system
+  labels:
+    project: gco
+spec:
+  podSelector:
+    matchLabels:
+      app: inference-proxy
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8080
+---
 # Allow DNS egress in gco-system
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -223,20 +242,20 @@ spec:
         - protocol: TCP
           port: 443
 ---
-# Allow the authenticated manifest API proxy to reach internal inference
-# Services. No other gco-system pod is selected, and model endpoints are never
-# exposed directly through the ALB.
+# Allow the authenticated inference proxy to reach internal model Services.
+# No other gco-system pod is selected, and model endpoints are never exposed
+# directly through the ALB.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-manifest-proxy-to-inference
+  name: allow-inference-proxy-to-inference
   namespace: gco-system
   labels:
     project: gco
 spec:
   podSelector:
     matchLabels:
-      app: manifest-processor
+      app: inference-proxy
   policyTypes:
     - Egress
   egress:
@@ -250,11 +269,11 @@ spec:
       ports:
         - protocol: TCP
 ---
-# Allow only the authenticated manifest API proxy into inference pods.
+# Allow only the authenticated inference proxy into inference pods.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-manifest-proxy-ingress
+  name: allow-inference-proxy-ingress
   namespace: gco-inference
   labels:
     project: gco
@@ -271,7 +290,7 @@ spec:
               kubernetes.io/metadata.name: gco-system
           podSelector:
             matchLabels:
-              app: manifest-processor
+              app: inference-proxy
       ports:
         - protocol: TCP
 ---

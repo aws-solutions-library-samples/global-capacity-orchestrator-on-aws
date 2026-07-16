@@ -433,8 +433,10 @@ def invoke_inference(
         api_path: Override the API sub-path (default: auto-detect from framework).
         region: Target region for the request (default: nearest via Global Accelerator).
 
-    Responses are buffered because API Gateway and Lambda do not provide
-    end-to-end response streaming for this route.
+    This MCP tool intentionally returns one buffered string because the MCP
+    runner has no incremental output contract. The API Gateway/Lambda route
+    supports response streaming; use ``gco inference invoke --stream`` when
+    token-by-token output is required.
     """
     args = ["inference", "invoke", name, "-p", prompt, "--max-tokens", str(max_tokens)]
     if api_path:
@@ -468,8 +470,10 @@ def chat_inference(
         temperature: Sampling temperature (optional, server default if omitted).
         region: Target region for the request.
 
-    Responses are buffered because API Gateway and Lambda do not provide
-    end-to-end response streaming for this route.
+    This MCP tool intentionally returns one buffered string because the MCP
+    runner has no incremental output contract. The API Gateway/Lambda route
+    supports response streaming; use ``gco inference invoke --stream`` when
+    token-by-token output is required.
     """
     body: dict[str, Any] = {"messages": messages, "max_tokens": max_tokens}
     if temperature is not None:

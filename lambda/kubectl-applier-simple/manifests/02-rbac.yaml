@@ -11,6 +11,7 @@
 #   gco-health-monitor-sa
 #   gco-manifest-processor-sa
 #   gco-inference-monitor-sa
+#   gco-inference-proxy-sa (AWS-only permissions; no Kubernetes role binding)
 
 # ─── ServiceAccounts ────────────────────────────────────────────────
 ---
@@ -46,6 +47,18 @@ metadata:
     project: gco
   annotations:
     eks.amazonaws.com/role-arn: "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gco-inference-proxy-sa
+  namespace: gco-system
+  labels:
+    app: inference-proxy
+    project: gco
+  annotations:
+    eks.amazonaws.com/role-arn: "{{INFERENCE_PROXY_ROLE_ARN}}"
+automountServiceAccountToken: false
 
 # ─── Health Monitor: cluster-wide read-only ─────────────────────────
 ---

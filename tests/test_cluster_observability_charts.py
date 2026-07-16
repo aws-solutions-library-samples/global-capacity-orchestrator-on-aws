@@ -415,7 +415,12 @@ def test_monitors_cover_schedulers_dcgm_and_gco_services(servicemonitor_docs) ->
         for key, value in doc["spec"]["selector"]["matchLabels"].items()
         if key == "app"
     }
-    assert {"health-monitor", "manifest-processor", "inference-monitor"} <= pm_apps
+    assert {
+        "health-monitor",
+        "manifest-processor",
+        "inference-monitor",
+        "inference-proxy",
+    } <= pm_apps
 
 
 def test_monitors_are_gated_and_well_formed(servicemonitor_docs) -> None:

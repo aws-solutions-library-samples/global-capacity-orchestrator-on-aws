@@ -690,25 +690,36 @@ class TestInferenceInvoke:
         assert result.exit_code != 0
         assert "Provide --prompt" in result.output
 
-    def test_invoke_stream_flag_is_rejected_before_endpoint_lookup(self, runner):
-        mock_mgr_factory = MagicMock()
-        with patch("cli.inference.get_inference_manager", mock_mgr_factory):
+    def test_invoke_stream_flag_streams_openai_response(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._mock_endpoint()
+        mock_client = MagicMock()
+        mock_resp = MagicMock(ok=True, status_code=200, encoding="utf-8")
+        mock_resp.iter_content.return_value = [b'data: {"token":"hel', b'lo"}\n\n']
+        mock_client.make_authenticated_request.return_value = mock_resp
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
             result = runner.invoke(
                 cli,
                 ["inference", "invoke", "ep", "-p", "hello", "--stream"],
             )
 
-        assert result.exit_code != 0
-        assert (
-            "--stream is not supported: API Gateway and Lambda buffer inference responses"
-            in result.output
-        )
-        mock_mgr_factory.assert_not_called()
+        assert result.exit_code == 0
+        assert 'data: {"token":"hello"}' in result.output
+        call_kwargs = mock_client.make_authenticated_request.call_args.kwargs
+        assert call_kwargs["stream"] is True
+        assert call_kwargs["body"]["stream"] is True
+        mock_resp.close.assert_called_once_with()
 
-    def test_invoke_raw_stream_true_is_rejected_before_request(self, runner):
+    def test_invoke_raw_stream_true_auto_enables_transport(self, runner):
         mock_mgr = MagicMock()
         mock_mgr.get_endpoint.return_value = self._mock_endpoint()
         mock_client = MagicMock()
+        mock_resp = MagicMock(ok=True, status_code=200, encoding="utf-8")
+        mock_resp.iter_content.return_value = [b"data: first\n\n", b"data: second\n\n"]
+        mock_client.make_authenticated_request.return_value = mock_resp
         with (
             patch("cli.inference.get_inference_manager", return_value=mock_mgr),
             patch("cli.aws_client.get_aws_client", return_value=mock_client),
@@ -724,12 +735,63 @@ class TestInferenceInvoke:
                 ],
             )
 
-        assert result.exit_code != 0
-        assert (
-            "Streaming requests are not supported: API Gateway and Lambda buffer responses"
-            in result.output
+        assert result.exit_code == 0
+        assert "data: first" in result.output
+        call_kwargs = mock_client.make_authenticated_request.call_args.kwargs
+        assert call_kwargs["stream"] is True
+        assert call_kwargs["body"]["stream"] is True
+        mock_resp.close.assert_called_once_with()
+
+    def test_invoke_no_stream_forces_raw_body_false(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._mock_endpoint()
+        mock_client = MagicMock()
+        mock_resp = MagicMock(ok=True, status_code=200)
+        mock_resp.json.return_value = {"choices": [{"text": "buffered"}]}
+        mock_client.make_authenticated_request.return_value = mock_resp
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "inference",
+                    "invoke",
+                    "ep",
+                    "-d",
+                    '{"prompt": "hello", "stream": true}',
+                    "--no-stream",
+                ],
+            )
+
+        assert result.exit_code == 0
+        call_kwargs = mock_client.make_authenticated_request.call_args.kwargs
+        assert call_kwargs["stream"] is False
+        assert call_kwargs["body"]["stream"] is False
+
+    def test_invoke_tgi_stream_uses_generate_stream_path(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._mock_endpoint(
+            image="ghcr.io/huggingface/text-generation-inference:3.2"
         )
-        mock_client.make_authenticated_request.assert_not_called()
+        mock_client = MagicMock()
+        mock_resp = MagicMock(ok=True, status_code=200, encoding="utf-8")
+        mock_resp.iter_content.return_value = [b'{"token":{"text":"hello"}}\n']
+        mock_client.make_authenticated_request.return_value = mock_resp
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(
+                cli,
+                ["inference", "invoke", "ep", "-p", "hello", "--stream"],
+            )
+
+        assert result.exit_code == 0
+        call_kwargs = mock_client.make_authenticated_request.call_args.kwargs
+        assert call_kwargs["path"].endswith("/generate_stream")
+        assert call_kwargs["stream"] is True
 
     def test_invoke_endpoint_not_found(self, runner):
         mock_mgr = MagicMock()

@@ -15,6 +15,7 @@
 #   - integration:docker:health-monitor      — build + /healthz + /readyz
 #   - integration:docker:helm-installer      — build + `helm version`/`kubectl version`
 #   - integration:docker:inference-monitor   — build + import-based liveness
+#   - integration:docker:inference-proxy     — build + import-based liveness
 #   - integration:docker:manifest-processor  — build + /healthz + /readyz
 #   - integration:docker:queue-processor     — build + startup-banner check
 #   - integration:helm:charts-valid          — every charts.yaml (chart,version) resolves + renders with helm
@@ -419,6 +420,29 @@ jobs:
           docker run --rm inference-monitor:ci \
             python -c "import gco.services.inference_monitor as m; print('inference-monitor import OK:', m.__name__)"
 
+  integration-docker-inference-proxy:
+    name: "integration:docker:inference-proxy"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4.2.0
+      - name: Build image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: dockerfiles/inference-proxy-dockerfile
+          tags: inference-proxy:ci
+          load: true
+          cache-from: type=gha,scope=inference-proxy
+          cache-to: type=gha,mode=max,scope=inference-proxy,ignore-error=true
+      - name: Verify image boots the module
+        # End-to-end HTTP coverage lives in the kind E2E job below; this
+        # dedicated image job proves the image builds and imports its entrypoint.
+        run: |
+          docker run --rm inference-proxy:ci \
+            python -c "import gco.services.inference_api as m; print('inference-proxy import OK:', m.__name__)"
+
   integration-docker-queue-processor:
     name: "integration:docker:queue-processor"
     runs-on: ubuntu-latest
@@ -724,11 +748,21 @@ jobs:
           load: true
           cache-from: type=gha,scope=inference-monitor
           cache-to: type=gha,mode=max,scope=inference-monitor,ignore-error=true
+      - name: Build inference-proxy image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: dockerfiles/inference-proxy-dockerfile
+          tags: inference-proxy:ci
+          load: true
+          cache-from: type=gha,scope=inference-proxy
+          cache-to: type=gha,mode=max,scope=inference-proxy,ignore-error=true
       - name: Load images into kind
         run: |
           kind load docker-image health-monitor:ci --name gco-ci
           kind load docker-image manifest-processor:ci --name gco-ci
           kind load docker-image inference-monitor:ci --name gco-ci
+          kind load docker-image inference-proxy:ci --name gco-ci
       - name: Apply namespaces + RBAC
         run: |
           kubectl apply -f lambda/kubectl-applier-simple/manifests/00-namespaces.yaml
@@ -760,11 +794,13 @@ jobs:
           for manifest in \
               lambda/kubectl-applier-simple/manifests/30-health-monitor.yaml \
               lambda/kubectl-applier-simple/manifests/31-manifest-processor.yaml \
-              lambda/kubectl-applier-simple/manifests/32-inference-monitor.yaml; do
+              lambda/kubectl-applier-simple/manifests/32-inference-monitor.yaml \
+              lambda/kubectl-applier-simple/manifests/33-inference-proxy.yaml; do
             case "$manifest" in
               *30-health-monitor*)     image="health-monitor:ci"; key="HEALTH_MONITOR_IMAGE" ;;
               *31-manifest-processor*) image="manifest-processor:ci"; key="MANIFEST_PROCESSOR_IMAGE" ;;
               *32-inference-monitor*)  image="inference-monitor:ci"; key="INFERENCE_MONITOR_IMAGE" ;;
+              *33-inference-proxy*)    image="inference-proxy:ci"; key="INFERENCE_PROXY_IMAGE" ;;
             esac
             # Stub out every remaining {{PLACEHOLDER}} with a safe literal
             # so the apiserver accepts the manifest (empty strings are fine
@@ -782,6 +818,7 @@ jobs:
           kubectl -n gco-system get deploy health-monitor
           kubectl -n gco-system get deploy manifest-processor
           kubectl -n gco-system get deploy inference-monitor
+          kubectl -n gco-system get deploy inference-proxy
           # At least one pod got scheduled for each — confirms the apiserver
           # admitted the PodSpec and the scheduler found the nodes.
           for _ in $(seq 1 30); do
@@ -791,15 +828,17 @@ jobs:
               | python3 -c "import json,sys; print(len(json.load(sys.stdin)['items']))")
             im=$(kubectl -n gco-system get pods -l app=inference-monitor -o json \
               | python3 -c "import json,sys; print(len(json.load(sys.stdin)['items']))")
-            if [ "$hm" -gt 0 ] && [ "$mp" -gt 0 ] && [ "$im" -gt 0 ]; then
-              echo "Pods created: health-monitor=$hm manifest-processor=$mp inference-monitor=$im"
+            ip=$(kubectl -n gco-system get pods -l app=inference-proxy -o json \
+              | python3 -c "import json,sys; print(len(json.load(sys.stdin)['items']))")
+            if [ "$hm" -gt 0 ] && [ "$mp" -gt 0 ] && [ "$im" -gt 0 ] && [ "$ip" -gt 0 ]; then
+              echo "Pods created: health-monitor=$hm manifest-processor=$mp inference-monitor=$im inference-proxy=$ip"
               exit 0
             fi
             sleep 2
           done
           echo "Pods never appeared within 60s"
           kubectl -n gco-system get pods -o wide
-          kubectl -n gco-system describe deploy health-monitor manifest-processor
+          kubectl -n gco-system describe deploy health-monitor manifest-processor inference-monitor inference-proxy
           exit 1
       - name: Verify NetworkPolicies validated
         # Calico's admission webhooks would reject malformed policies, so
@@ -834,14 +873,15 @@ jobs:
           kubectl -n gco-jobs get limitrange gco-jobs-limits
           echo "ResourceQuota and LimitRange applied"
       - name: Verify PodDisruptionBudgets exist
-        # Assert every PDB shipped by the three deployment manifests. A count
+        # Assert every PDB shipped by the four deployment manifests. A count
         # greater than zero can hide a partially applied policy set.
         run: |
           set -euo pipefail
           for pdb in \
               health-monitor-pdb \
               manifest-processor-pdb \
-              inference-monitor-pdb; do
+              inference-monitor-pdb \
+              inference-proxy-pdb; do
             kubectl -n gco-system get pdb "$pdb"
           done
           echo "All expected PodDisruptionBudgets exist"
@@ -994,11 +1034,12 @@ jobs:
         if: failure()
         run: |
           kubectl get pods -A -o wide || true
-          kubectl -n gco-system describe deploy health-monitor manifest-processor inference-monitor || true
+          kubectl -n gco-system describe deploy health-monitor manifest-processor inference-monitor inference-proxy || true
           kubectl -n gco-system get events --sort-by=.lastTimestamp | tail -50 || true
           kubectl -n gco-system logs deploy/health-monitor --tail=200 || true
           kubectl -n gco-system logs deploy/manifest-processor --tail=200 || true
           kubectl -n gco-system logs deploy/inference-monitor --tail=200 || true
+          kubectl -n gco-system logs deploy/inference-proxy --tail=200 || true
 
   # --------------------------------------------------------------------------
   # Dev-onboarding alias live proofs. Each job installs the latest version of a

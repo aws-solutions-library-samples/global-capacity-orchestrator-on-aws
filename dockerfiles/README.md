@@ -12,6 +12,7 @@ This directory contains Dockerfiles for the Kubernetes services deployed to the 
 - `health-monitor-dockerfile` - Health monitoring service that tracks cluster resource utilization
 - `manifest-processor-dockerfile` - Manifest processing service that validates and applies Kubernetes manifests
 - `inference-monitor-dockerfile` - Inference endpoint reconciliation controller that manages K8s resources from DynamoDB state
+- `inference-proxy-dockerfile` - In-cluster proxy that routes authenticated inference requests to endpoint backends
 - `queue-processor-dockerfile` - SQS consumer that processes manifests submitted via `gco jobs submit-sqs` (KEDA ScaledJob)
 
 ## Usage

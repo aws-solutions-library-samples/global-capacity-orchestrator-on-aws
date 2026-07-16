@@ -46,6 +46,33 @@ def _methods_for_child_resource(
     }
 
 
+def _integrations_for_child_resource(
+    template: assertions.Template,
+    parent_path_part: str,
+    child_path_part: str,
+) -> list[dict]:
+    """Return integrations attached to one exact parent/child API resource path."""
+    resources = template.find_resources("AWS::ApiGateway::Resource")
+    parent_ids = [
+        logical_id
+        for logical_id, resource in resources.items()
+        if resource.get("Properties", {}).get("PathPart") == parent_path_part
+    ]
+    assert len(parent_ids) == 1
+    child_ids = [
+        logical_id
+        for logical_id, resource in resources.items()
+        if resource.get("Properties", {}).get("PathPart") == child_path_part
+        and resource.get("Properties", {}).get("ParentId") == {"Ref": parent_ids[0]}
+    ]
+    assert len(child_ids) == 1
+    return [
+        resource["Properties"]["Integration"]
+        for resource in template.find_resources("AWS::ApiGateway::Method").values()
+        if resource.get("Properties", {}).get("ResourceId") == {"Ref": child_ids[0]}
+    ]
+
+
 # Mock the ConfigLoader to avoid needing actual cdk.json context
 class MockConfigLoader:
     """Mock ConfigLoader for testing."""
@@ -439,6 +466,24 @@ class TestApiGatewayStackSynth:
             "HEAD",
             "POST",
         }
+        inference_integrations = _integrations_for_child_resource(template, "inference", "{proxy+}")
+        assert len(inference_integrations) == 3
+        assert all(
+            integration["ResponseTransferMode"] == "STREAM"
+            and integration["TimeoutInMillis"] == 900000
+            for integration in inference_integrations
+        )
+        template.has_resource_properties(
+            "AWS::Lambda::Function",
+            {
+                "Runtime": "nodejs22.x",
+                "Handler": "index.handler",
+                "Timeout": 900,
+                "Environment": {
+                    "Variables": assertions.Match.object_like({"ROUTING_MODE": "global"})
+                },
+            },
+        )
 
 
 class TestMonitoringStackSynth:

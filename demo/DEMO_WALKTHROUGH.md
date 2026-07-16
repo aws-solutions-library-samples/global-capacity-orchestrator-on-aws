@@ -265,7 +265,7 @@ gco inference deploy vllm-demo \
   --extra-args '--model' --extra-args 'facebook/opt-125m'
 ```
 
-Omitting `-r` deploys to all regions so Global Accelerator routing works. The inference_monitor in each region picks up the DynamoDB record and creates the Kubernetes Deployment and internal ClusterIP Service. The existing shared Ingress routes `/inference/*` through the authenticated manifest processor before it reaches that Service; no endpoint-specific Ingress is created.
+Omitting `-r` deploys to all regions so Global Accelerator routing works. The inference_monitor in each region picks up the DynamoDB record and creates the Kubernetes Deployment and internal ClusterIP Service. The existing shared Ingress routes `/inference/*` through the dedicated authenticated inference proxy before it reaches that Service; no endpoint-specific Ingress is created.
 
 **Check status and invoke:**
 
@@ -274,6 +274,10 @@ gco inference status vllm-demo
 
 gco inference invoke vllm-demo \
   -p "Explain GPU orchestration for ML workloads."
+
+# Optional: print chunks as the model emits them
+gco inference invoke vllm-demo \
+  -p "Explain GPU orchestration for ML workloads." --stream
 ```
 
 **Scale and clean up:**

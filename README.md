@@ -225,16 +225,26 @@ See the [Quick Start Guide](QUICKSTART.md) for the full step-by-step walkthrough
 
 *Figure 1: Generated CDK architecture for the global control plane and regional EKS data planes*
 
+### Reference Architecture Diagrams
+
+These curated views complement the generated CDK diagram with the multi-region platform, regional EKS data plane, and security/request flow.
+
+<p align="center">
+  <a href="images/gco_ref_architecture_part1.png"><img src="images/gco_ref_architecture_part1.png" alt="GCO multi-region reference architecture" width="32%"></a>
+  <a href="images/gco_ref_architecture_part2.png"><img src="images/gco_ref_architecture_part2.png" alt="GCO regional EKS reference architecture" width="32%"></a>
+  <a href="images/gco_ref_architecture_part3.png"><img src="images/gco_ref_architecture_part3.png" alt="GCO security controls and request flow" width="32%"></a>
+</p>
+
 ### Multi-Region Reference Architecture workflow
 
 1. **DevOps / Platform engineers** own the deployment. They configure the platform through `cdk.json` and drive everything from the `gco` CLI.
 2. The **AWS CDK app** synthesises and deploys the GCO stacks with a single `gco stacks deploy-all`, provisioning the global control plane and one regional stack per target region.
 3. **Users** submit jobs and inference requests through the `gco` CLI, which signs every call with **AWS SigV4** credentials.
 4. **Amazon API Gateway** (edge-optimized) is the global entry point. It enforces **IAM (SigV4) authentication** on every request before anything reaches the backend.
-5. An **AWS Lambda proxy** signs the exact backend request with a short-lived HMAC envelope derived from a rotating **AWS Secrets Manager** key. The reusable key is never transmitted.
+5. Route-specific **AWS Lambda proxies** sign the exact backend request with a short-lived HMAC envelope derived from a rotating **AWS Secrets Manager** key. The reusable key is never transmitted; `/api/v1/*` stays buffered while the dedicated `/inference/*` Lambda streams responses.
 6. **AWS Global Accelerator** routes each request over the AWS backbone via anycast IPs to the nearest healthy region, providing automatic cross-region failover.
 7. A regional internal **AWS Application Load Balancer** terminates the deployment-local private-root TLS connection forwarded through Global Accelerator, then sends HTTP to the shared platform Ingress targets.
-8. Each region runs an **Amazon EKS Auto Mode cluster** with built-in `system` and `general-purpose` NodePools plus project-managed GPU, inference, EFA, Mooncake EFA, Neuron, and CPU NodePools. Platform services include the Health Monitor, Manifest Processor, Queue Processor, and Inference Monitor.
+8. Each region runs an **Amazon EKS Auto Mode cluster** with built-in `system` and `general-purpose` NodePools plus project-managed GPU, inference, EFA, Mooncake EFA, Neuron, and CPU NodePools. Platform services include the Health Monitor, Manifest Processor, Queue Processor, Inference Monitor, and dedicated Inference Proxy.
 
 Below is the per-region workflow for a single regional stack.
 
@@ -243,7 +253,7 @@ Below is the per-region workflow for a single regional stack.
 1. An internal **Application Load Balancer** created from the shared platform Ingress accepts only HTTPS/443 with a rotating regional ACM leaf, then forwards HTTP to cluster services after TLS termination.
 2. The **Amazon EKS Auto Mode cluster** is the heart of the regional stack, hosting platform services and user workloads with a private API endpoint by default.
 3. **NodePools** provision capacity on demand: built-in `system` and `general-purpose`, plus `gpu-x86-pool`, `gpu-arm-pool`, `gpu-inference-pool`, `gpu-efa-pool`, `mooncake-efa-pool`, `neuron-pool`, and `cpu-general-pool`.
-4. **Workloads and platform services** run across namespaces: `gco-system` (Health Monitor, Manifest Processor, Queue Processor, Inference Monitor) and `gco-jobs` / `gco-inference` (training and batch jobs, inference endpoints, and job DAG pipelines).
+4. **Workloads and platform services** run across namespaces: `gco-system` (Health Monitor, Manifest Processor, Queue Processor, Inference Monitor, Inference Proxy) and `gco-jobs` / `gco-inference` (training and batch jobs, inference endpoints, and job DAG pipelines).
 5. **Storage and data services** back workloads: Amazon EFS, optional FSx for Lustre, optional Valkey, optional Aurora pgvector, and Amazon S3 for KMS-encrypted model weights.
 6. An always-deployed **Regional API Gateway bridge** gives the aggregator a SigV4-authenticated path to the VPC Lambda and internal ALB; `regional_api_enabled` controls only optional direct same-account callers.
 7. **Regional AWS services** complete the stack: Amazon SQS for job ingestion, DynamoDB-backed state where applicable, and Amazon CloudWatch metrics and logs.
@@ -512,7 +522,7 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 ├── gco/
 │   ├── config/                          # Configuration loader with validation
 │   ├── models/                          # Data models for k8s clusters, health monitor, inference monitor and manifest processor
-│   ├── services/                        # K8s services (health monitor, inference monitor, manifest processor, queue processor)
+│   ├── services/                        # K8s services (health/inference monitors, inference proxy, manifest/queue processors)
 │   └── stacks/                          # CDK stacks (global, API gateway, regional, regional API gateway, monitoring, analytics)
 │       └── constants.py                 # Pinned versions: EKS addons, Lambda runtime, Aurora engine
 │
@@ -526,6 +536,7 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 │   ├── helm-installer/                  # Installs Helm charts (schedulers, cert-manager)
 │   │   └── charts.yaml                  # Helm chart configuration (schedulers, cert-manager)
 │   ├── image-lookup/                    # Adopt-or-create custom resource for the project's gco/* ECR repositories
+│   ├── inference-streaming-proxy/       # Node.js response-streaming proxy for global and regional inference routes
 │   ├── kubectl-applier-simple/          # Applies K8s manifests during deployment
 │   │   └── manifests/                   # Kubernetes manifests (nodepools, RBAC, services, storage)
 │   ├── proxy-shared/                    # Shared utilities for proxy Lambdas
