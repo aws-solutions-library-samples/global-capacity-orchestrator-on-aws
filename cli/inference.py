@@ -936,7 +936,11 @@ class InferenceManager:
         canary = raw_spec.get("canary")
         if not isinstance(canary, dict):
             raise ValueError(f"Endpoint '{endpoint_name}' has no active canary deployment")
-        canary_image = canary.get("image")
+        if "image" not in canary:
+            raise ValueError(
+                f"Canary deployment for '{endpoint_name}' is missing the 'image' field"
+            )
+        canary_image = canary["image"]
         if not isinstance(canary_image, str) or not canary_image.strip():
             raise ValueError(
                 f"Canary deployment for '{endpoint_name}' has an invalid 'image' field"

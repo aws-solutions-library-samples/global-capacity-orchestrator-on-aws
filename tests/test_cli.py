@@ -56,7 +56,7 @@ class TestGCOConfig:
         assert isinstance(config_dict, dict)
         assert "project_name" in config_dict
         assert "default_region" in config_dict
-        assert "allowed_namespaces" in config_dict
+        assert "default_namespace" in config_dict
 
     def test_config_from_yaml_file(self):
         """Test loading config from YAML file."""
