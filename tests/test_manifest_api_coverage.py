@@ -457,35 +457,47 @@ class TestCreateJobFromTemplateEdgeCases:
 class TestPollJobsEdgeCases:
     """Tests for poll jobs endpoint edge cases."""
 
-    def test_poll_jobs_processing_error(self, mock_manifest_processor):
-        """Test poll jobs when processing fails."""
-        mock_job_store = MagicMock()
-        # The actual code uses get_queued_jobs_for_region and claim_job (singular)
-        mock_job_store.get_queued_jobs_for_region.return_value = [
-            {
-                "job_id": "abc123",
-                "job_name": "test-job",
-                "manifest": {
-                    "apiVersion": "batch/v1",
-                    "kind": "Job",
-                    "metadata": {"name": "test-job"},
-                    "spec": {
-                        "template": {
-                            "spec": {
-                                "containers": [{"name": "main", "image": "test:latest"}],
-                                "restartPolicy": "Never",
-                            }
+    @staticmethod
+    def _claimed_job_store() -> MagicMock:
+        """Return a store holding one successfully fenced queued-job claim."""
+        queued_job = {
+            "job_id": "abc123",
+            "job_name": "test-job",
+            "manifest": {
+                "apiVersion": "batch/v1",
+                "kind": "Job",
+                "metadata": {"name": "test-job"},
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "containers": [{"name": "main", "image": "test:latest"}],
+                            "restartPolicy": "Never",
                         }
-                    },
+                    }
                 },
-                "namespace": "gco-jobs",
-            }
-        ]
-        mock_job_store.claim_job.return_value = True  # Successfully claimed
+            },
+            "namespace": "gco-jobs",
+        }
+        mock_job_store = MagicMock(claim_lease_seconds=300)
+        mock_job_store.migrate_legacy_records_for_region.return_value = {
+            "evaluated": 0,
+            "migrated": 0,
+            "failed": 0,
+            "complete": True,
+        }
+        mock_job_store.get_queued_jobs_for_region.return_value = [queued_job]
+        mock_job_store.claim_job.return_value = {
+            **queued_job,
+            "claim_token": "claim-token",
+            "claim_generation": 1,
+        }
+        mock_job_store.transition_job.return_value = {"job_id": "abc123"}
+        return mock_job_store
 
-        mock_manifest_processor.process_manifest_submission = AsyncMock(
-            side_effect=Exception("Processing error")
-        )
+    def test_poll_jobs_processing_error(self, mock_manifest_processor):
+        """Test poll jobs when deterministic Kubernetes apply raises."""
+        mock_job_store = self._claimed_job_store()
+        mock_manifest_processor.apply_queued_job.side_effect = RuntimeError("Processing error")
 
         with (
             patch(
@@ -511,38 +523,13 @@ class TestPollJobsEdgeCases:
                 assert data["results"][0]["status"] == "failed"
 
     def test_poll_jobs_with_k8s_uid(self, mock_manifest_processor):
-        """Test poll jobs when K8s returns UID."""
-        mock_job_store = MagicMock()
-        mock_job_store.get_queued_jobs_for_region.return_value = [
-            {
-                "job_id": "abc123",
-                "job_name": "test-job",
-                "manifest": {
-                    "apiVersion": "batch/v1",
-                    "kind": "Job",
-                    "metadata": {"name": "test-job"},
-                    "spec": {
-                        "template": {
-                            "spec": {
-                                "containers": [{"name": "main", "image": "test:latest"}],
-                                "restartPolicy": "Never",
-                            }
-                        }
-                    },
-                },
-                "namespace": "gco-jobs",
-            }
-        ]
-        mock_job_store.claim_job.return_value = True
-
-        mock_result = MagicMock()
-        mock_result.success = True
-        mock_result.errors = []
+        """Test poll jobs when Kubernetes returns a UID."""
+        mock_job_store = self._claimed_job_store()
         mock_resource = MagicMock()
+        mock_resource.name = "test-job-queue-id"
+        mock_resource.namespace = "gco-jobs"
         mock_resource.uid = "k8s-uid-12345"
-        mock_result.resources = [mock_resource]
-
-        mock_manifest_processor.process_manifest_submission = AsyncMock(return_value=mock_result)
+        mock_manifest_processor.apply_queued_job.return_value = mock_resource
 
         with (
             patch(
@@ -566,39 +553,14 @@ class TestPollJobsEdgeCases:
                 data = response.json()
                 assert len(data["results"]) == 1
                 assert data["results"][0]["status"] == "applied"
-                assert data["results"][0]["k8s_uid"] == "k8s-uid-12345"
+                assert data["results"][0]["k8s_job_uid"] == "k8s-uid-12345"
 
     def test_poll_jobs_submission_failed(self, mock_manifest_processor):
-        """Test poll jobs when submission fails."""
-        mock_job_store = MagicMock()
-        mock_job_store.get_queued_jobs_for_region.return_value = [
-            {
-                "job_id": "abc123",
-                "job_name": "test-job",
-                "manifest": {
-                    "apiVersion": "batch/v1",
-                    "kind": "Job",
-                    "metadata": {"name": "test-job"},
-                    "spec": {
-                        "template": {
-                            "spec": {
-                                "containers": [{"name": "main", "image": "test:latest"}],
-                                "restartPolicy": "Never",
-                            }
-                        }
-                    },
-                },
-                "namespace": "gco-jobs",
-            }
-        ]
-        mock_job_store.claim_job.return_value = True
-
-        mock_result = MagicMock()
-        mock_result.success = False
-        mock_result.errors = ["Validation failed", "Resource limit exceeded"]
-        mock_result.resources = []
-
-        mock_manifest_processor.process_manifest_submission = AsyncMock(return_value=mock_result)
+        """Test poll jobs when deterministic Job validation fails."""
+        mock_job_store = self._claimed_job_store()
+        mock_manifest_processor.apply_queued_job.side_effect = ValueError(
+            "Queued Job validation failed: Validation failed; Resource limit exceeded"
+        )
 
         with (
             patch(
