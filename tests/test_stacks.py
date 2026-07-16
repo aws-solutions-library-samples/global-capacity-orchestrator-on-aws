@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 
 class TestContainerRuntimeDetection:
@@ -3424,7 +3425,15 @@ class TestStackExistsInCloudFormation:
         manager = StackManager(config)
         fake_cfn = MagicMock()
         if raises:
-            fake_cfn.describe_stacks.side_effect = Exception("Stack does not exist")
+            fake_cfn.describe_stacks.side_effect = ClientError(
+                {
+                    "Error": {
+                        "Code": "ValidationError",
+                        "Message": "Stack gco-us-east-1 does not exist",
+                    }
+                },
+                "DescribeStacks",
+            )
         else:
             fake_cfn.describe_stacks.return_value = {"Stacks": [{"StackStatus": status}]}
         with (
