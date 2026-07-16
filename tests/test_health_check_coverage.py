@@ -3,9 +3,9 @@ Consistency tests between ALB Ingress health-check paths and the
 auth middleware allowlist.
 
 Parses every Kubernetes Ingress manifest under
-lambda/kubectl-applier-simple/manifests/ (skipping any with unresolved
-template variables), pulls the alb.ingress.kubernetes.io/healthcheck-path
-annotation, and asserts each one appears in
+lambda/kubectl-applier-simple/manifests/ after rendering unresolved template
+variables to inert scalar placeholders, pulls the
+alb.ingress.kubernetes.io/healthcheck-path annotation, and asserts each one appears in
 gco.services.auth_middleware.UNAUTHENTICATED_PATHS. Also checks that
 the GA health check path from cdk.json is allowlisted. Prevents the
 regression where a new Ingress lands with a health-check path that the
@@ -14,6 +14,7 @@ rotation.
 """
 
 import json
+import re
 from pathlib import Path
 
 import yaml
@@ -38,10 +39,12 @@ class TestHealthCheckPathCoverage:
         for manifest_file in sorted(manifests_dir.glob("*.yaml")):
             with open(manifest_file, encoding="utf-8") as f:
                 content = f.read()
-            # Skip manifests with template variables (they need substitution)
-            if "{{" in content:
-                continue
-            for doc in yaml.safe_load_all(content):
+            # Render deployment-time tokens as inert YAML scalars. Health-path
+            # coverage must include templated Ingresses (for example, the
+            # deployment-local TLS certificate ARN) rather than skipping the
+            # entire manifest.
+            rendered = re.sub(r"\{\{[^{}]+\}\}", "placeholder", content)
+            for doc in yaml.safe_load_all(rendered):
                 if doc is None:
                     continue
                 if doc.get("kind") != "Ingress":
