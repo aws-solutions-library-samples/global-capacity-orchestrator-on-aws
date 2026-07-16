@@ -106,7 +106,7 @@ jobs:
           kubectl version --client --output=yaml | head -5
       - name: Configure AWS credentials (OIDC)
         if: env.GCO_CI_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@v6.2.0
+        uses: aws-actions/configure-aws-credentials@6.2.2
         env:
           GCO_CI_ROLE_ARN: ${{ secrets.GCO_CI_ROLE_ARN }}
         with:
