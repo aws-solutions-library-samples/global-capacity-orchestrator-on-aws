@@ -94,7 +94,23 @@ _CACHE_MAX_STALE_SECONDS = max(
     _bounded_env_float("SECRET_CACHE_MAX_STALE_SECONDS", 900.0, 1.0, 7200.0),
 )
 _CACHE_RETRY_SECONDS = _bounded_env_float("SECRET_CACHE_RETRY_SECONDS", 5.0, 0.1, 60.0)
-_secrets_client = boto3.client("secretsmanager")
+
+
+def _secret_region(secret_arn: str) -> str | None:
+    """Return the owning region for a Secrets Manager ARN, if present."""
+    parts = secret_arn.split(":", 5)
+    if len(parts) == 6 and parts[0] == "arn" and parts[2] == "secretsmanager":
+        return parts[3] or None
+    return None
+
+
+# The regional VPC proxy runs outside the API Gateway region where the shared
+# HMAC key lives. Secrets Manager clients do not route cross-region ARNs to the
+# owning endpoint automatically, so bind the client to the ARN's region.
+_secrets_client = boto3.client(
+    "secretsmanager",
+    region_name=_secret_region(os.getenv("SECRET_ARN", "")),
+)
 
 
 def get_secret_token() -> str:
