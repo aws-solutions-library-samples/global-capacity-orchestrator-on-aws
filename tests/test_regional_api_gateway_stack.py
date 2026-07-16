@@ -227,14 +227,22 @@ class TestRegionalApiGatewayStack:
                 },
                 "VpcConfig": assertions.Match.object_like(
                     {
-                        "SecurityGroupIds": assertions.Match.array_with(
-                            [assertions.Match.any_value()]
-                        ),
-                        "SubnetIds": assertions.Match.array_with([assertions.Match.any_value()]),
+                        "SecurityGroupIds": assertions.Match.any_value(),
+                        "SubnetIds": assertions.Match.any_value(),
                     }
                 ),
             },
         )
+        inference_functions = [
+            resource
+            for resource in template.find_resources("AWS::Lambda::Function").values()
+            if resource.get("Properties", {}).get("FunctionName")
+            == "gco-regional-inference-proxy-us-east-1"
+        ]
+        assert len(inference_functions) == 1
+        vpc_config = inference_functions[0]["Properties"]["VpcConfig"]
+        assert vpc_config["SecurityGroupIds"]
+        assert vpc_config["SubnetIds"]
 
     def test_regional_api_gateway_has_security_group(self, app, mock_config, vpc):
         """Test that the regional API gateway Lambda has a security group."""

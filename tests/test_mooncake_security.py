@@ -328,7 +328,7 @@ def test_first_allow_rule_failure_names_rule_and_keeps_default_deny(monitor):
     naming that rule, and no deny policy is ever read, modified, or deleted.
     """
     from gco.services.inference_monitor import (
-        NETWORK_POLICY_POD_TO_MASTER,
+        NETWORK_POLICY_INFERENCE_INTERNAL,
         NetworkPolicyApplyError,
     )
 
@@ -339,15 +339,16 @@ def test_first_allow_rule_failure_names_rule_and_keeps_default_deny(monitor):
     with pytest.raises(NetworkPolicyApplyError) as excinfo:
         monitor._ensure_intra_namespace_network_policies("gco-inference", {})
 
-    assert excinfo.value.rule == NETWORK_POLICY_POD_TO_MASTER
+    assert excinfo.value.rule == NETWORK_POLICY_INFERENCE_INTERNAL
     _deny_policy_untouched(monitor)
 
 
 def test_later_allow_rule_failure_names_that_rule(monitor):
     """A failure on a later allow rule names that specific rule.
 
-    The first rule applies cleanly; the second fails with a non-conflict error.
-    The surfaced failure names the second rule, and default-deny is preserved.
+    The first two rules apply cleanly; the third fails with a non-conflict
+    error. The surfaced failure names the third rule, and default-deny is
+    preserved.
     """
     from gco.services.inference_monitor import (
         NETWORK_POLICY_POD_TO_METADATA,
@@ -355,6 +356,7 @@ def test_later_allow_rule_failure_names_that_rule(monitor):
     )
 
     monitor.networking_v1.create_namespaced_network_policy.side_effect = [
+        None,
         None,
         ApiException(status=403, reason="Forbidden"),
     ]
