@@ -40,9 +40,9 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import boto3
-from fastapi import HTTPException, Request
+from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -217,7 +217,7 @@ def _accept_nonce(nonce: str, now: float) -> bool:
         if nonce in _seen_nonces:
             return False
         if len(_seen_nonces) >= _MAX_TRACKED_NONCES:
-            oldest = min(_seen_nonces, key=_seen_nonces.get)
+            oldest = min(_seen_nonces, key=_seen_nonces.__getitem__)
             _seen_nonces.pop(oldest, None)
         _seen_nonces[nonce] = expires_at
     return True
@@ -311,10 +311,7 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             call_next: The next middleware/handler in the chain
 
         Returns:
-            Response from the next handler if authenticated
-
-        Raises:
-            HTTPException: 403 if authentication fails
+            Response from the next handler, or a bounded JSON authentication error.
         """
         # Skip authentication for health check endpoints
         if request.url.path in UNAUTHENTICATED_PATHS:
@@ -340,15 +337,15 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
                     "No AUTH_SECRET_ARN configured and GCO_DEV_MODE is not enabled. "
                     "Set AUTH_SECRET_ARN for production or GCO_DEV_MODE=true for local development."
                 )
-                raise HTTPException(
+                return JSONResponse(
                     status_code=503,
-                    detail="Service unavailable - authentication not configured",
+                    content={"detail": "Service unavailable - authentication not configured"},
                 )
             # Secret configured but couldn't load - deny access
             logger.error("Failed to load authentication tokens")
-            raise HTTPException(
+            return JSONResponse(
                 status_code=503,
-                detail="Service temporarily unavailable - authentication error",
+                content={"detail": "Service temporarily unavailable - authentication error"},
             )
 
         if not await _has_valid_signature(request, valid_tokens):
@@ -358,9 +355,11 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
                 client_ip,
                 request.url.path,
             )
-            raise HTTPException(
+            return JSONResponse(
                 status_code=403,
-                detail="Forbidden - requests must come through authenticated API Gateway",
+                content={
+                    "detail": ("Forbidden - requests must come through authenticated API Gateway")
+                },
             )
 
         return await call_next(request)

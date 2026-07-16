@@ -106,6 +106,20 @@ _NON_COLLISION_NAME_PROPS: dict[tuple[str, str], str] = {
         "Input property passed to a custom resource; its value IS the project_name, "
         "not a resource identifier."
     ),
+    (
+        "AWS::CloudFormation::CustomResource",
+        "RootCaParameterName",
+    ): (
+        "Project-scoped public-root SSM path passed into the TLS manager custom "
+        "resource, not a CloudFormation physical resource name."
+    ),
+    (
+        "AWS::CloudFormation::CustomResource",
+        "ServerName",
+    ): (
+        "Project-scoped certificate DNS identity passed into the TLS manager custom "
+        "resource, not a CloudFormation physical resource name."
+    ),
     ("AWS::CloudWatch::Alarm", "MetricName"): (
         "The CloudWatch metric the alarm watches (e.g. '5XXError'), not the alarm's "
         "physical name; scoped to its metric namespace."

@@ -18,7 +18,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from gco.services.auth_middleware import (
@@ -73,15 +73,8 @@ def reset_cache():
 @pytest.fixture
 def app_with_middleware():
     """Create FastAPI app with authentication middleware."""
-    from fastapi.responses import JSONResponse
-
     app = FastAPI()
     app.add_middleware(AuthenticationMiddleware)
-
-    # Add exception handler for HTTPException
-    @app.exception_handler(HTTPException)
-    async def http_exception_handler(request, exc):  # nosemgrep: useless-inner-function
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
     @app.get("/api/v1/health")
     async def get_health():  # nosemgrep: useless-inner-function
@@ -181,35 +174,32 @@ class TestAuthenticatedPaths:
             )
             assert response.status_code == 200
 
-    def test_signature_from_unknown_key_raises_exception(self, app_with_middleware):
+    def test_signature_from_unknown_key_returns_403(self, app_with_middleware):
         """An otherwise well-formed envelope signed by another key is rejected."""
         with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-key"}):
-            client = TestClient(app_with_middleware, raise_server_exceptions=True)
-            with pytest.raises(HTTPException) as exc_info:
-                client.post(
-                    "/api/v1/manifests",
-                    headers=_signed_headers("wrong-key", "POST", "/api/v1/manifests"),
-                )
-            assert exc_info.value.status_code == 403
+            client = TestClient(app_with_middleware, raise_server_exceptions=False)
+            response = client.post(
+                "/api/v1/manifests",
+                headers=_signed_headers("wrong-key", "POST", "/api/v1/manifests"),
+            )
+            assert response.status_code == 403
 
-    def test_missing_signature_raises_exception(self, app_with_middleware):
+    def test_missing_signature_returns_403(self, app_with_middleware):
         """A request without an HMAC envelope is rejected."""
         with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-key"}):
-            client = TestClient(app_with_middleware, raise_server_exceptions=True)
-            with pytest.raises(HTTPException) as exc_info:
-                client.post("/api/v1/manifests")
-            assert exc_info.value.status_code == 403
+            client = TestClient(app_with_middleware, raise_server_exceptions=False)
+            response = client.post("/api/v1/manifests")
+            assert response.status_code == 403
 
-    def test_incomplete_signature_raises_exception(self, app_with_middleware):
+    def test_incomplete_signature_returns_403(self, app_with_middleware):
         """A partial envelope cannot be treated as backend authentication."""
         with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-key"}):
-            client = TestClient(app_with_middleware, raise_server_exceptions=True)
-            with pytest.raises(HTTPException) as exc_info:
-                client.post(
-                    "/api/v1/manifests",
-                    headers={"x-gco-signature-version": "v1", "x-gco-signature": ""},
-                )
-            assert exc_info.value.status_code == 403
+            client = TestClient(app_with_middleware, raise_server_exceptions=False)
+            response = client.post(
+                "/api/v1/manifests",
+                headers={"x-gco-signature-version": "v1", "x-gco-signature": ""},
+            )
+            assert response.status_code == 403
 
     def test_pending_key_allowed_during_rotation(self, app_with_middleware):
         """AWSCURRENT and AWSPENDING keys can sign distinct requests during rotation."""
@@ -261,10 +251,9 @@ class TestDevelopmentMode:
             patch.dict("os.environ", {}, clear=True),
             patch("gco.services.auth_middleware.get_valid_tokens", return_value=set()),
         ):
-            client = TestClient(app_with_middleware, raise_server_exceptions=True)
-            with pytest.raises(HTTPException) as exc_info:
-                client.post("/api/v1/manifests")
-            assert exc_info.value.status_code == 503
+            client = TestClient(app_with_middleware, raise_server_exceptions=False)
+            response = client.post("/api/v1/manifests")
+            assert response.status_code == 503
 
     def test_warning_logged_when_dev_mode(self, app_with_middleware):
         """Test warning is logged when dev mode bypasses auth."""
@@ -507,13 +496,12 @@ class TestSecretRotation:
             "gco.services.auth_middleware.get_valid_tokens",
             return_value={"new-current-key"},
         ):
-            client = TestClient(app_with_middleware, raise_server_exceptions=True)
-            with pytest.raises(HTTPException) as exc_info:
-                client.post(
-                    "/api/v1/manifests",
-                    headers=_signed_headers("old-key", "POST", "/api/v1/manifests"),
-                )
-            assert exc_info.value.status_code == 403
+            client = TestClient(app_with_middleware, raise_server_exceptions=False)
+            response = client.post(
+                "/api/v1/manifests",
+                headers=_signed_headers("old-key", "POST", "/api/v1/manifests"),
+            )
+            assert response.status_code == 403
 
 
 # =============================================================================
@@ -589,16 +577,11 @@ class TestAuthMiddlewareErrorHandlingExtended:
     def test_middleware_503_when_secret_configured_but_load_fails(self):
         """Test middleware returns 503 when secret is configured but can't be loaded."""
         from fastapi import FastAPI
-        from fastapi.responses import JSONResponse
 
         from gco.services.auth_middleware import AuthenticationMiddleware
 
         app = FastAPI()
         app.add_middleware(AuthenticationMiddleware)
-
-        @app.exception_handler(HTTPException)
-        async def http_exception_handler(request, exc):
-            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
         @app.post("/api/v1/test")
         async def test_endpoint():
@@ -613,21 +596,16 @@ class TestAuthMiddlewareErrorHandlingExtended:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             response = client.post("/api/v1/test")
-            assert response.status_code in [500, 503]
+            assert response.status_code == 503
 
     def test_middleware_logs_client_ip_unknown(self):
         """Test middleware handles missing client IP gracefully."""
         from fastapi import FastAPI
-        from fastapi.responses import JSONResponse
 
         from gco.services.auth_middleware import AuthenticationMiddleware
 
         app = FastAPI()
         app.add_middleware(AuthenticationMiddleware)
-
-        @app.exception_handler(HTTPException)
-        async def http_exception_handler(request, exc):
-            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
         @app.post("/api/v1/test")
         async def test_endpoint():

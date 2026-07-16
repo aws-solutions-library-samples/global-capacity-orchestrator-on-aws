@@ -264,6 +264,7 @@ class TestKubernetesManifests:
             "policy/v1",
             "karpenter.sh/v1",
             "karpenter.k8s.aws/v1",
+            "coordination.k8s.io/v1",
             "eks.amazonaws.com/v1",
             "resource.k8s.io/v1beta1",
             "apiregistration.k8s.io/v1",

@@ -525,7 +525,32 @@ class GCOApiGatewayGlobalStack(Stack):
                         "scoped to this account's certificate ARNs; SSM is scoped to the exact "
                         "project backend-tls namespace."
                     ),
-                    "appliesTo": ["Resource::*"],
+                    "appliesTo": [
+                        "Resource::*",
+                        "Action::kms:GenerateDataKey*",
+                        "Action::kms:ReEncrypt*",
+                        "Resource::arn:aws:acm:*:<AWS::AccountId>:certificate/*",
+                        (
+                            f"Resource::arn:aws:ssm:{self.registry_region}:"
+                            f"<AWS::AccountId>:parameter/{project_name}/backend-tls/*"
+                        ),
+                    ],
+                },
+            ],
+        )
+        acknowledge_nag_findings(
+            provider,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The CDK custom-resource provider invokes only versioned aliases of "
+                        "BackendTlsCertificateManager; the generated :* qualifier cannot be "
+                        "narrowed to a version that does not exist until deployment."
+                    ),
+                    "appliesTo": [
+                        "Resource::<BackendTlsCertificateManager7EB9FC32.Arn>:*",
+                    ],
                 }
             ],
         )
@@ -555,18 +580,27 @@ class GCOApiGatewayGlobalStack(Stack):
             self.backend_tls_rotation_dlq,
             [
                 {
+                    "id": "AwsSolutions-SQS3",
+                    "reason": (
+                        "This is itself EventBridge's terminal dead-letter queue; it is "
+                        "retained for 14 days and monitored by BackendTlsRotationDlqAlarm. "
+                        "Chaining another DLQ would only move the same terminal failure."
+                    ),
+                },
+                {
                     "id": "Serverless-SQSRedrivePolicy",
                     "reason": (
                         "This queue is the terminal EventBridge dead-letter queue and is monitored "
                         "by BackendTlsRotationDlqAlarm; redriving it into another queue would only "
                         "move the terminal failure."
                     ),
-                }
+                },
             ],
         )
         for alarm in [
             self.backend_tls_manager_error_alarm,
             self.backend_tls_rotation_dlq_alarm,
+            self.backend_tls_root_expiry_alarm,
             *self.backend_tls_expiry_alarms,
         ]:
             acknowledge_nag_findings(
@@ -738,6 +772,23 @@ class GCOApiGatewayGlobalStack(Stack):
             )
         )
 
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        acknowledge_nag_findings(
+            lambda_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "Active X-Ray tracing requires xray:PutTraceSegments and "
+                        "xray:PutTelemetryRecords on Resource::* because those APIs do not "
+                        "support resource-level IAM constraints."
+                    ),
+                    "appliesTo": ["Resource::*"],
+                }
+            ],
+        )
+
         # Create log group for Lambda
         proxy_lambda_log_group = logs.LogGroup(
             self,
@@ -857,12 +908,24 @@ class GCOApiGatewayGlobalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "Regional API IDs are generated only when their stacks deploy, so the "
-                        "aggregator's execute-api resource uses wildcard API IDs. The policy is "
-                        "still constrained to this account, the /api/v1 route tree, and Invoke; "
-                        "regional API resource policies admit only this role unless operators "
-                        "explicitly enable direct regional access."
+                        "The aggregator uses X-Ray write APIs that require Resource::*, "
+                        "describes only deterministic project/region CloudFormation stack "
+                        "ARNs, and invokes only this account's generated regional API IDs "
+                        "under /api/v1. Regional API resource policies admit only this role "
+                        "unless operators explicitly enable direct regional access."
                     ),
+                    "appliesTo": [
+                        "Resource::*",
+                        *[
+                            (
+                                f"Resource::arn:aws:cloudformation:{region}:"
+                                f"<AWS::AccountId>:stack/{self.project_name}-regional-api-"
+                                f"{region}/*"
+                            )
+                            for region in self.certificate_regions
+                        ],
+                        ("Resource::arn:aws:execute-api:*:<AWS::AccountId>:*/*/*/api/v1/*"),
+                    ],
                 },
             ],
         )

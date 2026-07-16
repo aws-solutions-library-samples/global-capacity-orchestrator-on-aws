@@ -185,7 +185,7 @@ def _request_headers(request: Request) -> list[tuple[str, str]]:
     """Forward only explicitly supported end-to-end model request headers."""
     return [
         (name.lower(), value)
-        for name, value in request.headers.multi_items()
+        for name, value in request.headers.items()
         if name.lower() in _ALLOWED_REQUEST_HEADERS
     ]
 
@@ -257,7 +257,11 @@ async def _proxy(
     )
     encoded_suffix = quote(upstream_path, safe="/:@-._~")
     upstream_path_value = f"/{encoded_suffix}" if encoded_suffix else "/"
-    upstream_url = f"http://{service_name}.{namespace}.svc.cluster.local{upstream_path_value}"
+    upstream_url = (  # nosemgrep: python.django.security.injection.tainted-url-host.tainted-url-host
+        # Both host labels passed the strict Kubernetes DNS-label allowlist in
+        # _resolve_upstream; callers cannot supply a URL, address, or suffix.
+        f"http://{service_name}.{namespace}.svc.cluster.local{upstream_path_value}"
+    )
 
     body = await request.body()
     timeout = httpx.Timeout(

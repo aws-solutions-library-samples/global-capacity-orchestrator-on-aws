@@ -58,6 +58,7 @@ _DNS_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 _REGIONAL_ENDPOINT_CACHE: dict[tuple[str, str, str, str], tuple[float, str]] = {}
+_BACKEND_AUTH_ERRORS = (KeyError, RuntimeError)
 
 
 def _regional_endpoint_cache_ttl() -> float:
@@ -210,7 +211,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """Proxy one IAM-authenticated API Gateway request to the internal ALB."""
     try:
         signing_key = get_secret_token()
-    except KeyError, RuntimeError:
+    except _BACKEND_AUTH_ERRORS:
         return _error_response(503, "Backend authentication is temporarily unavailable")
 
     try:

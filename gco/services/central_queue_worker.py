@@ -321,6 +321,8 @@ async def reconcile_active_jobs_once(
             )
             continue
 
+        observed: str
+        error: str | None
         try:
             k8s_job = await asyncio.to_thread(
                 processor.read_queued_job,

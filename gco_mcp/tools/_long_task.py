@@ -202,7 +202,11 @@ async def _run_long_task(
         tool_name = logical_argv[1]
     else:
         tool_name = logical_argv[0] if logical_argv else "task"
-    task_id = protocol_task_id if is_valid_task_id(protocol_task_id) else make_task_id(tool_name)
+    task_id = (
+        protocol_task_id
+        if isinstance(protocol_task_id, str) and is_valid_task_id(protocol_task_id)
+        else make_task_id(tool_name)
+    )
 
     spawn_argv = list(logical_argv)
     if spawn_argv and spawn_argv[0] == "gco":

@@ -27,4 +27,8 @@ RUN for attempt in 1 2 3; do \
 
 COPY handler.py .
 
+# Lambda normally supplies a least-privileged runtime user; declare one
+# explicitly so the image remains non-root in generic container runtimes too.
+USER 1000:1000
+
 CMD ["handler.lambda_handler"]

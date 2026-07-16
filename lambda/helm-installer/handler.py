@@ -782,7 +782,8 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
     namespace = config.get("namespace", "default")
     kubeconfig = configure_kubeconfig(cluster_name, region)
     try:
-        if action == "uninstall_chart" or (action == "install_chart" and not is_enabled):
+        disabled_install = action == "install_chart" and not is_enabled
+        if action == "uninstall_chart" or disabled_install:
             # Disabled chart on an install pass: ensure it's gone (idempotent).
             # Helm's explicit "release: not found" is already reported as
             # success by uninstall_chart; every other error must escape so
@@ -791,6 +792,8 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
             if not success:
                 _record_addon_status(chart_name, "failed", message)
                 raise RuntimeError(f"helm uninstall {chart_name} failed: {message}")
+            if disabled_install:
+                message = f"uninstalled (disabled): {message}"
             _record_addon_status(chart_name, "uninstalled", message)
             return {
                 "chart": chart_name,
@@ -892,6 +895,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> Any:
                     namespace = config.get("namespace", "default")
                     logger.info(f"Chart {chart_name} is disabled, checking if installed...")
                     success, message = uninstall_chart(chart_name, namespace, kubeconfig)
+                    if success:
+                        message = f"uninstalled (disabled): {message}"
                     results[chart_name] = message
                     if not success:
                         uninstall_failed.append(chart_name)

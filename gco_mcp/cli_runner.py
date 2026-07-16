@@ -60,19 +60,24 @@ def _run_cli(
             return json.dumps({"error": f"Invalid argument: path traversal not allowed: {arg}"})
 
     cmd = [_gco_executable(), "--output", "json", *args]
-    run_options: dict[str, object] = {
-        "capture_output": True,
-        "text": True,
-        "timeout": timeout_seconds,
-        "cwd": str(PROJECT_ROOT),
-    }
-    if pass_fds:
-        run_options["pass_fds"] = pass_fds
     try:
-        result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - shell=False; args are validated above and passed as literal argv elements
-            cmd,
-            **run_options,
-        )
+        if pass_fds:
+            result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - shell=False; validated literal argv
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=str(PROJECT_ROOT),
+                pass_fds=pass_fds,
+            )
+        else:
+            result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - shell=False; validated literal argv
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=str(PROJECT_ROOT),
+            )
         output = result.stdout.strip()
         if result.returncode != 0:
             error = result.stderr.strip() or output

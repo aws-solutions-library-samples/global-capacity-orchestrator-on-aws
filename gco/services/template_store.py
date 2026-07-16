@@ -471,7 +471,9 @@ class JobStore:
 
     @staticmethod
     def _is_conditional_failure(error: ClientError) -> bool:
-        return error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
+        return bool(
+            error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
+        )
 
     @staticmethod
     def _decode_json(value: Any, default: Any) -> Any:

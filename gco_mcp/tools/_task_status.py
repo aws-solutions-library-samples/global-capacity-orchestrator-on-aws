@@ -586,9 +586,9 @@ class TaskStatusWriter:
         if self._enabled:
             try:
                 with _TASK_ARTIFACT_LOCK:
-                    self._dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    self._dir.mkdir(mode=stat.S_IRWXU, parents=True, exist_ok=True)
                     with _suppress_oserror():
-                        os.chmod(self._dir, 0o700)
+                        os.chmod(self._dir, stat.S_IRWXU)
 
                     # Establish the JSON anchor before creating a log. If the
                     # initial status cannot be written, disable all disk output

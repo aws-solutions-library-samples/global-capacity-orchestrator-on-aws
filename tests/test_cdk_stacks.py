@@ -336,7 +336,17 @@ class TestApiGatewayStackSynth:
             "AWS::Lambda::Function",
             {
                 "Environment": {
-                    "Variables": assertions.Match.object_like({"GLOBAL_REGION": "eu-west-1"})
+                    "Variables": assertions.Match.object_like(
+                        {"BACKEND_TLS_ROOT_CA_REGION": "eu-west-1"}
+                    )
+                }
+            },
+        )
+        template.has_resource_properties(
+            "AWS::Lambda::Function",
+            {
+                "Environment": {
+                    "Variables": assertions.Match.object_like({"REGISTRY_REGION": "eu-west-1"})
                 }
             },
         )

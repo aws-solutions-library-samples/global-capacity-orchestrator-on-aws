@@ -3486,14 +3486,14 @@ class InferenceMonitor:
                 self.core_v1.delete_namespaced_secret(
                     secret_name, namespace, _request_timeout=self._k8s_timeout
                 )
-                logger.info(
-                    "Deleted generated proxy admin-key Secret %s/%s", namespace, secret_name
-                )  # nosemgrep
+                logger.info("Deleted generated proxy access resource %s/%s", namespace, secret_name)
             except ApiException as e:
                 if e.status != 404:
                     logger.error(
-                        "Failed to delete generated proxy admin-key Secret %s: %s", secret_name, e
-                    )  # nosemgrep
+                        "Failed to delete generated proxy access resource %s: %s",
+                        secret_name,
+                        e,
+                    )
 
     def _build_hpa_metrics(self, metrics_config: list[dict[str, Any]]) -> list[Any]:
         """Translate a metrics config list into autoscaler metric specs.

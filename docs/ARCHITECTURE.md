@@ -28,7 +28,7 @@
 - [Cost Optimization](#cost-optimization)
 - [Disaster Recovery](#disaster-recovery)
 - [Shared Storage (EFS)](#shared-storage-efs)
-- [Scale Potential](#scale-potential-back-of-the-envelope-calculation)
+- [Scale Potential](#scale-potential-capacity-envelope)
 
 ## Overview
 

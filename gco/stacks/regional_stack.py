@@ -755,7 +755,7 @@ class GCORegionalStack(Stack):
             role=self.aws_custom_resource_role,
         )
         reader.node.add_dependency(self.aws_custom_resource_role)
-        return reader.get_response_field("Parameter.Value")
+        return str(reader.get_response_field("Parameter.Value"))
 
     def _create_container_images(self) -> None:
         """Create ECR repositories and build Docker images for services"""
@@ -1656,6 +1656,7 @@ class GCORegionalStack(Stack):
                         "required Resource:*. PutMetricData is constrained to the exact "
                         "GCO/HealthMonitor namespace; all SSM and DynamoDB resources are exact."
                     ),
+                    "appliesTo": ["Resource::*"],
                 }
             ],
         )
@@ -1734,6 +1735,7 @@ class GCORegionalStack(Stack):
                         "suffix, and cloudwatch:PutMetricData Resource:*. DynamoDB table "
                         "names and the CloudWatch namespace are otherwise exact."
                     ),
+                    "appliesTo": ["Resource::*"],
                 }
             ],
         )
@@ -4071,6 +4073,16 @@ class GCORegionalStack(Stack):
         )
         self.helm_teardown_state_machine.grant_start_execution(teardown_on_event)
         self.helm_teardown_state_machine.grant_read(teardown_is_complete)
+        install_execution_detail = (
+            "Resource::arn:aws:states:<AWS::Region>:<AWS::AccountId>:execution:"
+            '{"Fn::Select":[6,{"Fn::Split":[":",'
+            '{"Ref":"HelmInstallStateMachine7DB71CDC"}]}]}:*'
+        )
+        teardown_execution_detail = (
+            "Resource::arn:aws:states:<AWS::Region>:<AWS::AccountId>:execution:"
+            '{"Fn::Select":[6,{"Fn::Split":[":",'
+            '{"Ref":"HelmTeardownStateMachine1C15895F"}]}]}:*'
+        )
         for handler in (teardown_on_event, teardown_is_complete):
             self.helm_install_state_machine.grant(
                 handler,
@@ -4135,10 +4147,15 @@ class GCORegionalStack(Stack):
                     {
                         "id": "AwsSolutions-IAM5",
                         "reason": (
-                            "StopExecution is limited to execution ARNs belonging to the "
-                            "single regional Helm-install state machine; execution names "
-                            "are runtime-generated and therefore require a trailing wildcard."
+                            "X-Ray write APIs require Resource::*. StopExecution and "
+                            "DescribeExecution are otherwise limited to runtime-generated "
+                            "execution ARNs belonging to the two regional Helm state machines."
                         ),
+                        "appliesTo": [
+                            "Resource::*",
+                            install_execution_detail,
+                            teardown_execution_detail,
+                        ],
                     }
                 ],
             )
@@ -4148,9 +4165,16 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The CDK provider framework invokes versioned onEvent/isComplete "
-                        "handlers and polls a runtime-generated execution ARN."
+                        "The CDK provider framework invokes only versioned onEvent/isComplete "
+                        "handlers and its generated waiter invokes only its versioned timeout "
+                        "and completion handlers; every wildcard is a Lambda qualifier."
                     ),
+                    "appliesTo": [
+                        "Resource::<HelmTeardownIsComplete5ECB4605.Arn>:*",
+                        "Resource::<HelmTeardownOnEvent3DB6F756.Arn>:*",
+                        ("Resource::<HelmTeardownProviderframeworkisComplete3D7339F4.Arn>:*"),
+                        ("Resource::<HelmTeardownProviderframeworkonTimeout3415E5E9.Arn>:*"),
+                    ],
                 },
                 {
                     "id": "AwsSolutions-SF1",

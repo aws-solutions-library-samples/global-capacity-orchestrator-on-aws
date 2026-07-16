@@ -66,26 +66,24 @@ SCRIPT="docs/client-examples/curl_sigv4_proxy_example.sh"
 
 # ── Configuration Defaults (functional — verifies actual values) ──────────────
 
-@test "default region is us-east-1" {
-    run bash -c 'REGION="us-east-1"; echo "$REGION"'
-    [ "$output" = "us-east-1" ]
-    grep -q 'REGION="us-east-1"' "$SCRIPT"
+@test "default API region comes from cdk context with us-east-2 fallback" {
+    grep -Fq "deployment_regions.api_gateway' 'us-east-2'" "$SCRIPT"
 }
 
-@test "default proxy port is 8080" {
-    run bash -c 'PROXY_PORT="8080"; echo "$PROXY_PORT"'
+@test "default proxy port is 8080 unless overridden" {
+    run bash -c 'unset PROXY_PORT; echo "${PROXY_PORT:-8080}"'
     [ "$output" = "8080" ]
-    grep -q 'PROXY_PORT="8080"' "$SCRIPT"
+    grep -Fq 'PROXY_PORT=${PROXY_PORT:-8080}' "$SCRIPT"
 }
 
-@test "stack name is constructed from region" {
-    run bash -c 'REGION="us-east-1"; STACK_NAME="gco-regional-${REGION}"; echo "$STACK_NAME"'
-    [ "$output" = "gco-regional-us-east-1" ]
+@test "stack name is constructed from project name" {
+    run bash -c 'PROJECT_NAME="gco"; STACK_NAME="${PROJECT_NAME}-api-gateway"; echo "$STACK_NAME"'
+    [ "$output" = "gco-api-gateway" ]
 }
 
-@test "stack name works for non-default regions" {
-    run bash -c 'REGION="eu-west-1"; STACK_NAME="gco-regional-${REGION}"; echo "$STACK_NAME"'
-    [ "$output" = "gco-regional-eu-west-1" ]
+@test "stack name supports non-default project names" {
+    run bash -c 'PROJECT_NAME="research"; STACK_NAME="${PROJECT_NAME}-api-gateway"; echo "$STACK_NAME"'
+    [ "$output" = "research-api-gateway" ]
 }
 
 # ── Proxy Lifecycle Management ───────────────────────────────────────────────
@@ -112,12 +110,13 @@ SCRIPT="docs/client-examples/curl_sigv4_proxy_example.sh"
     grep -q 'POST.*api/v1/manifests' "$SCRIPT"
 }
 
-@test "script sends GET to /api/v1/manifests" {
-    grep -q 'GET.*api/v1/manifests' "$SCRIPT"
+@test "script sends GET to the submitted Job status endpoint" {
+    grep -Fq '${LOCAL_API_BASE}/api/v1/jobs/gco-jobs/curl-example-job' "$SCRIPT"
 }
 
-@test "script sends DELETE to /api/v1/manifests" {
-    grep -q 'DELETE.*api/v1/manifests' "$SCRIPT"
+@test "script sends DELETE to the submitted Job endpoint" {
+    grep -Fq -- '-X DELETE' "$SCRIPT"
+    grep -Fq '${LOCAL_API_BASE}/api/v1/jobs/gco-jobs/curl-example-job' "$SCRIPT"
 }
 
 @test "all proxy requests include Host header" {
@@ -154,18 +153,18 @@ SCRIPT="docs/client-examples/curl_sigv4_proxy_example.sh"
 
 @test "script tests unauthenticated request and expects 403" {
     grep -q "403" "$SCRIPT"
-    grep -q "Authentication correctly required" "$SCRIPT"
+    grep -q "Unsigned request correctly rejected" "$SCRIPT"
 }
 
 @test "unauthenticated test hits the real API endpoint (not proxy)" {
     # The auth test should bypass the proxy to prove SigV4 is required
-    grep -q '${API_ENDPOINT}/api/v1/manifests' "$SCRIPT"
+    grep -Fq '${API_ENDPOINT}/api/v1/jobs?limit=1' "$SCRIPT"
 }
 
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 
 @test "temporary manifest file is cleaned up" {
-    grep -q "rm -f /tmp/manifest-payload.json" "$SCRIPT"
+    grep -Fq 'rm -f "$PAYLOAD_FILE"' "$SCRIPT"
 }
 
 @test "script includes at least 5 numbered examples" {

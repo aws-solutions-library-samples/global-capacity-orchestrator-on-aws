@@ -365,6 +365,37 @@ class GCORegionalApiGatewayStack(Stack):
                     ],
                 )
 
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        acknowledge_nag_findings(
+            api.deployment_stage,
+            [
+                {
+                    "id": "AwsSolutions-APIG3",
+                    "reason": (
+                        "This regional bridge is not a general public API: every method "
+                        "requires SigV4 and its resource policy admits only the exact "
+                        "aggregator role unless account-local direct access is explicitly "
+                        "enabled. A separate WAF would duplicate those identity controls."
+                    ),
+                },
+                {
+                    "id": "NIST.800.53.R5-APIGWAssociatedWithWAF",
+                    "reason": (
+                        "The IAM-authenticated regional bridge has an aggregator-only resource "
+                        "policy by default; unauthorized traffic is rejected before integration."
+                    ),
+                },
+                {
+                    "id": "PCI.DSS.321-APIGWAssociatedWithWAF",
+                    "reason": (
+                        "The IAM-authenticated regional bridge has an aggregator-only resource "
+                        "policy by default and carries no payment-card-specific public surface."
+                    ),
+                },
+            ],
+        )
+
         return api
 
     def _create_outputs(self) -> None:

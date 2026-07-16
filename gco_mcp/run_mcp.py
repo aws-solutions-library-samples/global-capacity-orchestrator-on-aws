@@ -53,7 +53,7 @@ if __name__ in {"gco_mcp.run_mcp", "__main__"}:
 # ``importlib.reload`` retains a module's globals. Record whether this is an
 # explicit same-process reload so compatibility rebinds do not re-register
 # every flagged tool during a normal, clean server startup.
-_IS_RELOAD = bool(globals().get("_RUN_MCP_IMPORT_COMPLETE", False))
+_IS_RELOAD = bool(getattr(_THIS_MODULE, "_RUN_MCP_IMPORT_COMPLETE", False))
 
 # Direct script execution starts with only gco_mcp/ on sys.path. Add each
 # required root at most once; package imports need no mutation.

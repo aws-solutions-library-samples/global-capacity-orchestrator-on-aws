@@ -551,8 +551,8 @@ def apply_manifests(
     custom_api = client.CustomObjectsApi()
 
     applied_count = 0
-    failed = []
-    skipped = []
+    failed: list[str] = []
+    skipped: list[str] = []
     pruned: list[str] = []
     prune_failures: list[str] = []
     reconciled_feature_gates: set[tuple[str, bool]] = set()

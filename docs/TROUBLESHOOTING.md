@@ -11,7 +11,7 @@ Common issues and their solutions.
   - [Stack Creation Fails](#stack-creation-fails)
   - [Deploy Fails on Image Mirror or linux/amd64 Asset Build (Apple Silicon)](#deploy-fails-on-image-mirror-or-linuxamd64-asset-build-apple-silicon)
   - [Stack Stuck in DELETE_FAILED](#stack-stuck-in-delete_failed)
-  - [Lambda Custom Resource Timeout](#lambda-custom-resource-timeout)
+  - [Lambda or State-Machine Custom Resource Timeout](#lambda-or-state-machine-custom-resource-timeout)
 - [kubectl Access Issues](#kubectl-access-issues)
   - [Unauthorized Error](#unauthorized-error)
   - [No cluster found Error](#no-cluster-found-error)
@@ -391,6 +391,7 @@ kubectl apply -f lambda/kubectl-applier-simple/manifests/01-serviceaccounts.yaml
 **Symptom**: Pods remain in `ContainerCreating` and never reach `Running`.
 
 **Causes**:
+
 - Image pull errors
 - Volume mount issues
 - Network plugin issues
