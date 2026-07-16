@@ -531,13 +531,12 @@ class TestAuthEnvelopePreservation:
             "gco.services.auth_middleware.get_valid_tokens",
             return_value={"valid-key"},
         ):
-            client = TestClient(app_with_middleware, raise_server_exceptions=True)
-            with pytest.raises(HTTPException) as exc_info:
-                client.post(
-                    "/api/v1/manifests",
-                    headers=_signed_headers("wrong-key", "POST", "/api/v1/manifests"),
-                )
-            assert exc_info.value.status_code == 403
+            client = TestClient(app_with_middleware, raise_server_exceptions=False)
+            response = client.post(
+                "/api/v1/manifests",
+                headers=_signed_headers("wrong-key", "POST", "/api/v1/manifests"),
+            )
+            assert response.status_code == 403
 
     def test_missing_signature_returns_403(self, app_with_middleware):
         """Requests without an envelope still get 403."""
@@ -545,10 +544,9 @@ class TestAuthEnvelopePreservation:
             "gco.services.auth_middleware.get_valid_tokens",
             return_value={"valid-key"},
         ):
-            client = TestClient(app_with_middleware, raise_server_exceptions=True)
-            with pytest.raises(HTTPException) as exc_info:
-                client.post("/api/v1/manifests")
-            assert exc_info.value.status_code == 403
+            client = TestClient(app_with_middleware, raise_server_exceptions=False)
+            response = client.post("/api/v1/manifests")
+            assert response.status_code == 403
 
     def test_healthz_bypasses_auth(self, app_with_middleware):
         """/healthz bypasses auth."""
