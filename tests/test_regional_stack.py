@@ -934,9 +934,16 @@ class TestRegionalStackSynthesis:
                 matching.append(statement)
 
         assert len(matching) == 1
-        assert matching[0]["Resource"] == (
-            "arn:aws:ssm:us-east-2:123456789012:parameter/gco-test/alb-hostname-us-east-1"
-        )
+        assert matching[0]["Resource"] == {
+            "Fn::Join": [
+                "",
+                [
+                    "arn:",
+                    {"Ref": "AWS::Partition"},
+                    ":ssm:us-east-2:123456789012:parameter/gco-test/alb-hostname-us-east-1",
+                ],
+            ]
+        }
         for statement in shared_statements:
             actions = statement.get("Action", [])
             if isinstance(actions, str):
