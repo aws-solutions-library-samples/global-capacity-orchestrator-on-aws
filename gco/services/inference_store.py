@@ -25,6 +25,14 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _validate_endpoint_spec(spec: dict[str, Any]) -> None:
+    """Reject endpoint shapes the reconciler cannot safely materialize."""
+    if not isinstance(spec, dict):
+        raise ValueError("Endpoint spec must be a mapping")
+    if "mooncake" in spec and "canary" in spec:
+        raise ValueError("Endpoint spec cannot combine 'mooncake' and 'canary' blocks")
+
+
 class InferenceEndpointStore:
     """DynamoDB store for inference endpoint desired state."""
 
@@ -46,6 +54,7 @@ class InferenceEndpointStore:
         created_by: str | None = None,
     ) -> dict[str, Any]:
         """Create a new inference endpoint entry."""
+        _validate_endpoint_spec(spec)
         now = _utc_now_iso()
         ingress_path = f"/inference/{endpoint_name}"
 
@@ -122,6 +131,7 @@ class InferenceEndpointStore:
 
     def update_spec(self, endpoint_name: str, spec: dict[str, Any]) -> dict[str, Any] | None:
         """Update the spec of an endpoint (triggers re-reconciliation)."""
+        _validate_endpoint_spec(spec)
         try:
             response = self._table.update_item(
                 Key={"endpoint_name": endpoint_name},

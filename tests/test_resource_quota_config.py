@@ -35,7 +35,10 @@ class TestResourceQuotaTemplateVars:
             "{{MP_MAX_GPU_PER_MANIFEST}}": "8",
             "{{MP_REQUIRE_ACCELERATOR_TOLERATION}}": "true",
             "{{MP_MAX_REQUEST_BODY_BYTES}}": "1048576",
-            "{{MP_ALLOWED_NAMESPACES}}": "default,gco-jobs",
+            "{{MP_ALLOWED_NAMESPACES}}": "gco-jobs",
+            "{{MP_ALLOWED_KINDS}}": (
+                "Job,CronJob,Deployment,StatefulSet,DaemonSet,Service,ConfigMap,Pod"
+            ),
             # Image registry allowlist — augmented with the project's own
             # ECR registry hostnames in regional_stack.py via
             # ``_augment_trusted_registries_with_project_ecr``. The test
@@ -64,6 +67,10 @@ class TestResourceQuotaTemplateVars:
         ).read_text()
 
         replacements = {
+            "{{QP_ALLOWED_NAMESPACES}}": "gco-jobs",
+            "{{QP_ALLOWED_KINDS}}": (
+                "Job,CronJob,Deployment,StatefulSet,DaemonSet,Service,ConfigMap,Pod"
+            ),
             "{{QP_MAX_CPU_PER_MANIFEST}}": "48",
             "{{QP_MAX_MEMORY_PER_MANIFEST}}": "128Gi",
             "{{QP_MAX_GPU_PER_MANIFEST}}": "4",
@@ -71,6 +78,10 @@ class TestResourceQuotaTemplateVars:
         for key, value in replacements.items():
             content = content.replace(key, value)
 
+        assert 'value: "gco-jobs"' in content
+        assert (
+            'value: "Job,CronJob,Deployment,StatefulSet,DaemonSet,Service,ConfigMap,Pod"' in content
+        )
         assert 'value: "48"' in content
         assert 'value: "128Gi"' in content
         assert 'value: "4"' in content
@@ -99,6 +110,10 @@ class TestManifestProcessorEnvVars:
         assert "MAX_GPU_PER_MANIFEST" in manifest_content
         assert "{{MP_MAX_GPU_PER_MANIFEST}}" in manifest_content
 
+    def test_has_shared_namespace_and_kind_policy_env(self, manifest_content):
+        assert 'value: "{{MP_ALLOWED_NAMESPACES}}"' in manifest_content
+        assert 'value: "{{MP_ALLOWED_KINDS}}"' in manifest_content
+
 
 class TestQueueProcessorEnvVars:
     """Verify the queue processor K8s manifest has resource quota env vars."""
@@ -119,6 +134,10 @@ class TestQueueProcessorEnvVars:
     def test_has_max_gpu_env(self, manifest_content):
         assert "MAX_GPU_PER_MANIFEST" in manifest_content
         assert "{{QP_MAX_GPU_PER_MANIFEST}}" in manifest_content
+
+    def test_has_shared_namespace_and_kind_policy_env(self, manifest_content):
+        assert 'value: "{{QP_ALLOWED_NAMESPACES}}"' in manifest_content
+        assert 'value: "{{QP_ALLOWED_KINDS}}"' in manifest_content
 
 
 class TestResourceQuotaErrorMessages:

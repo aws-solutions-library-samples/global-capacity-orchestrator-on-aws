@@ -75,7 +75,7 @@ def deploy_inference(
 
     Args:
         name: Endpoint name (e.g. my-llm).
-        image: Container image (e.g. vllm/vllm-openai:v0.22.0).
+        image: Container image (e.g. vllm/vllm-openai:v0.24.0).
         gpu_count: GPUs per replica.
         replicas: Number of replicas per region.
         port: Container port.
@@ -257,6 +257,50 @@ def set_mooncake_topology(name: str, prefill: int, decode: int) -> str:
     )
 
 
+@mcp.tool(tags={"low-risk", "inference"})
+@audit_logged
+def configure_mooncake_store(
+    endpoint_name: str,
+    cold_tier: bool | None = None,
+    offload: str | None = None,
+    global_segment_size: int | None = None,
+    local_buffer_size: int | None = None,
+    enabled: bool | None = None,
+) -> str:
+    """Update a Mooncake endpoint's shared KV-cache store configuration.
+
+    At least one optional setting must be supplied. Enabling the cold tier also
+    enables the shared store it extends; the CLI merges supplied fields onto
+    the endpoint's existing store block before reconciliation.
+
+    Args:
+        endpoint_name: Endpoint whose store configuration should change.
+        cold_tier: Enable or disable the asynchronous per-region S3 cold tier.
+        offload: Spill tier: ``cpu``, ``disk``, or ``none``.
+        global_segment_size: Global KV-cache segment size in bytes.
+        local_buffer_size: Local KV-cache buffer size in bytes.
+        enabled: Enable or disable the shared store itself.
+    """
+    if all(
+        value is None
+        for value in (cold_tier, offload, global_segment_size, local_buffer_size, enabled)
+    ):
+        raise ValueError("At least one Mooncake store setting must be supplied")
+
+    args = ["inference", "configure-store", endpoint_name]
+    if cold_tier is not None:
+        args.append("--cold-tier" if cold_tier else "--no-cold-tier")
+    if offload is not None:
+        args += ["--offload", offload]
+    if global_segment_size is not None:
+        args += ["--global-segment-size", str(global_segment_size)]
+    if local_buffer_size is not None:
+        args += ["--local-buffer-size", str(local_buffer_size)]
+    if enabled is not None:
+        args.append("--enable-store" if enabled else "--disable-store")
+    return cli_runner._run_cli(*args)
+
+
 @mcp.tool(tags={"safe", "inference"})
 @audit_logged
 def mooncake_topology_status(name: str) -> str:
@@ -371,7 +415,6 @@ def invoke_inference(
     prompt: str,
     max_tokens: int = 100,
     api_path: str | None = None,
-    stream: bool = False,
     region: str | None = None,
 ) -> str:
     """Send a prompt to an inference endpoint and return the generated text.
@@ -388,14 +431,14 @@ def invoke_inference(
         prompt: Text prompt to send to the model.
         max_tokens: Maximum tokens to generate (default: 100).
         api_path: Override the API sub-path (default: auto-detect from framework).
-        stream: Enable streaming for lower time-to-first-token (default: false).
         region: Target region for the request (default: nearest via Global Accelerator).
+
+    Responses are buffered because API Gateway and Lambda do not provide
+    end-to-end response streaming for this route.
     """
     args = ["inference", "invoke", name, "-p", prompt, "--max-tokens", str(max_tokens)]
     if api_path:
         args += ["--path", api_path]
-    if stream:
-        args.append("--stream")
     if region:
         args += ["-r", region]
     return cli_runner._run_cli(*args)
@@ -408,7 +451,6 @@ def chat_inference(
     messages: list[dict[str, str]],
     max_tokens: int = 256,
     temperature: float | None = None,
-    stream: bool = False,
     region: str | None = None,
 ) -> str:
     """Send a multi-turn chat conversation to an inference endpoint.
@@ -424,16 +466,16 @@ def chat_inference(
         messages: List of chat messages, e.g. [{"role": "user", "content": "Hello"}].
         max_tokens: Maximum tokens to generate (default: 256).
         temperature: Sampling temperature (optional, server default if omitted).
-        stream: Enable streaming for lower time-to-first-token (default: false).
         region: Target region for the request.
+
+    Responses are buffered because API Gateway and Lambda do not provide
+    end-to-end response streaming for this route.
     """
-    body: dict[str, Any] = {"messages": messages, "max_tokens": max_tokens, "stream": stream}
+    body: dict[str, Any] = {"messages": messages, "max_tokens": max_tokens}
     if temperature is not None:
         body["temperature"] = temperature
     data_str = json.dumps(body)
     args = ["inference", "invoke", name, "-d", data_str, "--path", "/v1/chat/completions"]
-    if stream:
-        args.append("--stream")
     if region:
         args += ["-r", region]
     return cli_runner._run_cli(*args)

@@ -147,9 +147,11 @@ jobs:
         # images switch to pip-tools-style pinning.
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD":/repo -w /repo \
+          # The image entrypoint is hadolint; override it so this shell loop
+          # executes instead of being parsed as hadolint file arguments.
+          docker run --rm --entrypoint bash -v "$PWD":/repo -w /repo \
             hadolint/hadolint:v2.14.0-debian \
-            bash -c '
+            -c '
               set -euo pipefail
               FOUND=0
               while IFS= read -r df; do
@@ -178,9 +180,11 @@ jobs:
         # -x follows source directives so sourced files are resolved.
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD":/repo -w /repo \
+          # The image entrypoint is shellcheck; override it so this shell loop
+          # executes instead of being parsed as shellcheck file arguments.
+          docker run --rm --entrypoint sh -v "$PWD":/repo -w /repo \
             koalaman/shellcheck-alpine:v0.11.0 \
-            sh -c '
+            -c '
               set -eu
               FOUND=0
               find . -name "*.sh" \
@@ -273,7 +277,7 @@ jobs:
         run: |
           set -uo pipefail
           FAILED=0
-          for d in lambda/alb-header-validator lambda/api-gateway-proxy \
+          for d in lambda/api-gateway-proxy \
                    lambda/cross-region-aggregator lambda/drift-detection \
                    lambda/ga-registration lambda/helm-installer \
                    lambda/kubectl-applier-simple lambda/proxy-shared \

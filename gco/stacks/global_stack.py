@@ -2,7 +2,7 @@
 Global stack for GCO (Global Capacity Orchestrator on AWS) - AWS Global Accelerator configuration.
 
 This stack creates the global-level resources that span all regions:
-- AWS Global Accelerator with TCP listeners on ports 80 and 443
+- AWS Global Accelerator with a TCP listener on port 443
 - Endpoint groups for each configured region
 - SSM parameters for cross-region endpoint group ARN sharing
 - DynamoDB tables for templates and webhooks (global, replicated)
@@ -14,7 +14,7 @@ The Global Accelerator provides:
 - Reduced latency through AWS global network
 
 Architecture:
-    Global Accelerator → Listener (80, 443) → Endpoint Groups (per region)
+    Global Accelerator → Listener (443) → Endpoint Groups (per region)
                                                     ↓
                                             Regional ALBs (registered separately)
 """
@@ -216,7 +216,9 @@ class GCOGlobalStack(Stack):
         if self.config.get_capacity_history_enabled():
             self._create_capacity_poller()
 
-        # Create Global Accelerator with TCP protocol for HTTP/HTTPS traffic
+        # Create Global Accelerator with a TCP listener that transparently
+        # carries authenticated TLS to each regional ALB. There is deliberately
+        # no port-80 listener, so the backend path cannot downgrade to plaintext.
         self.accelerator = ga.Accelerator(
             self, "GCOAccelerator", accelerator_name=self.accelerator_name, enabled=True
         )
@@ -227,15 +229,12 @@ class GCOGlobalStack(Stack):
         # Use Fn.select and Fn.split to extract the ID at deploy time
         self.accelerator_id = Fn.select(1, Fn.split("/", self.accelerator.accelerator_arn))
 
-        # Create listener for both HTTP (80) and HTTPS (443) traffic.
-        # Client affinity controls whether GA pins a client to the same
-        # endpoint across connections (see ``_resolve_client_affinity``).
+        # Global Accelerator is layer 4 here: TLS terminates only at the
+        # regional ALB. Client affinity controls whether GA pins a client to the
+        # same endpoint across connections (see ``_resolve_client_affinity``).
         self.listener = self.accelerator.add_listener(
             "GCOListener",
-            port_ranges=[
-                ga.PortRange(from_port=80, to_port=80),
-                ga.PortRange(from_port=443, to_port=443),
-            ],
+            port_ranges=[ga.PortRange(from_port=443, to_port=443)],
             protocol=ga.ConnectionProtocol.TCP,
             client_affinity=self._resolve_client_affinity(ga_config),
         )
@@ -541,9 +540,10 @@ class GCOGlobalStack(Stack):
         """
         Create an endpoint group for a specific region.
 
-        Configures HTTP health checks using the path from cdk.json so
-        Global Accelerator can verify the ALB's backend services are
-        actually healthy (not just that the port is open).
+        Configures an HTTPS/443 health-check contract matching the ALB's only
+        listener. Global Accelerator derives ALB endpoint health from the ALB
+        target groups, but keeping the endpoint-group settings aligned prevents
+        an accidental plaintext fallback if the endpoint type changes later.
 
         Also stores the endpoint group ARN in SSM Parameter Store for
         cross-region access by regional stacks.
@@ -555,15 +555,15 @@ class GCOGlobalStack(Stack):
         region_id = region.replace("-", "").title()
         ga_config = self.config.get_global_accelerator_config()
 
-        # Use HTTP health checks so GA validates the backend services are
-        # actually responding, not just that the ALB port is open.
-        # The health_check_path from cdk.json (default: /api/v1/health)
-        # hits the health-monitor service behind the ALB.
+        # Keep the endpoint-group contract aligned with the HTTPS-only ALB.
+        # For ALB endpoints GA uses target-group health rather than actively
+        # applying these probe settings, but 443/HTTPS remains the safe default
+        # if an endpoint type is changed in a future deployment.
         endpoint_group = self.listener.add_endpoint_group(
             f"EndpointGroup{region_id}",
             region=region,
-            health_check_port=80,
-            health_check_protocol=ga.HealthCheckProtocol.HTTP,
+            health_check_port=443,
+            health_check_protocol=ga.HealthCheckProtocol.HTTPS,
             health_check_path=ga_config.get("health_check_path", "/api/v1/health"),
             health_check_interval=Duration.seconds(ga_config.get("health_check_interval", 30)),
             health_check_threshold=3,
@@ -688,7 +688,8 @@ class GCOGlobalStack(Stack):
             time_to_live_attribute="ttl",  # Auto-cleanup old completed jobs
         )
 
-        # GSI for querying jobs by region and status (for regional polling)
+        # Legacy GSI retained for compatibility with existing deployments and
+        # ad-hoc operational queries.
         self.jobs_table.add_global_secondary_index(
             index_name="region-status-index",
             partition_key=dynamodb.Attribute(
@@ -697,6 +698,37 @@ class GCOGlobalStack(Stack):
             ),
             sort_key=dynamodb.Attribute(
                 name="status",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
+        # Worker-facing GSI. A composite partition isolates one lifecycle state
+        # in one region; the inverted, fixed-width priority sort key gives true
+        # highest-priority-first ordering with FIFO ties and paginates safely.
+        self.jobs_table.add_global_secondary_index(
+            index_name="region-status-priority-index",
+            partition_key=dynamodb.Attribute(
+                name="region_status",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="priority_sort",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
+        # Lease recovery must not be starved by unexpired high-priority claims.
+        # This sparse GSI contains only records that currently have a lease.
+        self.jobs_table.add_global_secondary_index(
+            index_name="region-status-lease-index",
+            partition_key=dynamodb.Attribute(
+                name="region_status",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="lease_expires_at",
                 type=dynamodb.AttributeType.STRING,
             ),
             projection_type=dynamodb.ProjectionType.ALL,

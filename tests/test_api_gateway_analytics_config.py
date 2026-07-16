@@ -150,9 +150,9 @@ class TestAnalyticsApiConfigAbsent:
         to ``NONE``/``COGNITO``.
         """
         methods = absent_template.find_resources("AWS::ApiGateway::Method")
-        # At minimum, the stack ships /api/v1/{proxy+} methods and
-        # /inference/{proxy+} methods — five HTTP verbs each plus the
-        # /global/* aggregation endpoints. All of these are IAM.
+        # At minimum, the stack ships five /api/v1/{proxy+} methods,
+        # three /inference/{proxy+} serving methods, and the /global/*
+        # aggregation endpoints. All of these are IAM-authorized.
         auth_types = {props["Properties"].get("AuthorizationType") for props in methods.values()}
         # Only ``AWS_IAM`` should appear (OPTIONS preflight methods are
         # not added by this stack). Assert via set membership so future

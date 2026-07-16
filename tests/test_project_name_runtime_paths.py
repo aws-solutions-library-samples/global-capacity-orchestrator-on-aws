@@ -15,7 +15,9 @@ inference monitor — that the two stay in lockstep. They run in the normal
 Covered runtime writers/readers:
   * ``gco.services.inference_monitor`` — regional-shared-bucket discovery prefix.
   * ``lambda/ga-registration`` — writes/deletes ``/<project>/alb-hostname-<region>``.
-  * ``lambda/cross-region-aggregator`` — scans ``/<project>/`` for ALB hostnames.
+  * ``lambda/cross-region-aggregator`` — discovers deterministic
+    ``<project>-regional-api-<region>`` stacks and their
+    ``RegionalApiEndpoint`` CloudFormation outputs.
   * ``lambda/kubectl-applier-simple`` + ``lambda/helm-installer`` — write
     ``/<project>/addons/<region>/<phase|chart>`` add-on status.
 
@@ -94,36 +96,77 @@ class TestGaRegistrationAlbHostnamePath:
         )
 
 
-class TestAggregatorDiscoveryPath:
-    """The cross-region aggregator discovers ALB hostnames by scanning the
-    project-scoped ``/<project>/`` SSM path in the global region."""
+class TestAggregatorDiscoveryStackName:
+    """The aggregator scopes deterministic regional API stack discovery to
+    ``PROJECT_NAME`` and consumes only the expected CloudFormation output."""
 
     @pytest.mark.parametrize("project", _PROJECTS)
-    def test_discovery_scans_project_scoped_path(self, project: str) -> None:
+    def test_discovery_uses_project_scoped_stack_name(self, project: str) -> None:
         handler = load_lambda_module("cross-region-aggregator")
-        handler._cached_endpoints = None  # bypass the module TTL cache
-        mock_ssm = MagicMock()
-        mock_paginator = MagicMock()
-        mock_paginator.paginate.return_value = []
-        mock_ssm.get_paginator.return_value = mock_paginator
+        handler._cached_endpoints = None
+        handler._endpoints_cache_time = 0
+        mock_cloudformation = MagicMock()
+        mock_cloudformation.describe_stacks.return_value = {
+            "Stacks": [
+                {
+                    "Outputs": [
+                        {
+                            "OutputKey": "RegionalApiEndpoint",
+                            "OutputValue": (
+                                "https://abc123.execute-api.us-east-1.amazonaws.com/prod/"
+                            ),
+                        }
+                    ]
+                }
+            ]
+        }
         with (
-            patch.dict(os.environ, {"PROJECT_NAME": project, "GLOBAL_REGION": "us-east-2"}),
-            patch("boto3.client", return_value=mock_ssm),
+            patch.dict(
+                os.environ,
+                {
+                    "PROJECT_NAME": project,
+                    "TARGET_REGIONS": '["us-east-1"]',
+                },
+            ),
+            patch("boto3.client", return_value=mock_cloudformation) as mock_client,
         ):
-            handler.get_regional_endpoints()
-        assert mock_paginator.paginate.call_args.kwargs["Path"] == f"/{project}/"
+            endpoints = handler.get_regional_endpoints()
+
+        mock_client.assert_called_once_with("cloudformation", region_name="us-east-1")
+        mock_cloudformation.describe_stacks.assert_called_once_with(
+            StackName=f"{project}-regional-api-us-east-1"
+        )
+        assert endpoints == {"us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"}
 
     def test_discovery_defaults_to_gco(self) -> None:
         handler = load_lambda_module("cross-region-aggregator")
         handler._cached_endpoints = None
-        mock_ssm = MagicMock()
-        mock_paginator = MagicMock()
-        mock_paginator.paginate.return_value = []
-        mock_ssm.get_paginator.return_value = mock_paginator
-        with patch.dict(os.environ), patch("boto3.client", return_value=mock_ssm):
-            os.environ.pop("PROJECT_NAME", None)
-            handler.get_regional_endpoints()
-        assert mock_paginator.paginate.call_args.kwargs["Path"] == "/gco/"
+        handler._endpoints_cache_time = 0
+        mock_cloudformation = MagicMock()
+        mock_cloudformation.describe_stacks.return_value = {
+            "Stacks": [
+                {
+                    "Outputs": [
+                        {
+                            "OutputKey": "RegionalApiEndpoint",
+                            "OutputValue": (
+                                "https://abc123.execute-api.us-west-2.amazonaws.com/prod"
+                            ),
+                        }
+                    ]
+                }
+            ]
+        }
+        with (
+            patch.dict(os.environ, {"TARGET_REGIONS": '["us-west-2"]'}, clear=True),
+            patch("boto3.client", return_value=mock_cloudformation),
+        ):
+            endpoints = handler.get_regional_endpoints()
+
+        mock_cloudformation.describe_stacks.assert_called_once_with(
+            StackName="gco-regional-api-us-west-2"
+        )
+        assert endpoints == {"us-west-2": "https://abc123.execute-api.us-west-2.amazonaws.com/prod"}
 
 
 class TestAddonStatusPaths:

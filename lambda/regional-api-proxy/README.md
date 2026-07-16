@@ -1,53 +1,90 @@
 # Regional API Proxy
 
-Proxies authenticated requests from the regional API Gateway directly to the internal ALB via VPC networking. Used when public access is disabled and the ALB is internal-only.
+Proxies IAM-authenticated requests from each always-deployed regional API bridge to the regional internal ALB through a Lambda function in the workload VPC. The centralized aggregator always uses this path. Same-account callers may also use it as a direct, region-pinned alternative when `api_gateway.regional_api_enabled=true`.
 
 ## Table of Contents
 
 - [Trigger](#trigger)
 - [How It Works](#how-it-works)
+- [Backend Discovery and Verification](#backend-discovery-and-verification)
 - [Environment Variables](#environment-variables)
+- [Failure Behavior](#failure-behavior)
 - [IAM Permissions](#iam-permissions)
 - [Dependencies](#dependencies)
 
 ## Trigger
 
-Regional API Gateway (proxy integration) — all routes are forwarded through this Lambda.
+Regional API Gateway proxy integration. The stack exposes `/api/v1/{proxy+}` and `/inference/{proxy+}` routes and requires IAM authorization (SigV4) on each method.
 
 ## How It Works
 
-1. Regional API Gateway validates the caller's IAM credentials (SigV4)
-2. This Lambda (running inside the VPC) retrieves the auth token from Secrets Manager (cached with 5-min TTL)
-3. Adds `X-GCO-Auth-Token` header to the request
-4. Strips hop-by-hop and forwarding headers (`Host`, `X-Forwarded-*`)
-5. Forwards the request to the internal ALB over HTTP (TLS not needed inside VPC)
-6. Returns the upstream response to the caller
+1. Regional API Gateway validates the caller's IAM credentials.
+2. The Lambda retrieves the HMAC signing key from Secrets Manager through a bounded TTL/stale cache.
+3. It resolves and verifies the current regional platform ALB.
+4. It allowlists supported end-to-end request headers, then signs the version, timestamp, random nonce, method, exact path/query, and body digest.
+5. It reads the public root bundle, sends/asserts
+   `backend.<project>.gco.internal`, and forwards to the internal ALB over
+   private-root HTTPS/443.
+6. The ALB terminates TLS and forwards HTTP to the Kubernetes target.
+7. Backend middleware validates freshness, integrity, and process-local nonce replay before serving the request.
+8. The Lambda returns the buffered upstream response to the caller.
 
-Includes retry logic with exponential backoff for transient failures (502/503/504/429).
+Only safe read-only methods (`GET`, `HEAD`, and `OPTIONS`) use bounded exponential backoff for 429/502/503/504 responses or transport timeouts. Mutating methods are attempted once so the proxy cannot duplicate a successful write whose response was lost.
 
-## Input
+## Backend Discovery and Verification
 
-API Gateway proxy event (httpMethod, path, queryStringParameters, headers, body).
+Production wiring omits `ALB_ENDPOINT`. At request time the Lambda reads `/<project>/alb-hostname-<target-region>` from SSM in `REGISTRY_REGION`, validates that the value is an ELB DNS name, and verifies with Elastic Load Balancing APIs that it is:
 
-## Output
+- an internal application load balancer;
+- owned by `AWS_ACCOUNT_ID` in `TARGET_REGION`;
+- tagged for the exact `<project>-<region>` EKS cluster; and
+- tagged for the GCO platform Ingress.
 
-API Gateway proxy response (statusCode, headers, body).
+Verified endpoints are cached for 60 seconds by default. `REGIONAL_ENDPOINT_CACHE_TTL_SECONDS=0` disables the cache; accepted values are 0–300 seconds. Resolution or ownership failures are never cached.
+
+`ALB_ENDPOINT` is an optional compatibility override for isolated stack synthesis or controlled tests. When supplied, the Lambda validates its ELB DNS shape but intentionally skips SSM lookup and ELB ownership/tag verification. Production deployments should use the registry path.
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ALB_ENDPOINT` | Yes | DNS name of the internal ALB |
-| `SECRET_ARN` | Yes | ARN of the Secrets Manager secret |
-| `PROXY_MAX_RETRIES` | No | Max retry attempts (default: 3) |
-| `PROXY_RETRY_BACKOFF_BASE` | No | Base backoff in seconds (default: 0.3) |
-| `SECRET_CACHE_TTL_SECONDS` | No | Secret cache TTL in seconds (default: 300) |
+| `SECRET_ARN` | Yes | Secrets Manager ARN containing the backend HMAC signing key |
+| `REGISTRY_REGION` | Registry mode | AWS Region containing the project ALB-hostname SSM registry |
+| `TARGET_REGION` | Registry mode | Workload Region served by this regional API |
+| `PROJECT_NAME` | Registry mode | Deployment prefix used in the SSM path, EKS cluster name, and ownership checks |
+| `AWS_ACCOUNT_ID` | Registry mode | AWS account that must own the resolved ALB |
+| `ALB_ENDPOINT` | No | Literal ELB DNS override for compatibility/isolated use; bypasses registry ownership checks |
+| `REGIONAL_ENDPOINT_CACHE_TTL_SECONDS` | No | Verified endpoint cache TTL, 0–300 seconds (default: 60; `0` disables caching) |
+| `PROXY_MAX_RETRIES` | No | Maximum attempts for safe read-only methods (default: 3) |
+| `PROXY_RETRY_BACKOFF_BASE` | No | Base retry backoff in seconds (default: 0.3) |
+| `SECRET_CACHE_TTL_SECONDS` | No | Normal signing-key cache TTL in seconds (default: 300) |
+| `SECRET_CACHE_MAX_STALE_SECONDS` | No | Maximum bounded stale-key age during refresh failures (default: 900) |
+| `SECRET_CACHE_RETRY_SECONDS` | No | Minimum delay between failed secret-refresh attempts (default: 5) |
+| `BACKEND_TLS_SERVER_NAME` | Yes | Stable private certificate identity sent through SNI and asserted during verification |
+| `BACKEND_TLS_ROOT_CA_PARAMETER` | Yes | SSM parameter containing public CA roots only |
+| `BACKEND_TLS_ROOT_CA_REGION` | Yes | Region containing the public trust parameter |
+| `BACKEND_TLS_CA_CACHE_TTL_SECONDS` | No | Normal public-trust refresh interval |
+| `BACKEND_TLS_CA_MAX_STALE_SECONDS` | No | Maximum bounded stale-trust interval |
+
+“Registry mode” variables are required when `ALB_ENDPOINT` is absent, which is the normal application wiring.
+
+## Failure Behavior
+
+- Signing-key retrieval failure returns `503 Backend authentication is temporarily unavailable`.
+- Registry lookup, malformed endpoint, ELB API, or ownership verification failure returns `502 Regional backend is temporarily unavailable`.
+- Base64-encoded request bodies return `415`; the proxy does not reinterpret binary payloads.
+- Upstream status codes and bounded transport failures are returned by the shared forwarding utility.
 
 ## IAM Permissions
 
-- `secretsmanager:GetSecretValue` on the secret ARN
-- VPC access (ENI creation) for reaching the internal ALB
+The regional proxy role needs:
+
+- `secretsmanager:GetSecretValue` and `secretsmanager:DescribeSecret` on the signing secret;
+- `ssm:GetParameter` on the exact `/<project>/alb-hostname-<region>` endpoint parameter and public backend-root trust parameter;
+- `elasticloadbalancing:DescribeLoadBalancers` and `elasticloadbalancing:DescribeTags` for ownership verification (these Describe APIs do not support resource-level scoping); and
+- Lambda VPC ENI permissions through `AWSLambdaVPCAccessExecutionRole` so it can reach the internal ALB.
 
 ## Dependencies
 
-- `proxy_utils.py` — shared secret caching and HTTP forwarding utilities (copied from `proxy-shared/`)
+- `proxy_utils.py` — shared secret caching, request signing, header sanitization, URL construction, retry, and HTTPS forwarding utilities copied from `lambda/proxy-shared/`
+- `backend_tls.py` — strict public-trust loading, TLS 1.2+, SNI, and hostname verification copied from `lambda/tls-shared/`

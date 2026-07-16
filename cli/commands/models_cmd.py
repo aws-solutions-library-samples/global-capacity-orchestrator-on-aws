@@ -148,7 +148,11 @@ def models_list(config: Any) -> None:
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 @pass_config
 def models_delete(config: Any, model_name: Any, yes: Any) -> None:
-    """Delete a model from the central S3 bucket.
+    """Permanently delete a model and all object history from the central S3 bucket.
+
+    Every current object, historical version, and delete marker beneath the
+    model prefix is removed. Successful batches cannot be restored if a later
+    batch fails.
 
     Examples:
         gco models delete llama3-8b -y
@@ -158,7 +162,11 @@ def models_delete(config: Any, model_name: Any, yes: Any) -> None:
     formatter = get_output_formatter(config)
 
     if not yes:
-        click.confirm(f"Delete model '{model_name}' and all its files?", abort=True)
+        click.confirm(
+            f"Permanently delete model '{model_name}', including all current files "
+            "and historical S3 versions? This cannot be undone.",
+            abort=True,
+        )
 
     try:
         manager = get_model_manager(config)

@@ -10,34 +10,62 @@ runs end-to-end against TestClient traffic — same code path as
 production, no get_valid_tokens mocking.
 """
 
+import hashlib
+import hmac
+import secrets
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# Auth token used by all tests in this module. The autouse fixture seeds
-# the auth middleware's token cache so the real middleware validation runs.
-_TEST_AUTH_TOKEN = "test-manifest-api-token"  # nosec B105 - test fixture token, not a real credential
-_AUTH_HEADERS = {"x-gco-auth-token": _TEST_AUTH_TOKEN}
+_TEST_SIGNING_KEY = "test-manifest-api-signing-key"  # nosec B105 - test-only key
+
+
+def _sign_request(request) -> None:
+    """Attach a unique HMAC envelope after TestClient serializes the request."""
+    timestamp = str(int(time.time()))
+    nonce = secrets.token_hex(16)
+    raw_target = request.url.raw_path
+    target = raw_target.decode("ascii") if isinstance(raw_target, bytes) else str(raw_target)
+    body = bytes(request.content)
+    content_hash = hashlib.sha256(body).hexdigest()
+    canonical = "\n".join(["v1", timestamp, nonce, request.method.upper(), target, content_hash])
+    signature = hmac.new(_TEST_SIGNING_KEY.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+    request.headers.update(
+        {
+            "x-gco-signature-version": "v1",
+            "x-gco-signature": signature,
+            "x-gco-timestamp": timestamp,
+            "x-gco-nonce": nonce,
+            "x-gco-content-sha256": content_hash,
+        }
+    )
 
 
 @pytest.fixture(autouse=True)
-def _seed_auth_cache():
-    """Seed the auth middleware token cache with a known token.
+def _seed_auth_cache(monkeypatch):
+    """Seed a fresh signing key and sign every serialized TestClient request."""
+    from fastapi.testclient import TestClient
 
-    This lets the real middleware code run (no mocking of get_valid_tokens)
-    while giving tests a token they can send in headers. The middleware
-    validates the header against the cache — same code path as production.
-    """
     import gco.services.auth_middleware as auth_module
 
-    original_tokens = auth_module._cached_tokens
-    original_timestamp = auth_module._cache_timestamp
-    auth_module._cached_tokens = {_TEST_AUTH_TOKEN}
-    auth_module._cache_timestamp = time.time()
+    original_send = TestClient.send
+
+    def send_with_signature(client, request, *args, **kwargs):
+        _sign_request(request)
+        return original_send(client, request, *args, **kwargs)
+
+    auth_module.clear_token_cache()
+    now = time.monotonic()
+    auth_module._cached_tokens = {_TEST_SIGNING_KEY}
+    auth_module._cache_timestamp = now
+    auth_module._last_successful_refresh = now
+    auth_module._last_refresh_attempt = now
+    auth_module._secrets_client = None
+    monkeypatch.setattr(TestClient, "send", send_with_signature)
     yield
-    auth_module._cached_tokens = original_tokens
-    auth_module._cache_timestamp = original_timestamp
+    auth_module.clear_token_cache()
+    auth_module._secrets_client = None
 
 
 class TestManifestAPIModels:
@@ -126,7 +154,7 @@ class TestManifestAPIBasicEndpoints:
             from gco.services.manifest_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get("/", headers={"x-gco-auth-token": _TEST_AUTH_TOKEN})
+                response = client.get("/", headers={})
                 assert response.status_code == 200
                 data = response.json()
                 assert data["service"] == "GCO Manifest Processor API"
@@ -173,9 +201,7 @@ class TestManifestAPIBasicEndpoints:
             from gco.services.manifest_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get(
-                    "/api/v1/status", headers={"x-gco-auth-token": _TEST_AUTH_TOKEN}
-                )
+                response = client.get("/api/v1/status", headers={})
                 assert response.status_code == 200
                 data = response.json()
                 assert data["service"] == "GCO Manifest Processor API"
@@ -199,7 +225,7 @@ class TestSubmitManifestsEndpoint:
                 response = client.post(
                     "/api/v1/manifests",
                     json={"manifests": [{"apiVersion": "v1", "kind": "ConfigMap"}]},
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 # Returns 200 on success, 400 on validation error, 500/503 on error
                 assert response.status_code in [200, 400, 500, 503]
@@ -221,7 +247,7 @@ class TestSubmitManifestsEndpoint:
                 response = client.post(
                     "/api/v1/manifests",
                     json={"manifests": []},
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 assert response.status_code == 400, (
                     f"empty manifests should return 400, got {response.status_code} "
@@ -234,8 +260,13 @@ class TestValidateManifestsEndpoint:
     """Tests for POST /api/v1/manifests/validate endpoint."""
 
     def test_validate_manifests(self, mock_manifest_processor):
-        """Test manifest validation endpoint."""
+        """Request namespace is forwarded to validation and reported consistently."""
         mock_manifest_processor.validate_manifest = MagicMock(return_value=(True, None))
+        manifest = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "test-config"},
+        }
         with patch(
             "gco.services.manifest_api.create_manifest_processor_from_env",
             return_value=mock_manifest_processor,
@@ -247,11 +278,13 @@ class TestValidateManifestsEndpoint:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.post(
                     "/api/v1/manifests/validate",
-                    json={"manifests": [{"apiVersion": "v1", "kind": "ConfigMap"}]},
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    json={"manifests": [manifest], "namespace": "team-a"},
+                    headers={},
                 )
-                # Returns 200 on success, 500/503 on error
-                assert response.status_code in [200, 500, 503]
+
+        assert response.status_code == 200
+        mock_manifest_processor.validate_manifest.assert_called_once_with(manifest, "team-a")
+        assert response.json()["results"][0]["namespace"] == "team-a"
 
 
 class TestDeleteResourceEndpoint:
@@ -281,7 +314,7 @@ class TestDeleteResourceEndpoint:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.delete(
                     "/api/v1/manifests/default/test-app",
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 # Returns 200 on success, 400/404 on error, 500/503 on server error
                 assert response.status_code in [200, 400, 404, 500, 503]
@@ -307,7 +340,7 @@ class TestGetResourceEndpoint:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(
                     "/api/v1/manifests/default/test-app",
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 # Returns 200 if found, 404 if not found, 500/503 on error
                 assert response.status_code in [200, 404, 500, 503]
@@ -378,7 +411,7 @@ class TestManifestAPIWithMockedProcessor:
                             }
                         ]
                     },
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 # Should return some response (success or error)
                 assert response.status_code in [200, 400, 500, 503]
@@ -412,7 +445,7 @@ class TestValidateManifestsWithMockedProcessor:
                             }
                         ]
                     },
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 # Should return some response
                 assert response.status_code in [200, 500, 503]
@@ -445,7 +478,7 @@ class TestDeleteResourceWithMockedProcessor:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.delete(
                     "/api/v1/manifests/default/test-app",
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 # Should return some response
                 assert response.status_code in [200, 400, 404, 500, 503]
@@ -471,7 +504,7 @@ class TestGetResourceWithMockedProcessor:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(
                     "/api/v1/manifests/default/test-app",
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 # Should return some response
                 assert response.status_code in [200, 404, 500, 503]
@@ -512,7 +545,7 @@ class TestRootEndpointDetails:
             from gco.services.manifest_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get("/", headers={"x-gco-auth-token": _TEST_AUTH_TOKEN})
+                response = client.get("/", headers={})
                 assert response.status_code == 200
                 data = response.json()
                 assert data["service"] == "GCO Manifest Processor API"
@@ -533,9 +566,7 @@ class TestStatusEndpointWithProcessor:
             from gco.services.manifest_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get(
-                    "/api/v1/status", headers={"x-gco-auth-token": _TEST_AUTH_TOKEN}
-                )
+                response = client.get("/api/v1/status", headers={})
                 assert response.status_code == 200
                 data = response.json()
                 assert data["service"] == "GCO Manifest Processor API"
@@ -579,9 +610,7 @@ class TestListJobsEndpoint:
             from gco.services.manifest_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get(
-                    "/api/v1/jobs", headers={"x-gco-auth-token": _TEST_AUTH_TOKEN}
-                )
+                response = client.get("/api/v1/jobs", headers={})
                 assert response.status_code == 200
                 data = response.json()
                 assert "jobs" in data
@@ -600,9 +629,7 @@ class TestListJobsEndpoint:
             from gco.services.manifest_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get(
-                    "/api/v1/jobs?namespace=default", headers={"x-gco-auth-token": _TEST_AUTH_TOKEN}
-                )
+                response = client.get("/api/v1/jobs?namespace=default", headers={})
                 assert response.status_code == 200
                 mock_manifest_processor.list_jobs.assert_called_with(
                     namespace="default", status_filter=None
@@ -621,9 +648,7 @@ class TestListJobsEndpoint:
             from gco.services.manifest_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get(
-                    "/api/v1/jobs?status=running", headers={"x-gco-auth-token": _TEST_AUTH_TOKEN}
-                )
+                response = client.get("/api/v1/jobs?status=running", headers={})
                 assert response.status_code == 200
                 mock_manifest_processor.list_jobs.assert_called_with(
                     namespace=None, status_filter="running"
@@ -646,7 +671,7 @@ class TestListJobsEndpoint:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(
                     "/api/v1/jobs?namespace=kube-system",
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 assert response.status_code == 400
 
@@ -663,9 +688,7 @@ class TestListJobsEndpoint:
             from gco.services.manifest_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get(
-                    "/api/v1/jobs", headers={"x-gco-auth-token": _TEST_AUTH_TOKEN}
-                )
+                response = client.get("/api/v1/jobs", headers={})
                 assert response.status_code == 500
 
     def test_app_has_jobs_route(self):
@@ -717,9 +740,7 @@ class TestGetJobEndpoint:
             from gco.services.manifest_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get(
-                    "/api/v1/jobs/default/test-job", headers={"x-gco-auth-token": _TEST_AUTH_TOKEN}
-                )
+                response = client.get("/api/v1/jobs/default/test-job", headers={})
                 assert response.status_code == 200
                 data = response.json()
                 assert data["cluster_id"] == "test-cluster"
@@ -743,7 +764,7 @@ class TestGetJobEndpoint:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(
                     "/api/v1/jobs/default/nonexistent-job",
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 assert response.status_code == 404
 
@@ -762,7 +783,7 @@ class TestGetJobEndpoint:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(
                     "/api/v1/jobs/kube-system/test-job",
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 assert response.status_code == 403
 
@@ -782,9 +803,7 @@ class TestGetJobEndpoint:
             from gco.services.manifest_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get(
-                    "/api/v1/jobs/default/test-job", headers={"x-gco-auth-token": _TEST_AUTH_TOKEN}
-                )
+                response = client.get("/api/v1/jobs/default/test-job", headers={})
                 assert response.status_code == 500
 
 
@@ -814,7 +833,7 @@ class TestGetJobLogsEndpoint:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(
                     "/api/v1/jobs/default/test-job/logs",
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 assert response.status_code == 200
                 data = response.json()
@@ -847,7 +866,7 @@ class TestGetJobLogsEndpoint:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(
                     "/api/v1/jobs/default/test-job/logs?tail=50",
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 assert response.status_code == 200
                 # Verify the call was made with expected parameters
@@ -876,7 +895,7 @@ class TestGetJobLogsEndpoint:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(
                     "/api/v1/jobs/default/test-job/logs",
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 assert response.status_code == 404
 
@@ -895,7 +914,7 @@ class TestGetJobLogsEndpoint:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(
                     "/api/v1/jobs/kube-system/test-job/logs",
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 assert response.status_code == 403
 
@@ -916,7 +935,7 @@ class TestGetJobLogsEndpoint:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(
                     "/api/v1/jobs/default/test-job/logs",
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 assert response.status_code == 500
 
@@ -938,9 +957,7 @@ class TestDeleteJobEndpoint:
             from gco.services.manifest_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.delete(
-                    "/api/v1/jobs/default/test-job", headers={"x-gco-auth-token": _TEST_AUTH_TOKEN}
-                )
+                response = client.delete("/api/v1/jobs/default/test-job", headers={})
                 assert response.status_code == 200
                 data = response.json()
                 assert data["status"] == "deleted"
@@ -964,7 +981,7 @@ class TestDeleteJobEndpoint:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.delete(
                     "/api/v1/jobs/default/nonexistent-job",
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 assert response.status_code == 404
 
@@ -983,7 +1000,7 @@ class TestDeleteJobEndpoint:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.delete(
                     "/api/v1/jobs/kube-system/test-job",
-                    headers={"x-gco-auth-token": _TEST_AUTH_TOKEN},
+                    headers={},
                 )
                 assert response.status_code == 403
 
@@ -1003,9 +1020,7 @@ class TestDeleteJobEndpoint:
             from gco.services.manifest_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.delete(
-                    "/api/v1/jobs/default/test-job", headers={"x-gco-auth-token": _TEST_AUTH_TOKEN}
-                )
+                response = client.delete("/api/v1/jobs/default/test-job", headers={})
                 assert response.status_code == 500
 
 

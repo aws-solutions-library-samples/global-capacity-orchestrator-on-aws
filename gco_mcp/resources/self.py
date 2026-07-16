@@ -54,9 +54,11 @@ from feature_flags import (
     FLAG_IMAGE_PUBLISH,
     FLAG_INFRASTRUCTURE_DEPLOY,
     FLAG_INFRASTRUCTURE_DESTROY,
+    FLAG_LOCAL_METRICS,
     FLAG_LOCAL_STORAGE_SYNC,
     FLAG_MISSION,
     FLAG_MODEL_UPLOAD,
+    FLAG_SEMANTIC_PROGRESS,
 )
 
 # Import the live FastMCP instance so the resource handlers can hit
@@ -72,14 +74,18 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # ---------------------------------------------------------------------------
 
 _TOOL_GATING_TABLE: dict[str, str] = {
-    # gco_mcp/tools/capacity.py — module-level gate for purchase tools
+    # gco_mcp/tools/capacity.py — purchase + destructive tools
     "reserve_capacity": FLAG_CAPACITY_PURCHASE,
-    # gco_mcp/tools/models.py — model upload + destructive
+    "create_reservation": FLAG_CAPACITY_PURCHASE,
+    "cancel_reservation": FLAG_DESTRUCTIVE_OPERATIONS,
+    # gco_mcp/tools/models.py / storage.py — local model-data upload + deletion
     "models_upload": FLAG_MODEL_UPLOAD,
+    "upload_to_regional_bucket": FLAG_MODEL_UPLOAD,
     "delete_model": FLAG_DESTRUCTIVE_OPERATIONS,
     # gco_mcp/tools/images.py — image-publish + destructive
     "images_build": FLAG_IMAGE_PUBLISH,
     "images_push": FLAG_IMAGE_PUBLISH,
+    "images_mirror": FLAG_IMAGE_PUBLISH,
     "images_delete_tag": FLAG_DESTRUCTIVE_OPERATIONS,
     "images_delete_repo": FLAG_DESTRUCTIVE_OPERATIONS,
     "images_cleanup": FLAG_DESTRUCTIVE_OPERATIONS,
@@ -88,8 +94,22 @@ _TOOL_GATING_TABLE: dict[str, str] = {
     "deploy_stack": FLAG_INFRASTRUCTURE_DEPLOY,
     "deploy_all": FLAG_INFRASTRUCTURE_DEPLOY,
     "bootstrap_cdk": FLAG_INFRASTRUCTURE_DEPLOY,
+    "addons_install": FLAG_INFRASTRUCTURE_DEPLOY,
     "destroy_stack": FLAG_INFRASTRUCTURE_DESTROY,
     "destroy_all": FLAG_INFRASTRUCTURE_DESTROY,
+    # Other destructive module-level gates
+    "delete_job": FLAG_DESTRUCTIVE_OPERATIONS,
+    "delete_inference": FLAG_DESTRUCTIVE_OPERATIONS,
+    "delete_template": FLAG_DESTRUCTIVE_OPERATIONS,
+    "delete_webhook": FLAG_DESTRUCTIVE_OPERATIONS,
+    "delete_nodepool": FLAG_DESTRUCTIVE_OPERATIONS,
+    "analytics_user_remove": FLAG_DESTRUCTIVE_OPERATIONS,
+    "monitoring_user_remove": FLAG_DESTRUCTIVE_OPERATIONS,
+    "cancel_queue_job": FLAG_DESTRUCTIVE_OPERATIONS,
+    "task_prune": FLAG_DESTRUCTIVE_OPERATIONS,
+    # Local filesystem and model-scoring readers
+    "metrics_from_local_file": FLAG_LOCAL_METRICS,
+    "metrics_semantic_progress": FLAG_SEMANTIC_PROGRESS,
     # gco_mcp/tools/storage.py — local filesystem transfer
     "sync_storage_bucket": FLAG_LOCAL_STORAGE_SYNC,
     # gco_mcp/tools/mission.py — module-level gate

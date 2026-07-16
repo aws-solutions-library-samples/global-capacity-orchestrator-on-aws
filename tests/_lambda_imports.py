@@ -28,8 +28,8 @@ collide with anything and immune to the order tests run in.
 
 Each call performs a fresh module load. This matches the semantics of
 the ``sys.modules.pop('handler') + import handler`` pattern that
-several fixtures rely on: some Lambda handlers (e.g.
-``alb-header-validator/handler.py``) do
+several fixtures rely on: handlers such as
+``secret-rotation/handler.py`` create
 ``boto3.client("secretsmanager")`` at module import time, and fixtures
 that wrap the load in ``patch("boto3.client")`` expect the mock to
 be applied on every fixture invocation. Caching the module object

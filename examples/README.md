@@ -353,18 +353,20 @@ gco jobs logs inferentia-test -r us-east-1
 
 **File:** `keda-scaled-job.yaml`
 
-A custom SQS-triggered ScaledJob using KEDA. Scales job replicas based on SQS queue depth. Note: GCO ships with a built-in SQS consumer — use this example as a starting point for custom SQS-triggered workloads.
+A safe, non-consuming SQS scaling demonstration using KEDA. It scales credentialless observer Jobs from a **disposable demo queue's** depth, but the Jobs never call `ReceiveMessage` or `DeleteMessage`. GCO ships a separate built-in consumer for real manifest submissions.
 
 **Usage:**
 
 ```bash
-# Edit the manifest to set your JOB_QUEUE_URL and REGION, then:
+# Replace the explicit disposable demo queue URL/region, then:
 kubectl apply -f examples/keda-scaled-job.yaml
 ```
 
-**Requirements:** KEDA (enabled by default). See [KEDA docs](../docs/KEDA.md).
+**Safety:** Do not point this demonstration at GCO's `JobQueueUrl`; because it intentionally never drains messages, real submissions would repeatedly trigger observer Jobs.
 
-**When to use:** Custom SQS-triggered processing, event-driven autoscaling, scaling workloads based on external metrics.
+**Requirements:** KEDA (enabled by default), a disposable demo queue, and read-only KEDA metric access to that queue. See [KEDA docs](../docs/KEDA.md).
+
+**When to use:** Learning how SQS queue depth maps to KEDA Jobs. Use the built-in queue processor—or a fully implemented custom consumer—for actual message processing.
 
 ---
 
@@ -853,24 +855,19 @@ The GCO API validates manifest resource requests against configurable limits. If
 
 ```json
 {
-  "manifest_processor": {
+  "job_validation_policy": {
     "resource_quotas": {
       "max_cpu_per_manifest": "96",
       "max_memory_per_manifest": "192Gi",
       "max_gpu_per_manifest": 8
     }
-  },
-  "queue_processor": {
-    "max_cpu_per_manifest": "96",
-    "max_memory_per_manifest": "192Gi",
-    "max_gpu_per_manifest": 8
   }
 }
 ```
 
 Then redeploy: `gco stacks deploy-all -y`
 
-Both sections control independent submission paths — `manifest_processor` validates jobs submitted via the API Gateway, and `queue_processor` validates jobs submitted via SQS. Update whichever path you use, or both if you use both.
+`job_validation_policy` is authoritative for both submission paths: the REST manifest processor and SQS queue processor enforce the same limits, namespace/kind allowlists, image policy, and security controls.
 
 ## Testing Your Manifests
 

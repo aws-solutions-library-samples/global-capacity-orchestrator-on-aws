@@ -72,6 +72,21 @@ class TestCreateEndpoint:
         with pytest.raises(ClientError):
             store.create_endpoint("ep", spec={}, target_regions=["us-east-1"])
 
+    def test_rejects_mooncake_canary_before_put(self, store, mock_table):
+        invalid_spec = {
+            "image": "image:v1",
+            "mooncake": {"mode": "store"},
+            "canary": {"image": "image:v2", "weight": 10},
+        }
+
+        with pytest.raises(
+            ValueError,
+            match="Endpoint spec cannot combine 'mooncake' and 'canary' blocks",
+        ):
+            store.create_endpoint("invalid", invalid_spec, ["us-east-1"])
+
+        mock_table.put_item.assert_not_called()
+
 
 # ---- get_endpoint ----
 
@@ -175,6 +190,21 @@ class TestUpdateSpec:
     def test_returns_none_when_not_found(self, store, mock_table):
         mock_table.update_item.side_effect = _client_error("ConditionalCheckFailedException")
         assert store.update_spec("nope", {}) is None
+
+    def test_rejects_mooncake_canary_before_update(self, store, mock_table):
+        invalid_spec = {
+            "image": "image:v1",
+            "mooncake": {"mode": "both"},
+            "canary": {"image": "image:v2", "weight": 25},
+        }
+
+        with pytest.raises(
+            ValueError,
+            match="Endpoint spec cannot combine 'mooncake' and 'canary' blocks",
+        ):
+            store.update_spec("invalid", invalid_spec)
+
+        mock_table.update_item.assert_not_called()
 
 
 # ---- delete_endpoint ----

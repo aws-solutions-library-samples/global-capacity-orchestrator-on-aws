@@ -70,7 +70,7 @@ def queue_submit(
         result = aws_client.call_api(
             method="POST",
             path="/api/v1/queue/jobs",
-            region=region,
+            region=region if config.use_regional_api else None,
             body={
                 "manifest": manifest,
                 "target_region": region,
@@ -123,8 +123,9 @@ def queue_list(config: Any, region: Any, status: Any, namespace: Any, limit: Any
         if namespace:
             params["namespace"] = namespace
 
-        # Use any region to query (DynamoDB is global)
-        query_region = region or config.default_region
+        # The region is a DynamoDB filter, not a transport pin. The global API
+        # can serve it; forced regional mode uses the configured default bridge.
+        query_region = config.default_region if config.use_regional_api else None
         result = aws_client.call_api(
             method="GET",
             path="/api/v1/queue/jobs",
@@ -176,7 +177,7 @@ def queue_get(config: Any, job_id: Any, region: Any) -> None:
 
         aws_client = get_aws_client(config)
 
-        query_region = region or config.default_region
+        query_region = region or (config.default_region if config.use_regional_api else None)
         result = aws_client.call_api(
             method="GET",
             path=f"/api/v1/queue/jobs/{job_id}",
@@ -241,7 +242,7 @@ def queue_cancel(config: Any, job_id: Any, reason: Any, region: Any, yes: Any) -
 
         aws_client = get_aws_client(config)
 
-        query_region = region or config.default_region
+        query_region = region or (config.default_region if config.use_regional_api else None)
         params = {}
         if reason:
             params["reason"] = reason
@@ -277,7 +278,7 @@ def queue_stats(config: Any, region: Any) -> None:
 
         aws_client = get_aws_client(config)
 
-        query_region = region or config.default_region
+        query_region = region or (config.default_region if config.use_regional_api else None)
         result = aws_client.call_api(
             method="GET",
             path="/api/v1/queue/stats",

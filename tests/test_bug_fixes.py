@@ -283,19 +283,19 @@ class TestQueryRegionUrlEncoding:
 
         handler = load_lambda_module("cross-region-aggregator")
 
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps({"ok": True}).encode("utf-8")
-
         mock_http = MagicMock()
         mock_http.request.return_value = mock_response
 
-        with patch.object(handler, "http", mock_http):
+        with (
+            patch.object(handler, "http", mock_http),
+            patch.object(handler, "_sigv4_headers", return_value={"Authorization": "test"}),
+        ):
             handler.query_region(
                 "us-east-1",
-                "alb.example.com",
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod",
                 "/api/v1/jobs",
                 "GET",
                 query_params={"namespace": "my namespace", "label": "app=web&tier=front"},
@@ -322,7 +322,7 @@ class TestBuildTargetUrlEncoding:
         """Query params with special characters should be URL-encoded."""
         from tests._lambda_imports import load_lambda_module
 
-        proxy_utils = load_lambda_module("proxy-shared", "proxy_utils")
+        proxy_utils = load_lambda_module("proxy-shared", "proxy_utils", shared_dirs=["tls-shared"])
 
         url = proxy_utils.build_target_url(
             "alb.example.com",
@@ -337,18 +337,18 @@ class TestBuildTargetUrlEncoding:
         """URL without query params should have no question mark."""
         from tests._lambda_imports import load_lambda_module
 
-        proxy_utils = load_lambda_module("proxy-shared", "proxy_utils")
+        proxy_utils = load_lambda_module("proxy-shared", "proxy_utils", shared_dirs=["tls-shared"])
 
         url = proxy_utils.build_target_url("alb.example.com", "/api/v1/health", None)
 
-        assert url == "http://alb.example.com/api/v1/health"
+        assert url == "https://alb.example.com/api/v1/health"
         assert "?" not in url
 
     def test_empty_query_params(self):
         """Empty query params dict should produce no query string."""
         from tests._lambda_imports import load_lambda_module
 
-        proxy_utils = load_lambda_module("proxy-shared", "proxy_utils")
+        proxy_utils = load_lambda_module("proxy-shared", "proxy_utils", shared_dirs=["tls-shared"])
 
         url = proxy_utils.build_target_url("alb.example.com", "/api/v1/health", {})
 

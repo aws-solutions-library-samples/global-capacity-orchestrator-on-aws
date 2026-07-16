@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,36 +205,35 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op685=>operation: "\n        Submit a job to GCO.\n\n        Args:\n            manifests: Path to manifest file/directory or list of manifest dicts\n            namespace: Fallback namespace for manifests that don't declare\n                their own. When set, each manifest's ``metadata.namespace`` is\n                filled in only if missing — existing values are preserved so\n                users who've declared a target namespace in the manifest can\n                rely on it reaching the server untouched. Server-side\n                validation enforces the allowlist.\n            target_region: Force job to specific region\n            dry_run: Validate without applying\n            labels: Additional labels to add to manifests\n\n        Returns:\n            Submission result dictionary\n        "
-op687=>operation: manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
-cond690=>condition: if namespace
-cond695=>condition: for manifest in manifest_list
-cond700=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
-sub710=>subroutine: manifest['metadata'].setdefault('namespace', namespace)
-cond718=>condition: if labels
-cond723=>condition: for manifest in manifest_list
-cond728=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
-cond739=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
-sub749=>subroutine: manifest['metadata']['labels'].update(labels)
-io759=>inputoutput: output: self._aws_client.submit_manifests(manifests=manifest_list, namespace=namespace, target_region=target_region, dry_run=dry_run)
-e757=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op822=>operation: "\n        Submit a job to GCO.\n\n        Args:\n            manifests: Path to manifest file/directory or list of manifest dicts\n            namespace: Fallback namespace for manifests that don't declare\n                their own. When set, each manifest's ``metadata.namespace`` is\n                filled in only if missing — existing values are preserved so\n                users who've declared a target namespace in the manifest can\n                rely on it reaching the server untouched. Server-side\n                validation enforces the allowlist.\n            target_region: Force job to specific region\n            dry_run: Validate without applying\n            labels: Additional labels to add to manifests\n\n        Returns:\n            Submission result dictionary\n        "
+op824=>operation: manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
+op826=>operation: effective_namespace = namespace or self.config.default_namespace
+cond829=>condition: for manifest in manifest_list
+cond834=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
+sub844=>subroutine: manifest['metadata'].setdefault('namespace', effective_namespace)
+cond849=>condition: if labels
+cond854=>condition: for manifest in manifest_list
+cond859=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
+cond870=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
+sub880=>subroutine: manifest['metadata']['labels'].update(labels)
+io890=>inputoutput: output: self._aws_client.submit_manifests(manifests=manifest_list, namespace=effective_namespace, target_region=target_region, dry_run=dry_run)
+e888=>end: end function return
 
-op685->op687
-op687->cond690
-cond690(yes)->cond695
-cond695(yes)->cond700
-cond700->sub710
-sub710(left)->cond695
-cond695(no)->cond718
-cond718(yes)->cond723
-cond723(yes)->cond728
-cond728->cond739
-cond739->sub749
-sub749(left)->cond723
-cond723(no)->io759
-io759->e757
-cond718(no)->io759
-cond690(no)->cond718
+op822->op824
+op824->op826
+op826->cond829
+cond829(yes)->cond834
+cond834->sub844
+sub844(left)->cond829
+cond829(no)->cond849
+cond849(yes)->cond854
+cond854(yes)->cond859
+cond859->cond870
+cond870->sub880
+sub880(left)->cond854
+cond854(no)->io890
+io890->e888
+cond849(no)->io890
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

@@ -65,7 +65,7 @@ def valid_context():
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
         },
         "job_validation_policy": {
-            "allowed_namespaces": ["default", "gco-jobs"],
+            "allowed_namespaces": ["gco-jobs"],
             "resource_quotas": {
                 "max_cpu_per_manifest": "10",
                 "max_memory_per_manifest": "32Gi",
@@ -306,7 +306,7 @@ class TestConfigLoaderGetters:
         config = ConfigLoader(app)
         mp_config = config.get_manifest_processor_config()
         assert mp_config["replicas"] == 3
-        assert "default" in mp_config["allowed_namespaces"]
+        assert mp_config["allowed_namespaces"] == ["gco-jobs"]
 
     def test_get_alb_config(self, valid_context):
         """Test getting ALB config."""
@@ -336,6 +336,12 @@ class TestDefaultValues:
         app = MockApp({})
         config = ConfigLoader(app)
         assert config.get_kubernetes_version() == "1.36"
+
+    def test_omitted_valkey_config_is_disabled(self):
+        """Valkey is opt-in when the entire context block is omitted."""
+        app = MockApp({})
+        config = ConfigLoader(app)
+        assert config.get_valkey_config()["enabled"] is False
 
     def test_default_resource_thresholds(self):
         """Test default resource thresholds."""

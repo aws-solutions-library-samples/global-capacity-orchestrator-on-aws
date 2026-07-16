@@ -61,6 +61,23 @@ def _load_validator():
 validator = _load_validator()
 
 
+class TestBuiltInNodePoolContracts:
+    def test_cpu_general_pool_does_not_mislabel_arm_nodes_as_x86(self) -> None:
+        manifest = yaml.safe_load(
+            (MANIFESTS_DIR / "45-nodepool-cpu-general.yaml").read_text(encoding="utf-8")
+        )
+        template = manifest["spec"]["template"]
+        labels = template["metadata"]["labels"]
+        arch_requirement = next(
+            requirement
+            for requirement in template["spec"]["requirements"]
+            if requirement["key"] == "kubernetes.io/arch"
+        )
+
+        assert set(arch_requirement["values"]) == {"amd64", "arm64"}
+        assert "arch" not in labels
+
+
 # ── render_placeholders ───────────────────────────────────────────────────────
 
 
@@ -151,8 +168,53 @@ class TestIterTargetFiles:
         assert "dag-step-preprocess.yaml" in names
 
     def test_missing_directory_is_skipped(self) -> None:
-        # A target dir that doesn't exist yields nothing rather than raising.
+        # Compatibility wrapper still returns valid files only; detailed callers
+        # use collect_target_files() to surface the missing-input error.
         assert validator.iter_target_files(("does/not/exist",)) == []
+
+
+class TestCollectTargetFiles:
+    def test_existing_file_is_kept_when_another_input_is_missing(self, tmp_path: Path) -> None:
+        manifest = tmp_path / "valid.yaml"
+        manifest.write_text("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: valid\n")
+
+        files, errors = validator.collect_target_files(
+            (str(manifest), str(tmp_path / "missing.yaml"))
+        )
+
+        assert files == [manifest.resolve()]
+        assert len(errors) == 1
+        assert "missing.yaml: path does not exist" in errors[0]
+
+    def test_explicit_non_yaml_file_is_reported(self, tmp_path: Path) -> None:
+        text_file = tmp_path / "notes.txt"
+        text_file.write_text("not yaml")
+        files, errors = validator.collect_target_files((str(text_file),))
+        assert files == []
+        assert errors == [f"{text_file}: explicit file is not .yaml or .yml"]
+
+    def test_empty_explicit_directory_is_reported(self, tmp_path: Path) -> None:
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        files, errors = validator.collect_target_files((str(empty),))
+        assert files == []
+        assert errors == [f"{empty}: directory contains no Kubernetes YAML manifests"]
+
+    def test_quoted_recursive_glob_is_supported(self, tmp_path: Path) -> None:
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        manifest = nested / "job.yaml"
+        manifest.write_text("apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: x\n")
+        files, errors = validator.collect_target_files((str(tmp_path / "**" / "*.yaml"),))
+        assert files == [manifest.resolve()]
+        assert errors == []
+
+    def test_duplicate_inputs_preserve_first_seen_order(self, tmp_path: Path) -> None:
+        manifest = tmp_path / "a.yaml"
+        manifest.write_text("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: a\n")
+        files, errors = validator.collect_target_files((str(manifest), str(manifest)))
+        assert files == [manifest.resolve()]
+        assert errors == []
 
 
 # ── render_tree ────────────────────────────────────────────────────────────────
@@ -165,16 +227,16 @@ class TestRenderTree:
         content = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: x\n"
         (src / "plain.yaml").write_text(content)
         dest = tmp_path / "out"
-        validator.render_tree([src / "plain.yaml"], dest)
-        assert (dest / "plain.yaml").read_text() == content
+        rendered_paths = validator.render_tree([src / "plain.yaml"], dest)
+        assert rendered_paths[0].read_text() == content
 
     def test_templated_file_is_rendered(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         src.mkdir()
         (src / "tmpl.yaml").write_text("image: {{SOME_IMAGE}}\n")
         dest = tmp_path / "out"
-        validator.render_tree([src / "tmpl.yaml"], dest)
-        rendered = (dest / "tmpl.yaml").read_text()
+        rendered_path = validator.render_tree([src / "tmpl.yaml"], dest)[0]
+        rendered = rendered_path.read_text()
         assert "{{" not in rendered
 
     def test_dest_created_if_absent(self, tmp_path: Path) -> None:
@@ -182,8 +244,14 @@ class TestRenderTree:
         src.mkdir()
         (src / "a.yaml").write_text("kind: Namespace\n")
         dest = tmp_path / "nested" / "out"
-        validator.render_tree([src / "a.yaml"], dest)
-        assert (dest / "a.yaml").exists()
+        rendered_paths = validator.render_tree([src / "a.yaml"], dest)
+        assert rendered_paths[0].exists()
+
+    def test_repo_relative_paths_are_preserved(self, tmp_path: Path) -> None:
+        dest = tmp_path / "out"
+        source = EXAMPLES_DIR / "simple-job.yaml"
+        rendered_path = validator.render_tree([source], dest)[0]
+        assert rendered_path == dest / "examples" / "simple-job.yaml"
 
 
 # ── format_failures ────────────────────────────────────────────────────────────
@@ -238,6 +306,67 @@ class TestFormatFailures:
     def test_empty_result_is_no_failures(self) -> None:
         assert validator.format_failures({}) == []
         assert validator.format_failures({"resources": []}) == []
+
+
+class TestMainExplicitInputs:
+    def test_missing_input_does_not_mask_existing_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        manifest = tmp_path / "valid.yaml"
+        manifest.write_text("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: valid\n")
+        missing = tmp_path / "missing.yaml"
+        calls: list[Path] = []
+
+        monkeypatch.setattr(validator.shutil, "which", lambda _binary: "/usr/bin/kubeconform")
+
+        def fake_run(directory: Path, **_kwargs):
+            calls.extend(directory.rglob("*.yaml"))
+            return 0, {"resources": [], "summary": {"valid": 1, "skipped": 0}}
+
+        monkeypatch.setattr(validator, "run_kubeconform", fake_run)
+        rc = validator.main(
+            ["--path", str(manifest), "--path", str(missing), "--kubeconform-binary", "fake"]
+        )
+
+        captured = capsys.readouterr()
+        assert rc == 2
+        assert calls, "the existing explicit file must still be validated"
+        assert str(missing) in captured.err
+
+    def test_schema_and_input_failures_are_both_reported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        manifest = tmp_path / "bad.yaml"
+        manifest.write_text("apiVersion: v1\nkind: Pod\nmetadata:\n  name: bad\n")
+        missing = tmp_path / "missing.yaml"
+        monkeypatch.setattr(validator.shutil, "which", lambda _binary: "/usr/bin/kubeconform")
+        monkeypatch.setattr(
+            validator,
+            "run_kubeconform",
+            lambda _directory, **_kwargs: (
+                1,
+                {
+                    "resources": [
+                        {
+                            "filename": "bad.yaml",
+                            "kind": "Pod",
+                            "name": "bad",
+                            "status": "statusInvalid",
+                            "msg": "schema error",
+                        }
+                    ],
+                    "summary": {"valid": 0, "skipped": 0},
+                },
+            ),
+        )
+
+        rc = validator.main(
+            ["--path", str(manifest), "--path", str(missing), "--kubeconform-binary", "fake"]
+        )
+        captured = capsys.readouterr()
+        assert rc == 2
+        assert "bad.yaml" in captured.out
+        assert str(missing) in captured.err
 
 
 # ── main(): binary-missing exit path (offline) ────────────────────────────────

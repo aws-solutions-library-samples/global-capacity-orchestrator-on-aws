@@ -79,11 +79,6 @@ TARGETS: list[Target] = [
         title="Regional API Gateway Proxy Lambda",
     ),
     Target(
-        source="lambda/alb-header-validator/handler.py",
-        function="lambda_handler",
-        title="ALB Header Validator Lambda",
-    ),
-    Target(
         source="lambda/cross-region-aggregator/handler.py",
         function="lambda_handler",
         title="Cross-Region Aggregator Lambda",
@@ -112,6 +107,11 @@ TARGETS: list[Target] = [
         source="lambda/secret-rotation/handler.py",
         function="lambda_handler",
         title="Secrets Manager Rotation Lambda",
+    ),
+    Target(
+        source="lambda/tls-certificate-manager/handler.py",
+        function="lambda_handler",
+        title="Backend TLS Certificate Manager Lambda",
     ),
     # --- CLI entry points ------------------------------------------------
     Target(
@@ -206,6 +206,77 @@ TARGETS: list[Target] = [
         source="gco/stacks/analytics_stack.py",
         function="GCOAnalyticsStack._create_studio_domain",
         title="Analytics stack Studio domain (Canvas override branch)",
+    ),
+    # --- Runtime service security and reconciliation paths ---------------
+    Target(
+        source="gco/services/auth_middleware.py",
+        function="AuthenticationMiddleware.dispatch",
+        title="Backend authentication gate (health bypass, HMAC validation, fail-closed paths)",
+    ),
+    Target(
+        source="lambda/proxy-shared/proxy_utils.py",
+        function="build_signed_headers",
+        title="Proxy request-bound HMAC envelope construction",
+    ),
+    Target(
+        source="lambda/tls-shared/backend_tls.py",
+        function="get_backend_http_pool",
+        title="Private-root backend TLS trust refresh and verified connection pool",
+    ),
+    Target(
+        source="gco/services/manifest_api.py",
+        function="lifespan",
+        title="Manifest API lifecycle (stores + optional central queue worker)",
+    ),
+    Target(
+        source="gco/services/central_queue_worker.py",
+        function="process_queued_jobs_once",
+        title="Central queue activation pass (migration, fenced claim, heartbeat, deterministic apply)",
+    ),
+    Target(
+        source="gco/services/central_queue_worker.py",
+        function="reconcile_active_jobs_once",
+        title="Central queue status reconciliation (Kubernetes UID fencing + terminal transitions)",
+    ),
+    Target(
+        source="gco/services/template_store.py",
+        function="JobStore.claim_job",
+        title="Global queue fenced claim (conditional write + monotonic generation)",
+    ),
+    Target(
+        source="gco/services/template_store.py",
+        function="JobStore.transition_job",
+        title="Global queue lifecycle transition (lease, status, and Kubernetes UID fencing)",
+    ),
+    Target(
+        source="gco/services/manifest_processor.py",
+        function="ManifestProcessor.apply_queued_job",
+        title="Deterministic queued Job create-or-adopt path",
+    ),
+    Target(
+        source="gco/services/api_routes/inference_proxy.py",
+        function="_resolve_upstream",
+        title="Authenticated inference target resolution (region, readiness, namespace, canary)",
+    ),
+    Target(
+        source="gco/services/api_routes/inference_proxy.py",
+        function="_proxy",
+        title="Managed inference reverse proxy (path allowlist, bounded I/O, streaming cleanup)",
+    ),
+    Target(
+        source="gco/services/inference_monitor.py",
+        function="InferenceMonitor._reconcile_endpoint",
+        title="Inference endpoint desired-state reconciliation",
+    ),
+    Target(
+        source="lambda/helm-installer/teardown_provider.py",
+        function="on_event",
+        title="Helm teardown provider event path (install drain + idempotent execution start)",
+    ),
+    Target(
+        source="lambda/helm-installer/teardown_provider.py",
+        function="is_complete",
+        title="Helm teardown completion poll (continued fencing + terminal status)",
     ),
     # --- MCP server branchy modules --------------------------------------
     # New code-diagram targets for the branchy MCP modules introduced by

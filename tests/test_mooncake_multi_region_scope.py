@@ -198,12 +198,12 @@ def test_out_of_region_explicit_peer_is_rejected():
     _assert_nothing_materialized(monitor)
 
 
-def test_in_region_master_with_local_peers_passes():
-    """An own-region master alongside bare in-cluster peers passes the gate.
+def test_in_region_master_with_local_kubernetes_peers_passes():
+    """An own-region master and namespace-qualified Service peers pass.
 
-    Bare in-cluster Service names carry no region token and are region-local by
-    construction, so a topology whose only region-tokened address is the
-    own-region master is wholly in-region.
+    Kubernetes ``.svc.cluster.local`` names are region-local by construction,
+    so a topology whose only region-tokened address is the own-region master
+    is wholly in-region.
     """
     monitor = _make_monitor(region="us-east-1")
     region_services = {"master_server_address": "mooncake-master.us-east-1.internal:50051"}
@@ -214,7 +214,34 @@ def test_in_region_master_with_local_peers_passes():
 
     assert result.in_region is True
     assert result.error is None
-    # The sibling role Services are in the wired set and are region-local.
-    assert f"shared-endpoint-prefill.{NAMESPACE}" in result.peer_addresses
-    assert f"shared-endpoint-decode.{NAMESPACE}" in result.peer_addresses
+    assert f"shared-endpoint-prefill.{NAMESPACE}.svc.cluster.local" in result.peer_addresses
+    assert f"shared-endpoint-decode.{NAMESPACE}.svc.cluster.local" in result.peer_addresses
+    _assert_nothing_materialized(monitor)
+
+
+def test_unknown_external_host_is_rejected_and_materializes_nothing():
+    """An untagged external host is ambiguous and therefore fails closed."""
+    monitor = _make_monitor(region="us-east-1")
+    unknown_peer = "kv-peer.example.com:50051"
+    spec = {
+        "mooncake": {
+            "mode": "disaggregated",
+            "topology": {"prefill": 1, "decode": 1},
+            "transfer": {"peer_addresses": [unknown_peer]},
+        }
+    }
+
+    result = monitor._resolve_regional_scope(
+        "shared-endpoint",
+        NAMESPACE,
+        spec,
+        {"master_server_address": "mooncake-master:50051"},
+    )
+
+    assert monitor._region_of_address(unknown_peer) == "unknown"
+    assert result.in_region is False
+    assert result.state == "failed"
+    assert result.error is not None
+    assert unknown_peer in result.error
+    assert "region unknown" in result.error
     _assert_nothing_materialized(monitor)

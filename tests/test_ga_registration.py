@@ -6,7 +6,7 @@ Exercises the full CloudFormation custom-resource lifecycle
 (Create/Update/Delete) that registers per-region platform ALBs with
 the shared Global Accelerator endpoint group. Covers ALB discovery
 via Kubernetes Ingress status and tag-based fallback, filtering of
-inference ALBs and Slurm NLBs, stale endpoint scrubbing, HTTP health
+inference ALBs and Slurm NLBs, stale endpoint scrubbing, HTTPS/443 health
 check enforcement, and SSM parameter storage of the chosen ALB
 hostname. The ga_module fixture pops and reloads the handler module
 under patched boto3 + urllib3 so each test starts from a clean slate.
@@ -92,13 +92,14 @@ def _make_context():
     return ctx
 
 
-def _make_alb(arn, name, dns, state="active", lb_type="application"):
+def _make_alb(arn, name, dns, state="active", lb_type="application", scheme="internal"):
     return {
         "LoadBalancerArn": arn,
         "LoadBalancerName": name,
         "DNSName": dns,
         "State": {"Code": state},
         "Type": lb_type,
+        "Scheme": scheme,
     }
 
 
@@ -245,6 +246,60 @@ class TestFindPlatformAlbByTags:
         dns, arn, state = handler.find_platform_alb_by_tags(elb, "test-cluster")
 
         assert arn == PLATFORM_ALB_ARN
+
+    def test_valid_legacy_tags_are_not_masked_by_unrelated_auto_mode_tags(self, ga_module):
+        handler, _, _ = ga_module
+        elb = MagicMock()
+        elb.describe_load_balancers.return_value = {
+            "LoadBalancers": [
+                _make_alb(PLATFORM_ALB_ARN, "k8s-gco", PLATFORM_ALB_DNS),
+            ]
+        }
+        elb.describe_tags.return_value = {
+            "TagDescriptions": [
+                _make_tags(
+                    PLATFORM_ALB_ARN,
+                    {
+                        "eks:eks-cluster-name": "other-cluster",
+                        "elbv2.k8s.aws/cluster": "test-cluster",
+                        "ingress.eks.amazonaws.com/stack": "unrelated",
+                        "ingress.k8s.aws/stack": "gco-system/gco-ingress",
+                    },
+                ),
+            ]
+        }
+
+        dns, arn, state = handler.find_platform_alb_by_tags(elb, "test-cluster")
+
+        assert dns == PLATFORM_ALB_DNS
+        assert arn == PLATFORM_ALB_ARN
+        assert state == "active"
+
+    def test_skips_unrecognized_ingress_stack(self, ga_module):
+        handler, _, _ = ga_module
+        elb = MagicMock()
+        elb.describe_load_balancers.return_value = {
+            "LoadBalancers": [
+                _make_alb(PLATFORM_ALB_ARN, "k8s-other", PLATFORM_ALB_DNS),
+            ]
+        }
+        elb.describe_tags.return_value = {
+            "TagDescriptions": [
+                _make_tags(
+                    PLATFORM_ALB_ARN,
+                    {
+                        "eks:eks-cluster-name": "test-cluster",
+                        "ingress.eks.amazonaws.com/stack": "unrelated",
+                    },
+                ),
+            ]
+        }
+
+        dns, arn, state = handler.find_platform_alb_by_tags(elb, "test-cluster")
+
+        assert dns is None
+        assert arn is None
+        assert state is None
 
     def test_skips_inference_alb(self, ga_module):
         handler, _, _ = ga_module
@@ -625,8 +680,8 @@ class TestRegisterAlbWithGa:
 # ============================================================================
 
 
-class TestEnsureHttpHealthCheck:
-    def test_updates_tcp_to_http(self, ga_module):
+class TestEnsureHttpsHealthCheck:
+    def test_updates_tcp_to_https(self, ga_module):
         handler, _, _ = ga_module
         ga = MagicMock()
         ga.describe_endpoint_group.return_value = {
@@ -643,28 +698,29 @@ class TestEnsureHttpHealthCheck:
             }
         }
 
-        handler.ensure_http_health_check(ga, ENDPOINT_GROUP_ARN)
+        handler.ensure_https_health_check(ga, ENDPOINT_GROUP_ARN)
 
         ga.update_endpoint_group.assert_called_once()
         kw = ga.update_endpoint_group.call_args.kwargs
-        assert kw["HealthCheckProtocol"] == "HTTP"
+        assert kw["HealthCheckProtocol"] == "HTTPS"
         assert kw["HealthCheckPath"] == "/api/v1/health"
-        assert kw["HealthCheckPort"] == 80
+        assert kw["HealthCheckPort"] == 443
         assert kw["HealthCheckIntervalSeconds"] == 30
         assert kw["ThresholdCount"] == 3
 
-    def test_skips_when_already_http(self, ga_module):
+    def test_skips_when_already_https(self, ga_module):
         handler, _, _ = ga_module
         ga = MagicMock()
         ga.describe_endpoint_group.return_value = {
             "EndpointGroup": {
-                "HealthCheckProtocol": "HTTP",
+                "HealthCheckProtocol": "HTTPS",
+                "HealthCheckPort": 443,
                 "HealthCheckPath": "/api/v1/health",
                 "EndpointDescriptions": [],
             }
         }
 
-        handler.ensure_http_health_check(ga, ENDPOINT_GROUP_ARN)
+        handler.ensure_https_health_check(ga, ENDPOINT_GROUP_ARN)
 
         ga.update_endpoint_group.assert_not_called()
 
@@ -673,13 +729,14 @@ class TestEnsureHttpHealthCheck:
         ga = MagicMock()
         ga.describe_endpoint_group.return_value = {
             "EndpointGroup": {
-                "HealthCheckProtocol": "HTTP",
+                "HealthCheckProtocol": "HTTPS",
+                "HealthCheckPort": 443,
                 "HealthCheckPath": "/healthz",
                 "EndpointDescriptions": [],
             }
         }
 
-        handler.ensure_http_health_check(ga, ENDPOINT_GROUP_ARN)
+        handler.ensure_https_health_check(ga, ENDPOINT_GROUP_ARN)
 
         ga.update_endpoint_group.assert_called_once()
 
@@ -697,7 +754,7 @@ class TestEnsureHttpHealthCheck:
             }
         }
 
-        handler.ensure_http_health_check(ga, ENDPOINT_GROUP_ARN)
+        handler.ensure_https_health_check(ga, ENDPOINT_GROUP_ARN)
 
         endpoints = ga.update_endpoint_group.call_args.kwargs["EndpointConfigurations"]
         assert len(endpoints) == 2
@@ -711,12 +768,29 @@ class TestEnsureHttpHealthCheck:
         )
 
         # Should not raise
-        handler.ensure_http_health_check(ga, ENDPOINT_GROUP_ARN)
+        handler.ensure_https_health_check(ga, ENDPOINT_GROUP_ARN)
 
 
 # ============================================================================
 # SSM Storage Tests
 # ============================================================================
+
+
+class TestRegistryRegion:
+    def test_prefers_explicit_registry_region(self, ga_module):
+        handler, _, _ = ga_module
+        assert (
+            handler._get_registry_region(
+                {"RegistryRegion": "eu-west-1", "GlobalRegion": "us-east-2"}
+            )
+            == "eu-west-1"
+        )
+
+    def test_accepts_legacy_global_region(self, ga_module):
+        handler, _, _ = ga_module
+        assert handler._get_registry_region({"GlobalRegion": "ap-southeast-2"}) == (
+            "ap-southeast-2"
+        )
 
 
 class TestStoreAlbHostnameInSsm:
@@ -942,19 +1016,24 @@ class TestOnDeleteEvent:
             "ResourceProperties": {
                 "EndpointGroupArn": ENDPOINT_GROUP_ARN,
                 "Region": "us-east-1",
+                "RegistryRegion": "eu-west-1",
                 "ProjectName": "gco",
             },
         }
 
-    def test_delete_deregisters_alb(self, ga_module):
-        handler, mock_boto_client, _ = ga_module
+    def test_delete_deregisters_alb_and_cleans_registry(self, ga_module):
+        handler, _, _ = ga_module
 
-        with patch.object(handler, "deregister_alb_from_ga") as mock_dereg:
+        with (
+            patch.object(handler, "deregister_alb_from_ga") as mock_dereg,
+            patch.object(handler, "delete_alb_hostname_from_ssm") as mock_delete_ssm,
+        ):
             result = handler.on_delete_event(self._delete_event(), None)
 
         mock_dereg.assert_called_once()
         # Called with (ga_client, endpoint_group_arn).
         assert mock_dereg.call_args[0][1] == ENDPOINT_GROUP_ARN
+        mock_delete_ssm.assert_called_once_with("us-east-1", "eu-west-1", "gco")
         assert result["PhysicalResourceId"] == "ga-dereg-us-east-1"
 
     def test_create_is_noop(self, ga_module):
@@ -984,14 +1063,25 @@ class TestOnDeleteEvent:
         mock_dereg.assert_not_called()
         assert result["PhysicalResourceId"] == "pid"
 
-    def test_delete_without_endpoint_group_is_noop(self, ga_module):
+    def test_delete_without_endpoint_group_still_cleans_registry(self, ga_module):
         handler, _, _ = ga_module
-        event = {"RequestType": "Delete", "ResourceProperties": {"Region": "us-east-1"}}
+        event = {
+            "RequestType": "Delete",
+            "ResourceProperties": {
+                "Region": "us-east-1",
+                "RegistryRegion": "eu-west-1",
+                "ProjectName": "gco",
+            },
+        }
 
-        with patch.object(handler, "deregister_alb_from_ga") as mock_dereg:
+        with (
+            patch.object(handler, "deregister_alb_from_ga") as mock_dereg,
+            patch.object(handler, "delete_alb_hostname_from_ssm") as mock_delete_ssm,
+        ):
             result = handler.on_delete_event(event, None)
 
         mock_dereg.assert_not_called()
+        mock_delete_ssm.assert_called_once_with("us-east-1", "eu-west-1", "gco")
         assert result["PhysicalResourceId"].startswith("ga-dereg")
 
     def test_delete_never_raises_on_error(self, ga_module):
@@ -999,7 +1089,11 @@ class TestOnDeleteEvent:
 
         # Even if deregistration blows up, the guard must return success so the
         # stack delete is never wedged in DELETE_FAILED by the guard itself.
-        with patch.object(handler, "deregister_alb_from_ga", side_effect=Exception("boom")):
+        with (
+            patch.object(handler, "deregister_alb_from_ga", side_effect=Exception("boom")),
+            patch.object(handler, "delete_alb_hostname_from_ssm") as mock_delete_ssm,
+        ):
             result = handler.on_delete_event(self._delete_event(), None)
 
+        mock_delete_ssm.assert_called_once_with("us-east-1", "eu-west-1", "gco")
         assert result["PhysicalResourceId"] == "ga-dereg-us-east-1"

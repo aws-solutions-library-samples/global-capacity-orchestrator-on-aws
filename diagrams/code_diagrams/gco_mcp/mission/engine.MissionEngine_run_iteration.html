@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,82 +205,82 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2886=>operation: 'Run one full iteration for ``session_id`` and return its record.\n\n        Lifecycle:\n\n        1. Load the session; raise ``session_not_found`` when missing.\n        2. Refuse a session in any terminal state (``failed`` →\n           ``session_failed``; ``completed`` / ``terminated`` →\n           ``session_terminal``) or in ``paused`` (``session_paused``).\n        3. Transition ``pending → running`` on the very first iteration\n           and stamp ``session["started_at"]``.\n        4. Allocate a fresh :class:`IterationRecord` and run the five\n           phases in order. Each phase emits exactly one\n           ``audit.emit_phase_event`` regardless of outcome.\n        5. On any phase exception: append the partial iteration to\n           ``session["iterations"]``, mark the session ``failed``, save,\n           and re-raise. The session JSON stays inspectable.\n        6. On success: stamp the verdict on the iteration, append it,\n           update the no-progress counter, save the session.\n        7. On terminal verdict (``complete`` / ``terminate``): transition\n           the session status, write the Final_Report, save again.\n        8. Emit one ``audit.emit_verdict_event`` regardless of outcome.\n        9. Return the iteration record.\n        '
-op2888=>operation: session = self.backend.load_session(session_id)
-cond2891=>operation: raise MissionEngineError('session_not_found') if  session is None
-op2901=>operation: status = session['status']
-cond2904=>operation: raise MissionEngineError('session_failed') if  status == 'failed'
-cond2915=>operation: raise MissionEngineError('session_terminal') if  status in TERMINAL_STATES
-cond2926=>operation: raise MissionEngineError('session_paused') if  status == 'paused'
-op2936=>operation: iteration_start = self.now()
-cond2939=>condition: if session['status'] == 'pending'
-op2943=>operation: session['status'] = 'running'
-op2945=>operation: session['started_at'] = iteration_start.isoformat()
-op2950=>operation: iteration_index = len(session['iterations'])
-op2952=>operation: record = self._make_iteration_record(iteration_index, iteration_start)
-op2955=>operation: strategy = await self._propose_phase(session, ctx, record)
+        <div><textarea id="code" style="width: 100%;" rows="11">op4543=>operation: 'Run one full iteration for ``session_id`` and return its record.\n\n        Lifecycle:\n\n        1. Load the session; raise ``session_not_found`` when missing.\n        2. Refuse a session in any terminal state (``failed`` →\n           ``session_failed``; ``completed`` / ``terminated`` →\n           ``session_terminal``) or in ``paused`` (``session_paused``).\n        3. Transition ``pending → running`` on the very first iteration\n           and stamp ``session["started_at"]``.\n        4. Allocate a fresh :class:`IterationRecord` and run the five\n           phases in order. Each phase emits exactly one\n           ``audit.emit_phase_event`` regardless of outcome.\n        5. On any phase exception: append the partial iteration to\n           ``session["iterations"]``, mark the session ``failed``, save,\n           and re-raise. The session JSON stays inspectable.\n        6. On success: stamp the verdict on the iteration, append it,\n           update the no-progress counter, save the session.\n        7. On terminal verdict (``complete`` / ``terminate``): transition\n           the session status, write the Final_Report, save again.\n        8. Emit one ``audit.emit_verdict_event`` regardless of outcome.\n        9. Return the iteration record.\n        '
+op4545=>operation: session = self.backend.load_session(session_id)
+cond4548=>operation: raise MissionEngineError('session_not_found') if  session is None
+op4558=>operation: status = session['status']
+cond4561=>operation: raise MissionEngineError('session_failed') if  status == 'failed'
+cond4572=>operation: raise MissionEngineError('session_terminal') if  status in TERMINAL_STATES
+cond4583=>operation: raise MissionEngineError('session_paused') if  status == 'paused'
+op4593=>operation: iteration_start = self.now()
+cond4596=>condition: if session['status'] == 'pending'
+op4600=>operation: session['status'] = 'running'
+op4602=>operation: session['started_at'] = iteration_start.isoformat()
+op4607=>operation: iteration_index = len(session['iterations'])
+op4609=>operation: record = self._make_iteration_record(iteration_index, iteration_start)
+op4612=>operation: strategy = await self._propose_phase(session, ctx, record)
 executed_calls = await self._execute_phase(session, strategy, ctx, record)
 await self._observe_phase(session, strategy, executed_calls, record)
 await self._evaluate_phase(session, record)
 verdict, reason = await self._decide_phase(session, record)
-cond2954=>condition: exception raised?
-cond2957=>condition: except Exception
-op2961=>operation: record['ended_at'] = self.now().isoformat()
-sub2963=>subroutine: session['iterations'].append(record)
-op2965=>operation: session['status'] = 'failed'
-op2967=>operation: session['ended_at'] = record['ended_at']
-op2969=>operation: with contextlib.suppress(Exception):
+cond4611=>condition: exception raised?
+cond4614=>condition: except Exception
+op4618=>operation: record['ended_at'] = self.now().isoformat()
+sub4620=>subroutine: session['iterations'].append(record)
+op4622=>operation: session['status'] = 'failed'
+op4624=>operation: session['ended_at'] = record['ended_at']
+op4626=>operation: with contextlib.suppress(Exception):
     self.backend.save_session(session)
-sub2971=>subroutine: raise
-op2976=>operation: record['verdict'] = verdict
-op2978=>operation: record['verdict_reason'] = reason
-op2980=>operation: record['ended_at'] = self.now().isoformat()
-sub2982=>subroutine: session['iterations'].append(record)
-sub2984=>subroutine: self._update_session_post_iteration(session, record)
-sub2986=>subroutine: self.backend.save_session(session)
-cond2989=>condition: if verdict in TERMINAL_VERDICTS
-op2993=>operation: await self._finalise_terminal_session(session, record, verdict, reason)
-sub2995=>subroutine: self.backend.save_session(session)
-sub3000=>subroutine: audit.emit_verdict_event(session_id=session_id, iteration_index=iteration_index, verdict=verdict, verdict_reason=reason, revision_rationale=record.get('revision_rationale'))
-io3005=>inputoutput: output: record
-e3003=>end: end function return
+sub4628=>subroutine: raise
+op4633=>operation: record['verdict'] = verdict
+op4635=>operation: record['verdict_reason'] = reason
+op4637=>operation: record['ended_at'] = self.now().isoformat()
+sub4639=>subroutine: session['iterations'].append(record)
+sub4641=>subroutine: self._update_session_post_iteration(session, record)
+sub4643=>subroutine: self.backend.save_session(session)
+cond4646=>condition: if verdict in TERMINAL_VERDICTS
+op4650=>operation: await self._finalise_terminal_session(session, record, verdict, reason)
+sub4652=>subroutine: self.backend.save_session(session)
+sub4657=>subroutine: audit.emit_verdict_event(session_id=session_id, iteration_index=iteration_index, verdict=verdict, verdict_reason=reason, revision_rationale=record.get('revision_rationale'))
+io4662=>inputoutput: output: record
+e4660=>end: end function return
 
-op2886->op2888
-op2888->cond2891
-cond2891->op2901
-op2901->cond2904
-cond2904->cond2915
-cond2915->cond2926
-cond2926->op2936
-op2936->cond2939
-cond2939(yes)->op2943
-op2943->op2945
-op2945->op2950
-op2950->op2952
-op2952->op2955
-op2955->cond2954
-cond2954(yes)->cond2957
-cond2957(yes)->op2961
-op2961->sub2963
-sub2963->op2965
-op2965->op2967
-op2967->op2969
-op2969->sub2971
-cond2957(no)->op2976
-op2976->op2978
-op2978->op2980
-op2980->sub2982
-sub2982->sub2984
-sub2984->sub2986
-sub2986->cond2989
-cond2989(yes)->op2993
-op2993->sub2995
-sub2995->sub3000
-sub3000->io3005
-io3005->e3003
-cond2989(no)->sub3000
-cond2954(no)->op2976
-cond2939(no)->op2950
+op4543->op4545
+op4545->cond4548
+cond4548->op4558
+op4558->cond4561
+cond4561->cond4572
+cond4572->cond4583
+cond4583->op4593
+op4593->cond4596
+cond4596(yes)->op4600
+op4600->op4602
+op4602->op4607
+op4607->op4609
+op4609->op4612
+op4612->cond4611
+cond4611(yes)->cond4614
+cond4614(yes)->op4618
+op4618->sub4620
+sub4620->op4622
+op4622->op4624
+op4624->op4626
+op4626->sub4628
+cond4614(no)->op4633
+op4633->op4635
+op4635->op4637
+op4637->sub4639
+sub4639->sub4641
+sub4641->sub4643
+sub4643->cond4646
+cond4646(yes)->op4650
+op4650->sub4652
+sub4652->sub4657
+sub4657->io4662
+io4662->e4660
+cond4646(no)->sub4657
+cond4611(no)->op4633
+cond4596(no)->op4607
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

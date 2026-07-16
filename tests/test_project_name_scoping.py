@@ -481,8 +481,7 @@ class TestNoHardcodedProjectPrefixInPolicies:
     but several #139 leaks hid where that scan never looks:
 
     * IAM policy **Resource ARNs** — the image-lookup Lambda's
-      ``repository/gco/*`` grant, the cross-region aggregator's
-      ``parameter/gco/*`` grant, and the SageMaker execution role's
+      ``repository/gco/*`` grant and the SageMaker execution role's
       ``gco-jobs-*`` / ``parameter/gco/cluster-shared-bucket/*`` grants. Where
       a policy *and* its cdk-nag suppression were both hardcoded to ``gco``
       they stayed self-consistent, so cdk-nag stayed silent too.

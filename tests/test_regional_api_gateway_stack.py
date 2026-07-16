@@ -21,6 +21,38 @@ from aws_cdk import assertions
 from aws_cdk import aws_ec2 as ec2
 
 
+def _methods_for_child_resource(
+    template: assertions.Template,
+    parent_path_part: str,
+    child_path_part: str,
+) -> set[str]:
+    """Return methods attached to one exact parent/child API resource path."""
+    resources = template.find_resources("AWS::ApiGateway::Resource")
+    parent_ids = [
+        logical_id
+        for logical_id, resource in resources.items()
+        if resource.get("Properties", {}).get("PathPart") == parent_path_part
+    ]
+    assert len(parent_ids) == 1
+    parent_id = parent_ids[0]
+
+    child_ids = [
+        logical_id
+        for logical_id, resource in resources.items()
+        if resource.get("Properties", {}).get("PathPart") == child_path_part
+        and resource.get("Properties", {}).get("ParentId") == {"Ref": parent_id}
+    ]
+    assert len(child_ids) == 1
+    child_id = child_ids[0]
+
+    methods = template.find_resources("AWS::ApiGateway::Method")
+    return {
+        resource["Properties"]["HttpMethod"]
+        for resource in methods.values()
+        if resource.get("Properties", {}).get("ResourceId") == {"Ref": child_id}
+    }
+
+
 class TestRegionalApiGatewayStack:
     """Test cases for GCORegionalApiGatewayStack."""
 
@@ -29,6 +61,7 @@ class TestRegionalApiGatewayStack:
         """Create a mock config loader."""
         config = MagicMock()
         config.get_project_name.return_value = "gco"
+        config.get_global_region.return_value = "us-east-2"
         config.get_deployment_regions.return_value = {
             "global": "us-east-2",
             "api_gateway": "us-east-2",
@@ -37,8 +70,15 @@ class TestRegionalApiGatewayStack:
         }
         config.get_api_gateway_config.return_value = {
             "regional_api_enabled": True,
-            "throttle_rate_limit": 1000,
-            "throttle_burst_limit": 2000,
+            "throttle_rate_limit": 37,
+            "throttle_burst_limit": 73,
+            "log_level": "ERROR",
+            "metrics_enabled": False,
+            "tracing_enabled": False,
+        }
+        config.get_backend_tls_config.return_value = {
+            "trust_cache_ttl_seconds": 120,
+            "trust_cache_max_stale_seconds": 900,
         }
         return config
 
@@ -65,6 +105,7 @@ class TestRegionalApiGatewayStack:
             vpc=vpc,
             alb_dns_name="internal-test-alb.elb.amazonaws.com",
             auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+            aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
             env=cdk.Environment(region="us-east-1"),
         )
 
@@ -78,6 +119,29 @@ class TestRegionalApiGatewayStack:
                 "EndpointConfiguration": {"Types": ["REGIONAL"]},
             },
         )
+        template.has_resource_properties(
+            "AWS::ApiGateway::Stage",
+            {
+                "MethodSettings": assertions.Match.array_with(
+                    [
+                        assertions.Match.object_like(
+                            {
+                                "LoggingLevel": "ERROR",
+                                "MetricsEnabled": False,
+                                "ThrottlingRateLimit": 37,
+                                "ThrottlingBurstLimit": 73,
+                            }
+                        )
+                    ]
+                ),
+                "TracingEnabled": False,
+            },
+        )
+        assert _methods_for_child_resource(template, "inference", "{proxy+}") == {
+            "GET",
+            "HEAD",
+            "POST",
+        }
 
     def test_regional_api_gateway_has_lambda(self, app, mock_config, vpc):
         """Test that the regional API gateway has a VPC Lambda."""
@@ -91,6 +155,7 @@ class TestRegionalApiGatewayStack:
             vpc=vpc,
             alb_dns_name="internal-test-alb.elb.amazonaws.com",
             auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+            aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
             env=cdk.Environment(region="us-east-1"),
         )
 
@@ -118,6 +183,7 @@ class TestRegionalApiGatewayStack:
             vpc=vpc,
             alb_dns_name="internal-test-alb.elb.amazonaws.com",
             auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+            aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
             env=cdk.Environment(region="us-east-1"),
         )
 
@@ -143,6 +209,7 @@ class TestRegionalApiGatewayStack:
             vpc=vpc,
             alb_dns_name="internal-test-alb.elb.amazonaws.com",
             auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+            aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
             env=cdk.Environment(region="us-east-1"),
         )
 
@@ -164,6 +231,35 @@ class TestRegionalApiGatewayStack:
             },
         )
 
+        # Registry and public-root reads are constrained to the two exact parameters.
+        template.has_resource_properties(
+            "AWS::IAM::Policy",
+            {
+                "PolicyDocument": {
+                    "Statement": assertions.Match.array_with(
+                        [
+                            assertions.Match.object_like(
+                                {
+                                    "Action": "ssm:GetParameter",
+                                    "Effect": "Allow",
+                                    "Resource": [
+                                        stack.resolve(
+                                            f"arn:{stack.partition}:ssm:us-east-2:{stack.account}:"
+                                            "parameter/gco/alb-hostname-us-east-1"
+                                        ),
+                                        stack.resolve(
+                                            f"arn:{stack.partition}:ssm:us-east-2:{stack.account}:"
+                                            "parameter/gco/backend-tls/root-ca.pem"
+                                        ),
+                                    ],
+                                }
+                            )
+                        ]
+                    )
+                }
+            },
+        )
+
     def test_regional_api_gateway_has_log_groups(self, app, mock_config, vpc):
         """Test that the regional API gateway has CloudWatch log groups."""
         from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
@@ -176,6 +272,7 @@ class TestRegionalApiGatewayStack:
             vpc=vpc,
             alb_dns_name="internal-test-alb.elb.amazonaws.com",
             auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+            aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
             env=cdk.Environment(region="us-east-1"),
         )
 
@@ -196,6 +293,7 @@ class TestRegionalApiGatewayStack:
             vpc=vpc,
             alb_dns_name="internal-test-alb.elb.amazonaws.com",
             auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+            aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
             env=cdk.Environment(region="us-east-1"),
         )
 
@@ -221,6 +319,7 @@ class TestRegionalApiGatewayStack:
             vpc=vpc,
             alb_dns_name="internal-test-alb.elb.amazonaws.com",
             auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+            aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
             env=cdk.Environment(region="us-east-1"),
         )
 
@@ -231,10 +330,17 @@ class TestRegionalApiGatewayStack:
             "AWS::Lambda::Function",
             {
                 "Environment": {
-                    "Variables": {
-                        "ALB_ENDPOINT": "internal-test-alb.elb.amazonaws.com",
-                        "SECRET_ARN": "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID
-                    }
+                    "Variables": assertions.Match.object_like(
+                        {
+                            "ALB_ENDPOINT": "internal-test-alb.elb.amazonaws.com",
+                            "SECRET_ARN": "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID
+                            "BACKEND_TLS_SERVER_NAME": "backend.gco.gco.internal",
+                            "BACKEND_TLS_ROOT_CA_PARAMETER": "/gco/backend-tls/root-ca.pem",
+                            "BACKEND_TLS_ROOT_CA_REGION": "us-east-2",
+                            "BACKEND_TLS_CA_CACHE_TTL_SECONDS": "120",
+                            "BACKEND_TLS_CA_MAX_STALE_SECONDS": "900",
+                        }
+                    )
                 }
             },
         )
@@ -442,7 +548,7 @@ class TestRegionalApiProxyHandler:
 
             with patch.object(proxy_utils_module, "_http") as mock_http:
                 mock_http.request.side_effect = urllib3.exceptions.MaxRetryError(
-                    None, "http://test", "Connection refused"
+                    None, "https://test", "Connection refused"
                 )
 
                 with patch.dict(

@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,114 +205,110 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1020=>operation: '\n        Deploy all stacks in the correct order.\n\n        Deploys global stacks first, then regional stacks (optionally in parallel),\n        then the monitoring stack (which depends on regional stacks).\n\n        Args:\n            require_approval: Whether to require approval for changes\n            outputs_file: File to write outputs to\n            parameters: CDK parameters\n            tags: Tags to apply to stacks\n            progress: Progress display type\n            on_stack_start: Callback(stack_name) called when starting a stack\n            on_stack_complete: Callback(stack_name, success) called when stack completes\n            parallel: Deploy regional stacks in parallel\n            max_workers: Maximum number of parallel deployments (default: 4)\n\n        Returns:\n            Tuple of (overall_success, successful_stacks, failed_stacks)\n        '
-op1022=>operation: stacks = self.list_stacks()
-op1024=>operation: ordered_stacks = get_stack_deployment_order(stacks)
-op1026=>operation: pre_regional = {'gco-global', 'gco-api-gateway'}
-op1028=>operation: post_regional = {'gco-monitoring'}
-op1030=>operation: pre_regional_stacks = [s for s in ordered_stacks if s in pre_regional]
-op1032=>operation: regional_stacks = [s for s in ordered_stacks if s not in pre_regional and s not in post_regional]
-op1034=>operation: post_regional_stacks = [s for s in ordered_stacks if s in post_regional]
-op1036=>operation: successful: list[str] = []
-op1038=>operation: failed: list[str] = []
-cond1041=>condition: for stack_name in pre_regional_stacks
-cond1046=>operation: on_stack_start(stack_name) if  on_stack_start
-op1056=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress)
-cond1059=>condition: if success
-sub1063=>subroutine: successful.append(stack_name)
-cond1071=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
-cond1082=>condition: if not success
-io1089=>inputoutput: output: (False, successful, failed)
-e1087=>end: end function return
-sub1067=>subroutine: failed.append(stack_name)
-cond1098=>condition: if regional_stacks
-cond1103=>condition: if parallel and len(regional_stacks) > 1
-op1107=>operation: successful_regional, failed_regional = self._deploy_stacks_parallel(stacks=regional_stacks, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete, max_workers=max_workers)
-sub1109=>subroutine: successful.extend(successful_regional)
-sub1111=>subroutine: failed.extend(failed_regional)
-cond1114=>condition: if failed_regional
-io1121=>inputoutput: output: (False, successful, failed)
-e1119=>end: end function return
-cond1191=>condition: for stack_name in post_regional_stacks
-cond1196=>operation: on_stack_start(stack_name) if  on_stack_start
-op1206=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, exclusively=True)
-cond1209=>condition: if success
-sub1213=>subroutine: successful.append(stack_name)
-cond1221=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
-cond1232=>condition: if not success
-io1239=>inputoutput: output: (False, successful, failed)
-e1237=>end: end function return
-sub1217=>subroutine: failed.append(stack_name)
-io1250=>inputoutput: output: (len(failed) == 0, successful, failed)
-e1248=>end: end function return
-cond1130=>condition: for stack_name in regional_stacks
-cond1135=>operation: on_stack_start(stack_name) if  on_stack_start
-op1145=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, exclusively=True)
-cond1148=>condition: if success
-sub1152=>subroutine: successful.append(stack_name)
-cond1160=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
-cond1171=>condition: if not success
-io1178=>inputoutput: output: (False, successful, failed)
-e1176=>end: end function return
-sub1156=>subroutine: failed.append(stack_name)
+        <div><textarea id="code" style="width: 100%;" rows="11">op1151=>operation: '\n        Deploy all stacks in the correct order.\n\n        Deploys global stacks first, then regional stacks (optionally in parallel),\n        then the monitoring stack (which depends on regional stacks).\n\n        Args:\n            require_approval: Whether to require approval for changes\n            outputs_file: File to write outputs to\n            parameters: CDK parameters\n            tags: Tags to apply to stacks\n            progress: Progress display type\n            on_stack_start: Callback(stack_name) called when starting a stack\n            on_stack_complete: Callback(stack_name, success) called when stack completes\n            parallel: Deploy regional stacks in parallel\n            max_workers: Maximum number of parallel deployments (default: 4)\n\n        Returns:\n            Tuple of (overall_success, successful_stacks, failed_stacks)\n        '
+op1153=>operation: stacks = self.list_stacks()
+op1155=>operation: ordered_stacks = get_stack_deployment_order(stacks)
+op1157=>operation: pre_regional_stacks = [s for s in ordered_stacks if s.endswith(('-global', '-api-gateway'))]
+op1159=>operation: regional_stacks = [s for s in ordered_stacks if not s.endswith(('-global', '-api-gateway', '-monitoring'))]
+op1161=>operation: post_regional_stacks = [s for s in ordered_stacks if s.endswith('-monitoring')]
+op1163=>operation: successful: list[str] = []
+op1165=>operation: failed: list[str] = []
+cond1168=>condition: for stack_name in pre_regional_stacks
+cond1173=>operation: on_stack_start(stack_name) if  on_stack_start
+op1183=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress)
+cond1186=>condition: if success
+sub1190=>subroutine: successful.append(stack_name)
+cond1198=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
+cond1209=>condition: if not success
+io1216=>inputoutput: output: (False, successful, failed)
+e1214=>end: end function return
+sub1194=>subroutine: failed.append(stack_name)
+cond1225=>condition: if regional_stacks
+cond1230=>condition: if parallel and len(regional_stacks) > 1
+op1234=>operation: successful_regional, failed_regional = self._deploy_stacks_parallel(stacks=regional_stacks, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete, max_workers=max_workers)
+sub1236=>subroutine: successful.extend(successful_regional)
+sub1238=>subroutine: failed.extend(failed_regional)
+cond1241=>condition: if failed_regional
+io1248=>inputoutput: output: (False, successful, failed)
+e1246=>end: end function return
+cond1318=>condition: for stack_name in post_regional_stacks
+cond1323=>operation: on_stack_start(stack_name) if  on_stack_start
+op1333=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, exclusively=True)
+cond1336=>condition: if success
+sub1340=>subroutine: successful.append(stack_name)
+cond1348=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
+cond1359=>condition: if not success
+io1366=>inputoutput: output: (False, successful, failed)
+e1364=>end: end function return
+sub1344=>subroutine: failed.append(stack_name)
+io1377=>inputoutput: output: (len(failed) == 0, successful, failed)
+e1375=>end: end function return
+cond1257=>condition: for stack_name in regional_stacks
+cond1262=>operation: on_stack_start(stack_name) if  on_stack_start
+op1272=>operation: success = self.deploy(stack_name=stack_name, require_approval=require_approval, outputs_file=outputs_file, parameters=parameters, tags=tags, progress=progress, exclusively=True)
+cond1275=>condition: if success
+sub1279=>subroutine: successful.append(stack_name)
+cond1287=>operation: on_stack_complete(stack_name, success) if  on_stack_complete
+cond1298=>condition: if not success
+io1305=>inputoutput: output: (False, successful, failed)
+e1303=>end: end function return
+sub1283=>subroutine: failed.append(stack_name)
 
-op1020->op1022
-op1022->op1024
-op1024->op1026
-op1026->op1028
-op1028->op1030
-op1030->op1032
-op1032->op1034
-op1034->op1036
-op1036->op1038
-op1038->cond1041
-cond1041(yes)->cond1046
-cond1046->op1056
-op1056->cond1059
-cond1059(yes)->sub1063
-sub1063->cond1071
-cond1071->cond1082
-cond1082(yes)->io1089
-io1089->e1087
-cond1082(no)->cond1041
-cond1059(no)->sub1067
-sub1067->cond1071
-cond1041(no)->cond1098
-cond1098(yes)->cond1103
-cond1103(yes)->op1107
-op1107->sub1109
-sub1109->sub1111
-sub1111->cond1114
-cond1114(yes)->io1121
-io1121->e1119
-cond1114(no)->cond1191
-cond1191(yes)->cond1196
-cond1196->op1206
-op1206->cond1209
-cond1209(yes)->sub1213
-sub1213->cond1221
-cond1221->cond1232
-cond1232(yes)->io1239
-io1239->e1237
-cond1232(no)->cond1191
-cond1209(no)->sub1217
-sub1217->cond1221
-cond1191(no)->io1250
-io1250->e1248
-cond1103(no)->cond1130
-cond1130(yes)->cond1135
-cond1135->op1145
-op1145->cond1148
-cond1148(yes)->sub1152
-sub1152->cond1160
-cond1160->cond1171
-cond1171(yes)->io1178
-io1178->e1176
-cond1171(no)->cond1130
-cond1148(no)->sub1156
-sub1156->cond1160
-cond1130(no)->cond1191
-cond1098(no)->cond1191
+op1151->op1153
+op1153->op1155
+op1155->op1157
+op1157->op1159
+op1159->op1161
+op1161->op1163
+op1163->op1165
+op1165->cond1168
+cond1168(yes)->cond1173
+cond1173->op1183
+op1183->cond1186
+cond1186(yes)->sub1190
+sub1190->cond1198
+cond1198->cond1209
+cond1209(yes)->io1216
+io1216->e1214
+cond1209(no)->cond1168
+cond1186(no)->sub1194
+sub1194->cond1198
+cond1168(no)->cond1225
+cond1225(yes)->cond1230
+cond1230(yes)->op1234
+op1234->sub1236
+sub1236->sub1238
+sub1238->cond1241
+cond1241(yes)->io1248
+io1248->e1246
+cond1241(no)->cond1318
+cond1318(yes)->cond1323
+cond1323->op1333
+op1333->cond1336
+cond1336(yes)->sub1340
+sub1340->cond1348
+cond1348->cond1359
+cond1359(yes)->io1366
+io1366->e1364
+cond1359(no)->cond1318
+cond1336(no)->sub1344
+sub1344->cond1348
+cond1318(no)->io1377
+io1377->e1375
+cond1230(no)->cond1257
+cond1257(yes)->cond1262
+cond1262->op1272
+op1272->cond1275
+cond1275(yes)->sub1279
+sub1279->cond1287
+cond1287->cond1298
+cond1298(yes)->io1305
+io1305->e1303
+cond1298(no)->cond1257
+cond1275(no)->sub1283
+sub1283->cond1287
+cond1257(no)->cond1318
+cond1225(no)->cond1318
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

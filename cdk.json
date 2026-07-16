@@ -59,6 +59,20 @@
       "client_affinity": "NONE"
     },
 
+    "_comment_backend_tls": "Mandatory authenticated TLS from the proxy Lambdas through Global Accelerator/direct regional routing to each internal ALB. GCO creates a deployment-local ECDSA root CA in a customer-managed-KMS-encrypted secret, publishes only its public trust bundle, and imports short-lived signed leaves into regional ACM. The scheduled manager reimports renewed leaves into stable ACM ARNs. root_generation can be incremented for an explicit staged rollover; activation delay must exceed the maximum stale trust-cache window, and overlap must exceed leaf validity.",
+    "backend_tls": {
+      "root_generation": 1,
+      "root_validity_days": 3650,
+      "root_rotate_before_days": 180,
+      "root_activation_delay_hours": 24,
+      "root_overlap_days": 45,
+      "leaf_validity_days": 30,
+      "leaf_rotate_before_days": 10,
+      "rotation_schedule_hours": 12,
+      "trust_cache_ttl_seconds": 300,
+      "trust_cache_max_stale_seconds": 3600
+    },
+
     "_comment_alb_config": "Internal ALB target-group health checks for the manifest-processor service. health_check_interval / health_check_timeout in seconds. healthy_threshold / unhealthy_threshold are the consecutive-probe counts before a target flips state. See https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-target-groups.html.",
     "alb_config": {
       "health_check_interval": 30,
@@ -67,13 +81,14 @@
       "unhealthy_threshold": 2
     },
 
-    "_comment_api_gateway": "Edge-optimized REST API behavior. throttle_rate_limit (req/s) and throttle_burst_limit (peak burst) are the account-level caps. log_level applies to access/execution logs. metrics_enabled and tracing_enabled toggle CloudWatch metrics and X-Ray tracing for the stage. See https://docs.aws.amazon.com/apigateway/latest/developerguide/how-to-deploy-api.html.",
+    "_comment_api_gateway": "Edge-optimized global REST API behavior plus direct-caller policy for the always-deployed per-region aggregation bridges. throttle_rate_limit (req/s) and throttle_burst_limit (peak burst) are stage caps. log_level applies to access/execution logs. metrics_enabled and tracing_enabled toggle CloudWatch metrics and X-Ray tracing. regional_api_enabled admits other IAM-authorized principals from this account to each bridge; the exact aggregator role is always admitted and bridge deployment is unconditional. Each VPC Lambda resolves the current internal ALB from the trusted SSM registry and uses private-root TLS. See docs/CUSTOMIZATION.md (Regional API Gateway).",
     "api_gateway": {
       "throttle_rate_limit": 1000,
       "throttle_burst_limit": 2000,
       "log_level": "INFO",
       "metrics_enabled": true,
-      "tracing_enabled": true
+      "tracing_enabled": true,
+      "regional_api_enabled": false
     },
 
     "_comment_waf": "WAFv2 web ACL in front of API Gateway. per_ip_rate_limit is the WAF rate-based rule's request budget per source IP over a 5-minute window. See https://docs.aws.amazon.com/waf/latest/developerguide/waf-rule-statement-type-rate-based.html.",
@@ -88,7 +103,7 @@
 
     "_comment_workloads": "Job submission, validation, and processing pipelines",
 
-    "_comment_manifest_processor": "Service that validates POST /api/v1/manifests and writes accepted jobs to SQS. image: container image for the deployment. replicas: pod count behind the internal ALB. resource_limits: per-pod CPU/memory caps. validation_enabled: master switch for the security-policy validator. max_request_body_bytes: hard request-size cap (1 MiB default). yaml_max_depth: YAML parser nesting cap to defuse billion-laughs / alias-bomb attacks. See docs/CUSTOMIZATION.md (Manifest Processor, Security Policy Configuration).",
+    "_comment_manifest_processor": "Authenticated API, direct manifest submission, inference proxy, and DynamoDB queue worker. central_queue_worker_enabled activates queued Jobs in each target region. Claims use unique pod owners, fencing generations, deterministic Kubernetes identities, and renewable leases; lease_renewal_seconds must be no more than half lease_seconds. poll_interval_seconds controls pickup cadence; batch_size bounds each pass; reconcile_limit bounds pending/running status checks. max_request_body_bytes is the hard request-size cap (1 MiB default). yaml_max_depth limits YAML nesting. See docs/CUSTOMIZATION.md.",
     "manifest_processor": {
       "image": "gco/manifest-processor:latest",
       "replicas": 3,
@@ -98,10 +113,16 @@
       },
       "validation_enabled": true,
       "max_request_body_bytes": 1048576,
-      "yaml_max_depth": 50
+      "yaml_max_depth": 50,
+      "central_queue_worker_enabled": true,
+      "central_queue_poll_interval_seconds": 10,
+      "central_queue_batch_size": 5,
+      "central_queue_reconcile_limit": 100,
+      "central_queue_lease_seconds": 300,
+      "central_queue_lease_renewal_seconds": 60
     },
 
-    "_comment_queue_processor": "SQS-backed job submitter. enabled: master toggle (when false the post-helm-sqs-consumer manifest is skipped). polling_interval: SQS receive interval in seconds. max_concurrent_jobs: in-flight jobs per pod. messages_per_job: SQS messages drained per worker iteration. successful_jobs_history / failed_jobs_history: K8s Job .spec history caps.",
+    "_comment_queue_processor": "SQS-backed job submitter. enabled: master toggle (when false the exact built-in ScaledJob is pruned). polling_interval: how often KEDA checks SQS. max_concurrent_jobs: maximum active consumer Jobs. messages_per_job: target queued messages per active Job for KEDA scaling; each worker still receives at most one message. successful_jobs_history / failed_jobs_history: K8s Job history caps.",
     "queue_processor": {
       "enabled": true,
       "polling_interval": 10,
@@ -114,7 +135,6 @@
     "_comment_job_validation_policy": "Shared validation policy applied by BOTH the REST manifest_processor (POST /api/v1/manifests) and the SQS queue_processor (gco jobs submit-sqs). CDK wires these values into both services at deploy time so a single change applies uniformly. An attacker holding sqs:SendMessage cannot bypass checks the REST path enforces. allowed_namespaces: namespaces a submitted manifest may target. resource_quotas: per-manifest caps applied before admission. trusted_registries / trusted_dockerhub_orgs: image source allowlist. manifest_security_policy.block_*: hardening flags rejecting privileged or host-namespace pods. allowed_kinds: K8s resource kinds the gateway will accept. See docs/CUSTOMIZATION.md (Security Policy Configuration).",
     "job_validation_policy": {
       "allowed_namespaces": [
-        "default",
         "gco-jobs"
       ],
       "resource_quotas": {
@@ -317,7 +337,7 @@
       }
     },
 
-    "_comment_inference_monitor": "Long-running controller that reconciles InferenceEndpoint CRs into Deployments / Services / Ingresses / HPAs. reconcile_interval: seconds between reconciliation passes (also drives the leader-election lease duration). unhealthy_threshold_seconds: how long an endpoint may stay NotReady before its ingress is removed. See docs/INFERENCE.md.",
+    "_comment_inference_monitor": "Long-running controller that reconciles InferenceEndpoint desired state into Deployments, Services, autoscaling objects, and supporting configuration. Direct per-endpoint Ingresses are forbidden; reconciliation removes any legacy ones so inference stays behind the shared authenticated proxy. reconcile_interval: seconds between reconciliation passes (also drives the leader-election lease duration). unhealthy_threshold_seconds: how long an endpoint may stay NotReady before the monitor emits an explicit degraded-state warning while the proxy returns 503. See docs/INFERENCE.md.",
     "inference_monitor": {
       "reconcile_interval": 15,
       "unhealthy_threshold_seconds": 300

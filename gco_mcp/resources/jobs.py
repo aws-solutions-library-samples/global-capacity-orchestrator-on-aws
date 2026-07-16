@@ -1,11 +1,4 @@
-"""Live job state resources (gco://jobs/...) for the GCO MCP server.
-
-Each handler is a thin wrapper around ``kubectl get job`` so the
-resource layer never re-implements Kubernetes plumbing. Handler
-returns the raw YAML (or a structured error string) — pinning a job
-URI is a cheap way for an LLM to keep the latest manifest in context
-across turns.
-"""
+"""Live job state resources for explicitly selected regional clusters."""
 
 from __future__ import annotations
 
@@ -14,6 +7,8 @@ import re
 from typing import Any
 
 import cli_runner
+
+from resources._eks import eks_context_for_region, is_valid_region
 
 # RFC 1123 label format. Job names live in the same namespace as pod
 # names, so the same rule applies. Bounded length stops accidental
@@ -24,8 +19,21 @@ _KUBECTL_TIMEOUT_SECONDS = 30
 
 
 def _job_resource(job_name: str) -> str:
-    """Return the live YAML for ``job_name`` in the GCO jobs namespace."""
-    if not _JOB_NAME_RE.match(job_name):
+    """Fail closed for the legacy URI that did not identify a cluster."""
+    return json.dumps(
+        {
+            "error": "explicit region required",
+            "code": "eks_region_required",
+            "use": f"gco://jobs/{{region}}/{job_name}",
+        }
+    )
+
+
+def _job_resource_for_region(region: str, job_name: str) -> str:
+    """Return live YAML for ``job_name`` from one explicit regional cluster."""
+    if not is_valid_region(region):
+        return json.dumps({"error": "invalid region", "value": region})
+    if not _JOB_NAME_RE.fullmatch(job_name):
         return json.dumps(
             {
                 "error": "invalid job_name",
@@ -34,7 +42,11 @@ def _job_resource(job_name: str) -> str:
             }
         )
     try:
-        result = cli_runner.subprocess.run(  # type: ignore[attr-defined] # nosemgrep: dangerous-subprocess-use-audit - shell=False; argv is a literal list with a validated job_name
+        context_arn = eks_context_for_region(region)
+    except Exception as exc:  # AWS credential/session failures become resource errors
+        return json.dumps({"error": "unable to resolve EKS context", "detail": str(exc)[:200]})
+    try:
+        result = cli_runner.subprocess.run(  # type: ignore[attr-defined] # nosemgrep: dangerous-subprocess-use-audit - shell=False; caller input is validated and the context ARN is constructed internally
             [
                 "kubectl",
                 "get",
@@ -44,6 +56,8 @@ def _job_resource(job_name: str) -> str:
                 _DEFAULT_NAMESPACE,
                 "-o",
                 "yaml",
+                "--context",
+                context_arn,
             ],
             capture_output=True,
             text=True,
@@ -62,5 +76,6 @@ def _job_resource(job_name: str) -> str:
 
 
 def register(mcp_instance: Any) -> None:
-    """Register live job-state resources against the shared MCP server."""
+    """Register regional live job-state resources and the fail-closed legacy URI."""
     mcp_instance.resource("gco://jobs/{job_name}")(_job_resource)
+    mcp_instance.resource("gco://jobs/{region}/{job_name}")(_job_resource_for_region)

@@ -83,10 +83,14 @@ spec:
               value: "{{CLUSTER_NAME}}"
             - name: REGION
               value: "{{REGION}}"
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
             - name: AUTH_SECRET_ARN
               value: "{{AUTH_SECRET_ARN}}"
             - name: AWS_ROLE_ARN
-              value: "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+              value: "{{MANIFEST_PROCESSOR_ROLE_ARN}}"
             - name: AWS_WEB_IDENTITY_TOKEN_FILE
               value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
             - name: CPU_THRESHOLD
@@ -111,6 +115,22 @@ spec:
               value: "{{JOBS_TABLE_NAME}}"
             - name: DYNAMODB_REGION
               value: "{{DYNAMODB_REGION}}"
+            # The regional worker activates DynamoDB-queued jobs and reconciles
+            # their Kubernetes lifecycle back to terminal queue states.
+            - name: CENTRAL_QUEUE_WORKER_ENABLED
+              value: "{{CENTRAL_QUEUE_WORKER_ENABLED}}"
+            - name: CENTRAL_QUEUE_POLL_INTERVAL_SECONDS
+              value: "{{CENTRAL_QUEUE_POLL_INTERVAL_SECONDS}}"
+            - name: CENTRAL_QUEUE_BATCH_SIZE
+              value: "{{CENTRAL_QUEUE_BATCH_SIZE}}"
+            - name: CENTRAL_QUEUE_RECONCILE_LIMIT
+              value: "{{CENTRAL_QUEUE_RECONCILE_LIMIT}}"
+            - name: CENTRAL_QUEUE_LEASE_SECONDS
+              value: "{{CENTRAL_QUEUE_LEASE_SECONDS}}"
+            - name: CENTRAL_QUEUE_LEASE_RENEWAL_SECONDS
+              value: "{{CENTRAL_QUEUE_LEASE_RENEWAL_SECONDS}}"
+            - name: QUEUE_TARGET_REGIONS
+              value: "{{QUEUE_TARGET_REGIONS}}"
             - name: MAX_CPU_PER_MANIFEST
               value: "{{MP_MAX_CPU_PER_MANIFEST}}"
             - name: MAX_MEMORY_PER_MANIFEST
@@ -128,6 +148,8 @@ spec:
             # cdk.json::job_validation_policy.allowed_namespaces.
             - name: ALLOWED_NAMESPACES
               value: "{{MP_ALLOWED_NAMESPACES}}"
+            - name: ALLOWED_KINDS
+              value: "{{MP_ALLOWED_KINDS}}"
             # Image registry allowlist — shared with the queue processor via
             # cdk.json::job_validation_policy.{trusted_registries,trusted_dockerhub_orgs}.
             # Must include the project's own ECR registry hostnames so jobs

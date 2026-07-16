@@ -7,6 +7,7 @@ a second instance.
 """
 
 import os
+import sys
 
 from fastmcp import FastMCP
 
@@ -22,6 +23,16 @@ from fastmcp.experimental.transforms.code_mode import (
 )
 from fastmcp.server.transforms import ResourcesAsTools
 from fastmcp.server.transforms.search import BM25SearchTransform, RegexSearchTransform
+
+# ``run_mcp`` supports both legacy top-level imports (``import server`` after
+# adding gco_mcp/ to sys.path) and package imports. Bind both names to the first
+# loaded module before constructing the FastMCP object so the two routes can
+# never create independent registries.
+_THIS_MODULE = sys.modules[__name__]
+if __name__ == "server":
+    sys.modules.setdefault("gco_mcp.server", _THIS_MODULE)
+elif __name__ == "gco_mcp.server":
+    sys.modules.setdefault("server", _THIS_MODULE)
 
 mcp = FastMCP(
     "GCO",
@@ -40,8 +51,13 @@ mcp = FastMCP(
         "- clients:// — API client examples (Python, curl, AWS CLI)\n"
         "- scripts:// — Utility scripts for cluster access, versioning, testing\n"
         "- tests:// — Test suite documentation, patterns, and configuration\n"
-        "- config:// — CDK configuration schema, feature toggles, and environment variables\n\n"
-        "Start with docs://gco/index or k8s://gco/manifests/index to explore."
+        "- config:// — CDK configuration and environment variables\n"
+        "- images:// — ECR repositories, tags, image details, and replication state\n"
+        "- gco:// — Live regional jobs, Kubernetes objects, cluster topology, and inference state\n"
+        "- costs:// and tasks:// — Windowed cost and background-task status views\n"
+        "- mission:// — Mission sessions, reports, and audit replay (feature-gated)\n"
+        "- mcp:// — Live tool/resource indexes and feature-flag mappings\n\n"
+        "Start with docs://gco/index or mcp://gco/resources/index to explore."
     ),
     # NOTE on background-task support: ``tasks=True`` is intentionally NOT set
     # here. FastMCP's ``tasks=True`` at the server level applies a default

@@ -19,6 +19,7 @@ if str(MCP_ROOT) not in sys.path:
     sys.path.insert(0, str(MCP_ROOT))
 
 import cli_runner  # noqa: E402
+import local_data  # noqa: E402
 
 
 class _FakeMCP:
@@ -33,10 +34,26 @@ class _RunnerModule(ModuleType):
     def __init__(self) -> None:
         super().__init__("cli_runner")
         self.calls: list[tuple[str, ...]] = []
+        self.call_kwargs: list[dict[str, Any]] = []
+        self.staged_observations: list[dict[str, Any]] = []
         self.async_calls: list[tuple[tuple[str, ...], dict[str, Any]]] = []
 
-    def _run_cli(self, *args: str) -> str:
+    def _run_cli(self, *args: str, **kwargs: Any) -> str:
         self.calls.append(args)
+        self.call_kwargs.append(kwargs)
+        for argument in args:
+            if not argument.startswith("/dev/fd/"):
+                continue
+            metadata = os.stat(argument, follow_symlinks=False)
+            self.staged_observations.append(
+                {
+                    "argument": argument,
+                    "device": metadata.st_dev,
+                    "inode": metadata.st_ino,
+                    "mode": metadata.st_mode,
+                    "pass_fds": kwargs.get("pass_fds"),
+                }
+            )
         return json.dumps({"args": args})
 
     async def _run_cli_async(self, *args: str, **kwargs: Any) -> str:
@@ -44,14 +61,21 @@ class _RunnerModule(ModuleType):
         return json.dumps({"args": args})
 
 
-def _load_storage_tool(*, enabled: bool) -> tuple[ModuleType, _RunnerModule]:
+def _load_storage_tool(
+    *,
+    enabled: bool,
+    upload_enabled: bool = False,
+) -> tuple[ModuleType, _RunnerModule]:
     """Load the tool module against isolated decorators and a recording runner."""
     runner = _RunnerModule()
     audit = ModuleType("audit")
     audit.audit_logged = lambda function: function  # type: ignore[attr-defined]
     flags = ModuleType("feature_flags")
     flags.FLAG_LOCAL_STORAGE_SYNC = "GCO_ENABLE_LOCAL_STORAGE_SYNC"  # type: ignore[attr-defined]
-    flags.is_enabled = lambda _flag: enabled  # type: ignore[attr-defined]
+    flags.FLAG_MODEL_UPLOAD = "GCO_ENABLE_MODEL_UPLOAD"  # type: ignore[attr-defined]
+    flags.is_enabled = lambda flag: (  # type: ignore[attr-defined]
+        upload_enabled if flag == flags.FLAG_MODEL_UPLOAD else enabled
+    )
     server = ModuleType("server")
     server.mcp = _FakeMCP()  # type: ignore[attr-defined]
     name = f"_gco_mcp_storage_test_{id(runner)}"
@@ -89,7 +113,6 @@ class TestMCPStorageTools:
         asyncio.run(module.files_get("us-east-1", "fsx"))
         asyncio.run(module.files_access_points())
         asyncio.run(module.files_access_points("eu-central-1"))
-        asyncio.run(module.upload_to_regional_bucket("model.bin", "us-east-1", "models"))
 
         assert ("files", "ls", "-r", "us-west-2", "/outputs") in runner.calls
         assert ("files", "list") in runner.calls
@@ -98,16 +121,55 @@ class TestMCPStorageTools:
         assert ("storage", "list", "--region", "ap-south-1") in runner.calls
         assert ("files", "get", "us-east-1", "-t", "fsx") in runner.calls
         assert ("files", "access-points", "-r", "eu-central-1") in runner.calls
-        assert (
-            "models",
-            "upload-regional",
-            "model.bin",
-            "-r",
-            "us-east-1",
-            "--prefix",
-            "models",
-        ) in runner.calls
+        assert not hasattr(module, "upload_to_regional_bucket")
         assert not hasattr(module, "sync_storage_bucket")
+
+    def test_regional_upload_is_gated_and_uses_private_descriptor_snapshot(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        module, runner = _load_storage_tool(enabled=False, upload_enabled=True)
+        root = tmp_path / "root"
+        source = root / "model.bin"
+        source.parent.mkdir()
+        source.write_bytes(b"weights")
+        source_identity = (source.stat().st_dev, source.stat().st_ino)
+
+        with patch.dict(os.environ, {"GCO_STORAGE_LOCAL_ROOT": str(root)}):
+            result = asyncio.run(
+                module.upload_to_regional_bucket("./model.bin", "us-east-1", "models")
+            )
+
+        args = json.loads(result)["args"]
+        assert args[0:2] == ["models", "upload-regional"]
+        assert args[2].startswith("/dev/fd/")
+        assert args[3:] == ["-r", "us-east-1", "--prefix", "models"]
+        observation = runner.staged_observations[-1]
+        assert (observation["device"], observation["inode"]) == source_identity
+        assert observation["pass_fds"] == runner.call_kwargs[-1]["pass_fds"]
+        assert len(observation["pass_fds"]) == 1
+        assert not list(root.glob(".gco-mcp-upload-*"))
+        assert not hasattr(module, "sync_storage_bucket")
+
+    def test_regional_upload_rejects_descendant_symlink(self, tmp_path: Path) -> None:
+        module, runner = _load_storage_tool(enabled=False, upload_enabled=True)
+        root = tmp_path / "root"
+        source = root / "dataset"
+        source.mkdir(parents=True)
+        outside = tmp_path / "outside.txt"
+        outside.write_text("secret", encoding="utf-8")
+        (source / "escape.txt").symlink_to(outside)
+
+        with patch.dict(os.environ, {"GCO_STORAGE_LOCAL_ROOT": str(root)}):
+            result = asyncio.run(
+                module.upload_to_regional_bucket("dataset", "us-east-1", "uploads")
+            )
+
+        payload = json.loads(result)
+        assert payload["code"] == "local_data_path_rejected"
+        assert "symbolic link" in payload["error"]
+        assert runner.calls == []
+        assert not list(root.glob(".gco-mcp-upload-*"))
 
     def test_resolve_sync_local_path_contract(self, tmp_path: Path) -> None:
         module, _ = _load_storage_tool(enabled=True)
@@ -121,6 +183,7 @@ class TestMCPStorageTools:
 
         expected = root.stat()
         assert contract.local_argument == "child"
+        assert contract.resolved_path == child.resolve()
         assert contract.root == root.resolve()
         assert (contract.device, contract.inode) == (expected.st_dev, expected.st_ino)
         assert root_contract.local_argument == "."
@@ -145,7 +208,10 @@ class TestMCPStorageTools:
             with pytest.raises(ValueError, match="stay within"):
                 module._resolve_sync_local_path("link/file", require_exists=False)
 
-            with patch.object(module.os, "name", "nt"), pytest.raises(ValueError, match="requires"):
+            with (
+                patch.object(local_data.os, "name", "nt"),
+                pytest.raises(ValueError, match="requires"),
+            ):
                 module._resolve_sync_local_path("child", require_exists=False)
 
         missing_root = tmp_path / "missing-root"

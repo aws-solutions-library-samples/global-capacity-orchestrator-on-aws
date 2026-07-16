@@ -857,11 +857,13 @@ class TestJobManagerSubmitJobDirect:
                 MagicMock(returncode=0, stdout="job/test-job created", stderr=""),
             ]
 
-            result = manager.submit_job_direct(manifests, region="us-east-1", namespace="default")
+            result = manager.submit_job_direct(manifests, region="us-east-1")
 
             assert result["status"] == "success"
             assert result["method"] == "kubectl"
             assert result["region"] == "us-east-1"
+            assert result["namespace"] == "gco-jobs"
+            assert manifests[0]["metadata"]["namespace"] == "gco-jobs"
             assert "warnings" not in result
 
     def test_submit_job_direct_no_stack(self):

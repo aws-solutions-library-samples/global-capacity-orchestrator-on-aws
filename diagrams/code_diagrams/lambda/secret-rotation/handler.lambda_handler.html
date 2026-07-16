@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,36 +205,36 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op629=>operation: '\n    Handle Secrets Manager rotation request.\n\n    Args:\n        event: Rotation event with Step, SecretId, ClientRequestToken\n        context: Lambda context (unused)\n\n    Raises:\n        ValueError: If the rotation step is invalid\n    '
-op631=>operation: secret_id = event['SecretId']
-op633=>operation: token = event['ClientRequestToken']
-op635=>operation: step = event['Step']
-sub637=>subroutine: logger.info(f"Rotation step '{step}' for secret {secret_id}")
-op639=>operation: client = boto3.client('secretsmanager')
-cond642=>condition: if step == 'createSecret'
-sub646=>subroutine: create_secret(client, secret_id, token)
-cond651=>condition: if step == 'setSecret'
-sub655=>subroutine: set_secret(client, secret_id, token)
-cond660=>condition: if step == 'testSecret'
-sub664=>subroutine: test_secret(client, secret_id, token)
-cond669=>condition: if step == 'finishSecret'
-sub673=>subroutine: finish_secret(client, secret_id, token)
-sub677=>subroutine: raise ValueError(f'Invalid rotation step: {step}')
+        <div><textarea id="code" style="width: 100%;" rows="11">op705=>operation: '\n    Handle Secrets Manager rotation request.\n\n    Args:\n        event: Rotation event with Step, SecretId, ClientRequestToken\n        context: Lambda context (unused)\n\n    Raises:\n        ValueError: If the rotation step is invalid\n    '
+op707=>operation: secret_id = event['SecretId']
+op709=>operation: token = event['ClientRequestToken']
+op711=>operation: step = event['Step']
+sub713=>subroutine: logger.info(f"Rotation step '{step}' for secret {secret_id}")
+op715=>operation: client = boto3.client('secretsmanager')
+cond718=>condition: if step == 'createSecret'
+sub722=>subroutine: create_secret(client, secret_id, token)
+cond727=>condition: if step == 'setSecret'
+sub731=>subroutine: set_secret(client, secret_id, token)
+cond736=>condition: if step == 'testSecret'
+sub740=>subroutine: test_secret(client, secret_id, token)
+cond745=>condition: if step == 'finishSecret'
+sub749=>subroutine: finish_secret(client, secret_id, token)
+sub753=>subroutine: raise ValueError(f'Invalid rotation step: {step}')
 
-op629->op631
-op631->op633
-op633->op635
-op635->sub637
-sub637->op639
-op639->cond642
-cond642(yes)->sub646
-cond642(no)->cond651
-cond651(yes)->sub655
-cond651(no)->cond660
-cond660(yes)->sub664
-cond660(no)->cond669
-cond669(yes)->sub673
-cond669(no)->sub677
+op705->op707
+op707->op709
+op709->op711
+op711->sub713
+sub713->op715
+op715->cond718
+cond718(yes)->sub722
+cond718(no)->cond727
+cond727(yes)->sub731
+cond727(no)->cond736
+cond736(yes)->sub740
+cond736(no)->cond745
+cond745(yes)->sub749
+cond745(no)->sub753
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

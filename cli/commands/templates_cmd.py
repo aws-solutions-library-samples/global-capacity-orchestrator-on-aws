@@ -38,7 +38,7 @@ def templates_list(config: Any, region: Any) -> None:
 
         aws_client = get_aws_client(config)
 
-        query_region = region or config.default_region
+        query_region = region or (config.default_region if config.use_regional_api else None)
         result = aws_client.call_api(
             method="GET",
             path="/api/v1/templates",
@@ -85,7 +85,7 @@ def templates_get(config: Any, name: Any, region: Any) -> None:
 
         aws_client = get_aws_client(config)
 
-        query_region = region or config.default_region
+        query_region = region or (config.default_region if config.use_regional_api else None)
         result = aws_client.call_api(
             method="GET",
             path=f"/api/v1/templates/{name}",
@@ -158,7 +158,7 @@ def templates_create(
 
         aws_client = get_aws_client(config)
 
-        query_region = region or config.default_region
+        query_region = region or (config.default_region if config.use_regional_api else None)
         result = aws_client.call_api(
             method="POST",
             path="/api/v1/templates",
@@ -201,7 +201,7 @@ def templates_delete(config: Any, name: Any, region: Any, yes: Any) -> None:
 
         aws_client = get_aws_client(config)
 
-        query_region = region or config.default_region
+        query_region = region or (config.default_region if config.use_regional_api else None)
         result = aws_client.call_api(
             method="DELETE",
             path=f"/api/v1/templates/{name}",

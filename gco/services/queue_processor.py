@@ -23,7 +23,9 @@ Configuration via environment variables:
     JOB_QUEUE_URL:           SQS queue URL to consume from (required)
     AWS_REGION:              AWS region (default: us-east-1)
     ALLOWED_NAMESPACES:      Comma-separated namespace allowlist
-                             (default: default,gco-jobs)
+                             (default: gco-jobs)
+    ALLOWED_KINDS:           Comma-separated resource-kind allowlist shared
+                             with the REST manifest processor
     MAX_GPU_PER_MANIFEST:    Max GPUs summed across all containers
                              (regular + init + ephemeral) (default: 4)
     MAX_CPU_PER_MANIFEST:    Max CPU summed across all containers; accepts
@@ -83,6 +85,9 @@ from kubernetes import client, config, dynamic
 from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
+from gco.models import ResourceStatus
+from gco.services.manifest_processor import DEFAULT_ALLOWED_KINDS, validate_resource_kind
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [queue-processor] %(message)s",
@@ -137,7 +142,20 @@ def _parse_memory_string(memory_str: str) -> int:
 # and populated from cdk.json queue_processor settings during CDK deploy.
 QUEUE_URL = os.environ.get("JOB_QUEUE_URL", "")
 REGION = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
-ALLOWED_NAMESPACES = set(os.environ.get("ALLOWED_NAMESPACES", "default,gco-jobs").split(","))
+_allowed_namespaces_env = os.environ.get("ALLOWED_NAMESPACES")
+ALLOWED_NAMESPACES = (
+    {"gco-jobs"}
+    if _allowed_namespaces_env is None
+    else {
+        namespace.strip() for namespace in _allowed_namespaces_env.split(",") if namespace.strip()
+    }
+)
+_allowed_kinds_env = os.environ.get("ALLOWED_KINDS")
+ALLOWED_KINDS = (
+    set(DEFAULT_ALLOWED_KINDS)
+    if _allowed_kinds_env is None
+    else {kind.strip() for kind in _allowed_kinds_env.split(",") if kind.strip()}
+)
 MAX_CPU = _parse_cpu_string(os.environ.get("MAX_CPU_PER_MANIFEST", "10000"))  # millicores
 MAX_MEMORY = _parse_memory_string(os.environ.get("MAX_MEMORY_PER_MANIFEST", "32Gi"))  # bytes
 MAX_GPU = int(os.environ.get("MAX_GPU_PER_MANIFEST", "4"))
@@ -345,12 +363,16 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
     api = m.get("apiVersion")
     if not api:
         return False, "missing 'apiVersion'"
-    meta = m.get("metadata", {})
-    if not meta.get("name"):
+    meta = m.get("metadata")
+    if not isinstance(meta, dict) or not meta.get("name"):
         return False, "missing 'metadata.name'"
-    ns = meta.get("namespace", "default")
+    ns = meta.get("namespace", "gco-jobs")
     if ns not in ALLOWED_NAMESPACES:
         return False, f"namespace '{ns}' not in allowed list {ALLOWED_NAMESPACES}"
+
+    kind_valid, kind_error = validate_resource_kind(m, ALLOWED_KINDS)
+    if not kind_valid:
+        return False, kind_error or "resource kind is not allowed"
 
     # Get pod spec for security and resource checks.
     # Handle multiple resource shapes, matching manifest_processor._get_all_containers:
@@ -555,23 +577,37 @@ def _inject_security_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
     return manifest
 
 
-def apply_manifest(m: dict[str, Any]) -> str:
-    """Apply a single manifest using the dynamic Kubernetes client."""
+def apply_manifest(m: dict[str, Any]) -> ResourceStatus:
+    """Apply one prevalidated manifest and return an explicit operation status.
+
+    Unsupported API resources are failures, never successful skips. This keeps
+    the owning SQS message available for retry and eventual DLQ inspection.
+    """
     # Inject security defaults BEFORE applying so user pods never
     # auto-mount the default SA token (T-022 / M-113 parity with the
     # REST manifest_processor path).
     _inject_security_defaults(m)
 
-    dyn = dynamic.DynamicClient(client.ApiClient())
     api_version = m["apiVersion"]
     kind = m["kind"]
     name = m["metadata"]["name"]
-    namespace = m["metadata"].get("namespace", "default")
+    namespace = m["metadata"].get("namespace", "gco-jobs")
 
+    def status(result: str, message: str) -> ResourceStatus:
+        return ResourceStatus(
+            api_version=api_version,
+            kind=kind,
+            name=name,
+            namespace=namespace,
+            status=result,
+            message=message,
+        )
+
+    dyn = dynamic.DynamicClient(client.ApiClient())
     try:
         resource = dyn.resources.get(api_version=api_version, kind=kind)
     except ResourceNotFoundError:
-        return f"SKIP unknown resource {api_version}/{kind}"
+        return status("failed", f"Unsupported Kubernetes resource {api_version}/{kind}")
 
     # For Jobs, delete completed/failed ones first so re-submission works.
     # Without this, re-submitting the same job name would fail with a 409 conflict
@@ -583,7 +619,7 @@ def apply_manifest(m: dict[str, Any]) -> str:
             conditions = existing.get("status", {}).get("conditions", [])
             finished = any(c.get("type") in ("Complete", "Failed") for c in conditions)
             if finished:
-                log.info(f"Deleting finished Job {namespace}/{name} before re-creation")
+                log.info("Deleting finished Job %s/%s before re-creation", namespace, name)
                 resource.delete(
                     name=name,
                     namespace=namespace,
@@ -600,7 +636,7 @@ def apply_manifest(m: dict[str, Any]) -> str:
             resource.create(body=m, namespace=namespace)
         else:
             resource.create(body=m)
-        return f"CREATED {kind}/{name}"
+        return status("created", "Resource created successfully")
     except ApiException as e:
         if e.status == 409:
             try:
@@ -608,14 +644,23 @@ def apply_manifest(m: dict[str, Any]) -> str:
                     resource.patch(body=m, name=name, namespace=namespace)
                 else:
                     resource.patch(body=m, name=name)
-                return f"UPDATED {kind}/{name}"
+                return status("updated", "Resource updated successfully")
             except ApiException as patch_err:
-                return f"PATCH_FAILED {kind}/{name}: {patch_err.reason}"
-        return f"CREATE_FAILED {kind}/{name}: {e.reason}"
+                return status("failed", f"Patch failed: {patch_err.reason}")
+        return status("failed", f"Create failed: {e.reason}")
+    except Exception as e:
+        return status("failed", f"Unexpected apply error: {e}")
 
 
 def process_one_message() -> bool:
-    """Receive and process a single SQS message. Returns True on success."""
+    """Receive one SQS message and delete it only after complete success.
+
+    ``True`` means either the poll was empty or the received message was fully
+    validated, applied, and deleted. ``False`` means the message was not
+    acknowledged (or queue configuration was invalid). Malformed, empty,
+    invalid, unsupported, and apply-failed messages deliberately remain in SQS
+    for visibility-timeout retries and eventual dead-letter-queue handling.
+    """
     if not QUEUE_URL:
         log.error("JOB_QUEUE_URL not set")
         return False
@@ -635,37 +680,79 @@ def process_one_message() -> bool:
         return True
 
     msg = messages[0]
-    receipt = msg["ReceiptHandle"]
-    body = json.loads(msg["Body"])
+    receipt = msg.get("ReceiptHandle")
+    if not receipt:
+        log.error("Received SQS message without a receipt handle; cannot acknowledge it")
+        return False
+
+    try:
+        body = json.loads(msg.get("Body", ""))
+    except (json.JSONDecodeError, TypeError) as e:
+        log.error("Malformed SQS message body; retaining for retry/DLQ: %s", e)
+        return False
+
+    if not isinstance(body, dict):
+        log.error("SQS message body must be a JSON object; retaining for retry/DLQ")
+        return False
 
     job_id = body.get("job_id", "unknown")
-    manifests = body.get("manifests", [])
-    log.info(f"Processing job_id={job_id}, manifests={len(manifests)}")
+    manifests = body.get("manifests")
+    if not isinstance(manifests, list) or not manifests:
+        log.error(
+            "Job %s must contain a non-empty manifests list; retaining for retry/DLQ",
+            job_id,
+        )
+        return False
+    if any(not isinstance(manifest, dict) for manifest in manifests):
+        log.error("Job %s contains a non-object manifest; retaining for retry/DLQ", job_id)
+        return False
 
-    results: list[str] = []
-    failed = False
-    for i, m in enumerate(manifests):
-        ok, reason = validate_manifest(m)
+    log.info("Processing job_id=%s, manifests=%d", job_id, len(manifests))
+
+    # Validate the entire batch before applying anything. A disallowed resource
+    # later in the message must not leave an earlier resource partially applied.
+    validation_errors: list[tuple[int, str]] = []
+    for i, manifest in enumerate(manifests):
+        try:
+            ok, reason = validate_manifest(manifest)
+        except Exception as e:
+            ok, reason = False, f"validation error: {e}"
         if not ok:
-            log.error(f"  manifest[{i}] validation failed: {reason}")
-            results.append(f"INVALID: {reason}")
+            validation_errors.append((i, reason))
+    if validation_errors:
+        for i, reason in validation_errors:
+            log.error("  manifest[%d] validation failed: %s", i, reason)
+        log.error("Job %s failed prevalidation; message will return to queue", job_id)
+        return False
+
+    failed = False
+    for i, manifest in enumerate(manifests):
+        try:
+            result = apply_manifest(manifest)
+        except Exception as e:
+            log.error("  manifest[%d] apply raised: %s", i, e)
             failed = True
             continue
-        result = apply_manifest(m)
-        log.info(f"  manifest[{i}]: {result}")
-        results.append(result)
-        if "FAILED" in result:
+        log.info(
+            "  manifest[%d]: %s %s/%s: %s",
+            i,
+            result.status,
+            result.kind,
+            result.name,
+            result.message or "",
+        )
+        if not result.is_successful():
             failed = True
 
     if failed:
         # Don't delete the SQS message — it will become visible again after the
-        # visibility timeout (5 min) and retry. After 3 total failures, SQS
-        # moves it to the dead-letter queue for manual inspection.
-        log.error(f"Job {job_id} had failures — message will return to queue")
+        # visibility timeout and retry. The queue redrive policy eventually
+        # moves it to the DLQ for operator inspection.
+        log.error("Job %s had failures; message will return to queue", job_id)
         return False
 
     sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=receipt)
-    log.info(f"Job {job_id} processed successfully")
+    log.info("Job %s processed successfully", job_id)
     return True
 
 

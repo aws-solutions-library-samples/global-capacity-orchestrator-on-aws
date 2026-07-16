@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,43 +205,43 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op463=>operation: "Lambda handler for GA registration.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the convergence pipeline's final step): the event\n      carries an ``Action`` key and is dispatched to :func:`handle_task`.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the result is POSTed back to CloudFormation.\n    "
-cond466=>condition: if event.get('Action')
-sub470=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
-io475=>inputoutput: output: handle_task(event)
-e473=>end: end function return
-sub481=>subroutine: logger.info(f'Event: {json.dumps(event)}')
-op483=>operation: request_type = event['RequestType']
-op485=>operation: props = event['ResourceProperties']
-op487=>operation: physical_id = event.get('PhysicalResourceId', f"ga-reg-{props['ClusterName']}")
-cond493=>condition: if request_type == 'Delete'
-sub497=>subroutine: handle_delete(event, context, props, physical_id)
-cond489=>condition: exception raised?
-cond504=>condition: except Exception as e
-sub508=>subroutine: logger.error(f'Error: {e}', exc_info=True)
-cond511=>condition: if request_type == 'Delete'
-sub515=>subroutine: send_response(event, context, 'SUCCESS', {}, physical_id)
-sub519=>subroutine: send_response(event, context, 'FAILED', {}, physical_id, str(e))
-sub501=>subroutine: handle_create_update(event, context, props, physical_id)
+        <div><textarea id="code" style="width: 100%;" rows="11">op549=>operation: "Lambda handler for GA registration.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the convergence pipeline's final step): the event\n      carries an ``Action`` key and is dispatched to :func:`handle_task`.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the result is POSTed back to CloudFormation.\n    "
+cond552=>condition: if event.get('Action')
+sub556=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
+io561=>inputoutput: output: handle_task(event)
+e559=>end: end function return
+sub567=>subroutine: logger.info(f'Event: {json.dumps(event)}')
+op569=>operation: request_type = event['RequestType']
+op571=>operation: props = event['ResourceProperties']
+op573=>operation: physical_id = event.get('PhysicalResourceId', f"ga-reg-{props['ClusterName']}")
+cond579=>condition: if request_type == 'Delete'
+sub583=>subroutine: handle_delete(event, context, props, physical_id)
+cond575=>condition: exception raised?
+cond590=>condition: except Exception as e
+sub594=>subroutine: logger.error(f'Error: {e}', exc_info=True)
+cond597=>condition: if request_type == 'Delete'
+sub601=>subroutine: send_response(event, context, 'SUCCESS', {}, physical_id)
+sub605=>subroutine: send_response(event, context, 'FAILED', {}, physical_id, str(e))
+sub587=>subroutine: handle_create_update(event, context, props, physical_id)
 
-op463->cond466
-cond466(yes)->sub470
-sub470->io475
-io475->e473
-cond466(no)->sub481
-sub481->op483
-op483->op485
-op485->op487
-op487->cond493
-cond493(yes)->sub497
-sub497->cond489
-cond489(yes)->cond504
-cond504(yes)->sub508
-sub508->cond511
-cond511(yes)->sub515
-cond511(no)->sub519
-cond493(no)->sub501
-sub501->cond489
+op549->cond552
+cond552(yes)->sub556
+sub556->io561
+io561->e559
+cond552(no)->sub567
+sub567->op569
+op569->op571
+op571->op573
+op573->cond579
+cond579(yes)->sub583
+sub583->cond575
+cond575(yes)->cond590
+cond590(yes)->sub594
+sub594->cond597
+cond597(yes)->sub601
+cond597(no)->sub605
+cond579(no)->sub587
+sub587->cond575
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

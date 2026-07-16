@@ -3,12 +3,10 @@
 These examples pin the behaviour that makes disaggregated and ``both``-mode
 endpoints usable end to end, and the surface for warming their KV cache:
 
-- The public prefill-decode proxy Ingress is scoped to the endpoint's own
-  ingress prefix (``/inference/{name}/v1``), so a client request — which always
-  arrives at ``/inference/{name}/...`` through Global Accelerator and the shared
-  ALB — actually reaches the proxy and stays isolated from other endpoints on
-  that ALB. A bare ``/v1`` rule would match neither the client URL nor stay
-  endpoint-scoped.
+- Reconciliation removes both historical per-endpoint Ingress names. Public
+  requests always enter through the shared ``/inference`` platform route, where
+  the manifest processor authenticates and validates the serving path before
+  forwarding to the endpoint's internal Service.
 - A ``store``/``both`` deploy enables the shared KV-cache store by default so
   the store connector is wired to the shared master, and a split deploy
   defaults the prefill-decode proxy image to the endpoint image.
@@ -29,6 +27,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
+from kubernetes.client.rest import ApiException
 
 from cli.inference import InferenceManager
 from cli.main import cli
@@ -101,57 +100,48 @@ def mock_config():
         yield mock_cfg
 
 
-def _ingress_paths(monitor) -> list[str]:
-    """Return the routing paths from the last created proxy Ingress."""
-    args, _ = monitor.networking_v1.create_namespaced_ingress.call_args
-    ingress = args[1]
-    return [p.path for rule in ingress.spec.rules for p in rule.http.paths]
+def _deleted_ingress_names(monitor) -> list[str]:
+    """Return historical Ingress names targeted by the cleanup pass."""
+    return [call.args[0] for call in monitor.networking_v1.delete_namespaced_ingress.call_args_list]
 
 
 # ===========================================================================
-# Invoke path: the proxy Ingress is scoped to the endpoint's ingress prefix
+# Routing boundary: legacy direct Ingresses are removed, never recreated
 # ===========================================================================
 
 
-class TestProxyIngressScoping:
-    def test_published_path_matches_the_client_invoke_url(self):
-        """The published prefix is a prefix of the URL the CLI builds and sends.
-
-        ``gco inference invoke`` posts to ``/inference/{name}{api_path}``. The
-        proxy Ingress must publish ``/inference/{name}/v1`` so that request
-        routes to the proxy rather than missing every rule on the shared ALB.
-        """
+class TestProxyIngressCleanup:
+    def test_removes_both_historical_ingress_names(self):
         monitor = _make_monitor()
         monitor._update_proxy_ingress("llama", "llama-proxy", "gco-inference", {})
 
-        paths = _ingress_paths(monitor)
-        assert paths == ["/inference/llama/v1"]
-        client_invoke_url = "/inference/llama/v1/completions"
-        assert client_invoke_url.startswith(paths[0])
+        assert _deleted_ingress_names(monitor) == ["inference-llama", "inference-llama-proxy"]
+        monitor.networking_v1.create_namespaced_ingress.assert_not_called()
+        monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
 
-    def test_respects_a_custom_ingress_path(self):
-        """A non-default ingress path on the endpoint is honoured for the proxy."""
+    def test_custom_legacy_ingress_path_cannot_recreate_a_bypass(self):
         monitor = _make_monitor()
         monitor._update_proxy_ingress(
             "llama", "llama-proxy", "gco-inference", {"ingress_path": "/custom/llama"}
         )
-        assert _ingress_paths(monitor) == ["/custom/llama/v1"]
 
-    def test_admin_path_is_never_published(self):
-        """The privileged ``/instances/add`` admin path stays off the public surface."""
-        monitor = _make_monitor()
-        monitor._update_proxy_ingress("llama", "llama-proxy", "gco-inference", {})
-        paths = _ingress_paths(monitor)
-        assert all("/instances" not in p for p in paths)
+        assert _deleted_ingress_names(monitor) == ["inference-llama", "inference-llama-proxy"]
+        monitor.networking_v1.create_namespaced_ingress.assert_not_called()
 
-    def test_healthcheck_path_is_scoped_too(self):
-        """The ALB health-check path tracks the scoped serving prefix."""
+    def test_missing_historical_ingresses_are_idempotent(self):
         monitor = _make_monitor()
+        monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=404)
+
         monitor._update_proxy_ingress("llama", "llama-proxy", "gco-inference", {})
-        args, _ = monitor.networking_v1.create_namespaced_ingress.call_args
-        ingress = args[1]
-        hc = ingress.metadata.annotations["alb.ingress.kubernetes.io/healthcheck-path"]
-        assert hc == "/inference/llama/v1"
+
+        assert _deleted_ingress_names(monitor) == ["inference-llama", "inference-llama-proxy"]
+
+    def test_non_404_cleanup_error_propagates(self):
+        monitor = _make_monitor()
+        monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=500)
+
+        with pytest.raises(ApiException):
+            monitor._update_proxy_ingress("llama", "llama-proxy", "gco-inference", {})
 
 
 # ===========================================================================

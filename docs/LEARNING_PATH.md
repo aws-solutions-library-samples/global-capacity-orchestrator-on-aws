@@ -45,7 +45,7 @@ The goal here is narrow: understand the handful of Kubernetes objects GCO actual
 | `resources.limits.nvidia.com/gpu: 1` | The line that makes GCO provision a GPU node for you |
 | Namespace | `gco-system` (platform services), `gco-jobs` (your jobs), `gco-inference` (endpoints) |
 | PersistentVolumeClaim | `gco-shared-storage` (EFS) or `gco-fsx-storage` (FSx) for outputs that survive pod termination |
-| Deployment + Service + Ingress | Created for you by the inference monitor when you deploy an endpoint |
+| Deployment + Service | Created for you by the inference monitor when you deploy an endpoint; requests stay behind the shared authenticated platform Ingress |
 | Nodepool / autoscaling | Abstracted by EKS Auto Mode and Karpenter — you never hand-edit node groups |
 
 **Checkpoint.** You can read the sample Job manifest in [Core Concepts](CONCEPTS.md#manifest-submission), explain what each field does, and say which namespace it runs in and how it gets a GPU.
@@ -59,7 +59,7 @@ Everyone does these four stages in order. By the end you can deploy GCO, submit 
 - **Read:** [Core Concepts](CONCEPTS.md) — what GCO is, the problem it solves, multi-region architecture, EKS Auto Mode, nodepools, manifest submission, and global routing.
 - **Do:** nothing to install yet. Skim the four submission methods and the security-layers diagram.
 - **Go deeper (optional):** the AWS layer GCO builds on — [Amazon EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) for hands-off compute, and [Karpenter](https://karpenter.sh/docs/concepts/) for the node provisioning behind GCO's nodepools.
-- **Checkpoint:** in one sentence each, explain "capacity-aware routing," "EKS Auto Mode," and why job outputs survive after a pod terminates.
+- **Checkpoint:** in one sentence each, explain "capacity-aware placement," "health-based global routing," "EKS Auto Mode," and why job outputs survive after a pod terminates.
 
 ### Stage 2: First Success Milestone
 
@@ -118,7 +118,7 @@ Train and serve models.
 - **Inference:** read the [Inference Guide](INFERENCE.md), then deploy an endpoint.
 
   ```bash
-  gco inference deploy my-llm -i vllm/vllm-openai:v0.22.0 --gpu-count 1
+  gco inference deploy my-llm -i vllm/vllm-openai:v0.24.0 --gpu-count 1
   gco inference status my-llm
   ```
 

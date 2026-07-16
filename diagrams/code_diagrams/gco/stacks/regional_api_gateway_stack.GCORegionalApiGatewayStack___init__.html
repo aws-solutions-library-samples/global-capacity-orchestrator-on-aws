@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,26 +205,28 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub1917=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op1919=>operation: self.config = config
-op1921=>operation: self.deployment_region = region
-op1923=>operation: self.vpc = vpc
-op1925=>operation: self.alb_dns_name = alb_dns_name
-op1927=>operation: self.auth_secret_arn = auth_secret_arn
-op1929=>operation: self.proxy_lambda = self._create_vpc_proxy_lambda()
-op1931=>operation: self.api = self._create_api_gateway()
-sub1933=>subroutine: self._create_outputs()
-sub1935=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub2122=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op2124=>operation: self.config = config
+op2126=>operation: self.deployment_region = region
+op2128=>operation: self.vpc = vpc
+op2130=>operation: self.alb_dns_name = alb_dns_name
+op2132=>operation: self.auth_secret_arn = auth_secret_arn
+op2134=>operation: self.aggregator_role_arn = aggregator_role_arn
+op2136=>operation: self.proxy_lambda = self._create_vpc_proxy_lambda()
+op2138=>operation: self.api = self._create_api_gateway()
+sub2140=>subroutine: self._create_outputs()
+sub2142=>subroutine: self._apply_nag_suppressions()
 
-sub1917->op1919
-op1919->op1921
-op1921->op1923
-op1923->op1925
-op1925->op1927
-op1927->op1929
-op1929->op1931
-op1931->sub1933
-sub1933->sub1935
+sub2122->op2124
+op2124->op2126
+op2126->op2128
+op2128->op2130
+op2130->op2132
+op2132->op2134
+op2134->op2136
+op2136->op2138
+op2138->sub2140
+sub2140->sub2142
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

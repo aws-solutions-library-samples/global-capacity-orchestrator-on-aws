@@ -1,18 +1,8 @@
 """Tests that exercise the Python 3.14+ minimum-version commitment.
 
-Two checks:
-
-1. ``test_feature_toggles_resource_compiles_and_runs`` imports
-   ``gco_mcp/resources/config.py`` and calls ``feature_toggles_resource()``. The
-   module contains an un-parenthesized except-tuple
-   (``except json.JSONDecodeError, KeyError:``) that only parses on Python
-   3.14+. Importing the module is therefore an executable proof that the
-   running interpreter meets the documented minimum.
-
-2. ``test_no_legacy_python_versions_in_docs`` walks every doc file that names
-   the supported interpreter version and asserts none of ``Python 3.10``,
-   ``Python 3.11``, ``Python 3.12``, or ``Python 3.13`` appear as a supported
-   version. References like ``Python 3.14`` or ``Python 3.14+`` are allowed.
+The config resource import is kept as a direct compatibility smoke check, and
+the interpreter floor is asserted explicitly. Documentation is scanned for
+legacy supported-version claims.
 """
 
 from __future__ import annotations
@@ -31,13 +21,14 @@ if _MCP_DIR not in sys.path:
     sys.path.insert(0, _MCP_DIR)
 
 
-def test_feature_toggles_resource_compiles_and_runs() -> None:
-    """Confirms the un-parenthesized except-tuple syntax compiles on this interpreter."""
+def test_config_resource_imports_on_supported_python() -> None:
+    """The current config resource imports and serves raw CDK configuration."""
+    assert sys.version_info >= (3, 14)
     from resources import config as config_resource
 
-    result = config_resource.feature_toggles_resource()
+    result = config_resource.cdk_json_resource()
     assert isinstance(result, str)
-    assert result.strip(), "feature_toggles_resource() returned an empty / whitespace-only string"
+    assert result.strip(), "cdk_json_resource() returned empty content"
 
 
 # Doc files whose Python-version language was bumped to 3.14+.

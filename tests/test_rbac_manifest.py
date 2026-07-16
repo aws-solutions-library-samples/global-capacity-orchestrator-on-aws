@@ -106,6 +106,39 @@ class TestHealthMonitorRole:
         expected = {"pods", "nodes", "deployments", "services", "events", "jobs"}
         assert expected.issubset(resource_names), f"Missing resources: {expected - resource_names}"
 
+    def test_health_monitor_self_healing_is_exactly_scoped(self, rbac_docs):
+        """Ingress repair and election access stay in gco-system and named resources."""
+        role = _find_doc(rbac_docs, "Role", "gco-health-monitor-self-healing")
+        assert role is not None
+        assert role["metadata"]["namespace"] == "gco-system"
+
+        rules = {
+            (tuple(rule["apiGroups"]), tuple(rule["resources"])): rule for rule in role["rules"]
+        }
+        ingress_rule = rules[(("networking.k8s.io",), ("ingresses",))]
+        assert ingress_rule["verbs"] == ["get"]
+        assert ingress_rule["resourceNames"] == ["gco-ingress"]
+
+        lease_rule = rules[(("coordination.k8s.io",), ("leases",))]
+        assert set(lease_rule["verbs"]) == {"get", "update"}
+        assert lease_rule["resourceNames"] == ["gco-health-monitor-alb-sync"]
+        assert "create" not in lease_rule["verbs"]
+
+        lease = _find_doc(rbac_docs, "Lease", "gco-health-monitor-alb-sync")
+        assert lease is not None
+        assert lease["metadata"]["namespace"] == "gco-system"
+        assert lease["spec"]["leaseDurationSeconds"] == 90
+
+        binding = _find_doc(rbac_docs, "RoleBinding", "gco-health-monitor-self-healing")
+        assert binding["roleRef"]["name"] == "gco-health-monitor-self-healing"
+        assert binding["subjects"] == [
+            {
+                "kind": "ServiceAccount",
+                "name": "gco-health-monitor-sa",
+                "namespace": "gco-system",
+            }
+        ]
+
 
 # ─── Manifest Processor Role ───────────────────────────────────────
 
@@ -450,35 +483,42 @@ class TestDedicatedServiceAccounts:
                     f"SA {sa['metadata']['name']} missing project=gco label"
                 )
 
+    def test_health_monitor_uses_dedicated_role_annotation(self, service_accounts):
+        health_sa = next(
+            sa for sa in service_accounts if sa["metadata"]["name"] == "gco-health-monitor-sa"
+        )
+        annotations = health_sa["metadata"].get("annotations") or {}
+        assert annotations[ROLE_ANNOTATION] == HEALTH_ROLE_ANNOTATION_VALUE
+
 
 # ── IRSA trust policy regression tests ─────────────────────────────────────
 #
-# Bug history: The IRSA trust policy in gco/stacks/regional_stack.py must
-# list EVERY ServiceAccount that will be annotated with the role ARN. When
-# task 10 (RBAC restructuring) introduced gco-health-monitor-sa,
-# gco-manifest-processor-sa, and gco-inference-monitor-sa with
-# `eks.amazonaws.com/role-arn` annotations pointing at the shared role,
-# the trust policy was NOT updated to include them. Result: pods crash-
-# looped with `AccessDenied` on `sts:AssumeRoleWithWebIdentity`.
+# Bug history: every IRSA annotation in the kubectl-applier manifests must
+# select a CDK role whose trust policy includes that ServiceAccount. The
+# health monitor intentionally uses a dedicated role so its narrowly-scoped
+# SSM write cannot be assumed by general platform/job workloads.
 #
-# These tests pin the invariant: every SA that carries the role-arn
-# annotation in the kubectl-applier manifests MUST also be listed in the
-# trust policy's `service_account_names` argument.
+# These tests pin both trust domains and prevent either annotation from
+# drifting away from its matching `service_account_names` list.
 
 
 ROLE_ANNOTATION = "eks.amazonaws.com/role-arn"
-ROLE_ANNOTATION_VALUE = "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+SHARED_ROLE_ANNOTATION_VALUE = "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+HEALTH_ROLE_ANNOTATION_VALUE = "{{HEALTH_MONITOR_ROLE_ARN}}"
 
-# SAs that the CDK stack declares as trusted for the shared IRSA role.
-# Keep in sync with gco/stacks/regional_stack.py::_create_service_account_role.
-CDK_TRUSTED_SAS = frozenset(
-    {
-        "gco-service-account",
-        "gco-health-monitor-sa",
-        "gco-manifest-processor-sa",
-        "gco-inference-monitor-sa",
-    }
-)
+# SAs that the CDK stack declares as trusted for each IRSA role. Keep in
+# sync with gco/stacks/regional_stack.py::_create_service_account_role.
+CDK_TRUSTED_SAS_BY_ANNOTATION = {
+    SHARED_ROLE_ANNOTATION_VALUE: frozenset(
+        {
+            "gco-service-account",
+            "gco-manifest-processor-sa",
+            "gco-inference-monitor-sa",
+        }
+    ),
+    HEALTH_ROLE_ANNOTATION_VALUE: frozenset({"gco-health-monitor-sa"}),
+}
+CDK_TRUSTED_SAS = frozenset().union(*CDK_TRUSTED_SAS_BY_ANNOTATION.values())
 
 MANIFEST_DIR = Path("lambda/kubectl-applier-simple/manifests")
 
@@ -498,23 +538,24 @@ def _load_all_manifest_sas():
 
 
 class TestIRSATrustPolicyCoverage:
-    """Verify every SA annotated with the shared IRSA role ARN is listed
-    in the CDK trust policy (`service_account_names=[...]`)."""
+    """Verify each role-annotated SA is trusted by the matching CDK role."""
 
-    def test_every_annotated_sa_is_trusted_by_cdk(self):
-        """Any SA carrying the role-arn annotation must be in CDK_TRUSTED_SAS,
-        otherwise pods using that SA will crash with AccessDenied."""
-        annotated = set()
+    def test_every_annotated_sa_is_trusted_by_matching_cdk_role(self):
+        """An annotation must select a known role that trusts that exact SA."""
+        missing = []
         for filename, doc in _load_all_manifest_sas():
             annotations = doc["metadata"].get("annotations") or {}
-            if annotations.get(ROLE_ANNOTATION) == ROLE_ANNOTATION_VALUE:
-                annotated.add((filename, doc["metadata"]["name"]))
+            annotation_value = annotations.get(ROLE_ANNOTATION)
+            if not annotation_value:
+                continue
+            trusted = CDK_TRUSTED_SAS_BY_ANNOTATION.get(annotation_value)
+            name = doc["metadata"]["name"]
+            if trusted is None or name not in trusted:
+                missing.append(f"{filename}: {name} -> {annotation_value}")
 
-        missing = [f"{fn}: {name}" for fn, name in sorted(annotated) if name not in CDK_TRUSTED_SAS]
         assert not missing, (
-            "ServiceAccounts annotated with the IRSA role ARN but NOT listed in "
-            "regional_stack.py::service_account_names. Pods using these SAs will "
-            "crash-loop with AccessDenied. Missing:\n  - " + "\n  - ".join(missing)
+            "ServiceAccounts select an IRSA role that does not trust them. Missing:\n  - "
+            + "\n  - ".join(sorted(missing))
         )
 
     def test_cdk_trusted_sas_are_declared_in_manifests(self):

@@ -1,107 +1,213 @@
-"""
-Shared proxy utilities for API Gateway Lambda handlers.
+"""Shared, fail-closed utilities for API Gateway backend proxy Lambdas."""
 
-Provides thread-safe secret caching and HTTP forwarding with retry logic.
-Used by both api-gateway-proxy and regional-api-proxy handlers.
-"""
-
+import hashlib
+import hmac
 import json
 import logging
 import os
+import re
+import secrets
 import threading
 import time
 from typing import Any
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import boto3
 import urllib3
+from backend_tls import get_backend_http_pool
+
+# <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Flowchart(s) generated from this file:
+#   * ``build_signed_headers`` -> ``diagrams/code_diagrams/lambda/proxy-shared/proxy_utils.build_signed_headers.html``
+#     (PNG: ``diagrams/code_diagrams/lambda/proxy-shared/proxy_utils.build_signed_headers.png``)
+# Regenerate with ``python diagrams/code_diagrams/generate.py``.
+# <pyflowchart-code-diagram> END
+
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Thread-safe secret cache
-# ---------------------------------------------------------------------------
+_HOP_BY_HOP_HEADERS = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+_ALLOWED_REQUEST_HEADERS = frozenset(
+    {
+        "accept",
+        "accept-encoding",
+        "cache-control",
+        "content-encoding",
+        "content-type",
+        "idempotency-key",
+        "if-match",
+        "if-none-match",
+        "prefer",
+        "range",
+        "user-agent",
+        "x-request-id",
+    }
+)
+_INTERNAL_SIGNATURE_HEADERS = frozenset(
+    {
+        "x-gco-signature-version",
+        "x-gco-signature",
+        "x-gco-timestamp",
+        "x-gco-nonce",
+        "x-gco-content-sha256",
+    }
+)
+_RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
+_RETRYABLE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _bounded_env_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return value if minimum <= value <= maximum else default
+
+
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return value if minimum <= value <= maximum else default
+
 
 _secret_lock = threading.Lock()
 _cached_secret: str | None = None
-_cache_timestamp: float = 0.0
-
-# Cache TTL in seconds (5 minutes) — ensures rotated secrets are picked up
-# without requiring a Lambda cold start
-_CACHE_TTL_SECONDS = int(os.environ.get("SECRET_CACHE_TTL_SECONDS", "300"))
-
-# Shared Secrets Manager client (module-level for connection reuse)
+_cache_timestamp = 0.0
+_last_successful_refresh = 0.0
+_last_refresh_attempt = 0.0
+_CACHE_TTL_SECONDS = _bounded_env_float("SECRET_CACHE_TTL_SECONDS", 300.0, 1.0, 3600.0)
+_CACHE_MAX_STALE_SECONDS = max(
+    _CACHE_TTL_SECONDS,
+    _bounded_env_float("SECRET_CACHE_MAX_STALE_SECONDS", 900.0, 1.0, 7200.0),
+)
+_CACHE_RETRY_SECONDS = _bounded_env_float("SECRET_CACHE_RETRY_SECONDS", 5.0, 0.1, 60.0)
 _secrets_client = boto3.client("secretsmanager")
 
 
 def get_secret_token() -> str:
-    """
-    Retrieve the authentication token from AWS Secrets Manager.
+    """Return a cached signing key, with a strictly bounded stale grace period."""
+    global _cached_secret, _cache_timestamp, _last_successful_refresh, _last_refresh_attempt
 
-    Thread-safe with TTL-based caching. The token is refreshed after
-    ``_CACHE_TTL_SECONDS`` to pick up rotated secrets without requiring
-    a Lambda cold start.
-
-    On transient Secrets Manager failures, returns the stale cached token
-    rather than raising — better to use a slightly-old token than to fail
-    every request during an outage.
-
-    Raises:
-        KeyError: If SECRET_ARN environment variable is not set.
-        RuntimeError: If no token is available (first call + SM failure).
-    """
-    global _cached_secret, _cache_timestamp
-
-    now = time.time()
-
-    # Fast path — read without lock (safe because Python GIL protects reads)
-    if _cached_secret is not None and (now - _cache_timestamp) < _CACHE_TTL_SECONDS:
+    now = time.monotonic()
+    age = now - _last_successful_refresh
+    if _cached_secret is not None and age < _CACHE_TTL_SECONDS:
+        return _cached_secret
+    if (
+        _cached_secret is not None
+        and age <= _CACHE_MAX_STALE_SECONDS
+        and now - _last_refresh_attempt < _CACHE_RETRY_SECONDS
+    ):
         return _cached_secret
 
     with _secret_lock:
-        # Double-check after acquiring lock
-        now = time.time()
-        if _cached_secret is not None and (now - _cache_timestamp) < _CACHE_TTL_SECONDS:
+        now = time.monotonic()
+        age = now - _last_successful_refresh
+        if _cached_secret is not None and age < _CACHE_TTL_SECONDS:
+            return _cached_secret
+        if (
+            _cached_secret is not None
+            and age <= _CACHE_MAX_STALE_SECONDS
+            and now - _last_refresh_attempt < _CACHE_RETRY_SECONDS
+        ):
             return _cached_secret
 
-        secret_arn = os.environ["SECRET_ARN"]
+        _last_refresh_attempt = now
         try:
-            response = _secrets_client.get_secret_value(SecretId=secret_arn)
+            response = _secrets_client.get_secret_value(SecretId=os.environ["SECRET_ARN"])
             secret_data = json.loads(response["SecretString"])
-            _cached_secret = secret_data["token"]
-            _cache_timestamp = now
-        except Exception as e:
-            if _cached_secret is not None:
-                # Extend stale cache — better than failing every request
-                _cache_timestamp = now
-                logger.warning(  # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
-                    "Secrets Manager refresh failed, using cached value: %s",
-                    e,
-                )
-            else:
-                raise RuntimeError(
-                    f"Failed to load secret and no cached value available: {e}"
-                ) from e
+            token = secret_data.get("token")
+            if not isinstance(token, str) or not token:
+                raise ValueError("secret token is missing")
+        except Exception as error:
+            if _cached_secret is not None and age <= _CACHE_MAX_STALE_SECONDS:
+                logger.warning("Secrets Manager refresh failed; using bounded stale signing key")
+                return _cached_secret
+            raise RuntimeError("Authentication signing key is unavailable") from error
 
-    return _cached_secret
+        _cached_secret = token
+        _last_successful_refresh = now
+        _cache_timestamp = now  # Backward-compatible observability/test alias.
+        return token
 
 
-# ---------------------------------------------------------------------------
-# HTTP forwarding with retry
-# ---------------------------------------------------------------------------
+def sanitize_request_headers(headers: dict[str, Any]) -> dict[str, str]:
+    """Apply a case-insensitive end-to-end allowlist at the IAM trust boundary."""
+    sanitized: dict[str, str] = {}
+    for name, value in headers.items():
+        normalized = str(name).strip().lower()
+        if normalized not in _ALLOWED_REQUEST_HEADERS or value is None:
+            continue
+        sanitized[normalized] = str(value)
+    return sanitized
 
-# Retry configuration
-_MAX_RETRIES = int(os.environ.get("PROXY_MAX_RETRIES", "3"))
-_RETRY_BACKOFF_BASE = float(os.environ.get("PROXY_RETRY_BACKOFF_BASE", "0.3"))
 
-# Retryable HTTP status codes (server errors and rate limiting)
-_RETRYABLE_STATUS_CODES = {502, 503, 504, 429}
+def _request_target(target_url: str) -> str:
+    parsed = urlsplit(target_url)
+    return parsed.path + (f"?{parsed.query}" if parsed.query else "")
 
-# Connection pool shared across invocations
-_http = urllib3.PoolManager(
-    num_pools=4,
-    maxsize=10,
-    retries=False,  # We handle retries ourselves for better control
-)
+
+def build_signed_headers(
+    signing_key: str,
+    http_method: str,
+    target_url: str,
+    body: str | None,
+) -> dict[str, str]:
+    """Build short-lived request authentication without transmitting the signing key."""
+    timestamp = str(int(time.time()))
+    nonce = secrets.token_hex(16)
+    content_hash = hashlib.sha256((body or "").encode("utf-8")).hexdigest()
+    canonical = "\n".join(
+        ["v1", timestamp, nonce, http_method.upper(), _request_target(target_url), content_hash]
+    )
+    signature = hmac.new(
+        signing_key.encode("utf-8"),
+        canonical.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        "x-gco-signature-version": "v1",
+        "x-gco-signature": signature,
+        "x-gco-timestamp": timestamp,
+        "x-gco-nonce": nonce,
+        "x-gco-content-sha256": content_hash,
+    }
+
+
+def _outbound_headers(headers: dict[str, Any]) -> dict[str, str]:
+    """Re-validate caller headers while retaining only generated auth fields."""
+    allowed = _ALLOWED_REQUEST_HEADERS | _INTERNAL_SIGNATURE_HEADERS
+    return {
+        str(name).lower(): str(value)
+        for name, value in headers.items()
+        if str(name).lower() in allowed and value is not None
+    }
+
+
+_MAX_RETRIES = _bounded_env_int("PROXY_MAX_RETRIES", 3, 1, 5)
+_RETRY_BACKOFF_BASE = _bounded_env_float("PROXY_RETRY_BACKOFF_BASE", 0.3, 0.0, 5.0)
+_http: urllib3.PoolManager | None = None
+
+
+def _tls_failure_response() -> dict[str, Any]:
+    """Return a bounded error without exposing certificate or trust details."""
+    return {
+        "statusCode": 502,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"error": "Backend TLS verification failed"}),
+    }
 
 
 def forward_request(
@@ -111,91 +217,109 @@ def forward_request(
     body: str | None,
     timeout: float = 29.0,
 ) -> dict[str, Any]:
+    """Forward over authenticated TLS within one deadline.
+
+    Retries are limited to safe, read-only methods. Plaintext, non-443, and
+    credential-bearing targets are rejected before any network request.
     """
-    Forward an HTTP request to the target URL with retry logic.
+    parsed_target = urlsplit(target_url)
+    try:
+        target_port = parsed_target.port
+    except ValueError as exc:
+        raise ValueError("Backend proxy target has an invalid port") from exc
+    if (
+        parsed_target.scheme.lower() != "https"
+        or not parsed_target.hostname
+        or parsed_target.username is not None
+        or parsed_target.password is not None
+        or target_port not in {None, 443}
+    ):
+        raise ValueError("Backend proxy targets must use HTTPS on port 443")
 
-    Implements exponential backoff for transient failures (connection errors,
-    502/503/504, 429). Non-retryable errors are returned immediately.
+    try:
+        transport = _http or get_backend_http_pool()
+    except RuntimeError:
+        logger.exception("Backend TLS trust is unavailable")
+        return {
+            "statusCode": 503,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": "Backend trust is temporarily unavailable"}),
+        }
 
-    Args:
-        target_url: Full URL to forward the request to.
-        http_method: HTTP method (GET, POST, etc.).
-        headers: Request headers to forward.
-        body: Request body (may be None or empty).
-        timeout: Per-attempt timeout in seconds (default: API Gateway's 29s).
-
-    Returns:
-        API Gateway proxy response dict with statusCode, headers, and body.
-    """
+    method = http_method.upper()
     encoded_body = body.encode("utf-8") if body else None
+    max_attempts = _MAX_RETRIES if method in _RETRYABLE_METHODS else 1
+    deadline = time.monotonic() + max(timeout, 0.0)
     last_exception: Exception | None = None
-    last_status: int | None = None
+    last_response: urllib3.BaseHTTPResponse | None = None
+    attempts_made = 0
 
-    for attempt in range(_MAX_RETRIES):
+    for attempt in range(max_attempts):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        attempts_made = attempt + 1
         try:
-            response = _http.request(
-                http_method,
+            response = transport.request(
+                method,
                 target_url,
-                headers=headers,
+                headers=_outbound_headers(headers),
                 body=encoded_body,
-                timeout=timeout,
+                timeout=urllib3.Timeout(total=remaining),
             )
-
-            # Return immediately on success or non-retryable status
             if response.status not in _RETRYABLE_STATUS_CODES:
                 return _build_success_response(response)
-
-            # Retryable status — log and retry
-            last_status = response.status
+            last_response = response
             logger.warning(
-                "Retryable status %d on attempt %d/%d for %s %s",
+                "Retryable upstream status %d on attempt %d/%d for %s",
                 response.status,
                 attempt + 1,
-                _MAX_RETRIES,
-                http_method,
-                target_url,
+                max_attempts,
+                method,
             )
-
-            # On last attempt, return whatever we got
-            if attempt == _MAX_RETRIES - 1:
+            if attempt == max_attempts - 1:
                 return _build_success_response(response)
-
-        except urllib3.exceptions.MaxRetryError as e:
-            last_exception = e
+            response.release_conn()
+        except urllib3.exceptions.SSLError:
+            logger.exception("Backend TLS verification failed")
+            return _tls_failure_response()
+        except urllib3.exceptions.MaxRetryError as error:
+            if isinstance(getattr(error, "reason", None), urllib3.exceptions.SSLError):
+                logger.exception("Backend TLS verification failed")
+                return _tls_failure_response()
+            last_exception = error
             logger.warning(
-                "Connection failed on attempt %d/%d for %s %s: %s",
+                "Upstream %s failed on attempt %d/%d",
+                method,
                 attempt + 1,
-                _MAX_RETRIES,
-                http_method,
-                target_url,
-                e,
+                max_attempts,
             )
-        except urllib3.exceptions.TimeoutError as e:
-            last_exception = e
+        except urllib3.exceptions.TimeoutError as error:
+            last_exception = error
             logger.warning(
-                "Timeout on attempt %d/%d for %s %s: %s",
+                "Upstream %s failed on attempt %d/%d",
+                method,
                 attempt + 1,
-                _MAX_RETRIES,
-                http_method,
-                target_url,
-                e,
+                max_attempts,
             )
-        except Exception as e:
-            # Unknown error — don't retry
-            logger.error("Unexpected error forwarding request: %s", e)
+        except Exception:
+            logger.exception("Unexpected proxy forwarding failure")
             return {
                 "statusCode": 500,
                 "headers": {"Content-Type": "application/json"},
-                "body": json.dumps({"error": "Internal server error", "message": str(e)}),
+                "body": json.dumps({"error": "Internal server error"}),
             }
 
-        # Exponential backoff: 0.3s, 0.6s, 1.2s, ...
-        if attempt < _MAX_RETRIES - 1:
+        if attempt < max_attempts - 1:
+            remaining = deadline - time.monotonic()
             backoff = _RETRY_BACKOFF_BASE * (2**attempt)
+            if remaining <= backoff:
+                break
             time.sleep(backoff)
 
-    # All retries exhausted
-    if last_exception:
+    if last_response is not None:
+        return _build_success_response(last_response)
+    if last_exception is not None:
         status_code = 503 if isinstance(last_exception, urllib3.exceptions.MaxRetryError) else 504
         return {
             "statusCode": status_code,
@@ -203,36 +327,24 @@ def forward_request(
             "body": json.dumps(
                 {
                     "error": "Service unavailable" if status_code == 503 else "Gateway timeout",
-                    "message": f"Failed after {_MAX_RETRIES} attempts: {last_exception}",
+                    "message": f"Upstream failed after {attempts_made} attempt(s)",
                 }
             ),
         }
-
-    # Shouldn't reach here, but just in case
     return {
-        "statusCode": last_status or 500,
+        "statusCode": 504,
         "headers": {"Content-Type": "application/json"},
-        "body": json.dumps({"error": "Request failed after retries"}),
+        "body": json.dumps({"error": "Gateway timeout"}),
     }
 
 
 def _build_success_response(response: urllib3.BaseHTTPResponse) -> dict[str, Any]:
-    """Build an API Gateway proxy response from a urllib3 response."""
-    response_headers = dict(response.headers)
-
-    # Remove hop-by-hop headers that shouldn't be forwarded
-    hop_by_hop = [
-        "connection",
-        "keep-alive",
-        "transfer-encoding",
-        "te",
-        "trailer",
-        "upgrade",
-    ]
-    for h in hop_by_hop:
-        response_headers.pop(h, None)
-        response_headers.pop(h.title(), None)
-
+    """Build an API Gateway response without hop-by-hop framing headers."""
+    response_headers = {
+        str(name): str(value)
+        for name, value in response.headers.items()
+        if str(name).lower() not in _HOP_BY_HOP_HEADERS
+    }
     return {
         "statusCode": response.status,
         "headers": response_headers,
@@ -240,11 +352,39 @@ def _build_success_response(response: urllib3.BaseHTTPResponse) -> dict[str, Any
     }
 
 
-def build_target_url(endpoint: str, path: str, query_params: dict[str, str] | None) -> str:
-    """Build the target URL from endpoint, path, and query parameters."""
-    from urllib.parse import urlencode
+def build_target_url(
+    endpoint: str,
+    path: str,
+    query_params: dict[str, str | list[str]] | None,
+) -> str:
+    """Build one HTTPS/443 upstream URL without losing repeated query keys."""
+    base_url = endpoint if "://" in endpoint else f"https://{endpoint}"
+    parsed_endpoint = urlsplit(base_url)
+    try:
+        endpoint_port = parsed_endpoint.port
+    except ValueError as exc:
+        raise ValueError(f"Invalid proxy endpoint: {endpoint!r}") from exc
+    if (
+        parsed_endpoint.scheme.lower() != "https"
+        or not parsed_endpoint.hostname
+        or parsed_endpoint.username is not None
+        or parsed_endpoint.password is not None
+        or endpoint_port not in {None, 443}
+        or parsed_endpoint.query
+        or parsed_endpoint.fragment
+    ):
+        raise ValueError(f"Proxy endpoint must use HTTPS on port 443: {endpoint!r}")
 
-    url = f"http://{endpoint}{path}"
-    if query_params:
-        url += f"?{urlencode(query_params)}"
-    return url
+    request_path = path if path.startswith("/") else f"/{path}"
+    request_path = re.sub(r"%(?![0-9A-Fa-f]{2})", "%25", request_path)
+    encoded_path = quote(request_path, safe="/:@-._~!$&'()*+,;=%")
+    endpoint_path = parsed_endpoint.path.rstrip("/")
+    return urlunsplit(
+        (
+            parsed_endpoint.scheme,
+            parsed_endpoint.netloc,
+            f"{endpoint_path}{encoded_path}",
+            urlencode(query_params or {}, doseq=True),
+            "",
+        )
+    )

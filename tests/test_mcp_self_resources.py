@@ -151,3 +151,56 @@ class TestFeatureFlags:
         flags = {f["name"]: f for f in payload["flags"]}
         assert "GCO_ENABLE_CAPACITY_PURCHASE" in flags
         assert "reserve_capacity" in flags["GCO_ENABLE_CAPACITY_PURCHASE"]["gated_tools"]
+
+    def test_feature_flag_map_covers_every_gated_tool(self):
+        body = _read_resource_text("mcp://gco/feature-flags")
+        payload = json.loads(body)
+        actual = {
+            item["name"]: set(item["gated_tools"])
+            for item in payload["flags"]
+            if item["name"] != "GCO_ENABLE_ALL_TOOLS"
+        }
+        expected = {
+            "GCO_ENABLE_CAPACITY_PURCHASE": {"reserve_capacity", "create_reservation"},
+            "GCO_ENABLE_MODEL_UPLOAD": {"models_upload", "upload_to_regional_bucket"},
+            "GCO_ENABLE_IMAGE_PUBLISH": {"images_build", "images_push", "images_mirror"},
+            "GCO_ENABLE_INFRASTRUCTURE_DEPLOY": {
+                "deploy_stack",
+                "deploy_all",
+                "bootstrap_cdk",
+                "addons_install",
+            },
+            "GCO_ENABLE_INFRASTRUCTURE_DESTROY": {"destroy_stack", "destroy_all"},
+            "GCO_ENABLE_DESTRUCTIVE_OPERATIONS": {
+                "delete_job",
+                "delete_inference",
+                "delete_template",
+                "delete_webhook",
+                "delete_model",
+                "delete_nodepool",
+                "analytics_user_remove",
+                "monitoring_user_remove",
+                "cancel_queue_job",
+                "cancel_reservation",
+                "images_cleanup",
+                "images_prune",
+                "images_delete_tag",
+                "images_delete_repo",
+                "task_prune",
+            },
+            "GCO_ENABLE_MISSION": {
+                "mission_start",
+                "mission_status",
+                "mission_iterate",
+                "mission_checkpoint",
+                "mission_complete",
+                "mission_abort",
+                "mission_resume",
+                "mission_history",
+                "mission_list",
+            },
+            "GCO_ENABLE_LOCAL_METRICS": {"metrics_from_local_file"},
+            "GCO_ENABLE_LOCAL_STORAGE_SYNC": {"sync_storage_bucket"},
+            "GCO_ENABLE_SEMANTIC_PROGRESS": {"metrics_semantic_progress"},
+        }
+        assert actual == expected

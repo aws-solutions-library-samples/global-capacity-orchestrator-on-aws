@@ -30,7 +30,7 @@ from pathlib import Path
 import yaml
 
 from .config import GCOConfig, get_config
-from .jobs import JobManager, get_job_manager
+from .jobs import JobManager, get_job_manager, resolve_submission_identity
 
 logger = logging.getLogger(__name__)
 
@@ -195,15 +195,29 @@ class DagRunner:
             ready = dag.get_ready_steps()
 
             if not ready:
-                # Check if we're stuck (all remaining steps have failed deps)
+                # Propagate terminal dependency failures through the entire
+                # graph. A dependency skipped because of an earlier failure is
+                # just as unsatisfiable as a directly failed dependency.
                 pending = [s for s in dag.steps if s.status == "pending"]
                 if pending:
-                    failed_names = {s.name for s in dag.steps if s.status == "failed"}
+                    blocked_names = {s.name for s in dag.steps if s.status in ("failed", "skipped")}
+                    skipped_any = False
                     for step in pending:
-                        if any(dep in failed_names for dep in step.depends_on):
+                        if any(dep in blocked_names for dep in step.depends_on):
                             step.status = "skipped"
-                            step.error = "Dependency failed"
-                            _notify(step.name, "skipped", "Skipped (dependency failed)")
+                            step.error = "Dependency failed or was skipped"
+                            skipped_any = True
+                            _notify(step.name, "skipped", "Skipped (dependency unavailable)")
+                    if skipped_any:
+                        continue
+
+                    # A validated DAG cannot otherwise remain pending here;
+                    # terminate conservatively rather than spin forever if a
+                    # caller supplied inconsistent pre-existing step states.
+                    for step in pending:
+                        step.status = "skipped"
+                        step.error = "Dependencies could not be satisfied"
+                        _notify(step.name, "skipped", "Skipped (dependencies unresolved)")
                     continue
                 break
 
@@ -214,24 +228,37 @@ class DagRunner:
                     step.started_at = datetime.now(UTC).isoformat()
                     _notify(step.name, "running", f"Submitting {step.manifest}")
 
-                    # Submit the job via API Gateway
-                    self.job_manager.submit_job(
+                    # Load the requested identity only as a fallback. The API
+                    # may generate or rename the Job during submission.
+                    manifests = self.job_manager.load_manifests(step.manifest)
+                    requested_name = step.name
+                    requested_namespace = dag.namespace
+                    for manifest in manifests:
+                        if manifest.get("kind") == "Job":
+                            metadata = manifest.get("metadata", {})
+                            requested_name = metadata.get("name") or requested_name
+                            requested_namespace = metadata.get("namespace") or requested_namespace
+                            break
+
+                    submission_result = self.job_manager.submit_job(
                         manifests=step.manifest,
                         namespace=dag.namespace,
                         target_region=target_region,
                     )
-
-                    # Extract job name from manifest
-                    manifests = self.job_manager.load_manifests(step.manifest)
-                    if manifests:
-                        step.job_name = manifests[0].get("metadata", {}).get("name", step.name)
+                    submitted_name, submitted_namespace = resolve_submission_identity(
+                        submission_result,
+                        fallback_name=requested_name,
+                        fallback_namespace=requested_namespace,
+                    )
+                    step.job_name = submitted_name or step.name
 
                     _notify(step.name, "running", f"Job '{step.job_name}' submitted")
 
-                    # Wait for completion
+                    # Wait for the actual submitted identity, not the requested
+                    # manifest name that may no longer exist.
                     job_info = self.job_manager.wait_for_job(
-                        job_name=step.job_name or step.name,
-                        namespace=dag.namespace,
+                        job_name=step.job_name,
+                        namespace=submitted_namespace or dag.namespace,
                         region=target_region,
                         timeout_seconds=timeout_per_step,
                         poll_interval=poll_interval,

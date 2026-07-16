@@ -3,7 +3,7 @@
 Frozen, unmaintained files kept for people forking the project. Nothing in this
 folder runs in this repository's CI.
 
-## Contents
+## Table of Contents
 
 - [`.gitlab-ci.yml`](#gitlab-ciyml)
 

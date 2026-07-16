@@ -38,6 +38,23 @@ import run_mcp  # noqa: E402
 # ``_clean_gated_tools`` fixture so default-env tests see an unpolluted
 # registry no matter what order the suite runs in.
 UMBRELLA_FLAG_TOOLS = (
+    # Capacity purchase.
+    "reserve_capacity",
+    "create_reservation",
+    # Model/local-data upload.
+    "models_upload",
+    "upload_to_regional_bucket",
+    # Image publish.
+    "images_build",
+    "images_push",
+    "images_mirror",
+    # Infrastructure lifecycle.
+    "deploy_stack",
+    "deploy_all",
+    "bootstrap_cdk",
+    "destroy_stack",
+    "destroy_all",
+    # Destructive operations.
     "delete_job",
     "delete_inference",
     "delete_template",
@@ -45,20 +62,27 @@ UMBRELLA_FLAG_TOOLS = (
     "delete_model",
     "delete_nodepool",
     "analytics_user_remove",
+    "monitoring_user_remove",
     "cancel_queue_job",
-    "models_upload",
-    "reserve_capacity",
-    "deploy_stack",
-    "deploy_all",
-    "bootstrap_cdk",
-    "destroy_stack",
-    "destroy_all",
-    "images_build",
-    "images_push",
+    "cancel_reservation",
     "images_cleanup",
     "images_prune",
     "images_delete_tag",
     "images_delete_repo",
+    # Sensitive local/cost readers.
+    "metrics_from_local_file",
+    "sync_storage_bucket",
+    "metrics_semantic_progress",
+    # Mission family.
+    "mission_start",
+    "mission_status",
+    "mission_iterate",
+    "mission_checkpoint",
+    "mission_complete",
+    "mission_abort",
+    "mission_resume",
+    "mission_history",
+    "mission_list",
 )
 
 
@@ -129,6 +153,7 @@ class TestDestructiveDefaultEnv:
     def test_models_upload_absent_by_default(self):
         names = _list_tool_names()
         assert "models_upload" not in names
+        assert "upload_to_regional_bucket" not in names
 
 
 # =============================================================================
@@ -340,33 +365,41 @@ class TestDestructiveArgv:
 
 
 class TestModelUploadGating:
-    """``models_upload`` registers only under GCO_ENABLE_MODEL_UPLOAD."""
+    """Both local-data upload tools register only under GCO_ENABLE_MODEL_UPLOAD."""
 
     @patch.dict(os.environ, {"GCO_ENABLE_MODEL_UPLOAD": "true"})
-    def test_models_upload_present_when_model_upload_flag_set(self):
+    def test_upload_tools_present_when_model_upload_flag_set(self):
         importlib.reload(run_mcp)
         names = _list_tool_names()
-        assert "models_upload" in names
+        assert {"models_upload", "upload_to_regional_bucket"}.issubset(names)
         assert hasattr(run_mcp, "models_upload")
+        assert hasattr(run_mcp, "upload_to_regional_bucket")
 
     @pytest.mark.asyncio
     @patch.dict(os.environ, {"GCO_ENABLE_MODEL_UPLOAD": "true"})
-    async def test_models_upload_argv_minimal(self):
-        importlib.reload(run_mcp)
-        with patch("cli_runner.subprocess.run") as mock:
-            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
-            await run_mcp.models_upload(model_name="llama3-8b", source_path="./weights")
-            cmd = mock.call_args[0][0]
-            assert "models" in cmd
-            assert "upload" in cmd
-            # Positional source path, model name through ``--name`` to mirror
-            # the CLI's ``gco models upload <local_path> --name <name>`` surface.
-            assert "./weights" in cmd
-            assert cmd[cmd.index("--name") : cmd.index("--name") + 2] == [
-                "--name",
-                "llama3-8b",
-            ]
-            assert "-r" not in cmd
+    async def test_models_upload_argv_minimal(self, tmp_path: Path):
+        root = tmp_path / "local-root"
+        source = root / "weights"
+        source.mkdir(parents=True)
+        with patch.dict(os.environ, {"GCO_STORAGE_LOCAL_ROOT": str(root)}):
+            importlib.reload(run_mcp)
+            with patch("cli_runner.subprocess.run") as mock:
+                mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+                await run_mcp.models_upload(model_name="llama3-8b", source_path="./weights")
+                cmd = mock.call_args.args[0]
+                assert "models" in cmd
+                assert "upload" in cmd
+                # The CLI receives a descriptor-backed private snapshot rather
+                # than a raceable absolute source path.
+                upload_argument = cmd[cmd.index("upload") + 1]
+                assert upload_argument.startswith("/dev/fd/")
+                assert mock.call_args.kwargs["pass_fds"]
+                assert cmd[cmd.index("--name") : cmd.index("--name") + 2] == [
+                    "--name",
+                    "llama3-8b",
+                ]
+                assert "-r" not in cmd
+            assert not list(root.glob(".gco-mcp-upload-*"))
 
 
 # =============================================================================
@@ -388,6 +421,10 @@ class TestUmbrellaFlag:
             "GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "",
             "GCO_ENABLE_INFRASTRUCTURE_DESTROY": "",
             "GCO_ENABLE_CAPACITY_PURCHASE": "",
+            "GCO_ENABLE_MISSION": "",
+            "GCO_ENABLE_LOCAL_METRICS": "",
+            "GCO_ENABLE_LOCAL_STORAGE_SYNC": "",
+            "GCO_ENABLE_SEMANTIC_PROGRESS": "",
         }
         with patch.dict(os.environ, clean):
             importlib.reload(run_mcp)

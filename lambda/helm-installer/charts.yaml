@@ -386,10 +386,10 @@ charts:
           podSpec:
             nodeSelector:
               kubernetes.io/os: linux
-      # Login pods — disabled by default. GCO submits Slurm jobs via the
+      # Login pods are disabled by default. GCO submits Slurm jobs via the
       # Kubernetes API (gco jobs submit-direct), not via SSH. Enabling the
-      # login set creates a LoadBalancer (NLB) which adds cost and can
-      # interfere with Global Accelerator endpoint registration.
+      # login set creates a separate LoadBalancer (NLB), which adds cost and is
+      # not part of the GCO API path; GA registration explicitly ignores it.
       # For interactive access, use: kubectl exec -it <controller-pod> -- bash
       loginsets:
         slinky:

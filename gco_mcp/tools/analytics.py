@@ -16,6 +16,13 @@ async def analytics_doctor() -> str:
 
 @mcp.tool(tags={"safe", "analytics"})
 @audit_logged
+async def analytics_status() -> str:
+    """`gco analytics status` — show the analytics environment configuration."""
+    return await asyncio.to_thread(cli_runner._run_cli, "analytics", "status")
+
+
+@mcp.tool(tags={"safe", "analytics"})
+@audit_logged
 async def analytics_login_url(username: str, password: str | None = None) -> str:
     """`gco analytics studio login` — get a SageMaker Studio presigned login URL.
 

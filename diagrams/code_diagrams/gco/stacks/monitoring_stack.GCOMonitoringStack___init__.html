@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,36 +205,36 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub1939=>subroutine: kwargs.setdefault('cross_region_references', True)
-sub1941=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op1943=>operation: self.config = config
-op1945=>operation: self.global_stack = global_stack
-op1947=>operation: self.regional_stacks = regional_stacks
-op1949=>operation: self.api_gateway_stack = api_gateway_stack
-op1951=>operation: self.project_name = config.get_project_name()
-op1953=>operation: self.regions = config.get_regions()
-op1955=>operation: self.alert_topic = self._create_alert_topic()
-op1957=>operation: self.dashboard = self._create_dashboard()
-sub1959=>subroutine: self._create_alarms()
-sub1961=>subroutine: self._create_composite_alarms()
-sub1963=>subroutine: self._create_custom_metrics()
-sub1965=>subroutine: self._create_outputs()
-sub1967=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub2146=>subroutine: kwargs.setdefault('cross_region_references', True)
+sub2148=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op2150=>operation: self.config = config
+op2152=>operation: self.global_stack = global_stack
+op2154=>operation: self.regional_stacks = regional_stacks
+op2156=>operation: self.api_gateway_stack = api_gateway_stack
+op2158=>operation: self.project_name = config.get_project_name()
+op2160=>operation: self.regions = config.get_regions()
+op2162=>operation: self.alert_topic = self._create_alert_topic()
+op2164=>operation: self.dashboard = self._create_dashboard()
+sub2166=>subroutine: self._create_alarms()
+sub2168=>subroutine: self._create_composite_alarms()
+sub2170=>subroutine: self._create_custom_metrics()
+sub2172=>subroutine: self._create_outputs()
+sub2174=>subroutine: self._apply_nag_suppressions()
 
-sub1939->sub1941
-sub1941->op1943
-op1943->op1945
-op1945->op1947
-op1947->op1949
-op1949->op1951
-op1951->op1953
-op1953->op1955
-op1955->op1957
-op1957->sub1959
-sub1959->sub1961
-sub1961->sub1963
-sub1963->sub1965
-sub1965->sub1967
+sub2146->sub2148
+sub2148->op2150
+op2150->op2152
+op2152->op2154
+op2154->op2156
+op2156->op2158
+op2158->op2160
+op2160->op2162
+op2162->op2164
+op2164->sub2166
+sub2166->sub2168
+sub2168->sub2170
+sub2170->sub2172
+sub2172->sub2174
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

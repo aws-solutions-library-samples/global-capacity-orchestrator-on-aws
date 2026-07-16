@@ -106,6 +106,9 @@ class ConfigLoader:
         # Validate Global Accelerator config
         self._validate_global_accelerator_config()
 
+        # Validate deployment-local backend TLS rotation policy
+        self._validate_backend_tls_config()
+
         # Validate ALB config
         self._validate_alb_config()
 
@@ -247,6 +250,56 @@ class ConfigLoader:
                     f"client_affinity must be one of {sorted(allowed_affinity)}, got {value!r}"
                 )
 
+    def _validate_backend_tls_config(self) -> None:
+        """Validate private-root and leaf-certificate lifecycle settings."""
+        config = self.get_backend_tls_config()
+        ranges = {
+            "root_generation": (1, 1_000_000),
+            "root_validity_days": (365, 36_500),
+            "root_rotate_before_days": (30, 3_650),
+            "root_activation_delay_hours": (1, 168),
+            "root_overlap_days": (2, 365),
+            "leaf_validity_days": (2, 397),
+            "leaf_rotate_before_days": (1, 90),
+            "rotation_schedule_hours": (1, 24),
+            "trust_cache_ttl_seconds": (1, 3_600),
+            "trust_cache_max_stale_seconds": (1, 86_400),
+        }
+        for field, (minimum, maximum) in ranges.items():
+            value = config.get(field)
+            if type(value) is not int or not minimum <= value <= maximum:
+                raise ConfigValidationError(
+                    f"backend_tls.{field} must be an integer between "
+                    f"{minimum} and {maximum}, got {value!r}"
+                )
+
+        if config["root_rotate_before_days"] >= config["root_validity_days"]:
+            raise ConfigValidationError(
+                "backend_tls.root_rotate_before_days must be less than root_validity_days"
+            )
+        if config["leaf_rotate_before_days"] >= config["leaf_validity_days"]:
+            raise ConfigValidationError(
+                "backend_tls.leaf_rotate_before_days must be less than leaf_validity_days"
+            )
+        if config["root_validity_days"] <= config["leaf_validity_days"]:
+            raise ConfigValidationError(
+                "backend_tls.root_validity_days must exceed leaf_validity_days"
+            )
+        if config["root_overlap_days"] <= config["leaf_validity_days"]:
+            raise ConfigValidationError(
+                "backend_tls.root_overlap_days must exceed leaf_validity_days so old leaves "
+                "remain trusted throughout root rollover"
+            )
+        if config["trust_cache_max_stale_seconds"] < config["trust_cache_ttl_seconds"]:
+            raise ConfigValidationError(
+                "backend_tls.trust_cache_max_stale_seconds must be at least trust_cache_ttl_seconds"
+            )
+        if config["root_activation_delay_hours"] * 3_600 <= config["trust_cache_max_stale_seconds"]:
+            raise ConfigValidationError(
+                "backend_tls.root_activation_delay_hours must exceed the maximum stale trust "
+                "cache window so every proxy can observe a pending root before leaf rollover"
+            )
+
     def _validate_alb_config(self) -> None:
         """Validate ALB configuration"""
         alb_config = self.app.node.try_get_context("alb_config")
@@ -369,6 +422,11 @@ class ConfigLoader:
 
         if not isinstance(api_gw_config["tracing_enabled"], bool):
             raise ConfigValidationError("tracing_enabled must be a boolean")
+
+        if "regional_api_enabled" in api_gw_config and not isinstance(
+            api_gw_config["regional_api_enabled"], bool
+        ):
+            raise ConfigValidationError("regional_api_enabled must be a boolean")
 
     def _validate_eks_cluster_config(self) -> None:
         """Validate EKS cluster configuration"""
@@ -672,6 +730,25 @@ class ConfigLoader:
             "client_affinity": "NONE",
         }
 
+    def get_backend_tls_config(self) -> dict[str, Any]:
+        """Return the mandatory deployment-local backend TLS lifecycle policy."""
+        defaults = {
+            "root_generation": 1,
+            "root_validity_days": 3_650,
+            "root_rotate_before_days": 180,
+            "root_activation_delay_hours": 24,
+            "root_overlap_days": 45,
+            "leaf_validity_days": 30,
+            "leaf_rotate_before_days": 10,
+            "rotation_schedule_hours": 12,
+            "trust_cache_ttl_seconds": 300,
+            "trust_cache_max_stale_seconds": 3_600,
+        }
+        configured = self.app.node.try_get_context("backend_tls") or {}
+        if not isinstance(configured, dict):
+            raise ConfigValidationError("backend_tls must be a mapping")
+        return {**defaults, **configured}
+
     def get_alb_config(self) -> dict[str, Any]:
         """Get ALB configuration"""
         return self.app.node.try_get_context("alb_config") or {
@@ -704,10 +781,16 @@ class ConfigLoader:
             "replicas": 3,
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
             "validation_enabled": True,
+            "central_queue_worker_enabled": True,
+            "central_queue_poll_interval_seconds": 10,
+            "central_queue_batch_size": 5,
+            "central_queue_reconcile_limit": 100,
+            "central_queue_lease_seconds": 300,
+            "central_queue_lease_renewal_seconds": 60,
             # allowed_namespaces, resource_quotas, trusted_registries,
             # trusted_dockerhub_orgs, manifest_security_policy, and
             # allowed_kinds are merged in below from job_validation_policy.
-            "allowed_namespaces": ["default", "gco-jobs"],
+            "allowed_namespaces": ["gco-jobs"],
             "resource_quotas": {
                 "max_cpu_per_manifest": "10",
                 "max_memory_per_manifest": "32Gi",
@@ -741,7 +824,34 @@ class ConfigLoader:
         # them. We flatten them into the manifest processor's runtime config
         # so service code keeps its existing attribute layout.
         shared_policy = self.app.node.try_get_context("job_validation_policy") or {}
-        return {**default_config, **context_config, **shared_policy}
+        merged = {**default_config, **context_config, **shared_policy}
+
+        enabled = merged.get("central_queue_worker_enabled")
+        if not isinstance(enabled, bool):
+            raise ConfigValidationError(
+                "manifest_processor.central_queue_worker_enabled must be a boolean"
+            )
+        for key, minimum, maximum in (
+            ("central_queue_poll_interval_seconds", 1, 300),
+            ("central_queue_batch_size", 1, 20),
+            ("central_queue_reconcile_limit", 1, 500),
+            ("central_queue_lease_seconds", 30, 3600),
+            ("central_queue_lease_renewal_seconds", 1, 300),
+        ):
+            value = merged.get(key)
+            if type(value) is not int or not minimum <= value <= maximum:
+                raise ConfigValidationError(
+                    f"manifest_processor.{key} must be an integer between {minimum} and {maximum}"
+                )
+        if (
+            merged["central_queue_lease_renewal_seconds"] * 2
+            > merged["central_queue_lease_seconds"]
+        ):
+            raise ConfigValidationError(
+                "manifest_processor.central_queue_lease_renewal_seconds must be no more than "
+                "half of central_queue_lease_seconds"
+            )
+        return merged
 
     def get_api_gateway_config(self) -> dict[str, Any]:
         """Get API Gateway configuration.
@@ -753,9 +863,9 @@ class ConfigLoader:
             - log_level: CloudWatch logging level (OFF, ERROR, INFO)
             - metrics_enabled: Enable CloudWatch metrics
             - tracing_enabled: Enable X-Ray tracing
-            - regional_api_enabled: Enable regional API Gateways for private access
-              When true, deploys a regional API Gateway with VPC Lambda in each
-              region, allowing API access when the ALB is internal-only.
+            - regional_api_enabled: Permit direct same-account callers to use
+              the always-deployed regional API bridges. Each bridge is required
+              for centralized aggregation regardless of this setting.
         """
         default_config = {
             "throttle_rate_limit": 1000,
@@ -885,13 +995,13 @@ class ConfigLoader:
 
         Returns:
             Valkey configuration dictionary with the following keys:
-            - enabled: Whether Valkey cache is enabled (default: True)
+            - enabled: Whether Valkey cache is enabled (default: False)
             - max_data_storage_gb: Maximum data storage in GB (default: 5)
             - max_ecpu_per_second: Maximum ECPUs per second (default: 5000)
             - snapshot_retention_limit: Daily snapshots to retain (default: 1)
         """
         default_config: dict[str, Any] = {
-            "enabled": True,
+            "enabled": False,
             "max_data_storage_gb": 5,
             "max_ecpu_per_second": 5000,
             "snapshot_retention_limit": 1,

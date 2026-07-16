@@ -495,7 +495,7 @@ def add_iam_suppressions(
         # VPC Flow Logs delivery role writes log events to every stream in the
         # flow-log group (logs:CreateLogStream/PutLogEvents on `<group>.Arn:*`).
         "Resource::<VpcFlowLogGroup86559C69.Arn>:*",
-        # Secrets Manager access for the API Gateway auth token, with a
+        # Secrets Manager access for the backend HMAC signing key, with a
         # trailing wildcard for the random 6-char suffix. The regional
         # service-account role builds this exact ARN deterministically (from
         # the secret name + API Gateway region + account) so it matches in
@@ -591,7 +591,7 @@ def add_iam_suppressions(
                     "dynamic Kubernetes resources, (2) Custom resource providers to invoke Lambda versions, "
                     "(3) SSM parameter access for cross-region coordination, (4) EKS addon management, "
                     "(5) VPC Flow Logs to write to CloudWatch, (6) Secrets Manager cross-region access "
-                    "with wildcard suffix for auth token, (7) DynamoDB GSI access for job queue, templates, "
+                    "with wildcard suffix for the HMAC signing key, (7) DynamoDB GSI access for job queue, templates, "
                     "webhooks, and inference endpoints tables, (8) S3 access for model weights bucket "
                     "(auto-generated name). All wildcards are scoped to specific patterns. "
                     "(9) KMS decrypt scoped to S3 via condition for model weights bucket."
@@ -605,8 +605,8 @@ def add_iam_suppressions(
 def add_vpc_suppressions(stack: Stack) -> None:
     """Add suppressions for VPC-related cdk-nag findings.
 
-    Public subnets and IGW routes are required for ALB and NAT Gateway
-    functionality in a multi-tier architecture.
+    Public subnets and IGW routes host the NAT gateways that provide bounded
+    egress for private EKS nodes and VPC Lambdas. The platform ALB remains internal.
     """
     acknowledge_nag_findings(
         stack,
@@ -615,45 +615,51 @@ def add_vpc_suppressions(stack: Stack) -> None:
             NagSuppression(
                 id="HIPAA.Security-VPCSubnetAutoAssignPublicIpDisabled",
                 reason=(
-                    "Public subnets are required for internet-facing ALB. EC2 instances "
-                    "(EKS nodes) are deployed only in private subnets."
+                    "Public subnets host NAT gateways that provide controlled egress "
+                    "for private EKS nodes and VPC Lambdas; workloads and the platform "
+                    "ALB remain in private subnets."
                 ),
             ),
             NagSuppression(
                 id="HIPAA.Security-VPCNoUnrestrictedRouteToIGW",
                 reason=(
-                    "Public subnets require IGW route for ALB to receive traffic from "
-                    "Global Accelerator. All compute resources are in private subnets."
+                    "Public-subnet NAT gateways require an Internet Gateway route to "
+                    "provide outbound dependency access for private subnets. EKS nodes, "
+                    "VPC Lambdas, and the platform ALB remain private."
                 ),
             ),
             # NIST 800-53 VPC suppressions
             NagSuppression(
                 id="NIST.800.53.R5-VPCSubnetAutoAssignPublicIpDisabled",
                 reason=(
-                    "Public subnets are required for internet-facing ALB. EC2 instances "
-                    "(EKS nodes) are deployed only in private subnets."
+                    "Public subnets host NAT gateways that provide controlled egress "
+                    "for private EKS nodes and VPC Lambdas; workloads and the platform "
+                    "ALB remain in private subnets."
                 ),
             ),
             NagSuppression(
                 id="NIST.800.53.R5-VPCNoUnrestrictedRouteToIGW",
                 reason=(
-                    "Public subnets require IGW route for ALB to receive traffic from "
-                    "Global Accelerator. All compute resources are in private subnets."
+                    "Public-subnet NAT gateways require an Internet Gateway route to "
+                    "provide outbound dependency access for private subnets. EKS nodes, "
+                    "VPC Lambdas, and the platform ALB remain private."
                 ),
             ),
             # PCI DSS VPC suppressions
             NagSuppression(
                 id="PCI.DSS.321-VPCSubnetAutoAssignPublicIpDisabled",
                 reason=(
-                    "Public subnets are required for internet-facing ALB. EC2 instances "
-                    "(EKS nodes) are deployed only in private subnets."
+                    "Public subnets host NAT gateways that provide controlled egress "
+                    "for private EKS nodes and VPC Lambdas; workloads and the platform "
+                    "ALB remain in private subnets."
                 ),
             ),
             NagSuppression(
                 id="PCI.DSS.321-VPCNoUnrestrictedRouteToIGW",
                 reason=(
-                    "Public subnets require IGW route for ALB to receive traffic from "
-                    "Global Accelerator. All compute resources are in private subnets."
+                    "Public-subnet NAT gateways require an Internet Gateway route to "
+                    "provide outbound dependency access for private subnets. EKS nodes, "
+                    "VPC Lambdas, and the platform ALB remain private."
                 ),
             ),
         ],
@@ -705,22 +711,28 @@ def add_api_gateway_suppressions(stack: Stack) -> None:
             NagSuppression(
                 id="HIPAA.Security-APIGWSSLEnabled",
                 reason=(
-                    "Backend SSL certificates are not required as traffic flows through "
-                    "Global Accelerator (TLS terminated) to internal ALB (HTTPS)."
+                    "API Gateway integrates with Lambda rather than an HTTP backend that "
+                    "requires an API Gateway client certificate. The public API endpoint "
+                    "enforces HTTPS; Lambda signs the exact private-backend request with "
+                    "a short-lived HMAC envelope."
                 ),
             ),
             NagSuppression(
                 id="NIST.800.53.R5-APIGWSSLEnabled",
                 reason=(
-                    "Backend SSL certificates are not required as traffic flows through "
-                    "Global Accelerator (TLS terminated) to internal ALB (HTTPS)."
+                    "API Gateway integrates with Lambda rather than an HTTP backend that "
+                    "requires an API Gateway client certificate. The public API endpoint "
+                    "enforces HTTPS; Lambda signs the exact private-backend request with "
+                    "a short-lived HMAC envelope."
                 ),
             ),
             NagSuppression(
                 id="PCI.DSS.321-APIGWSSLEnabled",
                 reason=(
-                    "Backend SSL certificates are not required as traffic flows through "
-                    "Global Accelerator (TLS terminated) to internal ALB (HTTPS)."
+                    "API Gateway integrates with Lambda rather than an HTTP backend that "
+                    "requires an API Gateway client certificate. The public API endpoint "
+                    "enforces HTTPS; Lambda signs the exact private-backend request with "
+                    "a short-lived HMAC envelope."
                 ),
             ),
             # CloudWatch Log Group encryption suppressions
@@ -926,8 +938,9 @@ def add_eks_cluster_suppressions(stack: Stack) -> None:
             NagSuppression(
                 id="AwsSolutions-EKS1",
                 reason=(
-                    "EKS public endpoint is enabled for kubectl access from CI/CD pipelines "
-                    "and developer workstations. Access is controlled via IAM."
+                    "The production default is a private EKS API endpoint. When operators "
+                    "explicitly opt into PUBLIC_AND_PRIVATE for development access, the "
+                    "public endpoint is authenticated and authorized through IAM."
                 ),
             ),
         ],
@@ -1642,7 +1655,7 @@ def apply_all_suppressions(
     Args:
         stack: The CDK stack to apply suppressions to
         stack_type: Type of stack - 'regional', 'global', 'api_gateway',
-            'monitoring', or 'analytics'
+            'regional_api_gateway', 'monitoring', or 'analytics'
         regions: List of regional deployment regions (for dynamic IAM suppression patterns)
         global_region: Global region for SSM parameters (for dynamic IAM suppression patterns)
         api_gateway_region: API Gateway region (for analytics stack — used to
@@ -1676,6 +1689,9 @@ def apply_all_suppressions(
     elif stack_type == "api_gateway":
         add_api_gateway_suppressions(stack)
         add_secrets_suppressions(stack)
+
+    elif stack_type == "regional_api_gateway":
+        add_api_gateway_suppressions(stack)
 
     elif stack_type == "monitoring":
         add_monitoring_suppressions(stack)

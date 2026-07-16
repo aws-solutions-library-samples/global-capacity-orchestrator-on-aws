@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,62 +205,64 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub1859=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op1861=>operation: self.config = config
-op1863=>operation: self.deployment_region = region
-op1865=>operation: self.auth_secret_arn = auth_secret_arn
-op1867=>operation: self.alb_arn: str | None = None
-op1869=>operation: cluster_config = self.config.get_cluster_config(region)
-op1871=>operation: self.cluster_config = cluster_config
-op1873=>operation: self.vpc = ec2.Vpc(self, 'GCOVpc', max_azs=99, nat_gateways=2, subnet_configuration=[ec2.SubnetConfiguration(name='PublicSubnet', subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24), ec2.SubnetConfiguration(name='PrivateSubnet', subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS, cidr_mask=24)])
-sub1875=>subroutine: self._create_vpc_flow_logs()
-sub1877=>subroutine: self._create_sqs_queue()
-sub1879=>subroutine: self._create_container_images()
-sub1881=>subroutine: self._create_aws_custom_resource_role()
-sub1883=>subroutine: self._create_eks_cluster(cluster_config)
-sub1885=>subroutine: self._configure_volcano_image_mirror()
-op1887=>operation: self.cluster_shared_identity = self._resolve_cluster_shared_bucket_from_ssm()
-sub1889=>subroutine: self._grant_cluster_shared_bucket_to_job_role(self.cluster_shared_identity)
-sub1891=>subroutine: self._create_regional_shared_bucket()
-sub1893=>subroutine: self._create_efs()
-sub1895=>subroutine: self._create_fsx_lustre()
-sub1897=>subroutine: self._create_valkey_cache()
-sub1899=>subroutine: self._create_aurora_pgvector()
-sub1901=>subroutine: self._create_ga_registration_lambda()
-sub1903=>subroutine: self._create_helm_installer_lambda()
-sub1905=>subroutine: self._apply_kubernetes_manifests()
-sub1907=>subroutine: self._create_drift_detection()
-sub1909=>subroutine: self._create_mcp_role()
-sub1911=>subroutine: self._create_outputs()
-sub1913=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub2062=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op2064=>operation: self.config = config
+op2066=>operation: self.deployment_region = region
+op2068=>operation: self.auth_secret_arn = auth_secret_arn
+op2070=>operation: self.alb_arn: str | None = None
+op2072=>operation: cluster_config = self.config.get_cluster_config(region)
+op2074=>operation: self.cluster_config = cluster_config
+op2076=>operation: self.vpc = ec2.Vpc(self, 'GCOVpc', max_azs=99, nat_gateways=2, subnet_configuration=[ec2.SubnetConfiguration(name='PublicSubnet', subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24), ec2.SubnetConfiguration(name='PrivateSubnet', subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS, cidr_mask=24)])
+sub2078=>subroutine: self._create_vpc_flow_logs()
+sub2080=>subroutine: self._create_sqs_queue()
+sub2082=>subroutine: self._create_container_images()
+sub2084=>subroutine: self._create_aws_custom_resource_role()
+op2086=>operation: self.backend_tls_certificate_arn = self._resolve_backend_tls_certificate_arn()
+sub2088=>subroutine: self._create_eks_cluster(cluster_config)
+sub2090=>subroutine: self._configure_volcano_image_mirror()
+op2092=>operation: self.cluster_shared_identity = self._resolve_cluster_shared_bucket_from_ssm()
+sub2094=>subroutine: self._grant_cluster_shared_bucket_to_job_role(self.cluster_shared_identity)
+sub2096=>subroutine: self._create_regional_shared_bucket()
+sub2098=>subroutine: self._create_efs()
+sub2100=>subroutine: self._create_fsx_lustre()
+sub2102=>subroutine: self._create_valkey_cache()
+sub2104=>subroutine: self._create_aurora_pgvector()
+sub2106=>subroutine: self._create_ga_registration_lambda()
+sub2108=>subroutine: self._create_helm_installer_lambda()
+sub2110=>subroutine: self._apply_kubernetes_manifests()
+sub2112=>subroutine: self._create_drift_detection()
+sub2114=>subroutine: self._create_mcp_role()
+sub2116=>subroutine: self._create_outputs()
+sub2118=>subroutine: self._apply_nag_suppressions()
 
-sub1859->op1861
-op1861->op1863
-op1863->op1865
-op1865->op1867
-op1867->op1869
-op1869->op1871
-op1871->op1873
-op1873->sub1875
-sub1875->sub1877
-sub1877->sub1879
-sub1879->sub1881
-sub1881->sub1883
-sub1883->sub1885
-sub1885->op1887
-op1887->sub1889
-sub1889->sub1891
-sub1891->sub1893
-sub1893->sub1895
-sub1895->sub1897
-sub1897->sub1899
-sub1899->sub1901
-sub1901->sub1903
-sub1903->sub1905
-sub1905->sub1907
-sub1907->sub1909
-sub1909->sub1911
-sub1911->sub1913
+sub2062->op2064
+op2064->op2066
+op2066->op2068
+op2068->op2070
+op2070->op2072
+op2072->op2074
+op2074->op2076
+op2076->sub2078
+sub2078->sub2080
+sub2080->sub2082
+sub2082->sub2084
+sub2084->op2086
+op2086->sub2088
+sub2088->sub2090
+sub2090->op2092
+op2092->sub2094
+sub2094->sub2096
+sub2096->sub2098
+sub2098->sub2100
+sub2100->sub2102
+sub2102->sub2104
+sub2104->sub2106
+sub2106->sub2108
+sub2108->sub2110
+sub2110->sub2112
+sub2112->sub2114
+sub2114->sub2116
+sub2116->sub2118
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

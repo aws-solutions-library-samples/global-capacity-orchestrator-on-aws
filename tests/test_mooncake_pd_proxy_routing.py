@@ -2,27 +2,28 @@
 
 A disaggregated (or ``both``-mode) endpoint is reached through a lightweight
 proxy that runs the residency check and coordinates the prefill and decode
-pods. Two pieces of that front door are pinned here:
+pods. The front door has two enforced boundaries:
 
-- The proxy Service must resolve to the proxy pods alone. Its selector carries
-  the ``{name}-proxy`` app label together with the proxy role marker, so it
-  never fans traffic out to the prefill or decode role pods that share the
-  namespace.
-- The public Ingress must publish only the OpenAI-compatible serving paths. It
-  routes the endpoint-scoped ``{ingress_path}/v1`` prefix to the proxy Service
-  and leaves the proxy's ``/instances/add`` admin path off the public surface
-  entirely.
+- The proxy Service resolves to proxy pods alone. Its selector carries the
+  ``{name}-proxy`` app label and proxy role marker, so it never fans traffic out
+  to prefill or decode role pods in the same namespace.
+- There is no endpoint-specific Ingress. The shared ``gco-system/gco-ingress``
+  sends every ``/inference`` request to the authenticated manifest processor,
+  which validates the API proxy envelope before forwarding an allowlisted
+  serving path to the internal ClusterIP Service. Reconciliation removes both
+  historical direct-Ingress names.
 
-These examples build a monitor with every Kubernetes client mocked, invoke the
-proxy Service and Ingress creation directly, and inspect the objects handed to
-the API.
+These examples inspect the Service and cleanup calls emitted by the monitor and
+the checked-in shared Ingress manifest that defines the authenticated boundary.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 
 def _make_monitor(region: str = "us-east-1"):
@@ -90,52 +91,29 @@ def test_proxy_service_selects_only_proxy_pods(monitor):
     assert len(service.spec.ports) == 1
 
 
-def test_proxy_ingress_routes_only_v1_prefix_to_proxy(monitor):
-    """The public Ingress publishes the endpoint-scoped ``/v1`` prefix only.
-
-    Exactly one routing path is configured: the endpoint's own
-    ``{ingress_path}/v1`` prefix (``/inference/my-endpoint/v1``) pointing at the
-    proxy Service. Scoping to the endpoint prefix is what lets a client request
-    to ``/inference/my-endpoint/v1/...`` reach the proxy on the shared ALB. No
-    rule exposes the proxy's ``/instances/add`` admin path.
-    """
-    from gco.services.inference_monitor import PD_PROXY_PUBLIC_PATH_PREFIX
-
-    monitor.networking_v1.create_namespaced_ingress.reset_mock()
-    monitor._update_proxy_ingress("my-endpoint", "my-endpoint-proxy", "gco-inference", {})
-
-    args, _ = monitor.networking_v1.create_namespaced_ingress.call_args
-    namespace, ingress = args[0], args[1]
-    assert namespace == "gco-inference"
-
-    # Gather every routing path across every rule.
-    paths = [path for rule in ingress.spec.rules for path in rule.http.paths]
-
-    assert len(paths) == 1
-    only_path = paths[0]
-    # The published path is the endpoint's ingress prefix plus the serving
-    # prefix — the same path a client (and `gco inference invoke`) targets.
-    assert only_path.path == f"/inference/my-endpoint{PD_PROXY_PUBLIC_PATH_PREFIX}"
-    assert only_path.path == "/inference/my-endpoint/v1"
-    assert only_path.path_type == "Prefix"
-    assert only_path.backend.service.name == "my-endpoint-proxy"
-
-    # The admin path is never published on the public Ingress.
-    rendered_paths = {path.path for path in paths}
-    assert "/instances/add" not in rendered_paths
-    assert all("/instances" not in path for path in rendered_paths)
-
-
-def test_full_proxy_materialization_keeps_service_and_ingress_scoped(monitor):
-    """Materializing the whole proxy front keeps the Service and Ingress scoped.
-
-    Driving the full proxy creation path produces a Service whose selector is
-    proxy-only and an Ingress whose sole public path is the ``/v1`` prefix.
-    """
-    from gco.services.inference_monitor import (
-        PD_PROXY_PUBLIC_PATH_PREFIX,
-        PD_PROXY_ROLE_LABEL,
+def test_shared_ingress_routes_inference_through_manifest_processor():
+    """The one public inference prefix terminates at the authenticated API."""
+    manifest_path = (
+        Path(__file__).parents[1]
+        / "lambda"
+        / "kubectl-applier-simple"
+        / "manifests"
+        / "11-ingress.yaml"
     )
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    paths = manifest["spec"]["rules"][0]["http"]["paths"]
+    inference_paths = [path for path in paths if path["path"] == "/inference"]
+
+    assert len(inference_paths) == 1
+    route = inference_paths[0]
+    assert route["pathType"] == "Prefix"
+    assert route["backend"]["service"]["name"] == "manifest-processor"
+    assert route["backend"]["service"]["port"]["number"] == 80
+
+
+def test_full_proxy_materialization_keeps_internal_service_scoped(monitor):
+    """The proxy stays ClusterIP-only and legacy direct routes are removed."""
+    from gco.services.inference_monitor import PD_PROXY_ROLE_LABEL
 
     spec = {
         "mooncake": {
@@ -157,20 +135,26 @@ def test_full_proxy_materialization_keeps_service_and_ingress_scoped(monitor):
 
     monitor._create_pd_proxy("my-endpoint", "gco-inference", spec, {})
 
-    # Service selector is proxy-only.
+    # The proxy is reachable only as an in-cluster Service.
     svc_args, _ = monitor.core_v1.create_namespaced_service.call_args
     service = svc_args[1]
+    assert service.spec.type == "ClusterIP"
     assert service.spec.selector == {
         "app": "my-endpoint-proxy",
         "gco.io/role": PD_PROXY_ROLE_LABEL,
     }
 
-    # Ingress publishes only the endpoint-scoped /v1 prefix to the proxy Service.
-    ing_args, _ = monitor.networking_v1.create_namespaced_ingress.call_args
-    ingress = ing_args[1]
-    paths = [path for rule in ingress.spec.rules for path in rule.http.paths]
-    assert [p.path for p in paths] == [f"/inference/my-endpoint{PD_PROXY_PUBLIC_PATH_PREFIX}"]
-    assert paths[0].backend.service.name == "my-endpoint-proxy"
+    # Reconciliation cannot create a bypass route and removes both names used
+    # by older releases.
+    monitor.networking_v1.create_namespaced_ingress.assert_not_called()
+    monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
+    deleted = [
+        call.args[:2] for call in monitor.networking_v1.delete_namespaced_ingress.call_args_list
+    ]
+    assert deleted == [
+        ("inference-my-endpoint", "gco-inference"),
+        ("inference-my-endpoint-proxy", "gco-inference"),
+    ]
 
 
 def test_role_service_resolves_only_that_role(monitor):

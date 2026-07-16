@@ -190,7 +190,7 @@ EXAMPLE_METADATA: dict[str, dict[str, str | list[str]]] = {
         "summary": "vLLM OpenAI-compatible LLM serving with PagedAttention.",
         "gpu": "NVIDIA",
         "opt_in": "",
-        "submission": "gco inference deploy my-llm -i vllm/vllm-openai:v0.22.0 --gpu-count 1",
+        "submission": "gco inference deploy my-llm -i vllm/vllm-openai:v0.24.0 --gpu-count 1",
         "keywords": [
             "vllm",
             "openai",
@@ -530,7 +530,7 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
             "manifest processor",
             "endpoints",
             "auth",
-            "x-gco-auth-token",
+            "hmac request envelope",
             "api gateway",
             "sigv4",
             "openapi",
@@ -1190,14 +1190,16 @@ def docs_index() -> str:
 
     sections.append("## Live State")
     sections.append(
-        "- `gco://jobs/{job_name}` — live YAML for a Kubernetes Job in the `gco-jobs` namespace"
+        "- `gco://jobs/{region}/{job_name}` — live YAML for a Kubernetes Job in the "
+        "explicitly selected regional EKS cluster"
     )
     sections.append(
         "- `gco://inference/{endpoint_name}` — desired-state record for an inference endpoint "
         "from the DynamoDB store"
     )
     sections.append(
-        "- `gco://k8s/{namespace}/{kind}/{name}` — live YAML for any Kubernetes resource in any namespace"
+        "- `gco://k8s/{region}/{namespace}/{kind}/{name}` — live YAML for any Kubernetes "
+        "resource from the explicitly selected regional EKS cluster"
     )
     sections.append(
         "- `gco://cluster/{region}/topology` — Karpenter NodePools plus Pending pods snapshot for one region"
@@ -1206,6 +1208,10 @@ def docs_index() -> str:
         "- `costs://gco/summary/{days_window}` — cost summary for the given day window (positive integer)"
     )
     sections.append("- `tasks://gco/{task_id}` — current status of a FastMCP background task by ID")
+    sections.append(
+        "- `mission://sessions/{session_id}` — Mission session state, report, or audit replay "
+        "when `GCO_ENABLE_MISSION=true`"
+    )
     sections.append("")
 
     sections.append("## Other Resource Groups")
@@ -1213,14 +1219,20 @@ def docs_index() -> str:
     sections.append("- `iam://gco/policies/index` — IAM policy templates")
     sections.append("- `infra://gco/index` — Dockerfiles, Helm charts, CI/CD config")
     sections.append("- `ci://gco/index` — GitHub Actions workflows, composite actions, templates")
+    sections.append(
+        "- `images://gco/index` — ECR repositories, tags, images, and replication status"
+    )
     sections.append("- `source://gco/index` — Source code browser")
     sections.append("- `demos://gco/index` — Demo walkthroughs and presentation materials")
     sections.append("- `clients://gco/index` — API client examples (Python, curl, AWS CLI)")
     sections.append("- `scripts://gco/index` — Utility scripts")
     sections.append("- `tests://gco/index` — Test suite documentation and patterns")
     sections.append(
-        "- `config://gco/index` — CDK configuration, feature toggles, environment variables"
+        "- `config://gco/index` — authoritative CDK configuration, MCP feature flags, and environment variables"
     )
+    sections.append("- `mcp://gco/tools/index` — live registered-tool catalog")
+    sections.append("- `mcp://gco/resources/index` — live static-resource and template catalog")
+    sections.append("- `mcp://gco/feature-flags` — authoritative feature-gate mapping")
     return "\n".join(sections)
 
 

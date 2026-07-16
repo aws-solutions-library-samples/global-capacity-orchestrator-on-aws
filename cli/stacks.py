@@ -350,8 +350,32 @@ class StackManager:
             return
         self._lambda_sources_synced = True
 
-        source_dir = self.project_root / "lambda" / "kubectl-applier-simple"
-        build_dir = self.project_root / "lambda" / "kubectl-applier-simple-build"
+        lambda_dir = self.project_root / "lambda"
+
+        # Keep shared proxy and TLS transport sources synchronized with every
+        # deployable Lambda asset. Checked-in copies make direct ``cdk synth``
+        # deterministic; this deploy-time sync prevents stale copies after a
+        # canonical source edit.
+        shared_source_targets = {
+            lambda_dir / "proxy-shared" / "proxy_utils.py": [
+                lambda_dir / "api-gateway-proxy" / "proxy_utils.py",
+                lambda_dir / "regional-api-proxy" / "proxy_utils.py",
+            ],
+            lambda_dir / "tls-shared" / "backend_tls.py": [
+                lambda_dir / "proxy-shared" / "backend_tls.py",
+                lambda_dir / "api-gateway-proxy" / "backend_tls.py",
+                lambda_dir / "regional-api-proxy" / "backend_tls.py",
+            ],
+        }
+        for shared_source, targets in shared_source_targets.items():
+            if not shared_source.exists():
+                continue
+            for target in targets:
+                if target.parent.exists():
+                    shutil.copy2(shared_source, target)
+
+        source_dir = lambda_dir / "kubectl-applier-simple"
+        build_dir = lambda_dir / "kubectl-applier-simple-build"
 
         if not source_dir.exists() or not build_dir.exists():
             return
@@ -1157,8 +1181,13 @@ class StackManager:
             resp = cfn.describe_stacks(StackName=stack_name)
             status = resp["Stacks"][0]["StackStatus"]
             return bool(status != "DELETE_COMPLETE")
-        except Exception:
-            return False
+        except ClientError as e:
+            error = e.response.get("Error", {})
+            code = error.get("Code", "")
+            message = str(error.get("Message", "")).lower()
+            if code == "ValidationError" and "does not exist" in message:
+                return False
+            raise
 
     def _get_stack_status(self, stack_name: str) -> str | None:
         """Return the live CloudFormation status of ``stack_name`` or None.

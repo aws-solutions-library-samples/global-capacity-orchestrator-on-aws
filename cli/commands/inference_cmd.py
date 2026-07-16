@@ -24,7 +24,7 @@ def inference(config: Any) -> None:
     "--image",
     "-i",
     default=None,
-    help="Container image (e.g. vllm/vllm-openai:v0.8.0). Optional with "
+    help="Container image (e.g. vllm/vllm-openai:v0.24.0). Optional with "
     "--mooncake-mode: falls back to the default upstream Mooncake-enabled vLLM image.",
 )
 @click.option(
@@ -174,10 +174,10 @@ def inference_deploy(
     in each target region creates the Kubernetes resources automatically.
 
     Examples:
-        gco inference deploy my-llm -i vllm/vllm-openai:v0.8.0
+        gco inference deploy my-llm -i vllm/vllm-openai:v0.24.0
 
         gco inference deploy llama3-70b \\
-            -i vllm/vllm-openai:v0.8.0 \\
+            -i vllm/vllm-openai:v0.24.0 \\
             -r us-east-1 -r eu-west-1 \\
             --replicas 2 --gpu-count 4 \\
             --model-path /mnt/gco/models/llama3-70b \\
@@ -619,7 +619,7 @@ def inference_update_image(config: Any, endpoint_name: Any, image: Any) -> None:
     Triggers a rolling update across all target regions.
 
     Examples:
-        gco inference update-image my-llm -i vllm/vllm-openai:v0.9.0
+        gco inference update-image my-llm -i vllm/vllm-openai:v0.24.0
     """
     from ..inference import get_inference_manager
 
@@ -652,7 +652,11 @@ def inference_update_image(config: Any, endpoint_name: Any, image: Any) -> None:
 @click.option(
     "--max-tokens", type=int, default=100, help="Maximum tokens to generate (default: 100)"
 )
-@click.option("--stream/--no-stream", default=False, help="Stream the response")
+@click.option(
+    "--stream/--no-stream",
+    default=False,
+    help="Request streaming (unsupported: API Gateway and Lambda buffer responses)",
+)
 @pass_config
 def inference_invoke(
     config: Any,
@@ -666,8 +670,9 @@ def inference_invoke(
 ) -> None:
     """Send a request to an inference endpoint and print the response.
 
-    Automatically discovers the endpoint's ingress path and routes the
-    request through the API Gateway with SigV4 authentication.
+    Automatically discovers the endpoint's stored API path (the legacy
+    ``ingress_path`` record field) and routes the request through API Gateway
+    with SigV4 authentication.
 
     Examples:
         gco inference invoke my-llm -p "What is GPU orchestration?"
@@ -686,16 +691,23 @@ def inference_invoke(
     if not prompt and not data:
         formatter.print_error("Provide --prompt (-p) or --data (-d)")
         sys.exit(1)
+    if stream:
+        formatter.print_error(
+            "--stream is not supported: API Gateway and Lambda buffer inference responses"
+        )
+        sys.exit(1)
 
     try:
-        # Look up the endpoint to get its ingress path and spec
+        # Look up the endpoint's stored API prefix and serving spec. The record
+        # retains the historical ``ingress_path`` field name for compatibility;
+        # requests still traverse only the shared authenticated Ingress.
         manager = get_inference_manager(config)
         endpoint = manager.get_endpoint(endpoint_name)
         if not endpoint:
             formatter.print_error(f"Endpoint '{endpoint_name}' not found")
             sys.exit(1)
 
-        ingress_path = endpoint.get("ingress_path", f"/inference/{endpoint_name}")
+        endpoint_path = endpoint.get("ingress_path", f"/inference/{endpoint_name}")
         spec = endpoint.get("spec", {})
         image = spec.get("image", "") if isinstance(spec, dict) else ""
 
@@ -710,12 +722,19 @@ def inference_invoke(
             else:
                 api_path = "/v1/completions"
 
-        full_path = f"{ingress_path}{api_path}"
+        full_path = f"{endpoint_path}{api_path}"
 
         # Build the request body
         body_str: str | None = None
         if data:
-            body_str = data
+            parsed_data = _json.loads(data)
+            if not isinstance(parsed_data, dict):
+                raise ValueError("--data must contain a JSON object")
+            if parsed_data.get("stream") is True:
+                raise ValueError(
+                    "Streaming requests are not supported: API Gateway and Lambda buffer responses"
+                )
+            body_str = _json.dumps(parsed_data)
         elif prompt:
             # Build a sensible default body based on framework
             if "generate" in api_path:
@@ -758,7 +777,7 @@ def inference_invoke(
                     "model": model_name,
                     "prompt": prompt,
                     "max_tokens": max_tokens,
-                    "stream": stream,
+                    "stream": False,
                 }
             body_str = _json.dumps(body_dict)
 
@@ -831,7 +850,7 @@ def inference_canary(
     the new primary, or 'rollback' to remove it.
 
     Examples:
-        gco inference canary my-llm -i vllm/vllm-openai:v0.9.0 --weight 10
+        gco inference canary my-llm -i vllm/vllm-openai:v0.24.0 --weight 10
         gco inference canary my-llm -i new-image:latest -w 25 -r 2
     """
     from ..inference import get_inference_manager
@@ -997,10 +1016,12 @@ def inference_health(config: Any, endpoint_name: Any, region: Any) -> None:
             formatter.print_error(f"Endpoint '{endpoint_name}' not found")
             sys.exit(1)
 
-        ingress_path = endpoint.get("ingress_path", f"/inference/{endpoint_name}")
+        endpoint_path = endpoint.get("ingress_path", f"/inference/{endpoint_name}")
         spec = endpoint.get("spec", {})
-        health_path = spec.get("health_path", "/health") if isinstance(spec, dict) else "/health"
-        full_path = f"{ingress_path}{health_path}"
+        health_path = (
+            spec.get("health_check_path", "/health") if isinstance(spec, dict) else "/health"
+        )
+        full_path = f"{endpoint_path}{health_path}"
 
         client = get_aws_client(config)
         start = _time.monotonic()

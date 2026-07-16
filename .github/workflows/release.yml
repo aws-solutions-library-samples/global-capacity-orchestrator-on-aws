@@ -5,9 +5,9 @@
 # Replaces the GitLab "release:patch/minor/major" manual jobs. Triggered
 # from Actions → Release → Run workflow, with a `bump` input (patch/minor/major).
 #
-# Why no concurrency cancellation:
-#   A half-run release is worse than a slow one. We do NOT set
-#   `cancel-in-progress` here.
+# Concurrency:
+#   Release runs are serialized repository-wide. A half-run release is worse
+#   than a slow one, so queued runs wait and in-progress runs are never canceled.
 #
 # Permissions model:
 #   `contents: write` on the built-in GITHUB_TOKEN is enough for the push
@@ -30,15 +30,20 @@ on:
           - minor
           - major
 
-# Intentionally NO concurrency block — releases are serialized by the fact
-# that workflow_dispatch runs are rare and we don't want a second click to
-# cancel a mid-release run.
+# Serialize every release regardless of the selected ref. A second dispatch
+# waits for the active release instead of racing its version commit and tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
   release:
+    # A dispatch may select any branch or tag. Only a protected branch may
+    # receive a release commit; tags and unprotected branches are fail-closed.
+    if: github.ref_type == 'branch' && github.ref_protected
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -81,7 +86,9 @@ jobs:
           git add VERSION gco/_version.py cli/__init__.py
           git commit -m "Release v${NEW_VERSION}"
           git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
-          git push origin HEAD:"${GITHUB_REF_NAME}"
+          # Push back to the exact fully qualified protected branch selected
+          # by workflow_dispatch; do not rely on ref-name destination guessing.
+          git push origin "HEAD:${GITHUB_REF}"
           git push origin "v${NEW_VERSION}"
       - name: Create GitHub Release with generated notes
         env:

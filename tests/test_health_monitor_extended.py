@@ -9,6 +9,7 @@ requests from pending pods. Uses the same shared kubernetes-config
 mocking pattern as the base health monitor suite.
 """
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -588,6 +589,7 @@ class TestSyncAlbRegistration:
             patch("gco.services.health_monitor.config.load_incluster_config"),
             patch("gco.services.health_monitor.client.CoreV1Api"),
             patch("gco.services.health_monitor.client.NetworkingV1Api") as mock_net,
+            patch("gco.services.health_monitor.client.CoordinationV1Api") as mock_coord,
             patch("gco.services.health_monitor.client.CustomObjectsApi"),
         ):
             from gco.models.cluster_models import ResourceThresholds
@@ -600,7 +602,78 @@ class TestSyncAlbRegistration:
                 ),
             )
             m.networking_v1 = mock_net.return_value
+            m.coordination_v1 = mock_coord.return_value
+            lease = MagicMock()
+            lease.spec.holder_identity = m._alb_sync_holder
+            lease.spec.renew_time = datetime.now(UTC)
+            lease.spec.lease_duration_seconds = 90
+            lease.spec.lease_transitions = 0
+            m.coordination_v1.read_namespaced_lease.return_value = lease
             yield m
+
+    @pytest.mark.asyncio
+    async def test_sync_offloads_blocking_reconciliation(self, monitor):
+        """Kubernetes and AWS SDK calls must not block FastAPI's event loop."""
+        with (
+            patch.object(monitor, "_sync_alb_registration") as mock_sync,
+            patch(
+                "gco.services.health_monitor.asyncio.to_thread",
+                new_callable=AsyncMock,
+            ) as mock_to_thread,
+        ):
+            await monitor.sync_alb_registration()
+
+        mock_to_thread.assert_awaited_once_with(mock_sync)
+
+    @pytest.mark.asyncio
+    async def test_follower_keeps_serving_but_does_not_self_heal(self, monitor):
+        """A replica that does not hold the Lease must not touch Ingress or SSM."""
+        lease = monitor.coordination_v1.read_namespaced_lease.return_value
+        lease.spec.holder_identity = "another-health-monitor-pod"
+        lease.spec.renew_time = datetime.now(UTC)
+
+        with patch("boto3.client") as mock_boto:
+            await monitor.sync_alb_registration()
+
+        monitor.networking_v1.read_namespaced_ingress.assert_not_called()
+        mock_boto.assert_not_called()
+
+    def test_expired_lease_is_claimed_with_optimistic_replace(self, monitor):
+        """An expired holder is replaced using the read object's resourceVersion."""
+        lease = monitor.coordination_v1.read_namespaced_lease.return_value
+        lease.spec.holder_identity = "dead-health-monitor-pod"
+        lease.spec.renew_time = datetime.now(UTC) - timedelta(minutes=5)
+
+        assert monitor._try_acquire_alb_sync_lease() is True
+        assert lease.spec.holder_identity == monitor._alb_sync_holder
+        monitor.coordination_v1.replace_namespaced_lease.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_lease_conflict_fails_closed(self, monitor):
+        """A 409 election race must suppress mutation on the losing replica."""
+        from kubernetes.client.rest import ApiException
+
+        monitor.coordination_v1.replace_namespaced_lease.side_effect = ApiException(status=409)
+
+        with patch("boto3.client") as mock_boto:
+            await monitor.sync_alb_registration()
+
+        monitor.networking_v1.read_namespaced_ingress.assert_not_called()
+        mock_boto.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_precreated_lease_fails_closed(self, monitor):
+        """No broad create permission is needed; a missing Lease disables mutation."""
+        from kubernetes.client.rest import ApiException
+
+        monitor.coordination_v1.read_namespaced_lease.side_effect = ApiException(status=404)
+
+        with patch("boto3.client") as mock_boto:
+            await monitor.sync_alb_registration()
+
+        monitor.networking_v1.read_namespaced_ingress.assert_not_called()
+        monitor.coordination_v1.create_namespaced_lease.assert_not_called()
+        mock_boto.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_sync_skips_when_recently_synced(self, monitor):
@@ -624,7 +697,7 @@ class TestSyncAlbRegistration:
         mock_ssm.exceptions.ParameterNotFound = type("ParameterNotFound", (Exception,), {})
 
         with (
-            patch("boto3.client", return_value=mock_ssm),
+            patch("boto3.client", return_value=mock_ssm) as mock_boto,
             patch.dict("os.environ", {"GLOBAL_REGION": "us-east-2", "PROJECT_NAME": "gco"}),
         ):
             await monitor.sync_alb_registration()
@@ -635,6 +708,29 @@ class TestSyncAlbRegistration:
             Type="String",
             Overwrite=True,
         )
+        # Acquire once before the read and renew optimistically again
+        # immediately before the only mutation.
+        assert monitor.coordination_v1.replace_namespaced_lease.call_count == 2
+        client_config = mock_boto.call_args.kwargs["config"]
+        assert client_config.connect_timeout == 3
+        assert client_config.read_timeout == 10
+        assert client_config.retries["total_max_attempts"] == 2
+
+    @pytest.mark.asyncio
+    async def test_sync_loses_lease_before_put_and_fails_closed(self, monitor):
+        """A former leader must not write after the pre-mutation renewal fails."""
+        ingress = MagicMock()
+        ingress.status.load_balancer.ingress = [MagicMock(hostname="new-alb.elb.amazonaws.com")]
+        monitor.networking_v1.read_namespaced_ingress.return_value = ingress
+        monitor._try_acquire_alb_sync_lease = MagicMock(side_effect=[True, False])
+
+        mock_ssm = MagicMock()
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "old-alb"}}
+        with patch("boto3.client", return_value=mock_ssm):
+            await monitor.sync_alb_registration()
+
+        assert monitor._try_acquire_alb_sync_lease.call_count == 2
+        mock_ssm.put_parameter.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_sync_noop_when_hostname_matches(self, monitor):

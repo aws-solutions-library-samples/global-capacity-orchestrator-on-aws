@@ -69,7 +69,7 @@ spec:
 
 ### ScaledJob
 
-Creates Kubernetes Jobs in response to events (scale-to-zero capable):
+Creates Kubernetes Jobs in response to events (scale-to-zero capable). For SQS, `queueLength` is KEDA's target number of queued messages per active Job; it does **not** mean one worker will receive or drain that many messages:
 
 ```yaml
 apiVersion: keda.sh/v1alpha1
@@ -107,17 +107,21 @@ spec:
 | `kafka` | Process Kafka topic messages |
 | `cpu` / `memory` | Scale based on resource utilization |
 
-## Run the Example
+## Run the Safe Scaling Example
 
-The example creates a custom SQS-triggered ScaledJob (separate from GCO's built-in consumer):
+The shipped example is deliberately a **non-consuming scaler demonstration**, not a queue worker. Its credentialless pod only logs that KEDA created a Job; it contains no SQS receive/delete code and never drains messages.
+
+1. Create a disposable demo queue and synthetic messages.
+2. Grant the KEDA operator read-only queue-metric access to that demo queue.
+3. Replace the obvious demo URL/region in the manifest, apply it, and observe scaling:
 
 ```bash
 kubectl apply -f examples/keda-scaled-job.yaml
-kubectl get scaledjob -n gco-jobs
-kubectl get pods -n gco-jobs -l app=sqs-processor
+kubectl get scaledjob sqs-scaling-observer -n gco-jobs
+kubectl get pods -n gco-jobs -l app=sqs-scaling-observer
 ```
 
-Note: The example uses `{{JOB_QUEUE_URL}}` and `{{REGION}}` placeholders that are replaced during stack deployment. To use it standalone, replace these with actual values.
+> **Do not point this example at GCO's `JobQueueUrl`.** The example cannot consume or delete messages, so a real submission would remain queued and repeatedly trigger observer Jobs. Use GCO's built-in queue processor for real manifest submissions, or implement a custom consumer that validates and processes a message before acknowledging it.
 
 ## Scale Inference on GPU Utilization
 
@@ -127,7 +131,7 @@ When you deploy an endpoint with a GPU autoscaling metric:
 
 ```bash
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.22.0 \
+  -i vllm/vllm-openai:v0.24.0 \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric gpu:60
@@ -249,7 +253,7 @@ To disable the built-in SQS consumer while keeping KEDA, edit `cdk.json`:
 ## Cleanup
 
 ```bash
-kubectl delete scaledjob sqs-job-processor -n gco-jobs
+kubectl delete scaledjob sqs-scaling-observer -n gco-jobs
 ```
 
 ## Further Reading

@@ -469,29 +469,47 @@ class TestCreateService:
 
 
 # =============================================================================
-# Update Ingress Tests
+# Legacy Ingress Cleanup Tests
 # =============================================================================
 
 
 class TestUpdateIngress:
-    """Tests for _update_ingress_rule."""
+    """Tests for removal of the historical direct endpoint Ingress."""
 
-    def test_create_ingress(self):
+    def test_removes_legacy_endpoint_ingress_without_creating_a_replacement(self):
         monitor = _make_monitor()
-        spec = {"health_check_path": "/health"}
-        endpoint = {"ingress_path": "/inference/ep"}
-        monitor._update_ingress_rule("ep", "ns", spec, endpoint)
-        monitor.networking_v1.create_namespaced_ingress.assert_called_once()
+        monitor._update_ingress_rule(
+            "ep",
+            "ns",
+            {"health_check_path": "/health"},
+            {"ingress_path": "/inference/ep"},
+        )
 
-    def test_update_ingress_on_conflict(self):
+        monitor.networking_v1.delete_namespaced_ingress.assert_called_once_with(
+            "inference-ep", "ns", _request_timeout=30
+        )
+        monitor.networking_v1.create_namespaced_ingress.assert_not_called()
+        monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
+
+    def test_missing_legacy_ingress_is_idempotent(self):
         from kubernetes.client.rest import ApiException
 
         monitor = _make_monitor()
-        monitor.networking_v1.create_namespaced_ingress.side_effect = ApiException(status=409)
-        spec = {"health_check_path": "/health"}
-        endpoint = {"ingress_path": "/inference/ep"}
-        monitor._update_ingress_rule("ep", "ns", spec, endpoint)
-        monitor.networking_v1.patch_namespaced_ingress.assert_called_once()
+        monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=404)
+
+        monitor._update_ingress_rule("ep", "ns", {}, {})
+
+        monitor.networking_v1.create_namespaced_ingress.assert_not_called()
+        monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
+
+    def test_legacy_ingress_cleanup_error_propagates(self):
+        from kubernetes.client.rest import ApiException
+
+        monitor = _make_monitor()
+        monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=500)
+
+        with pytest.raises(ApiException):
+            monitor._update_ingress_rule("ep", "ns", {}, {})
 
 
 # =============================================================================

@@ -9,9 +9,12 @@ Provides:
 - ``audit_messages_var`` / ``audit_elicitations_var`` — ContextVars populated
   by ``gco_mcp/audit_middleware.py`` to surface ``ctx.warning``/``info``/``error``
   /``elicit`` calls in the audit entry.
-- Startup audit log entry emitted at import time.
+- ``audit_resource_read`` — emits the same structured success/error metadata
+  for every MCP resource read via centralized middleware.
+- Startup audit log entry emitted only when the server entry point starts.
 """
 
+import contextlib
 import contextvars
 import functools
 import inspect
@@ -51,7 +54,12 @@ _SENSITIVE_KEY_PATTERNS = [
     re.compile(r".*key.*", re.IGNORECASE),
 ]
 
-_MAX_ARG_VALUE_BYTES = 1024  # 1KB
+_MAX_ARG_VALUE_BYTES = 1024  # 1KB per string leaf
+_MAX_TASK_ID_BYTES = 256
+_MAX_AUDIT_DEPTH = 12
+_MAX_CONTAINER_ITEMS = 100
+_CIRCULAR_VALUE = "<circular-reference>"
+_MAX_DEPTH_VALUE = "<max-depth-exceeded>"
 
 # Per-invocation capture buffers populated by the audit middleware. The
 # middleware sets fresh lists at the start of every tool call; the audit
@@ -66,48 +74,106 @@ audit_elicitations_var: contextvars.ContextVar[list[dict[str, object]] | None] =
 )
 
 
-def _sanitize_arguments(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Sanitize tool arguments for audit logging.
+def _is_sensitive_key(key: object) -> bool:
+    """Return whether a mapping key names a value that must be redacted."""
+    return isinstance(key, str) and any(pattern.match(key) for pattern in _SENSITIVE_KEY_PATTERNS)
 
-    - Redact values whose key name matches sensitive patterns (token, secret, password, key).
-    - Truncate string values longer than 1KB to first 100 chars + '[truncated]'.
-    - Replace values that aren't JSON-serializable (e.g. FastMCP ``Context``
-      and ``Progress`` dependencies injected as keyword arguments) with a
-      type-only placeholder so ``json.dumps(_build_audit_entry(...))`` can't
-      raise ``TypeError`` mid-tool. Without this guard, every long-running
-      tool that takes ``ctx``/``progress`` (deploy_all, destroy_all,
-      bootstrap_cdk, deploy_stack, destroy_stack, images_build,
-      images_push) crashes the wrapper with
-      ``Object of type Context is not JSON serializable`` before the
-      underlying CLI ever runs.
+
+def _truncate_string(value: str) -> str:
+    """Bound one string leaf by encoded byte length."""
+    if len(value.encode("utf-8", errors="replace")) <= _MAX_ARG_VALUE_BYTES:
+        return value
+    return value[:100] + "[truncated]"
+
+
+def _truncate_task_id(value: str) -> str:
+    """Bound an audit task identifier without assuming an ASCII-only value."""
+    encoded = value.encode("utf-8", errors="replace")
+    if len(encoded) <= _MAX_TASK_ID_BYTES:
+        return value
+    marker = b"[truncated]"
+    prefix = encoded[: _MAX_TASK_ID_BYTES - len(marker)]
+    return prefix.decode("utf-8", errors="ignore") + marker.decode()
+
+
+def _sanitize_value(value: Any, *, depth: int, seen: set[int]) -> Any:
+    """Recursively redact and bound one audit value without calling user ``repr``.
+
+    Mapping keys are inspected at every depth before their values are visited,
+    preventing a nested secret from leaking through a parent container's string
+    representation. Containers are depth/item bounded and cycle-aware so audit
+    logging cannot become an unbounded traversal of attacker-controlled input.
     """
-    sanitized = {}
-    for k, v in kwargs.items():
-        # Check if the key name matches any sensitive pattern
-        if any(pattern.match(k) for pattern in _SENSITIVE_KEY_PATTERNS):
-            sanitized[k] = "[REDACTED]"
-            continue
-
-        # Truncate large string values
-        str_val = str(v) if not isinstance(v, str) else v
-        if len(str_val.encode("utf-8", errors="replace")) > _MAX_ARG_VALUE_BYTES:
-            sanitized[k] = str_val[:100] + "[truncated]"
-            continue
-
-        # Probe JSON-serializability so injected dependencies (FastMCP
-        # Context / Progress, dataclasses without ``default``, etc.) don't
-        # blow up the audit emission. Bare primitives short-circuit the
-        # try/except since ``json.dumps`` on str/int/float/bool/None/list/
-        # dict-of-primitives is ~free.
+    if isinstance(value, str):
+        return _truncate_string(value)
+    if value is None or isinstance(value, (bool, int, float)):
         try:
-            json.dumps(v)
-            sanitized[k] = v
-        except Exception:
-            # Best-effort: any serialization failure (TypeError on unknown
-            # types, ValueError on circular refs / NaN with allow_nan=False)
-            # falls through to a type-only placeholder so the audit log
-            # always emits valid JSON.
-            sanitized[k] = f"<unserializable: {type(v).__name__}>"
+            json.dumps(value, allow_nan=False)
+            return value
+        except TypeError, ValueError:
+            return f"<unserializable: {type(value).__name__}>"
+    if depth >= _MAX_AUDIT_DEPTH:
+        return _MAX_DEPTH_VALUE
+
+    if isinstance(value, dict):
+        identity = id(value)
+        if identity in seen:
+            return _CIRCULAR_VALUE
+        seen.add(identity)
+        try:
+            sanitized: dict[Any, Any] = {}
+            for index, (key, nested) in enumerate(value.items()):
+                if index >= _MAX_CONTAINER_ITEMS:
+                    break
+                safe_key: Any = key
+                if not isinstance(key, (str, int, float, bool)) and key is not None:
+                    safe_key = f"<key:{type(key).__name__}>"
+                sanitized[safe_key] = (
+                    "[REDACTED]"
+                    if _is_sensitive_key(key)
+                    else _sanitize_value(nested, depth=depth + 1, seen=seen)
+                )
+            if len(value) > _MAX_CONTAINER_ITEMS:
+                sanitized["<truncated-items>"] = len(value) - _MAX_CONTAINER_ITEMS
+            return sanitized
+        finally:
+            seen.remove(identity)
+
+    if isinstance(value, (list, tuple)):
+        identity = id(value)
+        if identity in seen:
+            return _CIRCULAR_VALUE
+        seen.add(identity)
+        try:
+            sanitized_items = [
+                _sanitize_value(item, depth=depth + 1, seen=seen)
+                for item in value[:_MAX_CONTAINER_ITEMS]
+            ]
+            if len(value) > _MAX_CONTAINER_ITEMS:
+                sanitized_items.append(f"<truncated-items:{len(value) - _MAX_CONTAINER_ITEMS}>")
+            return sanitized_items
+        finally:
+            seen.remove(identity)
+
+    # Unknown objects are intentionally not coerced through str/repr: those
+    # methods can expose credentials or execute arbitrary user code.
+    return f"<unserializable: {type(value).__name__}>"
+
+
+def _sanitize_arguments(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Recursively sanitize tool arguments for audit logging.
+
+    Sensitive mapping keys are redacted at every nesting depth. String leaves,
+    container depth, and container item counts are bounded. Unknown objects are
+    represented by type only, keeping audit emission JSON-safe without invoking
+    potentially secret-bearing ``__str__`` implementations.
+    """
+    sanitized: dict[str, Any] = {}
+    seen: set[int] = {id(kwargs)}
+    for key, value in kwargs.items():
+        sanitized[key] = (
+            "[REDACTED]" if _is_sensitive_key(key) else _sanitize_value(value, depth=0, seen=seen)
+        )
     return sanitized
 
 
@@ -127,21 +193,55 @@ def _try_get_fastmcp_context() -> Any | None:
 
 
 def _try_get_task_id(ctx: Any | None) -> str | None:
-    """Extract the FastMCP task ID from request meta when present.
+    """Extract the active FastMCP task ID through supported APIs first.
 
-    Every attribute access is wrapped in ``getattr(..., None)`` so a missing
-    intermediate (no request_context, no meta, no task_id) yields ``None``
-    rather than raising.
+    Docket-backed FastMCP workers expose the protocol task through
+    ``get_task_context()`` rather than request metadata. ``Context.task_id`` is
+    the next supported surface; the metadata walk remains as a compatibility
+    fallback for older FastMCP releases and focused callers. Any identifier is
+    byte-bounded before it can enter an audit record or task-status decision.
     """
+    candidates: list[object] = []
+    try:
+        from fastmcp.server.dependencies import get_task_context
+
+        candidates.append(getattr(get_task_context(), "task_id", None))
+    except Exception:
+        pass
+
+    if ctx is not None:
+        with contextlib.suppress(Exception):
+            candidates.append(getattr(ctx, "task_id", None))
+        with contextlib.suppress(Exception):
+            request_context = getattr(ctx, "request_context", None)
+            meta = getattr(request_context, "meta", None) if request_context is not None else None
+            candidates.append(getattr(meta, "task_id", None) if meta is not None else None)
+
+    for task_id in candidates:
+        if isinstance(task_id, str) and task_id:
+            return _truncate_task_id(task_id)
+    return None
+
+
+def _add_request_context_fields(entry: dict[str, Any], ctx: Any | None = None) -> None:
+    """Add common request/client/task identifiers to one audit entry."""
+    ctx = _try_get_fastmcp_context() if ctx is None else ctx
     if ctx is None:
-        return None
-    rc = getattr(ctx, "request_context", None)
-    if rc is None:
-        return None
-    meta = getattr(rc, "meta", None)
-    if meta is None:
-        return None
-    return getattr(meta, "task_id", None)
+        return
+    try:
+        request_context = getattr(ctx, "request_context", None)
+        request_id = getattr(ctx, "request_id", None) if request_context is not None else None
+        client_id = getattr(ctx, "client_id", None)
+    except Exception:
+        request_id = None
+        client_id = None
+    if request_id:
+        entry["request_id"] = request_id
+    if client_id:
+        entry["client_id"] = client_id
+    task_id = _try_get_task_id(ctx)
+    if task_id:
+        entry["task_id"] = task_id
 
 
 def _build_audit_entry(
@@ -170,23 +270,7 @@ def _build_audit_entry(
     if error:
         entry["error"] = error[:200]
 
-    ctx = _try_get_fastmcp_context()
-    if ctx is not None:
-        # ``request_id`` raises if no request_context is set; guard with
-        # request_context first so the access is safe.
-        if getattr(ctx, "request_context", None) is not None:
-            try:
-                rid = ctx.request_id
-            except Exception:
-                rid = None
-            if rid:
-                entry["request_id"] = rid
-        cid = getattr(ctx, "client_id", None)
-        if cid:
-            entry["client_id"] = cid
-        tid = _try_get_task_id(ctx)
-        if tid:
-            entry["task_id"] = tid
+    _add_request_context_fields(entry)
 
     msgs = audit_messages_var.get()
     if msgs:
@@ -196,6 +280,28 @@ def _build_audit_entry(
         entry["elicitations"] = list(elics)
 
     return entry
+
+
+def audit_resource_read(
+    resource_uri: object,
+    *,
+    status: str,
+    duration_ms: float,
+    error: str | None = None,
+    ctx: Any | None = None,
+) -> None:
+    """Emit one bounded audit record for an MCP resource read."""
+    entry: dict[str, Any] = {
+        "event": "mcp.resource.read",
+        "resource_uri": _truncate_string(str(resource_uri)),
+        "status": status,
+        "duration_ms": round(duration_ms, 2),
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    if error:
+        entry["error"] = _truncate_string(error)[:200]
+    _add_request_context_fields(entry, ctx)
+    audit_logger.info(json.dumps(entry))
 
 
 def audit_logged(func: Callable[..., Any]) -> Callable[..., Any]:

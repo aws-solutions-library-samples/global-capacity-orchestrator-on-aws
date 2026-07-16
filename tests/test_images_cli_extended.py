@@ -33,8 +33,8 @@ from cli.images import ImageManager, _isoformat, get_image_manager
 def mock_config() -> Any:
     config = MagicMock()
     config.global_region = "us-east-2"
+    config.default_region = "us-west-2"
     config.project_name = "gco"
-    config.regions = ["us-east-2", "us-west-2", "eu-west-1"]
     return config
 
 
@@ -87,17 +87,11 @@ class TestRegionResolution:
             mgr = ImageManager(config=mock_config, region="ap-south-1")
         assert mgr.region == "ap-south-1"
 
-    def test_falls_through_to_global_region_when_no_regions(
-        self, mock_config: Any, monkeypatch: Any
-    ) -> None:
-        # Strip both config.regions and AWS_DEFAULT_REGION; only
-        # config.global_region remains.
-        bare = MagicMock(spec=["global_region", "project_name"])
-        bare.global_region = "us-east-2"
-        bare.project_name = "gco"
+    def test_falls_through_to_global_region(self, mock_config: Any, monkeypatch: Any) -> None:
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
-        with patch("cli.images.get_config", return_value=bare):
-            mgr = ImageManager(config=bare)
+        with patch("cli.images.get_config", return_value=mock_config):
+            mgr = ImageManager(config=mock_config)
+        assert mock_config.default_region == "us-west-2"
         assert mgr.region == "us-east-2"
 
 
@@ -365,18 +359,23 @@ class TestDescribe:
 class TestReplicationGet:
     def test_returns_empty_when_policy_missing(self, manager: ImageManager) -> None:
         ecr = _ecr_mock()
-        ecr.get_registry_policy.side_effect = ClientError(
-            {"Error": {"Code": "RegistryPolicyNotFoundException", "Message": ""}},
-            "GetRegistryPolicy",
+        ecr.get_replication_configuration.side_effect = ClientError(
+            {
+                "Error": {
+                    "Code": "ReplicationConfigurationNotFoundException",
+                    "Message": "",
+                }
+            },
+            "GetReplicationConfiguration",
         )
         with patch.object(manager, "_ecr_client", return_value=ecr):
             assert manager.replication_get() == {}
 
     def test_re_raises_unexpected_error(self, manager: ImageManager) -> None:
         ecr = _ecr_mock()
-        ecr.get_registry_policy.side_effect = ClientError(
+        ecr.get_replication_configuration.side_effect = ClientError(
             {"Error": {"Code": "AccessDeniedException", "Message": ""}},
-            "GetRegistryPolicy",
+            "GetReplicationConfiguration",
         )
         with (
             patch.object(manager, "_ecr_client", return_value=ecr),
@@ -384,16 +383,19 @@ class TestReplicationGet:
         ):
             manager.replication_get()
 
-    def test_unpacks_policy_text(self, manager: ImageManager) -> None:
+    def test_unpacks_replication_configuration(self, manager: ImageManager) -> None:
         ecr = _ecr_mock()
-        ecr.get_registry_policy.return_value = {
+        configuration = {
+            "rules": [{"destinations": [{"region": "us-west-2", "registryId": "123456789012"}]}]
+        }
+        ecr.get_replication_configuration.return_value = {
             "registryId": "123456789012",
-            "policyText": json.dumps({"rules": []}),
+            "replicationConfiguration": configuration,
         }
         with patch.object(manager, "_ecr_client", return_value=ecr):
             result = manager.replication_get()
         assert result["registryId"] == "123456789012"
-        assert result["policy"] == {"rules": []}
+        assert result["policy"] == configuration
 
 
 class TestReplicationStatus:
@@ -498,8 +500,23 @@ class TestLifecycle:
 class TestReplicationSync:
     def test_writes_rule_to_every_other_region(self, manager: ImageManager) -> None:
         ecr = _ecr_mock()
-        ecr.put_replication_configuration.return_value = {"replicationConfiguration": {}}
-        with patch.object(manager, "_ecr_client", return_value=ecr):
+        ecr.get_replication_configuration.return_value = {
+            "registryId": "123456789012",
+            "replicationConfiguration": {"rules": []},
+        }
+        ecr.put_replication_configuration.return_value = {"registryId": "123456789012"}
+        with (
+            patch.object(
+                manager,
+                "_replication_regions",
+                return_value=[
+                    "us-east-2",
+                    "us-west-2",
+                    "eu-west-1",
+                ],
+            ),
+            patch.object(manager, "_ecr_client", return_value=ecr),
+        ):
             result = manager.replication_sync()
         ecr.put_replication_configuration.assert_called_once()
         cfg = ecr.put_replication_configuration.call_args.kwargs["replicationConfiguration"]
@@ -510,22 +527,63 @@ class TestReplicationSync:
         assert rule["repositoryFilters"][0]["filter"] == "gco/"
         assert result["destinations"] == ["us-west-2", "eu-west-1"]
 
-    def test_no_destinations_writes_empty_rules(self, mock_config: Any) -> None:
+    def test_preserves_unrelated_rules(self, manager: ImageManager) -> None:
+        ecr = _ecr_mock()
+        unrelated_rule = {
+            "destinations": [{"region": "ap-south-1", "registryId": "123456789012"}],
+            "repositoryFilters": [{"filter": "other/", "filterType": "PREFIX_MATCH"}],
+        }
+        ecr.get_replication_configuration.return_value = {
+            "registryId": "123456789012",
+            "replicationConfiguration": {"rules": [unrelated_rule]},
+        }
+        ecr.put_replication_configuration.return_value = {"registryId": "123456789012"}
+        with (
+            patch.object(manager, "_replication_regions", return_value=["us-west-2"]),
+            patch.object(manager, "_ecr_client", return_value=ecr),
+        ):
+            manager.replication_sync()
+
+        configuration = ecr.put_replication_configuration.call_args.kwargs[
+            "replicationConfiguration"
+        ]
+        assert unrelated_rule in configuration["rules"]
+        assert any(
+            rule.get("repositoryFilters") == [{"filter": "gco/", "filterType": "PREFIX_MATCH"}]
+            for rule in configuration["rules"]
+        )
+
+    def test_no_destinations_preserves_current_configuration(self, mock_config: Any) -> None:
         single_region = MagicMock()
         single_region.global_region = "us-east-2"
+        single_region.default_region = "us-east-2"
         single_region.project_name = "gco"
-        single_region.regions = ["us-east-2"]
         with patch("cli.images.get_config", return_value=single_region):
             mgr = ImageManager(config=single_region, region="us-east-2")
         mgr._account_id_cache = "123456789012"
 
         ecr = _ecr_mock()
-        ecr.put_replication_configuration.return_value = {"replicationConfiguration": {}}
-        with patch.object(mgr, "_ecr_client", return_value=ecr):
+        current = {
+            "rules": [
+                {
+                    "destinations": [{"region": "eu-west-1", "registryId": "123456789012"}],
+                    "repositoryFilters": [{"filter": "other/", "filterType": "PREFIX_MATCH"}],
+                }
+            ]
+        }
+        ecr.get_replication_configuration.return_value = {
+            "registryId": "123456789012",
+            "replicationConfiguration": current,
+        }
+        with (
+            patch.object(mgr, "_replication_regions", return_value=["us-east-2"]),
+            patch.object(mgr, "_ecr_client", return_value=ecr),
+        ):
             result = mgr.replication_sync()
-        cfg = ecr.put_replication_configuration.call_args.kwargs["replicationConfiguration"]
-        assert cfg == {"rules": []}
+        ecr.put_replication_configuration.assert_not_called()
+        assert result["configuration"] == current
         assert result["destinations"] == []
+        assert result["updated"] is False
 
 
 # ---------------------------------------------------------------------------

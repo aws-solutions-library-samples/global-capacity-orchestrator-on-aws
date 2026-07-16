@@ -10,7 +10,7 @@ Key Features:
 - Multi-region deployment with automatic failover
 - EKS Auto Mode with GPU support (x86 and ARM)
 - IAM-authenticated API Gateway entry point
-- Secure request validation with secret headers
+- Secure request validation with short-lived HMAC envelopes
 - CloudWatch monitoring and alerting
 
 Package Structure:

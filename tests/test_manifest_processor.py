@@ -18,6 +18,7 @@ from kubernetes.client.rest import ApiException
 
 from gco.models import ManifestSubmissionRequest
 from gco.services.manifest_processor import (
+    DEFAULT_ALLOWED_KINDS,
     ManifestProcessor,
     create_manifest_processor_from_env,
 )
@@ -142,6 +143,20 @@ class TestBasicValidation:
         is_valid, error = processor.validate_manifest(manifest)
         assert is_valid is False
         assert "Missing metadata.name field" in error
+
+    def test_disallowed_resource_kind_fails_closed(self, processor):
+        """The shared kind policy rejects resources outside its allowlist."""
+        manifest = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "credentials", "namespace": "gco-jobs"},
+            "data": {"token": "not-a-real-secret"},
+        }
+
+        is_valid, error = processor.validate_manifest(manifest)
+
+        assert is_valid is False
+        assert "Resource kind 'Secret' is not allowed" in error
 
 
 class TestNamespaceValidation:
@@ -465,6 +480,8 @@ class TestCreateManifestProcessorFromEnv:
             assert processor.region == "unknown-region"
             assert processor.max_cpu_per_manifest == 10000  # 10 cores in millicores
             assert processor.max_gpu_per_manifest == 4
+            assert processor.allowed_namespaces == {"gco-jobs"}
+            assert processor.allowed_kinds == set(DEFAULT_ALLOWED_KINDS)
             assert processor.validation_enabled is True
 
     def test_create_from_env_custom_values(self):
@@ -476,6 +493,7 @@ class TestCreateManifestProcessorFromEnv:
             "MAX_MEMORY_PER_MANIFEST": "64Gi",
             "MAX_GPU_PER_MANIFEST": "8",
             "ALLOWED_NAMESPACES": "default,production,staging",
+            "ALLOWED_KINDS": "Job,ConfigMap",
             "VALIDATION_ENABLED": "false",
         }
 
@@ -499,6 +517,59 @@ class TestCreateManifestProcessorFromEnv:
             assert "default" in processor.allowed_namespaces
             assert "production" in processor.allowed_namespaces
             assert "staging" in processor.allowed_namespaces
+            assert processor.allowed_kinds == {"Job", "ConfigMap"}
+
+    def test_create_from_env_explicit_empty_allowed_kinds_denies_all(self):
+        """An explicit empty policy must not silently restore default kinds."""
+        with (
+            patch("gco.services.manifest_processor.config") as mock_config,
+            patch.dict("os.environ", {"ALLOWED_KINDS": ""}, clear=True),
+        ):
+            mock_config.ConfigException = k8s_config.ConfigException
+            mock_config.load_incluster_config.side_effect = k8s_config.ConfigException(
+                "Not in cluster"
+            )
+            mock_config.load_kube_config.return_value = None
+
+            processor = create_manifest_processor_from_env()
+
+            assert processor.allowed_kinds == set()
+            valid, reason = processor.validate_manifest(
+                {
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "metadata": {"name": "denied", "namespace": "gco-jobs"},
+                    "spec": {"template": {"spec": {"containers": []}}},
+                }
+            )
+            assert valid is False
+            assert "not allowed" in reason
+
+    def test_create_from_env_explicit_empty_namespaces_denies_all(self):
+        """An explicit empty namespace policy must not restore gco-jobs."""
+        with (
+            patch("gco.services.manifest_processor.config") as mock_config,
+            patch.dict("os.environ", {"ALLOWED_NAMESPACES": ""}, clear=True),
+        ):
+            mock_config.ConfigException = k8s_config.ConfigException
+            mock_config.load_incluster_config.side_effect = k8s_config.ConfigException(
+                "Not in cluster"
+            )
+            mock_config.load_kube_config.return_value = None
+
+            processor = create_manifest_processor_from_env()
+
+            assert processor.allowed_namespaces == set()
+            valid, reason = processor.validate_manifest(
+                {
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {"name": "denied", "namespace": "gco-jobs"},
+                    "data": {"key": "value"},
+                }
+            )
+            assert valid is False
+            assert "not allowed" in reason
 
 
 class TestProcessManifestSubmission:
@@ -564,6 +635,31 @@ class TestProcessManifestSubmission:
 
         assert response.success is False
         assert "not allowed" in response.errors[0]
+
+    @pytest.mark.asyncio
+    async def test_request_namespace_is_validated_when_manifest_omits_it(
+        self, processor_with_mocks
+    ):
+        """The request default and applied namespace share one allowlist check."""
+        manifest = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "test-config"},
+            "data": {"key": "value"},
+        }
+
+        allowed = await processor_with_mocks.process_manifest_submission(
+            ManifestSubmissionRequest(manifests=[manifest], namespace="default", dry_run=True)
+        )
+        denied = await processor_with_mocks.process_manifest_submission(
+            ManifestSubmissionRequest(manifests=[manifest], namespace="kube-system", dry_run=True)
+        )
+
+        assert allowed.success is True
+        assert allowed.resources[0].namespace == "default"
+        assert denied.success is False
+        assert denied.resources[0].namespace == "kube-system"
+        assert "not allowed" in denied.errors[0]
 
     @pytest.mark.asyncio
     async def test_process_multiple_valid_manifests(self, processor_with_mocks):

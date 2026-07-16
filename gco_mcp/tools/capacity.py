@@ -20,6 +20,43 @@ def check_capacity(instance_type: str, region: str) -> str:
 
 @mcp.tool(tags={"safe", "capacity"})
 @audit_logged
+def instance_info(instance_type: str) -> str:
+    """Get hardware and pricing metadata for an EC2 instance type.
+
+    Args:
+        instance_type: EC2 instance type (for example, g5.2xlarge or p5.48xlarge).
+    """
+    return cli_runner._run_cli("capacity", "instance-info", instance_type)
+
+
+@mcp.tool(tags={"safe", "capacity"})
+@audit_logged
+def recommend_capacity(
+    instance_type: str,
+    region: str,
+    fault_tolerance: str = "medium",
+) -> str:
+    """Recommend spot or on-demand capacity for a workload.
+
+    Args:
+        instance_type: EC2 instance type to evaluate.
+        region: AWS region in which the workload will run.
+        fault_tolerance: Interruption tolerance: ``high``, ``medium``, or ``low``.
+    """
+    return cli_runner._run_cli(
+        "capacity",
+        "recommend",
+        "-i",
+        instance_type,
+        "-r",
+        region,
+        "-f",
+        fault_tolerance,
+    )
+
+
+@mcp.tool(tags={"safe", "capacity"})
+@audit_logged
 def capacity_status(region: str | None = None) -> str:
     """View capacity status across all deployed regions.
 

@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,16 +205,16 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op337=>operation: '\n    Handle cross-region aggregation requests.\n\n    Routes:\n        GET /global/jobs - List jobs across all regions\n        GET /global/health - Health status across all regions\n        GET /global/status - Cluster status across all regions\n        DELETE /global/jobs - Bulk delete across all regions\n    '
-op339=>operation: http_method = event.get('httpMethod', 'GET')
-op341=>operation: path = event.get('path', '')
-op343=>operation: query_params = event.get('queryStringParameters') or {}
-op345=>operation: body = event.get('body')
-op348=>operation: if path == '/api/v1/global/jobs' and http_method == 'GET':
+        <div><textarea id="code" style="width: 100%;" rows="11">op409=>operation: '\n    Handle cross-region aggregation requests.\n\n    Routes:\n        GET /global/jobs - List jobs across all regions\n        GET /global/health - Health status across all regions\n        GET /global/status - Cluster status across all regions\n        DELETE /global/jobs - Bulk delete across all regions\n    '
+op411=>operation: http_method = event.get('httpMethod', 'GET')
+op413=>operation: path = event.get('path', '')
+op415=>operation: query_params = event.get('queryStringParameters') or {}
+op417=>operation: body = event.get('body')
+op420=>operation: if path == '/api/v1/global/jobs' and http_method == 'GET':
     result = aggregate_jobs(namespace=query_params.get('namespace'), status=query_params.get('status'), limit=int(query_params.get('limit', '50')))
 elif path == '/api/v1/global/jobs' and http_method == 'DELETE':
     body_data = json.loads(body) if body else {}
-    result = bulk_delete_jobs(namespace=body_data.get('namespace'), status=body_data.get('status'), older_than_days=body_data.get('older_than_days'), dry_run=body_data.get('dry_run', True))
+    result = bulk_delete_jobs(namespace=body_data.get('namespace'), status=body_data.get('status'), older_than_days=body_data.get('older_than_days'), label_selector=body_data.get('label_selector'), dry_run=body_data.get('dry_run', True))
 elif path == '/api/v1/global/health':
     result = aggregate_health()
 elif path == '/api/v1/global/status':
@@ -222,20 +222,30 @@ elif path == '/api/v1/global/status':
 else:
     return {'statusCode': 404, 'body': json.dumps({'error': 'Not found', 'path': path})}
 return {'statusCode': 200, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps(result)}
-cond347=>condition: exception raised?
-cond350=>condition: except Exception as e
-io357=>inputoutput: output: {'statusCode': 500, 'body': json.dumps({'error': 'Internal server error', 'detail': str(e)})}
-e355=>end: end function return
+cond419=>condition: exception raised?
+cond422=>condition: except RuntimeError
+sub426=>subroutine: _LOGGER.exception('Regional aggregation bridge discovery failed')
+io431=>inputoutput: output: {'statusCode': 503, 'body': json.dumps({'error': 'Regional aggregation is temporarily unavailable'})}
+e429=>end: end function return
+cond434=>condition: except Exception
+sub438=>subroutine: _LOGGER.exception('Unhandled regional aggregation request failure')
+io443=>inputoutput: output: {'statusCode': 500, 'body': json.dumps({'error': 'Internal server error'})}
+e441=>end: end function return
 
-op337->op339
-op339->op341
-op341->op343
-op343->op345
-op345->op348
-op348->cond347
-cond347(yes)->cond350
-cond350(yes)->io357
-io357->e355
+op409->op411
+op411->op413
+op413->op415
+op415->op417
+op417->op420
+op420->cond419
+cond419(yes)->cond422
+cond422(yes)->sub426
+sub426->io431
+io431->e429
+cond422(no)->cond434
+cond434(yes)->sub438
+sub438->io443
+io443->e441
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

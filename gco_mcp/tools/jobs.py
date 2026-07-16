@@ -153,6 +153,84 @@ def get_job_events(job_name: str, region: str, namespace: str = "gco-jobs") -> s
 
 @mcp.tool(tags={"safe", "jobs"})
 @audit_logged
+def get_job_pods(job_name: str, region: str, namespace: str = "gco-jobs") -> str:
+    """Get pod details, placement, and container status for a job.
+
+    Args:
+        job_name: Name of the owning Kubernetes Job.
+        region: AWS region where the job is running.
+        namespace: Kubernetes namespace.
+    """
+    return cli_runner._run_cli("jobs", "pods", job_name, "-r", region, "-n", namespace)
+
+
+@mcp.tool(tags={"safe", "jobs"})
+@audit_logged
+def get_pod_logs(
+    job_name: str,
+    pod_name: str,
+    region: str,
+    namespace: str = "gco-jobs",
+    tail: int = 100,
+    container: str | None = None,
+) -> str:
+    """Get a bounded log tail from one specific pod belonging to a job.
+
+    Args:
+        job_name: Name of the owning Kubernetes Job.
+        pod_name: Exact pod name returned by ``get_job_pods``.
+        region: AWS region where the pod is running.
+        namespace: Kubernetes namespace.
+        tail: Maximum number of log lines to return.
+        container: Container name for a multi-container pod.
+    """
+    args = [
+        "jobs",
+        "pod-logs",
+        job_name,
+        pod_name,
+        "-r",
+        region,
+        "-n",
+        namespace,
+        "--tail",
+        str(tail),
+    ]
+    if container:
+        args += ["--container", container]
+    return cli_runner._run_cli(*args)
+
+
+@mcp.tool(tags={"safe", "jobs"})
+@audit_logged
+def get_job_metrics(job_name: str, region: str, namespace: str = "gco-jobs") -> str:
+    """Get CPU and memory usage for all pods in a job.
+
+    Requires metrics-server in the target cluster.
+
+    Args:
+        job_name: Name of the Kubernetes Job.
+        region: AWS region where the job is running.
+        namespace: Kubernetes namespace.
+    """
+    return cli_runner._run_cli("jobs", "metrics", job_name, "-r", region, "-n", namespace)
+
+
+@mcp.tool(tags={"low-risk", "jobs"})
+@audit_logged
+def retry_job(job_name: str, region: str, namespace: str = "gco-jobs") -> str:
+    """Retry a failed job by creating a new Job while preserving the original.
+
+    Args:
+        job_name: Failed Kubernetes Job to retry.
+        region: AWS region where the job ran.
+        namespace: Kubernetes namespace.
+    """
+    return cli_runner._run_cli("jobs", "retry", job_name, "-r", region, "-n", namespace, "--yes")
+
+
+@mcp.tool(tags={"safe", "jobs"})
+@audit_logged
 def cluster_health(region: str | None = None) -> str:
     """Get health status of GCO clusters.
 

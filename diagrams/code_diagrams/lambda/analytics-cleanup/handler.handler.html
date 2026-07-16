@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,73 +205,73 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op119=>operation: 'CloudFormation custom resource handler.'
-op121=>operation: request_type = event.get('RequestType', '')
-op123=>operation: physical_id = event.get('PhysicalResourceId', 'analytics-cleanup')
-cond126=>condition: if request_type != 'Delete'
-sub130=>subroutine: logger.info('RequestType=%s, nothing to do', request_type)
-io135=>inputoutput: output: {'Status': 'SUCCESS', 'PhysicalResourceId': physical_id}
-e133=>end: end function return
-op141=>operation: region = os.environ['REGION']
-op143=>operation: domain_id = os.environ['DOMAIN_ID']
-op145=>operation: efs_id = os.environ.get('EFS_ID', '')
-op147=>operation: vpc_id = os.environ.get('VPC_ID', '')
-op149=>operation: errors: list[str] = []
-op151=>operation: critical_errors: list[str] = []
-op153=>operation: app_errors = _delete_apps(region, domain_id)
-sub155=>subroutine: errors.extend(app_errors)
-sub157=>subroutine: critical_errors.extend(app_errors)
-op159=>operation: space_errors = _delete_spaces(region, domain_id)
-sub161=>subroutine: errors.extend(space_errors)
-sub163=>subroutine: critical_errors.extend(space_errors)
-op165=>operation: profile_errors = _delete_user_profiles(region, domain_id)
-sub167=>subroutine: errors.extend(profile_errors)
-sub169=>subroutine: critical_errors.extend(profile_errors)
-cond172=>operation: _delete_efs_resource_policy(region, efs_id) if  efs_id
-op182=>operation: sm_efs_id = _get_sagemaker_home_efs_id(region, domain_id)
-cond185=>operation: _delete_efs_resource_policy(region, sm_efs_id) if  sm_efs_id
-sub195=>subroutine: errors.extend(_delete_sagemaker_managed_efs(region, domain_id))
-cond198=>operation: errors.extend(_delete_sagemaker_security_groups(region, domain_id, vpc_id)) if  vpc_id
-cond209=>condition: if errors
-sub213=>subroutine: logger.warning('Cleanup completed with %d errors: %s', len(errors), errors)
-cond221=>operation: raise RuntimeError(f'Analytics cleanup failed to fully drain the SageMaker domain ({len(critical_errors)} error(s)). See CloudWatch Logs for details: {critical_errors}') if  critical_errors
-io234=>inputoutput: output: {'Status': 'SUCCESS', 'PhysicalResourceId': physical_id}
-e232=>end: end function return
-sub217=>subroutine: logger.info('Cleanup completed successfully')
+        <div><textarea id="code" style="width: 100%;" rows="11">op123=>operation: 'CloudFormation custom resource handler.'
+op125=>operation: request_type = event.get('RequestType', '')
+op127=>operation: physical_id = event.get('PhysicalResourceId', 'analytics-cleanup')
+cond130=>condition: if request_type != 'Delete'
+sub134=>subroutine: logger.info('RequestType=%s, nothing to do', request_type)
+io139=>inputoutput: output: {'Status': 'SUCCESS', 'PhysicalResourceId': physical_id}
+e137=>end: end function return
+op145=>operation: region = os.environ['REGION']
+op147=>operation: domain_id = os.environ['DOMAIN_ID']
+op149=>operation: efs_id = os.environ.get('EFS_ID', '')
+op151=>operation: vpc_id = os.environ.get('VPC_ID', '')
+op153=>operation: errors: list[str] = []
+op155=>operation: critical_errors: list[str] = []
+op157=>operation: app_errors = _delete_apps(region, domain_id)
+sub159=>subroutine: errors.extend(app_errors)
+sub161=>subroutine: critical_errors.extend(app_errors)
+op163=>operation: space_errors = _delete_spaces(region, domain_id)
+sub165=>subroutine: errors.extend(space_errors)
+sub167=>subroutine: critical_errors.extend(space_errors)
+op169=>operation: profile_errors = _delete_user_profiles(region, domain_id)
+sub171=>subroutine: errors.extend(profile_errors)
+sub173=>subroutine: critical_errors.extend(profile_errors)
+cond176=>operation: _delete_efs_resource_policy(region, efs_id) if  efs_id
+op186=>operation: sm_efs_id = _get_sagemaker_home_efs_id(region, domain_id)
+cond189=>operation: _delete_efs_resource_policy(region, sm_efs_id) if  sm_efs_id
+sub199=>subroutine: errors.extend(_delete_sagemaker_managed_efs(region, domain_id))
+cond202=>operation: errors.extend(_delete_sagemaker_security_groups(region, domain_id, vpc_id)) if  vpc_id
+cond213=>condition: if errors
+sub217=>subroutine: logger.warning('Cleanup completed with %d errors: %s', len(errors), errors)
+cond225=>operation: raise RuntimeError(f'Analytics cleanup failed to fully drain the SageMaker domain ({len(critical_errors)} error(s)). See CloudWatch Logs for details: {critical_errors}') if  critical_errors
+io238=>inputoutput: output: {'Status': 'SUCCESS', 'PhysicalResourceId': physical_id}
+e236=>end: end function return
+sub221=>subroutine: logger.info('Cleanup completed successfully')
 
-op119->op121
-op121->op123
-op123->cond126
-cond126(yes)->sub130
-sub130->io135
-io135->e133
-cond126(no)->op141
-op141->op143
-op143->op145
+op123->op125
+op125->op127
+op127->cond130
+cond130(yes)->sub134
+sub134->io139
+io139->e137
+cond130(no)->op145
 op145->op147
 op147->op149
 op149->op151
 op151->op153
-op153->sub155
-sub155->sub157
-sub157->op159
-op159->sub161
-sub161->sub163
-sub163->op165
-op165->sub167
-sub167->sub169
-sub169->cond172
-cond172->op182
-op182->cond185
-cond185->sub195
-sub195->cond198
-cond198->cond209
-cond209(yes)->sub213
-sub213->cond221
-cond221->io234
-io234->e232
-cond209(no)->sub217
-sub217->cond221
+op153->op155
+op155->op157
+op157->sub159
+sub159->sub161
+sub161->op163
+op163->sub165
+sub165->sub167
+sub167->op169
+op169->sub171
+sub171->sub173
+sub173->cond176
+cond176->op186
+op186->cond189
+cond189->sub199
+sub199->cond202
+cond202->cond213
+cond213(yes)->sub217
+sub217->cond225
+cond225->io238
+io238->e236
+cond213(no)->sub221
+sub221->cond225
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

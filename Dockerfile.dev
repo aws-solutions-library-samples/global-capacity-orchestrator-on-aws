@@ -227,9 +227,15 @@ COPY gco/_version.py ./gco/_version.py
 #     belt-and-suspenders retry if all the above still hits an
 #     unrecoverable network blip; pip is idempotent under re-run.
 RUN for attempt in 1 2 3; do \
-        pip install --no-cache-dir \
+        if pip install --no-cache-dir \
             --retries 10 --timeout 120 --resume-retries 5 \
-            -e ".[dev,mcp]" && break; \
+            -e ".[dev,mcp]"; then \
+            break; \
+        fi; \
+        if [ "${attempt}" -eq 3 ]; then \
+            echo "pip install failed after ${attempt} attempts" >&2; \
+            exit 1; \
+        fi; \
         echo "pip install attempt ${attempt} failed; retrying in 10s..."; \
         sleep 10; \
     done

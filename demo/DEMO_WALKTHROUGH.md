@@ -259,13 +259,13 @@ GCO isn't just for batch jobs — it also manages multi-region inference endpoin
 
 ```bash
 gco inference deploy vllm-demo \
-  -i vllm/vllm-openai:v0.22.0 \
+  -i vllm/vllm-openai:v0.24.0 \
   --gpu-count 1 \
   --replicas 1 \
   --extra-args '--model' --extra-args 'facebook/opt-125m'
 ```
 
-Omitting `-r` deploys to all regions so Global Accelerator routing works. The inference_monitor in each region picks up the DynamoDB record and creates the Kubernetes Deployment, Service, and Ingress on the shared ALB.
+Omitting `-r` deploys to all regions so Global Accelerator routing works. The inference_monitor in each region picks up the DynamoDB record and creates the Kubernetes Deployment and internal ClusterIP Service. The existing shared Ingress routes `/inference/*` through the authenticated manifest processor before it reaches that Service; no endpoint-specific Ingress is created.
 
 **Check status and invoke:**
 
@@ -419,7 +419,6 @@ User ──► API Gateway (IAM/SigV4 Auth)
   us-east-1  us-west-2  eu-west-1  ... (add regions via config)
   ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
   │  ALB (shared)  │  │  ALB (shared)  │  │  ALB (shared)  │
-  │  NLB (internal)│  │  NLB (internal)│  │  NLB (internal)│
   │  Regional API  │  │  Regional API  │  │  Regional API  │
   │  EKS Auto Mode │  │  EKS Auto Mode │  │  EKS Auto Mode │
   │  SQS + Queue   │  │  SQS + Queue   │  │  SQS + Queue   │

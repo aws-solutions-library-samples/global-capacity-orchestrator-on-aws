@@ -4,7 +4,7 @@ Tests for the Lambda proxy handlers and shared proxy_utils.
 Exercises the cached secret fetch (within-TTL reuse, post-TTL refresh,
 stale-cache fallback when Secrets Manager throws, first-call failure
 surfacing as RuntimeError), plus the URL-building and urllib3-based
-HTTP forwarding with retries used by both lambda/api-gateway-proxy
+HTTPS forwarding with retries used by both lambda/api-gateway-proxy
 and lambda/regional-api-proxy. Covers the header-stripping logic that
 prevents client-supplied auth headers from leaking into the internal
 ALB request.
@@ -44,13 +44,16 @@ def proxy_utils_module():
             },
         ),
     ):
-        proxy_utils = load_lambda_module("proxy-shared", "proxy_utils")
+        proxy_utils = load_lambda_module("proxy-shared", "proxy_utils", shared_dirs=["tls-shared"])
 
         proxy_utils._cached_secret = None
         proxy_utils._cache_timestamp = 0.0
+        proxy_utils._last_successful_refresh = 0.0
+        proxy_utils._last_refresh_attempt = 0.0
 
         mock_sm = mock_boto.return_value
         mock_pool = mock_pool_cls.return_value
+        proxy_utils._http = mock_pool
         yield proxy_utils, mock_sm, mock_pool
 
 
@@ -73,7 +76,10 @@ class TestGetSecretToken:
         assert proxy_utils.get_secret_token() == "old-token"
 
         # Expire the cache
-        proxy_utils._cache_timestamp = time.time() - 400
+        now = time.monotonic()
+        proxy_utils._cache_timestamp = now - 400
+        proxy_utils._last_successful_refresh = now - 400
+        proxy_utils._last_refresh_attempt = 0.0
 
         mock_sm.get_secret_value.return_value = {"SecretString": json.dumps({"token": "new-token"})}
         assert proxy_utils.get_secret_token() == "new-token"
@@ -87,7 +93,10 @@ class TestGetSecretToken:
         assert proxy_utils.get_secret_token() == "cached-token"
 
         # Expire cache, then make SM fail
-        proxy_utils._cache_timestamp = time.time() - 400
+        now = time.monotonic()
+        proxy_utils._cache_timestamp = now - 400
+        proxy_utils._last_successful_refresh = now - 400
+        proxy_utils._last_refresh_attempt = 0.0
         mock_sm.get_secret_value.side_effect = Exception("SM unavailable")
 
         # Should return stale cached value instead of raising
@@ -97,7 +106,7 @@ class TestGetSecretToken:
         proxy_utils, mock_sm, _ = proxy_utils_module
         mock_sm.get_secret_value.side_effect = Exception("SM unavailable")
 
-        with pytest.raises(RuntimeError, match="Failed to load secret"):
+        with pytest.raises(RuntimeError, match="Authentication signing key is unavailable"):
             proxy_utils.get_secret_token()
 
 
@@ -107,17 +116,42 @@ class TestBuildTargetUrl:
         url = proxy_utils.build_target_url(
             "my-alb.example.com", "/api/v1/jobs", {"status": "running", "limit": "10"}
         )
-        assert url.startswith("http://my-alb.example.com/api/v1/jobs?")
+        assert url.startswith("https://my-alb.example.com/api/v1/jobs?")
         assert "status=running" in url
         assert "limit=10" in url
 
     def test_builds_url_without_query_params(self, proxy_utils_module):
         proxy_utils, _, _ = proxy_utils_module
         url = proxy_utils.build_target_url("my-alb.example.com", "/health", None)
-        assert url == "http://my-alb.example.com/health"
+        assert url == "https://my-alb.example.com/health"
 
         url_empty = proxy_utils.build_target_url("my-alb.example.com", "/health", {})
-        assert url_empty == "http://my-alb.example.com/health"
+        assert url_empty == "https://my-alb.example.com/health"
+
+    def test_encodes_path_and_repeated_query_values(self, proxy_utils_module):
+        proxy_utils, _, _ = proxy_utils_module
+
+        url = proxy_utils.build_target_url(
+            "https://my-alb.example.com/base/",
+            "/team alpha/report?#/%2F",
+            {"tag": ["first value", "second&value"]},
+        )
+
+        assert url == (
+            "https://my-alb.example.com/base/team%20alpha/report%3F%23/%2F"
+            "?tag=first+value&tag=second%26value"
+        )
+
+    def test_preserves_only_valid_percent_escapes(self, proxy_utils_module):
+        proxy_utils, _, _ = proxy_utils_module
+
+        url = proxy_utils.build_target_url(
+            "my-alb.example.com",
+            "/valid/%2F/literal%/malformed%2G",
+            None,
+        )
+
+        assert url == "https://my-alb.example.com/valid/%2F/literal%25/malformed%252G"
 
 
 class TestForwardRequest:
@@ -130,7 +164,7 @@ class TestForwardRequest:
         mock_pool.request.return_value = mock_response
 
         result = proxy_utils.forward_request(
-            "http://example.com/api", "GET", {"Accept": "application/json"}, ""
+            "https://example.com/api", "GET", {"Accept": "application/json"}, ""
         )
         assert result["statusCode"] == 200
         assert result["body"] == '{"ok": true}'
@@ -151,7 +185,7 @@ class TestForwardRequest:
 
         mock_pool.request.side_effect = [fail_response, ok_response]
 
-        result = proxy_utils.forward_request("http://example.com/api", "GET", {}, "")
+        result = proxy_utils.forward_request("https://example.com/api", "GET", {}, "")
         assert result["statusCode"] == 200
         assert result["body"] == "OK"
         assert mock_pool.request.call_count == 2
@@ -159,13 +193,14 @@ class TestForwardRequest:
     def test_returns_503_on_connection_failure_after_retries(self, proxy_utils_module):
         proxy_utils, _, mock_pool = proxy_utils_module
         mock_pool.request.side_effect = urllib3.exceptions.MaxRetryError(
-            pool=None, url="http://example.com", reason="Connection refused"
+            pool=None, url="https://example.com", reason="Connection refused"
         )
 
-        result = proxy_utils.forward_request("http://example.com/api", "POST", {}, '{"data": 1}')
+        result = proxy_utils.forward_request("https://example.com/api", "POST", {}, '{"data": 1}')
         assert result["statusCode"] == 503
         body = json.loads(result["body"])
-        assert "Failed after" in body["message"]
+        assert body["message"] == "Upstream failed after 1 attempt(s)"
+        assert mock_pool.request.call_count == 1
 
 
 # ============================================================================
@@ -197,23 +232,19 @@ def api_gw_proxy_module():
             },
         ),
     ):
-        # Load proxy_utils first so we can reset its cache before the
-        # handler imports from it. The handler's own module body does
-        # ``from proxy_utils import ...`` which captures function
-        # references; resetting proxy_utils._cached_secret after the
-        # handler loads is still fine because the functions close over
-        # the module dict.
-        proxy_utils = load_lambda_module("proxy-shared", "proxy_utils")
-        proxy_utils._cached_secret = None
-        proxy_utils._cache_timestamp = 0.0
-
         handler = load_lambda_module("api-gateway-proxy", shared_dirs=["proxy-shared"])
+        proxy_state = handler.get_secret_token.__globals__
+        proxy_state["_cached_secret"] = None
+        proxy_state["_cache_timestamp"] = 0.0
+        proxy_state["_last_successful_refresh"] = 0.0
+        proxy_state["_last_refresh_attempt"] = 0.0
 
         mock_sm = mock_boto.return_value
         mock_sm.get_secret_value.return_value = {
             "SecretString": json.dumps({"token": "gco-secret-token"})
         }
         mock_pool = mock_pool_cls.return_value
+        proxy_state["_http"] = mock_pool
         yield handler, mock_sm, mock_pool
 
 
@@ -240,11 +271,27 @@ class TestApiGatewayProxyHandler:
         assert result["statusCode"] == 200
         # Verify the request was made to Global Accelerator with auth header
         call_args = mock_pool.request.call_args
+        assert call_args[0][1].startswith("https://")
         assert "ga-abc123.awsglobalaccelerator.com" in call_args[0][1]
         forwarded_headers = (
             call_args[1]["headers"] if "headers" in call_args[1] else call_args[0][2]
         )
-        assert forwarded_headers["X-GCO-Auth-Token"] == "gco-secret-token"
+        assert "x-gco-auth-token" not in forwarded_headers
+        assert forwarded_headers["x-gco-signature-version"] == "v1"
+        assert len(forwarded_headers["x-gco-signature"]) == 64
+        assert len(forwarded_headers["x-gco-nonce"]) == 32
+        assert len(forwarded_headers["x-gco-content-sha256"]) == 64
+
+    def test_caps_forwarding_budget_below_api_gateway_timeout(self, api_gw_proxy_module):
+        handler, _, _ = api_gw_proxy_module
+        context = MagicMock()
+        context.get_remaining_time_in_millis.return_value = 60_000
+        response = {"statusCode": 200, "headers": {}, "body": "OK"}
+
+        with patch.object(handler, "forward_request", return_value=response) as mock_forward:
+            assert handler.lambda_handler(self._make_event(), context) == response
+
+        assert mock_forward.call_args.kwargs["timeout"] == pytest.approx(28.0)
 
     def test_passes_query_string_parameters(self, api_gw_proxy_module):
         handler, _, mock_pool = api_gw_proxy_module
@@ -261,6 +308,31 @@ class TestApiGatewayProxyHandler:
         target_url = call_args[0][1]
         assert "status=running" in target_url
         assert "limit=5" in target_url
+
+    def test_preserves_multi_value_query_parameters(self, api_gw_proxy_module):
+        handler, _, mock_pool = api_gw_proxy_module
+        mock_response = MagicMock(status=200, headers={}, data=b"OK")
+        mock_pool.request.return_value = mock_response
+        event = self._make_event(path="/api/v1/jobs", qs={"tag": "last"})
+        event["multiValueQueryStringParameters"] = {"tag": ["first value", "second&value"]}
+
+        handler.lambda_handler(event, None)
+
+        target_url = mock_pool.request.call_args[0][1]
+        assert target_url.endswith("?tag=first+value&tag=second%26value")
+        assert "tag=last" not in target_url
+
+    def test_target_region_header_fails_closed(self, api_gw_proxy_module):
+        handler, _, mock_pool = api_gw_proxy_module
+
+        result = handler.lambda_handler(
+            self._make_event(headers={"X-GCO-Target-Region": "us-east-1"}),
+            None,
+        )
+
+        assert result["statusCode"] == 400
+        assert "regional API endpoint" in result["body"]
+        mock_pool.request.assert_not_called()
 
 
 # ============================================================================
@@ -289,17 +361,19 @@ def regional_proxy_module():
             },
         ),
     ):
-        proxy_utils = load_lambda_module("proxy-shared", "proxy_utils")
-        proxy_utils._cached_secret = None
-        proxy_utils._cache_timestamp = 0.0
-
         handler = load_lambda_module("regional-api-proxy", shared_dirs=["proxy-shared"])
+        proxy_state = handler.get_secret_token.__globals__
+        proxy_state["_cached_secret"] = None
+        proxy_state["_cache_timestamp"] = 0.0
+        proxy_state["_last_successful_refresh"] = 0.0
+        proxy_state["_last_refresh_attempt"] = 0.0
 
         mock_sm = mock_boto.return_value
         mock_sm.get_secret_value.return_value = {
             "SecretString": json.dumps({"token": "regional-secret"})
         }
         mock_pool = mock_pool_cls.return_value
+        proxy_state["_http"] = mock_pool
         yield handler, mock_sm, mock_pool
 
 
@@ -325,11 +399,26 @@ class TestRegionalApiProxyHandler:
 
         assert result["statusCode"] == 200
         call_args = mock_pool.request.call_args
+        assert call_args[0][1].startswith("https://")
         assert "internal-alb.us-east-1.elb.amazonaws.com" in call_args[0][1]
         forwarded_headers = (
             call_args[1]["headers"] if "headers" in call_args[1] else call_args[0][2]
         )
-        assert forwarded_headers["X-GCO-Auth-Token"] == "regional-secret"
+        assert "x-gco-auth-token" not in forwarded_headers
+        assert forwarded_headers["x-gco-signature-version"] == "v1"
+        assert len(forwarded_headers["x-gco-signature"]) == 64
+        assert len(forwarded_headers["x-gco-nonce"]) == 32
+
+    def test_reserves_lambda_response_headroom(self, regional_proxy_module):
+        handler, _, _ = regional_proxy_module
+        context = MagicMock()
+        context.get_remaining_time_in_millis.return_value = 5_000
+        response = {"statusCode": 200, "headers": {}, "body": "OK"}
+
+        with patch.object(handler, "forward_request", return_value=response) as mock_forward:
+            assert handler.lambda_handler(self._make_event(), context) == response
+
+        assert mock_forward.call_args.kwargs["timeout"] == pytest.approx(4.0)
 
     def test_strips_host_and_forwarded_headers(self, regional_proxy_module):
         handler, _, mock_pool = regional_proxy_module
@@ -360,6 +449,9 @@ class TestRegionalApiProxyHandler:
         assert "X-Forwarded-For" not in forwarded_headers
         assert "X-Forwarded-Proto" not in forwarded_headers
         assert "X-Forwarded-Port" not in forwarded_headers
-        # Non-stripped headers should still be present
-        assert forwarded_headers["Accept"] == "application/json"
-        assert forwarded_headers["X-GCO-Auth-Token"] == "regional-secret"
+        # Allowlisted headers survive in normalized form.
+        assert forwarded_headers["accept"] == "application/json"
+        assert "x-gco-auth-token" not in forwarded_headers
+        assert forwarded_headers["x-gco-signature-version"] == "v1"
+        assert len(forwarded_headers["x-gco-signature"]) == 64
+        assert len(forwarded_headers["x-gco-nonce"]) == 32

@@ -117,6 +117,8 @@ def test_get_region_capacity_no_stack():
         capacity = checker.get_region_capacity("us-east-1")
     assert capacity.region == "us-east-1"
     assert capacity.queue_depth == 0
+    assert capacity.telemetry_status == "unavailable"
+    assert capacity.recommendation_score > 0
 
 
 def test_get_region_capacity_no_queue_url_empty_metrics():
@@ -147,6 +149,8 @@ def test_get_region_capacity_queue_client_error():
         mock_get.return_value.get_regional_stack.return_value = _stack()
         capacity = checker.get_region_capacity("us-east-1")
     assert capacity.queue_depth == 0
+    assert "queue" in capacity.unavailable_signals
+    assert capacity.recommendation_score > 0
 
 
 def test_get_region_capacity_queue_unexpected_error():
@@ -189,6 +193,8 @@ def test_get_region_capacity_cloudwatch_client_error():
         capacity = checker.get_region_capacity("us-east-1")
     assert capacity.queue_depth == 3
     assert capacity.running_jobs == 1
+    assert capacity.telemetry_status == "partial"
+    assert capacity.recommendation_score > 30
 
 
 def test_get_region_capacity_cloudwatch_unexpected_error():
@@ -231,6 +237,117 @@ def test_get_all_regions_capacity_with_exception():
         capacities = checker.get_all_regions_capacity()
     assert len(capacities) == 1
     assert capacities[0].region == "us-east-1"
+
+
+def test_recommend_region_handles_discovery_failure_conservatively():
+    checker = _make_mr()
+    with patch("cli.aws_client.get_aws_client") as mock_get:
+        mock_get.return_value.discover_regional_stacks.side_effect = RuntimeError("discovery down")
+        result = checker.recommend_region_for_job()
+
+    assert result["region"] == "us-east-1"
+    assert result["score"] > 0
+    assert result["telemetry_status"] == "unavailable"
+    assert "region discovery: discovery down" in result["error"]
+
+
+def test_recommend_region_handles_all_region_checks_failing_conservatively():
+    checker = _make_mr()
+    with (
+        patch("cli.aws_client.get_aws_client") as mock_get,
+        patch.object(
+            checker,
+            "get_region_capacity",
+            side_effect=[RuntimeError("east down"), RuntimeError("west down")],
+        ),
+    ):
+        mock_get.return_value.discover_regional_stacks.return_value = {
+            "us-east-1": MagicMock(),
+            "us-west-2": MagicMock(),
+        }
+        result = checker.recommend_region_for_job()
+
+    assert result["region"] == "us-east-1"
+    assert result["score"] > 0
+    assert result["telemetry_status"] == "unavailable"
+    assert "us-east-1: east down" in result["error"]
+    assert "us-west-2: west down" in result["error"]
+
+
+def test_cpu_only_missing_does_not_penalize_simple_score():
+    checker = _make_mr()
+    mock_cfn = MagicMock()
+    mock_sqs = MagicMock()
+    mock_cloudwatch = MagicMock()
+    mock_cfn.describe_stacks.return_value = {
+        "Stacks": [
+            {"Outputs": [{"OutputKey": "JobQueueUrl", "OutputValue": "https://sqs.example/q"}]}
+        ]
+    }
+    mock_sqs.get_queue_attributes.return_value = {
+        "Attributes": {
+            "ApproximateNumberOfMessages": "1",
+            "ApproximateNumberOfMessagesNotVisible": "0",
+        }
+    }
+    mock_cloudwatch.get_metric_statistics.side_effect = [
+        {"Datapoints": [{"Average": 25.0}]},
+        {"Datapoints": []},
+    ]
+    checker._session.client = _factory(
+        {"cloudformation": mock_cfn, "sqs": mock_sqs, "cloudwatch": mock_cloudwatch}
+    )
+
+    with patch("cli.aws_client.get_aws_client") as mock_get:
+        mock_get.return_value.get_regional_stack.return_value = _stack()
+        capacity = checker.get_region_capacity("us-east-1")
+
+    assert capacity.unavailable_signals == ["cpu"]
+    assert capacity.telemetry_status == "partial"
+    assert capacity.recommendation_score == 35.0
+
+
+def test_cpu_only_missing_does_not_penalize_weighted_score():
+    checker = _make_mr()
+    cpu_missing = RegionCapacity(
+        region="us-east-1",
+        telemetry_status="partial",
+        unavailable_signals=["cpu"],
+    )
+    complete = RegionCapacity(region="us-west-2", telemetry_status="complete")
+
+    with patch("cli.capacity.multi_region.CapacityChecker") as mock_cls:
+        instance = mock_cls.return_value
+        instance.get_spot_placement_score.return_value = {}
+        instance.get_spot_price_history.return_value = []
+        instance.get_on_demand_price.return_value = None
+        instance.get_capacity_block_trend.return_value = 0.0
+        result = checker._weighted_recommend([cpu_missing, complete], "p5.48xlarge", gpu_count=8)
+
+    assert result["region"] == "us-east-1"
+    assert result["all_regions"][0]["score"] == result["all_regions"][1]["score"]
+
+
+def test_simple_recommend_does_not_prefer_failed_telemetry():
+    checker = _make_mr()
+    failed = RegionCapacity(
+        region="us-east-1",
+        recommendation_score=2000,
+        telemetry_status="unavailable",
+        unavailable_signals=["queue", "gpu", "cpu"],
+        telemetry_errors=["API unavailable"],
+    )
+    known = RegionCapacity(
+        region="us-west-2",
+        queue_depth=201,
+        recommendation_score=2010,
+        telemetry_status="complete",
+    )
+
+    result = checker._simple_recommend([failed, known])
+
+    assert result["region"] == "us-west-2"
+    assert result["telemetry_status"] == "complete"
 
 
 def test_simple_recommend_high_metrics_no_reasons():

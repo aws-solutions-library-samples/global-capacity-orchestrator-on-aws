@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,55 +205,55 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3481=>operation: 'Mirror the configured upstream images into ECR for ``region`` (full flow).\n\n    ``source_refs`` defaults to :func:`collect_source_refs` (every registered\n    image). Resolves the account/registry, builds the plan, picks a multi-arch\n    copy strategy, authenticates, then for each image ensures the repo exists and\n    copies it — skipping any tag already present when ``skip_existing`` is True\n    (so repeat deploys are a fast no-op). Returns a summary dict with the\n    destination ``registry``, the ``strategy`` used, and the ``mirrored`` /\n    ``skipped`` destination refs.\n    '
-op3483=>operation: ecr_namespace = (ecr_namespace or cdk_default_namespace()).strip('/')
-cond3486=>operation: source_refs = collect_source_refs(load_charts_config(charts_path) if charts_path else None) if  source_refs is None
-op3496=>operation: account_id = _account_id()
-op3498=>operation: registry_host = _registry_host(account_id, region)
-op3500=>operation: plan = plan_from_sources(source_refs, registry_host, ecr_namespace)
-op3502=>operation: runtime = detect_runtime()
-op3504=>operation: strategy = resolve_copy_strategy(runtime)
-sub3506=>subroutine: log(f'Mirroring {len(plan)} image(s) into {registry_host}/{ecr_namespace} (region {region}) via {strategy} (runtime: {runtime}):')
-op3508=>operation: username, password = ecr_auth(region)
-cond3511=>operation: runtime_login(runtime, registry_host, username, password, log=log) if  strategy != 'skopeo'
-op3521=>operation: ecr_client = boto3.client('ecr', region_name=region)
-op3523=>operation: mirrored: list[str] = []
-op3525=>operation: skipped: list[str] = []
-cond3528=>condition: for item in plan
-sub3532=>subroutine: ensure_repository(ecr_client, item.dest_repo, log=log)
-cond3535=>condition: if skip_existing and tag_exists(ecr_client, item.dest_repo, item.tag)
-sub3539=>subroutine: log(f'  skip (already mirrored): {item.dest_ref}')
-sub3541=>subroutine: skipped.append(item.dest_ref)
-sub3543=>subroutine: continue
-sub3548=>subroutine: copy_image(item, runtime=runtime, strategy=strategy, password=password, log=log)
-sub3550=>subroutine: mirrored.append(item.dest_ref)
-io3557=>inputoutput: output: {'registry': f'{registry_host}/{ecr_namespace}', 'strategy': strategy, 'mirrored': mirrored, 'skipped': skipped}
-e3555=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op5138=>operation: 'Mirror the configured upstream images into ECR for ``region`` (full flow).\n\n    ``source_refs`` defaults to :func:`collect_source_refs` (every registered\n    image). Resolves the account/registry, builds the plan, picks a multi-arch\n    copy strategy, authenticates, then for each image ensures the repo exists and\n    copies it — skipping any tag already present when ``skip_existing`` is True\n    (so repeat deploys are a fast no-op). Returns a summary dict with the\n    destination ``registry``, the ``strategy`` used, and the ``mirrored`` /\n    ``skipped`` destination refs.\n    '
+op5140=>operation: ecr_namespace = (ecr_namespace or cdk_default_namespace()).strip('/')
+cond5143=>operation: source_refs = collect_source_refs(load_charts_config(charts_path) if charts_path else None) if  source_refs is None
+op5153=>operation: account_id = _account_id()
+op5155=>operation: registry_host = _registry_host(account_id, region)
+op5157=>operation: plan = plan_from_sources(source_refs, registry_host, ecr_namespace)
+op5159=>operation: runtime = detect_runtime()
+op5161=>operation: strategy = resolve_copy_strategy(runtime)
+sub5163=>subroutine: log(f'Mirroring {len(plan)} image(s) into {registry_host}/{ecr_namespace} (region {region}) via {strategy} (runtime: {runtime}):')
+op5165=>operation: username, password = ecr_auth(region)
+cond5168=>operation: runtime_login(runtime, registry_host, username, password, log=log) if  strategy != 'skopeo'
+op5178=>operation: ecr_client = boto3.client('ecr', region_name=region)
+op5180=>operation: mirrored: list[str] = []
+op5182=>operation: skipped: list[str] = []
+cond5185=>condition: for item in plan
+sub5189=>subroutine: ensure_repository(ecr_client, item.dest_repo, log=log)
+cond5192=>condition: if skip_existing and tag_exists(ecr_client, item.dest_repo, item.tag)
+sub5196=>subroutine: log(f'  skip (already mirrored): {item.dest_ref}')
+sub5198=>subroutine: skipped.append(item.dest_ref)
+sub5200=>subroutine: continue
+sub5205=>subroutine: copy_image(item, runtime=runtime, strategy=strategy, password=password, log=log)
+sub5207=>subroutine: mirrored.append(item.dest_ref)
+io5214=>inputoutput: output: {'registry': f'{registry_host}/{ecr_namespace}', 'strategy': strategy, 'mirrored': mirrored, 'skipped': skipped}
+e5212=>end: end function return
 
-op3481->op3483
-op3483->cond3486
-cond3486->op3496
-op3496->op3498
-op3498->op3500
-op3500->op3502
-op3502->op3504
-op3504->sub3506
-sub3506->op3508
-op3508->cond3511
-cond3511->op3521
-op3521->op3523
-op3523->op3525
-op3525->cond3528
-cond3528(yes)->sub3532
-sub3532->cond3535
-cond3535(yes)->sub3539
-sub3539->sub3541
-sub3541->sub3543
-cond3535(no)->sub3548
-sub3548->sub3550
-sub3550(left)->cond3528
-cond3528(no)->io3557
-io3557->e3555
+op5138->op5140
+op5140->cond5143
+cond5143->op5153
+op5153->op5155
+op5155->op5157
+op5157->op5159
+op5159->op5161
+op5161->sub5163
+sub5163->op5165
+op5165->cond5168
+cond5168->op5178
+op5178->op5180
+op5180->op5182
+op5182->cond5185
+cond5185(yes)->sub5189
+sub5189->cond5192
+cond5192(yes)->sub5196
+sub5196->sub5198
+sub5198->sub5200
+cond5192(no)->sub5205
+sub5205->sub5207
+sub5207(left)->cond5185
+cond5185(no)->io5214
+io5214->e5212
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

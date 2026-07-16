@@ -221,40 +221,39 @@ aws cloudformation delete-stack \
 # Go to CloudFormation Console → Stack → Delete → Skip failing resources
 ```
 
-### Lambda Custom Resource Timeout
+### Lambda or State-Machine Custom Resource Timeout
 
-**Symptom**: Stack fails with "Custom resource did not receive response"
+**Symptom**: A stack reports that a custom resource did not stabilize or a Helm chart task timed out.
 
 **Causes**:
 
-- Lambda timeout (5 minutes)
-- VPC networking issues
-- EKS authentication failures
+- A Helm chart task exceeded its 14-minute Lambda budget or the 2-hour state-machine budget
+- VPC networking or DNS prevented a Lambda from reaching EKS/AWS APIs
+- EKS authentication or access-entry failures
+- A Kubernetes resource never became ready
 
 **Solution**:
 
 ```bash
-# 1. Check Lambda logs
-aws logs tail /aws/lambda/gco-REGION-KubectlApplier* \
-  --region REGION \
-  --since 30m
+# 1. Identify the failing logical/physical resource from stack events
+aws cloudformation describe-stack-events \
+  --stack-name gco-REGION --region REGION --max-items 30
 
-# 2. Verify Lambda can reach EKS
+# 2. List generated Lambda/log-group/state-machine names (names are not fixed)
+aws cloudformation list-stack-resources \
+  --stack-name gco-REGION --region REGION \
+  --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function' || ResourceType=='AWS::Logs::LogGroup' || ResourceType=='AWS::StepFunctions::StateMachine'].{Type:ResourceType,Logical:LogicalResourceId,Physical:PhysicalResourceId}"
+
+# 3. Tail the exact log group selected from the output above
+aws logs tail <LOG_GROUP_NAME> --region REGION --since 30m
+
+# 4. Verify cluster reachability and the Lambda access entry
 aws eks describe-cluster \
-  --name gco-REGION \
-  --region REGION \
-  --query 'cluster.endpoint'
-
-# 3. Check Lambda security group
-aws ec2 describe-security-groups \
-  --filters "Name=group-name,Values=*KubectlLambda*" \
-  --region REGION
-
-# 4. Verify EKS access entry
-aws eks list-access-entries \
-  --cluster-name gco-REGION \
-  --region REGION
+  --name gco-REGION --region REGION --query 'cluster.{Status:status,Endpoint:endpoint}'
+aws eks list-access-entries --cluster-name gco-REGION --region REGION
 ```
+
+Fix the failing chart, manifest, networking, or access entry and redeploy. Do not increase a timeout until the stack events and exact generated log group identify a genuinely long operation.
 
 ## kubectl Access Issues
 
@@ -336,7 +335,7 @@ ENDPOINT=$(aws eks describe-cluster \
   --query 'cluster.endpoint' \
   --output text)
 
-curl -k $ENDPOINT/healthz
+curl -sS -o /dev/null -w 'HTTP %{http_code}\n' "$ENDPOINT/healthz"
 
 # 2. Check kubeconfig
 kubectl config view
@@ -385,8 +384,11 @@ kubectl describe nodes
 kubectl get sa -n gco-system
 # Solution: Apply service account manifest
 kubectl apply -f lambda/kubectl-applier-simple/manifests/01-serviceaccounts.yaml
+```
 
-**Symptom**: Pods stuck in `ContainerCreating` for > 2 minutes
+### Pods Stuck in ContainerCreating
+
+**Symptom**: Pods remain in `ContainerCreating` and never reach `Running`.
 
 **Causes**:
 - Image pull errors
@@ -459,34 +461,32 @@ kubectl rollout restart deployment/manifest-processor -n gco-system
 
 ### Lambda Timeout
 
-**Symptom**: Lambda function times out after 5 minutes
+**Symptom**: A Lambda or its surrounding custom-resource workflow reaches its configured timeout.
 
 **Causes**:
 
-- Can't connect to EKS
-- Slow manifest application
-- Network issues
+- EKS or AWS API connectivity failure
+- A Kubernetes/Helm readiness wait that never converges
+- An operation whose real duration exceeds the function's configured budget
 
 **Solution**:
 
 ```bash
-# 1. Check Lambda logs
-aws logs tail /aws/lambda/gco-REGION-KubectlApplier* \
-  --region REGION \
-  --since 30m
+# 1. Find the exact generated function and log group in CloudFormation
+aws cloudformation list-stack-resources \
+  --stack-name gco-REGION --region REGION \
+  --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function' || ResourceType=='AWS::Logs::LogGroup'].{Type:ResourceType,Logical:LogicalResourceId,Physical:PhysicalResourceId}"
 
-# 2. Verify Lambda VPC configuration
+# 2. Tail the selected log group; wildcards are not accepted by `aws logs tail`
+aws logs tail <LOG_GROUP_NAME> --region REGION --since 30m
+
+# 3. Inspect the selected function's VPC and timeout settings
 aws lambda get-function-configuration \
-  --function-name FUNCTION-NAME \
-  --region REGION \
-  --query 'VpcConfig'
-
-# 3. Check security group rules
-# Lambda SG should allow outbound to EKS cluster SG on port 443
-
-# 4. Increase timeout (in regional_stack.py)
-timeout=Duration.minutes(10)  # Increase from 5
+  --function-name <FUNCTION_NAME> --region REGION \
+  --query '{Timeout:Timeout,MemorySize:MemorySize,VpcConfig:VpcConfig,LogGroup:LoggingConfig.LogGroup}'
 ```
+
+Resolve connectivity, access, or readiness failures first. If a healthy operation still needs a larger budget, change the owning CDK construct and redeploy rather than patching the function out of band.
 
 ### Lambda 401 Unauthorized
 
@@ -592,34 +592,44 @@ kubectl get networkpolicies -n NAMESPACE
 
 ### API Gateway Timeout After Deployment
 
-**Symptom**: `gco jobs submit` returns "Endpoint request timed out" immediately after deploying a new stack
+**Symptom**: `gco jobs submit` returns a 502/503 or endpoint timeout immediately after a fresh regional deployment.
 
-**Cause**: After a fresh deployment or stack recreation, the NLB target groups need 1-2 minutes for the AWS Load Balancer Controller to register the pod IPs and for health checks to pass.
+**Cause**: The AWS load balancer controller creates the internal platform ALB asynchronously. Global Accelerator registration, the SSM hostname registry, ALB target registration, and pod health must all converge before the backend is routable.
 
 **Solution**:
 
-Wait 1-2 minutes after deployment completes, then retry:
-
 ```bash
-# Check if targets are healthy
-aws elbv2 describe-target-health \
-  --target-group-arn $(aws elbv2 describe-target-groups \
-    --region us-east-1 \
-    --query 'TargetGroups[?contains(TargetGroupName, `gco-nlb`)].TargetGroupArn' \
-    --output text) \
-  --region us-east-1
+PROJECT_NAME=${PROJECT_NAME:-gco}
+REGION=us-east-1
+GLOBAL_REGION=us-east-2
+PARAMETER="/${PROJECT_NAME}/alb-hostname-${REGION}"
 
-# Once targets show "healthy", retry your command
-gco jobs submit examples/simple-job.yaml --namespace gco-jobs
+# 1. Confirm that GA registration published the verified ALB hostname
+ALB_DNS=$(aws ssm get-parameter \
+  --name "$PARAMETER" --region "$GLOBAL_REGION" \
+  --query 'Parameter.Value' --output text)
+
+# 2. Confirm it is an active internal application ALB
+aws elbv2 describe-load-balancers \
+  --region "$REGION" \
+  --query "LoadBalancers[?DNSName=='${ALB_DNS}'].{State:State.Code,Type:Type,Scheme:Scheme,Arn:LoadBalancerArn}"
+
+# 3. Inspect target groups attached to that ALB and their health
+ALB_ARN=$(aws elbv2 describe-load-balancers \
+  --region "$REGION" \
+  --query "LoadBalancers[?DNSName=='${ALB_DNS}'].LoadBalancerArn | [0]" \
+  --output text)
+aws elbv2 describe-target-groups \
+  --load-balancer-arn "$ALB_ARN" --region "$REGION"
 ```
 
-**Alternative**: Use `submit-direct` which bypasses the API Gateway and goes directly to kubectl:
+Then inspect the regional stack events, GA-registration Lambda log group, and `gco-system` pods. Retry after the ALB is active and its targets are healthy.
+
+For emergency operator access, `submit-direct` uses the configured Kubernetes context and therefore requires network access to the private EKS API. SQS submission remains the preferred asynchronous production path:
 
 ```bash
-gco jobs submit-direct examples/simple-job.yaml --region us-east-1 -n gco-jobs
-
-# Or use SQS submission (recommended for production)
-gco jobs submit-sqs examples/simple-job.yaml --region us-east-1
+gco jobs submit-direct examples/simple-job.yaml --region "$REGION" -n gco-jobs
+gco jobs submit-sqs examples/simple-job.yaml --region "$REGION"
 ```
 
 ### ALB Not Routing Traffic
@@ -629,21 +639,27 @@ gco jobs submit-sqs examples/simple-job.yaml --region us-east-1
 **Solution**:
 
 ```bash
-# 1. Check ALB status
+# 1. Resolve the platform ALB from the global-region registry
+ALB_DNS=$(aws ssm get-parameter \
+  --name /gco/alb-hostname-REGION \
+  --region GLOBAL-REGION \
+  --query 'Parameter.Value' --output text)
+
+# 2. Confirm it is the expected active internal application ALB
 aws elbv2 describe-load-balancers \
-  --names gco-alb-REGION \
-  --region REGION
+  --region REGION \
+  --query "LoadBalancers[?DNSName=='${ALB_DNS}'].{Arn:LoadBalancerArn,State:State.Code,Type:Type,Scheme:Scheme}"
 
-# 2. Check target groups
+# 3. Check target groups and target health
+aws elbv2 describe-target-groups \
+  --load-balancer-arn ALB-ARN --region REGION
 aws elbv2 describe-target-health \
-  --target-group-arn TARGET-GROUP-ARN \
-  --region REGION
+  --target-group-arn TARGET-GROUP-ARN --region REGION
 
-# 3. Check security groups
-# ALB SG should allow inbound from Global Accelerator IPs
-# Target SG should allow inbound from ALB SG
+# 4. Verify the ALB's EKS cluster and platform-Ingress ownership tags
+aws elbv2 describe-tags --resource-arns ALB-ARN --region REGION
 
-# 4. Check listeners
+# 5. Check listeners
 aws elbv2 describe-listeners \
   --load-balancer-arn ALB-ARN \
   --region REGION
@@ -726,12 +742,14 @@ Set any threshold to `-1` to disable that check. See [Customization Guide](CUSTO
 
 ```bash
 # 1. Check API Gateway metrics
+START_TIME=$(python3 -c 'from datetime import UTC, datetime, timedelta; print((datetime.now(UTC) - timedelta(hours=1)).isoformat())')
+END_TIME=$(python3 -c 'from datetime import UTC, datetime; print(datetime.now(UTC).isoformat())')
 aws cloudwatch get-metric-statistics \
   --namespace AWS/ApiGateway \
   --metric-name Latency \
-  --dimensions Name=ApiName,Value=gco-api \
-  --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
-  --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+  --dimensions Name=ApiName,Value=gco-global-api \
+  --start-time "$START_TIME" \
+  --end-time "$END_TIME" \
   --period 300 \
   --statistics Average \
   --region REGION

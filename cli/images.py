@@ -42,7 +42,7 @@ from ._container_runtime import detect_container_runtime
 from ._image_uri import (
     rewrite_image_uri_for_region as _rewrite_image_uri_for_region,  # noqa: F401
 )
-from .config import GCOConfig, get_config
+from .config import GCOConfig, _load_cdk_json, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Flowchart(s) generated from this file:
@@ -134,15 +134,13 @@ class ImageManager:
     def _resolve_region(self, region: str | None) -> str:
         """Pick a region for ECR API calls.
 
-        Priority: explicit argument, ``config.regions[0]`` if the
-        config exposes a regions list, ``AWS_DEFAULT_REGION``, then
-        ``config.global_region``.
+        Priority: explicit argument, ``AWS_DEFAULT_REGION``, then the global
+        region where the shared ECR registry is deployed. ``GCOConfig`` has no
+        ``regions`` attribute; deployment-region discovery is handled
+        separately by :meth:`_replication_regions`.
         """
         if region:
             return region
-        cfg_regions = getattr(self.config, "regions", None)
-        if cfg_regions:
-            return str(cfg_regions[0])
         env_region = os.environ.get("AWS_DEFAULT_REGION")
         if env_region:
             return env_region
@@ -665,23 +663,51 @@ class ImageManager:
             return f"{repo}:{tag}"
         return _DISAGGREGATED_DEFAULT_IMAGE
 
-    def replication_get(self) -> dict[str, Any]:
-        """Return the current ECR replication configuration, or ``{}``."""
-        ecr = self._ecr_client()
+    def _current_replication_configuration(self, ecr: Any) -> tuple[str | None, dict[str, Any]]:
+        """Return the registry ID and current ECR replication configuration."""
         try:
-            resp = ecr.get_registry_policy()
-            policy_text = resp.get("policyText")
-            if policy_text:
-                return {
-                    "registryId": resp.get("registryId"),
-                    "policy": json.loads(policy_text),
-                }
+            response = ecr.get_replication_configuration()
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code", "")
-            if code in ("RegistryPolicyNotFoundException",):
-                return {}
+            if code == "ReplicationConfigurationNotFoundException":
+                return None, {"rules": []}
             raise
-        return {}
+
+        configuration = response.get("replicationConfiguration") or {"rules": []}
+        if not isinstance(configuration, dict):
+            configuration = {"rules": []}
+        if not isinstance(configuration.get("rules"), list):
+            configuration = {**configuration, "rules": []}
+        return response.get("registryId"), configuration
+
+    def replication_get(self) -> dict[str, Any]:
+        """Return the current ECR replication configuration, or ``{}``.
+
+        The historical ``policy`` response key is retained for CLI/API
+        compatibility, but its value now comes from the replication API rather
+        than the unrelated registry-permissions policy API.
+        """
+        registry_id, configuration = self._current_replication_configuration(self._ecr_client())
+        if not configuration.get("rules"):
+            return {}
+        return {
+            "registryId": registry_id,
+            "policy": configuration,
+        }
+
+    def _replication_regions(self) -> list[str]:
+        """Resolve deployed regional destinations from supported config data."""
+        deployment_regions = _load_cdk_json().get("regional", [])
+        candidates = deployment_regions if isinstance(deployment_regions, list) else []
+        if not candidates:
+            default_region = getattr(self.config, "default_region", None)
+            if isinstance(default_region, str) and default_region:
+                candidates = [default_region]
+
+        # Preserve declaration order while removing invalid values/duplicates.
+        return list(
+            dict.fromkeys(region for region in candidates if isinstance(region, str) and region)
+        )
 
     def replication_status(self) -> list[dict[str, Any]]:
         """Per-repo replication status across the project repos."""
@@ -815,30 +841,61 @@ class ImageManager:
         }
 
     def replication_sync(self) -> dict[str, Any]:
-        """Apply the project's standard replication rule.
+        """Apply this project's replication rule without clobbering others.
 
-        Replicates ``gco/*`` to every region in ``config.regions`` (when
-        the config exposes one) — the rule object mirrors what the
-        global stack provisions so the two stay aligned.
+        Existing rules for unrelated repository prefixes are retained. If no
+        non-source destination can be resolved, no write is made; this avoids
+        replacing a valid registry configuration with an empty rule set.
         """
         ecr = self._ecr_client()
-        regions = list(getattr(self.config, "regions", []) or [])
-        # Don't replicate to the source region itself.
-        destinations = [r for r in regions if r != self.region]
+        registry_id, current = self._current_replication_configuration(ecr)
+        destinations = [region for region in self._replication_regions() if region != self.region]
+
+        if not destinations:
+            return {
+                "configuration": current,
+                "destinations": [],
+                "registry_id": registry_id,
+                "updated": False,
+            }
 
         account = self._account_id()
-        rule = {
-            "destinations": [{"region": r, "registryId": account} for r in destinations],
-            "repositoryFilters": [
-                {"filter": f"{self._repo_prefix}/", "filterType": "PREFIX_MATCH"}
-            ],
+        managed_filter = {
+            "filter": f"{self._repo_prefix}/",
+            "filterType": "PREFIX_MATCH",
         }
-        config = {"rules": [rule]} if destinations else {"rules": []}
-        resp = ecr.put_replication_configuration(replicationConfiguration=config)
+        managed_rule = {
+            "destinations": [{"region": region, "registryId": account} for region in destinations],
+            "repositoryFilters": [managed_filter],
+        }
+
+        preserved_rules: list[dict[str, Any]] = []
+        for existing_rule in current.get("rules", []):
+            if not isinstance(existing_rule, dict):
+                continue
+            filters = existing_rule.get("repositoryFilters") or []
+            managed_filters = [item for item in filters if item == managed_filter]
+            if not managed_filters:
+                preserved_rules.append(existing_rule)
+                continue
+
+            # A rule can contain filters for multiple prefixes. Retain the
+            # unrelated filters with their original destinations while replacing
+            # only this project's managed filter.
+            unrelated_filters = [item for item in filters if item != managed_filter]
+            if unrelated_filters:
+                preserved_rules.append({**existing_rule, "repositoryFilters": unrelated_filters})
+
+        configuration = {
+            **current,
+            "rules": [*preserved_rules, managed_rule],
+        }
+        response = ecr.put_replication_configuration(replicationConfiguration=configuration)
         return {
-            "configuration": config,
+            "configuration": configuration,
             "destinations": destinations,
-            "registry_id": resp.get("replicationConfiguration", {}),
+            "registry_id": response.get("registryId") or registry_id or account,
+            "updated": True,
         }
 
     # ------------------------------------------------------------------

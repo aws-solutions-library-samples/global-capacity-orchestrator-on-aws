@@ -12,10 +12,25 @@ Gateway routing toggle. Heavy use of boto3.Session and requests.request
 mocking; every test stubs get_config to avoid reading real CDK context.
 """
 
+import json
 import time
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+def _cache_regional_endpoint(client: Any, region: str) -> None:
+    """Install a fresh regional endpoint without CloudFormation discovery."""
+    from cli.aws_client import ApiEndpoint
+
+    client._regional_api_cache[region] = ApiEndpoint(
+        url=f"https://regional.execute-api.{region}.amazonaws.com/prod",
+        region=region,
+        api_id="regional",
+        is_regional=True,
+    )
+    client._cache_timestamp = time.time()
 
 
 class TestRegionalStack:
@@ -881,7 +896,7 @@ class TestGCOAWSClientMakeAuthenticatedRequest:
                 assert response.status_code == 200
 
     def test_make_authenticated_request_with_target_region(self):
-        """Test making authenticated request with target region header."""
+        """Test that an exact region uses its regional API without routing headers."""
         from cli.aws_client import ApiEndpoint, GCOAWSClient
 
         with patch("cli.aws_client.get_config") as mock_config:
@@ -906,15 +921,16 @@ class TestGCOAWSClientMakeAuthenticatedRequest:
                     api_id="test",
                 )
                 client._cache_timestamp = time.time()
+                _cache_regional_endpoint(client, "us-west-2")
 
                 response = client.make_authenticated_request(
                     "GET", "/api/v1/jobs", target_region="us-west-2"
                 )
 
                 assert response.status_code == 200
-                # Verify target region header was included
                 call_kwargs = mock_request.call_args[1]
-                assert "X-GCO-Target-Region" in call_kwargs["headers"]
+                assert "regional.execute-api.us-west-2.amazonaws.com" in call_kwargs["url"]
+                assert "X-GCO-Target-Region" not in call_kwargs["headers"]
 
 
 class TestGCOAWSClientGetJobs:
@@ -947,6 +963,7 @@ class TestGCOAWSClientGetJobs:
                     api_id="test",
                 )
                 client._cache_timestamp = time.time()
+                _cache_regional_endpoint(client, "us-west-2")
 
                 jobs = client.get_jobs(region="us-west-2", namespace="gco-jobs", status="running")
 
@@ -1173,11 +1190,17 @@ class TestGCOAWSClientBulkDeleteGlobal:
                 client._cache_timestamp = time.time()
 
                 result = client.bulk_delete_global(
-                    namespace="default", status="failed", older_than_days=7, dry_run=True
+                    namespace="default",
+                    status="failed",
+                    older_than_days=7,
+                    label_selector="team=ml",
+                    dry_run=True,
                 )
 
                 assert result["dry_run"] is True
                 assert result["total"] == 2
+                request_body = json.loads(mock_request.call_args.kwargs["data"])
+                assert request_body["label_selector"] == "team=ml"
 
     def test_bulk_delete_global_execute(self):
         """Test bulk delete across all regions with actual deletion."""
@@ -1271,6 +1294,7 @@ class TestGCOAWSClientJobEvents:
                     api_id="test",
                 )
                 client._cache_timestamp = time.time()
+                _cache_regional_endpoint(client, "us-east-1")
 
                 result = client.get_job_events("test-job", "default", "us-east-1")
 
@@ -1321,6 +1345,7 @@ class TestGCOAWSClientJobPods:
                     api_id="test",
                 )
                 client._cache_timestamp = time.time()
+                _cache_regional_endpoint(client, "us-east-1")
 
                 result = client.get_job_pods("test-job", "default", "us-east-1")
 
@@ -1374,6 +1399,7 @@ class TestGCOAWSClientJobMetrics:
                     api_id="test",
                 )
                 client._cache_timestamp = time.time()
+                _cache_regional_endpoint(client, "us-east-1")
 
                 result = client.get_job_metrics("test-job", "default", "us-east-1")
 
@@ -1416,6 +1442,7 @@ class TestGCOAWSClientRetryJob:
                     api_id="test",
                 )
                 client._cache_timestamp = time.time()
+                _cache_regional_endpoint(client, "us-east-1")
 
                 result = client.retry_job("failed-job", "default", "us-east-1")
 
@@ -1463,6 +1490,7 @@ class TestGCOAWSClientBulkDeleteJobs:
                     api_id="test",
                 )
                 client._cache_timestamp = time.time()
+                _cache_regional_endpoint(client, "us-east-1")
 
                 result = client.bulk_delete_jobs(
                     namespace="default",
@@ -1502,6 +1530,7 @@ class TestGCOAWSClientBulkDeleteJobs:
                     api_id="test",
                 )
                 client._cache_timestamp = time.time()
+                _cache_regional_endpoint(client, "us-west-2")
 
                 client.bulk_delete_jobs(
                     label_selector="app=test,env=dev",
@@ -1556,6 +1585,7 @@ class TestGCOAWSClientGetHealth:
                     api_id="test",
                 )
                 client._cache_timestamp = time.time()
+                _cache_regional_endpoint(client, "us-east-1")
 
                 result = client.get_health("us-east-1")
 
@@ -1563,7 +1593,8 @@ class TestGCOAWSClientGetHealth:
                 assert result["region"] == "us-east-1"
                 call_args = mock_request.call_args
                 assert "/api/v1/health" in call_args[1]["url"]
-                assert call_args[1]["headers"]["X-GCO-Target-Region"] == "us-east-1"
+                assert "regional.execute-api.us-east-1.amazonaws.com" in call_args[1]["url"]
+                assert "X-GCO-Target-Region" not in call_args[1]["headers"]
 
 
 class TestGCOAWSClientRetryLogic:

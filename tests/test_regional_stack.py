@@ -83,7 +83,7 @@ class MockConfigLoader:
             "image": "gco/manifest-processor:latest",
             "replicas": 3,
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
-            "allowed_namespaces": ["default", "gco-jobs"],
+            "allowed_namespaces": ["gco-jobs"],
             "resource_quotas": {
                 "max_cpu_per_manifest": "10",
                 "max_memory_per_manifest": "32Gi",
@@ -592,6 +592,21 @@ class TestRegionalStackSynthesis:
             "arn:aws:lambda:us-east-1:123456789012:function:mock"  # nosec B106 - test fixture ARN with fake account ID, not a real credential
         )
 
+    @staticmethod
+    def _mock_helm_installer_with_teardown(stack):
+        """Provide lightweight constructs so dependency ordering synthesizes without Docker."""
+        TestRegionalStackSynthesis._mock_helm_installer(stack)
+        stack.helm_installer_access_entry = cdk.CfnResource(
+            stack,
+            "MockHelmInstallerAccessEntry",
+            type="AWS::EKS::AccessEntry",
+        )
+        stack.helm_teardown_resource = cdk.CustomResource(
+            stack,
+            "HelmTeardown",
+            service_token=("arn:aws:lambda:us-east-1:123456789012:function:mock-teardown"),
+        )
+
     def test_regional_stack_creates_vpc(self):
         """Test that RegionalStack creates a VPC."""
 
@@ -685,6 +700,7 @@ class TestRegionalStackSynthesis:
                 f"Expected a GaDeregistration custom resource; found: {list(custom_resources)}"
             )
             (dereg_res,) = dereg.values()
+            assert dereg_res["Properties"]["RegistryRegion"] == "us-east-2"
             depends_on = dereg_res.get("DependsOn", [])
             if isinstance(depends_on, str):
                 depends_on = [depends_on]
@@ -724,6 +740,50 @@ class TestRegionalStackSynthesis:
                     )
                 },
             )
+
+    def test_runtime_teardown_dependency_chain(self):
+        """Delete order is Helm/quiesce -> GA -> convergence -> EKS access/cluster."""
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer_with_teardown,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-regional-runtime-teardown-order",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+        resources = assertions.Template.from_stack(stack).to_json()["Resources"]
+
+        def _depends_on(logical_id):
+            value = resources[logical_id].get("DependsOn", [])
+            return [value] if isinstance(value, str) else value
+
+        assert "HelmInstallCharts" in _depends_on("HelmTeardown")
+        assert "MockHelmInstallerAccessEntry" in _depends_on("HelmInstallCharts")
+        assert any(
+            logical_id.startswith("KubectlLambdaAccessEntry")
+            for logical_id in _depends_on("HelmInstallCharts")
+        )
+        ga_id = next(
+            logical_id for logical_id in resources if logical_id.startswith("GaDeregistration")
+        )
+        assert ga_id in _depends_on("HelmTeardown")
+        assert "HelmInstallCharts" in _depends_on(ga_id)
 
     def test_regional_stack_creates_ecr_repositories(self):
         """Test that RegionalStack creates ECR repositories."""
@@ -822,6 +882,147 @@ class TestRegionalStackSynthesis:
             template = assertions.Template.from_stack(stack)
             # Should have multiple IAM roles (cluster admin, node group, service account, etc.)
             template.has_resource("AWS::IAM::Role", {})
+
+    def test_health_monitor_ssm_repair_policy_is_exact(self):
+        """Health self-healing gets only Get/Put on its one global-region parameter."""
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-health-self-healing-iam",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+        template = assertions.Template.from_stack(stack)
+        policies = template.find_resources("AWS::IAM::Policy")
+        health_statements = [
+            statement
+            for logical_id, policy in policies.items()
+            if logical_id.startswith("HealthMonitorRoleDefaultPolicy")
+            for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+        ]
+        shared_statements = [
+            statement
+            for logical_id, policy in policies.items()
+            if logical_id.startswith("ServiceAccountRoleDefaultPolicy")
+            for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+        ]
+        matching = []
+        for statement in health_statements:
+            actions = statement.get("Action", [])
+            if isinstance(actions, str):
+                actions = [actions]
+            if set(actions) == {"ssm:GetParameter", "ssm:PutParameter"}:
+                matching.append(statement)
+
+        assert len(matching) == 1
+        assert matching[0]["Resource"] == (
+            "arn:aws:ssm:us-east-2:123456789012:parameter/gco-test/alb-hostname-us-east-1"
+        )
+        for statement in shared_statements:
+            actions = statement.get("Action", [])
+            if isinstance(actions, str):
+                actions = [actions]
+            assert "ssm:PutParameter" not in actions
+
+    def test_manifest_processor_role_owns_jobs_table_access(self):
+        """Only the manifest processor may read or mutate centralized queue records."""
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-manifest-processor-queue-iam",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+        policies = assertions.Template.from_stack(stack).find_resources("AWS::IAM::Policy")
+
+        def _statements(logical_id_prefix):
+            return [
+                statement
+                for logical_id, policy in policies.items()
+                if logical_id.startswith(logical_id_prefix)
+                for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+            ]
+
+        manifest_statements = _statements("ManifestProcessorRoleDefaultPolicy")
+        shared_statements = _statements("ServiceAccountRoleDefaultPolicy")
+        assert manifest_statements
+        assert shared_statements
+
+        jobs_table_arn = "arn:aws:dynamodb:us-east-2:123456789012:table/gco-test-jobs"
+        jobs_index_arn = f"{jobs_table_arn}/index/*"
+        jobs_resources = {jobs_table_arn, jobs_index_arn}
+
+        manifest_jobs_statements = []
+        for statement in manifest_statements:
+            resources = statement.get("Resource", [])
+            if isinstance(resources, str):
+                resources = [resources]
+            if jobs_resources.intersection(resources):
+                manifest_jobs_statements.append(statement)
+
+        assert len(manifest_jobs_statements) == 1
+        jobs_statement = manifest_jobs_statements[0]
+        actions = jobs_statement.get("Action", [])
+        if isinstance(actions, str):
+            actions = [actions]
+        resources = jobs_statement.get("Resource", [])
+        if isinstance(resources, str):
+            resources = [resources]
+        assert set(actions) == {
+            "dynamodb:GetItem",
+            "dynamodb:PutItem",
+            "dynamodb:UpdateItem",
+            "dynamodb:Query",
+            "dynamodb:Scan",
+        }
+        assert set(resources) == jobs_resources
+
+        for statement in shared_statements:
+            actions = statement.get("Action", [])
+            if isinstance(actions, str):
+                actions = [actions]
+            resources = statement.get("Resource", [])
+            if isinstance(resources, str):
+                resources = [resources]
+            assert jobs_resources.isdisjoint(resources)
+            assert not (
+                jobs_resources.intersection(resources)
+                and {"dynamodb:PutItem", "dynamodb:UpdateItem"}.intersection(actions)
+            )
 
     def test_regional_stack_creates_lambda_functions(self):
         """Test that RegionalStack creates Lambda functions."""
@@ -1641,6 +1842,37 @@ class TestGlobalStackDynamoDBTables:
                 "KeySchema": [{"AttributeName": "job_id", "KeyType": "HASH"}],
             },
         )
+
+    def test_jobs_table_has_priority_and_lease_indexes(self):
+        """Worker claims and lease recovery use their exact ordered queue GSIs."""
+        from gco.stacks.global_stack import GCOGlobalStack
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+        stack = GCOGlobalStack(app, "test-dynamodb-jobs-queue-indexes", config=config)
+
+        tables = assertions.Template.from_stack(stack).find_resources("AWS::DynamoDB::Table")
+        jobs_tables = [
+            table
+            for table in tables.values()
+            if table["Properties"].get("TableName") == "gco-test-jobs"
+        ]
+        assert len(jobs_tables) == 1
+        indexes = {
+            index["IndexName"]: index
+            for index in jobs_tables[0]["Properties"]["GlobalSecondaryIndexes"]
+        }
+
+        assert indexes["region-status-priority-index"]["KeySchema"] == [
+            {"AttributeName": "region_status", "KeyType": "HASH"},
+            {"AttributeName": "priority_sort", "KeyType": "RANGE"},
+        ]
+        assert indexes["region-status-priority-index"]["Projection"] == {"ProjectionType": "ALL"}
+        assert indexes["region-status-lease-index"]["KeySchema"] == [
+            {"AttributeName": "region_status", "KeyType": "HASH"},
+            {"AttributeName": "lease_expires_at", "KeyType": "RANGE"},
+        ]
+        assert indexes["region-status-lease-index"]["Projection"] == {"ProjectionType": "ALL"}
 
     def test_global_stack_creates_backup_plan(self):
         """Test that GlobalStack creates AWS Backup plan for DynamoDB tables."""

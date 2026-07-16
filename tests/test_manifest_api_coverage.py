@@ -4,34 +4,28 @@ Coverage-focused tests for gco/services/manifest_api.py.
 Targets edge-case branches the main manifest-api suites don't hit:
 the health endpoint returning 503 when the Kubernetes API is
 unreachable (list_namespace raises), job metrics when pod-metrics
-retrieval errors out, and similar error-path branches. Shares the
-same autouse auth-cache seeding pattern as test_manifest_api.py.
+retrieval errors out, and similar error-path branches. Authentication
+is bypassed explicitly because its cryptographic behavior has dedicated tests.
 """
 
-import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-# Auth token used by all tests in this module.
-_TEST_AUTH_TOKEN = "test-manifest-coverage-token"  # nosec B105 - test fixture token, not a real credential
-_AUTH_HEADERS = {"x-gco-auth-token": _TEST_AUTH_TOKEN}
+from tests._auth import bypass_backend_auth
+
+# Call sites retain a common header mapping for concise request construction;
+# authentication itself is handled by the autouse fixture below.
+_AUTH_HEADERS: dict[str, str] = {}
 
 
 @pytest.fixture(autouse=True)
-def _seed_auth_cache():
-    """Seed the auth middleware token cache with a known token."""
-    import gco.services.auth_middleware as auth_module
-
-    original_tokens = auth_module._cached_tokens
-    original_timestamp = auth_module._cache_timestamp
-    auth_module._cached_tokens = {_TEST_AUTH_TOKEN}
-    auth_module._cache_timestamp = time.time()
-    yield
-    auth_module._cached_tokens = original_tokens
-    auth_module._cache_timestamp = original_timestamp
+def _bypass_authentication():
+    """Isolate route behavior from the separately tested HMAC verifier."""
+    with bypass_backend_auth():
+        yield
 
 
 @pytest.fixture
@@ -806,6 +800,42 @@ class TestJobsLogsCoverage:
 
 
 class TestJobsEventsCoverage:
+    def test_older_than_handles_aware_and_naive_timestamps(
+        self, jobs_mock_processor, jobs_api_client
+    ):
+        old_aware = (datetime.now(UTC) - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+        recent_naive = (datetime.now(UTC) - timedelta(days=1)).replace(tzinfo=None).isoformat()
+        jobs_mock_processor.list_jobs = AsyncMock(
+            return_value=[
+                {
+                    "metadata": {
+                        "name": "old",
+                        "namespace": "gco-jobs",
+                        "creationTimestamp": old_aware,
+                        "labels": {},
+                    }
+                },
+                {
+                    "metadata": {
+                        "name": "recent",
+                        "namespace": "gco-jobs",
+                        "creationTimestamp": recent_naive,
+                        "labels": {},
+                    }
+                },
+            ]
+        )
+
+        resp = jobs_api_client.request(
+            "DELETE",
+            "/api/v1/jobs",
+            json={"older_than_days": 5, "dry_run": True},
+            headers=_AUTH_HEADERS,
+        )
+
+        assert resp.status_code == 200
+        assert [job["name"] for job in resp.json()["jobs"]] == ["old"]
+
     def test_error(self, jobs_mock_processor, jobs_api_client):
         jobs_mock_processor.core_v1.list_namespaced_event.side_effect = RuntimeError("fail")
         resp = jobs_api_client.get("/api/v1/jobs/gco-jobs/j/events", headers=_AUTH_HEADERS)
@@ -914,6 +944,29 @@ class TestJobsBulkDeleteCoverage:
             headers=_AUTH_HEADERS,
         )
         assert resp.json()["total_matched"] == 1
+
+    def test_invalid_label_selector_fails_closed(self, jobs_mock_processor, jobs_api_client):
+        jobs_mock_processor.list_jobs = AsyncMock(
+            return_value=[
+                {
+                    "metadata": {
+                        "name": "must-not-delete",
+                        "namespace": "gco-jobs",
+                        "labels": {"team": "ml"},
+                    }
+                }
+            ]
+        )
+
+        resp = jobs_api_client.request(
+            "DELETE",
+            "/api/v1/jobs",
+            json={"label_selector": "team", "dry_run": False},
+            headers=_AUTH_HEADERS,
+        )
+
+        assert resp.status_code == 400
+        jobs_mock_processor.batch_v1.delete_namespaced_job.assert_not_called()
 
     def test_error(self, jobs_mock_processor, jobs_api_client):
         jobs_mock_processor.list_jobs = AsyncMock(side_effect=RuntimeError("fail"))

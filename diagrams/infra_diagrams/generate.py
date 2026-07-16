@@ -30,7 +30,9 @@ daemon or live AWS access is required) and then invokes
 Per-stack diagrams synthesize just the target stack (passing placeholder
 strings for cross-stack inputs). ``regional-api`` also instantiates the
 regional stack because its constructor consumes the regional VPC construct;
-``--include`` then scopes the diagram to the regional-api stack.
+``--include`` then scopes the diagram to the regional-api stack. The full view
+always includes each regional aggregation bridge; direct caller access remains
+a separate policy toggle.
 
 Output is PNG only (cdk-dia does not emit SVG). The full-architecture diagram
 is rendered twice: a collapsed overview and a ``--no-collapse`` detailed view.
@@ -75,7 +77,7 @@ import aws_cdk as cdk
 
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.analytics_stack import GCOAnalyticsStack
-from gco.stacks.api_gateway_global_stack import GCOApiGatewayGlobalStack
+from gco.stacks.api_gateway_global_stack import AnalyticsApiConfig, GCOApiGatewayGlobalStack
 from gco.stacks.global_stack import GCOGlobalStack
 from gco.stacks.monitoring_stack import GCOMonitoringStack
 from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
@@ -199,6 +201,11 @@ def _build_api_gateway(app: cdk.App, config: ConfigLoader) -> list[str]:
         app,
         f"{project}-api-gateway",
         global_accelerator_dns="placeholder.awsglobalaccelerator.com",
+        project_name=project,
+        api_gateway_config=config.get_api_gateway_config(),
+        registry_region=config.get_global_region(),
+        certificate_regions=config.get_deployment_regions()["regional"],
+        backend_tls_config=config.get_backend_tls_config(),
         env=cdk.Environment(region=region),
         description="Global API Gateway with IAM authentication",
     )
@@ -241,16 +248,16 @@ def _build_regional_api(app: cdk.App, config: ConfigLoader) -> list[str]:
         config=config,
         region=region,
         vpc=regional_stack.vpc,
-        alb_dns_name=f"internal-{project}-{region}.elb.amazonaws.com",
         auth_secret_arn=f"arn:aws:secretsmanager:{region}:123456789012:secret:placeholder",
+        aggregator_role_arn=("arn:aws:iam::123456789012:role/gco-diagram-cross-region-aggregator"),
         env=cdk.Environment(region=region),
-        description=f"Regional API Gateway for {region} (private access)",
+        description=(f"Regional aggregation bridge for {region} with optional direct access"),
     )
     return [f"{project}-regional-api-{region}"]
 
 
 def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
-    """Build the whole app: global, api-gateway, every regional stack, monitoring.
+    """Build global, API, regional, monitoring, and enabled analytics stacks.
 
     Returns ``None`` so callers diagram every stack. ``monitoring`` passes its
     own ``--include`` to scope the view to the monitoring stack.
@@ -265,6 +272,11 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
         app,
         f"{project}-api-gateway",
         global_accelerator_dns=global_stack.accelerator.dns_name,
+        project_name=project,
+        api_gateway_config=config.get_api_gateway_config(),
+        registry_region=config.get_global_region(),
+        certificate_regions=regions["regional"],
+        backend_tls_config=config.get_backend_tls_config(),
         env=cdk.Environment(region=regions["api_gateway"]),
     )
     api_gateway_stack.add_dependency(global_stack)
@@ -283,6 +295,18 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
         regional_stack.add_dependency(api_gateway_stack)
         regional_stacks.append(regional_stack)
 
+        regional_api_stack = GCORegionalApiGatewayStack(
+            app,
+            f"{project}-regional-api-{region}",
+            config=config,
+            region=region,
+            vpc=regional_stack.vpc,
+            auth_secret_arn=api_gateway_stack.secret.secret_arn,
+            aggregator_role_arn=api_gateway_stack.aggregator_role.role_arn,
+            env=cdk.Environment(region=region),
+        )
+        regional_api_stack.add_dependency(regional_stack)
+
     monitoring_stack = GCOMonitoringStack(
         app,
         f"{project}-monitoring",
@@ -294,6 +318,31 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
     )
     for regional_stack in regional_stacks:
         monitoring_stack.add_dependency(regional_stack)
+
+    if config.get_analytics_enabled():
+        analytics_stack = GCOAnalyticsStack(
+            app,
+            f"{project}-analytics",
+            config=config,
+            env=cdk.Environment(region=regions["api_gateway"]),
+            description=(
+                "Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)"
+            ),
+        )
+        analytics_stack.add_dependency(global_stack)
+        api_gateway_stack.set_analytics_config(
+            AnalyticsApiConfig(
+                user_pool_arn=analytics_stack.cognito_pool.user_pool_arn,
+                user_pool_client_id=analytics_stack.cognito_client.user_pool_client_id,
+                presigned_url_lambda=analytics_stack.presigned_url_lambda,
+                studio_domain_name=analytics_stack.studio_domain.domain_name or "",
+                callback_url=(
+                    f"https://{api_gateway_stack.api.rest_api_id}.execute-api."
+                    f"{regions['api_gateway']}.amazonaws.com/prod/studio/callback"
+                ),
+            )
+        )
+        api_gateway_stack.add_dependency(analytics_stack)
     return None
 
 
@@ -372,12 +421,18 @@ def main() -> None:
             context=_ANALYTICS_CONTEXT,
         )
     if args.stack == "all":
-        _generate("full-architecture", "GCO Complete Infrastructure Architecture", _build_full)
+        _generate(
+            "full-architecture",
+            "GCO Complete Infrastructure Architecture",
+            _build_full,
+            context=_ANALYTICS_CONTEXT,
+        )
         _generate(
             "full-architecture-detailed",
             "GCO Detailed Architecture",
             _build_full,
             collapse=False,
+            context=_ANALYTICS_CONTEXT,
         )
 
     print("\n" + "=" * 50)

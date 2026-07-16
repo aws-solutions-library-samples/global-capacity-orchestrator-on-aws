@@ -40,6 +40,20 @@ def cost_trend(days: int = 14) -> str:
 
 @mcp.tool(tags={"safe", "costs"})
 @audit_logged
+def cost_workloads(region: str | None = None) -> str:
+    """Estimate accumulated and hourly cost for running workloads.
+
+    Args:
+        region: Region to inspect, or omit to inspect every deployment region.
+    """
+    args = ["costs", "workloads"]
+    if region:
+        args += ["-r", region]
+    return cli_runner._run_cli(*args)
+
+
+@mcp.tool(tags={"safe", "costs"})
+@audit_logged
 def cost_forecast(days_ahead: int = 30) -> str:
     """Forecast GCO costs for the next N days.
 

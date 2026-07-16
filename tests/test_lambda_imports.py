@@ -37,13 +37,13 @@ class TestUniqueModuleNaming:
         assert "_gco_lambda_secret_rotation_handler" in sys.modules
 
     def test_unique_name_for_non_handler_module(self):
-        module = load_lambda_module("proxy-shared", "proxy_utils")
+        module = load_lambda_module("proxy-shared", "proxy_utils", shared_dirs=["tls-shared"])
         assert module.__name__ == "_gco_lambda_proxy_shared_proxy_utils"
         assert "_gco_lambda_proxy_shared_proxy_utils" in sys.modules
 
     def test_different_lambda_dirs_produce_different_modules(self):
         a = load_lambda_module("secret-rotation")
-        b = load_lambda_module("alb-header-validator")
+        b = load_lambda_module("proxy-shared", "proxy_utils", shared_dirs=["tls-shared"])
         assert a is not b
         assert a.__name__ != b.__name__
 

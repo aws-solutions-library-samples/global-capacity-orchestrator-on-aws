@@ -11,6 +11,10 @@ couple of property-based sweeps over the preserved invariants.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import secrets
+import time
 from unittest.mock import patch
 
 import pytest
@@ -22,6 +26,27 @@ from hypothesis import strategies as st
 from kubernetes import config as k8s_config
 
 from gco.services.auth_middleware import AuthenticationMiddleware
+
+
+def _signed_headers(signing_key: str, method: str, target: str, body: str = "") -> dict[str, str]:
+    """Build a unique request envelope matching the trusted proxy contract."""
+    timestamp = str(int(time.time()))
+    nonce = secrets.token_hex(16)
+    content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    canonical = "\n".join(["v1", timestamp, nonce, method.upper(), target, content_hash])
+    signature = hmac.new(
+        signing_key.encode("utf-8"),
+        canonical.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        "x-gco-signature-version": "v1",
+        "x-gco-signature": signature,
+        "x-gco-timestamp": timestamp,
+        "x-gco-nonce": nonce,
+        "x-gco-content-sha256": content_hash,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Fixtures — mirrors test_manifest_processor_extended.py
@@ -65,15 +90,13 @@ def manifest_processor(mock_k8s_config):
 
 @pytest.fixture(autouse=True)
 def reset_auth_cache():
-    """Reset module-level cache before each test."""
+    """Reset signing-key cache, monotonic timers, client, and replay nonces."""
     import gco.services.auth_middleware as auth_module
 
-    auth_module._cached_tokens = set()
-    auth_module._cache_timestamp = 0
+    auth_module.clear_token_cache()
     auth_module._secrets_client = None
     yield
-    auth_module._cached_tokens = set()
-    auth_module._cache_timestamp = 0
+    auth_module.clear_token_cache()
     auth_module._secrets_client = None
 
 
@@ -482,39 +505,45 @@ class TestAllowedKindPreservation:
 
 
 # ==========================================================================
-# Preservation: Auth token validation
+# Preservation: Backend HMAC envelope validation
 # ==========================================================================
 
 
-class TestAuthTokenPreservation:
-    """Auth token validation preserves existing behavior."""
+class TestAuthEnvelopePreservation:
+    """Backend HMAC validation preserves the trusted-proxy boundary."""
 
-    def test_valid_token_accepted(self, app_with_middleware):
-        """Valid tokens still accepted."""
+    def test_valid_signature_accepted(self, app_with_middleware):
+        """A fresh envelope signed by a cached key is accepted."""
         with patch(
             "gco.services.auth_middleware.get_valid_tokens",
-            return_value={"valid-token"},
+            return_value={"valid-key"},
         ):
             client = TestClient(app_with_middleware, raise_server_exceptions=False)
-            response = client.post("/api/v1/manifests", headers={"x-gco-auth-token": "valid-token"})
+            response = client.post(
+                "/api/v1/manifests",
+                headers=_signed_headers("valid-key", "POST", "/api/v1/manifests"),
+            )
             assert response.status_code == 200
 
-    def test_invalid_token_returns_403(self, app_with_middleware):
-        """Invalid tokens still get 403."""
+    def test_signature_from_unknown_key_returns_403(self, app_with_middleware):
+        """A fresh envelope signed by an unknown key still gets 403."""
         with patch(
             "gco.services.auth_middleware.get_valid_tokens",
-            return_value={"valid-token"},
+            return_value={"valid-key"},
         ):
             client = TestClient(app_with_middleware, raise_server_exceptions=True)
             with pytest.raises(HTTPException) as exc_info:
-                client.post("/api/v1/manifests", headers={"x-gco-auth-token": "wrong-token"})
+                client.post(
+                    "/api/v1/manifests",
+                    headers=_signed_headers("wrong-key", "POST", "/api/v1/manifests"),
+                )
             assert exc_info.value.status_code == 403
 
-    def test_missing_token_returns_403(self, app_with_middleware):
-        """Missing tokens still get 403."""
+    def test_missing_signature_returns_403(self, app_with_middleware):
+        """Requests without an envelope still get 403."""
         with patch(
             "gco.services.auth_middleware.get_valid_tokens",
-            return_value={"valid-token"},
+            return_value={"valid-key"},
         ):
             client = TestClient(app_with_middleware, raise_server_exceptions=True)
             with pytest.raises(HTTPException) as exc_info:
@@ -585,16 +614,21 @@ class TestAuthTokenPreservation:
             response = client.get("/api/v1/health")
             assert response.status_code == 200
 
-    def test_token_validation_with_secrets_manager(self, app_with_middleware):
-        """Token validation against cached tokens works."""
+    def test_cached_rotation_keys_sign_distinct_requests(self, app_with_middleware):
+        """Either cached rotation key can authenticate its own unique envelope."""
         with patch(
             "gco.services.auth_middleware.get_valid_tokens",
-            return_value={"token-a", "token-b"},
+            return_value={"key-a", "key-b"},
         ):
             client = TestClient(app_with_middleware)
-            # Both tokens should work
-            r1 = client.post("/api/v1/manifests", headers={"x-gco-auth-token": "token-a"})
-            r2 = client.post("/api/v1/manifests", headers={"x-gco-auth-token": "token-b"})
+            r1 = client.post(
+                "/api/v1/manifests",
+                headers=_signed_headers("key-a", "POST", "/api/v1/manifests"),
+            )
+            r2 = client.post(
+                "/api/v1/manifests",
+                headers=_signed_headers("key-b", "POST", "/api/v1/manifests"),
+            )
             assert r1.status_code == 200
             assert r2.status_code == 200
 

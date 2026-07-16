@@ -2,12 +2,13 @@
 
 import logging
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 import click
 
 from ..config import GCOConfig
-from ..jobs import get_job_manager
+from ..jobs import get_job_manager, resolve_submission_identity
 from ..output import format_job_table, get_output_formatter
 
 logger = logging.getLogger(__name__)
@@ -15,24 +16,16 @@ logger = logging.getLogger(__name__)
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
 
-def _resolve_result_namespace(result: dict[str, Any], fallback: str) -> str:
-    """Pick the right namespace to poll for a submitted job.
+def _resolve_result_namespace(result: Any, fallback: str) -> str:
+    """Pick the submitted Job namespace without assuming mapping resources."""
+    _job_name, namespace = resolve_submission_identity(result, fallback_namespace=fallback)
+    return namespace or fallback
 
-    The manifest API response includes per-resource status dicts with a
-    ``namespace`` field reflecting where the resource actually landed
-    (which may differ from the CLI's ``--namespace`` flag if the manifest
-    declared its own ``metadata.namespace``). Prefer that, then the
-    top-level response envelope, then the CLI-provided fallback.
-    """
-    resources = result.get("resources") or []
-    for resource in resources:
-        ns = resource.get("namespace")
-        if ns:
-            return str(ns)
-    envelope_ns = result.get("namespace")
-    if envelope_ns:
-        return str(envelope_ns)
-    return fallback
+
+def _resolve_result_job_name(result: Any) -> str | None:
+    """Pick the generated/submitted Job name from a submission response."""
+    job_name, _namespace = resolve_submission_identity(result)
+    return job_name
 
 
 @click.group()
@@ -93,9 +86,13 @@ def submit_job(
         else:
             formatter.print_success("Job submitted successfully")
 
-        # Surface any rename warnings from the API response
-        for resource in result.get("resources", []):
-            msg = resource.get("message", "")
+        # Surface any rename warnings from mapping-shaped API resources.
+        # Direct kubectl responses contain strings in ``resources``.
+        resources = result.get("resources", []) if isinstance(result, Mapping) else []
+        for resource in resources:
+            if not isinstance(resource, Mapping):
+                continue
+            msg = str(resource.get("message", ""))
             if "renamed" in msg.lower() or "still running" in msg.lower():
                 formatter.print_warning(msg)
 
@@ -103,7 +100,7 @@ def submit_job(
 
         # Wait for completion if requested
         if wait and not dry_run:
-            job_name = result.get("job_name") or result.get("name")
+            job_name = _resolve_result_job_name(result)
             if job_name:
                 # The API response tells us exactly where the resource landed
                 # (may differ from --namespace since the manifest's own value
@@ -198,14 +195,16 @@ def submit_job_direct(
             formatter.print_success(f"Job submitted directly to {region}")
 
         # Surface any warnings (e.g. job was renamed due to name collision)
-        for warning in result.pop("warnings", []):
-            formatter.print_warning(warning)
+        # without mutating or assuming the shape of the direct result.
+        warnings = result.get("warnings", []) if isinstance(result, Mapping) else []
+        for warning in warnings:
+            formatter.print_warning(str(warning))
 
         formatter.print(result)
 
         # Wait for completion if requested
         if wait and not dry_run:
-            job_name = result.get("job_name") or result.get("name")
+            job_name = _resolve_result_job_name(result)
             if job_name:
                 resolved_ns = _resolve_result_namespace(
                     result, fallback=namespace or config.default_namespace
@@ -843,6 +842,7 @@ def bulk_delete_jobs(
                 namespace=namespace,
                 status=status,
                 older_than_days=older_than_days,
+                label_selector=label_selector,
                 dry_run=dry_run,
             )
 

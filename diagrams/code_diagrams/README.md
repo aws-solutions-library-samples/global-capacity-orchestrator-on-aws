@@ -85,6 +85,20 @@ has multiple charted entry points.
 
 ### `gco/`
 
+- **`gco/services/`**
+  - Backend authentication gate (health bypass, HMAC validation, fail-closed paths) &mdash; `gco/services/auth_middleware.py::AuthenticationMiddleware.dispatch` &mdash; [HTML](./gco/services/auth_middleware.AuthenticationMiddleware_dispatch.html) · [PNG](./gco/services/auth_middleware.AuthenticationMiddleware_dispatch.png)
+  - Manifest API lifecycle (stores + optional central queue worker) &mdash; `gco/services/manifest_api.py::lifespan` &mdash; [HTML](./gco/services/manifest_api.lifespan.html) · [PNG](./gco/services/manifest_api.lifespan.png)
+  - Central queue activation pass (migration, fenced claim, heartbeat, deterministic apply) &mdash; `gco/services/central_queue_worker.py::process_queued_jobs_once` &mdash; [HTML](./gco/services/central_queue_worker.process_queued_jobs_once.html) · [PNG](./gco/services/central_queue_worker.process_queued_jobs_once.png)
+  - Central queue status reconciliation (Kubernetes UID fencing + terminal transitions) &mdash; `gco/services/central_queue_worker.py::reconcile_active_jobs_once` &mdash; [HTML](./gco/services/central_queue_worker.reconcile_active_jobs_once.html) · [PNG](./gco/services/central_queue_worker.reconcile_active_jobs_once.png)
+  - Global queue fenced claim (conditional write + monotonic generation) &mdash; `gco/services/template_store.py::JobStore.claim_job` &mdash; [HTML](./gco/services/template_store.JobStore_claim_job.html) · [PNG](./gco/services/template_store.JobStore_claim_job.png)
+  - Global queue lifecycle transition (lease, status, and Kubernetes UID fencing) &mdash; `gco/services/template_store.py::JobStore.transition_job` &mdash; [HTML](./gco/services/template_store.JobStore_transition_job.html) · [PNG](./gco/services/template_store.JobStore_transition_job.png)
+  - Deterministic queued Job create-or-adopt path &mdash; `gco/services/manifest_processor.py::ManifestProcessor.apply_queued_job` &mdash; [HTML](./gco/services/manifest_processor.ManifestProcessor_apply_queued_job.html) · [PNG](./gco/services/manifest_processor.ManifestProcessor_apply_queued_job.png)
+  - Inference endpoint desired-state reconciliation &mdash; `gco/services/inference_monitor.py::InferenceMonitor._reconcile_endpoint` &mdash; [HTML](./gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint.html) · [PNG](./gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint.png)
+
+- **`gco/services/api_routes/`**
+  - Authenticated inference target resolution (region, readiness, namespace, canary) &mdash; `gco/services/api_routes/inference_proxy.py::_resolve_upstream` &mdash; [HTML](./gco/services/api_routes/inference_proxy._resolve_upstream.html) · [PNG](./gco/services/api_routes/inference_proxy._resolve_upstream.png)
+  - Managed inference reverse proxy (path allowlist, bounded I/O, streaming cleanup) &mdash; `gco/services/api_routes/inference_proxy.py::_proxy` &mdash; [HTML](./gco/services/api_routes/inference_proxy._proxy.html) · [PNG](./gco/services/api_routes/inference_proxy._proxy.png)
+
 - **`gco/stacks/`**
   - Global stack constructor (Global Accelerator, SSM, DynamoDB) &mdash; `gco/stacks/global_stack.py::GCOGlobalStack.__init__` &mdash; [HTML](./gco/stacks/global_stack.GCOGlobalStack___init__.html) · [PNG](./gco/stacks/global_stack.GCOGlobalStack___init__.png)
   - API Gateway stack constructor (REST API + IAM + WAF) &mdash; `gco/stacks/api_gateway_global_stack.py::GCOApiGatewayGlobalStack.__init__` &mdash; [HTML](./gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.html) · [PNG](./gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.png)
@@ -111,12 +125,9 @@ has multiple charted entry points.
   - Mission engine factory (live vs stub dispatcher, sampling, sandbox wiring) &mdash; `gco_mcp/mission/_engine_factory.py::build_engine_dependencies` &mdash; [HTML](./gco_mcp/mission/_engine_factory.build_engine_dependencies.html) · [PNG](./gco_mcp/mission/_engine_factory.build_engine_dependencies.png)
 
 - **`gco_mcp/tools/`**
-  - MCP long-task runner (drain, progress, cancel + SIGTERM/SIGKILL) &mdash; `gco_mcp/tools/_long_task.py::_run_long_task` &mdash; [HTML](./gco_mcp/tools/_long_task._run_long_task.html)
+  - MCP long-task runner (drain, progress, cancel + SIGTERM/SIGKILL) &mdash; `gco_mcp/tools/_long_task.py::_run_long_task` &mdash; [HTML](./gco_mcp/tools/_long_task._run_long_task.html) · [PNG](./gco_mcp/tools/_long_task._run_long_task.png)
 
 ### `lambda/`
-
-- **`lambda/alb-header-validator/`**
-  - ALB Header Validator Lambda &mdash; `lambda/alb-header-validator/handler.py::lambda_handler` &mdash; [HTML](./lambda/alb-header-validator/handler.lambda_handler.html) · [PNG](./lambda/alb-header-validator/handler.lambda_handler.png)
 
 - **`lambda/analytics-cleanup/`**
   - Analytics Cleanup Lambda (stack-delete drain) &mdash; `lambda/analytics-cleanup/handler.py::handler` &mdash; [HTML](./lambda/analytics-cleanup/handler.handler.html) · [PNG](./lambda/analytics-cleanup/handler.handler.png)
@@ -138,6 +149,8 @@ has multiple charted entry points.
 
 - **`lambda/helm-installer/`**
   - Helm Installer Lambda (CFN custom resource) &mdash; `lambda/helm-installer/handler.py::lambda_handler` &mdash; [HTML](./lambda/helm-installer/handler.lambda_handler.html) · [PNG](./lambda/helm-installer/handler.lambda_handler.png)
+  - Helm teardown provider event path (install drain + idempotent execution start) &mdash; `lambda/helm-installer/teardown_provider.py::on_event` &mdash; [HTML](./lambda/helm-installer/teardown_provider.on_event.html) · [PNG](./lambda/helm-installer/teardown_provider.on_event.png)
+  - Helm teardown completion poll (continued fencing + terminal status) &mdash; `lambda/helm-installer/teardown_provider.py::is_complete` &mdash; [HTML](./lambda/helm-installer/teardown_provider.is_complete.html) · [PNG](./lambda/helm-installer/teardown_provider.is_complete.png)
 
 - **`lambda/image-lookup/`**
   - Image-lookup-or-create custom resource Lambda &mdash; `lambda/image-lookup/handler.py::lambda_handler` &mdash; [HTML](./lambda/image-lookup/handler.lambda_handler.html) · [PNG](./lambda/image-lookup/handler.lambda_handler.png)
@@ -145,8 +158,17 @@ has multiple charted entry points.
 - **`lambda/kubectl-applier-simple/`**
   - Kubectl Applier Lambda (CFN custom resource) &mdash; `lambda/kubectl-applier-simple/handler.py::lambda_handler` &mdash; [HTML](./lambda/kubectl-applier-simple/handler.lambda_handler.html) · [PNG](./lambda/kubectl-applier-simple/handler.lambda_handler.png)
 
+- **`lambda/proxy-shared/`**
+  - Proxy request-bound HMAC envelope construction &mdash; `lambda/proxy-shared/proxy_utils.py::build_signed_headers` &mdash; [HTML](./lambda/proxy-shared/proxy_utils.build_signed_headers.html) · [PNG](./lambda/proxy-shared/proxy_utils.build_signed_headers.png)
+
 - **`lambda/regional-api-proxy/`**
   - Regional API Gateway Proxy Lambda &mdash; `lambda/regional-api-proxy/handler.py::lambda_handler` &mdash; [HTML](./lambda/regional-api-proxy/handler.lambda_handler.html) · [PNG](./lambda/regional-api-proxy/handler.lambda_handler.png)
 
 - **`lambda/secret-rotation/`**
   - Secrets Manager Rotation Lambda &mdash; `lambda/secret-rotation/handler.py::lambda_handler` &mdash; [HTML](./lambda/secret-rotation/handler.lambda_handler.html) · [PNG](./lambda/secret-rotation/handler.lambda_handler.png)
+
+- **`lambda/tls-certificate-manager/`**
+  - Backend TLS Certificate Manager Lambda &mdash; `lambda/tls-certificate-manager/handler.py::lambda_handler` &mdash; [HTML](./lambda/tls-certificate-manager/handler.lambda_handler.html) · [PNG](./lambda/tls-certificate-manager/handler.lambda_handler.png)
+
+- **`lambda/tls-shared/`**
+  - Private-root backend TLS trust refresh and verified connection pool &mdash; `lambda/tls-shared/backend_tls.py::get_backend_http_pool` &mdash; [HTML](./lambda/tls-shared/backend_tls.get_backend_http_pool.html) · [PNG](./lambda/tls-shared/backend_tls.get_backend_http_pool.png)

@@ -1496,11 +1496,20 @@ class TestJobsBulkDeleteCommand:
                     "--all-regions",
                     "--status",
                     "failed",
+                    "--label-selector",
+                    "team=ml",
                     "--execute",
                     "-y",
                 ],
             )
             assert result.exit_code == 0
+            mock_jm.bulk_delete_global.assert_called_once_with(
+                namespace=None,
+                status="failed",
+                older_than_days=None,
+                label_selector="team=ml",
+                dry_run=False,
+            )
 
     def test_jobs_bulk_delete_error(self):
         """Test jobs bulk-delete with error."""

@@ -16,6 +16,8 @@ parameters:
   uid: "1000"
   gid: "1000"
   basePath: "/dynamic"
+mountOptions:
+  - tls
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

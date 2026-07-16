@@ -11,15 +11,12 @@ now and what's stuck waiting for room to schedule".
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 import cli_runner
 
-# AWS region IDs: lowercase letters, digits, and hyphens. The bounded
-# length is generous (current AWS regions max out near 14 characters,
-# but local-region constructs like ``gov-east-1`` may grow).
-_REGION_RE = re.compile(r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$")
+from resources._eks import eks_context_for_region, is_valid_region
+
 _KUBECTL_TIMEOUT_SECONDS = 30
 
 
@@ -36,10 +33,13 @@ def _list_nodepools(region: str) -> dict[str, Any]:
 
 
 def _pending_pods(region: str) -> dict[str, Any]:
-    """Return pods currently in ``Pending`` phase across the regional cluster."""
-    cluster_name = f"gco-{region}"
+    """Return pending pods from the explicitly selected regional cluster."""
     try:
-        result = cli_runner.subprocess.run(  # type: ignore[attr-defined] # nosemgrep: dangerous-subprocess-use-audit - shell=False; argv built from validated region literal
+        context_arn = eks_context_for_region(region)
+    except Exception as exc:  # AWS credential/session failures become resource errors
+        return {"error": "unable to resolve EKS context", "detail": str(exc)[:200]}
+    try:
+        result = cli_runner.subprocess.run(  # type: ignore[attr-defined] # nosemgrep: dangerous-subprocess-use-audit - shell=False; argv built from validated region and account-qualified ARN
             [
                 "kubectl",
                 "get",
@@ -50,7 +50,7 @@ def _pending_pods(region: str) -> dict[str, Any]:
                 "-o",
                 "json",
                 "--context",
-                f"arn:aws:eks:{region}:cluster/{cluster_name}",
+                context_arn,
             ],
             capture_output=True,
             text=True,
@@ -74,7 +74,7 @@ def _pending_pods(region: str) -> dict[str, Any]:
 
 def _topology_resource(region: str) -> str:
     """Return a structured snapshot of nodepools plus pending pods for ``region``."""
-    if not _REGION_RE.match(region):
+    if not is_valid_region(region):
         return json.dumps({"error": "invalid region", "value": region})
     summary = {
         "region": region,

@@ -12,8 +12,9 @@ table.
 Two behaviors are pinned:
 
 - Reconciling a split prefill/decode endpoint lays down both role Deployments,
-  the proxy Deployment, the proxy Service, the proxy Ingress, and writes a
-  role-keyed status that breaks the endpoint down by prefill and decode.
+  the proxy Deployment, and an internal ClusterIP proxy Service; removes both
+  historical endpoint-specific Ingress names; and writes a role-keyed status
+  that breaks the endpoint down by prefill and decode.
 - Changing the prefill/decode counts on the persisted spec and reconciling
   again rescales the existing role Deployments to the new counts.
 
@@ -134,6 +135,7 @@ class _FakeNetworkingApi:
 
     def __init__(self) -> None:
         self.ingresses: dict[str, object] = {}
+        self.deleted_ingresses: list[str] = []
         self.network_policies: dict[str, object] = {}
 
     def create_namespaced_network_policy(self, namespace, policy, **_kw):
@@ -153,6 +155,12 @@ class _FakeNetworkingApi:
     def patch_namespaced_ingress(self, name, namespace, ingress, **_kw):
         self.ingresses[name] = ingress
         return ingress
+
+    def delete_namespaced_ingress(self, name, namespace, **_kw):
+        self.deleted_ingresses.append(name)
+        if name not in self.ingresses:
+            raise ApiException(status=404, reason="Not Found")
+        return self.ingresses.pop(name)
 
 
 # ---------------------------------------------------------------------------
@@ -315,14 +323,14 @@ class _RecordingStore:
 # ---------------------------------------------------------------------------
 
 
-def test_split_endpoint_materializes_roles_proxy_and_role_keyed_status():
-    """A split endpoint lays down both roles, the proxy front, and role status.
+def test_split_endpoint_materializes_roles_proxy_service_and_role_keyed_status():
+    """A split endpoint lays down both roles, an internal proxy, and role status.
 
     Reconciling a prefill/decode endpoint through the monitor's entry point
-    creates the ``chat-prefill`` and ``chat-decode`` role Deployments, the
-    ``chat-proxy`` Deployment and Service, and the proxy Ingress that routes
-    ``/v1`` to the proxy. The status written back breaks the endpoint down by
-    role, with each role's desired count reflecting the requested counts.
+    creates the ``chat-prefill`` and ``chat-decode`` role Deployments plus the
+    ``chat-proxy`` Deployment and ClusterIP Service. It creates no direct
+    Ingress and removes both historical names; the status written back breaks
+    the endpoint down by role, with each desired count matching the request.
     """
     apps = _FakeAppsApi()
     core = _FakeCoreApi()
@@ -353,17 +361,19 @@ def test_split_endpoint_materializes_roles_proxy_and_role_keyed_status():
     assert apps.deployments["chat-prefill"].spec.replicas == 2
     assert apps.deployments["chat-decode"].spec.replicas == 3
 
-    # The proxy front is materialized: Deployment, Service, and Ingress.
+    # The proxy front is internal: the shared authenticated platform route
+    # reaches this ClusterIP Service. No endpoint-specific Ingress is created,
+    # and both historical names are cleaned up during an upgrade.
     assert "chat-proxy" in apps.deployments
     assert "chat-proxy" in core.services
-    assert "inference-chat-proxy" in networking.ingresses
-
-    # The proxy Ingress routes only the endpoint-scoped /v1 serving prefix to
-    # the proxy Service, matching the URL clients send (/inference/{name}/...).
-    ingress = networking.ingresses["inference-chat-proxy"]
-    routes = [p for rule in ingress.spec.rules for p in rule.http.paths]
-    assert [r.path for r in routes] == ["/inference/chat/v1"]
-    assert routes[0].backend.service.name == "chat-proxy"
+    proxy_service = core.services["chat-proxy"]
+    assert proxy_service.spec.type == "ClusterIP"
+    assert proxy_service.spec.selector == {
+        "app": "chat-proxy",
+        "gco.io/role": "proxy",
+    }
+    assert networking.ingresses == {}
+    assert networking.deleted_ingresses == ["inference-chat", "inference-chat-proxy"]
 
     # The shared transport ConfigMap landed before the roles.
     assert "chat-mooncake" in core.config_maps

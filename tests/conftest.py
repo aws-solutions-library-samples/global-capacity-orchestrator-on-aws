@@ -433,7 +433,7 @@ def valid_cdk_context():
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
         },
         "job_validation_policy": {
-            "allowed_namespaces": ["default", "gco-jobs"],
+            "allowed_namespaces": ["gco-jobs"],
             "resource_quotas": {
                 "max_cpu_per_manifest": "10",
                 "max_memory_per_manifest": "32Gi",

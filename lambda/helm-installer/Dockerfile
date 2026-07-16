@@ -43,9 +43,15 @@ RUN curl -LO "https://dl.k8s.io/release/v1.36.2/bin/linux/amd64/kubectl" && \
 # (see Dockerfile.dev for the rationale).
 COPY requirements.txt .
 RUN for attempt in 1 2 3; do \
-        pip install --no-cache-dir \
+        if pip install --no-cache-dir \
             --retries 10 --timeout 120 --resume-retries 5 \
-            -r requirements.txt && break; \
+            -r requirements.txt; then \
+            break; \
+        fi; \
+        if [ "${attempt}" -eq 3 ]; then \
+            echo "pip install failed after ${attempt} attempts" >&2; \
+            exit 1; \
+        fi; \
         echo "pip install attempt ${attempt} failed; retrying in 10s..."; \
         sleep 10; \
     done

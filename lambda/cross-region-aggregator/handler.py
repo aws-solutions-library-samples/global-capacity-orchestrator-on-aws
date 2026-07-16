@@ -1,19 +1,22 @@
 """
-Cross-Region Aggregator Lambda for GCO (Global Capacity Orchestrator on AWS).
+Cross-region aggregation through reachable, IAM-authenticated regional APIs.
 
-This Lambda function aggregates data from all regional GCO clusters,
-providing a unified view of jobs, metrics, and status across all regions.
-It queries each regional ALB in parallel and merges the results.
+The centralized Lambda is intentionally not VPC-attached and cannot connect to
+private ALBs in other regions. It discovers each deterministic regional API
+Gateway stack with CloudFormation, signs each request with its execution-role
+credentials, and sends it over the AWS-managed HTTPS endpoint. The regional
+API's VPC Lambda then signs the backend request with the deployment HMAC key and
+uses private-root authenticated TLS to reach that region's internal ALB.
 
 Regional Endpoint Discovery:
-    Regional ALB hostnames are stored in SSM Parameter Store by the
-    GA registration Lambda when each regional stack is deployed.
-    Parameters follow the pattern: /{project_name}/alb-hostname-{region}
+    ``TARGET_REGIONS`` identifies the required regional API stacks. Each stack
+    is named ``{PROJECT_NAME}-regional-api-{region}`` and exposes a
+    ``RegionalApiEndpoint`` output. Discovery fails closed if any configured
+    bridge is absent or invalid.
 
 Environment Variables:
-    SECRET_ARN: ARN of the Secrets Manager secret containing the auth token
-    PROJECT_NAME: Project name for SSM parameter paths (default: gco)
-    GLOBAL_REGION: Region where SSM parameters are stored (default: us-east-2)
+    PROJECT_NAME: Deployment prefix used in regional API stack names.
+    TARGET_REGIONS: JSON list of required workload regions.
 
 API Routes:
     GET /api/v1/global/jobs - List jobs across all regions
@@ -23,14 +26,18 @@ API Routes:
 """
 
 import json
+import logging
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import boto3
 import urllib3
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Flowchart(s) generated from this file:
@@ -40,69 +47,127 @@ import urllib3
 # <pyflowchart-code-diagram> END
 
 
-# Initialize clients
-secrets_client = boto3.client("secretsmanager")
-http = urllib3.PoolManager()
+_LOGGER = logging.getLogger(__name__)
+_REGION_RE = re.compile(r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$")
+_API_ID_RE = re.compile(r"^[a-z0-9]+$")
 
-# Module-level cache
-_cached_secret: str | None = None
+# Regional API Gateway uses the AWS public trust chain. Certificate validation
+# remains mandatory; the private-root pool is used only by each VPC proxy's
+# subsequent ALB connection.
+http = urllib3.PoolManager(cert_reqs="CERT_REQUIRED")
+
 _cached_endpoints: dict[str, str] | None = None
 _endpoints_cache_time: float = 0
-_ENDPOINTS_CACHE_TTL = 300  # 5 minutes — allows picking up new regions
+_ENDPOINTS_CACHE_TTL = 300.0
+_ENDPOINTS_CACHE_MAX_STALE = 3_600.0
 
 
-def get_secret_token() -> str:
-    """Retrieve the authentication token from Secrets Manager."""
-    global _cached_secret
-    if _cached_secret is None:
-        secret_arn = os.environ["SECRET_ARN"]
-        response = secrets_client.get_secret_value(SecretId=secret_arn)
-        secret_data = json.loads(response["SecretString"])
-        _cached_secret = secret_data["token"]
-    return _cached_secret
+def _configured_regions() -> list[str]:
+    """Return the validated, de-duplicated regional bridge list."""
+    try:
+        configured = json.loads(os.environ["TARGET_REGIONS"])
+    except (KeyError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Regional API discovery is not configured") from exc
+    if not isinstance(configured, list) or not configured:
+        raise RuntimeError("Regional API discovery is not configured")
+
+    regions: list[str] = []
+    for value in configured:
+        if not isinstance(value, str) or _REGION_RE.fullmatch(value) is None:
+            raise RuntimeError("Regional API discovery contains an invalid region")
+        if value not in regions:
+            regions.append(value)
+    return regions
+
+
+def _normalize_regional_api_url(value: Any, region: str) -> str:
+    """Validate one stack output as this region's execute-api ``prod`` URL."""
+    parsed = urlsplit(str(value or "").strip())
+    host = parsed.hostname or ""
+    expected_suffixes = (
+        f".execute-api.{region}.amazonaws.com",
+        f".execute-api.{region}.amazonaws.com.cn",
+    )
+    api_id = host.split(".", 1)[0]
+    if (
+        parsed.scheme != "https"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port not in (None, 443)
+        or not any(host.endswith(suffix) for suffix in expected_suffixes)
+        or _API_ID_RE.fullmatch(api_id) is None
+        or parsed.path.rstrip("/") != "/prod"
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError(f"The regional API endpoint for {region} is invalid")
+    return f"https://{host}/prod"
 
 
 def get_regional_endpoints() -> dict[str, str]:
-    """Get the regional ALB endpoints from SSM Parameter Store.
-
-    Discovers all regional ALB hostnames stored by the GA registration Lambda.
-    Parameters are stored as /{project_name}/alb-hostname-{region}.
-
-    Results are cached with a 5-minute TTL so new regions are picked up
-    without requiring a Lambda cold start.
-    """
+    """Discover every required regional API Gateway endpoint via CloudFormation."""
     global _cached_endpoints, _endpoints_cache_time
 
-    # Check cache with TTL
-    if (
-        _cached_endpoints is not None
-        and (time.time() - _endpoints_cache_time) < _ENDPOINTS_CACHE_TTL
-    ):
+    now = time.monotonic()
+    cache_age = now - _endpoints_cache_time
+    if _cached_endpoints is not None and cache_age < _ENDPOINTS_CACHE_TTL:
         return _cached_endpoints
 
-    project_name = os.environ.get("PROJECT_NAME", "gco")
-    global_region = os.environ.get("GLOBAL_REGION", "us-east-2")
+    project_name = os.environ.get("PROJECT_NAME", "gco").strip()
+    if not project_name:
+        raise RuntimeError("Regional API discovery is not configured")
 
-    ssm_client = boto3.client("ssm", region_name=global_region)
     endpoints: dict[str, str] = {}
+    failed_regions: list[str] = []
+    for region in _configured_regions():
+        stack_name = f"{project_name}-regional-api-{region}"
+        try:
+            response = boto3.client("cloudformation", region_name=region).describe_stacks(
+                StackName=stack_name
+            )
+            stacks = response.get("Stacks", [])
+            if len(stacks) != 1:
+                raise RuntimeError("Regional API stack was not found")
+            outputs = {
+                output.get("OutputKey"): output.get("OutputValue")
+                for output in stacks[0].get("Outputs", [])
+            }
+            endpoints[region] = _normalize_regional_api_url(
+                outputs.get("RegionalApiEndpoint"), region
+            )
+        except Exception:
+            failed_regions.append(region)
+            _LOGGER.exception("Regional API discovery failed for %s", region)
 
-    try:
-        # Get all ALB hostname parameters
-        paginator = ssm_client.get_paginator("get_parameters_by_path")
-        for page in paginator.paginate(Path=f"/{project_name}/", Recursive=False):
-            for param in page.get("Parameters", []):
-                name = param["Name"]
-                # Extract region from parameter name like /gco/alb-hostname-us-east-1
-                if "/alb-hostname-" in name:
-                    region = name.split("/alb-hostname-")[-1]
-                    endpoints[region] = param["Value"]
-    except Exception as e:
-        # Log error but don't fail - return empty dict
-        print(f"Error fetching regional endpoints from SSM: {e}")
+    if failed_regions:
+        if _cached_endpoints is not None and cache_age < _ENDPOINTS_CACHE_MAX_STALE:
+            _LOGGER.warning(
+                "Using bounded stale regional API discovery after failures in %s",
+                ", ".join(failed_regions),
+            )
+            return _cached_endpoints
+        raise RuntimeError("One or more regional API bridges are unavailable")
 
     _cached_endpoints = endpoints
-    _endpoints_cache_time = time.time()
+    _endpoints_cache_time = time.monotonic()
     return endpoints
+
+
+def _sigv4_headers(region: str, method: str, url: str, body: str | None) -> dict[str, str]:
+    """Sign one execute-api request with the Lambda execution-role credentials."""
+    credentials = boto3.Session().get_credentials()
+    if credentials is None:
+        raise RuntimeError("Regional API request credentials are unavailable")
+    get_frozen = getattr(credentials, "get_frozen_credentials", None)
+    signing_credentials = get_frozen() if callable(get_frozen) else credentials
+    request = AWSRequest(
+        method=method.upper(),
+        url=url,
+        data=(body or "").encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    SigV4Auth(signing_credentials, "execute-api", region).add_auth(request)
+    return {str(key): str(value) for key, value in request.headers.items()}
 
 
 def query_region(
@@ -113,26 +178,16 @@ def query_region(
     body: str | None = None,
     query_params: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Query a single regional endpoint."""
-    token = get_secret_token()
-
-    # Build URL
-    query_str = ""
-    if query_params:
-        query_str = "?" + urlencode(query_params)
-
-    url = f"http://{endpoint}{path}{query_str}"
-
-    headers = {
-        "X-GCO-Auth-Token": token,
-        "Content-Type": "application/json",
-    }
-
+    """Query one regional bridge over AWS-managed TLS with SigV4 authentication."""
     try:
+        base_url = _normalize_regional_api_url(endpoint, region)
+        query_str = "?" + urlencode(query_params) if query_params else ""
+        url = f"{base_url}{path}{query_str}"
+
         response = http.request(
             method,
             url,
-            headers=headers,
+            headers=_sigv4_headers(region, method, url, body),
             body=body.encode("utf-8") if body else None,
             timeout=10.0,
         )
@@ -142,30 +197,29 @@ def query_region(
             data["_region"] = region
             data["_status"] = "success"
             return data
-        elif response.status == 503:
-            # 503 from health endpoint means degraded, not unreachable
+        if response.status == 503 and path == "/api/v1/health":
+            # The regional health API may deliberately report degraded state
+            # with 503 while still returning a useful authenticated JSON body.
             try:
                 data = json.loads(response.data.decode("utf-8"))
                 data["_region"] = region
                 data["_status"] = "success"
                 return data
             except json.JSONDecodeError, UnicodeDecodeError:
-                return {
-                    "_region": region,
-                    "_status": "error",
-                    "_error": f"HTTP {response.status}",
-                }
-        else:
-            return {
-                "_region": region,
-                "_status": "error",
-                "_error": f"HTTP {response.status}",
-            }
-    except Exception as e:
+                pass
         return {
             "_region": region,
             "_status": "error",
-            "_error": str(e),
+            "_error": f"HTTP {response.status}",
+        }
+    except Exception:
+        # Never expose credentials, certificate state, API identifiers, or
+        # network details through the aggregate API response.
+        _LOGGER.exception("Authenticated regional API request failed for %s", region)
+        return {
+            "_region": region,
+            "_status": "error",
+            "_error": "Authenticated regional API request failed",
         }
 
 
@@ -220,8 +274,9 @@ def aggregate_jobs(
                             "error": result.get("_error", "Unknown error"),
                         }
                     )
-            except Exception as e:
-                errors.append({"region": region, "error": str(e)})
+            except Exception:
+                _LOGGER.exception("Unexpected aggregate-jobs failure for %s", region)
+                errors.append({"region": region, "error": "Regional request failed"})
 
     # Sort by creation time descending
     all_jobs.sort(
@@ -279,8 +334,9 @@ def aggregate_metrics() -> dict[str, Any]:
                             "error": result.get("_error", "Unknown error"),
                         }
                     )
-            except Exception as e:
-                errors.append({"region": region, "error": str(e)})
+            except Exception:
+                _LOGGER.exception("Unexpected aggregate-metrics failure for %s", region)
+                errors.append({"region": region, "error": "Regional request failed"})
 
     return {
         "regions_queried": len(endpoints),
@@ -323,12 +379,13 @@ def aggregate_health() -> dict[str, Any]:
                             "error": result.get("_error"),
                         }
                     )
-            except Exception as e:
+            except Exception:
+                _LOGGER.exception("Unexpected aggregate-health failure for %s", region)
                 region_health.append(
                     {
                         "region": region,
                         "status": "error",
-                        "error": str(e),
+                        "error": "Regional request failed",
                     }
                 )
 
@@ -349,6 +406,7 @@ def bulk_delete_jobs(
     namespace: str | None = None,
     status: str | None = None,
     older_than_days: int | None = None,
+    label_selector: str | None = None,
     dry_run: bool = True,
 ) -> dict[str, Any]:
     """Bulk delete jobs across all regions."""
@@ -363,6 +421,8 @@ def bulk_delete_jobs(
         request_body["status"] = status
     if older_than_days:
         request_body["older_than_days"] = older_than_days
+    if label_selector:
+        request_body["label_selector"] = label_selector
 
     body_str = json.dumps(request_body)
 
@@ -401,8 +461,9 @@ def bulk_delete_jobs(
                             "error": result.get("_error", "Unknown error"),
                         }
                     )
-            except Exception as e:
-                errors.append({"region": region, "error": str(e)})
+            except Exception:
+                _LOGGER.exception("Unexpected bulk-delete failure for %s", region)
+                errors.append({"region": region, "error": "Regional request failed"})
 
     return {
         "dry_run": dry_run,
@@ -443,6 +504,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 namespace=body_data.get("namespace"),
                 status=body_data.get("status"),
                 older_than_days=body_data.get("older_than_days"),
+                label_selector=body_data.get("label_selector"),
                 dry_run=body_data.get("dry_run", True),
             )
         elif path == "/api/v1/global/health":
@@ -461,8 +523,15 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "body": json.dumps(result),
         }
 
-    except Exception as e:
+    except RuntimeError:
+        _LOGGER.exception("Regional aggregation bridge discovery failed")
+        return {
+            "statusCode": 503,
+            "body": json.dumps({"error": "Regional aggregation is temporarily unavailable"}),
+        }
+    except Exception:
+        _LOGGER.exception("Unhandled regional aggregation request failure")
         return {
             "statusCode": 500,
-            "body": json.dumps({"error": "Internal server error", "detail": str(e)}),
+            "body": json.dumps({"error": "Internal server error"}),
         }

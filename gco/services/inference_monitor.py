@@ -8,7 +8,8 @@ Kubernetes resources. Follows a GitOps-style reconciliation pattern:
     DynamoDB (desired state) → inference_monitor → Kubernetes (actual state)
 
 The monitor:
-- Creates Deployments, Services, and Ingress rules for new endpoints
+- Creates and reconciles Deployments, ClusterIP Services, and optional autoscalers
+- Removes legacy endpoint-specific Ingresses so traffic stays on the authenticated route
 - Updates existing deployments when spec changes
 - Scales deployments up/down
 - Tears down resources when endpoints are deleted
@@ -33,6 +34,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from kubernetes import client, config
 from kubernetes.client.models import V1Deployment
@@ -40,6 +42,14 @@ from kubernetes.client.rest import ApiException
 
 from gco.services.inference_store import InferenceEndpointStore
 from gco.services.structured_logging import configure_structured_logging
+
+# <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Flowchart(s) generated from this file:
+#   * ``InferenceMonitor._reconcile_endpoint`` -> ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint.html``
+#     (PNG: ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint.png``)
+# Regenerate with ``python diagrams/code_diagrams/generate.py``.
+# <pyflowchart-code-diagram> END
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,15 +75,14 @@ class NetworkPolicyApplyError(Exception):
 
 
 class AdminApiKeySecretError(Exception):
-    """The proxy admin API key Secret is missing or empty.
+    """A user-named proxy admin API key Secret is missing or empty.
 
-    Raised before the prefill-decode proxy is materialized when the Secret
-    named by ``proxy.admin_api_key_secret`` is absent, names no Secret at all,
-    or carries an empty ``ADMIN_API_KEY`` value. The proxy guards a privileged
-    admin path, so it is never started without a usable key: no proxy
-    Deployment, Service, or Ingress is created. ``secret`` records the Secret
-    name that was looked for (or ``None`` when the spec named none) so callers
-    can surface exactly what was missing.
+    Raised before the prefill-decode proxy is materialized when a Secret named
+    by ``proxy.admin_api_key_secret`` is absent or carries no usable
+    ``ADMIN_API_KEY`` value. An endpoint that names no Secret takes the separate
+    auto-managed path and receives a generated ``{name}-admin`` Secret. The
+    proxy never starts without a usable key, so no proxy Deployment or Service
+    is created on this error. ``secret`` records the rejected Secret name.
     """
 
     def __init__(self, secret: str | None, reason: str):
@@ -181,6 +190,7 @@ INFERENCE_POD_SELECTOR = {"gco.io/type": "inference"}
 # default-deny posture in gco-inference. These mirror the manifest names in
 # 03-network-policies.yaml so a failure can point at the same object an operator
 # would inspect with kubectl.
+NETWORK_POLICY_INFERENCE_INTERNAL = "allow-inference-internal"
 NETWORK_POLICY_POD_TO_MASTER = "allow-pod-to-master"
 NETWORK_POLICY_POD_TO_METADATA = "allow-pod-to-metadata"
 NETWORK_POLICY_RDMA_BOOTSTRAP = "allow-rdma-bootstrap"
@@ -292,18 +302,8 @@ PD_PROXY_STORE_ADDRESS_ENV = "PD_PROXY_STORE_ADDRESS"
 # distinct from the prefill/decode role pods (which carry their own role marker).
 PD_PROXY_ROLE_LABEL = "proxy"
 
-# TCP port the proxy container listens on for the public serving paths.
+# TCP port the proxy container listens on for authenticated serving requests.
 PD_PROXY_PORT = 8000
-
-# Public serving path prefix the proxy fronts. Client traffic to the OpenAI-
-# compatible serving paths (``/v1/...``) is routed to the proxy Service; the
-# proxy's admin path (``/instances/add``) is deliberately kept off this prefix.
-PD_PROXY_PUBLIC_PATH_PREFIX = "/v1"
-
-# The proxy's privileged admin path. It registers and deregisters scaled
-# prefill/decode pods and is never published on the public Ingress; only the
-# serving prefix above is routed in from outside the namespace.
-PD_PROXY_ADMIN_PATH = "/instances/add"
 
 # Environment variable the proxy reads its admin key from, and the data key the
 # backing Kubernetes Secret stores it under. The key value is delivered to the
@@ -748,10 +748,10 @@ class InferenceMonitor:
         self._k8s_timeout = int(os.environ.get("K8S_API_TIMEOUT", "30"))
 
         # Health watchdog: tracks when each endpoint first became unready.
-        # If an endpoint stays unready for longer than _ingress_removal_threshold,
-        # the watchdog removes its Ingress to protect the shared ALB from
-        # having an unhealthy target group (which would make GA mark the
-        # entire ALB as unhealthy, blocking all inference in the region).
+        # Inference traffic uses the shared authenticated proxy, so model
+        # readiness never mutates ALB rules. Once this threshold is exceeded,
+        # reconciliation emits an explicit degraded-state warning while the
+        # proxy continues returning 503 until a replica becomes ready.
         self._unready_since: dict[str, datetime] = {}
         self._ingress_removal_threshold = int(
             os.environ.get("INFERENCE_UNHEALTHY_THRESHOLD_SECONDS", "300")
@@ -963,14 +963,22 @@ class InferenceMonitor:
 
         # Am I a target region?
         if self.region not in target_regions:
-            # If I have resources for this endpoint, clean them up
-            if self._deployment_exists(name, ns):
+            # A classic endpoint uses ``name`` while a split endpoint has only
+            # role/proxy Deployments. Check every materialized shape so removing
+            # a region cannot strand Mooncake resources and their GPU nodes.
+            deployment_names = (
+                name,
+                f"{name}-prefill",
+                f"{name}-decode",
+                f"{name}-proxy",
+            )
+            if any(self._deployment_exists(d, ns) for d in deployment_names):
                 logger.info(
                     "Endpoint %s no longer targets %s, cleaning up",
                     name,
                     self.region,
                 )
-                self._delete_resources(name, ns)
+                self._delete_resources(name, ns, spec if isinstance(spec, dict) else None)
                 self.store.update_region_status(
                     name,
                     self.region,
@@ -981,11 +989,20 @@ class InferenceMonitor:
 
         # Reconcile based on desired state
         if desired_state in ("deploying", "running"):
-            return await self._reconcile_running(name, ns, spec, endpoint)
+            if not isinstance(spec, dict):
+                error = "endpoint spec must be a mapping"
+            elif "mooncake" in spec and "canary" in spec:
+                error = "endpoint spec cannot combine 'mooncake' and 'canary' blocks"
+            else:
+                return await self._reconcile_running(name, ns, spec, endpoint)
+
+            logger.error("Rejecting invalid endpoint %s: %s", name, error)
+            self.store.update_region_status(name, self.region, "failed", error=error)
+            return {"action": "reject", "endpoint": name, "reason": "invalid_spec"}
         if desired_state == "stopped":
             return self._reconcile_stopped(name, ns)
         if desired_state == "deleted":
-            return self._reconcile_deleted(name, ns)
+            return self._reconcile_deleted(name, ns, spec if isinstance(spec, dict) else None)
 
         return None
 
@@ -1022,21 +1039,21 @@ class InferenceMonitor:
             )
             return {"action": "create", "endpoint": name}
 
-        # Deployment exists — ensure Service and Ingress also exist
-        # (they may have been manually deleted or lost during a rollout)
+        # Deployment exists — ensure its Service exists and enforce the
+        # absence of any historical endpoint-specific direct Ingress.
         self._ensure_service(name, namespace, spec)
 
-        # Check readiness before ensuring Ingress — the health watchdog may
-        # remove the Ingress if the endpoint has been unready too long
+        # Inference traffic now flows through the authenticated manifest API
+        # proxy. Remove any legacy direct endpoint Ingress on every pass before
+        # evaluating readiness so an upgrade cannot retain an auth bypass.
         desired_replicas = spec.get("replicas", 1)
         current_replicas = deployment.spec.replicas or 1
         ready_replicas = deployment.status.ready_replicas or 0
 
-        ingress_removed = self._check_health_watchdog(
+        self._ensure_ingress(name, namespace, spec, endpoint)
+        self._check_health_watchdog(
             name, namespace, ready_replicas, desired_replicas, spec, endpoint
         )
-        if not ingress_removed:
-            self._ensure_ingress(name, namespace, spec, endpoint)
 
         if current_replicas != desired_replicas:
             logger.info(
@@ -1070,7 +1087,18 @@ class InferenceMonitor:
             )
             return {"action": "update_image", "endpoint": name, "image": desired_image}
 
-        # Everything is in sync — report status
+        # Reconcile canary first and publish only observed readiness. The
+        # authenticated proxy will not sample canary traffic until this exact
+        # region reports the matching image fully Ready.
+        canary = spec.get("canary")
+        canary_status = None
+        if isinstance(canary, dict):
+            canary_status = self._reconcile_canary(name, namespace, spec, canary, endpoint)
+        else:
+            self._cleanup_canary(name, namespace)
+
+        # Everything is in sync — report status and replace any stale canary
+        # sub-status in the same region-status write.
         state = "running" if ready_replicas >= desired_replicas else "creating"
         self.store.update_region_status(
             name,
@@ -1078,22 +1106,25 @@ class InferenceMonitor:
             state,
             replicas_ready=ready_replicas,
             replicas_desired=desired_replicas,
+            extra={"canary": canary_status} if canary_status is not None else None,
         )
 
-        # Reconcile canary deployment if present
-        canary = spec.get("canary")
-        if canary:
-            self._reconcile_canary(name, namespace, spec, canary, endpoint)
-        else:
-            # No canary — clean up canary resources if they exist
-            self._cleanup_canary(name, namespace)
-
-        # If all replicas are ready and desired_state is "deploying", promote to "running"
+        # Promote desired state only from live local readiness plus explicit
+        # running observations for every *other* target region. The endpoint
+        # object may contain a stale local region_status from before this pass.
         if state == "running" and endpoint.get("desired_state") == "deploying":
-            # Check if all target regions are running
-            all_running = True
-            for r_status in endpoint.get("region_status", {}).values():
-                if isinstance(r_status, dict) and r_status.get("state") != "running":
+            stored_statuses = endpoint.get("region_status", {})
+            target_regions = endpoint.get("target_regions", [])
+            all_running = bool(target_regions)
+            for target_region in target_regions:
+                if target_region == self.region:
+                    continue
+                target_status = (
+                    stored_statuses.get(target_region, {})
+                    if isinstance(stored_statuses, dict)
+                    else {}
+                )
+                if not isinstance(target_status, dict) or target_status.get("state") != "running":
                     all_running = False
                     break
             if all_running:
@@ -1319,9 +1350,9 @@ class InferenceMonitor:
            disaggregated and both modes, a single ``kv_both`` Deployment for
            store mode.
         6. Materialize each present role's autoscaler when autoscaling is on.
-        7. Front disaggregated and both modes with the proxy, its Service, and
-           the public Ingress; give store mode a Service and Ingress over its
-           single Deployment.
+        7. Front disaggregated and both modes with the proxy and its internal
+           Service; give store mode an internal Service. Public traffic always
+           traverses the authenticated manifest API inference proxy.
         8. Write the role-keyed region status.
 
         Returns:
@@ -1444,7 +1475,12 @@ class InferenceMonitor:
         )
         return None
 
-    def _reconcile_deleted(self, name: str, namespace: str) -> dict[str, Any] | None:
+    def _reconcile_deleted(
+        self,
+        name: str,
+        namespace: str,
+        spec: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         """Delete all resources for the endpoint."""
         # Clean up health watchdog tracker
         self._unready_since.pop(name, None)
@@ -1464,7 +1500,7 @@ class InferenceMonitor:
         )
         if any(self._deployment_exists(d, namespace) for d in deployment_names):
             logger.info("Deleting endpoint %s from %s", name, self.region)
-            self._delete_resources(name, namespace)
+            self._delete_resources(name, namespace, spec)
             self.store.update_region_status(name, self.region, "deleted")
             return {"action": "delete", "endpoint": name}
 
@@ -1646,25 +1682,31 @@ class InferenceMonitor:
     # ------------------------------------------------------------------
 
     def _region_of_address(self, address: str) -> str:
-        """Return the region an address resolves to.
+        """Return the address's explicit AWS region or safe local classification.
 
-        Addresses carrying an embedded AWS region token (a host or URI such as
-        ``mooncake-master.us-east-1.example:50051`` or
-        ``http://kv.eu-west-1.internal:8080/metadata``) resolve to that region.
-        A bare in-cluster Service name carries no token and is region-local by
-        construction, so it resolves to the monitor's own region.
-
-        Args:
-            address: A host, ``host:port``, or URI the topology wires to.
-
-        Returns:
-            The region the address resolves to: the embedded region token when
-            one is present, otherwise the monitor's own region.
+        AWS region tokens embedded in the host are authoritative. Bare Service
+        names and Kubernetes ``.svc`` names are local by construction. Any
+        other host without a region token is external and ambiguous, so it is
+        classified as ``"unknown"`` and rejected by regional-scope checks.
         """
-        match = _REGION_TOKEN_PATTERN.search(address or "")
+        candidate = (address or "").strip()
+        if not candidate:
+            return "unknown"
+
+        try:
+            parsed = urlsplit(candidate if "://" in candidate else f"//{candidate}")
+            host = (parsed.hostname or "").rstrip(".").lower()
+        except ValueError:
+            return "unknown"
+        if not host:
+            return "unknown"
+
+        match = _REGION_TOKEN_PATTERN.search(host)
         if match:
             return match.group(0)
-        return self.region
+        if "." not in host or host.endswith((".svc", ".svc.cluster.local")):
+            return self.region
+        return "unknown"
 
     def _resolve_regional_scope(
         self,
@@ -1715,7 +1757,7 @@ class InferenceMonitor:
         addresses: list[str] = []
         if "prefill" in roles or "decode" in roles:
             for role in ("prefill", "decode"):
-                addresses.append(f"{name}-{role}.{ns}")
+                addresses.append(f"{name}-{role}.{ns}.svc.cluster.local")
 
         # The shared master and metadata server the pods reach. These come from
         # the own-region resolution, but are checked here so a foreign address
@@ -1750,10 +1792,9 @@ class InferenceMonitor:
                 seen.add(address)
                 ordered.append(address)
 
+        resolved_regions = [(address, self._region_of_address(address)) for address in ordered]
         out_of_region = [
-            (address, self._region_of_address(address))
-            for address in ordered
-            if self._region_of_address(address) != self.region
+            (address, region) for address, region in resolved_regions if region != self.region
         ]
 
         if out_of_region:
@@ -2092,8 +2133,12 @@ class InferenceMonitor:
 
         Alongside the default-deny posture in ``gco-inference`` (defined in
         ``03-network-policies.yaml`` and never touched here), this maintains
-        three widening allow rules with create-if-absent semantics:
+        four widening allow rules with create-if-absent semantics:
 
+        - ``allow-inference-internal`` — managed inference pods exchange TCP
+          traffic and may reach the shared master's two fixed ports. This
+          permits proxy-to-role serving and bootstrap traffic while excluding
+          unselected sources such as the ALB.
         - ``allow-pod-to-master`` — inference pods reach the shared master RPC
           port (:data:`MOONCAKE_MASTER_RPC_PORT`).
         - ``allow-pod-to-metadata`` — inference pods reach the shared metadata
@@ -2131,8 +2176,45 @@ class InferenceMonitor:
         master_selector = client.V1LabelSelector(match_labels={"app": MOONCAKE_MASTER_SERVICE})
         inference_selector = client.V1LabelSelector(match_labels=INFERENCE_POD_SELECTOR)
         inference_peer = [client.V1NetworkPolicyPeer(pod_selector=inference_selector)]
+        master_peer = [client.V1NetworkPolicyPeer(pod_selector=master_selector)]
+        all_tcp = [client.V1NetworkPolicyPort(protocol="TCP")]
 
         policies = [
+            (
+                NETWORK_POLICY_INFERENCE_INTERNAL,
+                client.V1NetworkPolicy(
+                    metadata=client.V1ObjectMeta(
+                        name=NETWORK_POLICY_INFERENCE_INTERNAL, namespace=ns, labels=labels
+                    ),
+                    spec=client.V1NetworkPolicySpec(
+                        pod_selector=inference_selector,
+                        policy_types=["Ingress", "Egress"],
+                        ingress=[
+                            client.V1NetworkPolicyIngressRule(
+                                _from=inference_peer,
+                                ports=all_tcp,
+                            )
+                        ],
+                        egress=[
+                            client.V1NetworkPolicyEgressRule(
+                                to=inference_peer,
+                                ports=all_tcp,
+                            ),
+                            client.V1NetworkPolicyEgressRule(
+                                to=master_peer,
+                                ports=[
+                                    client.V1NetworkPolicyPort(
+                                        protocol="TCP", port=MOONCAKE_MASTER_RPC_PORT
+                                    ),
+                                    client.V1NetworkPolicyPort(
+                                        protocol="TCP", port=MOONCAKE_METADATA_PORT
+                                    ),
+                                ],
+                            ),
+                        ],
+                    ),
+                ),
+            ),
             (
                 NETWORK_POLICY_POD_TO_MASTER,
                 client.V1NetworkPolicy(
@@ -2726,29 +2808,24 @@ class InferenceMonitor:
 
         Disaggregated and ``both`` modes are fronted by a lightweight proxy that
         runs the residency check and dispatches each request to the prefill and
-        decode pods. This creates three objects, all keyed off ``{name}-proxy``:
+        decode pods. It materializes a ConfigMap, a proxy Deployment with at
+        least one replica, and a Service whose selector matches only the proxy
+        pods. The shared ``gco-system`` Ingress routes public requests through
+        the authenticated manifest API, which then reaches this internal
+        Service; endpoint-specific Ingresses are removed as an unsafe legacy
+        path.
 
-        - a proxy Deployment with at least one replica, running the proxy image
-          named by ``mooncake.proxy.image`` and carrying the environment from
-          :func:`build_pd_proxy_config`;
-        - a Service whose selector matches only the proxy pods (the
-          ``{name}-proxy`` app label plus the proxy role marker), so it never
-          fans out to prefill or decode pods; and
-        - an Ingress that routes the public ``/v1/*`` serving paths to that
-          Service.
-
-        Before any of those are created, the admin key Secret named by
-        ``mooncake.proxy.admin_api_key_secret`` is checked: it must exist and
-        carry a non-empty ``ADMIN_API_KEY`` value. The proxy guards a
-        privileged admin path, so when the Secret is absent, names no Secret,
-        or holds an empty key, no proxy resource is created and the deployment
-        is rejected. The key itself reaches the container only as a Secret
-        reference at pod start — it is never written to the spec or a command
-        argument.
+        Before those resources are created, a user-named
+        ``mooncake.proxy.admin_api_key_secret`` is verified to contain a usable
+        ``ADMIN_API_KEY``. When no Secret is named, the monitor auto-provisions
+        a generated ``{name}-admin`` Secret instead. A missing or empty named
+        Secret rejects the proxy; the key itself reaches the container only as
+        a Secret reference at pod start and is never written to the spec or a
+        command argument.
 
         Creation is idempotent at the API boundary: an already-present Deployment
-        or Service is left in place, and an already-present Ingress is patched to
-        the desired routing.
+        or Service is left in place, and historical direct Ingresses are deleted
+        if present.
 
         Args:
             name: The endpoint name.
@@ -2803,8 +2880,8 @@ class InferenceMonitor:
         }
 
         # The proxy reaches prefill and decode through their per-role Services
-        # and listens on PD_PROXY_PORT for the public serving paths. Routing via
-        # the Services means only Ready role pods receive traffic.
+        # and listens on PD_PROXY_PORT for requests from the authenticated API
+        # proxy. Routing via Services means only Ready role pods receive traffic.
         port = spec.get("port", 8000)
         container_env.extend(
             [
@@ -3012,92 +3089,17 @@ class InferenceMonitor:
     def _update_proxy_ingress(
         self, name: str, proxy_name: str, namespace: str, endpoint: dict[str, Any]
     ) -> None:
-        """Create or update the public Ingress that routes the proxy's serving paths.
+        """Remove legacy direct public Ingresses for a split-topology endpoint.
 
-        Only the OpenAI-compatible serving paths are published, and they are
-        scoped to the endpoint's own ingress prefix: the rule routes
-        ``{ingress_path}/v1`` (for example ``/inference/{name}/v1``) to the
-        proxy Service. Scoping to the endpoint prefix is what makes a
-        disaggregated endpoint reachable — every client request arrives at
-        ``/inference/{name}/...`` (through Global Accelerator and the shared
-        ALB), exactly as it does for a single-Deployment endpoint, so a bare
-        ``/v1`` rule would neither match the client URL nor stay isolated from
-        other endpoints sharing the ALB. The proxy's privileged admin path
-        (``{ingress_path}/instances/add``) is deliberately not among the
-        published paths, so an admin request arriving from outside the namespace
-        never matches an Ingress rule and is never forwarded to the proxy. The
-        Ingress merges onto the shared ALB through the ``alb`` ingress class,
-        matching the legacy single-Deployment Ingress convention.
+        The shared ``gco-system/gco-ingress`` sends ``/inference/*`` to the
+        manifest API, where the API Gateway-injected token is validated before
+        this internal proxy Service is reached. Keeping an endpoint-specific
+        Ingress would create a longer ALB path rule and silently bypass that
+        authentication boundary, so upgrades delete both historical names.
         """
-        # The public Ingress carries only the serving prefix, scoped to this
-        # endpoint's ingress path so it matches the client URL
-        # (``/inference/{name}/v1/...``) and stays isolated from other endpoints
-        # on the shared ALB. The proxy's admin path is filtered out so no future
-        # edit to the published set can route it in from outside the namespace.
-        ingress_path = endpoint.get("ingress_path", f"/inference/{name}")
-        serving_prefix = f"{ingress_path}{PD_PROXY_PUBLIC_PATH_PREFIX}"
-        admin_prefix = f"{ingress_path}{PD_PROXY_ADMIN_PATH}"
-        published_paths = [p for p in [serving_prefix] if p != admin_prefix]
-        ingress = client.V1Ingress(
-            metadata=client.V1ObjectMeta(
-                name=f"inference-{proxy_name}",
-                namespace=namespace,
-                labels={
-                    "app": proxy_name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                    "gco.io/role": PD_PROXY_ROLE_LABEL,
-                },
-                annotations={
-                    "alb.ingress.kubernetes.io/healthcheck-path": serving_prefix,
-                    "alb.ingress.kubernetes.io/healthcheck-interval-seconds": "15",
-                },
-            ),
-            spec=client.V1IngressSpec(
-                ingress_class_name="alb",
-                rules=[
-                    client.V1IngressRule(
-                        http=client.V1HTTPIngressRuleValue(
-                            paths=[
-                                client.V1HTTPIngressPath(
-                                    path=published_path,
-                                    path_type="Prefix",
-                                    backend=client.V1IngressBackend(
-                                        service=client.V1IngressServiceBackend(
-                                            name=proxy_name,
-                                            port=client.V1ServiceBackendPort(number=80),
-                                        ),
-                                    ),
-                                )
-                                for published_path in published_paths
-                            ]
-                        )
-                    )
-                ],
-            ),
-        )
-
-        try:
-            self.networking_v1.create_namespaced_ingress(
-                namespace, ingress, _request_timeout=self._k8s_timeout
-            )
-            logger.info(
-                "Created proxy ingress for %s routing %s to %s",
-                name,
-                serving_prefix,
-                proxy_name,
-            )
-        except ApiException as e:
-            if e.status == 409:
-                self.networking_v1.patch_namespaced_ingress(
-                    f"inference-{proxy_name}",
-                    namespace,
-                    ingress,
-                    _request_timeout=self._k8s_timeout,
-                )
-                logger.info("Updated proxy ingress for %s", name)
-            else:
-                raise
+        del endpoint  # Routing metadata is consumed by the authenticated proxy.
+        self._delete_legacy_inference_ingress(f"inference-{name}", namespace)
+        self._delete_legacy_inference_ingress(f"inference-{proxy_name}", namespace)
 
     def _create_service(self, name: str, namespace: str, spec: dict[str, Any]) -> None:
         """Create a Kubernetes Service for an inference endpoint."""
@@ -3150,6 +3152,17 @@ class InferenceMonitor:
             else:
                 raise
 
+    def _delete_legacy_inference_ingress(self, ingress_name: str, namespace: str) -> None:
+        """Delete one historical endpoint-specific public Ingress idempotently."""
+        try:
+            self.networking_v1.delete_namespaced_ingress(
+                ingress_name, namespace, _request_timeout=self._k8s_timeout
+            )
+            logger.info("Removed legacy direct inference ingress %s/%s", namespace, ingress_name)
+        except ApiException as e:
+            if e.status != 404:
+                raise
+
     def _ensure_ingress(
         self,
         name: str,
@@ -3157,17 +3170,8 @@ class InferenceMonitor:
         spec: dict[str, Any],
         endpoint: dict[str, Any],
     ) -> None:
-        """Ensure the Ingress exists, recreating it if missing."""
-        try:
-            self.networking_v1.read_namespaced_ingress(
-                f"inference-{name}", namespace, _request_timeout=self._k8s_timeout
-            )
-        except ApiException as e:
-            if e.status == 404:
-                logger.warning("Ingress for %s missing, recreating", name)
-                self._update_ingress_rule(name, namespace, spec, endpoint)
-            else:
-                raise
+        """Enforce the absence of a direct public endpoint Ingress."""
+        self._update_ingress_rule(name, namespace, spec, endpoint)
 
     def _update_ingress_rule(
         self,
@@ -3176,72 +3180,9 @@ class InferenceMonitor:
         spec: dict[str, Any],
         endpoint: dict[str, Any],
     ) -> None:
-        """Create or update an Ingress for the inference endpoint.
-
-        The Ingress is created in the same namespace as the Service and pods.
-        IngressClassParams with group.name merges all Ingresses onto a single
-        shared ALB regardless of namespace.
-        """
-        ingress_path = endpoint.get("ingress_path", f"/inference/{name}")
-        image = spec.get("image", "")
-        image_lower = image.lower()
-        root_path_images = ("vllm", "text-generation-inference", "tgi")
-        uses_root_path = any(tag in image_lower for tag in root_path_images)
-        base_health = spec.get("health_check_path", "/health")
-        health_path = f"/inference/{name}{base_health}" if uses_root_path else base_health
-
-        ingress = client.V1Ingress(
-            metadata=client.V1ObjectMeta(
-                name=f"inference-{name}",
-                namespace=namespace,
-                labels={
-                    "app": name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                },
-                annotations={
-                    "alb.ingress.kubernetes.io/healthcheck-path": health_path,
-                    "alb.ingress.kubernetes.io/healthcheck-interval-seconds": "15",
-                },
-            ),
-            spec=client.V1IngressSpec(
-                ingress_class_name="alb",
-                rules=[
-                    client.V1IngressRule(
-                        http=client.V1HTTPIngressRuleValue(
-                            paths=[
-                                client.V1HTTPIngressPath(
-                                    path=ingress_path,
-                                    path_type="Prefix",
-                                    backend=client.V1IngressBackend(
-                                        service=client.V1IngressServiceBackend(
-                                            name=name,
-                                            port=client.V1ServiceBackendPort(
-                                                number=80,
-                                            ),
-                                        ),
-                                    ),
-                                )
-                            ]
-                        )
-                    )
-                ],
-            ),
-        )
-
-        try:
-            self.networking_v1.create_namespaced_ingress(
-                namespace, ingress, _request_timeout=self._k8s_timeout
-            )
-            logger.info("Created ingress for %s at %s", name, ingress_path)
-        except ApiException as e:
-            if e.status == 409:
-                self.networking_v1.patch_namespaced_ingress(
-                    f"inference-{name}", namespace, ingress, _request_timeout=self._k8s_timeout
-                )
-                logger.info("Updated ingress for %s", name)
-            else:
-                raise
+        """Remove the legacy rule that bypassed API Gateway authentication."""
+        del spec, endpoint
+        self._delete_legacy_inference_ingress(f"inference-{name}", namespace)
 
     def _check_health_watchdog(
         self,
@@ -3252,36 +3193,22 @@ class InferenceMonitor:
         spec: dict[str, Any],
         endpoint: dict[str, Any],
     ) -> bool:
-        """Health watchdog: remove Ingress for persistently unhealthy endpoints.
+        """Track prolonged unavailability without changing shared ALB rules.
 
-        If an endpoint has zero ready replicas for longer than the configured
-        threshold, the watchdog removes its Ingress to protect the shared ALB.
-        Global Accelerator considers an ALB unhealthy if ANY target group has
-        zero healthy targets, so one bad endpoint can block all inference
-        traffic to the region.
-
-        When the endpoint recovers (ready_replicas > 0), the Ingress is
-        automatically re-created by _ensure_ingress on the next cycle.
-
-        Returns:
-            True if the Ingress was removed (caller should skip _ensure_ingress).
-            False if the endpoint is healthy or still within the grace period.
+        The authenticated inference proxy is the ALB's only inference target,
+        so an unhealthy model no longer creates an unhealthy ALB target group.
+        The historical threshold remains useful for explicit degraded logging
+        and for compatibility with callers that inspect this boolean.
         """
+        del namespace, spec, endpoint
         if ready_replicas > 0:
-            # Endpoint is healthy — clear the tracker
             if name in self._unready_since:
-                logger.info(
-                    "Endpoint %s recovered, re-enabling Ingress",
-                    name,
-                )
+                logger.info("Endpoint %s recovered", name)
                 del self._unready_since[name]
             return False
 
-        # Endpoint has zero ready replicas
         now = datetime.now(UTC)
-
         if name not in self._unready_since:
-            # First time seeing this endpoint as unready — start the clock
             self._unready_since[name] = now
             logger.warning(
                 "Endpoint %s has 0/%d ready replicas, starting health watchdog timer",
@@ -3290,40 +3217,17 @@ class InferenceMonitor:
             )
             return False
 
-        # Check how long it's been unready
         unready_duration = (now - self._unready_since[name]).total_seconds()
-
-        if unready_duration < self._ingress_removal_threshold:
-            remaining = self._ingress_removal_threshold - unready_duration
+        threshold_exceeded = unready_duration >= self._ingress_removal_threshold
+        if threshold_exceeded:
             logger.warning(
-                "Endpoint %s unready for %ds (removing Ingress in %ds)",
-                name,
-                int(unready_duration),
-                int(remaining),
-            )
-            return False
-
-        # Threshold exceeded — remove the Ingress to protect the ALB
-        ingress_name = f"inference-{name}"
-        try:
-            self.networking_v1.delete_namespaced_ingress(
-                ingress_name, namespace, _request_timeout=self._k8s_timeout
-            )
-            logger.warning(
-                "WATCHDOG: Removed Ingress for unhealthy endpoint %s "
-                "(unready for %ds > %ds threshold). "
-                "Ingress will be re-created when the endpoint recovers.",
+                "WATCHDOG: Endpoint %s has been unavailable for %ds (threshold %ds); "
+                "the authenticated proxy will return 503 until it recovers",
                 name,
                 int(unready_duration),
                 self._ingress_removal_threshold,
             )
-        except ApiException as e:
-            if e.status == 404:
-                logger.debug("Ingress for %s already removed", name)
-            else:
-                logger.error("Failed to remove Ingress for %s: %s", name, e)
-
-        return True
+        return threshold_exceeded
 
     def _scale_deployment(self, name: str, namespace: str, replicas: int) -> None:
         """Scale a deployment to the desired replica count."""
@@ -3354,42 +3258,80 @@ class InferenceMonitor:
         spec: dict[str, Any],
         canary: dict[str, Any],
         endpoint: dict[str, Any],
-    ) -> None:
-        """Reconcile canary deployment and weighted ingress routing.
+    ) -> dict[str, Any]:
+        """Reconcile a classic canary and return observed readiness for routing."""
+        canary_image_value = canary.get("image")
+        if not isinstance(canary_image_value, str) or not canary_image_value.strip():
+            raise ValueError("canary.image must be a non-empty string")
+        canary_image = canary_image_value.strip()
 
-        Creates a canary deployment and service alongside the primary,
-        then updates the ingress to use ALB action-based weighted routing.
-        """
-        canary_name = f"{name}-canary"
-        canary_image = canary.get("image", "")
         canary_replicas = canary.get("replicas", 1)
+        if (
+            not isinstance(canary_replicas, int)
+            or isinstance(canary_replicas, bool)
+            or canary_replicas < 1
+        ):
+            raise ValueError("canary.replicas must be a positive integer")
+
         canary_weight = canary.get("weight", 10)
+        if (
+            not isinstance(canary_weight, int)
+            or isinstance(canary_weight, bool)
+            or not 1 <= canary_weight <= 99
+        ):
+            raise ValueError("canary.weight must be an integer between 1 and 99")
+
+        canary_name = f"{name}-canary"
         primary_weight = 100 - canary_weight
 
-        # Build canary spec (same as primary but with canary image/replicas)
         canary_spec = dict(spec)
         canary_spec["image"] = canary_image
         canary_spec["replicas"] = canary_replicas
-        # Remove canary field from the canary spec to avoid recursion
         canary_spec.pop("canary", None)
+        # A canary image is explicit and global. Retaining the primary's
+        # region_image_uris would silently deploy the old regional image.
+        canary_spec.pop("region_image_uris", None)
 
-        # Create or update canary deployment
-        canary_deployment = self._get_deployment(canary_name, namespace)
-        if canary_deployment is None:
+        deployment = self._get_deployment(canary_name, namespace)
+        state = "creating"
+        ready_replicas = 0
+        if deployment is None:
             logger.info("Creating canary deployment %s with image %s", canary_name, canary_image)
             self._create_deployment(canary_name, namespace, canary_spec)
             self._create_service(canary_name, namespace, canary_spec)
         else:
-            # Update image if changed
-            current_image = self._get_deployment_image(canary_deployment)
+            self._ensure_service(canary_name, namespace, canary_spec)
+            current_image = self._get_deployment_image(deployment)
+            current_replicas = deployment.spec.replicas or 1
+            ready_replicas = deployment.status.ready_replicas or 0
             if current_image != canary_image:
                 self._update_deployment_image(canary_name, namespace, canary_image)
-            # Update replicas if changed
-            if (canary_deployment.spec.replicas or 1) != canary_replicas:
+                ready_replicas = 0
+                state = "updating"
+            elif current_replicas != canary_replicas:
                 self._scale_deployment(canary_name, namespace, canary_replicas)
+                ready_replicas = min(ready_replicas, canary_replicas)
+                state = "updating"
+            elif ready_replicas >= canary_replicas:
+                state = "running"
 
-        # Update ingress with weighted routing via ALB actions annotation
-        self._update_canary_ingress(name, namespace, spec, endpoint, primary_weight, canary_weight)
+        # Remove any historical ALB weighted-routing rule. The authenticated
+        # proxy consumes the observed canary status returned here.
+        self._update_canary_ingress(
+            name,
+            namespace,
+            spec,
+            endpoint,
+            primary_weight,
+            canary_weight,
+        )
+        return {
+            "state": state,
+            "image": canary_image,
+            "weight": canary_weight,
+            "replicas_ready": ready_replicas,
+            "replicas_desired": canary_replicas,
+        }
 
     def _update_canary_ingress(
         self,
@@ -3400,100 +3342,12 @@ class InferenceMonitor:
         primary_weight: int,
         canary_weight: int,
     ) -> None:
-        """Update ingress with ALB weighted target group routing."""
-        import json as _json
-
-        ingress_path = endpoint.get("ingress_path", f"/inference/{name}")
-        image = spec.get("image", "")
-        image_lower = image.lower()
-        root_path_images = ("vllm", "text-generation-inference", "tgi")
-        uses_root_path = any(tag in image_lower for tag in root_path_images)
-        base_health = spec.get("health_check_path", "/health")
-        health_path = f"/inference/{name}{base_health}" if uses_root_path else base_health
-
-        # ALB weighted routing via forward action annotation
-        forward_config = _json.dumps(
-            {
-                "type": "forward",
-                "forwardConfig": {
-                    "targetGroups": [
-                        {
-                            "serviceName": name,
-                            "servicePort": 80,
-                            "weight": primary_weight,
-                        },
-                        {
-                            "serviceName": f"{name}-canary",
-                            "servicePort": 80,
-                            "weight": canary_weight,
-                        },
-                    ]
-                },
-            }
-        )
-
-        ingress = client.V1Ingress(
-            metadata=client.V1ObjectMeta(
-                name=f"inference-{name}",
-                namespace=namespace,
-                labels={
-                    "app": name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                    "gco.io/canary": "true",
-                },
-                annotations={
-                    "alb.ingress.kubernetes.io/healthcheck-path": health_path,
-                    "alb.ingress.kubernetes.io/healthcheck-interval-seconds": "15",
-                    "alb.ingress.kubernetes.io/actions.weighted-routing": forward_config,
-                },
-            ),
-            spec=client.V1IngressSpec(
-                ingress_class_name="alb",
-                rules=[
-                    client.V1IngressRule(
-                        http=client.V1HTTPIngressRuleValue(
-                            paths=[
-                                client.V1HTTPIngressPath(
-                                    path=ingress_path,
-                                    path_type="Prefix",
-                                    backend=client.V1IngressBackend(
-                                        service=client.V1IngressServiceBackend(
-                                            name="weighted-routing",
-                                            port=client.V1ServiceBackendPort(
-                                                name="use-annotation",
-                                            ),
-                                        ),
-                                    ),
-                                )
-                            ]
-                        )
-                    )
-                ],
-            ),
-        )
-
-        try:
-            self.networking_v1.patch_namespaced_ingress(
-                f"inference-{name}", namespace, ingress, _request_timeout=self._k8s_timeout
-            )
-            logger.info(
-                "Updated ingress for %s: primary=%d%% canary=%d%%",
-                name,
-                primary_weight,
-                canary_weight,
-            )
-        except ApiException as e:
-            if e.status == 404:
-                self.networking_v1.create_namespaced_ingress(
-                    namespace, ingress, _request_timeout=self._k8s_timeout
-                )
-                logger.info("Created canary ingress for %s", name)
-            else:
-                raise
+        """Remove the legacy unauthenticated ALB canary rule."""
+        del spec, endpoint, primary_weight, canary_weight
+        self._delete_legacy_inference_ingress(f"inference-{name}", namespace)
 
     def _cleanup_canary(self, name: str, namespace: str) -> None:
-        """Remove canary deployment, service, and restore primary-only ingress."""
+        """Remove a canary Deployment and Service."""
         canary_name = f"{name}-canary"
 
         # Delete canary deployment
@@ -3516,17 +3370,22 @@ class InferenceMonitor:
             if e.status != 404:
                 logger.error("Failed to delete canary service %s: %s", canary_name, e)
 
-    def _delete_resources(self, name: str, namespace: str) -> None:
-        """Delete all Kubernetes resources for an endpoint.
+    def _delete_resources(
+        self,
+        name: str,
+        namespace: str,
+        spec: dict[str, Any] | None = None,
+    ) -> None:
+        """Delete all Kubernetes resources owned by an endpoint.
 
         Covers both the single-Deployment endpoint and the Mooncake role-split
-        topology — the ``name-prefill``/``name-decode`` workers, the
-        ``name-proxy`` PD proxy, the per-role HPAs, and the ``name-mooncake``
-        transport ConfigMap — so deleting a disaggregated endpoint does not
-        leave orphaned Deployments (and the GPU nodes they hold) behind. Each
-        delete is idempotent: a 404 means that object is not used by this
-        endpoint's mode and is ignored. The shared per-region ``mooncake-master``
-        is deliberately NOT deleted here, since it is shared across endpoints.
+        topology: role/proxy Deployments and Services, native HPAs or KEDA
+        ScaledObjects, transport/proxy ConfigMaps, historical direct Ingresses,
+        and the generated proxy admin Secret when the endpoint did not name a
+        user-managed Secret. Each delete is idempotent: a 404 means that object
+        is not used by this endpoint's mode and is ignored. The shared regional
+        ``mooncake-master`` is deliberately NOT deleted because other endpoints
+        may still depend on it.
         """
         # Delete canary resources first
         self._cleanup_canary(name, namespace)
@@ -3545,8 +3404,8 @@ class InferenceMonitor:
                 if e.status != 404:
                     logger.error("Failed to delete deployment %s: %s", deployment_name, e)
 
-        # Services: the single-instance endpoint Service and the PD proxy Service.
-        for service_name in (name, proxy_name):
+        # Services: classic/store, split-role backends, and the PD proxy.
+        for service_name in (name, f"{name}-prefill", f"{name}-decode", proxy_name):
             try:
                 self.core_v1.delete_namespaced_service(
                     service_name, namespace, _request_timeout=self._k8s_timeout
@@ -3556,7 +3415,8 @@ class InferenceMonitor:
                 if e.status != 404:
                     logger.error("Failed to delete service %s: %s", service_name, e)
 
-        # Ingresses: the single-instance endpoint Ingress and the PD proxy Ingress.
+        # Remove both historical endpoint-specific Ingress names. Current
+        # requests use only the shared authenticated platform Ingress.
         for ingress_name in (f"inference-{name}", f"inference-{proxy_name}"):
             try:
                 self.networking_v1.delete_namespaced_ingress(
@@ -3577,33 +3437,63 @@ class InferenceMonitor:
                 if e.status != 404:
                     logger.error("Failed to delete HPA %s: %s", hpa_name, e)
 
-        # Mooncake transport ConfigMap (a no-op 404 for non-Mooncake endpoints).
-        # The shared per-region mooncake-master is intentionally left in place.
-        try:
-            self.core_v1.delete_namespaced_config_map(
-                f"{name}-mooncake", namespace, _request_timeout=self._k8s_timeout
-            )
-            logger.info("Deleted configmap %s/%s-mooncake", namespace, name)
-        except ApiException as e:
-            if e.status != 404:
-                logger.error("Failed to delete configmap %s-mooncake: %s", name, e)
+        # Per-endpoint Mooncake transport and bundled PD-proxy program. The
+        # shared regional mooncake-master is intentionally left in place.
+        for config_map_name in (f"{name}-mooncake", f"{name}-pd-proxy"):
+            try:
+                self.core_v1.delete_namespaced_config_map(
+                    config_map_name, namespace, _request_timeout=self._k8s_timeout
+                )
+                logger.info("Deleted configmap %s/%s", namespace, config_map_name)
+            except ApiException as e:
+                if e.status != 404:
+                    logger.error("Failed to delete configmap %s: %s", config_map_name, e)
 
-        # Delete KEDA ScaledObject (the GPU-autoscaling path materializes one of
-        # these in place of a native HPA). Best-effort: absence is the common
-        # case for cpu/memory-only endpoints.
-        try:
-            client.CustomObjectsApi().delete_namespaced_custom_object(
-                group=KEDA_API_GROUP,
-                version=KEDA_API_VERSION,
-                namespace=namespace,
-                plural=KEDA_SCALEDOBJECT_PLURAL,
-                name=name,
-                _request_timeout=self._k8s_timeout,
-            )
-            logger.info("Deleted KEDA ScaledObject for %s", name)
-        except ApiException as e:
-            if e.status != 404:
-                logger.error("Failed to delete KEDA ScaledObject for %s: %s", name, e)
+        # GPU metrics use KEDA instead of native HPAs. Remove the classic and
+        # both role-scoped names; absent objects are the common case.
+        custom_objects = client.CustomObjectsApi()
+        for scaled_object_name in (name, f"{name}-prefill", f"{name}-decode"):
+            try:
+                custom_objects.delete_namespaced_custom_object(
+                    group=KEDA_API_GROUP,
+                    version=KEDA_API_VERSION,
+                    namespace=namespace,
+                    plural=KEDA_SCALEDOBJECT_PLURAL,
+                    name=scaled_object_name,
+                    _request_timeout=self._k8s_timeout,
+                )
+                logger.info("Deleted KEDA ScaledObject for %s", scaled_object_name)
+            except ApiException as e:
+                if e.status != 404:
+                    logger.error(
+                        "Failed to delete KEDA ScaledObject for %s: %s",
+                        scaled_object_name,
+                        e,
+                    )
+
+        # Only the unnamed-secret path is monitor-owned. A Secret explicitly
+        # named in the endpoint spec is user-managed and must survive deletion.
+        mooncake = spec.get("mooncake") if isinstance(spec, dict) else None
+        proxy = mooncake.get("proxy") if isinstance(mooncake, dict) else None
+        named_secret = proxy.get("admin_api_key_secret") if isinstance(proxy, dict) else None
+        if (
+            isinstance(mooncake, dict)
+            and mooncake.get("mode") in ("disaggregated", "both")
+            and not (isinstance(named_secret, str) and named_secret)
+        ):
+            secret_name = f"{name}-admin"
+            try:
+                self.core_v1.delete_namespaced_secret(
+                    secret_name, namespace, _request_timeout=self._k8s_timeout
+                )
+                logger.info(
+                    "Deleted generated proxy admin-key Secret %s/%s", namespace, secret_name
+                )  # nosemgrep
+            except ApiException as e:
+                if e.status != 404:
+                    logger.error(
+                        "Failed to delete generated proxy admin-key Secret %s: %s", secret_name, e
+                    )  # nosemgrep
 
     def _build_hpa_metrics(self, metrics_config: list[dict[str, Any]]) -> list[Any]:
         """Translate a metrics config list into autoscaler metric specs.

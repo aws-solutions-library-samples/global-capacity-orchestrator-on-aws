@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,30 +205,60 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op239=>operation: '\n    Proxy authenticated API Gateway requests to Global Accelerator.\n\n    Args:\n        event: API Gateway proxy event containing HTTP request details\n        context: Lambda context object\n\n    Returns:\n        API Gateway proxy response with status code, headers, and body\n    '
-op241=>operation: ga_endpoint = os.environ['GLOBAL_ACCELERATOR_ENDPOINT']
-op243=>operation: secret_token = get_secret_token()
-op245=>operation: http_method = event['httpMethod']
-op247=>operation: path = event['path']
-op249=>operation: query_string = event.get('queryStringParameters') or {}
-op251=>operation: headers = dict(event.get('headers') or {})
-op253=>operation: body = event.get('body') or ''
-op255=>operation: target_url = build_target_url(ga_endpoint, path, query_string)
-op257=>operation: headers['X-GCO-Auth-Token'] = secret_token
-io262=>inputoutput: output: forward_request(target_url, http_method, headers, body)
-e260=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op243=>operation: 'Proxy one IAM-authenticated request through Global Accelerator.'
+op248=>operation: signing_key = get_secret_token()
+cond245=>condition: exception raised?
+cond250=>condition: except (KeyError, RuntimeError)
+io257=>inputoutput: output: _error_response(503, 'Backend authentication is temporarily unavailable')
+e255=>end: end function return
+op263=>operation: http_method = event['httpMethod']
+op265=>operation: path = event['path']
+op267=>operation: query_string = event.get('multiValueQueryStringParameters') or event.get('queryStringParameters') or {}
+op269=>operation: headers = dict(event.get('headers') or {})
+cond272=>condition: if _pop_header(headers, 'X-GCO-Target-Region') is not None
+io279=>inputoutput: output: _error_response(400, "X-GCO-Target-Region is not supported by the global endpoint; use the target region's regional API endpoint if authorized for direct access")
+e277=>end: end function return
+op285=>operation: body = event.get('body') or ''
+cond288=>condition: if event.get('isBase64Encoded')
+io295=>inputoutput: output: _error_response(415, 'Base64-encoded request bodies are not supported')
+e293=>end: end function return
+op304=>operation: target_url = build_target_url(os.environ['GLOBAL_ACCELERATOR_ENDPOINT'], path, query_string)
+cond301=>condition: exception raised?
+cond306=>condition: except (KeyError, ValueError)
+io313=>inputoutput: output: _error_response(503, 'Global backend routing is temporarily unavailable')
+e311=>end: end function return
+op319=>operation: headers = sanitize_request_headers(headers)
+sub321=>subroutine: headers.update(build_signed_headers(signing_key, http_method, target_url, body))
+io326=>inputoutput: output: forward_request(target_url, http_method, headers, body, timeout=_get_request_timeout_seconds(context))
+e324=>end: end function return
 
-op239->op241
-op241->op243
-op243->op245
-op245->op247
-op247->op249
-op249->op251
-op251->op253
-op253->op255
-op255->op257
-op257->io262
-io262->e260
+op243->op248
+op248->cond245
+cond245(yes)->cond250
+cond250(yes)->io257
+io257->e255
+cond250(no)->op263
+op263->op265
+op265->op267
+op267->op269
+op269->cond272
+cond272(yes)->io279
+io279->e277
+cond272(no)->op285
+op285->cond288
+cond288(yes)->io295
+io295->e293
+cond288(no)->op304
+op304->cond301
+cond301(yes)->cond306
+cond306(yes)->io313
+io313->e311
+cond306(no)->op319
+op319->sub321
+sub321->io326
+io326->e324
+cond301(no)->op319
+cond245(no)->op263
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

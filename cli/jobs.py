@@ -4,7 +4,7 @@ Job management for GCO CLI.
 Provides functionality to submit, query, and manage jobs across GCO clusters.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,6 +53,58 @@ def _first_manifest_namespace(manifests: list[dict[str, Any]]) -> str | None:
         if ns:
             return str(ns)
     return None
+
+
+def resolve_submission_identity(
+    result: Any,
+    *,
+    fallback_name: str | None = None,
+    fallback_namespace: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve the submitted Job name and namespace from supported responses.
+
+    API submissions return resource-status dictionaries, while direct kubectl
+    submissions return a top-level ``job_name`` and a ``resources`` list of
+    human-readable strings. Only mapping-shaped resources are inspected, so
+    direct response lines can never be mistaken for response envelopes.
+    """
+    if not isinstance(result, Mapping):
+        return fallback_name, fallback_namespace
+
+    raw_resources = result.get("resources") or []
+    if isinstance(raw_resources, Mapping):
+        raw_resources = [raw_resources]
+    resources = [resource for resource in raw_resources if isinstance(resource, Mapping)]
+    job_resources = [
+        resource for resource in resources if str(resource.get("kind", "")).lower() == "job"
+    ]
+
+    explicit_job_name = result.get("job_name")
+    resource_with_name = next(
+        (resource for resource in job_resources if resource.get("name")), None
+    )
+    job_name = (
+        str(explicit_job_name)
+        if explicit_job_name
+        else str(resource_with_name.get("name"))
+        if resource_with_name is not None
+        else fallback_name
+    )
+
+    matching_resource = next(
+        (resource for resource in job_resources if resource.get("name") == job_name),
+        resource_with_name,
+    )
+    resource_namespace = matching_resource.get("namespace") if matching_resource else None
+    envelope_namespace = result.get("namespace")
+    namespace = (
+        str(resource_namespace)
+        if resource_namespace
+        else str(envelope_namespace)
+        if envelope_namespace
+        else fallback_namespace
+    )
+    return job_name, namespace
 
 
 def _extract_image_refs(spec: dict[str, Any]) -> list[str]:
@@ -127,10 +179,7 @@ class JobManager:
 
     def __init__(self, config: GCOConfig | None = None):
         self.config = config or get_config()
-        self._aws_client = get_aws_client(config)
-        # Configure regional API mode if enabled
-        if hasattr(self.config, "use_regional_api") and self.config.use_regional_api:
-            self._aws_client.set_use_regional_api(True)
+        self._aws_client = get_aws_client(self.config)
 
     def load_manifests(self, path: str) -> list[dict[str, Any]]:
         """
@@ -191,13 +240,13 @@ class JobManager:
         # Load manifests if path provided
         manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
 
-        # Apply namespace as a fallback only — preserve any namespace the
-        # manifest declared itself.
-        if namespace:
-            for manifest in manifest_list:
-                if "metadata" not in manifest:
-                    manifest["metadata"] = {}
-                manifest["metadata"].setdefault("namespace", namespace)
+        # Apply the explicit or configured namespace as a fallback only —
+        # preserve any namespace declared by an individual manifest.
+        effective_namespace = namespace or self.config.default_namespace
+        for manifest in manifest_list:
+            if "metadata" not in manifest:
+                manifest["metadata"] = {}
+            manifest["metadata"].setdefault("namespace", effective_namespace)
 
         # Apply additional labels
         if labels:
@@ -211,7 +260,7 @@ class JobManager:
         # Submit via API
         return self._aws_client.submit_manifests(
             manifests=manifest_list,
-            namespace=namespace,
+            namespace=effective_namespace,
             target_region=target_region,
             dry_run=dry_run,
         )
@@ -254,13 +303,13 @@ class JobManager:
         # Load manifests if path provided
         manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
 
-        # Apply namespace as a fallback only — preserve any namespace the
-        # manifest declared itself.
-        if namespace:
-            for manifest in manifest_list:
-                if "metadata" not in manifest:
-                    manifest["metadata"] = {}
-                manifest["metadata"].setdefault("namespace", namespace)
+        # Apply the explicit or configured namespace as a fallback only —
+        # preserve any namespace declared by an individual manifest.
+        effective_namespace = namespace or self.config.default_namespace
+        for manifest in manifest_list:
+            if "metadata" not in manifest:
+                manifest["metadata"] = {}
+            manifest["metadata"].setdefault("namespace", effective_namespace)
 
         # Apply additional labels
         if labels:
@@ -290,7 +339,7 @@ class JobManager:
                 if manifest.get("kind") != "Job":
                     continue
                 job_name = manifest.get("metadata", {}).get("name")
-                job_ns = manifest.get("metadata", {}).get("namespace", namespace or "default")
+                job_ns = manifest.get("metadata", {}).get("namespace", effective_namespace)
                 if not job_name:
                     continue
 
@@ -351,11 +400,17 @@ class JobManager:
                 if line:
                     created_resources.append(line)
 
-            # Get job name from first manifest (may have been renamed)
+            # Get the actual Job identity from the submitted manifest. The
+            # name may have been changed above to avoid an active-job collision,
+            # and a manifest-declared namespace takes precedence over the CLI
+            # fallback.
             job_name = None
+            job_namespace = effective_namespace
             for manifest in manifest_list:
                 if manifest.get("kind") == "Job":
-                    job_name = manifest.get("metadata", {}).get("name")
+                    metadata = manifest.get("metadata", {})
+                    job_name = metadata.get("name")
+                    job_namespace = metadata.get("namespace") or job_namespace
                     break
 
             response: dict[str, Any] = {
@@ -363,7 +418,7 @@ class JobManager:
                 "method": "kubectl",
                 "cluster": cluster_name,
                 "region": region,
-                "namespace": namespace or "default",
+                "namespace": job_namespace,
                 "job_name": job_name,
                 "dry_run": dry_run,
                 "resources": created_resources,
@@ -1025,6 +1080,7 @@ class JobManager:
         namespace: str | None = None,
         status: str | None = None,
         older_than_days: int | None = None,
+        label_selector: str | None = None,
         dry_run: bool = True,
     ) -> dict[str, Any]:
         """
@@ -1034,6 +1090,7 @@ class JobManager:
             namespace: Filter by namespace
             status: Filter by status
             older_than_days: Delete jobs older than N days
+            label_selector: Kubernetes label selector
             dry_run: If True, only return what would be deleted
 
         Returns:
@@ -1043,6 +1100,7 @@ class JobManager:
             namespace=namespace,
             status=status,
             older_than_days=older_than_days,
+            label_selector=label_selector,
             dry_run=dry_run,
         )
 

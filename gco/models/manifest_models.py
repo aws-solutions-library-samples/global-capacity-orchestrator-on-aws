@@ -71,7 +71,7 @@ class KubernetesManifest:
 
     def get_namespace(self) -> str:
         """Get the resource namespace"""
-        return str(self.metadata.get("namespace", "default"))
+        return str(self.metadata.get("namespace", "gco-jobs"))
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary representation"""

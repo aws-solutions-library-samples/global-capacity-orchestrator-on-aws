@@ -690,6 +690,47 @@ class TestInferenceInvoke:
         assert result.exit_code != 0
         assert "Provide --prompt" in result.output
 
+    def test_invoke_stream_flag_is_rejected_before_endpoint_lookup(self, runner):
+        mock_mgr_factory = MagicMock()
+        with patch("cli.inference.get_inference_manager", mock_mgr_factory):
+            result = runner.invoke(
+                cli,
+                ["inference", "invoke", "ep", "-p", "hello", "--stream"],
+            )
+
+        assert result.exit_code != 0
+        assert (
+            "--stream is not supported: API Gateway and Lambda buffer inference responses"
+            in result.output
+        )
+        mock_mgr_factory.assert_not_called()
+
+    def test_invoke_raw_stream_true_is_rejected_before_request(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._mock_endpoint()
+        mock_client = MagicMock()
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "inference",
+                    "invoke",
+                    "ep",
+                    "-d",
+                    '{"prompt": "hello", "stream": true}',
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert (
+            "Streaming requests are not supported: API Gateway and Lambda buffer responses"
+            in result.output
+        )
+        mock_client.make_authenticated_request.assert_not_called()
+
     def test_invoke_endpoint_not_found(self, runner):
         mock_mgr = MagicMock()
         mock_mgr.get_endpoint.return_value = None
@@ -784,7 +825,10 @@ class TestInferenceHealth:
         return {
             "endpoint_name": "ep",
             "ingress_path": "/inference/ep",
-            "spec": {"image": "vllm/vllm-openai:v0.8.0", "health_path": health_path},
+            "spec": {
+                "image": "vllm/vllm-openai:v0.8.0",
+                "health_check_path": health_path,
+            },
         }
 
     def test_health_healthy(self, runner):

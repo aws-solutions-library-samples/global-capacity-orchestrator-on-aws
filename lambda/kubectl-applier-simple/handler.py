@@ -42,8 +42,9 @@ from typing import Any
 import boto3
 import urllib3
 import yaml
-from kubernetes import client
+from kubernetes import client, dynamic
 from kubernetes.client.rest import ApiException
+from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Flowchart(s) generated from this file:
@@ -75,6 +76,121 @@ FAILED = "FAILED"
 # {{Hostname}}) in the observability dashboard ConfigMaps, which must survive
 # substitution untouched and be applied verbatim.
 _UNRESOLVED_PLACEHOLDER_RE = re.compile(r"\{\{[A-Z0-9_]+\}\}")
+
+# Exact resources owned by optional features. Keys include the apply phase so
+# disabling one feature cannot delete similarly named or unrelated resources.
+# Tuples are (apiVersion, kind, namespace-or-None, name); order is deliberate
+# for dependent resources such as FSx claims before volumes before the class.
+_FEATURE_RESOURCE_INVENTORY: dict[
+    tuple[str, bool], tuple[tuple[str, str, str | None, str], ...]
+] = {
+    ("{{FSX_FILE_SYSTEM_ID}}", False): (
+        ("v1", "PersistentVolumeClaim", "default", "gco-fsx-storage"),
+        ("v1", "PersistentVolumeClaim", "gco-jobs", "gco-fsx-storage"),
+        ("v1", "PersistentVolumeClaim", "gco-system", "gco-fsx-storage"),
+        ("v1", "PersistentVolume", None, "gco-fsx-pv-default"),
+        ("v1", "PersistentVolume", None, "gco-fsx-pv-jobs"),
+        ("v1", "PersistentVolume", None, "gco-fsx-pv-system"),
+        ("storage.k8s.io/v1", "StorageClass", None, "fsx-sc"),
+    ),
+    ("{{VALKEY_ENDPOINT}}", False): tuple(
+        ("v1", "ConfigMap", namespace, "gco-valkey")
+        for namespace in ("gco-system", "gco-jobs", "gco-inference")
+    ),
+    ("{{AURORA_PGVECTOR_ENDPOINT}}", False): tuple(
+        ("v1", "ConfigMap", namespace, "gco-aurora-pgvector")
+        for namespace in ("gco-system", "gco-jobs", "gco-inference")
+    ),
+    ("{{CLUSTER_OBSERVABILITY_ENABLED}}", False): (
+        ("apps/v1", "DaemonSet", "kube-system", "dcgm-exporter"),
+        ("v1", "Service", "kube-system", "dcgm-exporter"),
+        ("v1", "ConfigMap", "kube-system", "dcgm-device-counters"),
+        ("storage.k8s.io/v1", "StorageClass", None, "gco-observability-gp3"),
+    ),
+    ("{{CLUSTER_OBSERVABILITY_ENABLED}}", True): (
+        ("batch/v1", "CronJob", "monitoring", "gco-grafana-admin-password-rotation"),
+        ("v1", "ConfigMap", "monitoring", "gco-dashboard-gpu"),
+        ("v1", "ConfigMap", "monitoring", "gco-dashboard-schedulers"),
+        ("v1", "ConfigMap", "monitoring", "gco-dashboard-keda"),
+        ("v1", "ConfigMap", "monitoring", "gco-dashboard-services"),
+        (
+            "rbac.authorization.k8s.io/v1",
+            "ClusterRoleBinding",
+            None,
+            "gco-prometheus-kueue-metrics",
+        ),
+        *tuple(
+            ("monitoring.coreos.com/v1", "ServiceMonitor", "monitoring", name)
+            for name in (
+                "gco-keda",
+                "gco-volcano",
+                "gco-kueue",
+                "gco-kuberay",
+                "gco-yunikorn",
+                "gco-dcgm-exporter",
+            )
+        ),
+        *tuple(
+            ("monitoring.coreos.com/v1", "PodMonitor", "monitoring", name)
+            for name in (
+                "gco-health-monitor",
+                "gco-manifest-processor",
+                "gco-inference-monitor",
+            )
+        ),
+        ("rbac.authorization.k8s.io/v1", "RoleBinding", "monitoring", "gco-grafana-rotator"),
+        ("rbac.authorization.k8s.io/v1", "Role", "monitoring", "gco-grafana-rotator"),
+        ("v1", "ServiceAccount", "monitoring", "gco-grafana-rotator"),
+    ),
+    ("{{QUEUE_PROCESSOR_IMAGE}}", True): (
+        ("keda.sh/v1alpha1", "ScaledJob", "gco-system", "sqs-queue-processor"),
+    ),
+}
+
+
+def _prune_disabled_feature(placeholder: str, post_helm: bool) -> dict[str, list[str]]:
+    """Delete only the exact resources managed by a disabled optional feature.
+
+    Missing resources and missing CRDs/API resource types are successful no-ops.
+    Every other error is returned so convergence fails instead of silently
+    leaving stale resources running after the feature was disabled.
+    """
+    targets = _FEATURE_RESOURCE_INVENTORY.get((placeholder, post_helm), ())
+    result: dict[str, list[str]] = {"pruned": [], "failed": []}
+    if not targets:
+        return result
+
+    dynamic_client = dynamic.DynamicClient(client.ApiClient())
+    delete_options = client.V1DeleteOptions(propagation_policy="Background")
+    for api_version, kind, namespace, name in targets:
+        identifier = f"{api_version}/{kind}/{namespace or '<cluster>'}/{name}"
+        try:
+            resource = dynamic_client.resources.get(api_version=api_version, kind=kind)
+            kwargs: dict[str, Any] = {"name": name, "body": delete_options}
+            if namespace is not None:
+                kwargs["namespace"] = namespace
+            resource.delete(**kwargs)
+            result["pruned"].append(identifier)
+            logger.info("Pruned disabled-feature resource %s", identifier)
+        except ResourceNotFoundError, NotFoundError:
+            logger.info("Disabled-feature resource already absent: %s", identifier)
+        except ApiException as exc:
+            if exc.status == 404:
+                logger.info("Disabled-feature resource already absent: %s", identifier)
+            else:
+                failure = f"{identifier}:{exc.status}:{exc.reason}"
+                result["failed"].append(failure)
+                logger.error("Failed pruning disabled-feature resource %s", failure)
+        except Exception as exc:
+            if getattr(exc, "status", None) == 404:
+                logger.info("Disabled-feature resource already absent: %s", identifier)
+            else:
+                failure = f"{identifier}:{exc}"
+                result["failed"].append(failure)
+                logger.error("Failed pruning disabled-feature resource %s", failure)
+
+    return result
+
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -437,6 +553,9 @@ def apply_manifests(
     applied_count = 0
     failed = []
     skipped = []
+    pruned: list[str] = []
+    prune_failures: list[str] = []
+    reconciled_feature_gates: set[tuple[str, bool]] = set()
 
     # Load and apply manifests
     # Files prefixed with "post-helm-" require Helm CRDs and are deferred to
@@ -472,13 +591,26 @@ def apply_manifests(
         # UPPER_SNAKE token convention so lower/mixed-case double-brace content
         # that is meant to be applied verbatim (Grafana dashboard legends) is
         # left alone. See _UNRESOLVED_PLACEHOLDER_RE.
-        unresolved = _UNRESOLVED_PLACEHOLDER_RE.search(content)
-        if unresolved:
+        unresolved_placeholders = set(_UNRESOLVED_PLACEHOLDER_RE.findall(content))
+        if unresolved_placeholders:
             logger.info(
-                f"Skipping {filename} - contains unreplaced placeholder "
-                f"{unresolved.group(0)} (feature not enabled)"
+                "Skipping %s - contains unreplaced feature placeholder(s): %s",
+                filename,
+                ", ".join(sorted(unresolved_placeholders)),
             )
             skipped.append(f"{filename}:unreplaced-placeholders")
+
+            # An unresolved canonical feature gate means the feature is disabled.
+            # Reconcile it once per pass by deleting only its exact owned objects.
+            for placeholder in sorted(unresolved_placeholders):
+                gate = (placeholder, post_helm)
+                if gate not in _FEATURE_RESOURCE_INVENTORY or gate in reconciled_feature_gates:
+                    continue
+                reconciled_feature_gates.add(gate)
+                prune_result = _prune_disabled_feature(placeholder, post_helm)
+                pruned.extend(prune_result["pruned"])
+                prune_failures.extend(prune_result["failed"])
+                failed.extend(f"prune:{failure}" for failure in prune_result["failed"])
             continue
 
         # Parse and apply
@@ -927,6 +1059,9 @@ def apply_manifests(
             "SkippedCount": len(skipped),
             "Failed": ",".join(failed) if failed else "None",
             "Skipped": ",".join(skipped) if skipped else "None",
+            "PrunedCount": len(pruned),
+            "Pruned": ",".join(pruned) if pruned else "None",
+            "PruneFailures": ",".join(prune_failures) if prune_failures else "None",
         }
 
     # Restart deployments in gco-system namespace to pick up new images
@@ -999,6 +1134,9 @@ def apply_manifests(
         "Skipped": ",".join(skipped) if skipped else "None",
         "RestartedDeployments": (",".join(all_restarted) if all_restarted else "None"),
         "CredentialWarnings": ",".join(credential_warnings) if credential_warnings else "None",
+        "PrunedCount": len(pruned),
+        "Pruned": ",".join(pruned) if pruned else "None",
+        "PruneFailures": ",".join(prune_failures) if prune_failures else "None",
     }
 
 

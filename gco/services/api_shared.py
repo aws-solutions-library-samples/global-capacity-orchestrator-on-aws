@@ -92,7 +92,11 @@ class BulkDeleteRequest(BaseModel):
     older_than_days: int | None = Field(
         None, description="Delete jobs older than N days", ge=1, le=365
     )
-    label_selector: str | None = Field(None, description="Kubernetes label selector")
+    label_selector: str | None = Field(
+        None,
+        description="Comma-separated exact-match label filters (key=value only)",
+        max_length=1024,
+    )
     dry_run: bool = Field(False, description="If true, only return what would be deleted")
 
     model_config = {

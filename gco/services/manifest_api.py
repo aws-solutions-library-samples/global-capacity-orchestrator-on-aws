@@ -17,10 +17,11 @@ See ``api_routes/`` for the individual routers:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import Any
 
@@ -31,6 +32,7 @@ from starlette.responses import Response
 from starlette.types import ASGIApp
 
 from gco.services.auth_middleware import AuthenticationMiddleware
+from gco.services.central_queue_worker import CentralQueueWorker
 from gco.services.manifest_processor import (
     ManifestProcessor,
     create_manifest_processor_from_env,
@@ -45,6 +47,14 @@ from gco.services.template_store import (
     get_template_store,
     get_webhook_store,
 )
+
+# <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Flowchart(s) generated from this file:
+#   * ``lifespan`` -> ``diagrams/code_diagrams/gco/services/manifest_api.lifespan.html``
+#     (PNG: ``diagrams/code_diagrams/gco/services/manifest_api.lifespan.png``)
+# Regenerate with ``python diagrams/code_diagrams/generate.py``.
+# <pyflowchart-code-diagram> END
+
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -124,6 +134,23 @@ webhook_store: WebhookStore | None = None
 job_store: JobStore | None = None
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Parse an explicit deployment boolean without truthy-string surprises."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_number(name: str, default: float, minimum: float, maximum: float) -> float:
+    """Read a finite bounded worker setting from the environment."""
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return value if minimum <= value <= maximum else default
+
+
 # =============================================================================
 # Pydantic Models for API
 # =============================================================================
@@ -136,9 +163,11 @@ job_store: JobStore | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan manager — initializes manifest processor and stores."""
+    """Initialize API dependencies and the optional regional queue worker."""
     global manifest_processor, manifest_metrics, template_store, webhook_store, job_store
 
+    queue_worker: CentralQueueWorker | None = None
+    queue_worker_task: asyncio.Task[None] | None = None
     logger.info("Starting Manifest API Service")
     try:
         manifest_processor = create_manifest_processor_from_env()
@@ -159,13 +188,47 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         webhook_store = get_webhook_store()
         job_store = get_job_store()
         logger.info("DynamoDB stores initialized")
+
+        if _env_bool("CENTRAL_QUEUE_WORKER_ENABLED"):
+            queue_worker = CentralQueueWorker(
+                processor=manifest_processor,
+                store=job_store,
+                poll_interval_seconds=_env_number(
+                    "CENTRAL_QUEUE_POLL_INTERVAL_SECONDS", 10.0, 1.0, 300.0
+                ),
+                batch_size=int(_env_number("CENTRAL_QUEUE_BATCH_SIZE", 5.0, 1.0, 20.0)),
+                reconcile_limit=int(
+                    _env_number("CENTRAL_QUEUE_RECONCILE_LIMIT", 100.0, 1.0, 500.0)
+                ),
+                lease_renewal_seconds=_env_number(
+                    "CENTRAL_QUEUE_LEASE_RENEWAL_SECONDS", 60.0, 1.0, 300.0
+                ),
+            )
+            queue_worker_task = asyncio.create_task(
+                queue_worker.run(),
+                name=f"central-queue-worker-{manifest_processor.region}",
+            )
+            app.state.central_queue_worker = queue_worker
+            app.state.central_queue_worker_task = queue_worker_task
+        else:
+            app.state.central_queue_worker = None
+            app.state.central_queue_worker_task = None
     except Exception as e:
         logger.error(f"Failed to initialize manifest processor: {e}")
         raise
 
-    yield
-
-    logger.info("Shutting down Manifest API Service")
+    try:
+        yield
+    finally:
+        if queue_worker is not None and queue_worker_task is not None:
+            queue_worker.stop()
+            try:
+                await asyncio.wait_for(queue_worker_task, timeout=30)
+            except TimeoutError:
+                queue_worker_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await queue_worker_task
+        logger.info("Shutting down Manifest API Service")
 
 
 # =============================================================================
@@ -194,6 +257,7 @@ from gco.services.service_metrics import mount_metrics  # noqa: E402
 mount_metrics(app, "manifest-processor")
 
 # Include domain routers
+from gco.services.api_routes.inference_proxy import router as inference_proxy_router  # noqa: E402
 from gco.services.api_routes.jobs import router as jobs_router  # noqa: E402
 from gco.services.api_routes.manifests import router as manifests_router  # noqa: E402
 from gco.services.api_routes.queue import router as queue_router  # noqa: E402
@@ -205,6 +269,7 @@ app.include_router(jobs_router)
 app.include_router(templates_router)
 app.include_router(webhooks_router)
 app.include_router(queue_router)
+app.include_router(inference_proxy_router)
 
 
 # =============================================================================
@@ -265,9 +330,12 @@ async def kubernetes_health_check() -> dict[str, str]:
 
 @app.get("/readyz", tags=["Health"])
 async def kubernetes_readiness_check() -> dict[str, str]:
-    """Kubernetes-style readiness probe."""
+    """Kubernetes readiness includes the enabled queue worker task."""
     if manifest_processor is None:
         raise HTTPException(status_code=503, detail="Manifest processor not ready")
+    worker_task = getattr(app.state, "central_queue_worker_task", None)
+    if worker_task is not None and worker_task.done():
+        raise HTTPException(status_code=503, detail="Central queue worker stopped unexpectedly")
     return {"status": "ready"}
 
 
@@ -340,11 +408,16 @@ async def get_service_status() -> dict[str, Any]:
             "max_cpu_per_manifest": os.getenv("MAX_CPU_PER_MANIFEST", "10"),
             "max_memory_per_manifest": os.getenv("MAX_MEMORY_PER_MANIFEST", "32Gi"),
             "max_gpu_per_manifest": os.getenv("MAX_GPU_PER_MANIFEST", "4"),
-            "allowed_namespaces": os.getenv("ALLOWED_NAMESPACES", "default,gco-jobs"),
+            "allowed_namespaces": os.getenv("ALLOWED_NAMESPACES", "gco-jobs"),
             "validation_enabled": os.getenv("VALIDATION_ENABLED", "true"),
         },
         "templates_count": templates_count,
         "webhooks_count": webhooks_count,
+        "central_queue_worker": (
+            worker.health()
+            if (worker := getattr(app.state, "central_queue_worker", None)) is not None
+            else {"enabled": False, "running": False}
+        ),
     }
 
     if manifest_processor:

@@ -5,38 +5,67 @@ Covers the create_app factory, route registration for the full health
 surface (/, /healthz, /readyz, /api/v1/health, /api/v1/metrics,
 /api/v1/status), and the endpoint handlers driven via TestClient
 against a mocked HealthMonitor. An autouse fixture seeds the auth
-middleware's token cache with a known test token so authenticated
-endpoints run through the real validation code rather than patching
-get_valid_tokens — this catches regressions in how the middleware
-reads the cache.
+middleware's signing-key cache, and authenticated requests carry fresh HMAC
+envelopes so the real freshness, body-integrity, and replay validation runs.
 """
 
 import contextlib
+import hashlib
+import hmac
+import secrets
 import time
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# Auth token used by tests that hit authenticated endpoints.
-# The autouse fixture seeds the middleware's token cache so the
-# real validation code runs — no mocking of get_valid_tokens.
-_TEST_AUTH_TOKEN = "test-health-api-token"  # nosec B105 - test fixture token, not a real credential
-_AUTH_HEADERS = {"x-gco-auth-token": _TEST_AUTH_TOKEN}
+# Signing key used by tests that hit authenticated endpoints. The autouse
+# fixture seeds the middleware cache; each request gets a fresh nonce.
+_TEST_SIGNING_KEY = "test-health-api-signing-key"  # nosec B105 - test fixture
+
+
+def _auth_headers(method: str, request_target: str, body: bytes = b"") -> dict[str, str]:
+    timestamp = str(int(time.time()))
+    nonce = secrets.token_hex(16)
+    content_hash = hashlib.sha256(body).hexdigest()
+    canonical = "\n".join(["v1", timestamp, nonce, method.upper(), request_target, content_hash])
+    signature = hmac.new(
+        _TEST_SIGNING_KEY.encode("utf-8"),
+        canonical.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        "x-gco-signature-version": "v1",
+        "x-gco-signature": signature,
+        "x-gco-timestamp": timestamp,
+        "x-gco-nonce": nonce,
+        "x-gco-content-sha256": content_hash,
+    }
 
 
 @pytest.fixture(autouse=True)
 def _seed_auth_cache():
-    """Seed the auth middleware token cache with a known token."""
+    """Seed the auth middleware signing-key cache and reset replay state."""
     import gco.services.auth_middleware as auth_module
 
     original_tokens = auth_module._cached_tokens
     original_timestamp = auth_module._cache_timestamp
-    auth_module._cached_tokens = {_TEST_AUTH_TOKEN}
-    auth_module._cache_timestamp = time.time()
+    original_successful_refresh = auth_module._last_successful_refresh
+    original_refresh_attempt = auth_module._last_refresh_attempt
+    original_nonces = dict(auth_module._seen_nonces)
+    now = time.monotonic()
+    auth_module._cached_tokens = {_TEST_SIGNING_KEY}
+    auth_module._cache_timestamp = now
+    auth_module._last_successful_refresh = now
+    auth_module._last_refresh_attempt = now
+    auth_module._seen_nonces.clear()
     yield
     auth_module._cached_tokens = original_tokens
     auth_module._cache_timestamp = original_timestamp
+    auth_module._last_successful_refresh = original_successful_refresh
+    auth_module._last_refresh_attempt = original_refresh_attempt
+    auth_module._seen_nonces.clear()
+    auth_module._seen_nonces.update(original_nonces)
 
 
 class TestHealthAPIModels:
@@ -104,7 +133,7 @@ class TestHealthAPIBasicEndpoints:
             from gco.services.health_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get("/", headers=_AUTH_HEADERS)
+                response = client.get("/", headers=_auth_headers("GET", "/"))
                 assert response.status_code == 200
                 data = response.json()
                 assert data["service"] == "GCO Health Monitor API"
@@ -163,7 +192,10 @@ class TestHealthAPIBasicEndpoints:
             from gco.services.health_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get("/api/v1/status", headers=_AUTH_HEADERS)
+                response = client.get(
+                    "/api/v1/status",
+                    headers=_auth_headers("GET", "/api/v1/status"),
+                )
                 assert response.status_code == 200
                 data = response.json()
                 assert data["service"] == "GCO Health Monitor API"
@@ -211,7 +243,10 @@ class TestMetricsEndpoint:
             from gco.services.health_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get("/api/v1/metrics", headers=_AUTH_HEADERS)
+                response = client.get(
+                    "/api/v1/metrics",
+                    headers=_auth_headers("GET", "/api/v1/metrics"),
+                )
                 # Returns 200 if metrics available, 500/503 if not
                 assert response.status_code in [200, 500, 503]
 
@@ -301,7 +336,10 @@ class TestMetricsWithMockedMonitor:
             from gco.services.health_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get("/api/v1/metrics", headers=_AUTH_HEADERS)
+                response = client.get(
+                    "/api/v1/metrics",
+                    headers=_auth_headers("GET", "/api/v1/metrics"),
+                )
                 # Should return some response
                 assert response.status_code in [200, 500, 503]
 
@@ -324,7 +362,10 @@ class TestStatusEndpointDetails:
             from gco.services.health_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get("/api/v1/status", headers=_AUTH_HEADERS)
+                response = client.get(
+                    "/api/v1/status",
+                    headers=_auth_headers("GET", "/api/v1/status"),
+                )
                 assert response.status_code == 200
                 data = response.json()
                 assert "environment" in data
@@ -349,7 +390,10 @@ class TestStatusEndpointDetails:
             from gco.services.health_api import app
 
             with TestClient(app, raise_server_exceptions=False) as client:
-                response = client.get("/api/v1/status", headers=_AUTH_HEADERS)
+                response = client.get(
+                    "/api/v1/status",
+                    headers=_auth_headers("GET", "/api/v1/status"),
+                )
                 assert response.status_code == 200
                 data = response.json()
                 assert data["service"] == "GCO Health Monitor API"
@@ -377,7 +421,10 @@ class TestGlobalExceptionHandler:
             # that may trigger exceptions
             with TestClient(app, raise_server_exceptions=False) as client:
                 # This should not raise but return proper error response
-                response = client.get("/nonexistent-endpoint", headers=_AUTH_HEADERS)
+                response = client.get(
+                    "/nonexistent-endpoint",
+                    headers=_auth_headers("GET", "/nonexistent-endpoint"),
+                )
                 assert response.status_code == 404  # FastAPI handles this
 
 

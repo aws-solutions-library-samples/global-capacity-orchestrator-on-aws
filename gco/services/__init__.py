@@ -8,7 +8,7 @@ This package contains the core services that run in the EKS cluster:
 - manifest_processor: Validates and applies Kubernetes manifests
 - manifest_api: FastAPI service exposing manifest submission endpoints
 - metrics_publisher: Publishes custom metrics to CloudWatch
-- auth_middleware: Validates X-GCO-Auth-Token header for authentication
+- auth_middleware: Validates short-lived HMAC request envelopes
 - webhook_dispatcher: Dispatches webhook notifications for job events
 - inference_monitor: Reconciliation controller for inference endpoints
 - inference_store: DynamoDB store for inference endpoint state

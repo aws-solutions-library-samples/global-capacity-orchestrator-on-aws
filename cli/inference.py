@@ -9,6 +9,7 @@ pattern (inference_monitor).
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeGuard
 
 from .aws_client import get_aws_client
@@ -37,7 +38,8 @@ logger = logging.getLogger(__name__)
 # An endpoint spec may carry an optional ``mooncake`` block describing
 # disaggregated prefill/decode (PD) serving and/or a shared KV-cache store.
 # The block is entirely additive: when it is absent the endpoint reconciles
-# exactly as it does today — a single Deployment, Service, and Ingress.
+# exactly as it does today — one Deployment and one internal ClusterIP Service
+# behind the shared authenticated inference route.
 #
 # The definitions below describe the shape of that block (the dict written to
 # DynamoDB and read back by the per-region monitor) and the constant
@@ -481,7 +483,7 @@ class InferenceManager:
 
         Args:
             endpoint_name: Unique name for the endpoint
-            image: Container image (e.g. vllm/vllm-openai:v0.8.0). Optional
+            image: Container image (e.g. vllm/vllm-openai:v0.24.0). Optional
                 when ``mooncake_mode`` is set: a disaggregated/store deploy
                 with no image falls back to the default upstream
                 Mooncake-enabled vLLM image. A plain deploy still requires an
@@ -787,12 +789,21 @@ class InferenceManager:
 
     def update_image(self, endpoint_name: str, image: str) -> dict[str, Any] | None:
         """Update the container image for an endpoint."""
+        if not isinstance(image, str) or not image.strip():
+            raise ValueError("Image must be a non-empty string")
+
         store = self._get_store()
         endpoint = store.get_endpoint(endpoint_name)
         if not endpoint:
             return None
-        spec = endpoint.get("spec", {})
-        spec["image"] = image
+        raw_spec = endpoint.get("spec")
+        if not isinstance(raw_spec, dict):
+            raise ValueError(f"Endpoint '{endpoint_name}' has an invalid spec")
+        spec = deepcopy(raw_spec)
+        spec["image"] = image.strip()
+        # A direct image update is global. Stale regional rewrites would take
+        # precedence in the monitor and silently keep serving the old image.
+        spec.pop("region_image_uris", None)
         result: dict[str, Any] | None = store.update_spec(endpoint_name, spec)
         return result
 
@@ -858,22 +869,27 @@ class InferenceManager:
         weight: int = 10,
         replicas: int = 1,
     ) -> dict[str, Any] | None:
-        """Start a canary deployment for an existing endpoint.
+        """Start a canary deployment for an existing classic endpoint.
 
-        Creates a canary variant with the new image receiving `weight`%
-        of traffic. The primary deployment continues serving the rest.
+        Creates a canary variant with the new image receiving ``weight``%
+        of traffic. Mooncake endpoints are excluded because their split-role
+        topology cannot be represented by the classic canary Deployment.
 
         Args:
             endpoint_name: Existing endpoint to canary
             image: New container image for the canary
             weight: Percentage of traffic to route to canary (1-99)
-            replicas: Number of canary replicas
+            replicas: Positive number of canary replicas
 
         Returns:
             Updated endpoint record, or None if endpoint not found
         """
-        if not 1 <= weight <= 99:
-            raise ValueError("Canary weight must be between 1 and 99")
+        if not isinstance(image, str) or not image.strip():
+            raise ValueError("Canary image must be a non-empty string")
+        if not _is_plain_int(weight) or not 1 <= weight <= 99:
+            raise ValueError("Canary weight must be an integer between 1 and 99")
+        if not _is_plain_int(replicas) or replicas < 1:
+            raise ValueError("Canary replicas must be a positive integer")
 
         store = self._get_store()
         endpoint = store.get_endpoint(endpoint_name)
@@ -883,12 +899,20 @@ class InferenceManager:
         if endpoint.get("desired_state") not in ("running", "deploying"):
             raise ValueError(
                 f"Cannot canary an endpoint in '{endpoint.get('desired_state')}' state. "
-                "Endpoint must be running."
+                "Endpoint must be running or deploying."
             )
 
-        spec = endpoint.get("spec", {})
+        raw_spec = endpoint.get("spec")
+        if not isinstance(raw_spec, dict):
+            raise ValueError(f"Endpoint '{endpoint_name}' has an invalid spec")
+        if "mooncake" in raw_spec:
+            raise ValueError("Canary deployments are not supported for Mooncake endpoints")
+
+        # Never mutate the object returned by the store; callers and test
+        # doubles may retain it as shared state.
+        spec = deepcopy(raw_spec)
         spec["canary"] = {
-            "image": image,
+            "image": image.strip(),
             "weight": weight,
             "replicas": replicas,
         }
@@ -897,55 +921,54 @@ class InferenceManager:
         return result
 
     def promote_canary(self, endpoint_name: str) -> dict[str, Any] | None:
-        """Promote the canary to primary, removing the canary deployment.
-
-        The primary image is replaced with the canary image, and the
-        canary config is removed. All traffic goes to the new image.
-
-        Returns:
-            Updated endpoint record, or None if endpoint not found
-        """
+        """Promote a classic canary to primary and remove its deployment."""
         store = self._get_store()
         endpoint = store.get_endpoint(endpoint_name)
         if not endpoint:
             return None
 
-        spec = endpoint.get("spec", {})
-        canary = spec.get("canary")
-        if not canary:
-            raise ValueError(f"Endpoint '{endpoint_name}' has no active canary deployment")
+        raw_spec = endpoint.get("spec")
+        if not isinstance(raw_spec, dict):
+            raise ValueError(f"Endpoint '{endpoint_name}' has an invalid spec")
+        if "mooncake" in raw_spec:
+            raise ValueError("Canary promotion is not supported for Mooncake endpoints")
 
-        if "image" not in canary:
+        canary = raw_spec.get("canary")
+        if not isinstance(canary, dict):
+            raise ValueError(f"Endpoint '{endpoint_name}' has no active canary deployment")
+        canary_image = canary.get("image")
+        if not isinstance(canary_image, str) or not canary_image.strip():
             raise ValueError(
-                f"Canary deployment for '{endpoint_name}' is missing the 'image' field"
+                f"Canary deployment for '{endpoint_name}' has an invalid 'image' field"
             )
 
-        # Swap primary image to canary image
-        spec["image"] = canary["image"]
-        # Remove canary config
-        del spec["canary"]
+        spec = deepcopy(raw_spec)
+        spec["image"] = canary_image.strip()
+        spec.pop("canary", None)
+        # The canary image is explicit and global. Existing per-region primary
+        # rewrites point at the superseded image and must not take precedence.
+        spec.pop("region_image_uris", None)
 
         result: dict[str, Any] | None = store.update_spec(endpoint_name, spec)
         return result
 
     def rollback_canary(self, endpoint_name: str) -> dict[str, Any] | None:
-        """Remove the canary deployment, keeping the primary unchanged.
-
-        All traffic returns to the primary deployment.
-
-        Returns:
-            Updated endpoint record, or None if endpoint not found
-        """
+        """Remove the canary deployment, keeping the primary unchanged."""
         store = self._get_store()
         endpoint = store.get_endpoint(endpoint_name)
         if not endpoint:
             return None
 
-        spec = endpoint.get("spec", {})
-        if "canary" not in spec:
+        raw_spec = endpoint.get("spec")
+        if not isinstance(raw_spec, dict):
+            raise ValueError(f"Endpoint '{endpoint_name}' has an invalid spec")
+        if "canary" not in raw_spec:
             raise ValueError(f"Endpoint '{endpoint_name}' has no active canary deployment")
 
-        del spec["canary"]
+        # Rollback is deliberately allowed for a legacy invalid
+        # Mooncake-plus-canary record so an operator can repair it.
+        spec = deepcopy(raw_spec)
+        spec.pop("canary", None)
         result: dict[str, Any] | None = store.update_spec(endpoint_name, spec)
         return result
 

@@ -23,7 +23,7 @@ metadata:
     app: health-monitor
     project: gco
   annotations:
-    eks.amazonaws.com/role-arn: "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+    eks.amazonaws.com/role-arn: "{{HEALTH_MONITOR_ROLE_ARN}}"
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -34,7 +34,7 @@ metadata:
     app: manifest-processor
     project: gco
   annotations:
-    eks.amazonaws.com/role-arn: "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+    eks.amazonaws.com/role-arn: "{{MANIFEST_PROCESSOR_ROLE_ARN}}"
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -89,6 +89,57 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: gco-health-monitor-role
+subjects:
+  - kind: ServiceAccount
+    name: gco-health-monitor-sa
+    namespace: gco-system
+
+# ─── Health Monitor: exact self-healing resources ───────────────────
+# Pre-create the election Lease so the service account needs no broad
+# `create leases` permission. Only the named Lease and main Ingress are mutable/
+# readable by the self-healing path; all replicas keep serving health endpoints.
+---
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: gco-health-monitor-alb-sync
+  namespace: gco-system
+  labels:
+    app: health-monitor
+    project: gco
+spec:
+  leaseDurationSeconds: 90
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gco-health-monitor-self-healing
+  namespace: gco-system
+  labels:
+    app: health-monitor
+    project: gco
+rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    resourceNames: ["gco-ingress"]
+    verbs: ["get"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["gco-health-monitor-alb-sync"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gco-health-monitor-self-healing
+  namespace: gco-system
+  labels:
+    app: health-monitor
+    project: gco
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gco-health-monitor-self-healing
 subjects:
   - kind: ServiceAccount
     name: gco-health-monitor-sa

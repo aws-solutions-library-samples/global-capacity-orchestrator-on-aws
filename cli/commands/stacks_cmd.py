@@ -19,16 +19,25 @@ def stacks(config: Any) -> None:
 
 
 @stacks.command("list")
-@click.option("--refresh", is_flag=True, help="Force refresh from AWS")
+@click.option(
+    "--refresh",
+    is_flag=True,
+    help="Compatibility flag; stack discovery already runs live",
+)
 @pass_config
 def list_stacks(config: Any, refresh: Any) -> None:
-    """List all GCO stacks (local CDK and deployed)."""
+    """List stacks synthesized by the local CDK app."""
     from ..stacks import get_stack_manager
 
     formatter = get_output_formatter(config)
 
     try:
         manager = get_stack_manager(config)
+        if refresh:
+            formatter.print_info(
+                "Stack discovery runs live on every invocation; --refresh is retained "
+                "for compatibility."
+            )
         local_stacks = manager.list_stacks()
 
         formatter.print_info("Available CDK stacks:")

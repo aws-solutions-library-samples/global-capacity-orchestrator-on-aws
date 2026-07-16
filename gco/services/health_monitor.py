@@ -25,9 +25,12 @@ Usage:
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
+import boto3
+from botocore.config import Config
+from botocore.exceptions import ClientError
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
@@ -38,6 +41,14 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+_ALB_SYNC_LEASE_MIN_SECONDS = 60
+_ALB_SYNC_K8S_TIMEOUT = (3, 10)
+_ALB_SYNC_SSM_CONFIG = Config(
+    connect_timeout=3,
+    read_timeout=10,
+    retries={"total_max_attempts": 2, "mode": "standard"},
+)
 
 
 class HealthMonitor:
@@ -66,6 +77,7 @@ class HealthMonitor:
 
         self.core_v1 = client.CoreV1Api()
         self.networking_v1 = client.NetworkingV1Api()
+        self.coordination_v1 = client.CoordinationV1Api()
         self.metrics_v1beta1 = client.CustomObjectsApi()
 
         # Timeout for Kubernetes API calls (seconds)
@@ -76,9 +88,30 @@ class HealthMonitor:
         self._cached_metrics: dict[str, Any] | None = None
         self._cache_duration = 30  # seconds
 
-        # ALB hostname sync
+        # ALB hostname sync. Every replica keeps serving health endpoints, but
+        # only the holder of this Kubernetes Lease may perform the mutating SSM
+        # reconciliation. The Lease is pre-created by 02-rbac.yaml so RBAC can
+        # grant update on one exact resource instead of create on every Lease in
+        # gco-system.
         self._last_alb_sync: datetime | None = None
         self._alb_sync_interval = 300  # 5 minutes
+        self._alb_sync_lease_name = os.environ.get(
+            "ALB_SYNC_LEASE_NAME", "gco-health-monitor-alb-sync"
+        )
+        self._alb_sync_lease_namespace = os.environ.get("POD_NAMESPACE", "gco-system")
+        configured_lease_duration = int(os.environ.get("ALB_SYNC_LEASE_DURATION", "90"))
+        self._alb_sync_lease_duration = max(configured_lease_duration, _ALB_SYNC_LEASE_MIN_SECONDS)
+        if configured_lease_duration < _ALB_SYNC_LEASE_MIN_SECONDS:
+            logger.warning(
+                "ALB_SYNC_LEASE_DURATION=%s is too short; enforcing %s seconds",
+                configured_lease_duration,
+                _ALB_SYNC_LEASE_MIN_SECONDS,
+            )
+        self._alb_sync_holder = (
+            os.environ.get("POD_NAME")
+            or os.environ.get("HOSTNAME")
+            or f"health-monitor-{os.getpid()}"
+        )
 
     async def get_cluster_metrics(self) -> tuple[ResourceUtilization, int, int, RequestedResources]:
         """
@@ -517,16 +550,98 @@ class HealthMonitor:
                 message=f"Health check error: {e!s}",
             )
 
+    def _try_acquire_alb_sync_lease(self) -> bool:
+        """Acquire or renew the single-writer Lease for ALB self-healing.
+
+        ``replace_namespaced_lease`` carries the resourceVersion returned by
+        the read, so Kubernetes rejects a racing writer with HTTP 409. API or
+        RBAC failures return ``False``: losing self-healing is safer than
+        allowing two replicas to mutate the cross-region SSM parameter.
+        """
+        observed_at = datetime.now(UTC)
+
+        try:
+            lease = self.coordination_v1.read_namespaced_lease(
+                self._alb_sync_lease_name,
+                self._alb_sync_lease_namespace,
+                _request_timeout=_ALB_SYNC_K8S_TIMEOUT,
+            )
+            spec = lease.spec
+            current_holder = spec.holder_identity
+            renew_time = spec.renew_time
+            lease_duration = spec.lease_duration_seconds or self._alb_sync_lease_duration
+
+            expired = False
+            if current_holder:
+                if renew_time is None:
+                    # A holder without a renewal timestamp cannot prove it still
+                    # owns the lease. Treat it as expired so the named Lease
+                    # cannot remain wedged indefinitely.
+                    expired = True
+                else:
+                    if renew_time.tzinfo is None:
+                        renew_time = renew_time.replace(tzinfo=UTC)
+                    expired = (observed_at - renew_time).total_seconds() >= lease_duration
+
+            if current_holder not in (None, "", self._alb_sync_holder) and not expired:
+                return False
+
+            acquiring = current_holder != self._alb_sync_holder
+            renewed_at = datetime.now(UTC)
+            if acquiring:
+                spec.holder_identity = self._alb_sync_holder
+                spec.acquire_time = renewed_at
+                spec.lease_transitions = (spec.lease_transitions or 0) + 1
+            spec.lease_duration_seconds = self._alb_sync_lease_duration
+            spec.renew_time = renewed_at
+
+            try:
+                self.coordination_v1.replace_namespaced_lease(
+                    self._alb_sync_lease_name,
+                    self._alb_sync_lease_namespace,
+                    lease,
+                    _request_timeout=_ALB_SYNC_K8S_TIMEOUT,
+                )
+            except ApiException as exc:
+                if exc.status == 409:
+                    logger.debug("Lost ALB-sync Lease race to another health-monitor replica")
+                    return False
+                raise
+
+            if acquiring:
+                logger.info("Acquired ALB-sync leader Lease as %s", self._alb_sync_holder)
+            return True
+
+        except ApiException as exc:
+            if exc.status == 404:
+                logger.warning(
+                    "ALB-sync Lease %s/%s is missing; self-healing is disabled until it is restored",
+                    self._alb_sync_lease_namespace,
+                    self._alb_sync_lease_name,
+                )
+            else:
+                logger.warning("ALB-sync Lease check failed (non-fatal): %s", exc)
+            return False
+        except Exception as exc:
+            logger.warning("ALB-sync Lease check failed (non-fatal): %s", exc)
+            return False
+
     async def sync_alb_registration(self) -> None:
+        """Run ALB self-healing without blocking FastAPI's event loop."""
+        await asyncio.to_thread(self._sync_alb_registration)
+
+    def _sync_alb_registration(self) -> None:
         """Ensure the SSM ALB hostname parameter matches the actual ALB.
 
-        Reads the main ingress status to get the current ALB hostname,
-        compares it to the SSM parameter, and updates SSM if stale.
-        This makes the system self-healing when the ALB changes
-        (e.g., due to IngressClassParams group merges).
-
-        Runs at most once every 5 minutes to avoid excessive API calls.
+        Every replica renews or checks the leader Lease on each health loop;
+        only the leader performs reconciliation, at most once every 5 minutes.
+        A second optimistic Lease renewal immediately before ``PutParameter``
+        prevents a stale former leader from writing. The SSM client's bounded
+        retry/timeouts keep that write comfortably inside the Lease duration.
         """
+        if not self._try_acquire_alb_sync_lease():
+            return
+
         now = datetime.now()
         if (
             self._last_alb_sync
@@ -537,7 +652,6 @@ class HealthMonitor:
         self._last_alb_sync = now
 
         try:
-            # Read the main ingress to get the current ALB hostname
             ingress = self.networking_v1.read_namespaced_ingress(
                 "gco-ingress",
                 "gco-system",
@@ -551,19 +665,21 @@ class HealthMonitor:
             if not current_hostname:
                 return
 
-            # Compare with SSM parameter
-            import os
-
-            from gco.services.aws_ssm import (
-                get_ssm_parameter_optional,
-                put_ssm_parameter,
-            )
-
             global_region = os.environ.get("GLOBAL_REGION", "us-east-2")
             project_name = os.environ.get("PROJECT_NAME", "gco")
             param_name = f"/{project_name}/alb-hostname-{self.region}"
-
-            stored_hostname = get_ssm_parameter_optional(param_name, region=global_region)
+            ssm_client = boto3.client(
+                "ssm",
+                region_name=global_region,
+                config=_ALB_SYNC_SSM_CONFIG,
+            )
+            try:
+                response = ssm_client.get_parameter(Name=param_name)
+                stored_hostname = str(response["Parameter"]["Value"])
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") != "ParameterNotFound":
+                    raise
+                stored_hostname = None
 
             if stored_hostname != current_hostname:
                 logger.warning(
@@ -571,17 +687,22 @@ class HealthMonitor:
                     stored_hostname,
                     current_hostname,
                 )
-                put_ssm_parameter(
-                    param_name,
-                    current_hostname,
-                    region=global_region,
-                    parameter_type="String",
-                    overwrite=True,
+                # Re-read and optimistically replace the Lease immediately
+                # before the only mutating AWS call. A 409 or a new live holder
+                # makes this replica fail closed.
+                if not self._try_acquire_alb_sync_lease():
+                    logger.info("Lost ALB-sync Lease before SSM update; skipping mutation")
+                    return
+                ssm_client.put_parameter(
+                    Name=param_name,
+                    Value=current_hostname,
+                    Type="String",
+                    Overwrite=True,
                 )
                 logger.info("Updated SSM parameter %s to %s", param_name, current_hostname)
 
-        except Exception as e:
-            logger.warning("ALB sync check failed (non-fatal): %s", e)
+        except Exception as exc:
+            logger.warning("ALB sync check failed (non-fatal): %s", exc)
 
 
 def create_health_monitor_from_env() -> HealthMonitor:

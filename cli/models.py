@@ -141,21 +141,68 @@ class ModelManager:
         return f"s3://{bucket}/{prefix}/{model_name}"
 
     def delete_model(self, model_name: str, prefix: str = "models") -> int:
-        """Delete a model and all its files from S3."""
+        """Delete every version and delete marker for a model prefix.
+
+        The central model bucket is versioned. Deleting only the current
+        objects creates delete markers and leaves prior versions behind, which
+        can prevent later bucket removal and retain model data unexpectedly.
+        """
         bucket = self._get_bucket_name()
         s3 = self._get_s3_client()
         s3_prefix = f"{prefix}/{model_name}/"
 
-        # List and delete all objects
-        deleted = 0
-        paginator = s3.get_paginator("list_objects_v2")
+        deleted_keys: set[str] = set()
+        deletion_errors: list[str] = []
+        paginator = s3.get_paginator("list_object_versions")
         for page in paginator.paginate(Bucket=bucket, Prefix=s3_prefix):
-            objects = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
-            if objects:
-                s3.delete_objects(Bucket=bucket, Delete={"Objects": objects})
-                deleted += len(objects)
+            versioned_objects = []
+            for item in [*page.get("Versions", []), *page.get("DeleteMarkers", [])]:
+                key = item.get("Key")
+                version_id = item.get("VersionId")
+                if not key:
+                    continue
+                identifier = {"Key": key}
+                if version_id is not None:
+                    identifier["VersionId"] = version_id
+                versioned_objects.append(identifier)
 
-        return deleted
+            # S3 accepts at most 1,000 identifiers per DeleteObjects request.
+            for start in range(0, len(versioned_objects), 1000):
+                batch = versioned_objects[start : start + 1000]
+                if not batch:
+                    continue
+
+                response = s3.delete_objects(Bucket=bucket, Delete={"Objects": batch})
+                errors = response.get("Errors", []) if isinstance(response, dict) else []
+                errors = [error for error in errors if isinstance(error, dict)]
+
+                for identifier in batch:
+                    failed = any(
+                        error.get("Key") == identifier["Key"]
+                        and (
+                            error.get("VersionId") is None
+                            or error.get("VersionId") == identifier.get("VersionId")
+                        )
+                        for error in errors
+                    )
+                    if not failed:
+                        deleted_keys.add(identifier["Key"])
+
+                for error in errors:
+                    key = error.get("Key", "<unknown key>")
+                    version_id = error.get("VersionId")
+                    target = f"{key} (version {version_id})" if version_id else str(key)
+                    code = error.get("Code", "UnknownError")
+                    message = error.get("Message", "no error message")
+                    deletion_errors.append(f"{target}: {code}: {message}")
+
+        if deletion_errors:
+            details = "; ".join(deletion_errors)
+            raise RuntimeError(
+                f"Failed to delete {len(deletion_errors)} model object version(s): {details}"
+            )
+
+        return len(deleted_keys)
 
 
 class RegionalBucketManager:

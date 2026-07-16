@@ -41,7 +41,7 @@ Kubernetes microservices that run inside the EKS clusters.
 | `metrics_publisher.py` | Publishes custom CloudWatch metrics for monitoring |
 | `template_store.py` | DynamoDB-backed store for reusable job templates |
 | `webhook_dispatcher.py` | Dispatches webhook notifications on job lifecycle events |
-| `auth_middleware.py` | Secret header validation middleware for service authentication |
+| `auth_middleware.py` | Validates short-lived, request-bound HMAC envelopes with key-rotation and replay protection |
 | `api_shared.py` | Shared utilities for the FastAPI-based services |
 | `structured_logging.py` | JSON structured logging configuration |
 

@@ -6,6 +6,7 @@ This document describes the REST API for the GCO Manifest Processor service.
 
 - [Base URL](#base-url)
 - [Authentication](#authentication)
+- [Transport Security](#transport-security)
 - [CLI Quick Reference](#cli-quick-reference)
 - [API Endpoints](#api-endpoints)
   - [Health & Status](#health--status)
@@ -54,9 +55,43 @@ https://<API_GATEWAY_ENDPOINT>/api/v1
 
 ## Authentication
 
-All API requests are authenticated using AWS IAM Signature Version 4 (SigV4) at the API Gateway level. The API Gateway validates your AWS credentials and forwards authenticated requests to the backend services.
+All API requests are authenticated using AWS IAM Signature Version 4 (SigV4)
+at the API Gateway level. API Gateway validates the caller's AWS credentials;
+the proxy then allowlists supported headers and signs the exact backend request
+with a short-lived HMAC envelope. The envelope binds a timestamp, nonce, method,
+path/query, and body digest, so the reusable Secrets Manager signing key is never
+sent to the cluster. Backend middleware rejects stale, tampered, or process-local
+replayed envelopes.
 
-**Important:** Never manually set the `X-GCO-Auth-Token` header. This internal header is automatically injected by the API Gateway proxy after successful SigV4 authentication.
+**Important:** Clients provide only SigV4 authentication. Do not set any
+`X-GCO-Signature-*`, `X-GCO-Timestamp`, `X-GCO-Nonce`, or
+`X-GCO-Content-SHA256` headers; the proxy strips caller-supplied internal headers
+and creates its own envelope after IAM authentication. The global endpoint also
+rejects `X-GCO-Target-Region`; select an authorized regional API endpoint for
+explicit region pinning. The GCO CLI does this automatically whenever an API
+operation carries an exact transport target region.
+
+## Transport Security
+
+GCO has two explicit TLS trust domains:
+
+1. Clients and the centralized aggregator use AWS-managed TLS to API Gateway.
+   Aggregator fan-out additionally uses SigV4 with its execution-role
+   credentials to each deterministic regional API bridge.
+2. Trusted proxy Lambdas use the deployment-local private root for the backend
+   ALB hop. The normal global path is proxy → Global Accelerator → ALB, while a
+   regional bridge uses VPC proxy → ALB. Global Accelerator forwards TCP/443 at
+   Layer 4 and does not terminate TLS.
+
+Every regional ACM leaf represents `backend.<project>.gco.internal`. Backend
+clients connect to dynamic accelerator or ALB DNS names but explicitly send
+that identity with SNI and assert it during certificate verification. ALBs
+terminate TLS and forward HTTP to Kubernetes pods.
+
+The root private key exists only in a customer-managed-KMS-encrypted Secrets
+Manager secret readable by the certificate-manager role. Proxy roles read only
+the public SSM trust bundle. The HMAC envelope is complementary: it provides
+application integrity, freshness, and replay defense, not encryption.
 
 ### Using AWS CLI with SigV4
 
@@ -151,7 +186,12 @@ gco webhooks delete <WEBHOOK_ID>
 
 ### Global Aggregation (Cross-Region)
 
-These endpoints query all regional clusters in parallel and return aggregated results.
+These endpoints query all required regions in parallel and return aggregated
+results. The aggregator discovers each `<project>-regional-api-<region>` stack
+through CloudFormation, validates its `RegionalApiEndpoint`, and calls it over
+AWS-managed TLS with SigV4. The regional VPC proxy then performs the
+HMAC-signed, private-root-TLS hop to the internal ALB. Discovery fails closed if
+a required bridge is unavailable.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|

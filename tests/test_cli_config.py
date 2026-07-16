@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import yaml
 
 from cli.config import GCOConfig, _load_cdk_json, _load_cdk_project_name, get_config
@@ -123,6 +124,29 @@ class TestGCOConfigFromFile:
             assert config.default_region == "us-east-1"
             assert config.project_name == "gco"
 
+    def test_explicit_missing_path_raises(self, tmp_path):
+        """An explicit typo must not silently fall back to defaults."""
+        missing = tmp_path / "missing.yaml"
+        with pytest.raises(FileNotFoundError, match="Configuration file not found"):
+            GCOConfig.from_file(str(missing))
+
+    def test_empty_yaml_uses_dataclass_defaults(self, tmp_path):
+        config_path = tmp_path / "empty.yaml"
+        config_path.write_text("")
+
+        config = GCOConfig.from_file(str(config_path))
+
+        assert config.default_region == "us-east-1"
+        assert config.cache_dir.endswith(".gco/cache")
+
+    def test_loads_default_factory_fields(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump({"cache_dir": str(tmp_path / "cache")}))
+
+        config = GCOConfig.from_file(str(config_path))
+
+        assert config.cache_dir == str(tmp_path / "cache")
+
     def test_ignores_unknown_keys(self, tmp_path):
         """Should ignore unknown keys in config file."""
         config_data = {
@@ -169,6 +193,11 @@ class TestGCOConfigFromEnv:
         with patch.dict(os.environ, {"GCO_VERBOSE": "no"}):
             config = GCOConfig.from_env()
             assert config.verbose is False
+
+    def test_loads_regional_api_mode(self):
+        with patch.dict(os.environ, {"GCO_REGIONAL_API": "true"}, clear=True):
+            config = GCOConfig.from_env()
+        assert config.use_regional_api is True
 
     def test_loads_multiple_env_vars(self):
         """Should load multiple env vars at once."""
@@ -247,7 +276,6 @@ class TestGCOConfigToDict:
             "api_gateway_stack_name",
             "regional_stack_prefix",
             "default_namespace",
-            "allowed_namespaces",
             "spot_price_history_days",
             "capacity_check_timeout",
             "efs_mount_path",
@@ -317,6 +345,38 @@ class TestGetConfig:
         ):
             config = get_config()
             assert config.default_region == "ap-southeast-1"
+
+    def test_file_explicit_default_and_regional_mode_override_cdk(self, tmp_path):
+        cdk_path = tmp_path / "cdk.json"
+        cdk_path.write_text(
+            json.dumps(
+                {
+                    "context": {
+                        "deployment_regions": {
+                            "regional": ["eu-west-1"],
+                            "api_gateway": "eu-west-2",
+                        }
+                    }
+                }
+            )
+        )
+        (tmp_path / ".gco.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "default_region": "us-east-1",
+                    "use_regional_api": True,
+                }
+            )
+        )
+
+        with (
+            patch("cli.config.Path.cwd", return_value=tmp_path),
+            patch("cli.config.GCOConfig.from_env", return_value=GCOConfig()),
+        ):
+            config = get_config()
+
+        assert config.default_region == "us-east-1"
+        assert config.use_regional_api is True
 
 
 class TestProjectScopedNames:

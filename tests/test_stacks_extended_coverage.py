@@ -32,6 +32,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 
 @pytest.fixture
@@ -312,11 +313,31 @@ class TestCloudFormationHelpers:
         with patch("boto3.client", return_value=cfn):
             assert manager._stack_exists_in_cloudformation("gco-global") is False
 
-    def test_stack_exists_returns_false_on_describe_error(self, manager: Any) -> None:
+    def test_stack_exists_returns_false_only_for_not_found(self, manager: Any) -> None:
         cfn = MagicMock()
-        cfn.describe_stacks.side_effect = RuntimeError("denied")
+        cfn.describe_stacks.side_effect = ClientError(
+            {
+                "Error": {
+                    "Code": "ValidationError",
+                    "Message": "Stack with id missing does not exist",
+                }
+            },
+            "DescribeStacks",
+        )
         with patch("boto3.client", return_value=cfn):
             assert manager._stack_exists_in_cloudformation("missing") is False
+
+    def test_stack_exists_propagates_describe_service_error(self, manager: Any) -> None:
+        cfn = MagicMock()
+        cfn.describe_stacks.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "denied"}},
+            "DescribeStacks",
+        )
+        with (
+            patch("boto3.client", return_value=cfn),
+            pytest.raises(ClientError),
+        ):
+            manager._stack_exists_in_cloudformation("gco-global")
 
     def test_cloudformation_delete_stack_success(self, manager: Any) -> None:
         cfn = MagicMock()

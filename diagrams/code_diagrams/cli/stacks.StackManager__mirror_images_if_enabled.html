@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,32 +205,32 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3562=>operation: "Mirror third-party images into ECR before a regional stack deploys.\n\n        No-op unless ``volcano_image_mirror.enabled`` is set in cdk.json. Mirrors\n        every relevant regional region (see :meth:`_mirror_target_regions`); the\n        copy is idempotent and skips images already present, so a fresh deploy\n        seeds the mirror automatically and repeat deploys cost only a few ECR\n        describe calls. Raises **before** any CDK call if an enabled mirror fails,\n        so a deploy never points a consumer (e.g. Volcano's ``image_registry``)\n        at images that aren't in ECR yet.\n        "
-op3564=>operation: from . import _image_mirror as image_mirror
-op3566=>operation: cfg = image_mirror.read_mirror_config()
-cond3569=>condition: if not cfg['enabled']
-e3574=>end: end function return
-op3580=>operation: regions = self._mirror_target_regions(stack_name, all_stacks)
-cond3583=>condition: for region in regions
-sub3587=>subroutine: print(f'Mirroring third-party images into ECR for {region} ...')
-sub3592=>subroutine: image_mirror.mirror_images(region, ecr_namespace=cfg['ecr_namespace'], skip_existing=True)
-cond3589=>condition: exception raised?
-cond3594=>condition: except Exception as exc
-sub3598=>subroutine: raise RuntimeError(f"Image mirror failed for region {region}: {exc}\nvolcano_image_mirror is enabled but the images could not be mirrored into ECR. Fix the cause (container runtime / network / credentials) or run 'gco images mirror --region {region}' manually, then retry. Aborting before CDK so the deploy never points a consumer at images that aren't in ECR.") from exc
+        <div><textarea id="code" style="width: 100%;" rows="11">op5219=>operation: "Mirror third-party images into ECR before a regional stack deploys.\n\n        No-op unless ``volcano_image_mirror.enabled`` is set in cdk.json. Mirrors\n        every relevant regional region (see :meth:`_mirror_target_regions`); the\n        copy is idempotent and skips images already present, so a fresh deploy\n        seeds the mirror automatically and repeat deploys cost only a few ECR\n        describe calls. Raises **before** any CDK call if an enabled mirror fails,\n        so a deploy never points a consumer (e.g. Volcano's ``image_registry``)\n        at images that aren't in ECR yet.\n        "
+op5221=>operation: from . import _image_mirror as image_mirror
+op5223=>operation: cfg = image_mirror.read_mirror_config()
+cond5226=>condition: if not cfg['enabled']
+e5231=>end: end function return
+op5237=>operation: regions = self._mirror_target_regions(stack_name, all_stacks)
+cond5240=>condition: for region in regions
+sub5244=>subroutine: print(f'Mirroring third-party images into ECR for {region} ...')
+sub5249=>subroutine: image_mirror.mirror_images(region, ecr_namespace=cfg['ecr_namespace'], skip_existing=True)
+cond5246=>condition: exception raised?
+cond5251=>condition: except Exception as exc
+sub5255=>subroutine: raise RuntimeError(f"Image mirror failed for region {region}: {exc}\nvolcano_image_mirror is enabled but the images could not be mirrored into ECR. Fix the cause (container runtime / network / credentials) or run 'gco images mirror --region {region}' manually, then retry. Aborting before CDK so the deploy never points a consumer at images that aren't in ECR.") from exc
 
-op3562->op3564
-op3564->op3566
-op3566->cond3569
-cond3569(yes)->e3574
-cond3569(no)->op3580
-op3580->cond3583
-cond3583(yes)->sub3587
-sub3587->sub3592
-sub3592->cond3589
-cond3589(yes)->cond3594
-cond3594(yes)->sub3598
-cond3594(no)->cond3583
-cond3589(no)->cond3583
+op5219->op5221
+op5221->op5223
+op5223->cond5226
+cond5226(yes)->e5231
+cond5226(no)->op5237
+op5237->cond5240
+cond5240(yes)->sub5244
+sub5244->sub5249
+sub5249->cond5246
+cond5246(yes)->cond5251
+cond5251(yes)->sub5255
+cond5251(no)->cond5240
+cond5246(no)->cond5240
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

@@ -65,6 +65,14 @@ HELM_INSTALL_MAX_RETRIES = 3
 # resource completion beyond its 15-minute timeout.
 HELM_INSTALL_RETRY_DELAY_SECONDS = 30
 
+# Delete is a synchronous CloudFormation custom-resource operation with a
+# one-hour ceiling. The regional stack can contain eleven releases, so each
+# serialized uninstall gets a two-minute Helm deadline and a 150-second process
+# cap. This leaves room for the mandatory 16-minute convergence drain and
+# health-monitor quiescence while still failing closed on slow/stuck releases.
+HELM_UNINSTALL_TIMEOUT = "2m"
+HELM_UNINSTALL_COMMAND_TIMEOUT_SECONDS = 150
+
 
 def _record_addon_status(chart_name: str, status: str, message: str) -> None:
     """Record a single chart's install outcome to SSM (best-effort).
@@ -225,7 +233,10 @@ def configure_kubeconfig(cluster_name: str, region: str) -> str:
 
 
 def run_helm(
-    args: list[str], kubeconfig: str, env: dict[str, str] | None = None
+    args: list[str],
+    kubeconfig: str,
+    env: dict[str, str] | None = None,
+    command_timeout_seconds: int | None = None,
 ) -> tuple[int, str, str]:
     """Run helm command with kubeconfig.
 
@@ -236,6 +247,10 @@ def run_helm(
     ``helm ... --wait`` can block on operator reconciliation; without this
     mapping a single stuck release would crash the Lambda past the outer
     ``except Exception`` and fail the whole retry loop.
+
+    ``command_timeout_seconds`` lets synchronous stack deletion use a tighter,
+    provable bound than create/update without changing the latter's 13-minute
+    allowance.
     """
     cmd = ["helm"] + args
 
@@ -257,7 +272,11 @@ def run_helm(
     # own Step Functions task / Lambda invocation, so this can safely approach
     # the per-invocation Lambda limit; retries are handled at the state-machine
     # level. Override with HELM_CMD_TIMEOUT_SECONDS.
-    cmd_timeout = int(os.environ.get("HELM_CMD_TIMEOUT_SECONDS", "780"))
+    cmd_timeout = (
+        command_timeout_seconds
+        if command_timeout_seconds is not None
+        else int(os.environ.get("HELM_CMD_TIMEOUT_SECONDS", "780"))
+    )
 
     try:
         result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - cmd is ["helm"] + static args list; helm_env is a controlled copy of os.environ, no shell=True
@@ -495,17 +514,100 @@ def install_chart(
 
 
 def uninstall_chart(chart_name: str, namespace: str, kubeconfig: str) -> tuple[bool, str]:
-    """Uninstall a Helm chart."""
-    args = ["uninstall", chart_name, "--namespace", namespace, "--wait"]
-    code, _, stderr = run_helm(args, kubeconfig)
+    """Uninstall a Helm chart within the synchronous teardown budget."""
+    args = [
+        "uninstall",
+        chart_name,
+        "--namespace",
+        namespace,
+        "--wait",
+        "--timeout",
+        HELM_UNINSTALL_TIMEOUT,
+    ]
+    code, _, stderr = run_helm(
+        args,
+        kubeconfig,
+        command_timeout_seconds=HELM_UNINSTALL_COMMAND_TIMEOUT_SECONDS,
+    )
 
     if code == 0:
         return True, f"Successfully uninstalled {chart_name}"
-    else:
-        # Ignore "not found" errors
-        if "not found" in stderr.lower():
-            return True, f"Chart {chart_name} not found (already uninstalled)"
-        return False, f"Failed to uninstall {chart_name}: {stderr}"
+
+    # Helm's explicit release-absence signature is idempotent success. Do not
+    # accept a generic "not found": Kubernetes API/resource failures can carry
+    # that text while the release is still live and must block teardown.
+    if "release: not found" in stderr.lower():
+        return True, f"Chart {chart_name} not found (already uninstalled)"
+    return False, f"Failed to uninstall {chart_name}: {stderr}"
+
+
+def quiesce_health_monitor(kubeconfig: str, namespace: str = "gco-system") -> tuple[bool, str]:
+    """Scale health-monitor to zero and wait until every replica is gone.
+
+    This is the first synchronous stack-delete task. It prevents the monitor
+    from recreating the ALB-hostname SSM parameter after GA deregistration.
+    Kubernetes' exact Deployment ``NotFound`` response is idempotent; every
+    other scale/wait failure is surfaced to the teardown state machine.
+    """
+    env = os.environ.copy()
+    env["KUBECONFIG"] = kubeconfig
+    common = ["kubectl", "--kubeconfig", kubeconfig, "--request-timeout=30s"]
+
+    try:
+        scale = subprocess.run(
+            [
+                *common,
+                "scale",
+                "deployment/health-monitor",
+                "--namespace",
+                namespace,
+                "--replicas=0",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "Timed out scaling health-monitor deployment to zero"
+
+    if scale.returncode != 0:
+        scale_error = (scale.stderr or scale.stdout).strip()
+        lowered = scale_error.lower()
+        exact_absence = (
+            'deployments.apps "health-monitor" not found',
+            'deployment.apps "health-monitor" not found',
+            'deployment "health-monitor" not found',
+        )
+        if not any(signature in lowered for signature in exact_absence):
+            return False, f"Failed to scale health-monitor to zero: {scale_error}"
+
+    try:
+        wait = subprocess.run(
+            [
+                *common,
+                "wait",
+                "--for=delete",
+                "pod",
+                "--selector=app=health-monitor",
+                "--namespace",
+                namespace,
+                "--timeout=180s",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=210,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "Timed out waiting for health-monitor pods to terminate"
+
+    if wait.returncode != 0:
+        wait_error = (wait.stderr or wait.stdout).strip()
+        if "no matching resources found" not in wait_error.lower():
+            return False, f"Failed waiting for health-monitor pods: {wait_error}"
+
+    return True, "Health monitor quiesced"
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -628,8 +730,8 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
     Event shape (from the state machine task payload)::
 
         {
-          "Action": "install_chart" | "uninstall_chart",
-          "Chart": "<chart name as keyed in charts.yaml>",
+          "Action": "install_chart" | "uninstall_chart" | "quiesce_health_monitor",
+          "Chart": "<chart name as keyed in charts.yaml>",  # omitted for quiesce
           "ClusterName": "...", "Region": "...",
           "EnabledCharts": ["keda", ...],
           "KedaOperatorRoleArn": "arn:...",   # optional
@@ -640,9 +742,23 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
     machine's Retry/Catch handles it.
     """
     action = event["Action"]
-    chart_name = event["Chart"]
     cluster_name = event.get("ClusterName") or os.environ["CLUSTER_NAME"]
     region = event.get("Region") or os.environ["REGION"]
+
+    if action == "quiesce_health_monitor":
+        kubeconfig = configure_kubeconfig(cluster_name, region)
+        try:
+            success, message = quiesce_health_monitor(kubeconfig)
+            if not success:
+                raise RuntimeError(f"health-monitor quiesce failed: {message}")
+            return {"status": "quiesced", "message": message}
+        finally:
+            import contextlib
+
+            with contextlib.suppress(Exception):
+                os.remove(kubeconfig)
+
+    chart_name = event["Chart"]
     enabled_charts = event.get("EnabledCharts") or []
     chart_overrides = event.get("Charts") or {}
     keda_operator_role_arn = event.get("KedaOperatorRoleArn")
@@ -668,12 +784,17 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
     try:
         if action == "uninstall_chart" or (action == "install_chart" and not is_enabled):
             # Disabled chart on an install pass: ensure it's gone (idempotent).
+            # Helm's explicit "release: not found" is already reported as
+            # success by uninstall_chart; every other error must escape so
+            # CloudFormation teardown cannot continue against a live release.
             success, message = uninstall_chart(chart_name, namespace, kubeconfig)
-            status = "uninstalled" if success else "absent"
-            _record_addon_status(chart_name, status, message)
+            if not success:
+                _record_addon_status(chart_name, "failed", message)
+                raise RuntimeError(f"helm uninstall {chart_name} failed: {message}")
+            _record_addon_status(chart_name, "uninstalled", message)
             return {
                 "chart": chart_name,
-                "status": status,
+                "status": "uninstalled",
                 "message": message,
             }
 
@@ -754,6 +875,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> Any:
 
         results = {}
         failed = []
+        uninstall_failed = []
 
         if request_type in ("Create", "Update"):
             # Install/upgrade enabled charts with retry for transient failures
@@ -762,17 +884,17 @@ def lambda_handler(event: dict[str, Any], context: Any) -> Any:
             max_retries = HELM_INSTALL_MAX_RETRIES
             retry_delay = HELM_INSTALL_RETRY_DELAY_SECONDS
 
-            # First pass: uninstall disabled charts that were previously installed
+            # First pass: uninstall disabled charts that were previously installed.
+            # A genuine uninstall error is a failed convergence operation; only
+            # Helm's explicit "not found" result is idempotent success.
             for chart_name, config in charts_config.items():
                 if not config.get("enabled", False):
                     namespace = config.get("namespace", "default")
                     logger.info(f"Chart {chart_name} is disabled, checking if installed...")
                     success, message = uninstall_chart(chart_name, namespace, kubeconfig)
-                    results[chart_name] = (
-                        "uninstalled (disabled)"
-                        if "Successfully" in message
-                        else "skipped (disabled)"
-                    )
+                    results[chart_name] = message
+                    if not success:
+                        uninstall_failed.append(chart_name)
 
             # Second pass: install/upgrade enabled charts
             for chart_name, config in charts_config.items():
@@ -828,6 +950,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> Any:
             if failed:
                 logger.warning(f"Charts still failing after {max_retries} retries: {failed}")
 
+            # Keep uninstall failures out of the install retry loop: retrying
+            # one as an install would recreate the disabled release. They still
+            # participate in the final FAILED response.
+            failed.extend(uninstall_failed)
+
         elif request_type == "Delete":
             # Uninstall charts (in reverse order)
             for chart_name, config in reversed(list(charts_config.items())):
@@ -856,7 +983,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> Any:
             "FailedCharts": ",".join(failed),
         }
 
-        if failed and request_type != "Delete":
+        if failed:
             send_response(
                 event,
                 context,
@@ -870,10 +997,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> Any:
 
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
-        if request_type == "Delete":
-            # Always succeed on delete to prevent stack from getting stuck
-            send_response(
-                event, context, SUCCESS, {"Status": "Forced success on delete"}, physical_id
-            )
-        else:
-            send_response(event, context, FAILED, {}, physical_id, str(e))
+        # Delete errors are intentionally failures. Reporting success here lets
+        # CloudFormation remove the EKS/access resources while Helm releases
+        # (and their external load balancers/webhooks) are still live.
+        send_response(event, context, FAILED, {}, physical_id, str(e))

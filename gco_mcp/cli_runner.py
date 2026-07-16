@@ -36,7 +36,11 @@ def _gco_executable() -> str:
     return shutil.which("gco") or "gco"
 
 
-def _run_cli(*args: str, timeout_seconds: int = 120) -> str:
+def _run_cli(
+    *args: str,
+    timeout_seconds: int = 120,
+    pass_fds: tuple[int, ...] = (),
+) -> str:
     """Run a gco CLI command and return its output.
 
     All args are passed as separate list elements to subprocess (shell=False),
@@ -44,7 +48,9 @@ def _run_cli(*args: str, timeout_seconds: int = 120) -> str:
     and cannot cause command injection. Path arguments are validated to prevent
     traversal outside the project root. ``timeout_seconds`` may be increased by
     wrappers for intentionally long-running transfers while preserving the
-    two-minute default for normal tools.
+    two-minute default for normal tools. ``pass_fds`` is reserved for verified
+    descriptor-backed local-data paths and is omitted from ``subprocess.run``
+    when empty for compatibility with platforms that do not support it.
     """
     # Validate any path-like arguments to prevent directory traversal.
     for arg in args:
@@ -54,13 +60,18 @@ def _run_cli(*args: str, timeout_seconds: int = 120) -> str:
             return json.dumps({"error": f"Invalid argument: path traversal not allowed: {arg}"})
 
     cmd = [_gco_executable(), "--output", "json", *args]
+    run_options: dict[str, object] = {
+        "capture_output": True,
+        "text": True,
+        "timeout": timeout_seconds,
+        "cwd": str(PROJECT_ROOT),
+    }
+    if pass_fds:
+        run_options["pass_fds"] = pass_fds
     try:
         result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - shell=False; args are validated above and passed as literal argv elements
             cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            cwd=str(PROJECT_ROOT),
+            **run_options,
         )
         output = result.stdout.strip()
         if result.returncode != 0:

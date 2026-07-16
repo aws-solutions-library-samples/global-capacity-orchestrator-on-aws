@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -22,6 +23,50 @@ from gco.services.api_shared import (
 router = APIRouter(prefix="/api/v1/jobs", tags=["Jobs"])
 logger = logging.getLogger(__name__)
 
+_LABEL_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[-_.A-Za-z0-9]{0,61}[A-Za-z0-9])?$")
+_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
+
+
+def _parse_exact_label_selector(selector: str | None) -> list[tuple[str, str]]:
+    """Parse the API's deliberately narrow, fail-closed selector subset."""
+    if selector is None:
+        return []
+
+    requirements: list[tuple[str, str]] = []
+    for raw_clause in selector.split(","):
+        clause = raw_clause.strip()
+        if not clause or clause.count("=") != 1:
+            raise ValueError(
+                "Label selectors must be comma-separated exact matches in key=value form"
+            )
+
+        key, value = (part.strip() for part in clause.split("=", 1))
+        if "/" in key:
+            if key.count("/") != 1:
+                raise ValueError(f"Invalid label key in selector: {key!r}")
+            prefix, name = key.split("/", 1)
+            valid_prefix = len(prefix) <= 253 and all(
+                _DNS_LABEL_RE.fullmatch(part) for part in prefix.split(".")
+            )
+        else:
+            name = key
+            valid_prefix = True
+
+        if not valid_prefix or not _LABEL_NAME_RE.fullmatch(name):
+            raise ValueError(f"Invalid label key in selector: {key!r}")
+        if value and not _LABEL_NAME_RE.fullmatch(value):
+            raise ValueError(f"Invalid label value in selector for {key!r}")
+        requirements.append((key, value))
+
+    return requirements
+
+
+def _labels_match(labels: Any, requirements: list[tuple[str, str]]) -> bool:
+    """Return whether all parsed exact-match requirements are satisfied."""
+    if not isinstance(labels, dict):
+        return False
+    return all(labels.get(key) == value for key, value in requirements)
+
 
 @router.get("")
 async def list_jobs(
@@ -30,28 +75,25 @@ async def list_jobs(
     limit: int = Query(50, ge=1, le=1000, description="Maximum number of jobs to return"),
     offset: int = Query(0, ge=0, description="Number of jobs to skip"),
     sort: str = Query("createdAt:desc", description="Sort field and order (field:asc|desc)"),
-    label_selector: str | None = Query(None, description="Kubernetes label selector"),
+    label_selector: str | None = Query(
+        None,
+        max_length=1024,
+        description="Comma-separated exact-match label filters (key=value only)",
+    ),
 ) -> Response:
     """List Kubernetes Jobs with pagination and filtering."""
     processor = _check_processor()
 
     try:
+        selector_requirements = _parse_exact_label_selector(label_selector)
         all_jobs = await processor.list_jobs(namespace=namespace, status_filter=status)
 
-        if label_selector:
-            filtered_jobs = []
-            for job in all_jobs:
-                labels = job.get("metadata", {}).get("labels", {})
-                match = True
-                for selector in label_selector.split(","):
-                    if "=" in selector:
-                        key, value = selector.split("=", 1)
-                        if labels.get(key.strip()) != value.strip():
-                            match = False
-                            break
-                if match:
-                    filtered_jobs.append(job)
-            all_jobs = filtered_jobs
+        if selector_requirements:
+            all_jobs = [
+                job
+                for job in all_jobs
+                if _labels_match(job.get("metadata", {}).get("labels", {}), selector_requirements)
+            ]
 
         sort_field, sort_order = "createdAt", "desc"
         if ":" in sort:
@@ -520,6 +562,7 @@ async def bulk_delete_jobs(request: BulkDeleteRequest) -> Response:
     processor = _check_processor()
 
     try:
+        selector_requirements = _parse_exact_label_selector(request.label_selector)
         status_filter = request.status.value if request.status else None
         all_jobs = await processor.list_jobs(
             namespace=request.namespace, status_filter=status_filter
@@ -535,20 +578,20 @@ async def bulk_delete_jobs(request: BulkDeleteRequest) -> Response:
                 created_str = job.get("metadata", {}).get("creationTimestamp")
                 if created_str:
                     created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-                    if created.replace(tzinfo=None) > cutoff_time:
+                    # Kubernetes normally returns an aware RFC3339 timestamp,
+                    # but older fixtures/clients may provide a naive value.
+                    # Normalize both forms to aware UTC before comparison.
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=UTC)
+                    else:
+                        created = created.astimezone(UTC)
+                    if created > cutoff_time:
                         continue
 
-            if request.label_selector:
-                labels = job.get("metadata", {}).get("labels", {})
-                match = True
-                for selector in request.label_selector.split(","):
-                    if "=" in selector:
-                        key, value = selector.split("=", 1)
-                        if labels.get(key.strip()) != value.strip():
-                            match = False
-                            break
-                if not match:
-                    continue
+            if selector_requirements and not _labels_match(
+                job.get("metadata", {}).get("labels", {}), selector_requirements
+            ):
+                continue
 
             jobs_to_delete.append(job)
 

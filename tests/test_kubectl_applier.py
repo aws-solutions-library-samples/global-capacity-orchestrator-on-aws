@@ -135,6 +135,11 @@ class TestPlaceholderSkipping:
 
         with (
             patch.object(handler_module, "configure_k8s_client"),
+            patch.object(
+                handler_module,
+                "_prune_disabled_feature",
+                return_value={"pruned": [], "failed": []},
+            ),
             patch("handler.client") as mock_client,
         ):
             mock_client.CoreV1Api.return_value = MagicMock()
@@ -236,6 +241,11 @@ class TestPlaceholderSkipping:
 
         with (
             patch.object(handler_module, "configure_k8s_client"),
+            patch.object(
+                handler_module,
+                "_prune_disabled_feature",
+                return_value={"pruned": [], "failed": []},
+            ),
             patch("handler.client") as mock_client,
         ):
             mock_client.CoreV1Api.return_value = MagicMock()
@@ -250,6 +260,156 @@ class TestPlaceholderSkipping:
 
         assert result["AppliedCount"] == 0
         assert "post-helm-grafana-dashboards.yaml:unreplaced-placeholders" in result["Skipped"]
+
+
+class TestDisabledFeaturePruning:
+    """Disabled optional features converge by pruning only owned resources."""
+
+    def test_prunes_only_exact_queue_processor_scaled_job(self, handler_module):
+        mock_resource = MagicMock()
+        mock_dynamic = MagicMock()
+        mock_dynamic.resources.get.return_value = mock_resource
+        delete_options = MagicMock()
+
+        with (
+            patch.object(
+                handler_module.dynamic,
+                "DynamicClient",
+                return_value=mock_dynamic,
+            ),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            patch.object(
+                handler_module.client,
+                "V1DeleteOptions",
+                return_value=delete_options,
+            ),
+        ):
+            result = handler_module._prune_disabled_feature(
+                "{{QUEUE_PROCESSOR_IMAGE}}", post_helm=True
+            )
+
+        mock_dynamic.resources.get.assert_called_once_with(
+            api_version="keda.sh/v1alpha1", kind="ScaledJob"
+        )
+        mock_resource.delete.assert_called_once_with(
+            name="sqs-queue-processor",
+            namespace="gco-system",
+            body=delete_options,
+        )
+        assert result == {
+            "pruned": ["keda.sh/v1alpha1/ScaledJob/gco-system/sqs-queue-processor"],
+            "failed": [],
+        }
+
+    def test_missing_resource_and_missing_crd_are_noops(self, handler_module):
+        from kubernetes.client.rest import ApiException
+
+        missing_resource = MagicMock()
+        missing_resource.delete.side_effect = ApiException(status=404, reason="Not Found")
+        missing_dynamic = MagicMock()
+        missing_dynamic.resources.get.return_value = missing_resource
+
+        with (
+            patch.object(
+                handler_module.dynamic,
+                "DynamicClient",
+                return_value=missing_dynamic,
+            ),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            patch.object(handler_module.client, "V1DeleteOptions", return_value=MagicMock()),
+        ):
+            result = handler_module._prune_disabled_feature(
+                "{{QUEUE_PROCESSOR_IMAGE}}", post_helm=True
+            )
+
+        assert result == {"pruned": [], "failed": []}
+
+        missing_dynamic.resources.get.side_effect = handler_module.ResourceNotFoundError(
+            "ScaledJob CRD is absent"
+        )
+        with (
+            patch.object(
+                handler_module.dynamic,
+                "DynamicClient",
+                return_value=missing_dynamic,
+            ),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            patch.object(handler_module.client, "V1DeleteOptions", return_value=MagicMock()),
+        ):
+            result = handler_module._prune_disabled_feature(
+                "{{QUEUE_PROCESSOR_IMAGE}}", post_helm=True
+            )
+
+        assert result == {"pruned": [], "failed": []}
+
+    def test_non_404_prune_failure_is_reported(self, handler_module):
+        from kubernetes.client.rest import ApiException
+
+        mock_resource = MagicMock()
+        mock_resource.delete.side_effect = ApiException(status=403, reason="Forbidden")
+        mock_dynamic = MagicMock()
+        mock_dynamic.resources.get.return_value = mock_resource
+
+        with (
+            patch.object(
+                handler_module.dynamic,
+                "DynamicClient",
+                return_value=mock_dynamic,
+            ),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            patch.object(handler_module.client, "V1DeleteOptions", return_value=MagicMock()),
+        ):
+            result = handler_module._prune_disabled_feature(
+                "{{QUEUE_PROCESSOR_IMAGE}}", post_helm=True
+            )
+
+        assert result["pruned"] == []
+        assert result["failed"] == [
+            "keda.sh/v1alpha1/ScaledJob/gco-system/sqs-queue-processor:403:Forbidden"
+        ]
+
+    def test_reconciles_each_gate_once_and_surfaces_prune_results(self, handler_module, tmp_path):
+        for filename in ("post-helm-queue-a.yaml", "post-helm-queue-b.yaml"):
+            (tmp_path / filename).write_text(
+                "apiVersion: v1\n"
+                "kind: ConfigMap\n"
+                "metadata:\n"
+                "  name: disabled-queue\n"
+                "  annotations:\n"
+                '    image: "{{QUEUE_PROCESSOR_IMAGE}}"\n'
+            )
+
+        pruned = "keda.sh/v1alpha1/ScaledJob/gco-system/sqs-queue-processor"
+        failure = f"{pruned}:403:Forbidden"
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch.object(
+                handler_module,
+                "_prune_disabled_feature",
+                return_value={"pruned": [pruned], "failed": [failure]},
+            ) as mock_prune,
+            patch("handler.client") as mock_client,
+        ):
+            mock_client.CoreV1Api.return_value = MagicMock()
+            mock_client.AppsV1Api.return_value = MagicMock()
+            mock_client.RbacAuthorizationV1Api.return_value = MagicMock()
+            mock_client.NetworkingV1Api.return_value = MagicMock()
+            mock_client.CustomObjectsApi.return_value = MagicMock()
+
+            result = handler_module.apply_manifests(
+                "test-cluster",
+                "us-east-1",
+                str(tmp_path),
+                {},
+                post_helm=True,
+            )
+
+        mock_prune.assert_called_once_with("{{QUEUE_PROCESSOR_IMAGE}}", True)
+        assert result["PrunedCount"] == 1
+        assert result["Pruned"] == pruned
+        assert result["PruneFailures"] == failure
+        assert result["FailedCount"] == 1
+        assert result["Failed"] == f"prune:{failure}"
 
 
 class TestPrometheusOperatorCRDs:

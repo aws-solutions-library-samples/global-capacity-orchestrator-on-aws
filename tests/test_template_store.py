@@ -3,13 +3,12 @@ Tests for the DynamoDB-backed stores in gco/services/template_store.py.
 
 Covers TemplateStore (list/get/create/update/delete with pagination
 and duplicate-name guard), WebhookStore (namespace-scoped queries,
-event-filtered fanout, HMAC secret round-trip), and JobStore (submit,
-conditional claim, update_job_status with history append and error
-fields, priority-sorted get_queued_jobs_for_region, counts by region,
-and cancel guarded by ConditionalCheckFailedException). Also pins the
-JobStatus enum values and the module-level singleton getters
-(get_template_store, get_webhook_store, get_job_store), including
-ClientError propagation on the TemplateStore/WebhookStore paths.
+event-filtered fanout, HMAC secret round-trip), and JobStore (idempotent
+submission, renewable fenced claims, compare-and-set lifecycle transitions,
+priority-indexed polling, opaque bounded pagination and counts, legacy-record
+migration, and queued-only cancellation). Also pins the JobStatus enum values
+and the module-level singleton getters (get_template_store, get_webhook_store,
+get_job_store), including ClientError propagation across store operations.
 """
 
 from unittest.mock import MagicMock, patch
@@ -425,7 +424,17 @@ class TestJobStore:
         mock_dynamodb.put_item.assert_called_once()
 
     def test_claim_job_success(self, job_store, mock_dynamodb):
-        """Test claiming a queued job."""
+        """A queued record is claimed with region and fencing identity."""
+        mock_dynamodb.get_item.return_value = {
+            "Item": {
+                "job_id": "job-123",
+                "status": "queued",
+                "target_region": "us-east-1",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "claim_generation": 2,
+                "status_history": "[]",
+            }
+        }
         mock_dynamodb.update_item.return_value = {
             "Attributes": {
                 "job_id": "job-123",
@@ -437,31 +446,55 @@ class TestJobStore:
                 "manifest": "{}",
                 "labels": "{}",
                 "status_history": "[]",
+                "claim_generation": 3,
+                "claim_token": "claim-token",
             }
         }
 
-        result = job_store.claim_job("job-123", claimed_by="us-east-1")
+        result = job_store.claim_job("job-123", "us-east-1", "worker-1")
 
         assert result is not None
         assert result["status"] == "claimed"
+        assert result["claim_generation"] == 3
+        assert result["claim_token"] == "claim-token"
+        values = mock_dynamodb.update_item.call_args.kwargs["ExpressionAttributeValues"]
+        assert values[":target_region"] == "us-east-1"
+        assert values[":claimed_by"] == "worker-1"
 
     def test_claim_job_already_claimed(self, job_store, mock_dynamodb):
-        """Test claiming an already claimed job."""
+        """A conditional race loss returns None without stealing the claim."""
+        mock_dynamodb.get_item.return_value = {
+            "Item": {
+                "job_id": "job-123",
+                "status": "queued",
+                "target_region": "us-east-1",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "claim_generation": 0,
+                "status_history": "[]",
+            }
+        }
         error_response = {"Error": {"Code": "ConditionalCheckFailedException"}}
         mock_dynamodb.update_item.side_effect = ClientError(error_response, "UpdateItem")
 
-        result = job_store.claim_job("job-123", claimed_by="us-west-2")
+        result = job_store.claim_job("job-123", "us-east-1", "worker-2")
 
         assert result is None
 
-    def test_update_job_status(self, job_store, mock_dynamodb):
-        """Test updating job status."""
+    def test_transition_job_status(self, job_store, mock_dynamodb):
+        """A compare-and-set lifecycle transition appends status atomically."""
+        mock_dynamodb.get_item.return_value = {
+            "Item": {
+                "job_id": "job-123",
+                "status": "pending",
+                "target_region": "us-east-1",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "status_history": "[]",
+            }
+        }
         mock_dynamodb.update_item.return_value = {
             "Attributes": {
                 "job_id": "job-123",
-                "job_name": "test-job",
                 "target_region": "us-east-1",
-                "namespace": "gco-jobs",
                 "status": "running",
                 "priority": 0,
                 "manifest": "{}",
@@ -469,52 +502,81 @@ class TestJobStore:
                 "status_history": "[]",
             }
         }
-        mock_dynamodb.get_item.return_value = {"Item": {"status_history": "[]"}}
 
-        result = job_store.update_job_status(
-            job_id="job-123",
+        result = job_store.transition_job(
+            "job-123",
+            target_region="us-east-1",
+            expected_status=JobStatus.PENDING,
             status=JobStatus.RUNNING,
             message="Job is now running",
         )
 
         assert result is not None
         assert result["status"] == "running"
+        condition = mock_dynamodb.update_item.call_args.kwargs["ConditionExpression"]
+        assert "updated_at = :expected_updated_at" in condition
 
-    def test_update_job_status_with_k8s_uid(self, job_store, mock_dynamodb):
-        """Test updating job status with Kubernetes UID."""
+    def test_transition_job_with_k8s_identity(self, job_store, mock_dynamodb):
+        """Applying to pending persists the deterministic Kubernetes identity."""
+        raw_item = {
+            "job_id": "job-123",
+            "status": "applying",
+            "target_region": "us-east-1",
+            "updated_at": "2024-01-01T00:00:00Z",
+            "status_history": "[]",
+            "claimed_by": "worker-1",
+            "claim_token": "claim-token",
+            "claim_generation": 4,
+            "lease_expires_at": "2099-01-01T00:00:00Z",
+        }
+        mock_dynamodb.get_item.return_value = {"Item": raw_item}
         mock_dynamodb.update_item.return_value = {
             "Attributes": {
-                "job_id": "job-123",
-                "job_name": "test-job",
-                "target_region": "us-east-1",
-                "namespace": "gco-jobs",
+                **raw_item,
                 "status": "pending",
                 "priority": 0,
                 "manifest": "{}",
                 "labels": "{}",
-                "status_history": "[]",
+                "k8s_job_name": "test-job",
+                "k8s_job_namespace": "gco-jobs",
                 "k8s_job_uid": "abc-123-def",
             }
         }
-        mock_dynamodb.get_item.return_value = {"Item": {"status_history": "[]"}}
 
-        result = job_store.update_job_status(
-            job_id="job-123",
+        result = job_store.transition_job(
+            "job-123",
+            target_region="us-east-1",
+            expected_status=JobStatus.APPLYING,
             status=JobStatus.PENDING,
+            k8s_job_name="test-job",
+            k8s_job_namespace="gco-jobs",
             k8s_job_uid="abc-123-def",
+            claimed_by="worker-1",
+            claim_token="claim-token",
+            claim_generation=4,
         )
 
         assert result is not None
         assert result["k8s_job_uid"] == "abc-123-def"
+        expression = mock_dynamodb.update_item.call_args.kwargs["UpdateExpression"]
+        assert "k8s_job_namespace = :k8s_job_namespace" in expression
+        assert "REMOVE claimed_by, claim_token, lease_expires_at" in expression
 
-    def test_update_job_status_failed(self, job_store, mock_dynamodb):
-        """Test updating job status to failed with error."""
+    def test_transition_job_failed(self, job_store, mock_dynamodb):
+        """A failed transition records a terminal timestamp and bounded error field."""
+        mock_dynamodb.get_item.return_value = {
+            "Item": {
+                "job_id": "job-123",
+                "status": "running",
+                "target_region": "us-east-1",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "status_history": "[]",
+            }
+        }
         mock_dynamodb.update_item.return_value = {
             "Attributes": {
                 "job_id": "job-123",
-                "job_name": "test-job",
                 "target_region": "us-east-1",
-                "namespace": "gco-jobs",
                 "status": "failed",
                 "priority": 0,
                 "manifest": "{}",
@@ -524,10 +586,11 @@ class TestJobStore:
                 "completed_at": "2024-01-01T00:00:00Z",
             }
         }
-        mock_dynamodb.get_item.return_value = {"Item": {"status_history": "[]"}}
 
-        result = job_store.update_job_status(
-            job_id="job-123",
+        result = job_store.transition_job(
+            "job-123",
+            target_region="us-east-1",
+            expected_status=JobStatus.RUNNING,
             status=JobStatus.FAILED,
             error="Pod crashed",
         )
@@ -535,6 +598,8 @@ class TestJobStore:
         assert result is not None
         assert result["status"] == "failed"
         assert result["error_message"] == "Pod crashed"
+        expression = mock_dynamodb.update_item.call_args.kwargs["UpdateExpression"]
+        assert "completed_at = :now" in expression
 
     def test_get_job_found(self, job_store, mock_dynamodb):
         """Test getting an existing job."""
@@ -662,22 +727,196 @@ class TestJobStore:
         assert result["us-east-1"]["queued"] == 1
         assert result["us-west-2"]["succeeded"] == 1
 
+    def test_list_jobs_page_returns_filter_bound_cursor(self, job_store, mock_dynamodb):
+        """Opaque cursors continue only the exact filter identity that created them."""
+        item = {
+            "job_id": "job-1",
+            "target_region": "us-east-1",
+            "status": "queued",
+            "namespace": "gco-jobs",
+            "submitted_at": "2024-01-01T00:00:00Z",
+        }
+        mock_dynamodb.scan.return_value = {
+            "Items": [item],
+            "ScannedCount": 1,
+            "LastEvaluatedKey": {"job_id": "job-1"},
+        }
+
+        jobs, cursor, partial = job_store.list_jobs_page(
+            target_region="us-east-1",
+            status="queued",
+            namespace="gco-jobs",
+            limit=1,
+        )
+
+        assert [job["job_id"] for job in jobs] == ["job-1"]
+        assert cursor is not None
+        assert partial is False
+
+        mock_dynamodb.scan.reset_mock()
+        mock_dynamodb.scan.return_value = {"Items": [], "ScannedCount": 0}
+        assert job_store.list_jobs_page(
+            target_region="us-east-1",
+            status="queued",
+            namespace="gco-jobs",
+            limit=1,
+            cursor=cursor,
+        ) == ([], None, False)
+        assert mock_dynamodb.scan.call_args.kwargs["ExclusiveStartKey"] == {"job_id": "job-1"}
+
+        with pytest.raises(ValueError, match="does not match"):
+            job_store.list_jobs_page(
+                target_region="us-east-1",
+                status="running",
+                namespace="gco-jobs",
+                limit=1,
+                cursor=cursor,
+            )
+
+    def test_job_count_summary_reports_bounded_partial_scan(self, job_store, mock_dynamodb):
+        """Count summaries disclose when their evaluation budget truncates the scan."""
+        mock_dynamodb.scan.return_value = {
+            "Items": [
+                {"target_region": "us-east-1", "status": "queued"},
+                {"target_region": "us-west-2", "status": "running"},
+            ],
+            "ScannedCount": 2,
+            "LastEvaluatedKey": {"job_id": "job-2"},
+        }
+
+        counts, evaluated, truncated = job_store.get_job_count_summary(max_evaluated=2)
+
+        assert counts == {
+            "us-east-1": {"queued": 1},
+            "us-west-2": {"running": 1},
+        }
+        assert evaluated == 2
+        assert truncated is True
+        assert mock_dynamodb.scan.call_args.kwargs["Limit"] == 2
+
+    def test_migrates_legacy_records_and_fences_unsafe_states(self, job_store, mock_dynamodb):
+        """Legacy active records without fencing or K8s identity fail instead of replaying."""
+        mock_dynamodb.query.side_effect = [
+            {
+                "Items": [
+                    {
+                        "job_id": "queued-legacy",
+                        "status": "queued",
+                        "target_region": "us-east-1",
+                        "priority": 9,
+                        "submitted_at": "2024-01-01T00:00:00Z",
+                        "status_history": "[]",
+                    }
+                ],
+                "ScannedCount": 1,
+            },
+            {
+                "Items": [
+                    {
+                        "job_id": "claimed-legacy",
+                        "status": "claimed",
+                        "target_region": "us-east-1",
+                        "status_history": "[]",
+                    }
+                ],
+                "ScannedCount": 1,
+            },
+            {"Items": [], "ScannedCount": 0},
+            {
+                "Items": [
+                    {
+                        "job_id": "pending-legacy",
+                        "status": "pending",
+                        "target_region": "us-east-1",
+                        "status_history": "[]",
+                    }
+                ],
+                "ScannedCount": 1,
+            },
+            {"Items": [], "ScannedCount": 0},
+        ]
+        mock_dynamodb.update_item.return_value = {}
+
+        result = job_store.migrate_legacy_records_for_region("us-east-1")
+
+        assert result == {"evaluated": 3, "migrated": 1, "failed": 2, "complete": True}
+        assert mock_dynamodb.update_item.call_count == 3
+        for call in mock_dynamodb.update_item.call_args_list:
+            condition = call.kwargs["ConditionExpression"]
+            assert "attribute_not_exists(region_status)" in condition
+            assert "#status = :expected" in condition
+        failed_calls = mock_dynamodb.update_item.call_args_list[1:]
+        assert all(":failed" in call.kwargs["ExpressionAttributeValues"] for call in failed_calls)
+        assert all(
+            "Record fenced during queue schema migration"
+            in call.kwargs["ExpressionAttributeValues"][":history"]
+            for call in failed_calls
+        )
+
     def test_cancel_job_success(self, job_store, mock_dynamodb):
-        """Test cancelling a queued job."""
+        """Only a still-queued record can be cancelled with an atomic history CAS."""
+        mock_dynamodb.get_item.return_value = {
+            "Item": {
+                "job_id": "job-123",
+                "status": "queued",
+                "target_region": "us-east-1",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "status_history": "[]",
+            }
+        }
         mock_dynamodb.update_item.return_value = {}
 
         result = job_store.cancel_job("job-123", reason="No longer needed")
 
         assert result is True
+        condition = mock_dynamodb.update_item.call_args.kwargs["ConditionExpression"]
+        assert "#status = :queued" in condition
+        assert "updated_at = :expected_updated_at" in condition
 
     def test_cancel_job_not_cancellable(self, job_store, mock_dynamodb):
         """Test cancelling a job that's already running."""
-        error_response = {"Error": {"Code": "ConditionalCheckFailedException"}}
-        mock_dynamodb.update_item.side_effect = ClientError(error_response, "UpdateItem")
+        mock_dynamodb.get_item.return_value = {
+            "Item": {
+                "job_id": "job-123",
+                "status": "running",
+                "target_region": "us-east-1",
+                "updated_at": "2024-01-01T00:00:00Z",
+            }
+        }
 
         result = job_store.cancel_job("job-123")
 
         assert result is False
+        mock_dynamodb.update_item.assert_not_called()
+
+
+# =============================================================================
+# Central Queue Worker Ordering Tests
+# =============================================================================
+
+
+class TestCentralQueueWorkerOrdering:
+    """The worker must migrate pre-GSI records before it polls the priority GSI."""
+
+    @pytest.mark.asyncio
+    async def test_migration_precedes_queue_poll(self):
+        from gco.services.central_queue_worker import process_queued_jobs_once
+
+        events: list[str] = []
+        processor = MagicMock(region="us-east-1")
+        store = MagicMock(claim_lease_seconds=300)
+        store.migrate_legacy_records_for_region.side_effect = lambda *args: (
+            events.append("migrate")
+            or {"evaluated": 0, "migrated": 0, "failed": 0, "complete": True}
+        )
+        store.get_queued_jobs_for_region.side_effect = lambda *args: events.append("poll") or []
+
+        polled, processed = await process_queued_jobs_once(processor, store, limit=5)
+
+        assert (polled, processed) == (0, [])
+        assert events == ["migrate", "poll"]
+        store.migrate_legacy_records_for_region.assert_called_once_with("us-east-1", 100)
+        store.get_queued_jobs_for_region.assert_called_once_with("us-east-1", 5)
 
 
 # =============================================================================
@@ -923,18 +1162,41 @@ class TestJobStoreErrors:
         with pytest.raises(ClientError):
             job_store.get_job("test-job-id")
 
-    def test_update_job_status_client_error(self, job_store, mock_dynamodb):
-        """Test update_job_status raises on ClientError."""
+    def test_transition_job_client_error(self, job_store, mock_dynamodb):
+        """Test transition_job raises on non-conditional ClientError."""
+        mock_dynamodb.get_item.return_value = {
+            "Item": {
+                "job_id": "test-job-id",
+                "status": "pending",
+                "target_region": "us-east-1",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "status_history": "[]",
+            }
+        }
         mock_dynamodb.update_item.side_effect = ClientError(
             {"Error": {"Code": "InternalServerError", "Message": "Test error"}},
             "UpdateItem",
         )
 
         with pytest.raises(ClientError):
-            job_store.update_job_status("test-job-id", JobStatus.RUNNING)
+            job_store.transition_job(
+                "test-job-id",
+                target_region="us-east-1",
+                expected_status=JobStatus.PENDING,
+                status=JobStatus.RUNNING,
+            )
 
     def test_cancel_job_client_error(self, job_store, mock_dynamodb):
-        """Test cancel_job raises on ClientError."""
+        """Test cancel_job raises on non-conditional ClientError."""
+        mock_dynamodb.get_item.return_value = {
+            "Item": {
+                "job_id": "test-job-id",
+                "status": "queued",
+                "target_region": "us-east-1",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "status_history": "[]",
+            }
+        }
         mock_dynamodb.update_item.side_effect = ClientError(
             {"Error": {"Code": "InternalServerError", "Message": "Test error"}},
             "UpdateItem",
@@ -954,11 +1216,21 @@ class TestJobStoreErrors:
             job_store.list_jobs()
 
     def test_claim_job_client_error(self, job_store, mock_dynamodb):
-        """Test claim_job raises on ClientError."""
+        """Test claim_job raises on non-conditional ClientError."""
+        mock_dynamodb.get_item.return_value = {
+            "Item": {
+                "job_id": "test-job-id",
+                "status": "queued",
+                "target_region": "us-east-1",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "claim_generation": 0,
+                "status_history": "[]",
+            }
+        }
         mock_dynamodb.update_item.side_effect = ClientError(
             {"Error": {"Code": "InternalServerError", "Message": "Test error"}},
             "UpdateItem",
         )
 
         with pytest.raises(ClientError):
-            job_store.claim_job("test-job-id", "worker-1")
+            job_store.claim_job("test-job-id", "us-east-1", "worker-1")

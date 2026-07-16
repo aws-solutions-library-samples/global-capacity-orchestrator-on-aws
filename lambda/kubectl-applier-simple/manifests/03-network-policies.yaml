@@ -29,6 +29,34 @@ spec:
   policyTypes:
     - Ingress
 ---
+# Ray uses dynamically allocated worker/object-manager ports in addition to its
+# well-known GCS, dashboard, and client ports. Permit all protocols only among
+# pods in the shipped ray-cluster; no other gco-jobs pod is selected or admitted.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ray-cluster-internal
+  namespace: gco-jobs
+  labels:
+    project: gco
+spec:
+  podSelector:
+    matchLabels:
+      ray.io/cluster: ray-cluster
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              ray.io/cluster: ray-cluster
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              ray.io/cluster: ray-cluster
+---
 # Allow ALB to reach health-monitor
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -195,11 +223,38 @@ spec:
         - protocol: TCP
           port: 443
 ---
-# Allow ALB ingress to inference pods
+# Allow the authenticated manifest API proxy to reach internal inference
+# Services. No other gco-system pod is selected, and model endpoints are never
+# exposed directly through the ALB.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-alb-ingress
+  name: allow-manifest-proxy-to-inference
+  namespace: gco-system
+  labels:
+    project: gco
+spec:
+  podSelector:
+    matchLabels:
+      app: manifest-processor
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gco-inference
+          podSelector:
+            matchLabels:
+              gco.io/type: inference
+      ports:
+        - protocol: TCP
+---
+# Allow only the authenticated manifest API proxy into inference pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-manifest-proxy-ingress
   namespace: gco-inference
   labels:
     project: gco
@@ -210,21 +265,62 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    - ports:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gco-system
+          podSelector:
+            matchLabels:
+              app: manifest-processor
+      ports:
         - protocol: TCP
-          port: 8000
+---
+# Permit TCP only among managed inference workloads. This covers the PD proxy,
+# prefill/decode serving ports, canary backends, and KV-transfer bootstrap ports.
+# The second egress rule permits inference clients to reach only the Mooncake
+# master's RPC and metadata ports. Sources outside the namespace still need an
+# explicit ingress rule, so ALB traffic cannot reach model pods directly.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-inference-internal
+  namespace: gco-inference
+  labels:
+    project: gco
+spec:
+  podSelector:
+    matchLabels:
+      gco.io/type: inference
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              gco.io/type: inference
+      ports:
+        - protocol: TCP
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              gco.io/type: inference
+      ports:
+        - protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              app: mooncake-master
+      ports:
+        - protocol: TCP
+          port: 50051
         - protocol: TCP
           port: 8080
-        - protocol: TCP
-          port: 80
 ---
-# Intra-namespace allow rules for disaggregated inference.
-# These sit alongside the default-deny posture above: inference pods reach the
-# shared master RPC and metadata ports, and reach each other on the KV-transfer
-# bootstrap ports. No deny rule is removed — these only widen what is permitted
-# within gco-inference. The monitor re-applies the same rules at materialization
-# time and fails pod creation if any of them cannot be applied.
----
+# Narrow, named Mooncake rules are also maintained dynamically by the inference
+# monitor. They make the required master and bootstrap contracts explicit and
+# preserve them for installations upgraded independently of this base manifest.
 # Allow inference pods to reach the shared master RPC port (pod-to-master)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

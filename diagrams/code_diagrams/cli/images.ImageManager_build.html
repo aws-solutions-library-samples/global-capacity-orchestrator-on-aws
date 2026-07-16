@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,52 +205,52 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2164=>operation: 'Build a container image and push it to the project\'s ECR repo.\n\n        Args:\n            context: Build context directory.\n            name: Image name (validated; lowercase letters, digits, dashes).\n            tag: Image tag (defaults to git short SHA, else ``latest``).\n            dockerfile: Path to the Dockerfile, relative to ``context``.\n            build_args: Optional ``KEY=value`` build args.\n            platform: ``--platform`` argument for the build (default\n                ``linux/amd64``).\n            retain: When True, mark the repository with ``gco:retain=true``\n                so it survives stack destroys.\n\n        Returns:\n            ``{"image_uri", "digest", "size_bytes", ...}``.\n        '
-op2166=>operation: ctx = self._validate_context(context)
-op2168=>operation: validated_name = self._validate_name(name)
-op2170=>operation: validated_tag = self._validate_tag(tag if tag is not None else self._default_tag())
-op2172=>operation: df_path = (ctx / dockerfile).resolve()
-cond2175=>operation: raise FileNotFoundError(f'Dockerfile not found: {df_path} (relative to {ctx})') if  not df_path.exists() or not df_path.is_file()
-cond2186=>operation: raise ValueError(f'Dockerfile must live inside the build context: {df_path}') if  not str(df_path).startswith(str(ctx))
-op2196=>operation: runtime = self._runtime_or_error()
-sub2198=>subroutine: self.init(name, retain=retain)
-sub2200=>subroutine: self._check_tag_immutable_collision(validated_name, validated_tag)
-sub2202=>subroutine: self._ecr_login(runtime)
-op2204=>operation: full_uri = f'{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}'
-op2206=>operation: build_cmd: list[str] = [runtime, 'build', '-t', full_uri, '--platform', platform, '-f', str(df_path)]
-cond2209=>operation: build_cmd.extend(['--build-arg', f'{key}={value}']) while  key, value in (build_args or {}).items()
-sub2218=>subroutine: build_cmd.append(str(ctx))
-sub2220=>subroutine: logger.info('Building image: %s', ' '.join(build_cmd))
-sub2222=>subroutine: subprocess.run(build_cmd, check=True, cwd=str(ctx))
-op2224=>operation: push_result = subprocess.run([runtime, 'push', full_uri], capture_output=True, text=True, check=True, cwd=str(ctx))
-op2226=>operation: digest = self._extract_digest((push_result.stdout or '') + (push_result.stderr or ''))
-cond2229=>operation: self._apply_retain_tag(validated_name) if  retain
-op2239=>operation: size_bytes = self._image_size_bytes(validated_name, validated_tag)
-io2244=>inputoutput: output: {'image_uri': full_uri, 'digest': digest, 'size_bytes': size_bytes, 'runtime': runtime, 'repository': f'{self._repo_prefix}/{validated_name}', 'tag': validated_tag, 'region': self.region, 'retain': retain}
-e2242=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op3720=>operation: 'Build a container image and push it to the project\'s ECR repo.\n\n        Args:\n            context: Build context directory.\n            name: Image name (validated; lowercase letters, digits, dashes).\n            tag: Image tag (defaults to git short SHA, else ``latest``).\n            dockerfile: Path to the Dockerfile, relative to ``context``.\n            build_args: Optional ``KEY=value`` build args.\n            platform: ``--platform`` argument for the build (default\n                ``linux/amd64``).\n            retain: When True, mark the repository with ``gco:retain=true``\n                so it survives stack destroys.\n\n        Returns:\n            ``{"image_uri", "digest", "size_bytes", ...}``.\n        '
+op3722=>operation: ctx = self._validate_context(context)
+op3724=>operation: validated_name = self._validate_name(name)
+op3726=>operation: validated_tag = self._validate_tag(tag if tag is not None else self._default_tag())
+op3728=>operation: df_path = (ctx / dockerfile).resolve()
+cond3731=>operation: raise FileNotFoundError(f'Dockerfile not found: {df_path} (relative to {ctx})') if  not df_path.exists() or not df_path.is_file()
+cond3742=>operation: raise ValueError(f'Dockerfile must live inside the build context: {df_path}') if  not str(df_path).startswith(str(ctx))
+op3752=>operation: runtime = self._runtime_or_error()
+sub3754=>subroutine: self.init(name, retain=retain)
+sub3756=>subroutine: self._check_tag_immutable_collision(validated_name, validated_tag)
+sub3758=>subroutine: self._ecr_login(runtime)
+op3760=>operation: full_uri = f'{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}'
+op3762=>operation: build_cmd: list[str] = [runtime, 'build', '-t', full_uri, '--platform', platform, '-f', str(df_path)]
+cond3765=>operation: build_cmd.extend(['--build-arg', f'{key}={value}']) while  key, value in (build_args or {}).items()
+sub3774=>subroutine: build_cmd.append(str(ctx))
+sub3776=>subroutine: logger.info('Building image: %s', ' '.join(build_cmd))
+sub3778=>subroutine: subprocess.run(build_cmd, check=True, cwd=str(ctx))
+op3780=>operation: push_result = subprocess.run([runtime, 'push', full_uri], capture_output=True, text=True, check=True, cwd=str(ctx))
+op3782=>operation: digest = self._extract_digest((push_result.stdout or '') + (push_result.stderr or ''))
+cond3785=>operation: self._apply_retain_tag(validated_name) if  retain
+op3795=>operation: size_bytes = self._image_size_bytes(validated_name, validated_tag)
+io3800=>inputoutput: output: {'image_uri': full_uri, 'digest': digest, 'size_bytes': size_bytes, 'runtime': runtime, 'repository': f'{self._repo_prefix}/{validated_name}', 'tag': validated_tag, 'region': self.region, 'retain': retain}
+e3798=>end: end function return
 
-op2164->op2166
-op2166->op2168
-op2168->op2170
-op2170->op2172
-op2172->cond2175
-cond2175->cond2186
-cond2186->op2196
-op2196->sub2198
-sub2198->sub2200
-sub2200->sub2202
-sub2202->op2204
-op2204->op2206
-op2206->cond2209
-cond2209->sub2218
-sub2218->sub2220
-sub2220->sub2222
-sub2222->op2224
-op2224->op2226
-op2226->cond2229
-cond2229->op2239
-op2239->io2244
-io2244->e2242
+op3720->op3722
+op3722->op3724
+op3724->op3726
+op3726->op3728
+op3728->cond3731
+cond3731->cond3742
+cond3742->op3752
+op3752->sub3754
+sub3754->sub3756
+sub3756->sub3758
+sub3758->op3760
+op3760->op3762
+op3762->cond3765
+cond3765->sub3774
+sub3774->sub3776
+sub3776->sub3778
+sub3778->op3780
+op3780->op3782
+op3782->cond3785
+cond3785->op3795
+op3795->io3800
+io3800->e3798
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

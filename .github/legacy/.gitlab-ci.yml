@@ -173,7 +173,7 @@ lint:typecheck-lambda:
     # Loop through each one and fail the job on the first error.
     - |
       FAILED=0
-      for d in lambda/alb-header-validator lambda/api-gateway-proxy \
+      for d in lambda/api-gateway-proxy \
                lambda/cross-region-aggregator lambda/drift-detection \
                lambda/ga-registration lambda/helm-installer \
                lambda/kubectl-applier-simple lambda/proxy-shared \
@@ -706,7 +706,6 @@ integration:lambda:
     - python -c "import sys; sys.path.insert(0, 'lambda/ga-registration'); from handler import lambda_handler; print('ga-registration OK')"
     - python -c "import sys; sys.path.insert(0, 'lambda/cross-region-aggregator'); from handler import lambda_handler; print('cross-region-agg OK')"
     - python -c "import sys; sys.path.insert(0, 'lambda/regional-api-proxy'); from handler import lambda_handler; print('regional-api-proxy OK')"
-    - python -c "import sys; sys.path.insert(0, 'lambda/alb-header-validator'); from handler import lambda_handler; print('alb-header-validator OK')"
     - python -c "import sys; sys.path.insert(0, 'lambda/secret-rotation'); from handler import lambda_handler; print('secret-rotation OK')"
     - python -c "import sys; sys.path.insert(0, 'lambda/helm-installer'); from handler import lambda_handler; print('helm-installer OK')"
 

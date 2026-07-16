@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,15 +205,15 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op527=>operation: 'Main Lambda handler.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the current install path): the event carries an\n      ``Action`` key and is dispatched to :func:`handle_task`, which operates on\n      a single chart and raises on failure.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the whole-chart-set loop below runs.\n    '
-cond530=>condition: if event.get('Action')
-sub534=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
-io539=>inputoutput: output: handle_task(event)
-e537=>end: end function return
-sub545=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
-op547=>operation: request_type = event['RequestType']
-op549=>operation: physical_id = event.get('PhysicalResourceId', f"helm-{event['LogicalResourceId']}")
-op552=>operation: props = event['ResourceProperties']
+        <div><textarea id="code" style="width: 100%;" rows="11">op613=>operation: 'Main Lambda handler.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the current install path): the event carries an\n      ``Action`` key and is dispatched to :func:`handle_task`, which operates on\n      a single chart and raises on failure.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the whole-chart-set loop below runs.\n    '
+cond616=>condition: if event.get('Action')
+sub620=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
+io625=>inputoutput: output: handle_task(event)
+e623=>end: end function return
+sub631=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
+op633=>operation: request_type = event['RequestType']
+op635=>operation: physical_id = event.get('PhysicalResourceId', f"helm-{event['LogicalResourceId']}")
+op638=>operation: props = event['ResourceProperties']
 cluster_name = props['ClusterName']
 region = props['Region']
 default_config = load_charts_config()
@@ -239,6 +239,7 @@ if keda_operator_role_arn and 'keda' in charts_config:
 kubeconfig = configure_kubeconfig(cluster_name, region)
 results = {}
 failed = []
+uninstall_failed = []
 if request_type in ('Create', 'Update'):
     max_retries = HELM_INSTALL_MAX_RETRIES
     retry_delay = HELM_INSTALL_RETRY_DELAY_SECONDS
@@ -247,7 +248,9 @@ if request_type in ('Create', 'Update'):
             namespace = config.get('namespace', 'default')
             logger.info(f'Chart {chart_name} is disabled, checking if installed...')
             success, message = uninstall_chart(chart_name, namespace, kubeconfig)
-            results[chart_name] = 'uninstalled (disabled)' if 'Successfully' in message else 'skipped (disabled)'
+            results[chart_name] = message
+            if not success:
+                uninstall_failed.append(chart_name)
     for chart_name, config in charts_config.items():
         if not config.get('enabled', False):
             continue
@@ -278,6 +281,7 @@ if request_type in ('Create', 'Update'):
                 logger.info(f'Retry succeeded for {chart_name}')
     if failed:
         logger.warning(f'Charts still failing after {max_retries} retries: {failed}')
+    failed.extend(uninstall_failed)
 elif request_type == 'Delete':
     for chart_name, config in reversed(list(charts_config.items())):
         if not config.get('enabled', False):
@@ -291,31 +295,27 @@ import contextlib
 with contextlib.suppress(Exception):
     os.remove(kubeconfig)
 response_data = {'Results': json.dumps(results), 'InstalledCharts': ','.join([k for k, v in results.items() if 'Successfully' in str(v)]), 'FailedCharts': ','.join(failed)}
-if failed and request_type != 'Delete':
+if failed:
     send_response(event, context, FAILED, response_data, physical_id, f"Failed charts: {', '.join(failed)}")
 else:
     send_response(event, context, SUCCESS, response_data, physical_id)
-cond551=>condition: exception raised?
-cond554=>condition: except Exception as e
-sub558=>subroutine: logger.error(f'Error: {e}', exc_info=True)
-cond561=>condition: if request_type == 'Delete'
-sub565=>subroutine: send_response(event, context, SUCCESS, {'Status': 'Forced success on delete'}, physical_id)
-sub569=>subroutine: send_response(event, context, FAILED, {}, physical_id, str(e))
+cond637=>condition: exception raised?
+cond640=>condition: except Exception as e
+sub644=>subroutine: logger.error(f'Error: {e}', exc_info=True)
+sub646=>subroutine: send_response(event, context, FAILED, {}, physical_id, str(e))
 
-op527->cond530
-cond530(yes)->sub534
-sub534->io539
-io539->e537
-cond530(no)->sub545
-sub545->op547
-op547->op549
-op549->op552
-op552->cond551
-cond551(yes)->cond554
-cond554(yes)->sub558
-sub558->cond561
-cond561(yes)->sub565
-cond561(no)->sub569
+op613->cond616
+cond616(yes)->sub620
+sub620->io625
+io625->e623
+cond616(no)->sub631
+sub631->op633
+op633->op635
+op635->op638
+op638->cond637
+cond637(yes)->cond640
+cond640(yes)->sub644
+sub644->sub646
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

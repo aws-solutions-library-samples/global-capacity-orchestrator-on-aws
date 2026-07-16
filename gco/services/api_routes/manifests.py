@@ -104,7 +104,7 @@ async def validate_manifests(request: ManifestSubmissionAPIRequest) -> Response:
         overall_valid = True
 
         for i, manifest in enumerate(request.manifests):
-            is_valid, error_msg = processor.validate_manifest(manifest)
+            is_valid, error_msg = processor.validate_manifest(manifest, request.namespace)
 
             result: dict[str, Any] = {
                 "manifest_index": i,
@@ -113,7 +113,7 @@ async def validate_manifests(request: ManifestSubmissionAPIRequest) -> Response:
                 "kind": manifest.get("kind", "unknown"),
                 "name": manifest.get("metadata", {}).get("name", f"manifest-{i + 1}"),
                 "namespace": manifest.get("metadata", {}).get(
-                    "namespace", request.namespace or "default"
+                    "namespace", request.namespace or "gco-jobs"
                 ),
             }
 

@@ -1,6 +1,6 @@
 # Secret Rotation
 
-Rotates the GCO API Gateway authentication token in AWS Secrets Manager. Follows the standard 4-step Secrets Manager rotation protocol.
+Rotates the GCO backend HMAC signing key in AWS Secrets Manager. The key is used to sign exact proxy-to-backend requests and is never sent as a reusable credential. The Lambda follows the standard four-step Secrets Manager rotation protocol.
 
 ## Table of Contents
 
@@ -17,12 +17,12 @@ Secrets Manager automatic rotation (daily schedule).
 
 Implements the 4-step rotation protocol:
 
-1. **createSecret** — Generates a new 64-character alphanumeric token and stores it as `AWSPENDING`
-2. **setSecret** — No-op (no external system to update; services read directly from Secrets Manager)
-3. **testSecret** — Validates the pending secret can be retrieved and has the correct structure
+1. **createSecret** — Generates a new 64-character alphanumeric signing key and stores it as `AWSPENDING`
+2. **setSecret** — No-op (no external system to update; proxies and services read Secrets Manager directly)
+3. **testSecret** — Validates that the pending key can be retrieved and has the expected structure and length
 4. **finishSecret** — Atomically moves `AWSPENDING` to `AWSCURRENT`
 
-Multi-region replication ensures all regions receive the new token automatically. Services validate against both `AWSCURRENT` and `AWSPENDING` during the rotation window for zero-downtime rotation.
+Multi-region replication distributes the new key automatically. Proxies and services accept both `AWSCURRENT` and `AWSPENDING` during the rotation window for zero downtime; backend requests carry only short-lived HMAC envelopes, never the key itself.
 
 ## Input
 

@@ -36,6 +36,7 @@ _QP_ENV_VARS = (
     "BLOCK_ADDED_CAPABILITIES",
     "BLOCK_RUN_AS_ROOT",
     "ALLOWED_NAMESPACES",
+    "ALLOWED_KINDS",
     "MAX_CPU",
     "MAX_MEMORY",
     "MAX_GPU",
@@ -109,7 +110,7 @@ def _sqs_resp(manifests, job_id="abc123"):
 def _env(monkeypatch):
     monkeypatch.setenv("JOB_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/q")
     monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("ALLOWED_NAMESPACES", "default,gco-jobs")
+    monkeypatch.setenv("ALLOWED_NAMESPACES", "gco-jobs")
     monkeypatch.setenv("MAX_GPU_PER_MANIFEST", "4")
 
 
@@ -146,9 +147,57 @@ class TestValidateManifest:
         ok, r = qp.validate_manifest(_job(namespace="kube-system"))
         assert not ok and "kube-system" in r
 
-    def test_default_namespace_allowed(self):
+    def test_implicit_namespace_defaults_to_gco_jobs(self):
         qp = _reload()
-        assert qp.validate_manifest(_job(namespace="default"))[0] is True
+        manifest = _job()
+        del manifest["metadata"]["namespace"]
+        assert qp.validate_manifest(manifest)[0] is True
+
+    def test_default_namespace_rejected_by_stock_policy(self):
+        qp = _reload()
+        ok, reason = qp.validate_manifest(_job(namespace="default"))
+        assert not ok
+        assert "default" in reason
+
+    def test_disallowed_resource_kind(self):
+        qp = _reload()
+        manifest = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "credentials", "namespace": "gco-jobs"},
+        }
+        ok, reason = qp.validate_manifest(manifest)
+        assert not ok
+        assert "not allowed" in reason
+
+    def test_custom_allowed_resource_kinds(self, monkeypatch):
+        monkeypatch.setenv("ALLOWED_KINDS", "Job")
+        qp = _reload()
+        config_map = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "config", "namespace": "gco-jobs"},
+        }
+        assert qp.validate_manifest(_job())[0] is True
+        assert qp.validate_manifest(config_map)[0] is False
+
+    def test_explicit_empty_allowed_kinds_denies_all(self, monkeypatch):
+        monkeypatch.setenv("ALLOWED_KINDS", "")
+        qp = _reload()
+
+        assert not qp.ALLOWED_KINDS
+        valid, reason = qp.validate_manifest(_job())
+        assert valid is False
+        assert "not allowed" in reason
+
+    def test_explicit_empty_allowed_namespaces_denies_all(self, monkeypatch):
+        monkeypatch.setenv("ALLOWED_NAMESPACES", "")
+        qp = _reload()
+
+        assert not qp.ALLOWED_NAMESPACES
+        valid, reason = qp.validate_manifest(_job())
+        assert valid is False
+        assert "not in allowed list" in reason
 
     def test_privileged_blocked(self):
         qp = _reload()
@@ -251,21 +300,23 @@ class TestApplyManifest:
 
     def test_create(self):
         qp, res = self._setup_mocks()
-        assert "CREATED" in qp.apply_manifest(_job())
+        assert qp.apply_manifest(_job()).status == "created"
 
     def test_update_on_409(self):
         from kubernetes.client.rest import ApiException
 
         qp, res = self._setup_mocks()
         res.create.side_effect = ApiException(status=409)
-        assert "UPDATED" in qp.apply_manifest(_job())
+        assert qp.apply_manifest(_job()).status == "updated"
 
     def test_create_failed(self):
         from kubernetes.client.rest import ApiException
 
         qp, res = self._setup_mocks()
         res.create.side_effect = ApiException(status=403, reason="Forbidden")
-        assert "CREATE_FAILED" in qp.apply_manifest(_job())
+        result = qp.apply_manifest(_job())
+        assert result.status == "failed"
+        assert "Create failed" in (result.message or "")
 
     def test_patch_failed(self):
         from kubernetes.client.rest import ApiException
@@ -273,7 +324,9 @@ class TestApplyManifest:
         qp, res = self._setup_mocks()
         res.create.side_effect = ApiException(status=409)
         res.patch.side_effect = ApiException(status=422, reason="Unprocessable")
-        assert "PATCH_FAILED" in qp.apply_manifest(_job())
+        result = qp.apply_manifest(_job())
+        assert result.status == "failed"
+        assert "Patch failed" in (result.message or "")
 
     def test_unknown_resource(self):
         from kubernetes.dynamic.exceptions import ResourceNotFoundError
@@ -284,20 +337,22 @@ class TestApplyManifest:
         mock_dyn.return_value.resources.get.side_effect = ResourceNotFoundError("nope")
         qp.dynamic = MagicMock()
         qp.dynamic.DynamicClient = mock_dyn
-        assert "SKIP" in qp.apply_manifest(_job())
+        result = qp.apply_manifest(_job())
+        assert result.status == "failed"
+        assert "Unsupported Kubernetes resource" in (result.message or "")
 
     def test_finished_job_deleted(self):
         qp, res = self._setup_mocks()
         qp.time = MagicMock()
         res.get.return_value = {"status": {"conditions": [{"type": "Complete"}]}}
-        assert "CREATED" in qp.apply_manifest(_job())
+        assert qp.apply_manifest(_job()).status == "created"
         res.delete.assert_called_once()
 
     def test_non_namespaced(self):
         qp, res = self._setup_mocks()
         res.namespaced = False
         m = {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "ns"}}
-        assert "CREATED" in qp.apply_manifest(m)
+        assert qp.apply_manifest(m).status == "created"
 
     def test_non_namespaced_update(self):
         from kubernetes.client.rest import ApiException
@@ -306,20 +361,31 @@ class TestApplyManifest:
         res.namespaced = False
         res.create.side_effect = ApiException(status=409)
         m = {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "ns"}}
-        assert "UPDATED" in qp.apply_manifest(m)
+        assert qp.apply_manifest(m).status == "updated"
 
 
 # ── SQS Processing ──────────────────────────────────────────────────────
 
 
 class TestProcessOneMessage:
-    def _setup(self, manifests, apply_return="CREATED Job/x"):
+    @staticmethod
+    def _result(qp, status="created", name="x"):
+        return qp.ResourceStatus(
+            api_version="batch/v1",
+            kind="Job",
+            name=name,
+            namespace="gco-jobs",
+            status=status,
+            message=f"{status} for test",
+        )
+
+    def _setup(self, manifests, apply_status="created"):
         qp = _reload()
         mock_sqs = MagicMock()
         qp.boto3 = MagicMock()
         qp.boto3.client.return_value = mock_sqs
         mock_sqs.receive_message.return_value = _sqs_resp(manifests)
-        qp.apply_manifest = MagicMock(return_value=apply_return)
+        qp.apply_manifest = MagicMock(return_value=self._result(qp, apply_status))
         return qp, mock_sqs
 
     def test_success(self):
@@ -342,7 +408,7 @@ class TestProcessOneMessage:
         sqs.delete_message.assert_not_called()
 
     def test_apply_failure(self):
-        qp, sqs = self._setup([_job()], "CREATE_FAILED Job/x: err")
+        qp, sqs = self._setup([_job()], "failed")
         assert qp.process_one_message() is False
         sqs.delete_message.assert_not_called()
 
@@ -353,7 +419,10 @@ class TestProcessOneMessage:
 
     def test_partial_failure(self):
         qp, sqs = self._setup([_job(name="a"), _job(name="b")])
-        qp.apply_manifest.side_effect = ["CREATED Job/a", "CREATE_FAILED Job/b: err"]
+        qp.apply_manifest.side_effect = [
+            self._result(qp, "created", "a"),
+            self._result(qp, "failed", "b"),
+        ]
         assert qp.process_one_message() is False
         sqs.delete_message.assert_not_called()
 
@@ -362,10 +431,36 @@ class TestProcessOneMessage:
         qp = _reload()
         assert qp.process_one_message() is False
 
-    def test_empty_manifests(self):
+    def test_empty_manifests_is_poison_message(self):
         qp, sqs = self._setup([])
-        assert qp.process_one_message() is True
-        sqs.delete_message.assert_called_once()
+        assert qp.process_one_message() is False
+        sqs.delete_message.assert_not_called()
+        qp.apply_manifest.assert_not_called()
+
+    def test_malformed_json_is_retained(self):
+        qp, sqs = self._setup([_job()])
+        sqs.receive_message.return_value = {
+            "Messages": [{"ReceiptHandle": "receipt-xyz", "Body": "{not-json"}]
+        }
+        assert qp.process_one_message() is False
+        sqs.delete_message.assert_not_called()
+        qp.apply_manifest.assert_not_called()
+
+    def test_entire_batch_is_validated_before_apply(self):
+        qp, sqs = self._setup([_job(name="valid"), _job(name="invalid", namespace="default")])
+        assert qp.process_one_message() is False
+        sqs.delete_message.assert_not_called()
+        qp.apply_manifest.assert_not_called()
+
+    def test_unsupported_kind_is_retained(self):
+        unsupported = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "credentials", "namespace": "gco-jobs"},
+        }
+        qp, sqs = self._setup([unsupported])
+        assert qp.process_one_message() is False
+        sqs.delete_message.assert_not_called()
         qp.apply_manifest.assert_not_called()
 
 

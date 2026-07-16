@@ -5,12 +5,11 @@ Verifies the middleware rejects POST/PUT/PATCH requests whose
 Content-Length exceeds DEFAULT_MAX_REQUEST_BODY_BYTES (1 MiB) with 413,
 rejects chunked/no-Content-Length requests whose body grows past the
 limit while streaming, and leaves GET/HEAD/OPTIONS/DELETE requests
-untouched. Uses a TestClient fixture with the manifest processor and
-auth middleware token cache pre-seeded; includes a Hypothesis sweep
+untouched. Uses a TestClient fixture with the manifest processor mocked
+and backend signature verification bypassed; includes a Hypothesis sweep
 over Content-Length values around the boundary.
 """
 
-import time
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -20,24 +19,18 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from gco.services.manifest_api import DEFAULT_MAX_REQUEST_BODY_BYTES
+from tests._auth import bypass_backend_auth
 
-# Auth token used by all tests in this module.
-_TEST_AUTH_TOKEN = "test-size-limit-token"  # nosec B105 - test fixture token
-_AUTH_HEADERS = {"x-gco-auth-token": _TEST_AUTH_TOKEN}
+# Call sites retain a common header mapping for concise request construction;
+# authentication itself is handled by the autouse fixture below.
+_AUTH_HEADERS: dict[str, str] = {}
 
 
 @pytest.fixture(autouse=True)
-def _seed_auth_cache():
-    """Seed the auth middleware token cache with a known token."""
-    import gco.services.auth_middleware as auth_module
-
-    original_tokens = auth_module._cached_tokens
-    original_timestamp = auth_module._cache_timestamp
-    auth_module._cached_tokens = {_TEST_AUTH_TOKEN}
-    auth_module._cache_timestamp = time.time()
-    yield
-    auth_module._cached_tokens = original_tokens
-    auth_module._cache_timestamp = original_timestamp
+def _bypass_authentication():
+    """Isolate size-limit behavior from the separately tested HMAC verifier."""
+    with bypass_backend_auth():
+        yield
 
 
 @pytest.fixture

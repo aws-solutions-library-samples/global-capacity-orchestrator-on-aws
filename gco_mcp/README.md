@@ -33,22 +33,29 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
   - [NodePools](#nodepools)
   - [Analytics](#analytics)
   - [Monitoring](#monitoring)
+  - [Cluster](#cluster)
   - [Config](#config)
   - [Image Registry](#image-registry)
   - [Examples Discovery](#examples-discovery)
   - [Docs Discovery](#docs-discovery)
+  - [Mission (Goal-Directed Loop)](#mission-goal-directed-loop)
+  - [Task Observability](#task-observability)
   - [Live State](#live-state)
 - [Available Resources](#available-resources)
   - [Documentation](#documentation-docs)
   - [Kubernetes Manifests](#kubernetes-manifests-k8s)
   - [IAM Policies](#iam-policies-iam)
   - [Infrastructure](#infrastructure-infra)
+  - [CI & GitHub Actions](#ci--github-actions-ci)
+  - [Image Registry](#image-registry-images)
   - [Source Code](#source-code-source)
   - [Demos & Walkthroughs](#demos--walkthroughs-demos)
   - [API Client Examples](#api-client-examples-clients)
   - [Utility Scripts](#utility-scripts-scripts)
   - [Test Suite](#test-suite-tests)
   - [Configuration](#configuration-config)
+  - [Live Operational State](#live-operational-state-gco-costs-tasks-and-mission)
+  - [MCP Introspection](#mcp-introspection-mcp)
 - [Getting Started with the MCP Server](#getting-started-with-the-mcp-server)
 - [Architecture](#architecture)
 - [Examples](#examples)
@@ -61,7 +68,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server wraps the `gco` CLI, exposing 116 tools by default (up to 153 with all flags enabled) that cover the full lifecycle of GPU workload management:
+The MCP server exposes 125 tools by default (up to 165 with all flags enabled) across the full lifecycle of accelerated-workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -414,13 +421,15 @@ A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, de
 |------|---------|-------------|----------------|
 | `GCO_ENABLE_ALL_TOOLS` | `false` | All flagged tools below | Umbrella switch. Setting this to `true` enables every gated tool at once and overrides any per-flag value (even per-flag values explicitly set to `false`). Use sparingly — prefer per-flag opt-in for production clients. |
 | `GCO_ENABLE_CAPACITY_PURCHASE` | `false` | `reserve_capacity`, `create_reservation` | Reserve capacity that incurs AWS charges — either purchasing a fixed-term Capacity Block (`reserve_capacity`, not cancellable once committed) or creating an On-Demand Capacity Reservation (`create_reservation`, billed until cancelled via `cancel_reservation`). |
-| `GCO_ENABLE_MODEL_UPLOAD` | `false` | `models_upload` | Uploads model weights to S3, which can be many GB per call and takes minutes to finish. Network egress and storage costs apply. |
+| `GCO_ENABLE_MODEL_UPLOAD` | `false` | `models_upload`, `upload_to_regional_bucket` | Uploads local model data to central or regional S3. Both tools require a source confined beneath `GCO_STORAGE_LOCAL_ROOT` and build a private descriptor-backed snapshot that rejects symlinks, special files, cross-filesystem entries, and pre-existing hard links; transfers can be many GB and incur network and storage costs. |
 | `GCO_ENABLE_IMAGE_PUBLISH` | `false` | `images_build`, `images_push`, `images_mirror` | Builds, publishes, and mirrors container images to ECR. `images_build` / `images_push` run a long-running build (FastMCP background task) and push binaries that get replicated across every deployed region; `images_mirror` copies third-party images (Volcano's docker.io images) into the project's `gco/*` ECR. |
-| `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` | `false` | `deploy_stack`, `deploy_all`, `bootstrap_cdk` | Creates or updates CloudFormation stacks. A full `deploy_all` runs 30-60 minutes wall-clock and can provision EKS clusters, NodePools, and storage that incur ongoing charges. |
+| `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` | `false` | `deploy_stack`, `deploy_all`, `bootstrap_cdk`, `addons_install` | Creates or updates CloudFormation stacks or starts Helm add-on re-convergence. A full `deploy_all` runs 30-60 minutes wall-clock and can provision EKS clusters, NodePools, and storage that incur ongoing charges. |
 | `GCO_ENABLE_INFRASTRUCTURE_DESTROY` | `false` | `destroy_stack`, `destroy_all` | Tears down CloudFormation stacks. Cancellation mid-flight can leave partial state behind that has to be cleaned up by hand. |
-| `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` | `false` | `delete_job`, `delete_inference`, `delete_template`, `delete_webhook`, `delete_model`, `delete_nodepool`, `analytics_user_remove`, `monitoring_user_remove`, `cancel_queue_job`, `cancel_reservation`, `images_cleanup`, `images_prune`, `images_delete_tag`, `images_delete_repo` | Delete operations are irreversible — once data, jobs, models, images, or capacity reservations are removed they can't be recovered without a backup. |
+| `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` | `false` | `delete_job`, `delete_inference`, `delete_template`, `delete_webhook`, `delete_model`, `delete_nodepool`, `analytics_user_remove`, `monitoring_user_remove`, `cancel_queue_job`, `cancel_reservation`, `images_cleanup`, `images_prune`, `images_delete_tag`, `images_delete_repo`, `task_prune` | Delete operations are irreversible — once data, jobs, models, images, capacity reservations, or local task history are removed they can't be recovered without a backup. |
 | `GCO_ENABLE_MISSION` | `false` | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list` | Runs an autonomous goal-directed loop that can call any tool in its allowlist. Gated to prevent unattended autonomous execution. |
+| `GCO_ENABLE_LOCAL_METRICS` | `false` | `metrics_from_local_file` | Reads a metric file from the MCP host beneath `GCO_METRICS_LOCAL_ROOT`; disabled by default to prevent unintended host-file access. |
 | `GCO_ENABLE_LOCAL_STORAGE_SYNC` | `false` | `sync_storage_bucket` | Reads from or writes to the MCP host and can upload objects to S3. A large or unintended sync can consume local disk or S3 storage and network capacity, so the operator must opt in and confine local paths with `GCO_STORAGE_LOCAL_ROOT`. |
+| `GCO_ENABLE_SEMANTIC_PROGRESS` | `false` | `metrics_semantic_progress` | Invokes an LLM-as-judge progress scorer, which can incur model-call cost and sends the supplied scoring inputs to the configured model. |
 
 ### Enabling a Flag
 
@@ -507,17 +516,22 @@ These environment variables tune the MCP server's behaviour but **do not gate an
 | Variable | Values | Default | What It Does |
 |----------|--------|---------|--------------|
 | `GCO_MCP_TOOL_SEARCH` | `off` \| `bm25` \| `regex` \| `code_mode` | `bm25` | Selects the catalog-replacement transform. `bm25` (default) replaces `list_tools()` with a BM25-ranked `search_tools` plus a small set of always-visible entry-point tools. `regex` swaps in a regex-based search. `code_mode` is experimental and exposes Code Mode meta-tools (`search` / `get_schemas` / `execute`). `off` returns the legacy full catalog. An unknown value falls back to `bm25`. |
-| `GCO_STORAGE_LOCAL_ROOT` | Directory path | — | Root directory allowed for `sync_storage_bucket`. The local path—download destination or upload source—must resolve inside this root; relative paths are resolved beneath it. Required when `GCO_ENABLE_LOCAL_STORAGE_SYNC=true`. POSIX hosts only; unsupported hosts fail closed. Prefer an absolute path. |
+| `GCO_STORAGE_LOCAL_ROOT` | Directory path | — | Shared confinement root for `models_upload`, `upload_to_regional_bucket`, and `sync_storage_bucket`. Relative paths resolve beneath this root; lexical traversal and symlink escapes fail closed. Short uploads additionally use a same-filesystem descriptor-backed snapshot and reject descendant symlinks, special files, and pre-existing hard links. Required when model upload or local storage sync is enabled. POSIX hosts with `/dev/fd` only for short uploads. |
+| `GCO_METRICS_LOCAL_ROOT` | Directory path | — | Confinement root for `metrics_from_local_file`; required when `GCO_ENABLE_LOCAL_METRICS=true`. |
+| `GCO_TASK_STATUS_DIR` | Directory path | `~/.gco/tasks` | Private directory for bounded long-task status and log artifacts. |
+| `GCO_DISABLE_TASK_STATUS` | Boolean | `false` | Disable disk-backed long-task status/log emission when set to `1`, `true`, or `yes`. |
 | `FASTMCP_DOCKET_URL` | URL | `memory://` | Controls where FastMCP's background-task store lives. The default `memory://` keeps task state in-process for the lifetime of the server. Set to e.g. `redis://localhost:6379` to persist task state across restarts and share it with other consumers. |
 
-### Breaking Change in This Version
+### Breaking Changes in This Version
 
-Two tools that used to be available by default are now gated behind `GCO_ENABLE_DESTRUCTIVE_OPERATIONS`:
+Three tools that previously accepted broader access are now gated or additionally confined:
 
-- `delete_job` — irreversibly deletes a Kubernetes job and its pods.
-- `delete_inference` — irreversibly removes an inference endpoint and its DynamoDB record.
+- `upload_to_regional_bucket` now requires `GCO_ENABLE_MODEL_UPLOAD=true` and a source beneath `GCO_STORAGE_LOCAL_ROOT`.
+- `models_upload` remains gated by `GCO_ENABLE_MODEL_UPLOAD` and now also requires a source beneath `GCO_STORAGE_LOCAL_ROOT`.
+- Both short-upload tools fail closed unless they can create a private descriptor-backed, same-filesystem snapshot. Descendant symlinks, special files, and pre-existing hard links are rejected rather than followed.
+- `delete_job` and `delete_inference` remain gated behind `GCO_ENABLE_DESTRUCTIVE_OPERATIONS`.
 
-If your client relied on them, restore them by adding the flag to your `env` block:
+If your client relied on uploads, set the model-upload gate and an absolute confinement root. If it relied on deletes, set the destructive-operations gate. A client that needs both can use:
 
 ```json
 {
@@ -530,6 +544,8 @@ If your client relied on them, restore them by adding the flag to your `env` blo
         "gco-mcp"
       ],
       "env": {
+        "GCO_ENABLE_MODEL_UPLOAD": "true",
+        "GCO_STORAGE_LOCAL_ROOT": "/absolute/path/to/approved-upload-data",
         "GCO_ENABLE_DESTRUCTIVE_OPERATIONS": "true"
       }
     }
@@ -539,7 +555,7 @@ If your client relied on them, restore them by adding the flag to your `env` blo
 
 Any release `>= v3.2.0` works — bump the `@v3.2.0` tag as needed.
 
-Setting the umbrella `GCO_ENABLE_ALL_TOOLS=true` also restores both tools alongside every other gated tool.
+Setting the umbrella `GCO_ENABLE_ALL_TOOLS=true` enables every gated tool, but local-data tools still require their confinement-root variables.
 
 ## Available Tools
 
@@ -555,6 +571,10 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `get_job` | Get details of a specific job | safe | — |
 | `get_job_logs` | Get logs from a job | safe | — |
 | `get_job_events` | Get Kubernetes events for a job (debugging) | safe | — |
+| `get_job_pods` | Get pod placement, phase, and container status for a job | safe | — |
+| `get_pod_logs` | Get a bounded log tail from one specific pod and optional container | safe | — |
+| `get_job_metrics` | Get CPU and memory usage for every pod in a job | safe | — |
+| `retry_job` | Create a new retry Job while preserving the failed original | low-risk | — |
 | `delete_job` | Delete a job (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 | `cluster_health` | Get health status of clusters | safe | — |
 | `queue_status` | View SQS queue status (pending, in-flight, DLQ) | safe | — |
@@ -567,20 +587,27 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `queue_get` | Fetch a single job record from the global queue | safe | — |
 | `queue_stats` | Aggregate queue stats per region | safe | — |
 | `queue_submit` | Submit a manifest to the global queue | low-risk | — |
-| `cancel_queue_job` | Cancel an in-flight queued job (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
+| `cancel_queue_job` | Cancel a job that is still in the `queued` state | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 
 ### Capacity
 
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
 | `check_capacity` | Check spot and on-demand capacity for an instance type | safe | — |
+| `instance_info` | Get hardware and pricing metadata for an EC2 instance type | safe | — |
+| `recommend_capacity` | Recommend spot or on-demand capacity from interruption tolerance | safe | — |
 | `capacity_status` | View capacity across all deployed regions | safe | — |
 | `recommend_region` | Get optimal region recommendation (supports instance-type-aware weighted scoring) | safe | — |
 | `spot_prices` | Get current spot prices for an instance type | safe | — |
 | `ai_recommend` | Get AI-powered capacity recommendation using Amazon Bedrock | safe | — |
 | `list_reservations` | List On-Demand Capacity Reservations (ODCRs) across regions | safe | — |
 | `reservation_check` | Check reservation availability and Capacity Block offerings | safe | — |
+| `find_capacity_blocks` | Search Capacity Block offerings across regions, durations, and a start-date window | safe | — |
 | `find_capacity_reservations` | Find existing ODCRs across regions in one parallel, ranked, priced report | safe | — |
+| `capacity_history_show` | Show recorded capacity time-series data for an instance type and region | safe | — |
+| `capacity_history_stats` | Summarize historical capacity metrics with percentiles and dispersion | safe | — |
+| `capacity_history_patterns` | Show day-of-week and hour capacity patterns | safe | — |
+| `capacity_predict` | Predict a favorable acquisition time from historical capacity signals using Bedrock | safe | — |
 | `reserve_capacity` | Purchase a Capacity Block offering by ID (supports dry-run) | cost-incurring | `GCO_ENABLE_CAPACITY_PURCHASE` |
 | `create_reservation` | Create a new On-Demand Capacity Reservation (supports dry-run) | cost-incurring | `GCO_ENABLE_CAPACITY_PURCHASE` |
 | `cancel_reservation` | Cancel an ODCR, releasing its reserved capacity (supports dry-run) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
@@ -594,8 +621,8 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `inference_status` | Get detailed status with per-region breakdown | safe | — |
 | `inference_health` | Health-check an inference endpoint | safe | — |
 | `list_endpoint_models` | List models loaded on an inference endpoint | safe | — |
-| `invoke_inference` | Send a prompt to an inference endpoint | safe | — |
-| `chat_inference` | Send a multi-turn chat conversation to an inference endpoint | safe | — |
+| `invoke_inference` | Send a prompt to an inference endpoint and return a buffered response | safe | — |
+| `chat_inference` | Send a buffered multi-turn chat conversation to an inference endpoint | safe | — |
 | `scale_inference` | Scale an endpoint's replica count | low-risk | — |
 | `update_inference_image` | Rolling update to a new container image | low-risk | — |
 | `stop_inference` | Stop an endpoint (scales to zero, keeps config) | low-risk | — |
@@ -605,6 +632,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `rollback_canary` | Rollback canary (100% traffic to primary) | low-risk | — |
 | `deploy_disaggregated_inference` | Deploy a split prefill/decode (Mooncake) endpoint | low-risk | — |
 | `set_mooncake_topology` | Resize a disaggregated endpoint's prefill/decode replica counts | low-risk | — |
+| `configure_mooncake_store` | Update shared-store, cold-tier, offload, and buffer settings | low-risk | — |
 | `mooncake_topology_status` | Show a disaggregated endpoint's per-role topology status | safe | — |
 | `populate_kv_cache` | Upload data into an endpoint's Mooncake KV-cache cold tier | low-risk | — |
 | `delete_inference` | Delete an endpoint (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
@@ -616,6 +644,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `cost_summary` | Total spend broken down by AWS service | safe | — |
 | `cost_by_region` | Cost breakdown by AWS region | safe | — |
 | `cost_trend` | Daily cost trend | safe | — |
+| `cost_workloads` | Estimate accumulated and hourly cost for running workloads | safe | — |
 | `cost_forecast` | Forecast costs for the next N days | safe | — |
 
 ### Infrastructure
@@ -627,6 +656,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `stack_diff` | Show CloudFormation diff for a stack | safe | — |
 | `stack_outputs` | Fetch CloudFormation outputs for a stack | safe | — |
 | `stack_synth` | Synthesize CloudFormation templates from CDK | safe | — |
+| `addons_status` | Show per-chart Helm add-on status from SSM | safe | — |
 | `valkey_status` | Show Valkey cache stack status | safe | — |
 | `aurora_status` | Show Aurora database stack status | safe | — |
 | `fsx_status` | Check FSx for Lustre configuration | safe | — |
@@ -635,6 +665,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `enable_valkey` / `disable_valkey` | Toggle Valkey Serverless in `cdk.json` | low-risk | — |
 | `enable_aurora` / `disable_aurora` | Toggle Aurora pgvector in `cdk.json` | low-risk | — |
 | `bootstrap_cdk` | Bootstrap a region for CDK (long-running, 2-5 min) | infrastructure | `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` |
+| `addons_install` | Start idempotent Helm add-on re-convergence from SSM input | infrastructure | `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` |
 | `deploy_stack` | Deploy a single stack via CDK (long-running, 15-30 min) | infrastructure | `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` |
 | `deploy_all` | Deploy every stack across every region (long-running, 30-60 min) | infrastructure | `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` |
 | `destroy_stack` | Destroy a single stack via CDK (long-running, 5-20 min) | infrastructure | `GCO_ENABLE_INFRASTRUCTURE_DESTROY` |
@@ -649,7 +680,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `list_storage_buckets` | Discover user-facing GCO S3 buckets and their stable aliases | safe | — |
 | `files_get` | Get EFS or FSx file-system details for a region | safe | — |
 | `files_access_points` | List EFS access points | safe | — |
-| `upload_to_regional_bucket` | Upload local files to a region's shared S3 bucket | low-risk | — |
+| `upload_to_regional_bucket` | Upload a confined local file or directory to a region's shared S3 bucket | data-upload | `GCO_ENABLE_MODEL_UPLOAD` |
 | `sync_storage_bucket` | Incrementally download from or upload to a GCO S3 bucket or prefix | low-risk | `GCO_ENABLE_LOCAL_STORAGE_SYNC` |
 
 `list_storage_buckets` is available by default and returns the canonical aliases
@@ -657,6 +688,13 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 `analytics-studio`. Generated physical bucket names are resolved from the
 SSM parameters and CloudFormation resources published by the deployment.
 Dedicated access-log buckets are intentionally excluded.
+
+Both short upload tools (`models_upload` and `upload_to_regional_bucket`) require
+`GCO_ENABLE_MODEL_UPLOAD=true` and `GCO_STORAGE_LOCAL_ROOT`. Their source path
+may be absolute or root-relative, but must already exist and resolve beneath
+that root; the wrapper passes the resolved absolute path to the CLI. Traversal,
+symlink escapes, special files, missing roots, and unsupported hosts fail
+closed.
 
 `sync_storage_bucket` is deliberately opt-in because it reads from or writes to
 the MCP host and upload mode writes S3. A bucket or local tree may also be
@@ -787,6 +825,7 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
 | `analytics_doctor` | Diagnose the analytics environment's health | safe | — |
+| `analytics_status` | Show the analytics environment configuration | safe | — |
 | `analytics_login_url` | Generate a login URL for an analytics user | safe | — |
 | `analytics_users_list` | List users provisioned in the analytics environment | safe | — |
 | `analytics_user_add` | Add a new analytics user | low-risk | — |
@@ -831,7 +870,7 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 | `images_mirror_plan` | Show which third-party images would be mirrored into ECR (no writes) | safe | — |
 | `images_mirror_status` | Report which managed images are already present in ECR | safe | — |
 | `images_init` | Create the project ECR repo idempotently with default lifecycle | low-risk | — |
-| `images_lifecycle_get` | Read the lifecycle policy on a repository | low-risk | — |
+| `images_lifecycle_get` | Read the lifecycle policy on a repository | safe | — |
 | `images_lifecycle_set` | Replace the lifecycle policy on a repository | low-risk | — |
 | `images_replication_sync` | Apply the standard `gco/*` replication rule | low-risk | — |
 | `images_build` | Build a container image from a context (long-running, FastMCP background task) | image | `GCO_ENABLE_IMAGE_PUBLISH` |
@@ -876,20 +915,27 @@ All nine Mission tools are gated behind `GCO_ENABLE_MISSION` — the loop can ca
 |------|-------------|-----------|----------|
 | `task_status` | Read the status of a FastMCP background task by ID | safe | — |
 | `task_tail` | Tail the recorded output of a long-running background task | safe | — |
+| `task_prune` | Delete old local task status/log pairs while retaining the newest records | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
+
+Task artifacts are written with private directory/file permissions. Status
+messages, command metadata, individual log records, total log bytes, and tail
+reads are all bounded; symlinks, hard links, special files, traversal IDs, and
+oversized status records fail closed.
 
 ### Live State
 
-The synthetic `read_resource` tool (added by FastMCP's Resources As Tools transform) reaches every resource path the server exposes — including the live-state paths below, which materialize current cluster state on demand. Tool-only clients (Cursor, etc.) can call `read_resource(uri="gco://jobs/my-job")` and get the same answer the resource handler would return directly.
+The synthetic `read_resource` tool (added by FastMCP's Resources As Tools transform) reaches every resource path the server exposes — including the live-state paths below, which materialize current cluster state on demand. Live kubectl-backed reads require an explicit AWS region and use an account-qualified EKS context; legacy regionless URIs return a structured `eks_region_required` error rather than using kubectl's ambient current context. Tool-only clients can call `read_resource(uri="gco://jobs/us-east-1/my-job")` and get the same answer the regional resource handler would return directly.
 
 | Tool / Resource Path | Description | Risk Tier | Gated By |
 |----------------------|-------------|-----------|----------|
 | `read_resource` (synthetic) | Read any MCP resource by URI — entry point for tool-only clients | safe | — |
-| `gco://jobs/{job_name}` | Live YAML for a Kubernetes job in `gco-jobs` | safe | — |
+| `gco://jobs/{region}/{job_name}` | Live YAML for a Kubernetes job in an explicit regional EKS cluster | safe | — |
 | `gco://inference/{endpoint_name}` | Inference endpoint record from the DynamoDB store | safe | — |
-| `gco://k8s/{namespace}/{kind}/{name}` | Live YAML for any cluster resource | safe | — |
+| `gco://k8s/{region}/{namespace}/{kind}/{name}` | Live YAML for any resource in an explicit regional EKS cluster | safe | — |
 | `gco://cluster/{region}/topology` | NodePools plus pending pods for a region | safe | — |
-| `costs://gco/summary/{days_window}` | Cached cost summary scoped to the named window | safe | — |
+| `costs://gco/summary/{days_window}` | Cost summary scoped to the named positive day window | safe | — |
 | `tasks://gco/{task_id}` | Status of a FastMCP background task | safe | — |
+| `mission://sessions/{session_id}` | Mission state, report, or audit replay when the Mission flag is enabled | safe | `GCO_ENABLE_MISSION` |
 
 ## Available Resources
 
@@ -950,6 +996,15 @@ Everything under `.github/` — workflows, composite actions, issue/PR templates
 | `ci://gco/kind/{filename}` | Read kind-cluster configuration used by integration tests |
 | `ci://gco/config/{filename}` | Read a top-level config file (`CI.md`, `CODEOWNERS`, `SECURITY.md`, `release.yml`, `dependabot.yml`) |
 
+### Image Registry (`images://`)
+
+| Resource | Description |
+|----------|-------------|
+| `images://gco/index` | Browse project ECR repositories and discover image resources |
+| `images://gco/replication/status` | Read the current project image-replication status |
+| `images://gco/{name}/tags` | List tags for one allowlisted `gco/*` repository |
+| `images://gco/{name}/{tag}` | Read details for one image tag |
+
 ### Source Code (`source://`)
 
 | Resource | Description |
@@ -1004,10 +1059,33 @@ Source code resources cover `gco/`, `cli/`, `lambda/`, `gco_mcp/`, `scripts/`, `
 
 | Resource | Description |
 |----------|-------------|
-| `config://gco/index` | Browse CDK configuration, feature toggles, and environment variables |
-| `config://gco/cdk.json` | Current CDK deployment configuration |
-| `config://gco/feature-toggles` | All feature toggles with their current values and defaults |
+| `config://gco/index` | Browse authoritative CDK configuration, MCP feature flags, and environment variables |
+| `config://gco/cdk.json` | Current raw CDK deployment configuration |
+| `mcp://gco/feature-flags` | Live MCP feature flags and their complete gated-tool map |
 | `config://gco/env-vars` | Environment variables used by the MCP server and services |
+
+### Live Operational State (`gco://`, `costs://`, `tasks://`, and `mission://`)
+
+| Resource | Description |
+|----------|-------------|
+| `gco://jobs/{region}/{job_name}` | Live Kubernetes Job YAML from an explicitly selected regional EKS cluster |
+| `gco://k8s/{region}/{namespace}/{kind}/{name}` | Live Kubernetes object YAML from an explicitly selected regional EKS cluster |
+| `gco://cluster/{region}/topology` | Regional NodePools and pending-pod topology |
+| `gco://inference/{endpoint_name}` | Desired-state record for an inference endpoint |
+| `costs://gco/summary/{days_window}` | Cost summary for a positive, bounded day window |
+| `tasks://gco/{task_id}` | FastMCP background-task state |
+| `mission://sessions/{session_id}` | Mission state, report, or audit replay; registered only when `GCO_ENABLE_MISSION=true` |
+
+Legacy regionless Job and Kubernetes templates remain registered only to return a structured `eks_region_required` error. They never read kubectl's ambient context.
+
+### MCP Introspection (`mcp://`)
+
+| Resource | Description |
+|----------|-------------|
+| `mcp://gco/tools/index` | Live registered-tool catalog with source locations, tags, and gating flags |
+| `mcp://gco/tools/{tool_name}` | Detail for one registered tool |
+| `mcp://gco/resources/index` | Live static-resource and resource-template catalog |
+| `mcp://gco/feature-flags` | Authoritative umbrella/per-tool feature-gate mapping |
 
 ### Try it
 
@@ -1057,12 +1135,12 @@ gco_mcp/
 ├── version.py             — Project version management
 ├── tools/                 — MCP tool definitions (one file per domain)
 │   ├── _long_task.py      — async subprocess runner for FastMCP Tasks (long-running tools)
-│   ├── jobs.py            — Job submission, listing, logs, events
+│   ├── jobs.py            — Job submission, pods, logs, metrics, retry, deletion
 │   ├── queue.py           — Global queue inspection and submission
-│   ├── capacity.py        — Capacity checking, recommendations, reservations
-│   ├── inference.py       — Inference deployment, scaling, canary, invocation, chat
-│   ├── costs.py           — Cost tracking and forecasting
-│   ├── stacks.py          — CDK stack management (incl. long-running deploy/destroy)
+│   ├── capacity.py        — Instance metadata, capacity recommendations, reservations
+│   ├── inference.py       — Deployment, Mooncake store/topology, canary, invocation, chat
+│   ├── costs.py           — Cost tracking, workload estimates, and forecasting
+│   ├── stacks.py          — CDK lifecycle and Helm add-on status/re-convergence
 │   ├── storage.py         — EFS/FSx operations plus S3 bucket discovery and local sync
 │   ├── models.py          — Model weight management (incl. gated upload)
 │   ├── images.py          — Image registry (build/push/lifecycle/replication/cleanup)
@@ -1070,11 +1148,15 @@ gco_mcp/
 │   ├── webhooks.py        — Lifecycle webhooks
 │   ├── dag.py             — DAG pipeline validation and submission
 │   ├── nodepools.py       — Karpenter NodePool management
-│   ├── analytics.py       — Analytics environment management
+│   ├── analytics.py       — Analytics environment status and management
+│   ├── monitoring.py      — Cluster-observability configuration and users
+│   ├── cluster.py         — Private-cluster connection-plan discovery
 │   ├── config.py          — Read-only access to cdk.json
+│   ├── metrics.py         — CloudWatch, log, shared, and local metric readers
+│   ├── semantic_progress.py — Feature-gated LLM progress scoring
 │   ├── examples.py        — find_examples discovery tool
 │   ├── docs.py            — find_docs discovery tool
-│   ├── tasks.py           — Task management tools
+│   ├── tasks.py           — Task status, log tails, and gated local-history pruning
 │   └── mission.py         — Mission goal-directed loop tools [gated by GCO_ENABLE_MISSION]
 ├── mission/               — Mission engine package (goal-directed iteration loop)
 │   ├── __init__.py          — Package marker + SCHEMA_VERSION export
@@ -1093,9 +1175,10 @@ gco_mcp/
 │   ├── types.py             — TypedDict definitions (SessionState, Strategy, etc.)
 │   └── validation.py        — Input validators (criteria, budget, allowlist, cadence)
 └── resources/             — MCP resource definitions (one file per scheme)
+    ├── _eks.py            — Shared account-qualified EKS context resolver
     ├── docs.py            — docs:// (documentation + examples with metadata)
     ├── source.py          — source:// (full source code browser)
-    ├── k8s.py             — k8s:// + live gco://k8s/{namespace}/{kind}/{name}
+    ├── k8s.py             — k8s:// + live gco://k8s/{region}/{namespace}/{kind}/{name}
     ├── iam_policies.py    — iam:// (IAM policy templates)
     ├── infra.py           — infra:// (Dockerfiles, Helm, CI/CD)
     ├── ci.py              — ci:// (GitHub Actions, workflows)
@@ -1103,9 +1186,9 @@ gco_mcp/
     ├── clients.py         — clients:// (API client examples)
     ├── scripts.py         — scripts:// (utility scripts)
     ├── tests.py           — tests:// (test suite docs and patterns)
-    ├── config.py          — config:// (CDK config, feature toggles, env vars)
+    ├── config.py          — config:// (raw CDK config and environment variables)
     ├── images.py          — images:// (image registry browse)
-    ├── jobs.py            — gco://jobs/{job_name} (live job YAML)
+    ├── jobs.py            — gco://jobs/{region}/{job_name} (live job YAML)
     ├── inference.py       — gco://inference/{endpoint_name} (live endpoint state)
     ├── cluster.py         — gco://cluster/{region}/topology (NodePools + pending pods)
     ├── costs.py           — costs://gco/summary/{days_window} (cost summary cache)
@@ -1116,10 +1199,10 @@ gco_mcp/
 
 Long-running tools (`deploy_stack`, `destroy_stack`, `images_build`, etc.) use FastMCP Tasks — protocol-native background-task support — rather than an in-house operation registry. The shared `tools/_long_task.py` helper drives `asyncio.create_subprocess_exec`, streams progress messages back through the FastMCP `Progress` dependency, and converts mid-flight cancellation into a structured result (with a partial-CloudFormation-state disclaimer for stack ops).
 
-Each tool shells out to the `gco` CLI. This approach:
+Most operational tools shell out to the `gco` CLI, while discovery, introspection, task-observability, and Mission tools use their dedicated in-process backends. The CLI-backed approach:
 
-- Reuses all existing auth (SigV4), error handling, and retry logic
-- Stays in sync with CLI updates automatically
+- Reuses existing SigV4 authentication, error handling, and retries for safe read-only requests
+- Keeps command behavior aligned with CLI updates
 - Avoids duplicating complex AWS client setup
 - Uses `--output json` for structured responses where supported
 

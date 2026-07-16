@@ -44,6 +44,20 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 import run_mcp  # noqa: E402, F401  -- side-effect registers tools/resources
 
 mcp = run_mcp.mcp
+_EKS_CONTEXT = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
+
+
+@pytest.fixture(autouse=True)
+def _pin_live_eks_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep live-resource branch tests offline while asserting explicit context use."""
+    monkeypatch.setattr(
+        "resources.cluster.eks_context_for_region",
+        lambda _region: _EKS_CONTEXT,
+    )
+    monkeypatch.setattr(
+        "resources.k8s.eks_context_for_region",
+        lambda _region: _EKS_CONTEXT,
+    )
 
 
 def _read_resource(uri: str) -> str:
@@ -367,23 +381,23 @@ class TestClusterTopology:
 
 
 # ---------------------------------------------------------------------------
-# gco_mcp/resources/k8s.py — gco://k8s/{namespace}/{kind}/{name}
+# gco_mcp/resources/k8s.py — gco://k8s/{region}/{namespace}/{kind}/{name}
 # ---------------------------------------------------------------------------
 
 
 class TestK8sLiveResource:
     def test_invalid_namespace(self) -> None:
-        body = _read_resource("gco://k8s/BAD/Pod/my-pod")
+        body = _read_resource("gco://k8s/us-east-1/BAD/Pod/my-pod")
         payload = json.loads(body)
         assert payload["error"] == "invalid namespace"
 
     def test_invalid_kind(self) -> None:
-        body = _read_resource("gco://k8s/default/!!!/my-pod")
+        body = _read_resource("gco://k8s/us-east-1/default/!!!/my-pod")
         payload = json.loads(body)
         assert payload["error"] == "invalid kind"
 
     def test_invalid_name(self) -> None:
-        body = _read_resource("gco://k8s/default/Pod/BAD")
+        body = _read_resource("gco://k8s/us-east-1/default/Pod/BAD")
         payload = json.loads(body)
         assert payload["error"] == "invalid name"
 
@@ -392,13 +406,14 @@ class TestK8sLiveResource:
         result.returncode = 0
         result.stdout = "apiVersion: v1\nkind: Pod\n"
         result.stderr = ""
-        with patch("resources.k8s.cli_runner.subprocess.run", return_value=result):
-            body = _read_resource("gco://k8s/default/pod/my-pod")
+        with patch("resources.k8s.cli_runner.subprocess.run", return_value=result) as run:
+            body = _read_resource("gco://k8s/us-east-1/default/pod/my-pod")
         assert "apiVersion: v1" in body
+        assert run.call_args[0][0][-2:] == ["--context", _EKS_CONTEXT]
 
     def test_kubectl_missing(self) -> None:
         with patch("resources.k8s.cli_runner.subprocess.run", side_effect=FileNotFoundError):
-            body = _read_resource("gco://k8s/default/pod/my-pod")
+            body = _read_resource("gco://k8s/us-east-1/default/pod/my-pod")
         payload = json.loads(body)
         assert payload["error"] == "kubectl not found"
 
@@ -419,7 +434,7 @@ class TestK8sLiveResource:
         result.stdout = ""
         result.stderr = "not found"
         with patch("resources.k8s.cli_runner.subprocess.run", return_value=result):
-            body = _read_resource("gco://k8s/default/pod/missing")
+            body = _read_resource("gco://k8s/us-east-1/default/pod/missing")
         payload = json.loads(body)
         assert payload["error"] == "not found"
 
@@ -510,6 +525,11 @@ class TestCiIndex:
         # Either the script content or the not-found message is fine —
         # we just want to exercise the read path.
         assert isinstance(body, str)
+
+    def test_python_script_resource_round_trips(self) -> None:
+        body = _read_resource("ci://gco/scripts/validate_k8s_manifests.py")
+        assert "python" in body.lower()
+        assert "File type '.py' not served" not in body
 
     def test_template_resource_missing(self) -> None:
         body = _read_resource("ci://gco/templates/does-not-exist.md")

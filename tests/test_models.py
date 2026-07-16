@@ -219,6 +219,16 @@ class TestKubernetesManifest:
         assert manifest.kind == "ConfigMap"
         assert manifest.data == {"key": "value"}
 
+    def test_missing_namespace_defaults_to_write_rbac_namespace(self):
+        manifest = KubernetesManifest(
+            apiVersion="v1",
+            kind="ConfigMap",
+            metadata={"name": "test-config"},
+            data={"key": "value"},
+        )
+
+        assert manifest.get_namespace() == "gco-jobs"
+
     def test_valid_namespace_manifest(self):
         """Test creating valid Namespace manifest (no spec/data required)."""
         manifest = KubernetesManifest(

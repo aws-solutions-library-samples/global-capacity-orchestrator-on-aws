@@ -1131,20 +1131,19 @@ class TestConfigWithFile:
             config_path = f.name
 
         try:
-            with patch("cli.commands.jobs_cmd.get_job_manager") as mock_manager:
-                mock_jm = MagicMock()
-                mock_jm.list_jobs.return_value = []
-                mock_manager.return_value = mock_jm
-
-                with patch("cli.main.GCOConfig.from_file") as mock_from_file:
-                    mock_config = MagicMock()
-                    mock_config.output_format = "table"
-                    mock_from_file.return_value = mock_config
-
-                    runner.invoke(cli, ["--config", config_path, "jobs", "list"])
-                    # Config file loading is attempted - check it was called with the path
-                    calls = [c for c in mock_from_file.call_args_list if c.args == (config_path,)]
-                    assert len(calls) >= 1, "from_file should be called with config path"
+            with patch.dict(os.environ, {}, clear=True):
+                result = runner.invoke(
+                    cli,
+                    [
+                        "--config",
+                        config_path,
+                        "config-cmd",
+                        "get",
+                        "default_namespace",
+                    ],
+                )
+            assert result.exit_code == 0
+            assert "test-ns" in result.output
         finally:
             os.unlink(config_path)
 
@@ -1295,7 +1294,16 @@ class TestJobsSubmitWithWait:
         try:
             with patch("cli.commands.jobs_cmd.get_job_manager") as mock_manager:
                 mock_jm = MagicMock()
-                mock_jm.submit_job.return_value = {"job_name": "test-job", "status": "submitted"}
+                mock_jm.submit_job.return_value = {
+                    "resources": [
+                        {
+                            "kind": "Job",
+                            "name": "test-job-generated",
+                            "namespace": "manifest-ns",
+                            "status": "created",
+                        }
+                    ]
+                }
                 mock_final_job = MagicMock()
                 mock_final_job.status = "Succeeded"
                 mock_jm.wait_for_job.return_value = mock_final_job
@@ -1303,7 +1311,12 @@ class TestJobsSubmitWithWait:
 
                 result = runner.invoke(cli, ["jobs", "submit", manifest_path, "--wait"])
                 assert result.exit_code == 0
-                mock_jm.wait_for_job.assert_called_once()
+                mock_jm.wait_for_job.assert_called_once_with(
+                    job_name="test-job-generated",
+                    namespace="manifest-ns",
+                    region=None,
+                    timeout_seconds=3600,
+                )
         finally:
             os.unlink(manifest_path)
 
@@ -1324,7 +1337,11 @@ class TestJobsSubmitWithWait:
         try:
             with patch("cli.commands.jobs_cmd.get_job_manager") as mock_manager:
                 mock_jm = MagicMock()
-                mock_jm.submit_job_direct.return_value = {"job_name": "test-job"}
+                mock_jm.submit_job_direct.return_value = {
+                    "job_name": "test-job",
+                    "namespace": "manifest-ns",
+                    "resources": ["job.batch/test-job created"],
+                }
                 mock_final_job = MagicMock()
                 mock_final_job.status = "Succeeded"
                 mock_jm.wait_for_job.return_value = mock_final_job
@@ -1334,7 +1351,12 @@ class TestJobsSubmitWithWait:
                     cli, ["jobs", "submit-direct", manifest_path, "-r", "us-east-1", "--wait"]
                 )
                 assert result.exit_code == 0
-                mock_jm.wait_for_job.assert_called_once()
+                mock_jm.wait_for_job.assert_called_once_with(
+                    job_name="test-job",
+                    namespace="manifest-ns",
+                    region="us-east-1",
+                    timeout_seconds=3600,
+                )
         finally:
             os.unlink(manifest_path)
 

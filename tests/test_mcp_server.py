@@ -12,6 +12,7 @@ without mocking the FastMCP server itself.
 """
 
 import asyncio
+import importlib
 import json
 import logging
 import os
@@ -127,6 +128,36 @@ class TestServerMetadata:
         )
 
 
+class TestImportSafety:
+    """Importing through either supported name is singleton-safe and inert."""
+
+    def test_package_and_legacy_imports_share_modules_and_server(self):
+        package_entrypoint = importlib.import_module("gco_mcp.run_mcp")
+        package_server = importlib.import_module("gco_mcp.server")
+        legacy_server = importlib.import_module("server")
+
+        assert package_entrypoint is run_mcp
+        assert package_server is legacy_server
+        assert package_server.mcp is run_mcp.mcp
+
+    def test_reload_does_not_emit_startup_log_or_assume_role(self):
+        import audit as audit_module
+        import iam as iam_module
+
+        try:
+            with (
+                patch.object(audit_module, "emit_startup_log") as emit,
+                patch.object(iam_module, "assume_mcp_role") as assume,
+            ):
+                importlib.reload(run_mcp)
+                emit.assert_not_called()
+                assume.assert_not_called()
+        finally:
+            # Restore the real imported function references without invoking
+            # runtime initialization; reload itself must remain side-effect free.
+            importlib.reload(run_mcp)
+
+
 class TestToolRegistration:
     """Verify tools are registered with correct signatures.
 
@@ -141,58 +172,13 @@ class TestToolRegistration:
 
     def test_tool_count(self):
         tools = asyncio.run(run_mcp.mcp._list_tools())
-        # 102 base tools after delete_job and delete_inference moved under
-        # GCO_ENABLE_DESTRUCTIVE_OPERATIONS and the three default-on metric
-        # readers were added, plus five unconditional inference/storage tools
-        # and the two read-only image-mirror tools. The breakdown:
-        #   * the original 81 (read-only + low-risk + discovery) minus 2
-        #     (delete_job + delete_inference) = 79
-        #   * 13 unconditional image-registry tools (read-only + administrative,
-        #     including images_mirror_plan / images_mirror_status)
-        #   * 2 unconditional task observability tools (task_status, task_tail)
-        #   * 3 unconditional, default-on metric readers (metrics_cloudwatch_get,
-        #     metrics_from_job_logs, metrics_from_shared_storage_file)
-        #   * 5 unconditional, low-risk inference/storage tools
-        #     (deploy_disaggregated_inference, set_mooncake_topology,
-        #     mooncake_topology_status, populate_kv_cache,
-        #     upload_to_regional_bucket)
-        #   * 2 unconditional ODCR/Capacity-Block parity tools
-        #     (find_capacity_reservations sweep, nodepools_create_capacity_block)
-        # = 104 total at default registration.
-        # reserve_capacity and create_reservation add 2 when
-        # GCO_ENABLE_CAPACITY_PURCHASE=true.
-        # Image-publish-gated tools (images_build, images_push, images_mirror)
-        # add 3 when GCO_ENABLE_IMAGE_PUBLISH=true. Destructive-gated tools add
-        # 14 when GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true: delete_job,
-        # delete_inference, delete_template, delete_webhook, delete_model,
-        # delete_nodepool, analytics_user_remove, monitoring_user_remove,
-        # cancel_queue_job,
-        # cancel_reservation (ten non-image), plus images_cleanup, images_prune,
-        # images_delete_tag, images_delete_repo (four image variants). Model-upload-gated
-        # models_upload adds 1 when GCO_ENABLE_MODEL_UPLOAD=true.
-        # Infrastructure-deploy gated tools (deploy_stack, deploy_all,
-        # bootstrap_cdk) add 3 when GCO_ENABLE_INFRASTRUCTURE_DEPLOY=true.
-        # Infrastructure-destroy gated tools (destroy_stack, destroy_all)
-        # add 2 when GCO_ENABLE_INFRASTRUCTURE_DESTROY=true.
-        # The local-file metric reader (metrics_from_local_file) adds 1 when
-        # GCO_ENABLE_LOCAL_METRICS=true. The semantic-progress judge
-        # (metrics_semantic_progress) adds 1 when GCO_ENABLE_SEMANTIC_PROGRESS=true.
-        # The nine mission_* tools (mission_start, mission_status, mission_iterate,
-        # mission_checkpoint, mission_complete, mission_abort, mission_resume,
-        # mission_history, mission_list) add 9 when GCO_ENABLE_MISSION=true.
-        # Five unconditional cluster-observability tools (monitoring_status,
-        # monitoring_users_list, enable_monitoring, disable_monitoring,
-        # monitoring_user_add) bring the base to 114, and the unconditional,
-        # read-only cluster_tunnel_command (SSM tunnel connection-plan) brings
-        # it to 115. The unconditional list_storage_buckets discovery tool
-        # brings the default registry to 116.
-        # With every flag enabled the ceiling is
-        # 116 + 2 + 3 + 14 + 1 + 3 + 2 + 1 + 1 + 1 + 9 = 153; the additional
-        # 1 is sync_storage_bucket under GCO_ENABLE_LOCAL_STORAGE_SYNC.
-        # (116 base includes the unconditional find_capacity_blocks and
-        # find_capacity_reservations sweep tools plus the
-        # nodepools_create_capacity_block generator.)
-        base_count = 116
+        # The default registry intentionally contains 125 read-only or low-risk
+        # tools. Optional families add 40 more when every flag is enabled:
+        # capacity purchase (2), image publish (3), destructive operations (15),
+        # model upload (2), infrastructure deploy (4), infrastructure destroy
+        # (2), local metrics (1), semantic progress (1), local storage sync (1),
+        # and Mission (9). The all-flags ceiling is therefore 165.
+        base_count = 125
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -205,13 +191,12 @@ class TestToolRegistration:
             expected += 1  # images_mirror (also GCO_ENABLE_IMAGE_PUBLISH-gated)
         if "delete_job" in tool_names:
             # The destructive-gated non-image tools register together with the
-            # four destructive image variants. Adding monitoring_user_remove
-            # brings the set to fourteen under the flag.
-            expected += 14
+            # four destructive image variants, including local task-history prune.
+            expected += 15
         if "models_upload" in tool_names:
-            expected += 1
+            expected += 2  # central + regional upload tools share the model-upload gate
         if "deploy_stack" in tool_names:
-            expected += 3  # deploy_stack + deploy_all + bootstrap_cdk
+            expected += 4  # deploy_stack + deploy_all + bootstrap_cdk + addons_install
         if "destroy_stack" in tool_names:
             expected += 2  # destroy_stack + destroy_all
         if "metrics_from_local_file" in tool_names:
@@ -235,13 +220,19 @@ class TestToolRegistration:
             "get_job",
             "get_job_logs",
             "get_job_events",
+            "get_job_pods",
+            "get_pod_logs",
+            "get_job_metrics",
             "cluster_health",
             "queue_status",
             # Mutating
             "submit_job_sqs",
             "submit_job_api",
+            "retry_job",
             # ── Capacity (all read-only) ──
             "check_capacity",
+            "instance_info",
+            "recommend_capacity",
             "capacity_status",
             "recommend_region",
             "spot_prices",
@@ -274,6 +265,7 @@ class TestToolRegistration:
             # Disaggregated (Mooncake) inference — low-risk
             "deploy_disaggregated_inference",
             "set_mooncake_topology",
+            "configure_mooncake_store",
             "mooncake_topology_status",
             "populate_kv_cache",
             # ── Cost tracking (all read-only) ──
@@ -281,11 +273,13 @@ class TestToolRegistration:
             "cost_by_region",
             "cost_trend",
             "cost_forecast",
+            "cost_workloads",
             # ── Infrastructure / stacks ──
             # Read-only
             "list_stacks",
             "stack_status",
             "fsx_status",
+            "addons_status",
             # Mutating
             "setup_cluster_access",
             # ── Storage (all read-only) ──
@@ -344,6 +338,7 @@ class TestToolRegistration:
             "nodepools_create_capacity_block",
             # Analytics
             "analytics_doctor",
+            "analytics_status",
             "analytics_login_url",
             "analytics_users_list",
             # Mutating
@@ -369,8 +364,7 @@ class TestToolRegistration:
             # Storage (read-only)
             "files_get",
             "files_access_points",
-            # Storage (low-risk regional upload)
-            "upload_to_regional_bucket",
+            # Storage (regional upload is added conditionally below)
             # ── Image registry ──
             # Read-only ("safe" risk tier)
             "images_list",
@@ -434,15 +428,17 @@ class TestToolRegistration:
                     "monitoring_user_remove",
                     "cancel_queue_job",
                     "cancel_reservation",
+                    "task_prune",
                 }
             )
-        # Model-upload gated tool registers under GCO_ENABLE_MODEL_UPLOAD.
+        # Model-upload gated tools register together under GCO_ENABLE_MODEL_UPLOAD.
         if "models_upload" in names:
             expected.add("models_upload")
+            expected.add("upload_to_regional_bucket")
         # Infrastructure-deploy gated tools register under
         # GCO_ENABLE_INFRASTRUCTURE_DEPLOY.
         if "deploy_stack" in names:
-            expected.update({"deploy_stack", "deploy_all", "bootstrap_cdk"})
+            expected.update({"deploy_stack", "deploy_all", "bootstrap_cdk", "addons_install"})
         # Infrastructure-destroy gated tools register under
         # GCO_ENABLE_INFRASTRUCTURE_DESTROY.
         if "destroy_stack" in names:
@@ -574,6 +570,55 @@ class TestJobTools:
             cmd = mock.call_args[0][0]
             assert "events" in cmd
 
+    def test_get_job_pods(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.get_job_pods("my-job", "us-west-2", namespace="ml-jobs")
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("pods") + 1] == "my-job"
+            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-west-2"]
+            assert cmd[cmd.index("-n") : cmd.index("-n") + 2] == ["-n", "ml-jobs"]
+
+    def test_get_pod_logs_with_container(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.get_pod_logs(
+                "my-job",
+                "my-job-abc12",
+                "us-east-1",
+                namespace="ml-jobs",
+                tail=250,
+                container="trainer",
+            )
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("pod-logs") + 1 : cmd.index("pod-logs") + 3] == [
+                "my-job",
+                "my-job-abc12",
+            ]
+            assert cmd[cmd.index("--tail") : cmd.index("--tail") + 2] == ["--tail", "250"]
+            assert cmd[cmd.index("--container") : cmd.index("--container") + 2] == [
+                "--container",
+                "trainer",
+            ]
+
+    def test_get_job_metrics(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.get_job_metrics("my-job", "eu-west-1")
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("metrics") + 1] == "my-job"
+            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "eu-west-1"]
+
+    def test_retry_job_is_non_interactive(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.retry_job("failed-job", "us-east-2", namespace="batch")
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("retry") + 1] == "failed-job"
+            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-2"]
+            assert cmd[cmd.index("-n") : cmd.index("-n") + 2] == ["-n", "batch"]
+            assert "--yes" in cmd
+
     def test_cluster_health_all(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
@@ -607,6 +652,25 @@ class TestCapacityTools:
             cmd = mock.call_args[0][0]
             assert "g4dn.xlarge" in cmd
             assert "us-east-1" in cmd
+
+    def test_instance_info(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.instance_info("p5.48xlarge")
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("instance-info") + 1] == "p5.48xlarge"
+
+    def test_recommend_capacity(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.recommend_capacity("g5.2xlarge", "us-west-2", fault_tolerance="high")
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("recommend") + 1 : cmd.index("recommend") + 3] == [
+                "-i",
+                "g5.2xlarge",
+            ]
+            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-west-2"]
+            assert cmd[cmd.index("-f") : cmd.index("-f") + 2] == ["-f", "high"]
 
     def test_capacity_status(self):
         with patch("cli_runner.subprocess.run") as mock:
@@ -810,6 +874,37 @@ class TestInferenceTools:
             cmd = mock.call_args[0][0]
             assert "start" in cmd
 
+    def test_configure_mooncake_store(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.configure_mooncake_store(
+                "my-llm",
+                cold_tier=True,
+                offload="disk",
+                global_segment_size=1_048_576,
+                local_buffer_size=262_144,
+                enabled=True,
+            )
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("configure-store") + 1] == "my-llm"
+            assert "--cold-tier" in cmd
+            assert cmd[cmd.index("--offload") : cmd.index("--offload") + 2] == [
+                "--offload",
+                "disk",
+            ]
+            assert cmd[
+                cmd.index("--global-segment-size") : cmd.index("--global-segment-size") + 2
+            ] == ["--global-segment-size", "1048576"]
+            assert cmd[cmd.index("--local-buffer-size") : cmd.index("--local-buffer-size") + 2] == [
+                "--local-buffer-size",
+                "262144",
+            ]
+            assert "--enable-store" in cmd
+
+    def test_configure_mooncake_store_requires_a_change(self):
+        with pytest.raises(ValueError, match="At least one Mooncake store setting"):
+            run_mcp.configure_mooncake_store("my-llm")
+
     @pytest.mark.asyncio
     @patch.dict(os.environ, {"GCO_ENABLE_DESTRUCTIVE_OPERATIONS": "true"})
     async def test_delete_inference(self):
@@ -872,12 +967,12 @@ class TestInferenceTools:
             assert "-r" in cmd
             assert "us-east-1" in cmd
 
-    def test_invoke_inference_with_stream(self):
+    def test_invoke_inference_is_buffered(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
-            run_mcp.invoke_inference("my-llm", "test", stream=True)
+            run_mcp.invoke_inference("my-llm", "test")
             cmd = mock.call_args[0][0]
-            assert "--stream" in cmd
+            assert "--stream" not in cmd
 
     def test_chat_inference_basic(self):
         with patch("cli_runner.subprocess.run") as mock:
@@ -914,21 +1009,20 @@ class TestInferenceTools:
             assert body["max_tokens"] == 512
             assert len(body["messages"]) == 2
 
-    def test_chat_inference_with_stream(self):
+    def test_chat_inference_is_buffered(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
             run_mcp.chat_inference(
                 "my-llm",
                 [{"role": "user", "content": "Hi"}],
-                stream=True,
             )
             cmd = mock.call_args[0][0]
-            assert "--stream" in cmd
+            assert "--stream" not in cmd
             data_arg_idx = cmd.index("-d") + 1
             import json
 
             body = json.loads(cmd[data_arg_idx])
-            assert body["stream"] is True
+            assert "stream" not in body
 
     def test_inference_health(self):
         with patch("cli_runner.subprocess.run") as mock:
@@ -989,6 +1083,14 @@ class TestCostTools:
             assert "trend" in cmd
             assert "7" in cmd
 
+    def test_cost_workloads_region(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.cost_workloads(region="ap-southeast-1")
+            cmd = mock.call_args[0][0]
+            assert "workloads" in cmd
+            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "ap-southeast-1"]
+
     def test_cost_forecast(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
@@ -1024,6 +1126,53 @@ class TestInfraTools:
             cmd = mock.call_args[0][0]
             assert "fsx" in cmd
             assert "status" in cmd
+
+    @pytest.mark.asyncio
+    async def test_addons_status_all_regions(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            await run_mcp.addons_status(all_regions=True)
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("addons") : cmd.index("addons") + 2] == ["addons", "status"]
+            assert "--all-regions" in cmd
+            assert "-r" not in cmd
+
+
+class TestNewParityWrappers:
+    """Focused argv coverage for parity wrappers outside the core sync classes."""
+
+    @pytest.mark.asyncio
+    async def test_analytics_status(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            await run_mcp.analytics_status()
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("analytics") : cmd.index("analytics") + 2] == [
+                "analytics",
+                "status",
+            ]
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "true"})
+    async def test_addons_install_all_regions(self):
+        importlib.reload(run_mcp)
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            await run_mcp.addons_install(all_regions=True)
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("addons") : cmd.index("addons") + 2] == ["addons", "install"]
+            assert "--all-regions" in cmd
+            assert "-r" not in cmd
+
+    @patch.dict(os.environ, {"GCO_ENABLE_DESTRUCTIVE_OPERATIONS": "true"})
+    def test_task_prune_is_bounded_and_non_interactive(self):
+        importlib.reload(run_mcp)
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.task_prune(keep=25)
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("prune") + 1 : cmd.index("prune") + 3] == ["--keep", "25"]
+            assert "--yes" in cmd
 
 
 class TestStorageTools:
@@ -1085,11 +1234,11 @@ class TestResourceRegistration:
         # infra://index, infra://helm/charts.yaml,
         # demos://index, clients://index, scripts://index,
         # ci://index, tests://index,
-        # config://index, config://cdk.json, config://feature-toggles, config://env-vars,
+        # config://index, config://cdk.json, config://env-vars,
         # images://index, images://replication/status,
         # plus three always-on self-introspection resources:
         # mcp://gco/tools/index, mcp://gco/resources/index, mcp://gco/feature-flags.
-        assert len(resources) == 26
+        assert len(resources) == 25
 
     def test_static_resource_uris(self):
         resources = asyncio.run(run_mcp.mcp.list_resources())
@@ -1112,7 +1261,7 @@ class TestResourceRegistration:
         assert "tests://gco/index" in uris
         assert "config://gco/index" in uris
         assert "config://gco/cdk.json" in uris
-        assert "config://gco/feature-toggles" in uris
+        assert "config://gco/feature-toggles" not in uris
         assert "config://gco/env-vars" in uris
         assert "images://gco/index" in uris
         assert "images://gco/replication/status" in uris
@@ -1128,8 +1277,11 @@ class TestResourceRegistration:
         # ci/workflows, ci/actions, ci/scripts, ci/templates,
         # ci/codeql, ci/kind, ci/config,
         # tests/{filepath}, images/{name}/tags, images/{name}/{tag},
-        # gco://jobs/{job_name}, gco://inference/{endpoint_name},
-        # gco://k8s/{namespace}/{kind}/{name}, gco://cluster/{region}/topology,
+        # gco://jobs/{job_name} (legacy fail-closed) and
+        # gco://jobs/{region}/{job_name}, gco://inference/{endpoint_name},
+        # gco://k8s/{namespace}/{kind}/{name} (legacy fail-closed) and
+        # gco://k8s/{region}/{namespace}/{kind}/{name},
+        # gco://cluster/{region}/topology,
         # costs://gco/summary/{days_window}, tasks://gco/{task_id},
         # mcp://gco/tools/{tool_name} (always-on self-introspection template).
         # mission://sessions/{session_id}, mission://sessions/{session_id}/report,
@@ -1137,7 +1289,7 @@ class TestResourceRegistration:
         # GCO_ENABLE_MISSION (or the umbrella flag) is set; accept either count
         # to avoid coupling this assertion to whichever gating env the rest of
         # the suite happens to leave behind.
-        assert len(templates) in (33, 36)
+        assert len(templates) in (35, 38)
 
     def test_resource_template_uris(self):
         templates = asyncio.run(run_mcp.mcp.list_resource_templates())
@@ -1164,8 +1316,10 @@ class TestResourceRegistration:
         assert "images://gco/{name}/{tag}" in uris
         # Live-state resource templates.
         assert "gco://jobs/{job_name}" in uris
+        assert "gco://jobs/{region}/{job_name}" in uris
         assert "gco://inference/{endpoint_name}" in uris
         assert "gco://k8s/{namespace}/{kind}/{name}" in uris
+        assert "gco://k8s/{region}/{namespace}/{kind}/{name}" in uris
         assert "gco://cluster/{region}/topology" in uris
         assert "costs://gco/summary/{days_window}" in uris
         assert "tasks://gco/{task_id}" in uris

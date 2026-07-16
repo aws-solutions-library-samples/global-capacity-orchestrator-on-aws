@@ -43,7 +43,7 @@ from .commands import (
     templates,
     webhooks,
 )
-from .config import GCOConfig, get_config
+from .config import get_config
 
 
 def _configure_cli_logging(verbose: bool) -> None:
@@ -95,15 +95,14 @@ def _configure_cli_logging(verbose: bool) -> None:
     "-o",
     "output_format",
     type=click.Choice(["table", "json", "yaml"]),
-    default="table",
-    help="Output format",
+    default=None,
+    help="Output format (defaults to the configured value)",
 )
-@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+@click.option("--verbose", "-v", is_flag=True, default=None, help="Verbose output")
 @click.option(
-    "--regional-api",
-    is_flag=True,
-    envvar="GCO_REGIONAL_API",
-    help="Use regional API endpoints (for private access when public is disabled)",
+    "--regional-api/--global-api",
+    default=None,
+    help="Use regional API endpoints, or explicitly use the global endpoint",
 )
 @click.pass_context
 def cli(
@@ -111,26 +110,22 @@ def cli(
     config_file: str | None,
     default_region: str | None,
     output_format: str | None,
-    verbose: bool,
-    regional_api: bool,
+    verbose: bool | None,
+    regional_api: bool | None,
 ) -> None:
     """GCO CLI - Manage multi-region EKS clusters for AI/ML workloads."""
-    _configure_cli_logging(verbose)
+    config = get_config(config_file)
 
-    config = get_config()
-
-    if config_file:
-        config = GCOConfig.from_file(config_file)
     if default_region:
         config.default_region = default_region
     if output_format:
         config.output_format = output_format
-    if verbose:
+    if verbose is not None:
         config.verbose = verbose
+    if regional_api is not None:
+        config.use_regional_api = regional_api
 
-    # Store regional_api flag in config for use by aws_client
-    config.use_regional_api = regional_api
-
+    _configure_cli_logging(config.verbose)
     ctx.obj = config
 
 

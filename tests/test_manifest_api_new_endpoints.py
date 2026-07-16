@@ -5,33 +5,27 @@ Covers the newer manifest-API endpoints split out of manifest_api.py:
 pagination on /api/v1/jobs, per-job /events, /pods, /metrics, bulk
 delete, retry, and the templates and webhooks surfaces. Drives them
 via TestClient with a mock_manifest_processor fixture that stubs
-every Kubernetes client used by the handlers. An autouse fixture
-seeds the auth middleware token cache.
+every Kubernetes client used by the handlers. Authentication is bypassed
+explicitly because its cryptographic behavior has dedicated tests.
 """
 
-import time
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# Auth token used by all tests in this module.
-_TEST_AUTH_TOKEN = "test-manifest-new-endpoints-token"  # nosec B105 - test fixture token, not a real credential
-_AUTH_HEADERS = {"x-gco-auth-token": _TEST_AUTH_TOKEN}
+from tests._auth import bypass_backend_auth
+
+# Call sites retain a common header mapping for concise request construction;
+# authentication itself is handled by the autouse fixture below.
+_AUTH_HEADERS: dict[str, str] = {}
 
 
 @pytest.fixture(autouse=True)
-def _seed_auth_cache():
-    """Seed the auth middleware token cache with a known token."""
-    import gco.services.auth_middleware as auth_module
-
-    original_tokens = auth_module._cached_tokens
-    original_timestamp = auth_module._cache_timestamp
-    auth_module._cached_tokens = {_TEST_AUTH_TOKEN}
-    auth_module._cache_timestamp = time.time()
-    yield
-    auth_module._cached_tokens = original_tokens
-    auth_module._cache_timestamp = original_timestamp
+def _bypass_authentication():
+    """Isolate route behavior from the separately tested HMAC verifier."""
+    with bypass_backend_auth():
+        yield
 
 
 @pytest.fixture

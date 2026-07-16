@@ -25,22 +25,55 @@ Job Queue Architecture:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import os
-from datetime import UTC, datetime
+import uuid
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
+# <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Flowchart(s) generated from this file:
+#   * ``JobStore.claim_job`` -> ``diagrams/code_diagrams/gco/services/template_store.JobStore_claim_job.html``
+#     (PNG: ``diagrams/code_diagrams/gco/services/template_store.JobStore_claim_job.png``)
+#   * ``JobStore.transition_job`` -> ``diagrams/code_diagrams/gco/services/template_store.JobStore_transition_job.html``
+#     (PNG: ``diagrams/code_diagrams/gco/services/template_store.JobStore_transition_job.png``)
+# Regenerate with ``python diagrams/code_diagrams/generate.py``.
+# <pyflowchart-code-diagram> END
+
+
 logger = logging.getLogger(__name__)
+
+_DEFAULT_CLAIM_LEASE_SECONDS = 5 * 60
+_MIN_CLAIM_LEASE_SECONDS = 30
+_MAX_CLAIM_LEASE_SECONDS = 60 * 60
+_MAX_LIST_EVALUATED_ITEMS = 20_000
+_MAX_LEGACY_MIGRATION_EVALUATED_ITEMS = 1_000
+_LEGACY_REGION_STATUS_INDEX = "region-status-index"
+_REGION_STATUS_PRIORITY_INDEX = "region-status-priority-index"
+_REGION_STATUS_LEASE_INDEX = "region-status-lease-index"
+_TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 
 
 def _utc_now_iso() -> str:
     """Return current UTC time in ISO format with Z suffix."""
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _claim_lease_expiry_iso(lease_seconds: int) -> str:
+    """Return a bounded lease expiry for crash-safe regional claims."""
+    return (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat().replace("+00:00", "Z")
+
+
+class JobSubmissionConflict(RuntimeError):
+    """A job ID or idempotency key was reused for a different submission."""
 
 
 class JobStatus(StrEnum):
@@ -54,6 +87,20 @@ class JobStatus(StrEnum):
     SUCCEEDED = "succeeded"  # Job completed successfully
     FAILED = "failed"  # Job failed
     CANCELLED = "cancelled"  # Job was cancelled
+
+
+_ALLOWED_JOB_TRANSITIONS: dict[str, frozenset[str]] = {
+    JobStatus.QUEUED.value: frozenset({JobStatus.CLAIMED.value, JobStatus.CANCELLED.value}),
+    JobStatus.CLAIMED.value: frozenset({JobStatus.APPLYING.value, JobStatus.FAILED.value}),
+    JobStatus.APPLYING.value: frozenset({JobStatus.PENDING.value, JobStatus.FAILED.value}),
+    JobStatus.PENDING.value: frozenset(
+        {JobStatus.RUNNING.value, JobStatus.SUCCEEDED.value, JobStatus.FAILED.value}
+    ),
+    JobStatus.RUNNING.value: frozenset({JobStatus.SUCCEEDED.value, JobStatus.FAILED.value}),
+    JobStatus.SUCCEEDED.value: frozenset(),
+    JobStatus.FAILED.value: frozenset(),
+    JobStatus.CANCELLED.value: frozenset(),
+}
 
 
 class TemplateStore:
@@ -383,24 +430,372 @@ class JobStore:
     - Cross-region job queries without hitting K8s APIs
     """
 
-    def __init__(self, table_name: str | None = None, region: str | None = None):
-        """Initialize the job store.
-
-        Args:
-            table_name: DynamoDB table name. Defaults to env var JOBS_TABLE_NAME.
-            region: AWS region for DynamoDB. Defaults to env var DYNAMODB_REGION,
-                    then GLOBAL_REGION, then AWS_REGION.
-        """
+    def __init__(
+        self,
+        table_name: str | None = None,
+        region: str | None = None,
+        claim_lease_seconds: int | None = None,
+    ) -> None:
+        """Initialize the store with bounded DynamoDB timeouts and claim leases."""
         self.table_name = table_name or os.getenv("JOBS_TABLE_NAME", "gco-jobs")
-        # DynamoDB tables are in the global region, not the regional cluster region
         self.region = (
             region
             or os.getenv("DYNAMODB_REGION")
             or os.getenv("GLOBAL_REGION")
             or os.getenv("AWS_REGION", "us-east-1")
         )
-        self._dynamodb = boto3.resource("dynamodb", region_name=self.region)
+        configured_lease = claim_lease_seconds
+        if configured_lease is None:
+            try:
+                configured_lease = int(
+                    os.getenv("CENTRAL_QUEUE_LEASE_SECONDS", str(_DEFAULT_CLAIM_LEASE_SECONDS))
+                )
+            except ValueError:
+                configured_lease = _DEFAULT_CLAIM_LEASE_SECONDS
+        self.claim_lease_seconds = min(
+            max(configured_lease, _MIN_CLAIM_LEASE_SECONDS),
+            _MAX_CLAIM_LEASE_SECONDS,
+        )
+        self._dynamodb = boto3.resource(
+            "dynamodb",
+            region_name=self.region,
+            config=Config(
+                connect_timeout=3,
+                read_timeout=10,
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
+        )
         self._table = self._dynamodb.Table(self.table_name)
+        self._legacy_migration_cursors: dict[tuple[str, str], dict[str, Any]] = {}
+        self._legacy_migration_complete: set[tuple[str, str]] = set()
+
+    @staticmethod
+    def _is_conditional_failure(error: ClientError) -> bool:
+        return error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
+
+    @staticmethod
+    def _decode_json(value: Any, default: Any) -> Any:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except TypeError, ValueError:
+                return default
+        return value
+
+    @classmethod
+    def _history_with(
+        cls,
+        item: dict[str, Any],
+        *,
+        status: str,
+        timestamp: str,
+        message: str | None = None,
+        error: str | None = None,
+    ) -> str:
+        history = cls._decode_json(item.get("status_history"), [])
+        if not isinstance(history, list):
+            history = []
+        entry: dict[str, str] = {"status": status, "timestamp": timestamp}
+        if message:
+            entry["message"] = message
+        if error:
+            entry["error"] = error
+        history.append(entry)
+        return json.dumps(history, separators=(",", ":"))
+
+    def _get_raw_job(self, job_id: str) -> dict[str, Any] | None:
+        response = self._table.get_item(Key={"job_id": job_id}, ConsistentRead=True)
+        item = response.get("Item")
+        return item if isinstance(item, dict) else None
+
+    @staticmethod
+    def _priority_sort_key(priority: int, submitted_at: str, job_id: str) -> str:
+        """Sort higher priorities first and preserve FIFO order for ties."""
+        return f"{100 - priority:03d}#{submitted_at}#{job_id}"
+
+    @staticmethod
+    def _region_status(region: str, status: str) -> str:
+        return f"{region}#{status}"
+
+    @staticmethod
+    def _list_filter_identity(
+        target_region: str | None,
+        status: str | None,
+        namespace: str | None,
+    ) -> dict[str, str | None]:
+        return {
+            "target_region": target_region,
+            "status": status,
+            "namespace": namespace,
+        }
+
+    @classmethod
+    def _encode_list_cursor(
+        cls,
+        key: dict[str, Any],
+        filters: dict[str, str | None],
+    ) -> str:
+        payload = json.dumps(
+            {"version": 1, "key": key, "filters": filters},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+    @classmethod
+    def _decode_list_cursor(
+        cls,
+        cursor: str,
+        filters: dict[str, str | None],
+    ) -> dict[str, Any]:
+        if not cursor or len(cursor) > 2_048:
+            raise ValueError("Invalid queue cursor")
+        try:
+            padding = "=" * (-len(cursor) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(cursor + padding))
+        except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("Invalid queue cursor") from error
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            raise ValueError("Invalid queue cursor")
+        if payload.get("filters") != filters:
+            raise ValueError("Queue cursor does not match the requested filters")
+        key = payload.get("key")
+        if (
+            not isinstance(key, dict)
+            or set(key) != {"job_id"}
+            or not isinstance(key.get("job_id"), str)
+            or not key["job_id"]
+        ):
+            raise ValueError("Invalid queue cursor")
+        return key
+
+    @staticmethod
+    def _legacy_priority(item: dict[str, Any]) -> int:
+        value = item.get("priority", 0)
+        try:
+            priority = int(value) if not isinstance(value, bool) else 0
+        except TypeError, ValueError:
+            priority = 0
+        return min(max(priority, 0), 100)
+
+    def _migrate_legacy_record(self, item: dict[str, Any], region: str, status: str) -> str:
+        """Backfill one pre-index record or fail it when safe adoption is impossible."""
+        job_id = item.get("job_id")
+        if not isinstance(job_id, str) or not job_id:
+            logger.error("Ignoring legacy queue record without a job_id")
+            return "skipped"
+
+        priority = self._legacy_priority(item)
+        submitted_at = str(item.get("submitted_at") or item.get("updated_at") or _utc_now_iso())
+        priority_sort = self._priority_sort_key(priority, submitted_at, job_id)
+
+        unsafe_reason: str | None = None
+        if status in {JobStatus.CLAIMED.value, JobStatus.APPLYING.value}:
+            try:
+                generation = int(item.get("claim_generation", 0))
+            except TypeError, ValueError:
+                generation = 0
+            if not (
+                item.get("claimed_by")
+                and item.get("claim_token")
+                and generation > 0
+                and item.get("lease_expires_at")
+            ):
+                unsafe_reason = (
+                    "Pre-upgrade transient queue record lacks complete lease fencing and "
+                    "cannot be safely replayed"
+                )
+        elif status in {JobStatus.PENDING.value, JobStatus.RUNNING.value} and not all(
+            item.get(field) for field in ("k8s_job_name", "k8s_job_namespace", "k8s_job_uid")
+        ):
+            unsafe_reason = (
+                "Pre-upgrade active queue record lacks deterministic Kubernetes identity and "
+                "cannot be safely adopted"
+            )
+
+        values: dict[str, Any] = {
+            ":expected": status,
+            ":target_region": region,
+            ":priority_sort": priority_sort,
+        }
+        condition = (
+            "attribute_exists(job_id) AND target_region = :target_region AND "
+            "#status = :expected AND "
+            "(attribute_not_exists(region_status) OR attribute_not_exists(priority_sort))"
+        )
+        if unsafe_reason is None:
+            update_expression = "SET region_status = :region_status, priority_sort = :priority_sort"
+            values[":region_status"] = self._region_status(region, status)
+            outcome = "migrated"
+        else:
+            now = _utc_now_iso()
+            update_expression = (
+                "SET #status = :failed, region_status = :region_status, "
+                "priority_sort = :priority_sort, updated_at = :now, completed_at = :now, "
+                "error_message = :error, status_history = :history "
+                "REMOVE claimed_by, claim_token, lease_expires_at"
+            )
+            values.update(
+                {
+                    ":failed": JobStatus.FAILED.value,
+                    ":region_status": self._region_status(region, JobStatus.FAILED.value),
+                    ":now": now,
+                    ":error": unsafe_reason,
+                    ":history": self._history_with(
+                        item,
+                        status=JobStatus.FAILED.value,
+                        timestamp=now,
+                        message="Record fenced during queue schema migration",
+                        error=unsafe_reason,
+                    ),
+                }
+            )
+            outcome = "failed"
+
+        try:
+            self._table.update_item(
+                Key={"job_id": job_id},
+                UpdateExpression=update_expression,
+                ConditionExpression=condition,
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues=values,
+            )
+            return outcome
+        except ClientError as error:
+            if self._is_conditional_failure(error):
+                return "skipped"
+            raise
+
+    def migrate_legacy_records_for_region(
+        self,
+        region: str,
+        evaluation_limit: int = _MAX_LEGACY_MIGRATION_EVALUATED_ITEMS,
+    ) -> dict[str, int | bool]:
+        """Incrementally backfill records created before the worker-facing GSIs."""
+        budget = min(max(int(evaluation_limit), 1), 10_000)
+        statuses = (
+            JobStatus.QUEUED.value,
+            JobStatus.CLAIMED.value,
+            JobStatus.APPLYING.value,
+            JobStatus.PENDING.value,
+            JobStatus.RUNNING.value,
+        )
+        stats: dict[str, int | bool] = {
+            "evaluated": 0,
+            "migrated": 0,
+            "failed": 0,
+            "complete": False,
+        }
+
+        for status in statuses:
+            migration_key = (region, status)
+            if migration_key in self._legacy_migration_complete:
+                continue
+            while int(stats["evaluated"]) < budget:
+                remaining = budget - int(stats["evaluated"])
+                kwargs: dict[str, Any] = {
+                    "IndexName": _LEGACY_REGION_STATUS_INDEX,
+                    "KeyConditionExpression": (
+                        "target_region = :target_region AND #status = :status"
+                    ),
+                    "FilterExpression": (
+                        "attribute_not_exists(region_status) OR attribute_not_exists(priority_sort)"
+                    ),
+                    "ExpressionAttributeNames": {"#status": "status"},
+                    "ExpressionAttributeValues": {
+                        ":target_region": region,
+                        ":status": status,
+                    },
+                    "Limit": min(remaining, 100),
+                }
+                cursor = self._legacy_migration_cursors.get(migration_key)
+                if cursor:
+                    kwargs["ExclusiveStartKey"] = cursor
+                response = self._table.query(**kwargs)
+                stats["evaluated"] = int(stats["evaluated"]) + int(response.get("ScannedCount", 0))
+                for item in response.get("Items", []):
+                    if not isinstance(item, dict):
+                        continue
+                    outcome = self._migrate_legacy_record(item, region, status)
+                    if outcome in {"migrated", "failed"}:
+                        stats[outcome] = int(stats[outcome]) + 1
+
+                next_cursor = response.get("LastEvaluatedKey")
+                if not isinstance(next_cursor, dict) or not next_cursor:
+                    self._legacy_migration_complete.add(migration_key)
+                    self._legacy_migration_cursors.pop(migration_key, None)
+                    break
+                self._legacy_migration_cursors[migration_key] = next_cursor
+
+            if int(stats["evaluated"]) >= budget:
+                break
+
+        stats["complete"] = all(
+            (region, status) in self._legacy_migration_complete for status in statuses
+        )
+        return stats
+
+    def _query_region_status(
+        self,
+        region: str,
+        status: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Read one region/status partition with correct DynamoDB pagination."""
+        items: list[dict[str, Any]] = []
+        exclusive_start_key: dict[str, Any] | None = None
+        while len(items) < limit:
+            kwargs: dict[str, Any] = {
+                "IndexName": _REGION_STATUS_PRIORITY_INDEX,
+                "KeyConditionExpression": "region_status = :region_status",
+                "ExpressionAttributeValues": {
+                    ":region_status": self._region_status(region, status)
+                },
+                "Limit": limit - len(items),
+                "ScanIndexForward": True,
+            }
+            if exclusive_start_key:
+                kwargs["ExclusiveStartKey"] = exclusive_start_key
+            response = self._table.query(**kwargs)
+            items.extend(item for item in response.get("Items", []) if isinstance(item, dict))
+            exclusive_start_key = response.get("LastEvaluatedKey")
+            if not exclusive_start_key:
+                break
+        return items[:limit]
+
+    def _query_expired_claims(
+        self,
+        region: str,
+        status: str,
+        expires_at_or_before: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return the oldest expired leases without unexpired-record starvation."""
+        items: list[dict[str, Any]] = []
+        exclusive_start_key: dict[str, Any] | None = None
+        while len(items) < limit:
+            kwargs: dict[str, Any] = {
+                "IndexName": _REGION_STATUS_LEASE_INDEX,
+                "KeyConditionExpression": (
+                    "region_status = :region_status AND lease_expires_at <= :expires_at"
+                ),
+                "ExpressionAttributeValues": {
+                    ":region_status": self._region_status(region, status),
+                    ":expires_at": expires_at_or_before,
+                },
+                "Limit": limit - len(items),
+                "ScanIndexForward": True,
+            }
+            if exclusive_start_key:
+                kwargs["ExclusiveStartKey"] = exclusive_start_key
+            response = self._table.query(**kwargs)
+            items.extend(item for item in response.get("Items", []) if isinstance(item, dict))
+            exclusive_start_key = response.get("LastEvaluatedKey")
+            if not exclusive_start_key:
+                break
+        return items[:limit]
 
     def submit_job(
         self,
@@ -411,184 +806,306 @@ class JobStore:
         priority: int = 0,
         labels: dict[str, str] | None = None,
         submitted_by: str | None = None,
+        *,
+        idempotency_key: str | None = None,
+        request_hash: str | None = None,
     ) -> dict[str, Any]:
-        """Submit a job to the centralized queue.
-
-        Args:
-            job_id: Unique job identifier
-            manifest: Kubernetes job manifest
-            target_region: Region where job should run
-            namespace: Kubernetes namespace
-            priority: Job priority (higher = more important)
-            labels: Optional labels for filtering
-            submitted_by: Optional submitter identifier
-
-        Returns:
-            Job record with submission details
-        """
+        """Submit a job exactly once, replaying only identical idempotent requests."""
         now = _utc_now_iso()
-
-        # Extract job name from manifest
         job_name = manifest.get("metadata", {}).get("name", job_id)
-
         item: dict[str, Any] = {
             "job_id": job_id,
             "job_name": job_name,
             "target_region": target_region,
             "namespace": namespace,
             "status": JobStatus.QUEUED.value,
+            "region_status": self._region_status(target_region, JobStatus.QUEUED.value),
             "priority": priority,
-            "manifest": json.dumps(manifest),
+            "priority_sort": self._priority_sort_key(priority, now, job_id),
+            "manifest": json.dumps(manifest, separators=(",", ":"), sort_keys=True),
             "submitted_at": now,
             "updated_at": now,
+            "claim_generation": 0,
             "status_history": json.dumps(
-                [{"status": JobStatus.QUEUED.value, "timestamp": now, "message": "Job submitted"}]
+                [{"status": JobStatus.QUEUED.value, "timestamp": now, "message": "Job submitted"}],
+                separators=(",", ":"),
             ),
         }
-
         if labels:
-            item["labels"] = json.dumps(labels)
+            item["labels"] = json.dumps(labels, separators=(",", ":"), sort_keys=True)
         if submitted_by:
             item["submitted_by"] = submitted_by
+        if idempotency_key:
+            item["idempotency_key"] = idempotency_key
+            item["request_hash"] = request_hash or ""
 
         try:
-            self._table.put_item(Item=item)
-            return {
-                "job_id": job_id,
-                "job_name": job_name,
-                "target_region": target_region,
-                "namespace": namespace,
-                "status": JobStatus.QUEUED.value,
-                "priority": priority,
-                "submitted_at": now,
-            }
-        except ClientError as e:
-            logger.error(f"Failed to submit job {job_id}: {e}")
-            raise
+            self._table.put_item(
+                Item=item,
+                ConditionExpression="attribute_not_exists(job_id)",
+            )
+            return self._parse_job_item(item)
+        except ClientError as error:
+            if not self._is_conditional_failure(error):
+                logger.error("Failed to submit job %s: %s", job_id, error)
+                raise
 
-    def claim_job(self, job_id: str, claimed_by: str) -> dict[str, Any] | None:
-        """Claim a queued job for processing.
+        existing = self._get_raw_job(job_id)
+        if (
+            idempotency_key
+            and existing
+            and existing.get("idempotency_key") == idempotency_key
+            and existing.get("request_hash") == (request_hash or "")
+        ):
+            replay = self._parse_job_item(existing)
+            replay["idempotent_replay"] = True
+            return replay
+        raise JobSubmissionConflict("job ID or idempotency key is already in use")
 
-        Uses conditional update to prevent race conditions between regions.
+    def claim_job(
+        self,
+        job_id: str,
+        target_region: str,
+        claimed_by: str,
+    ) -> dict[str, Any] | None:
+        """Claim a queued job with a unique token and monotonic fencing generation."""
+        item = self._get_raw_job(job_id)
+        if (
+            item is None
+            or item.get("status") != JobStatus.QUEUED.value
+            or item.get("target_region") != target_region
+        ):
+            return None
 
-        Args:
-            job_id: Job to claim
-            claimed_by: Identifier of the claiming processor (e.g., region name)
-
-        Returns:
-            Job record if claimed successfully, None if already claimed
-        """
         now = _utc_now_iso()
-
+        claim_token = uuid.uuid4().hex
+        generation = int(item.get("claim_generation", 0)) + 1
+        history = self._history_with(
+            item,
+            status=JobStatus.CLAIMED.value,
+            timestamp=now,
+            message=f"Claimed by {claimed_by}",
+        )
         try:
             response = self._table.update_item(
                 Key={"job_id": job_id},
-                UpdateExpression="SET #status = :new_status, claimed_by = :claimed_by, "
-                "claimed_at = :claimed_at, updated_at = :updated_at",
-                ConditionExpression="#status = :queued_status",
+                UpdateExpression=(
+                    "SET #status = :claimed, region_status = :region_status, "
+                    "claimed_by = :claimed_by, claim_token = :claim_token, "
+                    "claim_generation = :generation, claimed_at = :now, "
+                    "updated_at = :now, lease_expires_at = :lease_expires_at, "
+                    "status_history = :history"
+                ),
+                ConditionExpression=(
+                    "attribute_exists(job_id) AND #status = :queued AND "
+                    "target_region = :target_region AND updated_at = :expected_updated_at"
+                ),
                 ExpressionAttributeNames={"#status": "status"},
                 ExpressionAttributeValues={
-                    ":new_status": JobStatus.CLAIMED.value,
-                    ":queued_status": JobStatus.QUEUED.value,
+                    ":claimed": JobStatus.CLAIMED.value,
+                    ":queued": JobStatus.QUEUED.value,
+                    ":region_status": self._region_status(target_region, JobStatus.CLAIMED.value),
+                    ":target_region": target_region,
                     ":claimed_by": claimed_by,
-                    ":claimed_at": now,
-                    ":updated_at": now,
+                    ":claim_token": claim_token,
+                    ":generation": generation,
+                    ":now": now,
+                    ":expected_updated_at": item.get("updated_at"),
+                    ":lease_expires_at": _claim_lease_expiry_iso(self.claim_lease_seconds),
+                    ":history": history,
                 },
                 ReturnValues="ALL_NEW",
             )
-            item = response.get("Attributes", {})
-            return self._parse_job_item(item)
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                return None  # Job already claimed
-            logger.error(f"Failed to claim job {job_id}: {e}")
+            return self._parse_job_item(response.get("Attributes", {}), include_internal=True)
+        except ClientError as error:
+            if self._is_conditional_failure(error):
+                return None
+            logger.error("Failed to claim job %s: %s", job_id, error)
             raise
 
-    def update_job_status(
+    def renew_claim(
         self,
         job_id: str,
+        target_region: str,
+        claimed_by: str,
+        claim_token: str,
+        claim_generation: int,
+    ) -> bool:
+        """Renew an unexpired claim; an expired or fenced owner cannot regain it."""
+        now = _utc_now_iso()
+        try:
+            self._table.update_item(
+                Key={"job_id": job_id},
+                UpdateExpression=(
+                    "SET lease_expires_at = :lease_expires_at, lease_renewed_at = :now"
+                ),
+                ConditionExpression=(
+                    "attribute_exists(job_id) AND target_region = :target_region AND "
+                    "#status IN (:claimed, :applying) AND claimed_by = :claimed_by AND "
+                    "claim_token = :claim_token AND claim_generation = :generation AND "
+                    "lease_expires_at > :now"
+                ),
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":target_region": target_region,
+                    ":claimed": JobStatus.CLAIMED.value,
+                    ":applying": JobStatus.APPLYING.value,
+                    ":claimed_by": claimed_by,
+                    ":claim_token": claim_token,
+                    ":generation": claim_generation,
+                    ":now": now,
+                    ":lease_expires_at": _claim_lease_expiry_iso(self.claim_lease_seconds),
+                },
+            )
+            return True
+        except ClientError as error:
+            if self._is_conditional_failure(error):
+                return False
+            logger.error("Failed to renew claim for job %s: %s", job_id, error)
+            raise
+
+    def transition_job(
+        self,
+        job_id: str,
+        *,
+        target_region: str,
+        expected_status: JobStatus | str,
         status: JobStatus | str,
         message: str | None = None,
-        k8s_job_uid: str | None = None,
         error: str | None = None,
+        k8s_job_name: str | None = None,
+        k8s_job_namespace: str | None = None,
+        k8s_job_uid: str | None = None,
+        claimed_by: str | None = None,
+        claim_token: str | None = None,
+        claim_generation: int | None = None,
+        expected_k8s_uid: str | None = None,
     ) -> dict[str, Any] | None:
-        """Update job status with history tracking.
+        """Apply one fenced compare-and-set lifecycle transition.
 
-        Args:
-            job_id: Job to update
-            status: New status
-            message: Optional status message
-            k8s_job_uid: Kubernetes job UID (set when job is applied)
-            error: Error message if failed
-
-        Returns:
-            Updated job record
+        ``None`` means another actor won the race or the caller lost its lease.
+        Terminal records are immutable because the transition matrix has no
+        outgoing terminal edges.
         """
+        expected = (
+            expected_status.value if isinstance(expected_status, JobStatus) else expected_status
+        )
+        destination = status.value if isinstance(status, JobStatus) else status
+        if destination not in _ALLOWED_JOB_TRANSITIONS.get(expected, frozenset()):
+            raise ValueError(f"Invalid job transition: {expected} -> {destination}")
+
+        item = self._get_raw_job(job_id)
+        if (
+            item is None
+            or item.get("status") != expected
+            or item.get("target_region") != target_region
+        ):
+            return None
+
+        claim_is_required = expected in {JobStatus.CLAIMED.value, JobStatus.APPLYING.value}
+        if claim_is_required:
+            if claimed_by is None or claim_token is None or claim_generation is None:
+                raise ValueError(f"Transition from {expected} requires complete claim fencing")
+            if (
+                item.get("claimed_by") != claimed_by
+                or item.get("claim_token") != claim_token
+                or int(item.get("claim_generation", -1)) != claim_generation
+            ):
+                return None
+        if expected_k8s_uid is not None and str(item.get("k8s_job_uid") or "") != str(
+            expected_k8s_uid
+        ):
+            return None
+
         now = _utc_now_iso()
-        status_value = status.value if isinstance(status, JobStatus) else status
-
-        # Build update expression
-        update_parts = ["#status = :status", "updated_at = :updated_at"]
-        expr_values: dict[str, Any] = {
-            ":status": status_value,
-            ":updated_at": now,
+        update_parts = [
+            "#status = :destination",
+            "region_status = :region_status",
+            "updated_at = :now",
+            "status_history = :history",
+        ]
+        remove_parts: list[str] = []
+        values: dict[str, Any] = {
+            ":destination": destination,
+            ":expected": expected,
+            ":region_status": self._region_status(target_region, destination),
+            ":target_region": target_region,
+            ":now": now,
+            ":expected_updated_at": item.get("updated_at"),
+            ":history": self._history_with(
+                item,
+                status=destination,
+                timestamp=now,
+                message=message,
+                error=error,
+            ),
         }
+        conditions = [
+            "attribute_exists(job_id)",
+            "#status = :expected",
+            "target_region = :target_region",
+            "updated_at = :expected_updated_at",
+        ]
 
-        if k8s_job_uid:
-            update_parts.append("k8s_job_uid = :k8s_uid")
-            expr_values[":k8s_uid"] = k8s_job_uid
+        if claim_is_required:
+            conditions.extend(
+                [
+                    "claimed_by = :claimed_by",
+                    "claim_token = :claim_token",
+                    "claim_generation = :generation",
+                    "lease_expires_at > :now",
+                ]
+            )
+            values.update(
+                {
+                    ":claimed_by": claimed_by,
+                    ":claim_token": claim_token,
+                    ":generation": claim_generation,
+                }
+            )
+        if expected_k8s_uid is not None:
+            conditions.append("k8s_job_uid = :expected_k8s_uid")
+            values[":expected_k8s_uid"] = expected_k8s_uid
+
+        for attribute, value, placeholder in (
+            ("k8s_job_name", k8s_job_name, ":k8s_job_name"),
+            ("k8s_job_namespace", k8s_job_namespace, ":k8s_job_namespace"),
+            ("k8s_job_uid", k8s_job_uid, ":k8s_job_uid"),
+        ):
+            if value:
+                update_parts.append(f"{attribute} = {placeholder}")
+                values[placeholder] = value
 
         if error:
             update_parts.append("error_message = :error")
-            expr_values[":error"] = error
+            values[":error"] = error
+        elif destination != JobStatus.FAILED.value:
+            remove_parts.append("error_message")
 
-        if status_value in [JobStatus.SUCCEEDED.value, JobStatus.FAILED.value]:
-            update_parts.append("completed_at = :completed_at")
-            expr_values[":completed_at"] = now
+        if destination in _TERMINAL_JOB_STATUSES:
+            update_parts.append("completed_at = :now")
+        if destination not in {JobStatus.CLAIMED.value, JobStatus.APPLYING.value}:
+            remove_parts.extend(["claimed_by", "claim_token", "lease_expires_at"])
+
+        update_expression = "SET " + ", ".join(update_parts)
+        if remove_parts:
+            update_expression += " REMOVE " + ", ".join(dict.fromkeys(remove_parts))
 
         try:
             response = self._table.update_item(
                 Key={"job_id": job_id},
-                UpdateExpression="SET " + ", ".join(update_parts),
+                UpdateExpression=update_expression,
+                ConditionExpression=" AND ".join(conditions),
                 ExpressionAttributeNames={"#status": "status"},
-                ExpressionAttributeValues=expr_values,
+                ExpressionAttributeValues=values,
                 ReturnValues="ALL_NEW",
             )
-            item = response.get("Attributes", {})
-
-            # Append to status history (separate update to avoid conflicts)
-            history_entry = {"status": status_value, "timestamp": now}
-            if message:
-                history_entry["message"] = message
-            if error:
-                history_entry["error"] = error
-
-            self._append_status_history(job_id, history_entry)
-
-            return self._parse_job_item(item)
-        except ClientError as e:
-            logger.error(f"Failed to update job {job_id}: {e}")
+            return self._parse_job_item(response.get("Attributes", {}))
+        except ClientError as transition_error:
+            if self._is_conditional_failure(transition_error):
+                return None
+            logger.error("Failed to transition job %s: %s", job_id, transition_error)
             raise
-
-    def _append_status_history(self, job_id: str, entry: dict[str, Any]) -> None:
-        """Append an entry to job status history."""
-        try:
-            # Get current history
-            response = self._table.get_item(
-                Key={"job_id": job_id},
-                ProjectionExpression="status_history",
-            )
-            current = json.loads(response.get("Item", {}).get("status_history", "[]"))
-            current.append(entry)
-
-            # Update with new history
-            self._table.update_item(
-                Key={"job_id": job_id},
-                UpdateExpression="SET status_history = :history",
-                ExpressionAttributeValues={":history": json.dumps(current)},
-            )
-        except ClientError as e:
-            logger.warning(f"Failed to update status history for {job_id}: {e}")
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         """Get a job by ID."""
@@ -602,6 +1119,87 @@ class JobStore:
             logger.error(f"Failed to get job {job_id}: {e}")
             raise
 
+    def list_jobs_page(
+        self,
+        target_region: str | None = None,
+        status: str | None = None,
+        namespace: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None, bool]:
+        """Return one bounded scan page plus an opaque continuation cursor."""
+        limit = min(max(int(limit), 1), 1_000)
+        filters = self._list_filter_identity(target_region, status, namespace)
+        filter_parts: list[str] = []
+        values: dict[str, Any] = {}
+        names: dict[str, str] = {}
+        if target_region:
+            filter_parts.append("target_region = :region")
+            values[":region"] = target_region
+        if status:
+            filter_parts.append("#status = :status")
+            values[":status"] = status
+            names["#status"] = "status"
+        if namespace:
+            filter_parts.append("#namespace = :namespace")
+            values[":namespace"] = namespace
+            names["#namespace"] = "namespace"
+
+        items: list[dict[str, Any]] = []
+        evaluated = 0
+        exclusive_start_key = self._decode_list_cursor(cursor, filters) if cursor else None
+        next_key: dict[str, Any] | None = None
+        partial = False
+        try:
+            while len(items) < limit and evaluated < _MAX_LIST_EVALUATED_ITEMS:
+                page_budget = min(
+                    max((limit - len(items)) * 4, 100),
+                    _MAX_LIST_EVALUATED_ITEMS - evaluated,
+                )
+                kwargs: dict[str, Any] = {"Limit": page_budget}
+                if filter_parts:
+                    kwargs["FilterExpression"] = " AND ".join(filter_parts)
+                    kwargs["ExpressionAttributeValues"] = values
+                if names:
+                    kwargs["ExpressionAttributeNames"] = names
+                if exclusive_start_key:
+                    kwargs["ExclusiveStartKey"] = exclusive_start_key
+                response = self._table.scan(**kwargs)
+                page = [item for item in response.get("Items", []) if isinstance(item, dict)]
+                remaining = limit - len(items)
+                selected = page[:remaining]
+                items.extend(selected)
+                evaluated += int(response.get("ScannedCount", page_budget))
+
+                if len(page) > remaining and selected:
+                    last_job_id = selected[-1].get("job_id")
+                    if isinstance(last_job_id, str) and last_job_id:
+                        next_key = {"job_id": last_job_id}
+                    else:
+                        next_key = response.get("LastEvaluatedKey")
+                    break
+
+                response_key = response.get("LastEvaluatedKey")
+                if not isinstance(response_key, dict) or not response_key:
+                    next_key = None
+                    break
+                next_key = response_key
+                exclusive_start_key = response_key
+        except ClientError as error:
+            logger.error("Failed to list jobs: %s", error)
+            raise
+
+        if next_key and evaluated >= _MAX_LIST_EVALUATED_ITEMS:
+            partial = True
+            logger.warning(
+                "Job listing reached the %d-item evaluation budget before exhausting the table",
+                _MAX_LIST_EVALUATED_ITEMS,
+            )
+        parsed = [self._parse_job_item(item) for item in items]
+        parsed.sort(key=lambda job: job.get("submitted_at") or "", reverse=True)
+        next_cursor = self._encode_list_cursor(next_key, filters) if next_key else None
+        return parsed, next_cursor, partial
+
     def list_jobs(
         self,
         target_region: str | None = None,
@@ -609,176 +1207,252 @@ class JobStore:
         namespace: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """List jobs with optional filters.
-
-        Args:
-            target_region: Filter by target region
-            status: Filter by status
-            namespace: Filter by namespace
-            limit: Maximum results
-
-        Returns:
-            List of job records
-        """
-        try:
-            # Build filter expression
-            filter_parts = []
-            expr_values: dict[str, Any] = {}
-            expr_names: dict[str, str] = {}
-
-            if target_region:
-                filter_parts.append("target_region = :region")
-                expr_values[":region"] = target_region
-
-            if status:
-                filter_parts.append("#status = :status")
-                expr_values[":status"] = status
-                expr_names["#status"] = "status"
-
-            if namespace:
-                filter_parts.append("#ns = :namespace")
-                expr_values[":namespace"] = namespace
-                expr_names["#ns"] = "namespace"
-
-            scan_kwargs: dict[str, Any] = {"Limit": limit}
-            if filter_parts:
-                scan_kwargs["FilterExpression"] = " AND ".join(filter_parts)
-                scan_kwargs["ExpressionAttributeValues"] = expr_values
-            if expr_names:
-                scan_kwargs["ExpressionAttributeNames"] = expr_names
-
-            response = self._table.scan(**scan_kwargs)
-            items = response.get("Items", [])
-
-            return [self._parse_job_item(item) for item in items]
-        except ClientError as e:
-            logger.error(f"Failed to list jobs: {e}")
-            raise
+        """List the first bounded page of matching jobs."""
+        jobs, _, _ = self.list_jobs_page(
+            target_region=target_region,
+            status=status,
+            namespace=namespace,
+            limit=limit,
+        )
+        return jobs
 
     def get_queued_jobs_for_region(self, region: str, limit: int = 10) -> list[dict[str, Any]]:
-        """Get queued jobs targeting a specific region.
-
-        Used by regional processors to poll for work.
-
-        Args:
-            region: Target region
-            limit: Maximum jobs to return
-
-        Returns:
-            List of queued jobs sorted by priority (descending)
-        """
+        """Return the highest-priority queued jobs, FIFO within equal priority."""
         try:
-            response = self._table.query(
-                IndexName="region-status-index",
-                KeyConditionExpression="target_region = :region AND #status = :status",
-                ExpressionAttributeNames={"#status": "status"},
-                ExpressionAttributeValues={
-                    ":region": region,
-                    ":status": JobStatus.QUEUED.value,
-                },
-                Limit=limit,
-                ScanIndexForward=False,  # Descending order
-            )
-            items = response.get("Items", [])
-
-            # Sort by priority (higher first)
-            jobs = [self._parse_job_item(item) for item in items]
-            return sorted(jobs, key=lambda j: j.get("priority", 0), reverse=True)
-        except ClientError as e:
-            logger.error(f"Failed to get queued jobs for {region}: {e}")
+            items = self._query_region_status(region, JobStatus.QUEUED.value, limit)
+            return [self._parse_job_item(item) for item in items]
+        except ClientError as error:
+            logger.error("Failed to get queued jobs for %s: %s", region, error)
             raise
+
+    def get_active_jobs_for_region(self, region: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Return a total-bounded, fair sample of pending and running jobs."""
+        jobs: list[dict[str, Any]] = []
+        remaining = limit
+        statuses = (JobStatus.RUNNING.value, JobStatus.PENDING.value)
+        try:
+            for index, status in enumerate(statuses):
+                statuses_left = len(statuses) - index
+                allocation = remaining if statuses_left == 1 else max(1, remaining // statuses_left)
+                page = self._query_region_status(region, status, allocation)
+                jobs.extend(self._parse_job_item(item) for item in page)
+                remaining -= len(page)
+                if remaining <= 0:
+                    break
+        except ClientError as error:
+            logger.error("Failed to get active jobs for %s: %s", region, error)
+            raise
+        return jobs[:limit]
+
+    def requeue_expired_jobs(self, region: str, limit: int = 100) -> int:
+        """Fence expired claims and return them to the queue for deterministic adoption."""
+        now = _utc_now_iso()
+        candidates: list[dict[str, Any]] = []
+        remaining = limit
+        statuses = (JobStatus.CLAIMED.value, JobStatus.APPLYING.value)
+        try:
+            for index, status in enumerate(statuses):
+                statuses_left = len(statuses) - index
+                allocation = remaining if statuses_left == 1 else max(1, remaining // statuses_left)
+                page = self._query_expired_claims(region, status, now, allocation)
+                candidates.extend(page)
+                remaining -= len(page)
+                if remaining <= 0:
+                    break
+        except ClientError as error:
+            logger.error("Failed to find expired jobs for %s: %s", region, error)
+            raise
+
+        candidates.sort(key=lambda item: str(item.get("lease_expires_at") or ""))
+        recovered = 0
+        for item in candidates:
+            if recovered >= limit:
+                break
+            lease_expiry = item.get("lease_expires_at")
+            if lease_expiry is None or str(lease_expiry) > now:
+                continue
+            job_id = item.get("job_id")
+            owner = item.get("claimed_by")
+            token = item.get("claim_token")
+            generation = item.get("claim_generation")
+            expected_status = item.get("status")
+            expected_updated_at = item.get("updated_at")
+            if not all(
+                [job_id, owner, token, generation is not None, expected_status, expected_updated_at]
+            ):
+                logger.error("Refusing to recover unfenced queue record %s", job_id or "<missing>")
+                continue
+
+            history = self._history_with(
+                item,
+                status=JobStatus.QUEUED.value,
+                timestamp=now,
+                message="Expired worker claim fenced and recovered",
+            )
+            try:
+                self._table.update_item(
+                    Key={"job_id": job_id},
+                    UpdateExpression=(
+                        "SET #status = :queued, region_status = :region_status, "
+                        "updated_at = :now, status_history = :history "
+                        "REMOVE claimed_by, claim_token, lease_expires_at"
+                    ),
+                    ConditionExpression=(
+                        "attribute_exists(job_id) AND #status = :expected AND "
+                        "target_region = :region AND claimed_by = :owner AND "
+                        "claim_token = :token AND claim_generation = :generation AND "
+                        "updated_at = :expected_updated_at AND lease_expires_at <= :now"
+                    ),
+                    ExpressionAttributeNames={"#status": "status"},
+                    ExpressionAttributeValues={
+                        ":queued": JobStatus.QUEUED.value,
+                        ":region_status": self._region_status(region, JobStatus.QUEUED.value),
+                        ":expected": expected_status,
+                        ":region": region,
+                        ":owner": owner,
+                        ":token": token,
+                        ":generation": generation,
+                        ":expected_updated_at": expected_updated_at,
+                        ":now": now,
+                        ":history": history,
+                    },
+                )
+            except ClientError as error:
+                if self._is_conditional_failure(error):
+                    continue
+                logger.error("Failed to recover expired job %s: %s", job_id, error)
+                raise
+            recovered += 1
+        return recovered
+
+    def get_job_count_summary(
+        self,
+        max_evaluated: int = _MAX_LIST_EVALUATED_ITEMS,
+    ) -> tuple[dict[str, dict[str, int]], int, bool]:
+        """Return bounded region/status counts and whether the result is complete."""
+        budget = min(max(int(max_evaluated), 1), 100_000)
+        counts: dict[str, dict[str, int]] = {}
+        evaluated = 0
+        exclusive_start_key: dict[str, Any] | None = None
+        truncated = False
+        try:
+            while evaluated < budget:
+                kwargs: dict[str, Any] = {
+                    "ProjectionExpression": "target_region, #status",
+                    "ExpressionAttributeNames": {"#status": "status"},
+                    "Limit": min(1_000, budget - evaluated),
+                }
+                if exclusive_start_key:
+                    kwargs["ExclusiveStartKey"] = exclusive_start_key
+                response = self._table.scan(**kwargs)
+                page = response.get("Items", [])
+                evaluated += int(response.get("ScannedCount", len(page)))
+                for item in page:
+                    if not isinstance(item, dict):
+                        continue
+                    region = str(item.get("target_region") or "unknown")
+                    item_status = str(item.get("status") or "unknown")
+                    region_counts = counts.setdefault(region, {})
+                    region_counts[item_status] = region_counts.get(item_status, 0) + 1
+                next_key = response.get("LastEvaluatedKey")
+                if not isinstance(next_key, dict) or not next_key:
+                    exclusive_start_key = None
+                    break
+                exclusive_start_key = next_key
+            truncated = exclusive_start_key is not None
+        except ClientError as error:
+            logger.error("Failed to get job counts: %s", error)
+            raise
+        return counts, evaluated, truncated
 
     def get_job_counts_by_region(self) -> dict[str, dict[str, int]]:
-        """Get job counts grouped by region and status.
-
-        Returns:
-            Dict mapping region -> status -> count
-        """
-        try:
-            response = self._table.scan(
-                ProjectionExpression="target_region, #status",
-                ExpressionAttributeNames={"#status": "status"},
+        """Return bounded job counts; use ``get_job_count_summary`` for completeness metadata."""
+        counts, _, truncated = self.get_job_count_summary()
+        if truncated:
+            logger.warning(
+                "Queue statistics reached the %d-item evaluation budget and are partial",
+                _MAX_LIST_EVALUATED_ITEMS,
             )
-            items = response.get("Items", [])
-
-            # Handle pagination
-            while "LastEvaluatedKey" in response:
-                response = self._table.scan(
-                    ProjectionExpression="target_region, #status",
-                    ExpressionAttributeNames={"#status": "status"},
-                    ExclusiveStartKey=response["LastEvaluatedKey"],
-                )
-                items.extend(response.get("Items", []))
-
-            # Aggregate counts
-            counts: dict[str, dict[str, int]] = {}
-            for item in items:
-                region = item.get("target_region", "unknown")
-                status = item.get("status", "unknown")
-                if region not in counts:
-                    counts[region] = {}
-                counts[region][status] = counts[region].get(status, 0) + 1
-
-            return counts
-        except ClientError as e:
-            logger.error(f"Failed to get job counts: {e}")
-            raise
+        return counts
 
     def cancel_job(self, job_id: str, reason: str | None = None) -> bool:
-        """Cancel a job if it's still in a cancellable state.
-
-        Args:
-            job_id: Job to cancel
-            reason: Optional cancellation reason
-
-        Returns:
-            True if cancelled, False if not cancellable
-        """
-        cancellable_statuses = [JobStatus.QUEUED.value, JobStatus.CLAIMED.value]
-
+        """Cancel only an unclaimed queued job using the same atomic history CAS."""
+        item = self._get_raw_job(job_id)
+        if item is None or item.get("status") != JobStatus.QUEUED.value:
+            return False
+        now = _utc_now_iso()
+        history = self._history_with(
+            item,
+            status=JobStatus.CANCELLED.value,
+            timestamp=now,
+            message=reason or "Cancelled by user",
+        )
         try:
             self._table.update_item(
                 Key={"job_id": job_id},
-                UpdateExpression="SET #status = :cancelled, updated_at = :now, "
-                "cancelled_at = :now, cancel_reason = :reason",
-                ConditionExpression="#status IN (:s1, :s2)",
+                UpdateExpression=(
+                    "SET #status = :cancelled, region_status = :region_status, "
+                    "updated_at = :now, completed_at = :now, cancelled_at = :now, "
+                    "cancel_reason = :reason, status_history = :history"
+                ),
+                ConditionExpression=(
+                    "attribute_exists(job_id) AND #status = :queued AND "
+                    "target_region = :region AND updated_at = :expected_updated_at"
+                ),
                 ExpressionAttributeNames={"#status": "status"},
                 ExpressionAttributeValues={
                     ":cancelled": JobStatus.CANCELLED.value,
-                    ":now": _utc_now_iso(),
+                    ":queued": JobStatus.QUEUED.value,
+                    ":region_status": self._region_status(
+                        str(item.get("target_region")), JobStatus.CANCELLED.value
+                    ),
+                    ":region": item.get("target_region"),
+                    ":expected_updated_at": item.get("updated_at"),
+                    ":now": now,
                     ":reason": reason or "Cancelled by user",
-                    ":s1": cancellable_statuses[0],
-                    ":s2": cancellable_statuses[1],
+                    ":history": history,
                 },
             )
             return True
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        except ClientError as error:
+            if self._is_conditional_failure(error):
                 return False
-            logger.error(f"Failed to cancel job {job_id}: {e}")
+            logger.error("Failed to cancel job %s: %s", job_id, error)
             raise
 
-    def _parse_job_item(self, item: dict[str, Any]) -> dict[str, Any]:
-        """Parse a DynamoDB item into a job record."""
-        return {
+    def _parse_job_item(
+        self,
+        item: dict[str, Any],
+        *,
+        include_internal: bool = False,
+    ) -> dict[str, Any]:
+        """Parse a DynamoDB item without exposing reusable claim tokens to APIs."""
+        parsed = {
             "job_id": item.get("job_id"),
             "job_name": item.get("job_name"),
             "target_region": item.get("target_region"),
             "namespace": item.get("namespace"),
             "status": item.get("status"),
             "priority": int(item.get("priority", 0)),
-            "manifest": json.loads(item.get("manifest", "{}")),
-            "labels": json.loads(item.get("labels", "{}")),
+            "manifest": self._decode_json(item.get("manifest"), {}),
+            "labels": self._decode_json(item.get("labels"), {}),
             "submitted_at": item.get("submitted_at"),
             "submitted_by": item.get("submitted_by"),
             "claimed_by": item.get("claimed_by"),
             "claimed_at": item.get("claimed_at"),
+            "claim_generation": int(item.get("claim_generation", 0)),
+            "lease_expires_at": item.get("lease_expires_at"),
             "completed_at": item.get("completed_at"),
             "updated_at": item.get("updated_at"),
+            "k8s_job_name": item.get("k8s_job_name"),
+            "k8s_job_namespace": item.get("k8s_job_namespace"),
             "k8s_job_uid": item.get("k8s_job_uid"),
             "error_message": item.get("error_message"),
-            "status_history": json.loads(item.get("status_history", "[]")),
+            "status_history": self._decode_json(item.get("status_history"), []),
         }
+        if include_internal:
+            parsed["claim_token"] = item.get("claim_token")
+        return parsed
 
 
 # Singleton instances for use in the API

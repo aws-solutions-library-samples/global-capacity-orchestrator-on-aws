@@ -142,6 +142,34 @@ class TestSanitizeArguments:
         assert result["auth_token"] == "[REDACTED]"
         json.dumps(result)
 
+    def test_recursively_redacts_nested_mapping_keys(self):
+        args = {
+            "payload": {
+                "credentials": {"api_token": "nested-secret", "region": "us-east-1"},
+                "items": [{"db_password": "also-secret"}],
+            }
+        }
+
+        result = run_mcp._sanitize_arguments(args)
+
+        assert result["payload"]["credentials"]["api_token"] == "[REDACTED]"
+        assert result["payload"]["credentials"]["region"] == "us-east-1"
+        assert result["payload"]["items"][0]["db_password"] == "[REDACTED]"
+        assert "nested-secret" not in json.dumps(result)
+        assert "also-secret" not in json.dumps(result)
+
+    def test_circular_and_oversized_containers_are_bounded(self):
+        circular: list[object] = []
+        circular.append(circular)
+        oversized = {f"field-{index}": index for index in range(150)}
+
+        result = run_mcp._sanitize_arguments({"circular": circular, "oversized": oversized})
+
+        assert result["circular"] == ["<circular-reference>"]
+        assert result["oversized"]["<truncated-items>"] == 50
+        assert len(result["oversized"]) == 101
+        json.dumps(result)
+
 
 class TestAuditLoggedDecorator:
     """Tests for the audit_logged decorator."""
@@ -290,8 +318,8 @@ class TestStartupLog:
     """Tests for the startup audit log entry."""
 
     def test_startup_log_fields(self, caplog):
-        # The startup log is emitted at module load time.
-        # We can verify the module has the expected constants.
+        # Startup logging is explicit at server runtime, not an import side effect.
+        # The constants remain importable for version and logger assertions.
         # ``_MCP_SERVER_VERSION`` tracks the project-wide ``VERSION`` file via
         # ``gco._version.__version__`` — assert the server mirrors the project
         # version exactly rather than hardcoding a literal here, which would
@@ -725,21 +753,17 @@ class TestAuditContextCapture:
         # Message text is preserved.
         assert elics[0].get("message") == "Please confirm"
 
-    def test_audit_includes_task_id(self, caplog, monkeypatch):
-        """When request_context.meta.task_id is set, the audit entry exposes it."""
+    def test_audit_includes_supported_task_context_id(self, caplog, monkeypatch):
+        """The public FastMCP task context is the primary task-ID source."""
 
-        # Build a fake context with the right nested attributes. The audit
-        # decorator only walks ``request_context`` → ``meta`` → ``task_id``
-        # and ``client_id`` / ``request_id`` directly off the context, so a
-        # plain MagicMock with explicit attribute values is enough.
-        meta = MagicMock(spec=["task_id"])
-        meta.task_id = "test-task-123"
-        request_context = MagicMock()
-        request_context.meta = meta
         fake_ctx = MagicMock()
-        fake_ctx.request_context = request_context
+        fake_ctx.request_context = MagicMock()
+        fake_ctx.request_context.meta.task_id = "legacy-metadata-id"
+        fake_ctx.task_id = "context-property-id"
         fake_ctx.request_id = "fake-req-id"
-        fake_ctx.client_id = None  # must be falsy → field omitted
+        fake_ctx.client_id = None
+        task_context = MagicMock(spec=["task_id"])
+        task_context.task_id = "supported-task-123"
 
         monkeypatch.setattr(audit, "_try_get_fastmcp_context", lambda: fake_ctx)
 
@@ -747,14 +771,61 @@ class TestAuditContextCapture:
         async def task_tool() -> str:
             return "ok"
 
-        with caplog.at_level(logging.INFO, logger="gco.mcp.audit"):
+        with (
+            patch(
+                "fastmcp.server.dependencies.get_task_context",
+                return_value=task_context,
+            ),
+            caplog.at_level(logging.INFO, logger="gco.mcp.audit"),
+        ):
             asyncio.run(task_tool())
 
         entry = _last_invocation_entry(caplog)
-        assert entry["task_id"] == "test-task-123"
+        assert entry["task_id"] == "supported-task-123"
         assert entry["request_id"] == "fake-req-id"
-        # client_id was None — must be omitted, not emitted as null.
         assert "client_id" not in entry
+
+    def test_audit_task_id_falls_back_and_is_bounded(self, monkeypatch):
+        fake_ctx = MagicMock()
+        fake_ctx.task_id = "x" * 2_000
+        fake_ctx.request_context = None
+        with patch(
+            "fastmcp.server.dependencies.get_task_context",
+            side_effect=RuntimeError("no task context"),
+        ):
+            task_id = audit._try_get_task_id(fake_ctx)
+
+        assert task_id is not None
+        assert task_id.endswith("[truncated]")
+        assert len(task_id.encode("utf-8")) <= audit._MAX_TASK_ID_BYTES
+
+
+class TestAuditResourceReads:
+    """Central middleware audits static and templated resource reads."""
+
+    @pytest.mark.asyncio
+    async def test_static_resource_read_emits_success_entry(self, caplog):
+        test_mcp = FastMCP("audit-test-resource")
+        test_mcp.add_middleware(AuditCaptureMiddleware())
+
+        @test_mcp.resource("audit://gco/static")
+        def static_resource() -> str:
+            return "resource body"
+
+        with caplog.at_level(logging.INFO, logger="gco.mcp.audit"):
+            async with Client(test_mcp) as client:
+                blocks = await client.read_resource("audit://gco/static")
+
+        assert blocks[0].text == "resource body"
+        entries = [
+            entry for entry in _audit_entries(caplog) if entry.get("event") == "mcp.resource.read"
+        ]
+        assert len(entries) == 1
+        assert entries[0]["resource_uri"] == "audit://gco/static"
+        assert entries[0]["status"] == "success"
+        assert entries[0]["duration_ms"] >= 0
+        assert "timestamp" in entries[0]
+        assert "request_id" in entries[0]
 
 
 # =============================================================================

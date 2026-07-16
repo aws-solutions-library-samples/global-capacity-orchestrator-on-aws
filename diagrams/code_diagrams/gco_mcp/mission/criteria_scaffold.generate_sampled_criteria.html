@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,69 +205,69 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3319=>operation: 'Drive a sampling backend to produce a validated criteria list.\n\n    Builds the prompt, calls ``backend.sample(prompt_str)``, parses\n    the JSON, validates through :func:`validate_criteria`, and on\n    rejection retries up to ``retries`` times with feedback. Returns\n    the validated list (with private ``_parsed_ast`` keys stripped so\n    the result is JSON-safe). Raises :class:`ScaffoldSamplingError`\n    when every attempt was rejected.\n\n    The backend is duck-typed against the ``SamplingBackend`` protocol\n    on purpose — tests can substitute a stub object whose ``sample``\n    method returns canned strings without bringing in a transport.\n    '
-op3321=>operation: feedback: str | None = None
-op3323=>operation: last_reason = 'no_attempts'
-cond3326=>condition: for attempt in range(retries + 1)
-op3330=>operation: prompt_str = build_scaffold_prompt(directive, allowlist=allowlist, max_criteria=max_criteria, feedback=feedback)
-op3335=>operation: raw = await _call_backend(backend, prompt_str)
-cond3332=>condition: exception raised?
-cond3337=>condition: except Exception as exc
-sub3341=>subroutine: raise ScaffoldSamplingError('transport_error', message=f'sampling backend raised {type(exc).__name__}: {exc}') from exc
-op3349=>operation: parsed = _parse_response(raw)
-cond3346=>condition: exception raised?
-cond3351=>condition: except (ValueError, json.JSONDecodeError) as exc
-op3355=>operation: last_reason = 'json_parse'
-op3357=>operation: feedback = f'Your previous response could not be parsed as a JSON array. Return a single JSON array, no prose, no markdown fences. ({exc})'
-sub3359=>subroutine: continue
-cond3365=>operation: parsed = parsed[:max_criteria] if  len(parsed) > max_criteria
-op3375=>operation: parsed = [_normalize_kind_name(c) for c in parsed]
-op3377=>operation: parsed = [_normalize_metric_path(c) for c in parsed]
-op3379=>operation: parsed = [_autofix_predicate(c) for c in parsed]
-op3384=>operation: validated = _validation.validate_criteria(parsed)
-cond3381=>condition: exception raised?
-cond3386=>condition: except MissionValidationError as exc
-op3390=>operation: details = exc.details or {}
-op3392=>operation: last_reason = str(details.get('reason') or exc.code)
-op3394=>operation: feedback = f'Your previous response was rejected by the validator. Rejection reason: {last_reason}. Details: {details!r}. Re-emit a corrected JSON array.'
-sub3396=>subroutine: continue
-op3401=>operation: del attempt
-io3406=>inputoutput: output: [{k: v for k, v in entry.items() if not str(k).startswith('_')} for entry in validated]
-e3404=>end: end function return
-sub3411=>subroutine: raise ScaffoldSamplingError(last_reason)
+        <div><textarea id="code" style="width: 100%;" rows="11">op4976=>operation: 'Drive a sampling backend to produce a validated criteria list.\n\n    Builds the prompt, calls ``backend.sample(prompt_str)``, parses\n    the JSON, validates through :func:`validate_criteria`, and on\n    rejection retries up to ``retries`` times with feedback. Returns\n    the validated list (with private ``_parsed_ast`` keys stripped so\n    the result is JSON-safe). Raises :class:`ScaffoldSamplingError`\n    when every attempt was rejected.\n\n    The backend is duck-typed against the ``SamplingBackend`` protocol\n    on purpose — tests can substitute a stub object whose ``sample``\n    method returns canned strings without bringing in a transport.\n    '
+op4978=>operation: feedback: str | None = None
+op4980=>operation: last_reason = 'no_attempts'
+cond4983=>condition: for attempt in range(retries + 1)
+op4987=>operation: prompt_str = build_scaffold_prompt(directive, allowlist=allowlist, max_criteria=max_criteria, feedback=feedback)
+op4992=>operation: raw = await _call_backend(backend, prompt_str)
+cond4989=>condition: exception raised?
+cond4994=>condition: except Exception as exc
+sub4998=>subroutine: raise ScaffoldSamplingError('transport_error', message=f'sampling backend raised {type(exc).__name__}: {exc}') from exc
+op5006=>operation: parsed = _parse_response(raw)
+cond5003=>condition: exception raised?
+cond5008=>condition: except (ValueError, json.JSONDecodeError) as exc
+op5012=>operation: last_reason = 'json_parse'
+op5014=>operation: feedback = f'Your previous response could not be parsed as a JSON array. Return a single JSON array, no prose, no markdown fences. ({exc})'
+sub5016=>subroutine: continue
+cond5022=>operation: parsed = parsed[:max_criteria] if  len(parsed) > max_criteria
+op5032=>operation: parsed = [_normalize_kind_name(c) for c in parsed]
+op5034=>operation: parsed = [_normalize_metric_path(c) for c in parsed]
+op5036=>operation: parsed = [_autofix_predicate(c) for c in parsed]
+op5041=>operation: validated = _validation.validate_criteria(parsed)
+cond5038=>condition: exception raised?
+cond5043=>condition: except MissionValidationError as exc
+op5047=>operation: details = exc.details or {}
+op5049=>operation: last_reason = str(details.get('reason') or exc.code)
+op5051=>operation: feedback = f'Your previous response was rejected by the validator. Rejection reason: {last_reason}. Details: {details!r}. Re-emit a corrected JSON array.'
+sub5053=>subroutine: continue
+op5058=>operation: del attempt
+io5063=>inputoutput: output: [{k: v for k, v in entry.items() if not str(k).startswith('_')} for entry in validated]
+e5061=>end: end function return
+sub5068=>subroutine: raise ScaffoldSamplingError(last_reason)
 
-op3319->op3321
-op3321->op3323
-op3323->cond3326
-cond3326(yes)->op3330
-op3330->op3335
-op3335->cond3332
-cond3332(yes)->cond3337
-cond3337(yes)->sub3341
-cond3337(no)->op3349
-op3349->cond3346
-cond3346(yes)->cond3351
-cond3351(yes)->op3355
-op3355->op3357
-op3357->sub3359
-cond3351(no)->cond3365
-cond3365->op3375
-op3375->op3377
-op3377->op3379
-op3379->op3384
-op3384->cond3381
-cond3381(yes)->cond3386
-cond3386(yes)->op3390
-op3390->op3392
-op3392->op3394
-op3394->sub3396
-cond3386(no)->op3401
-op3401->io3406
-io3406->e3404
-cond3381(no)->op3401
-cond3346(no)->cond3365
-cond3332(no)->op3349
-cond3326(no)->sub3411
+op4976->op4978
+op4978->op4980
+op4980->cond4983
+cond4983(yes)->op4987
+op4987->op4992
+op4992->cond4989
+cond4989(yes)->cond4994
+cond4994(yes)->sub4998
+cond4994(no)->op5006
+op5006->cond5003
+cond5003(yes)->cond5008
+cond5008(yes)->op5012
+op5012->op5014
+op5014->sub5016
+cond5008(no)->cond5022
+cond5022->op5032
+op5032->op5034
+op5034->op5036
+op5036->op5041
+op5041->cond5038
+cond5038(yes)->cond5043
+cond5043(yes)->op5047
+op5047->op5049
+op5049->op5051
+op5051->sub5053
+cond5043(no)->op5058
+op5058->io5063
+io5063->e5061
+cond5038(no)->op5058
+cond5003(no)->cond5022
+cond4989(no)->op5006
+cond4983(no)->sub5068
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

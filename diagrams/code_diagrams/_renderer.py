@@ -7,6 +7,7 @@ makes it easy to unit-test the path math without importing Playwright.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import warnings
 from dataclasses import dataclass
@@ -81,6 +82,14 @@ def _render_one(
 
     title = target.title or f"{target.source}::{target.function}"
     output_html(str(html_path), title, dsl)
+    # pyflowchart's HTML template includes trailing spaces on some generated
+    # lines. Normalize every artifact here so regeneration remains compatible
+    # with ``git diff --check`` across pyflowchart releases.
+    html = html_path.read_text(encoding="utf-8")
+    html_path.write_text(
+        "\n".join(line.rstrip() for line in html.splitlines()) + "\n",
+        encoding="utf-8",
+    )
     print(f"   ✓ HTML  {html_path.relative_to(project_root)}")
 
     if renderer is not None:
@@ -111,6 +120,44 @@ def _output_stem_for(target: Target, *, output_dir: Path) -> Path:
     """
     src = Path(target.source)
     return output_dir / src.parent / f"{src.stem}.{target.slug()}"
+
+
+def prune_orphaned_artifacts(*, targets: list[Target], output_dir: Path) -> list[Path]:
+    """Delete generated HTML/PNG files that no longer have a target.
+
+    Only full-catalog runs call this helper. Restricting cleanup to the two
+    generated suffixes preserves the generator source, README, and unrelated
+    files while removing renamed-source trees and retired targets. Empty
+    directories left behind by those artifacts are removed bottom-up.
+    """
+    expected: set[Path] = set()
+    for target in targets:
+        stem = _output_stem_for(target, output_dir=output_dir)
+        expected.update({stem.parent / f"{stem.name}.html", stem.parent / f"{stem.name}.png"})
+
+    removed: list[Path] = []
+    for artifact in sorted(
+        path
+        for path in output_dir.rglob("*")
+        if path.is_file() and path.suffix in {".html", ".png"}
+    ):
+        if artifact not in expected:
+            artifact.unlink()
+            removed.append(artifact)
+            print(f"   🧹 removed obsolete artifact {artifact.relative_to(output_dir)}")
+
+    directories = sorted(
+        (path for path in output_dir.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for directory in directories:
+        if directory.name == "__pycache__":
+            continue
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+
+    return removed
 
 
 def write_readme(results: list[RenderedTarget], *, output_dir: Path) -> None:
@@ -173,7 +220,43 @@ class _PlaywrightRenderer:
                 timeout=30_000,
             )
             page.wait_for_timeout(500)  # give layout a beat to settle
-            page.locator("#canvas svg").screenshot(path=str(png_path))
+            locator = page.locator("#canvas svg")
+            box = locator.bounding_box()
+            # Chromium rejects screenshots above roughly 32k physical pixels
+            # on either axis. A CSS transform changes only painting, not the
+            # element bounds Playwright passes to captureScreenshot, so resize
+            # the SVG viewport itself. The viewBox preserves all chart content.
+            # The area cap also avoids allocating several hundred megapixels
+            # for unusually wide-and-tall control-flow charts.
+            if box is not None and max(box["width"], box["height"]) > 15_000:
+                max_css_dimension = 8_000
+                max_css_area = 25_000_000
+                factor = min(
+                    max_css_dimension / max(box["width"], box["height"]),
+                    (max_css_area / (box["width"] * box["height"])) ** 0.5,
+                )
+                locator.evaluate(
+                    """(svg, size) => {
+                        if (!svg.hasAttribute('viewBox')) {
+                            svg.setAttribute(
+                                'viewBox',
+                                `0 0 ${size.sourceWidth} ${size.sourceHeight}`,
+                            );
+                        }
+                        svg.setAttribute('width', size.width);
+                        svg.setAttribute('height', size.height);
+                        svg.style.width = `${size.width}px`;
+                        svg.style.height = `${size.height}px`;
+                    }""",
+                    {
+                        "sourceWidth": box["width"],
+                        "sourceHeight": box["height"],
+                        "width": box["width"] * factor,
+                        "height": box["height"] * factor,
+                    },
+                )
+                page.wait_for_timeout(100)
+            locator.screenshot(path=str(png_path))
             return True
         except PwTimeout as exc:
             warnings.warn(

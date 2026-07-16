@@ -7,6 +7,7 @@ Tests for the new MCP resource groups added during the refactor:
 """
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -78,7 +79,8 @@ class TestConfigResources:
         content = result.contents[0].content
         assert "Configuration" in content
         assert "config://gco/cdk.json" in content
-        assert "config://gco/feature-toggles" in content
+        assert "mcp://gco/feature-flags" in content
+        assert "config://gco/feature-toggles" not in content
         assert "config://gco/env-vars" in content
 
     def test_config_cdk_json_returns_content(self):
@@ -88,11 +90,15 @@ class TestConfigResources:
         # cdk.json should contain JSON
         assert "{" in content
 
-    def test_config_feature_toggles_returns_content(self):
-        result = asyncio.run(run_mcp.mcp.read_resource("config://gco/feature-toggles"))
-        content = result.contents[0].content
-        assert "Feature Toggles" in content
-        assert len(content) > 50
+    def test_mcp_feature_flags_returns_current_gating_map(self):
+        result = asyncio.run(run_mcp.mcp.read_resource("mcp://gco/feature-flags"))
+        payload = json.loads(result.contents[0].content)
+        flags = {item["name"]: item for item in payload["flags"]}
+        assert "GCO_ENABLE_MODEL_UPLOAD" in flags
+        assert {
+            "models_upload",
+            "upload_to_regional_bucket",
+        }.issubset(flags["GCO_ENABLE_MODEL_UPLOAD"]["gated_tools"])
 
     def test_config_env_vars_returns_content(self):
         result = asyncio.run(run_mcp.mcp.read_resource("config://gco/env-vars"))

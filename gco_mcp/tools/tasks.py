@@ -1,4 +1,4 @@
-"""Read-only MCP tools for inspecting long-running task status.
+"""MCP tools for inspecting and pruning long-running task status.
 
 Every long-running tool (``deploy_all``, ``destroy_all``, etc.) writes
 a JSON status file and a raw log file under ``~/.gco/tasks/`` via
@@ -7,16 +7,19 @@ those artifacts so any MCP client — including agents that don't render
 ``ctx.info`` notifications — can see real-time progress without
 blocking on the original tool call's response.
 
-Both tools are read-only and intentionally always enabled (no feature
-flag): they never mutate AWS state and never spawn subprocesses. The
-worst case is reporting nothing when the status directory is empty.
+The status and tail tools are read-only and always enabled: they never
+mutate AWS state or spawn subprocesses. The optional ``task_prune`` tool
+removes old local status/log pairs and is gated by
+``GCO_ENABLE_DESTRUCTIVE_OPERATIONS``.
 """
 
 from __future__ import annotations
 
 import json
 
+import cli_runner
 from audit import audit_logged
+from feature_flags import FLAG_DESTRUCTIVE_OPERATIONS, is_enabled
 from server import mcp
 
 from tools._task_status import get_task, list_tasks, tail_log
@@ -84,3 +87,22 @@ def task_tail(task_id: str, lines: int = 100) -> str:
     """
     tail = tail_log(task_id, lines=lines)
     return json.dumps({"task_id": task_id, "lines": tail}, indent=2)
+
+
+if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
+
+    @mcp.tool(tags={"destructive", "observability"})
+    @audit_logged
+    def task_prune(keep: int = 50) -> str:
+        """[gated by GCO_ENABLE_DESTRUCTIVE_OPERATIONS] destructive local cleanup.
+
+        Delete old ``~/.gco/tasks`` status/log pairs while retaining the newest
+        ``keep`` records. This never changes AWS or Kubernetes state, but removed
+        local task history cannot be recovered.
+
+        Args:
+            keep: Number of newest task records to retain; must be non-negative.
+        """
+        if keep < 0:
+            raise ValueError("keep must be non-negative")
+        return cli_runner._run_cli("tasks", "prune", "--keep", str(keep), "--yes")

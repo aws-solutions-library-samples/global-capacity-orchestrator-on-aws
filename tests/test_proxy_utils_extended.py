@@ -39,16 +39,96 @@ def proxy_module():
             },
         ),
     ):
-        proxy_utils = load_lambda_module("proxy-shared", "proxy_utils")
+        proxy_utils = load_lambda_module("proxy-shared", "proxy_utils", shared_dirs=["tls-shared"])
 
         proxy_utils._cached_secret = None
         proxy_utils._cache_timestamp = 0.0
+        proxy_utils._last_successful_refresh = 0.0
+        proxy_utils._last_refresh_attempt = 0.0
 
         mock_sm = mock_client.return_value
         mock_sm.get_secret_value.return_value = {
             "SecretString": json.dumps({"token": "test-token"})
         }
         yield proxy_utils, mock_sm
+
+
+@pytest.fixture(
+    params=["proxy-shared", "api-gateway-proxy", "regional-api-proxy"],
+    ids=["shared", "global-deployment", "regional-deployment"],
+)
+def packaged_proxy_module(request):
+    """Load every proxy helper copy that is packaged or used as its source."""
+    with (
+        patch("boto3.client"),
+        patch("urllib3.PoolManager") as mock_pool_cls,
+        patch.dict(
+            "os.environ",
+            {
+                "PROXY_MAX_RETRIES": "3",
+                "PROXY_RETRY_BACKOFF_BASE": "0.1",
+            },
+        ),
+    ):
+        module = load_lambda_module(request.param, "proxy_utils", shared_dirs=["tls-shared"])
+        module._http = mock_pool_cls.return_value
+        yield module
+
+
+class TestPackagedProxyHelperContract:
+    """Keep URL encoding and request-budget behavior aligned in all copies."""
+
+    def test_encodes_malformed_percent_and_repeated_query_values(self, packaged_proxy_module):
+        url = packaged_proxy_module.build_target_url(
+            "example.com/base/",
+            "/valid/%2F/literal%/bad%2G space",
+            {"tag": ["first value", "second&value"]},
+        )
+
+        assert url == (
+            "https://example.com/base/valid/%2F/literal%25/bad%252G%20space"
+            "?tag=first+value&tag=second%26value"
+        )
+
+    def test_retries_share_one_total_timeout(self, packaged_proxy_module):
+        retryable_response = MagicMock()
+        retryable_response.status = 503
+        successful_response = MagicMock()
+        successful_response.status = 200
+        successful_response.headers = {}
+        successful_response.data = b"OK"
+        mock_http = MagicMock()
+        mock_http.request.side_effect = [retryable_response, successful_response]
+
+        with (
+            patch.object(packaged_proxy_module, "_http", mock_http),
+            patch.object(
+                packaged_proxy_module.time,
+                "monotonic",
+                side_effect=[0.0, 0.0, 0.5, 0.75],
+            ),
+            patch.object(packaged_proxy_module.time, "sleep"),
+        ):
+            result = packaged_proxy_module.forward_request(
+                "https://example.com/api", "GET", {}, None, timeout=2.0
+            )
+
+        assert result["statusCode"] == 200
+        attempt_timeouts = [
+            call.kwargs["timeout"].total for call in mock_http.request.call_args_list
+        ]
+        assert attempt_timeouts == pytest.approx([2.0, 1.25])
+
+    @pytest.mark.parametrize(
+        "target_url",
+        [
+            "http://example.com/api",
+            "https://example.com:8443/api",
+        ],
+    )
+    def test_rejects_plaintext_and_non_443_targets(self, packaged_proxy_module, target_url):
+        with pytest.raises(ValueError, match="Backend proxy targets must use HTTPS on port 443"):
+            packaged_proxy_module.forward_request(target_url, "GET", {}, None)
 
 
 class TestForwardRequestTimeout:
@@ -62,11 +142,31 @@ class TestForwardRequestTimeout:
         mock_http.request.side_effect = urllib3.exceptions.TimeoutError("timed out")
 
         with patch.object(pu, "_http", mock_http):
-            result = pu.forward_request("http://example.com/api", "GET", {}, None, timeout=1.0)
+            result = pu.forward_request("https://example.com/api", "GET", {}, None, timeout=1.0)
 
         assert result["statusCode"] == 504
         body = json.loads(result["body"])
         assert "Gateway timeout" in body["error"]
+
+    def test_retry_attempts_share_one_total_budget(self, proxy_module):
+        """Each retry receives only the time remaining from the original budget."""
+        pu, _ = proxy_module
+        mock_http = MagicMock()
+        mock_http.request.side_effect = urllib3.exceptions.TimeoutError("timed out")
+
+        with (
+            patch.object(pu, "_http", mock_http),
+            patch.object(pu.time, "monotonic", side_effect=[0.0, 0.0, 0.6, 0.6, 1.0]),
+            patch.object(pu.time, "sleep"),
+        ):
+            result = pu.forward_request("https://example.com/api", "GET", {}, None, timeout=1.0)
+
+        assert result["statusCode"] == 504
+        assert mock_http.request.call_count == 2
+        attempt_timeouts = [
+            call.kwargs["timeout"].total for call in mock_http.request.call_args_list
+        ]
+        assert attempt_timeouts == pytest.approx([1.0, 0.4])
 
     def test_connection_error_returns_503(self, proxy_module):
         """MaxRetryError should result in 503 after retries."""
@@ -74,11 +174,11 @@ class TestForwardRequestTimeout:
 
         mock_http = MagicMock()
         mock_http.request.side_effect = urllib3.exceptions.MaxRetryError(
-            pool=None, url="http://example.com", reason="Connection refused"
+            pool=None, url="https://example.com", reason="Connection refused"
         )
 
         with patch.object(pu, "_http", mock_http):
-            result = pu.forward_request("http://example.com/api", "GET", {}, None)
+            result = pu.forward_request("https://example.com/api", "GET", {}, None)
 
         assert result["statusCode"] == 503
         body = json.loads(result["body"])
@@ -96,7 +196,7 @@ class TestForwardRequestUnknownException:
         mock_http.request.side_effect = RuntimeError("Unexpected crash")
 
         with patch.object(pu, "_http", mock_http):
-            result = pu.forward_request("http://example.com/api", "GET", {}, None)
+            result = pu.forward_request("https://example.com/api", "GET", {}, None)
 
         assert result["statusCode"] == 500
         body = json.loads(result["body"])
@@ -121,10 +221,27 @@ class TestForwardRequestRetryableStatus:
         mock_http.request.return_value = mock_response
 
         with patch.object(pu, "_http", mock_http):
-            result = pu.forward_request("http://example.com/api", "GET", {}, None)
+            result = pu.forward_request("https://example.com/api", "GET", {}, None)
 
         assert result["statusCode"] == 502
         assert mock_http.request.call_count == 3  # 3 retries
+
+    @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+    def test_mutating_methods_never_retry(self, proxy_module, method):
+        """A transient response cannot replay a potentially mutating request."""
+        pu, _ = proxy_module
+        response = MagicMock(status=503, headers={}, data=b"unavailable")
+        mock_http = MagicMock()
+        mock_http.request.return_value = response
+
+        with patch.object(pu, "_http", mock_http):
+            result = pu.forward_request(
+                "https://example.com/api", method, {}, '{"operation":"mutate"}'
+            )
+
+        assert result["statusCode"] == 503
+        assert mock_http.request.call_count == 1
+        response.release_conn.assert_not_called()
 
     def test_429_retries_then_succeeds(self, proxy_module):
         """429 should retry and succeed if next attempt returns 200."""
@@ -142,7 +259,7 @@ class TestForwardRequestRetryableStatus:
         mock_http.request.side_effect = [fail_response, ok_response]
 
         with patch.object(pu, "_http", mock_http):
-            result = pu.forward_request("http://example.com/api", "GET", {}, None)
+            result = pu.forward_request("https://example.com/api", "GET", {}, None)
 
         assert result["statusCode"] == 200
         assert mock_http.request.call_count == 2
@@ -163,7 +280,7 @@ class TestForwardRequestRetryableStatus:
         mock_http.request.side_effect = [fail_response, ok_response]
 
         with patch.object(pu, "_http", mock_http):
-            result = pu.forward_request("http://example.com/api", "GET", {}, None)
+            result = pu.forward_request("https://example.com/api", "GET", {}, None)
 
         assert result["statusCode"] == 200
 
@@ -180,7 +297,7 @@ class TestForwardRequestRetryableStatus:
         mock_http.request.return_value = mock_response
 
         with patch.object(pu, "_http", mock_http):
-            result = pu.forward_request("http://example.com/api", "GET", {}, None)
+            result = pu.forward_request("https://example.com/api", "GET", {}, None)
 
         assert result["statusCode"] == 404
         assert mock_http.request.call_count == 1
@@ -250,7 +367,7 @@ class TestForwardRequestBodyEncoding:
         mock_http.request.return_value = mock_response
 
         with patch.object(pu, "_http", mock_http):
-            pu.forward_request("http://example.com", "GET", {}, None)
+            pu.forward_request("https://example.com", "GET", {}, None)
 
         call_kwargs = mock_http.request.call_args[1]
         assert call_kwargs["body"] is None
@@ -268,7 +385,7 @@ class TestForwardRequestBodyEncoding:
         mock_http.request.return_value = mock_response
 
         with patch.object(pu, "_http", mock_http):
-            pu.forward_request("http://example.com", "POST", {}, '{"key": "value"}')
+            pu.forward_request("https://example.com", "POST", {}, '{"key": "value"}')
 
         call_kwargs = mock_http.request.call_args[1]
         assert call_kwargs["body"] == b'{"key": "value"}'
@@ -286,7 +403,7 @@ class TestForwardRequestBodyEncoding:
         mock_http.request.return_value = mock_response
 
         with patch.object(pu, "_http", mock_http):
-            pu.forward_request("http://example.com", "POST", {}, "")
+            pu.forward_request("https://example.com", "POST", {}, "")
 
         call_kwargs = mock_http.request.call_args[1]
         assert call_kwargs["body"] is None
@@ -311,7 +428,10 @@ class TestGetSecretTokenCaching:
         pu, mock_sm = proxy_module
 
         pu.get_secret_token()
-        pu._cache_timestamp = time.time() - 400  # Expire cache
+        now = time.monotonic()
+        pu._cache_timestamp = now - 400
+        pu._last_successful_refresh = now - 400
+        pu._last_refresh_attempt = 0.0  # Expire normal TTL and permit refresh
 
         mock_sm.get_secret_value.return_value = {"SecretString": json.dumps({"token": "new-token"})}
 
@@ -323,12 +443,41 @@ class TestGetSecretTokenCaching:
         pu, mock_sm = proxy_module
 
         pu.get_secret_token()
-        pu._cache_timestamp = time.time() - 400  # Expire cache
+        now = time.monotonic()
+        pu._cache_timestamp = now - 400
+        pu._last_successful_refresh = now - 400
+        pu._last_refresh_attempt = 0.0  # Expire normal TTL and permit refresh
 
         mock_sm.get_secret_value.side_effect = Exception("SM down")
 
         token = pu.get_secret_token()
         assert token == "test-token"  # Stale cache
+
+    def test_stale_cache_refresh_is_throttled(self, proxy_module):
+        """Requests inside the retry window reuse bounded stale data without an SM call."""
+        pu, mock_sm = proxy_module
+        pu.get_secret_token()
+        now = time.monotonic()
+        pu._last_successful_refresh = now - pu._CACHE_TTL_SECONDS - 1
+        pu._cache_timestamp = pu._last_successful_refresh
+        pu._last_refresh_attempt = now
+        mock_sm.get_secret_value.reset_mock()
+
+        assert pu.get_secret_token() == "test-token"
+        mock_sm.get_secret_value.assert_not_called()
+
+    def test_stale_cache_expires_at_max_age(self, proxy_module):
+        """A signing key older than the stale ceiling fails closed on refresh failure."""
+        pu, mock_sm = proxy_module
+        pu.get_secret_token()
+        now = time.monotonic()
+        pu._last_successful_refresh = now - pu._CACHE_MAX_STALE_SECONDS - 1
+        pu._cache_timestamp = pu._last_successful_refresh
+        pu._last_refresh_attempt = 0.0
+        mock_sm.get_secret_value.side_effect = Exception("SM down")
+
+        with pytest.raises(RuntimeError, match="Authentication signing key is unavailable"):
+            pu.get_secret_token()
 
     def test_no_cache_and_sm_failure_raises(self, proxy_module):
         """SM failure with no cache should raise RuntimeError."""
@@ -336,7 +485,7 @@ class TestGetSecretTokenCaching:
 
         mock_sm.get_secret_value.side_effect = Exception("SM down")
 
-        with pytest.raises(RuntimeError, match="Failed to load secret"):
+        with pytest.raises(RuntimeError, match="Authentication signing key is unavailable"):
             pu.get_secret_token()
 
 
@@ -357,7 +506,7 @@ class TestForwardRequestSuccess:
 
         with patch.object(pu, "_http", mock_http):
             result = pu.forward_request(
-                "http://example.com/api",
+                "https://example.com/api",
                 "POST",
                 {"Accept": "application/json"},
                 '{"input": "data"}',
@@ -381,13 +530,13 @@ class TestForwardRequestSuccess:
         mock_http.request.return_value = mock_response
 
         with patch.object(pu, "_http", mock_http):
-            result = pu.forward_request("http://example.com/api", "POST", {}, '{"name": "test"}')
+            result = pu.forward_request("https://example.com/api", "POST", {}, '{"name": "test"}')
 
         assert result["statusCode"] == 201
         assert mock_http.request.call_count == 1
 
     def test_custom_timeout_passed_to_urllib3(self, proxy_module):
-        """Custom timeout should be passed to urllib3."""
+        """Custom timeout should bound urllib3's total attempt time."""
         pu, _ = proxy_module
 
         mock_response = MagicMock()
@@ -399,7 +548,8 @@ class TestForwardRequestSuccess:
         mock_http.request.return_value = mock_response
 
         with patch.object(pu, "_http", mock_http):
-            pu.forward_request("http://example.com", "GET", {}, None, timeout=5.0)
+            pu.forward_request("https://example.com", "GET", {}, None, timeout=5.0)
 
-        call_kwargs = mock_http.request.call_args[1]
-        assert call_kwargs["timeout"] == 5.0
+        request_timeout = mock_http.request.call_args.kwargs["timeout"]
+        assert isinstance(request_timeout, urllib3.Timeout)
+        assert 0 < request_timeout.total <= 5.0

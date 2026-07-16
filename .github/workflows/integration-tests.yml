@@ -269,7 +269,6 @@ jobs:
               lambda/ga-registration \
               lambda/cross-region-aggregator \
               lambda/regional-api-proxy \
-              lambda/alb-header-validator \
               lambda/secret-rotation \
               lambda/helm-installer; do
             echo "=== $d ==="
@@ -835,62 +834,125 @@ jobs:
           kubectl -n gco-jobs get limitrange gco-jobs-limits
           echo "ResourceQuota and LimitRange applied"
       - name: Verify PodDisruptionBudgets exist
-        # The deployment manifests include PDBs. Verify the apiserver
-        # accepted them — PDBs are a common source of schema errors when
-        # the policy API version changes.
+        # Assert every PDB shipped by the three deployment manifests. A count
+        # greater than zero can hide a partially applied policy set.
         run: |
           set -euo pipefail
-          pdb_count=$(kubectl -n gco-system get pdb --no-headers 2>/dev/null | wc -l | tr -d ' ')
-          echo "PodDisruptionBudgets in gco-system: $pdb_count"
-          if [ "$pdb_count" -eq 0 ]; then
-            echo "WARNING: No PDBs found — deployment manifests may not include them"
-          else
-            kubectl -n gco-system get pdb
-          fi
+          for pdb in \
+              health-monitor-pdb \
+              manifest-processor-pdb \
+              inference-monitor-pdb; do
+            kubectl -n gco-system get pdb "$pdb"
+          done
+          echo "All expected PodDisruptionBudgets exist"
       - name: Verify RBAC restricts unauthorized access
-        # Create a test pod using the gco-service-account (which has
-        # automountServiceAccountToken: false) and verify it cannot
-        # list pods — confirming RBAC is actually enforced.
+        # Use impersonation to verify both sides of the RBAC boundary. Capture
+        # output as well as status so an API/transport error cannot masquerade
+        # as the expected denial.
         run: |
           set -euo pipefail
-          # The SA exists but has no RBAC bindings for pod listing.
-          # --as uses impersonation to test without creating a real pod.
-          if kubectl auth can-i list pods -n gco-jobs --as=system:serviceaccount:gco-jobs:gco-service-account 2>/dev/null; then
-            echo "FAIL: gco-service-account should NOT be able to list pods"
-            exit 1
-          else
+          denied_status=0
+          denied_output=$(kubectl auth can-i list pods -n gco-jobs \
+            --as=system:serviceaccount:gco-jobs:gco-service-account 2>&1) \
+            || denied_status=$?
+          if [ "$denied_status" -eq 1 ] && [ "$denied_output" = "no" ]; then
             echo "PASS: gco-service-account correctly denied pod listing"
+          else
+            echo "FAIL: expected an explicit RBAC denial; status=$denied_status output=$denied_output"
+            exit 1
           fi
-          # Verify the system service accounts DO have their expected permissions
-          if kubectl auth can-i get pods -n gco-system --as=system:serviceaccount:gco-system:gco-health-monitor-sa 2>/dev/null; then
+
+          allowed_output=$(kubectl auth can-i get pods -n gco-system \
+            --as=system:serviceaccount:gco-system:gco-health-monitor-sa 2>&1) || {
+            echo "FAIL: RBAC allow probe errored: $allowed_output"
+            exit 1
+          }
+          if [ "$allowed_output" = "yes" ]; then
             echo "PASS: gco-health-monitor-sa can get pods in gco-system"
           else
-            echo "FAIL: gco-health-monitor-sa should be able to get pods"
+            echo "FAIL: expected an explicit RBAC allow; output=$allowed_output"
             exit 1
           fi
       - name: Verify NetworkPolicy enforcement blocks cross-namespace traffic
-        # With Calico enforcing NetworkPolicies, verify that a pod in
-        # gco-jobs cannot reach services in gco-system (default-deny ingress).
-        # We use a lightweight busybox pod to attempt a connection.
+        # Probe a dedicated HTTP pod whose listener is verified locally first.
+        # This avoids treating an absent Service, an unready application, or a
+        # kubectl error as evidence that Calico enforced the deny policy.
         run: |
           set -euo pipefail
-          # Get the health-monitor service ClusterIP (if it exists)
-          svc_ip=$(kubectl -n gco-system get svc health-monitor -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
-          if [ -z "$svc_ip" ]; then
-            echo "SKIP: health-monitor service not found (no ClusterIP to test against)"
-            exit 0
+          kubectl run netpol-target \
+            --image=busybox:1.38.0 \
+            --namespace=gco-system \
+            --labels=app=netpol-probe \
+            --restart=Never \
+            --command -- sh -c '
+              mkdir -p /www
+              printf "netpol-target-ready\n" > /www/index.html
+              exec httpd -f -p 8080 -h /www
+            '
+          kubectl -n gco-system wait --for=condition=Ready pod/netpol-target --timeout=60s
+
+          target_body=""
+          for _ in $(seq 1 10); do
+            if target_body=$(kubectl -n gco-system exec netpol-target -- \
+              wget -qO- -T 5 http://127.0.0.1:8080); then
+              [ "$target_body" = "netpol-target-ready" ] && break
+            fi
+            sleep 1
+          done
+          if [ "$target_body" != "netpol-target-ready" ]; then
+            echo "FAIL: NetworkPolicy target was not serving the control response"
+            exit 1
           fi
-          # Run a test pod in gco-jobs that tries to reach gco-system
-          # Timeout after 5 seconds — if blocked, wget will fail.
-          kubectl run netpol-test --image=busybox:1.38.0 -n gco-jobs \
-            --restart=Never --rm -i --timeout=30s \
-            -- sh -c "wget -q -O- --timeout=5 http://${svc_ip}:8080/health 2>&1 || echo BLOCKED" \
-            | tee /tmp/netpol-result.txt || true
-          if grep -q "BLOCKED\|timed out\|Connection refused" /tmp/netpol-result.txt; then
+
+          target_ip=$(kubectl -n gco-system get pod netpol-target \
+            -o jsonpath='{.status.podIP}')
+          if [ -z "$target_ip" ]; then
+            echo "FAIL: NetworkPolicy target has no pod IP"
+            exit 1
+          fi
+
+          # Exit 42 only for the expected connection failure. Pod scheduling,
+          # image-pull, and kubectl failures produce a different state/status
+          # and therefore fail the assertion instead of being accepted as deny.
+          kubectl run netpol-test \
+            --image=busybox:1.38.0 \
+            --namespace=gco-jobs \
+            --labels=app=netpol-probe-client \
+            --restart=Never \
+            --command -- sh -c "
+              if wget -qO- -T 5 \"http://${target_ip}:8080\"; then
+                echo NETPOL_REACHABLE
+                exit 0
+              fi
+              echo NETPOL_BLOCKED
+              exit 42
+            "
+
+          phase=""
+          for _ in $(seq 1 60); do
+            phase=$(kubectl -n gco-jobs get pod netpol-test \
+              -o jsonpath='{.status.phase}')
+            case "$phase" in
+              Succeeded|Failed) break ;;
+            esac
+            sleep 1
+          done
+
+          probe_output=$(kubectl -n gco-jobs logs netpol-test 2>&1)
+          exit_code=$(kubectl -n gco-jobs get pod netpol-test \
+            -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}')
+          printf '%s\n' "$probe_output"
+          if [ "$phase" = "Failed" ] && [ "$exit_code" = "42" ] \
+              && printf '%s\n' "$probe_output" | grep -qx NETPOL_BLOCKED; then
             echo "PASS: Cross-namespace traffic blocked by NetworkPolicy"
           else
-            echo "WARNING: Cross-namespace traffic may not be blocked (could be service not ready)"
+            echo "FAIL: NetworkPolicy probe phase=$phase exit=$exit_code"
+            kubectl -n gco-jobs describe pod netpol-test
+            exit 1
           fi
+
+          kubectl -n gco-jobs delete pod netpol-test --wait=false
+          kubectl -n gco-system delete pod netpol-target --wait=false
       - name: Verify all namespaces exist
         run: |
           set -euo pipefail

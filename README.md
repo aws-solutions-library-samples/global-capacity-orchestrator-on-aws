@@ -4,7 +4,7 @@
 
 <p><b><i>One API. Every Accelerator. Any Region.</i></b></p>
 
-<p>Multi-region accelerated-compute orchestration for AWS — NVIDIA GPUs, AWS Trainium, AWS Inferentia, and CPU (amd64 + arm64 / Graviton) — with capacity-aware scheduling, spot fallback, and multi-region autoscaling inference endpoints with automatic failover and latency-aware routing, all from a single REST API and CLI.</p>
+<p>Multi-region accelerated-compute orchestration for AWS — NVIDIA GPUs, AWS Trainium, AWS Inferentia, and CPU (amd64 + arm64 / Graviton) — with capacity-aware placement workflows, spot fallback, and multi-region autoscaling inference endpoints with automatic failover and latency-aware routing, all from a single REST API and CLI.</p>
 
 <!-- BEGIN BADGE TABLE -->
 <p>
@@ -45,11 +45,11 @@
 
 </div>
 
-**What it does.** Spins up [EKS Auto Mode](docs/CONCEPTS.md#eks-auto-mode) clusters across AWS regions, wired together with [Global Accelerator](docs/CONCEPTS.md#global-routing) for latency-aware anycast routing and automatic failover. Submit Kubernetes manifests via a single REST API or CLI — GCO handles capacity-aware scheduling, spot fallback, multi-region autoscaling inference endpoints, and output persistence.
+**What it does.** Spins up [EKS Auto Mode](docs/CONCEPTS.md#eks-auto-mode) clusters across AWS regions, wired together with [Global Accelerator](docs/CONCEPTS.md#global-routing) for latency-aware anycast routing and automatic failover. Submit Kubernetes manifests through a REST API or CLI; capacity tools and auto-region queue/CLI workflows can select a target region, EKS Auto Mode provisions matching nodes, and shared storage can persist workload outputs. The global API routes by network health and proximity—it does not inspect live GPU inventory.
 
-**Who it's for.** Teams running accelerated workloads — LLM training and inference, batch ML, HPC, and general CPU jobs — that need multi-region redundancy, automatic capacity discovery, and IAM-based access without per-cluster kubeconfig distribution. Pre-wired [nodepools](docs/CONCEPTS.md#nodepools) for NVIDIA GPUs (g4dn, g5, and ARM64 g5g), AWS Trainium, AWS Inferentia, and general-purpose CPU on both amd64 and arm64 / Graviton.
+**Who it's for.** Teams running accelerated workloads — LLM training and inference, batch ML, HPC, and general CPU jobs — that need multi-region redundancy, capacity discovery, and IAM-based access without per-cluster kubeconfig distribution. GCO includes the EKS Auto Mode `system` and `general-purpose` NodePools plus project-managed GPU x86, GPU ARM, inference, EFA, Mooncake EFA, Neuron, and CPU NodePools.
 
-**Why it's different.** Capacity-aware routing across regions out of the box, full-stack observability (CloudWatch dashboards, alarms, SNS), and a CDK app validated across 20+ config matrix combinations in CI.
+**Why it's different.** Capacity-aware placement tools and auto-region workflows, health-based global failover, full-stack observability (CloudWatch dashboards, alarms, SNS), and a CDK app validated across 20+ config matrix combinations in CI.
 
 ---
 
@@ -115,7 +115,7 @@ cd global-capacity-orchestrator-on-aws && pipx install -e .
 
 See the [Quick Start](#quick-start) for the full install + first-job walkthrough, or [`docs/CLI.md`](docs/CLI.md) for every CLI command.
 
-> **💡 New to the codebase?** GCO ships with the **GCO MCP server** — an [MCP server](gco_mcp/) exposing 116 tools by default (up to 153 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with MCP support (like [Kiro](https://kiro.dev)) and explore GCO conversationally — ask questions about the codebase instead of reading repository files directly: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [gco_mcp/README.md](gco_mcp/README.md).
+> **💡 New to the codebase?** GCO ships with the **GCO MCP server** — an [MCP server](gco_mcp/) exposing 125 tools by default (up to 165 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with MCP support (like [Kiro](https://kiro.dev)) and explore GCO conversationally — ask questions about the codebase instead of reading repository files directly: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [gco_mcp/README.md](gco_mcp/README.md).
 
 <details>
 <summary><b>Table of Contents</b></summary>
@@ -142,7 +142,7 @@ Running GPU workloads at scale is hard. You need to find regions with available 
 
 | Challenge | Traditional Approach | With GCO |
 |-----------|---------------------|--------------|
-| GPU availability | Manually check each region | Auto-routes to available capacity |
+| GPU availability | Manually check each region | Capacity tools and auto-region workflows compare configured regions |
 | Node provisioning | Pre-provision or wait for scaling | EKS Auto Mode provisions on-demand |
 | Multi-region ops | Manage clusters separately | Single API, automatic routing |
 | Authentication | Configure per-cluster access | IAM-based, uses existing AWS credentials |
@@ -212,7 +212,7 @@ gco jobs logs hello-gco -n gco-jobs -r us-east-1
 ### Deploy an Inference Endpoint
 
 ```bash
-gco inference deploy my-llm -i vllm/vllm-openai:v0.22.0 --gpu-count 1
+gco inference deploy my-llm -i vllm/vllm-openai:v0.24.0 --gpu-count 1
 gco inference status my-llm
 gco inference scale my-llm --replicas 3
 ```
@@ -221,9 +221,9 @@ See the [Quick Start Guide](QUICKSTART.md) for the full step-by-step walkthrough
 
 ## Architecture Overview
 
-<img src="images/gco_ref_architecture_part1.png" alt="GCO Multi-Region Reference Architecture" width="80%">
+![Generated GCO infrastructure architecture](diagrams/infra_diagrams/full-architecture.png)
 
-*Figure 1: Global Capacity Orchestrator — multi-region control plane and regional EKS data planes*
+*Figure 1: Generated CDK architecture for the global control plane and regional EKS data planes*
 
 ### Multi-Region Reference Architecture workflow
 
@@ -231,59 +231,55 @@ See the [Quick Start Guide](QUICKSTART.md) for the full step-by-step walkthrough
 2. The **AWS CDK app** synthesises and deploys the GCO stacks with a single `gco stacks deploy-all`, provisioning the global control plane and one regional stack per target region.
 3. **Users** submit jobs and inference requests through the `gco` CLI, which signs every call with **AWS SigV4** credentials.
 4. **Amazon API Gateway** (edge-optimized) is the global entry point. It enforces **IAM (SigV4) authentication** on every request before anything reaches the backend.
-5. An **AWS Lambda proxy** injects a rotating secret header sourced from **AWS Secrets Manager**, adding a second authentication factor in front of the regional load balancers.
+5. An **AWS Lambda proxy** signs the exact backend request with a short-lived HMAC envelope derived from a rotating **AWS Secrets Manager** key. The reusable key is never transmitted.
 6. **AWS Global Accelerator** routes each request over the AWS backbone via anycast IPs to the nearest healthy region, providing automatic cross-region failover.
-7. A regional **AWS Application Load Balancer** receives Global Accelerator traffic and forwards it into the cluster. ALBs accept only Global Accelerator IPs.
-8. Each region runs an **Amazon EKS cluster** (EKS Auto Mode optional) with Karpenter GPU / Trainium / Inferentia / CPU node pools plus the GCO platform services — Health Monitor, Manifest Processor, Queue Processor, and Inference endpoints.
+7. A regional internal **AWS Application Load Balancer** terminates the deployment-local private-root TLS connection forwarded through Global Accelerator, then sends HTTP to the shared platform Ingress targets.
+8. Each region runs an **Amazon EKS Auto Mode cluster** with built-in `system` and `general-purpose` NodePools plus project-managed GPU, inference, EFA, Mooncake EFA, Neuron, and CPU NodePools. Platform services include the Health Monitor, Manifest Processor, Queue Processor, and Inference Monitor.
 
-Below is the per-region view showing how a single regional stack is composed.
-
-<img src="images/gco_ref_architecture_part2.png" alt="GCO Regional Architecture" width="80%">
-
-*Figure 2: Regional stack — EKS cluster, Karpenter node pools, platform services, and regional AWS services*
+Below is the per-region workflow for a single regional stack.
 
 ### Regional Architecture workflow
 
-1. A public-subnet **Application Load Balancer** accepts inbound traffic restricted to Global Accelerator IPs only.
-2. The **Amazon EKS cluster** is the heart of the regional stack, hosting both platform services and user workloads.
-3. **Karpenter node pools** provision capacity on demand across `system`, `general-purpose`, `gpu-x86` (g4dn/g5), `gpu-arm` (g5g), `inference`, and `gpu-efa` (p4d/p5/p6) pools.
-4. **Workloads & platform services** run across namespaces: `gco-system` (Health Monitor, Manifest Processor, Queue Processor, Inference Monitor) and `gco-jobs` / `gco-inference` (training and batch jobs, inference endpoints, and job DAG pipelines).
-5. **Storage & data** services back the workloads: Amazon EFS (shared RWX), optional FSx for Lustre (HPC), optional Valkey cache, optional Aurora pgvector (RAG), and Amazon S3 for KMS-encrypted model weights.
-6. An optional **Regional API Gateway** (IAM auth over a VPC Link) provides direct in-VPC access for private clusters without public ALB exposure.
-7. An internal **Network Load Balancer** in private subnets fronts in-cluster services for VPC-internal traffic.
-8. **Regional AWS services** complete the stack: Amazon SQS for the job queue, Amazon DynamoDB for state, and Amazon CloudWatch for metrics and logs.
+1. An internal **Application Load Balancer** created from the shared platform Ingress accepts only HTTPS/443 with a rotating regional ACM leaf, then forwards HTTP to cluster services after TLS termination.
+2. The **Amazon EKS Auto Mode cluster** is the heart of the regional stack, hosting platform services and user workloads with a private API endpoint by default.
+3. **NodePools** provision capacity on demand: built-in `system` and `general-purpose`, plus `gpu-x86-pool`, `gpu-arm-pool`, `gpu-inference-pool`, `gpu-efa-pool`, `mooncake-efa-pool`, `neuron-pool`, and `cpu-general-pool`.
+4. **Workloads and platform services** run across namespaces: `gco-system` (Health Monitor, Manifest Processor, Queue Processor, Inference Monitor) and `gco-jobs` / `gco-inference` (training and batch jobs, inference endpoints, and job DAG pipelines).
+5. **Storage and data services** back workloads: Amazon EFS, optional FSx for Lustre, optional Valkey, optional Aurora pgvector, and Amazon S3 for KMS-encrypted model weights.
+6. An always-deployed **Regional API Gateway bridge** gives the aggregator a SigV4-authenticated path to the VPC Lambda and internal ALB; `regional_api_enabled` controls only optional direct same-account callers.
+7. **Regional AWS services** complete the stack: Amazon SQS for job ingestion, DynamoDB-backed state where applicable, and Amazon CloudWatch metrics and logs.
 
 <details>
-<summary>📊 Full Architecture Diagram (click to expand)</summary>
+<summary>Infrastructure diagram generation details</summary>
 
-![Full Architecture](diagrams/infra_diagrams/full-architecture.png)
+Regenerate the full architecture and every per-stack view with `python diagrams/infra_diagrams/generate.py`. The generator synthesizes the current CDK app through cdk-dia so the committed diagrams track the deployed resource graph. See [`diagrams/infra_diagrams/README.md`](diagrams/infra_diagrams/README.md) for per-stack flags (`--stack global|api-gateway|regional|regional-api|monitoring|analytics|all`).
 
 </details>
 
-Regenerate this diagram and every per-stack view on demand with `python diagrams/infra_diagrams/generate.py` — it synthesises the current CDK app through cdk-dia so the diagrams never drift from the source. See [`diagrams/infra_diagrams/README.md`](diagrams/infra_diagrams/README.md) for per-stack flags (`--stack global|api-gateway|regional|regional-api|monitoring|analytics|all`). Flowcharts of the code itself (Lambda handlers, CLI commands) live alongside them under [`diagrams/code_diagrams/`](diagrams/code_diagrams/README.md).
+Flowcharts of Lambda handlers, CLI commands, stack constructors, and MCP control paths live under [`diagrams/code_diagrams/`](diagrams/code_diagrams/README.md).
 
 > The regional stack can be deployed to any AWS region. Add or remove regions by editing the `deployment_regions.regional` array in `cdk.json`.
 
 ### Security Model
 
-<img src="images/gco_ref_architecture_part3.png" alt="GCO Security Architecture and Request Flow" width="80%">
+Six complementary controls protect backend requests:
 
-*Figure 3: Defense-in-depth — five security layers applied across the request flow*
-
-Five layers protect every request:
-
-1. **IAM Authentication** — API Gateway validates AWS credentials (SigV4)
-2. **Secret Header** — Lambda injects a rotating token from Secrets Manager
-3. **IP Restriction** — ALBs only accept Global Accelerator IPs
-4. **Header Validation** — Backend services verify the secret token
-5. **IRSA** — Pods assume IAM roles for AWS access (no static credentials)
+1. **IAM authentication** — API Gateway validates AWS credentials with SigV4.
+2. **TLS trust separation** — API Gateway uses AWS-managed TLS; proxy-to-ALB traffic uses a deployment-local private root and explicit `backend.<project>.gco.internal` SNI/hostname verification.
+3. **Request-bound HMAC** — a trusted Lambda signs the version, timestamp, nonce, method, exact target, and body digest with a rotating key that is never transmitted. HMAC provides integrity/freshness/replay defense, not encryption.
+4. **Private backend exposure** — regional ALBs are internal and the EKS API endpoint is private by default.
+5. **Freshness and integrity validation** — backend middleware rejects stale, altered, or replayed envelopes.
+6. **IRSA / EKS Pod Identity** — pods receive scoped AWS permissions without static workload credentials.
 
 ```text
-Request flow: User → API Gateway (SigV4) → Lambda (adds secret) → Global Accelerator
-  → ALB (GA IPs only) → Services (validate secret)
+Request flow: User → API Gateway (AWS TLS + SigV4) → Lambda (HMAC)
+  → Global Accelerator (TCP/443 pass-through) → internal ALB (private-root TLS)
+  → AuthenticationMiddleware (HTTP after ALB termination)
 ```
 
-For private clusters, [Regional API Gateways](docs/CUSTOMIZATION.md#regional-api-gateway-private-access) provide direct VPC access without public ALB exposure.
+Every region's API bridge is required for aggregator fan-out. Optional [direct
+regional access](docs/CUSTOMIZATION.md#regional-api-gateway-aggregation-bridge-and-direct-regional-access)
+provides an IAM-authorized, region-pinned VPC-Lambda path to the same internal
+ALB.
 
 See [Architecture Details](docs/ARCHITECTURE.md) for the full deep dive.
 
@@ -294,7 +290,7 @@ See [Architecture Details](docs/ARCHITECTURE.md) for the full deep dive.
 | [Amazon EKS](https://aws.amazon.com/eks/) | Kubernetes control plane and Auto Mode compute (GPU, Trainium, Inferentia, CPU nodepools) |
 | [AWS Global Accelerator](https://aws.amazon.com/global-accelerator/) | Anycast endpoint with health-based cross-region routing and automatic failover |
 | [Amazon API Gateway](https://aws.amazon.com/api-gateway/) | IAM-authenticated (SigV4) REST entry point for job submission and inference |
-| [AWS Lambda](https://aws.amazon.com/lambda/) | Proxy functions (auth header injection, GA registration), manifest application, Helm chart installation orchestration |
+| [AWS Lambda](https://aws.amazon.com/lambda/) | HMAC-signing proxy functions, Global Accelerator registration, manifest application, and Helm chart installation orchestration |
 | [AWS Step Functions](https://aws.amazon.com/step-functions/) | Orchestrates Helm chart installs — one state per chart with per-chart retry and backoff |
 | [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) | Inference endpoint desired-state store, job queue state, and template storage |
 | [Amazon SQS](https://aws.amazon.com/sqs/) | Regional job ingestion queue with dead-letter queue and KEDA-driven scale-to-zero consumer |
@@ -306,8 +302,8 @@ See [Architecture Details](docs/ARCHITECTURE.md) for the full deep dive.
 | [Amazon ECR](https://aws.amazon.com/ecr/) | Container image registry with cross-region replication for platform and user images |
 | [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/) | Metrics, logs, alarms, dashboards, and Container Insights for GPU utilization |
 | [Amazon SNS](https://aws.amazon.com/sns/) | Alert notifications for drift detection, health issues, and capacity events |
-| [AWS Secrets Manager](https://aws.amazon.com/secrets-manager/) | Rotating auth tokens for ALB header validation |
-| [AWS KMS](https://aws.amazon.com/kms/) | Encryption keys for S3 model buckets, EFS, and secrets |
+| [AWS Secrets Manager](https://aws.amazon.com/secrets-manager/) | Rotating HMAC signing key plus the KMS-encrypted deployment-local TLS root state |
+| [AWS KMS](https://aws.amazon.com/kms/) | Encryption keys for S3 model buckets, EFS, application secrets, and the backend TLS root secret |
 | [AWS IAM](https://aws.amazon.com/iam/) | IRSA roles for pod-level AWS access, service roles, and SigV4 authentication |
 | [AWS CDK](https://aws.amazon.com/cdk/) | Infrastructure as code — synthesizes, validates (cdk-nag), and deploys all stacks |
 | [Amazon VPC](https://aws.amazon.com/vpc/) | Network isolation with public/private subnets, NAT Gateways, and VPC endpoints |
@@ -331,7 +327,7 @@ The following estimates are for a single-region deployment with default settings
 | EFS | Elastic storage (varies with usage) | ~$3 (10 GB stored) |
 | CloudWatch | Logs, metrics, Container Insights | ~$15 |
 | ECR | Image storage + replication | ~$5 |
-| Secrets Manager | 1 secret with rotation | < $1 |
+| Secrets Manager | 2 secrets with managed lifecycle (HMAC key and backend TLS root) | < $2 |
 | **Subtotal (platform, no GPU workloads)** | | **~$210/month** |
 | GPU instances (example) | 1× g5.xlarge on-demand, 24/7 (us-east-1) | ~$734 |
 | GPU instances (spot) | 1× g5.xlarge spot, 24/7 (us-east-1) | ~$250 |
@@ -383,10 +379,10 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 ### Compute & Orchestration
 
 - **EKS Auto Mode** with automatic node provisioning — no pre-scaling needed
-- **GPU support** for x86_64 (g4dn, g5) and ARM64 (g5g) via Karpenter nodepools
+- **GPU and accelerator support** through `gpu-x86-pool`, `gpu-arm-pool`, `gpu-inference-pool`, `gpu-efa-pool`, `mooncake-efa-pool`, and `neuron-pool`, plus built-in and project-scoped CPU pools
 - **Multiple submission methods**: API Gateway, SQS queues, DynamoDB job queue, or direct kubectl
 - **Job pipelines (DAGs)**: Multi-step ML pipelines with dependency ordering and failure handling
-- **Helm-managed ecosystem**: KEDA, Volcano, KubeRay, Kueue, DRA, and more — configurable via `cdk.json`
+- **Helm-managed ecosystem**: mandatory KEDA; EFA and Neuron device plugins; Volcano, KubeRay, cert-manager, optional kube-prometheus-stack, and Kueue; opt-in Slurm/Slinky and YuniKorn
 
 ### Inference Serving
 
@@ -400,7 +396,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 
 - **Global Accelerator**: Single anycast endpoint with automatic failover
 - **IAM authentication**: SigV4 at the API Gateway — no kubeconfig distribution
-- **Compliance validated**: CDK-nag checks for AWS Solutions, HIPAA, NIST 800-53, PCI DSS
+- **Infrastructure policy validation**: cdk-nag v3 rule packs for AWS Solutions, HIPAA, NIST 800-53, PCI DSS, and Serverless findings (these checks are not certifications)
 - **Network policies**: Default-deny with explicit allow rules for all service communication
 - **EFA support**: Optional Elastic Fabric Adapter for high-bandwidth distributed training and NIXL-based inference (toggle on/off)
 
@@ -521,7 +517,6 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 │       └── constants.py                 # Pinned versions: EKS addons, Lambda runtime, Aurora engine
 │
 ├── lambda/                              # Lambda functions
-│   ├── alb-header-validator/            # ALB header validation for auth tokens
 │   ├── analytics-cleanup/               # Custom resource that deletes Studio user profiles + EFS access points on stack destroy
 │   ├── analytics-presigned-url/         # Generates presigned SageMaker Studio URLs for Cognito-authenticated users
 │   ├── api-gateway-proxy/               # API Gateway → Global Accelerator proxy
@@ -537,7 +532,7 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 │   ├── regional-api-proxy/              # Regional API Gateway → internal ALB proxy
 │   └── secret-rotation/                 # Daily secret rotation
 │
-├── gco_mcp/                             # MCP server for LLM interaction (116 tools default, up to 153 with feature flags)
+├── gco_mcp/                             # MCP server for LLM interaction (125 tools default, up to 165 with feature flags)
 ├── scripts/                             # Utility scripts (version bump, cluster access setup)
 └── tests/                               # PyTest + BATS test suites (counts tracked via badges)
 ```
@@ -580,13 +575,13 @@ GCO implements defense-in-depth across five layers (see [Security Model](#securi
 **Authentication and Authorization:**
 
 - All API requests require AWS IAM (SigV4) authentication at the API Gateway
-- A Lambda-injected rotating secret from AWS Secrets Manager adds a second factor
+- The trusted proxy Lambda adds a request-bound HMAC envelope using a rotating Secrets Manager key; the reusable key is never sent downstream
 - IRSA (IAM Roles for Service Accounts) provides pod-level AWS access with no static credentials
 - EKS access entries with explicit policy bindings (no aws-auth ConfigMap)
 
 **Network Security:**
 
-- ALBs only accept traffic from Global Accelerator IP ranges
+- Regional platform ALBs are internal; the EKS API endpoint defaults to `PRIVATE`
 - EKS clusters run in private subnets with configurable endpoint access (PRIVATE or PUBLIC_AND_PRIVATE)
 - VPC endpoints eliminate traffic traversal over the public internet for ECR, S3, STS, SSM, and CloudWatch
 - VPC Flow Logs (30-day retention) capture all network traffic for audit
@@ -594,19 +589,25 @@ GCO implements defense-in-depth across five layers (see [Security Model](#securi
 
 **Encryption:**
 
-- Data at rest: S3 (KMS), EFS (KMS), EBS (KMS), DynamoDB (AWS-managed), Secrets Manager (KMS)
-- Data in transit: TLS 1.2+ for all connections including EFS mounts
-- Kubernetes secrets encrypted in etcd (EKS-managed encryption)
+- Data at rest: S3 (KMS), EFS (KMS), EBS (KMS), DynamoDB (AWS-managed), and Secrets Manager (KMS)
+- Client-to-global/regional API traffic uses AWS-managed TLS and IAM SigV4. Cross-region aggregation also uses AWS-managed TLS plus SigV4 from the aggregator to each regional API bridge.
+- The normal global proxy → Global Accelerator → ALB path and each regional VPC proxy → ALB path use authenticated private-root TLS on TCP/HTTPS 443. Global Accelerator is a Layer 4 pass-through and does not terminate TLS.
+- Every ALB leaf is issued for `backend.<project>.gco.internal`; clients send that identity through SNI and assert it while connecting to dynamic accelerator or ALB DNS names. ALB → Kubernetes pod traffic remains HTTP after ALB termination.
+- The root private key exists only in a customer-managed-KMS-encrypted Secrets Manager secret readable by the certificate-manager role. Proxy roles read only the public SSM trust bundle; rotating leaves are reimported into stable regional ACM ARNs.
+- The request-bound HMAC envelope adds integrity, freshness, and replay defense; it is not encryption and is independent of TLS confidentiality and server authentication.
+- EFS mount encryption in transit is enabled by the deployed storage configuration.
+- Kubernetes secrets are encrypted in etcd (EKS-managed encryption).
 
-**Compliance Validation:**
+**Infrastructure Policy Validation:**
 
-- CDK-nag runs automatically during synthesis and deployment, validating against:
+- Five cdk-nag v3 rule packs run during CDK policy validation:
   - AWS Solutions best practices
-  - HIPAA Security Rule
-  - NIST 800-53 Rev 5
-  - PCI DSS 3.2.1
+  - HIPAA Security Rule mappings
+  - NIST 800-53 Rev 5 mappings
+  - PCI DSS 3.2.1 mappings
   - Serverless best practices
-- All suppressions are documented with justifications in `gco/stacks/nag_suppressions.py`
+- Findings are either fixed or explicitly acknowledged with justification in `gco/stacks/nag_suppressions.py`.
+- These automated checks are not certifications and do not by themselves establish compliance.
 
 **Supply Chain Security:**
 

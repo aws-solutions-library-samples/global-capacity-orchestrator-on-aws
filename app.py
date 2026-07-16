@@ -5,11 +5,15 @@ GCO (Global Capacity Orchestrator on AWS) - Multi-Region EKS Auto Mode Platform 
 This is the main CDK application entry point that orchestrates the deployment of:
 - Global Stack: AWS Global Accelerator for multi-region routing
 - API Gateway Stack: Centralized IAM-authenticated entry point
-- Regional Stacks: EKS clusters, ALBs, and services per region
+- Regional Stacks: EKS clusters, internal ALBs, and services per region
+- Regional API Bridges: SigV4 entry points with VPC Lambdas for aggregation and optional direct access
 - Monitoring Stack: Cross-region CloudWatch dashboards and alarms
+- Optional Analytics Stack: SageMaker Studio and EMR Serverless
 
 Architecture:
-    User → API Gateway (IAM Auth) → Global Accelerator → Regional ALB → EKS Services
+    User → API Gateway (IAM Auth) → Global Accelerator → Internal Regional ALB → EKS Services
+    Aggregator → Regional API Gateway (SigV4) → VPC Lambda → Internal Regional ALB
+    User (optional direct access) ───────────────────────────┘
 
 Usage:
     cdk deploy --all                    # Deploy all stacks
@@ -29,6 +33,7 @@ from gco.stacks.api_gateway_global_stack import AnalyticsApiConfig, GCOApiGatewa
 from gco.stacks.global_stack import GCOGlobalStack
 from gco.stacks.monitoring_stack import GCOMonitoringStack
 from gco.stacks.nag_suppressions import nag_validation_plugins
+from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
 from gco.stacks.regional_stack import GCORegionalStack
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -70,7 +75,10 @@ def main() -> None:
     1. Global stack (Global Accelerator) - must be created first
     2. API Gateway stack - depends on Global Accelerator DNS
     3. Regional stacks - depend on both global stacks
-    4. Monitoring stack - depends on all regional stacks
+    4. Regional API bridges - depend on their matching regional stack
+       (direct caller access remains an optional policy setting)
+    5. Monitoring stack - depends on all regional stacks
+    6. Optional analytics stack - feeds Studio routes into the API Gateway stack
     """
     app = cdk.App()
 
@@ -107,6 +115,7 @@ def main() -> None:
     api_gateway_region = deployment_regions["api_gateway"]
     monitoring_region = deployment_regions["monitoring"]
     regional_regions = deployment_regions["regional"]
+    api_gateway_config = config.get_api_gateway_config()
 
     # Apply common tags to all stacks
     for key, value in tags.items():
@@ -139,6 +148,10 @@ def main() -> None:
         f"{project_name}-api-gateway",
         global_accelerator_dns=global_stack.accelerator.dns_name,
         project_name=project_name,
+        api_gateway_config=api_gateway_config,
+        registry_region=global_region,
+        certificate_regions=regional_regions,
+        backend_tls_config=config.get_backend_tls_config(),
         env=cdk.Environment(account=account, region=api_gateway_region),
         description="Global API Gateway with IAM authentication",
     )
@@ -162,10 +175,23 @@ def main() -> None:
         regional_stack.add_dependency(api_gateway_stack)
         regional_stacks.append(regional_stack)
 
-        # Register regional ALB with Global Accelerator
-        # alb_arn is set during regional stack construction; it's always populated
-        # by the time CloudFormation processes the dependency chain.
-        global_stack.add_regional_endpoint(region, regional_stack.alb_arn)  # type: ignore[arg-type]
+        # Every region gets an IAM-authenticated API bridge so the centralized
+        # aggregator can reach the private ALB through a VPC-attached Lambda.
+        # ``regional_api_enabled`` controls only whether other account
+        # principals may invoke the bridge directly; it never disables the
+        # aggregator's required path.
+        regional_api_stack = GCORegionalApiGatewayStack(
+            app,
+            f"{project_name}-regional-api-{region}",
+            config=config,
+            region=region,
+            vpc=regional_stack.vpc,
+            auth_secret_arn=api_gateway_stack.secret.secret_arn,
+            aggregator_role_arn=api_gateway_stack.aggregator_role.role_arn,
+            env=cdk.Environment(account=account, region=region),
+            description=(f"Regional aggregation bridge for {region} with optional direct access"),
+        )
+        regional_api_stack.add_dependency(regional_stack)
 
     # Create monitoring stack
     monitoring_stack = GCOMonitoringStack(

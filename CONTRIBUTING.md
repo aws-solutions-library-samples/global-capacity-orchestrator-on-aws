@@ -236,7 +236,12 @@ mypy gco/ cli/ --ignore-missing-imports --check-untyped-defs
 
 ### Authentication
 
-The in-cluster services use token-based authentication via AWS Secrets Manager. The auth middleware (`gco/services/auth_middleware.py`) validates an `X-GCO-Auth-Token` header on every request (except health checks).
+The in-cluster services validate short-lived HMAC request envelopes produced by
+the IAM-protected API Gateway proxies. The middleware
+(`gco/services/auth_middleware.py`) binds each signature to its timestamp, nonce,
+HTTP method, exact path/query, and body digest, accepts current and pending
+Secrets Manager keys during rotation, and rejects stale or replayed envelopes.
+The reusable signing key is never sent to the cluster as a request header.
 
 **Important:** The middleware is fail-closed by default. If `AUTH_SECRET_ARN` is not set and `GCO_DEV_MODE` is not enabled, all authenticated requests return 503. To run services locally without Secrets Manager:
 
@@ -312,10 +317,10 @@ cli/                         # CLI commands and utilities
 lambda/
 ├── kubectl-applier-simple/  # Lambda for kubectl operations
 ├── helm-installer/          # Lambda for Helm chart installation
-├── api-gateway-proxy/       # API Gateway proxy Lambda
+├── api-gateway-proxy/       # Global API Gateway proxy and HMAC signer
+├── regional-api-proxy/      # Region-pinned API Gateway proxy and HMAC signer
 ├── ga-registration/         # Global Accelerator registration
-├── secret-rotation/         # Secret rotation Lambda
-└── alb-header-validator/    # ALB header validation
+└── secret-rotation/         # Backend HMAC signing-key rotation Lambda
 
 dockerfiles/         # Dockerfiles for K8s services
 docs/                # Documentation
@@ -772,8 +777,14 @@ aws cloudformation describe-stack-events \
   --region us-east-1 \
   --max-items 20
 
-# Check Lambda logs
-aws logs tail /aws/lambda/gco-us-east-1-KubectlApplier* \
+# Resolve generated Lambda and log-group physical names
+aws cloudformation list-stack-resources \
+  --stack-name gco-us-east-1 \
+  --region us-east-1 \
+  --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function' || ResourceType=='AWS::Logs::LogGroup'].{Type:ResourceType,Logical:LogicalResourceId,Physical:PhysicalResourceId}"
+
+# Tail the exact log group selected from the output above
+aws logs tail <EXACT_LOG_GROUP_NAME> \
   --region us-east-1 \
   --since 30m
 

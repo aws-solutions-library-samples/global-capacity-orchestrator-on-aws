@@ -10,6 +10,7 @@ has instance_type/gpu_count/gpu parameters, and so on), call round
 trips, and error propagation back through the protocol.
 """
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -357,7 +358,8 @@ class TestMCPProtocolResources:
             result = await client.read_resource("config://gco/index")
             text = result[0].text if result else ""
             assert "config://gco/cdk.json" in text
-            assert "config://gco/feature-toggles" in text
+            assert "mcp://gco/feature-flags" in text
+            assert "config://gco/feature-toggles" not in text
 
     @pytest.mark.asyncio
     @pytest.mark.integration
@@ -373,14 +375,16 @@ class TestMCPProtocolResources:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
-    async def test_read_config_feature_toggles(self):
-        """Reading config://gco/feature-toggles should list toggles."""
+    async def test_read_mcp_feature_flags(self):
+        """Reading mcp://gco/feature-flags should return the live gating map."""
         from fastmcp import Client
 
         async with Client(run_mcp.mcp) as client:
-            result = await client.read_resource("config://gco/feature-toggles")
+            result = await client.read_resource("mcp://gco/feature-flags")
             text = result[0].text if result else ""
-            assert "Feature Toggles" in text
+            payload = json.loads(text)
+            names = {item["name"] for item in payload["flags"]}
+            assert "GCO_ENABLE_MODEL_UPLOAD" in names
 
     @pytest.mark.asyncio
     @pytest.mark.integration

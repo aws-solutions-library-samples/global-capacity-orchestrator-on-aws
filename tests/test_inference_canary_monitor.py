@@ -1,13 +1,11 @@
 """
 Tests for canary deployment reconciliation in gco/services/inference_monitor.py.
 
-Covers _reconcile_canary — creating a "-canary" Deployment + Service
-when the canary config appears, updating the canary image when it
-changes, scaling canary replicas, and re-weighting the Ingress — plus
-_cleanup_canary which tears down the canary resources when the field
-is removed. Uses a shared monitor fixture that builds an InferenceMonitor
-via __new__ with every Kubernetes API attribute mocked out, so tests
-never need a real cluster or K8s config on disk.
+Covers _reconcile_canary — validating the desired canary, creating or
+updating its Deployment and Service, deriving an isolated canary spec,
+and publishing observed image/readiness status for authenticated proxy
+routing — plus removal of historical direct Ingresses and cleanup when
+the canary field is removed. Kubernetes APIs are fully mocked.
 """
 
 from __future__ import annotations
@@ -39,30 +37,48 @@ def monitor():
 class TestReconcileCanary:
     """Tests for _reconcile_canary method."""
 
-    def test_creates_canary_deployment_when_missing(self, monitor):
-        monitor.apps_v1.read_namespaced_deployment.side_effect = ApiException(status=404)
-
-        canary = {"image": "new:v2", "weight": 20, "replicas": 1}
-        spec = {"image": "old:v1", "port": 8000, "replicas": 2, "gpu_count": 1, "canary": canary}
+    def test_creates_canary_deployment_with_isolated_spec_when_missing(self, monitor):
+        canary = {"image": " new:v2 ", "weight": 20, "replicas": 1}
+        original_spec = {
+            "image": "old:v1",
+            "port": 8000,
+            "replicas": 2,
+            "gpu_count": 1,
+            "region_image_uris": {"us-east-1": "regional-old:v1"},
+            "canary": canary,
+        }
         endpoint = {"ingress_path": "/inference/ep"}
 
-        # Mock _get_deployment to return None for canary
         with (
             patch.object(monitor, "_get_deployment", return_value=None),
             patch.object(monitor, "_create_deployment") as mock_create,
             patch.object(monitor, "_create_service") as mock_svc,
-            patch.object(monitor, "_update_canary_ingress"),
+            patch.object(monitor, "_update_canary_ingress") as mock_ingress,
         ):
-            monitor._reconcile_canary("ep", "ns", spec, canary, endpoint)
+            status = monitor._reconcile_canary("ep", "ns", original_spec, canary, endpoint)
 
-        mock_create.assert_called_once()
-        mock_svc.assert_called_once()
-        # Verify canary deployment name
-        assert mock_create.call_args[0][0] == "ep-canary"
+        submitted_spec = mock_create.call_args.args[2]
+        assert mock_create.call_args.args[:2] == ("ep-canary", "ns")
+        assert mock_svc.call_args.args[:2] == ("ep-canary", "ns")
+        assert submitted_spec["image"] == "new:v2"
+        assert submitted_spec["replicas"] == 1
+        assert "canary" not in submitted_spec
+        assert "region_image_uris" not in submitted_spec
+        assert "canary" in original_spec
+        assert "region_image_uris" in original_spec
+        mock_ingress.assert_called_once_with("ep", "ns", original_spec, endpoint, 80, 20)
+        assert status == {
+            "state": "creating",
+            "image": "new:v2",
+            "weight": 20,
+            "replicas_ready": 0,
+            "replicas_desired": 1,
+        }
 
     def test_updates_canary_image_when_changed(self, monitor):
         mock_deployment = MagicMock()
         mock_deployment.spec.replicas = 1
+        mock_deployment.status.ready_replicas = 1
 
         with (
             patch.object(monitor, "_get_deployment", return_value=mock_deployment),
@@ -71,7 +87,7 @@ class TestReconcileCanary:
             patch.object(monitor, "_scale_deployment"),
             patch.object(monitor, "_update_canary_ingress"),
         ):
-            monitor._reconcile_canary(
+            status = monitor._reconcile_canary(
                 "ep",
                 "ns",
                 {"image": "old:v1", "canary": {"image": "new:v2"}},
@@ -80,10 +96,14 @@ class TestReconcileCanary:
             )
 
         mock_update.assert_called_once_with("ep-canary", "ns", "new:v2")
+        assert status["state"] == "updating"
+        assert status["replicas_ready"] == 0
+        assert status["image"] == "new:v2"
 
     def test_scales_canary_when_replicas_changed(self, monitor):
         mock_deployment = MagicMock()
         mock_deployment.spec.replicas = 1
+        mock_deployment.status.ready_replicas = 1
 
         with (
             patch.object(monitor, "_get_deployment", return_value=mock_deployment),
@@ -91,7 +111,7 @@ class TestReconcileCanary:
             patch.object(monitor, "_scale_deployment") as mock_scale,
             patch.object(monitor, "_update_canary_ingress"),
         ):
-            monitor._reconcile_canary(
+            status = monitor._reconcile_canary(
                 "ep",
                 "ns",
                 {"image": "old:v1", "canary": {"image": "new:v2"}},
@@ -100,6 +120,78 @@ class TestReconcileCanary:
             )
 
         mock_scale.assert_called_once_with("ep-canary", "ns", 3)
+        assert status["state"] == "updating"
+        assert status["replicas_ready"] == 1
+        assert status["replicas_desired"] == 3
+
+    def test_reports_running_only_when_all_canary_replicas_are_ready(self, monitor):
+        mock_deployment = MagicMock()
+        mock_deployment.spec.replicas = 2
+        mock_deployment.status.ready_replicas = 2
+
+        with (
+            patch.object(monitor, "_get_deployment", return_value=mock_deployment),
+            patch.object(monitor, "_get_deployment_image", return_value="new:v2"),
+            patch.object(monitor, "_update_canary_ingress"),
+        ):
+            status = monitor._reconcile_canary(
+                "ep",
+                "ns",
+                {"image": "old:v1", "canary": {"image": "new:v2"}},
+                {"image": "new:v2", "weight": 25, "replicas": 2},
+                {"ingress_path": "/inference/ep"},
+            )
+
+        assert status == {
+            "state": "running",
+            "image": "new:v2",
+            "weight": 25,
+            "replicas_ready": 2,
+            "replicas_desired": 2,
+        }
+
+    @pytest.mark.parametrize(
+        ("canary", "message"),
+        [
+            ({"image": "", "weight": 10, "replicas": 1}, "canary.image must be a non-empty string"),
+            (
+                {"image": None, "weight": 10, "replicas": 1},
+                "canary.image must be a non-empty string",
+            ),
+            (
+                {"image": "new:v2", "weight": 10, "replicas": 0},
+                "canary.replicas must be a positive integer",
+            ),
+            (
+                {"image": "new:v2", "weight": 10, "replicas": True},
+                "canary.replicas must be a positive integer",
+            ),
+            (
+                {"image": "new:v2", "weight": 0, "replicas": 1},
+                "canary.weight must be an integer between 1 and 99",
+            ),
+            (
+                {"image": "new:v2", "weight": 100, "replicas": 1},
+                "canary.weight must be an integer between 1 and 99",
+            ),
+            (
+                {"image": "new:v2", "weight": True, "replicas": 1},
+                "canary.weight must be an integer between 1 and 99",
+            ),
+        ],
+    )
+    def test_rejects_invalid_canary_fields(self, monitor, canary, message):
+        with pytest.raises(ValueError, match=message):
+            monitor._reconcile_canary(
+                "ep",
+                "ns",
+                {"image": "old:v1", "canary": canary},
+                canary,
+                {"ingress_path": "/inference/ep"},
+            )
+
+        monitor.apps_v1.create_namespaced_deployment.assert_not_called()
+        monitor.core_v1.create_namespaced_service.assert_not_called()
 
 
 class TestCleanupCanary:
@@ -130,46 +222,36 @@ class TestCleanupCanary:
 
 
 class TestUpdateCanaryIngress:
-    """Tests for _update_canary_ingress method."""
+    """Canary reconciliation removes the historical unauthenticated rule."""
 
-    def test_patches_existing_ingress(self, monitor):
+    def test_deletes_only_the_legacy_primary_ingress(self, monitor):
         spec = {"image": "vllm/vllm-openai:v0.8.0", "health_check_path": "/health"}
         endpoint = {"ingress_path": "/inference/ep"}
 
-        monitor._update_canary_ingress("ep", "ns", spec, endpoint, 80, 20)
-
-        monitor.networking_v1.patch_namespaced_ingress.assert_called_once()
-        call_args = monitor.networking_v1.patch_namespaced_ingress.call_args
-        assert call_args[0][0] == "inference-ep"
-
-    def test_creates_ingress_on_404(self, monitor):
-        monitor.networking_v1.patch_namespaced_ingress.side_effect = ApiException(status=404)
-
-        spec = {"image": "vllm/vllm-openai:v0.8.0", "health_check_path": "/health"}
-        endpoint = {"ingress_path": "/inference/ep"}
-
-        monitor._update_canary_ingress("ep", "ns", spec, endpoint, 80, 20)
-
-        monitor.networking_v1.create_namespaced_ingress.assert_called_once()
-
-    def test_raises_on_non_404_error(self, monitor):
-        monitor.networking_v1.patch_namespaced_ingress.side_effect = ApiException(status=500)
-
-        spec = {"image": "img:v1", "health_check_path": "/health"}
-        endpoint = {"ingress_path": "/inference/ep"}
-
-        with pytest.raises(ApiException):
+        with patch.object(monitor, "_delete_legacy_inference_ingress") as mock_delete:
             monitor._update_canary_ingress("ep", "ns", spec, endpoint, 80, 20)
 
-    def test_canary_label_set(self, monitor):
-        spec = {"image": "img:v1", "health_check_path": "/health"}
-        endpoint = {"ingress_path": "/inference/ep"}
+        mock_delete.assert_called_once_with("inference-ep", "ns")
+        monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
+        monitor.networking_v1.create_namespaced_ingress.assert_not_called()
 
-        monitor._update_canary_ingress("ep", "ns", spec, endpoint, 90, 10)
-
-        call_args = monitor.networking_v1.patch_namespaced_ingress.call_args
-        ingress = call_args[0][2]
-        assert ingress.metadata.labels["gco.io/canary"] == "true"
+    def test_propagates_legacy_ingress_cleanup_errors(self, monitor):
+        with (
+            patch.object(
+                monitor,
+                "_delete_legacy_inference_ingress",
+                side_effect=ApiException(status=500),
+            ),
+            pytest.raises(ApiException),
+        ):
+            monitor._update_canary_ingress(
+                "ep",
+                "ns",
+                {"image": "img:v1"},
+                {"ingress_path": "/inference/ep"},
+                80,
+                20,
+            )
 
 
 class TestCapacityTypeNodeSelector:

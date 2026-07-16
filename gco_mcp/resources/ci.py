@@ -13,7 +13,7 @@ GITHUB_ISSUE_TEMPLATE_DIR = GITHUB_DIR / "ISSUE_TEMPLATE"
 GITHUB_KIND_DIR = GITHUB_DIR / "kind"
 GITHUB_CODEQL_DIR = GITHUB_DIR / "codeql"
 
-_CI_EXTENSIONS = {".yml", ".yaml", ".md", ".sh", ".json", ".toml"}
+_CI_EXTENSIONS = {".yml", ".yaml", ".md", ".sh", ".py", ".json", ".toml"}
 _CI_CONFIG_FILES = {
     "CI.md",
     "CODEOWNERS",

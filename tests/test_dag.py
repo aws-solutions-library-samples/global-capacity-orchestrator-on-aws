@@ -279,6 +279,56 @@ class TestDagRunner:
         assert result.has_failures()
 
     @patch("cli.dag.get_job_manager")
+    def test_run_dag_failure_skips_transitive_dependents(self, mock_jm_factory):
+        mock_jm = MagicMock()
+        mock_jm_factory.return_value = mock_jm
+        mock_jm.submit_job.side_effect = RuntimeError("submit failed")
+        mock_jm.load_manifests.return_value = [{"kind": "Job", "metadata": {"name": "a"}}]
+
+        dag = DagDefinition(
+            name="transitive-failure",
+            steps=[
+                DagStep(name="a", manifest="examples/simple-job.yaml"),
+                DagStep(name="b", manifest="examples/simple-job.yaml", depends_on=["a"]),
+                DagStep(name="c", manifest="examples/simple-job.yaml", depends_on=["b"]),
+            ],
+            region="us-east-1",
+        )
+
+        result = DagRunner(job_manager=mock_jm).run(dag)
+
+        assert [step.status for step in result.steps] == ["failed", "skipped", "skipped"]
+        mock_jm.submit_job.assert_called_once()
+
+    @patch("cli.dag.get_job_manager")
+    def test_run_waits_for_returned_job_identity(self, mock_jm_factory):
+        mock_jm = MagicMock()
+        mock_jm_factory.return_value = mock_jm
+        mock_jm.load_manifests.return_value = [
+            {"kind": "Job", "metadata": {"name": "requested", "namespace": "requested-ns"}}
+        ]
+        mock_jm.submit_job.return_value = {
+            "resources": [{"kind": "Job", "name": "generated-abc", "namespace": "actual-ns"}]
+        }
+        mock_jm.wait_for_job.return_value = MagicMock(status="succeeded")
+        dag = DagDefinition(
+            name="generated-name",
+            steps=[DagStep(name="a", manifest="examples/simple-job.yaml")],
+            region="us-east-1",
+        )
+
+        result = DagRunner(job_manager=mock_jm).run(dag)
+
+        assert result.steps[0].job_name == "generated-abc"
+        mock_jm.wait_for_job.assert_called_once_with(
+            job_name="generated-abc",
+            namespace="actual-ns",
+            region="us-east-1",
+            timeout_seconds=3600,
+            poll_interval=10,
+        )
+
+    @patch("cli.dag.get_job_manager")
     def test_run_dag_no_regions(self, mock_jm_factory):
         mock_jm = MagicMock()
         mock_jm_factory.return_value = mock_jm

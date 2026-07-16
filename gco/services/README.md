@@ -29,7 +29,8 @@ Each service runs as a container built from a Dockerfile in `dockerfiles/`. The 
 | `webhook_dispatcher.py` | Dispatches webhook notifications (HMAC-signed) on job lifecycle events (submitted, running, completed, failed). |
 | `inference_store.py` | DynamoDB-backed store for inference endpoint specs and per-region status. |
 | `metrics_publisher.py` | Publishes custom CloudWatch metrics (job counts, latency, queue depth). |
-| `auth_middleware.py` | FastAPI middleware that validates the `X-GCO-Auth-Token` secret header on every request. |
+| `central_queue_worker.py` | Fenced, renewable-lease worker that adopts or creates deterministic Kubernetes Jobs from the global DynamoDB queue. |
+| `auth_middleware.py` | Validates short-lived HMAC request envelopes (timestamp, nonce, method, target, and body digest) from trusted API Gateway proxies. |
 | `structured_logging.py` | JSON structured logging configuration for all services. |
 | `api_shared.py` | Shared Pydantic models and helper functions used by all API routes. |
 
@@ -39,8 +40,9 @@ The `api_routes/` subdirectory splits the FastAPI routes into focused modules:
 
 | File | Description |
 |------|-------------|
-| `jobs.py` | Job listing, status, logs, events, deletion |
-| `queue.py` | Job queue submission and stats |
+| `inference_proxy.py` | Authenticated, allowlisted reverse proxy for managed inference serving paths (`GET`, `HEAD`, and `POST` only). |
+| `jobs.py` | Job listing, status, logs, events, pods, metrics, retry, and deletion |
+| `queue.py` | Idempotent global queue submission, opaque pagination, bounded stats, queued-only cancellation, and operator polling |
 | `manifests.py` | Manifest submission and validation |
 | `templates.py` | Template CRUD |
 | `webhooks.py` | Webhook registration and testing |

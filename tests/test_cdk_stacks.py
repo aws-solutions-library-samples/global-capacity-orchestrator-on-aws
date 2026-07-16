@@ -14,6 +14,38 @@ import pytest
 from aws_cdk import assertions
 
 
+def _methods_for_child_resource(
+    template: assertions.Template,
+    parent_path_part: str,
+    child_path_part: str,
+) -> set[str]:
+    """Return methods attached to one exact parent/child API resource path."""
+    resources = template.find_resources("AWS::ApiGateway::Resource")
+    parent_ids = [
+        logical_id
+        for logical_id, resource in resources.items()
+        if resource.get("Properties", {}).get("PathPart") == parent_path_part
+    ]
+    assert len(parent_ids) == 1
+    parent_id = parent_ids[0]
+
+    child_ids = [
+        logical_id
+        for logical_id, resource in resources.items()
+        if resource.get("Properties", {}).get("PathPart") == child_path_part
+        and resource.get("Properties", {}).get("ParentId") == {"Ref": parent_id}
+    ]
+    assert len(child_ids) == 1
+    child_id = child_ids[0]
+
+    methods = template.find_resources("AWS::ApiGateway::Method")
+    return {
+        resource["Properties"]["HttpMethod"]
+        for resource in methods.values()
+        if resource.get("Properties", {}).get("ResourceId") == {"Ref": child_id}
+    }
+
+
 # Mock the ConfigLoader to avoid needing actual cdk.json context
 class MockConfigLoader:
     """Mock ConfigLoader for testing."""
@@ -67,6 +99,20 @@ class MockConfigLoader:
             "health_check_path": "/api/v1/health",
         }
 
+    def get_backend_tls_config(self):
+        return {
+            "root_generation": 1,
+            "root_validity_days": 3650,
+            "root_rotate_before_days": 180,
+            "root_activation_delay_hours": 24,
+            "root_overlap_days": 45,
+            "leaf_validity_days": 30,
+            "leaf_rotate_before_days": 10,
+            "rotation_schedule_hours": 12,
+            "trust_cache_ttl_seconds": 300,
+            "trust_cache_max_stale_seconds": 3600,
+        }
+
     def get_alb_config(self):
         return {
             "health_check_interval": 30,
@@ -80,7 +126,7 @@ class MockConfigLoader:
             "image": "gco/manifest-processor:latest",
             "replicas": 3,
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
-            "allowed_namespaces": ["default", "gco-jobs"],
+            "allowed_namespaces": ["gco-jobs"],
             "resource_quotas": {
                 "max_cpu_per_manifest": "10",
                 "max_memory_per_manifest": "32Gi",
@@ -153,6 +199,20 @@ class TestGlobalStackSynth:
 
         template = assertions.Template.from_stack(stack)
         template.resource_count_is("AWS::GlobalAccelerator::Listener", 1)
+        template.has_resource_properties(
+            "AWS::GlobalAccelerator::Listener",
+            {
+                "PortRanges": [{"FromPort": 443, "ToPort": 443}],
+                "Protocol": "TCP",
+            },
+        )
+        template.has_resource_properties(
+            "AWS::GlobalAccelerator::EndpointGroup",
+            {
+                "HealthCheckPort": 443,
+                "HealthCheckProtocol": "HTTPS",
+            },
+        )
 
     def test_listener_default_client_affinity_is_none(self):
         """Listener defaults to NONE client affinity when knob is omitted."""
@@ -234,6 +294,53 @@ class TestApiGatewayStackSynth:
         # Verify API Gateway REST API is created
         template.resource_count_is("AWS::ApiGateway::RestApi", 1)
 
+    def test_api_gateway_consumes_stage_config_and_registry_region(self):
+        """Stage knobs and the SSM registry region must reach synthesized resources."""
+        from gco.stacks.api_gateway_global_stack import GCOApiGatewayGlobalStack
+
+        app = cdk.App()
+        stack = GCOApiGatewayGlobalStack(
+            app,
+            "test-api-gateway-config",
+            global_accelerator_dns="test-accelerator.awsglobalaccelerator.com",
+            api_gateway_config={
+                "throttle_rate_limit": 37,
+                "throttle_burst_limit": 73,
+                "log_level": "ERROR",
+                "metrics_enabled": False,
+                "tracing_enabled": False,
+            },
+            registry_region="eu-west-1",
+        )
+
+        template = assertions.Template.from_stack(stack)
+        template.has_resource_properties(
+            "AWS::ApiGateway::Stage",
+            {
+                "MethodSettings": assertions.Match.array_with(
+                    [
+                        assertions.Match.object_like(
+                            {
+                                "LoggingLevel": "ERROR",
+                                "MetricsEnabled": False,
+                                "ThrottlingRateLimit": 37,
+                                "ThrottlingBurstLimit": 73,
+                            }
+                        )
+                    ]
+                ),
+                "TracingEnabled": False,
+            },
+        )
+        template.has_resource_properties(
+            "AWS::Lambda::Function",
+            {
+                "Environment": {
+                    "Variables": assertions.Match.object_like({"GLOBAL_REGION": "eu-west-1"})
+                }
+            },
+        )
+
     def test_api_gateway_has_secret(self):
         """Test that ApiGatewayStack creates a secret for auth."""
         from gco.stacks.api_gateway_global_stack import GCOApiGatewayGlobalStack
@@ -247,7 +354,28 @@ class TestApiGatewayStackSynth:
         )
 
         template = assertions.Template.from_stack(stack)
-        template.resource_count_is("AWS::SecretsManager::Secret", 1)
+        template.resource_count_is("AWS::SecretsManager::Secret", 2)
+        template.resource_count_is("AWS::KMS::Key", 1)
+        template.has_resource_properties(
+            "AWS::SecretsManager::Secret",
+            {"Name": "gco/backend-tls/root-ca"},
+        )
+        template.has_resource_properties(
+            "AWS::Lambda::Function",
+            {
+                "FunctionName": "gco-backend-tls-manager",
+                "PackageType": "Image",
+                "Environment": {
+                    "Variables": assertions.Match.object_like(
+                        {
+                            "BACKEND_TLS_SERVER_NAME": "backend.gco.gco.internal",
+                            "ROOT_CA_PARAMETER_NAME": "/gco/backend-tls/root-ca.pem",
+                            "CERTIFICATE_REGIONS": '["us-east-1"]',
+                        }
+                    )
+                },
+            },
+        )
 
     def test_api_gateway_has_lambda(self):
         """Test that ApiGatewayStack creates Lambda proxy function(s)."""
@@ -283,6 +411,24 @@ class TestApiGatewayStackSynth:
         template.has_resource_properties(
             "AWS::ApiGateway::Method", {"AuthorizationType": "AWS_IAM"}
         )
+
+    def test_inference_surface_exposes_only_serving_methods(self):
+        """The inference greedy resource excludes unsupported mutation verbs."""
+        from gco.stacks.api_gateway_global_stack import GCOApiGatewayGlobalStack
+
+        app = cdk.App()
+        stack = GCOApiGatewayGlobalStack(
+            app,
+            "test-api-gateway-inference-methods",
+            global_accelerator_dns="test-accelerator.awsglobalaccelerator.com",
+        )
+
+        template = assertions.Template.from_stack(stack)
+        assert _methods_for_child_resource(template, "inference", "{proxy+}") == {
+            "GET",
+            "HEAD",
+            "POST",
+        }
 
 
 class TestMonitoringStackSynth:
@@ -432,6 +578,7 @@ class TestConfigIntegration:
         assert config.get_alb_config() is not None
         assert config.get_manifest_processor_config() is not None
         assert config.get_api_gateway_config() is not None
+        assert config.get_backend_tls_config() is not None
 
     def test_global_stack_uses_config(self):
         """Test that GlobalStack uses configuration values."""

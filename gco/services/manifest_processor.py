@@ -13,7 +13,7 @@ Key Features:
 - Supports dry-run mode for validation without applying
 
 Security Validations:
-- Namespace must be in allowed list (default: default, gco-jobs)
+- Namespace must be in allowed list (default: gco-jobs)
 - No privileged containers or privilege escalation
 - Images must be from trusted registries
 - Resource requests/limits within configured maximums
@@ -34,8 +34,11 @@ Usage:
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import logging
 import os
+import re
 from typing import Any, cast
 
 import yaml
@@ -50,6 +53,14 @@ from gco.models import (
     ResourceStatus,
 )
 from gco.services.structured_logging import configure_structured_logging, sanitize_log_value
+
+# <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Flowchart(s) generated from this file:
+#   * ``ManifestProcessor.apply_queued_job`` -> ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.html``
+#     (PNG: ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.png``)
+# Regenerate with ``python diagrams/code_diagrams/generate.py``.
+# <pyflowchart-code-diagram> END
+
 
 # NOTE: No logging.basicConfig() here. This module is imported by the CLI
 # (cli/jobs.py, cli/commands/*_cmd.py) as a library for YAML loading helpers.
@@ -67,6 +78,34 @@ logger = logging.getLogger(__name__)
 # Taint key == resource key for all three. Kept in sync with the mirror in
 # gco/services/queue_processor.py::ACCELERATOR_TAINTS.
 ACCELERATOR_TAINTS = ("nvidia.com/gpu", "aws.amazon.com/neuron", "vpc.amazonaws.com/efa")
+
+# Authoritative resource-kind policy shared by the REST and SQS submission
+# paths. Keep the fallback here so both services fail closed to the same set
+# when ALLOWED_KINDS is not explicitly configured.
+DEFAULT_ALLOWED_KINDS = (
+    "Job",
+    "CronJob",
+    "Deployment",
+    "StatefulSet",
+    "DaemonSet",
+    "Service",
+    "ConfigMap",
+    "Pod",
+)
+
+
+def validate_resource_kind(
+    manifest: dict[str, Any], allowed_kinds: set[str] | tuple[str, ...] = DEFAULT_ALLOWED_KINDS
+) -> tuple[bool, str | None]:
+    """Validate a manifest kind against the shared submission allowlist."""
+    kind = manifest.get("kind", "")
+    allowed = set(allowed_kinds)
+    if kind not in allowed:
+        return (
+            False,
+            f"Resource kind '{kind}' is not allowed. Allowed kinds: {sorted(allowed)}",
+        )
+    return True, None
 
 
 def _positive_quantity(value: Any) -> bool:
@@ -228,9 +267,7 @@ class ManifestProcessor:
         self.require_accelerator_toleration = config_dict.get(
             "require_accelerator_toleration", True
         )
-        self.allowed_namespaces = set(
-            config_dict.get("allowed_namespaces", ["default", "gco-jobs"])
-        )
+        self.allowed_namespaces = set(config_dict.get("allowed_namespaces", ["gco-jobs"]))
         self.validation_enabled = config_dict.get("validation_enabled", True)
 
         # Trusted registries for image validation (configurable via cdk.json)
@@ -272,21 +309,7 @@ class ManifestProcessor:
         self.yaml_max_depth = int(config_dict.get("yaml_max_depth", 50))
 
         # Allowed resource kinds (configurable via cdk.json)
-        self.allowed_kinds = set(
-            config_dict.get(
-                "allowed_kinds",
-                [
-                    "Job",
-                    "CronJob",
-                    "Deployment",
-                    "StatefulSet",
-                    "DaemonSet",
-                    "Service",
-                    "ConfigMap",
-                    "Pod",
-                ],
-            )
-        )
+        self.allowed_kinds = set(config_dict.get("allowed_kinds", DEFAULT_ALLOWED_KINDS))
 
         # Security policy — toggleable checks (configurable via cdk.json)
         security_policy = config_dict.get("manifest_security_policy", {})
@@ -428,10 +451,19 @@ class ManifestProcessor:
             return all(self._check_yaml_depth(item, current_depth + 1) for item in obj)
         return True
 
-    def validate_manifest(self, manifest: dict[str, Any]) -> tuple[bool, str | None]:
-        """
-        Validate a Kubernetes manifest for security and resource constraints
-        Returns: (is_valid, error_message)
+    def validate_manifest(
+        self,
+        manifest: dict[str, Any],
+        default_namespace: str | None = None,
+    ) -> tuple[bool, str | None]:
+        """Validate a Kubernetes manifest for security and resource constraints.
+
+        ``default_namespace`` is the request-level destination for manifests
+        that omit ``metadata.namespace``. Validation and apply must resolve the
+        same effective namespace or the request default could bypass the
+        namespace allowlist.
+
+        Returns: ``(is_valid, error_message)``.
         """
         if not self.validation_enabled:
             return True, None
@@ -456,20 +488,18 @@ class ManifestProcessor:
                 return False, "Missing metadata.name field"
 
             # Validate namespace
-            namespace = metadata.get("namespace", "default")
+            namespace = metadata.get("namespace", default_namespace or "gco-jobs")
             if namespace not in self.allowed_namespaces:
                 return (
                     False,
                     f"Namespace '{namespace}' not allowed. Allowed namespaces: {list(self.allowed_namespaces)}",
                 )
 
-            # Validate resource kind
+            # Validate resource kind using the policy shared with the SQS path.
             kind = manifest.get("kind", "")
-            if kind not in self.allowed_kinds:
-                return (
-                    False,
-                    f"Resource kind '{kind}' is not allowed. Allowed kinds: {sorted(self.allowed_kinds)}",
-                )
+            kind_valid, kind_error = validate_resource_kind(manifest, self.allowed_kinds)
+            if not kind_valid:
+                return False, kind_error
 
             # Validate resource limits for workload resources
             if kind in [
@@ -845,7 +875,7 @@ class ManifestProcessor:
             for i, manifest_data in enumerate(request.manifests):
                 try:
                     # Validate manifest
-                    is_valid, error_msg = self.validate_manifest(manifest_data)
+                    is_valid, error_msg = self.validate_manifest(manifest_data, request.namespace)
                     if not is_valid:
                         error_msg = f"Manifest {i + 1} validation failed: {error_msg}"
                         errors.append(error_msg)
@@ -856,7 +886,9 @@ class ManifestProcessor:
                             api_version=manifest_data.get("apiVersion", "unknown"),
                             kind=manifest_data.get("kind", "unknown"),
                             name=manifest_data.get("metadata", {}).get("name", f"manifest-{i + 1}"),
-                            namespace=manifest_data.get("metadata", {}).get("namespace", "default"),
+                            namespace=manifest_data.get("metadata", {}).get(
+                                "namespace", request.namespace or "gco-jobs"
+                            ),
                             status="failed",
                             message=error_msg,
                         )
@@ -880,7 +912,7 @@ class ManifestProcessor:
                             kind=manifest_data.get("kind", "unknown"),
                             name=manifest_data.get("metadata", {}).get("name", "unknown"),
                             namespace=manifest_data.get("metadata", {}).get(
-                                "namespace", request.namespace or "default"
+                                "namespace", request.namespace or "gco-jobs"
                             ),
                             status="unchanged",
                             message="Dry run - validation passed",
@@ -898,7 +930,9 @@ class ManifestProcessor:
                         api_version=manifest_data.get("apiVersion", "unknown"),
                         kind=manifest_data.get("kind", "unknown"),
                         name=manifest_data.get("metadata", {}).get("name", f"manifest-{i + 1}"),
-                        namespace=manifest_data.get("metadata", {}).get("namespace", "default"),
+                        namespace=manifest_data.get("metadata", {}).get(
+                            "namespace", request.namespace or "gco-jobs"
+                        ),
                         status="failed",
                         message=str(e),
                     )
@@ -925,6 +959,118 @@ class ManifestProcessor:
 
         return response
 
+    @staticmethod
+    def queued_job_name(original_name: str, queue_job_id: str) -> str:
+        """Return a DNS-label-safe Kubernetes name deterministically fenced by queue ID."""
+        suffix = hashlib.sha256(queue_job_id.encode("utf-8")).hexdigest()[:16]
+        prefix = re.sub(r"[^a-z0-9-]+", "-", original_name.lower()).strip("-")
+        prefix = prefix[: 63 - len(suffix) - 1].rstrip("-") or "gco-job"
+        return f"{prefix}-{suffix}"
+
+    def apply_queued_job(
+        self,
+        manifest_data: dict[str, Any],
+        namespace: str,
+        queue_job_id: str,
+    ) -> ResourceStatus:
+        """Create or adopt exactly one deterministic ``batch/v1`` Job.
+
+        This path deliberately bypasses generic manifest upsert semantics: it
+        never deletes, renames, or replaces an existing Job. An ambiguous API
+        result is safe to retry because the same queue ID always resolves to the
+        same Kubernetes name and adoption requires the full queue ID annotation.
+        """
+        manifest = copy.deepcopy(manifest_data)
+        if manifest.get("apiVersion") != "batch/v1" or manifest.get("kind") != "Job":
+            raise ValueError("Central queue accepts only apiVersion 'batch/v1', kind 'Job'")
+
+        metadata = manifest.get("metadata")
+        if not isinstance(metadata, dict):
+            raise ValueError("Queued Job metadata must be an object")
+        declared_namespace = metadata.get("namespace")
+        if declared_namespace is not None and declared_namespace != namespace:
+            raise ValueError("Queued Job namespace does not match the queue envelope")
+        original_name = metadata.get("name")
+        if not isinstance(original_name, str) or not original_name:
+            raise ValueError("Queued Job metadata.name is required")
+
+        deterministic_name = self.queued_job_name(original_name, queue_job_id)
+        metadata["name"] = deterministic_name
+        metadata["namespace"] = namespace
+        labels = metadata.setdefault("labels", {})
+        annotations = metadata.setdefault("annotations", {})
+        if not isinstance(labels, dict) or not isinstance(annotations, dict):
+            raise ValueError("Queued Job metadata labels and annotations must be objects")
+        labels["gco.io/managed-by"] = "central-queue"
+        labels["gco.io/queue-job-key"] = hashlib.sha256(queue_job_id.encode("utf-8")).hexdigest()[
+            :32
+        ]
+        annotations["gco.io/queue-job-id"] = queue_job_id
+        annotations["gco.io/original-job-name"] = original_name
+
+        is_valid, validation_error = self.validate_manifest(manifest, namespace)
+        if not is_valid:
+            raise ValueError(f"Queued Job validation failed: {validation_error}")
+        self._inject_security_defaults(manifest)
+
+        try:
+            job = self.batch_v1.read_namespaced_job(
+                name=deterministic_name,
+                namespace=namespace,
+                _request_timeout=self._k8s_timeout,
+            )
+            operation = "unchanged"
+            message = "Existing deterministic Kubernetes Job adopted"
+        except ApiException as error:
+            if error.status != 404:
+                raise
+            try:
+                job = self.batch_v1.create_namespaced_job(
+                    namespace=namespace,
+                    body=manifest,
+                    _request_timeout=self._k8s_timeout,
+                )
+                operation = "created"
+                message = "Deterministic Kubernetes Job created"
+            except ApiException as create_error:
+                if create_error.status != 409:
+                    raise
+                job = self.batch_v1.read_namespaced_job(
+                    name=deterministic_name,
+                    namespace=namespace,
+                    _request_timeout=self._k8s_timeout,
+                )
+                operation = "unchanged"
+                message = "Concurrent deterministic Kubernetes Job adopted"
+
+        actual_annotations = getattr(job.metadata, "annotations", None) or {}
+        if actual_annotations.get("gco.io/queue-job-id") != queue_job_id:
+            raise RuntimeError(
+                f"Kubernetes Job name collision for {namespace}/{deterministic_name}"
+            )
+        uid = str(getattr(job.metadata, "uid", "") or "")
+        actual_name = str(getattr(job.metadata, "name", "") or deterministic_name)
+        actual_namespace = str(getattr(job.metadata, "namespace", "") or namespace)
+        if not uid:
+            raise RuntimeError("Kubernetes API returned a queued Job without a UID")
+        return ResourceStatus(
+            api_version="batch/v1",
+            kind="Job",
+            name=actual_name,
+            namespace=actual_namespace,
+            status=operation,
+            message=message,
+            uid=uid,
+        )
+
+    def read_queued_job(self, name: str, namespace: str) -> V1Job:
+        """Read one reconciled Job through the processor's bounded client contract."""
+        return self.batch_v1.read_namespaced_job(
+            name=name,
+            namespace=namespace,
+            _request_timeout=self._k8s_timeout,
+        )
+
     async def _apply_manifest(
         self, manifest_data: dict[str, Any], default_namespace: str | None = None
     ) -> ResourceStatus:
@@ -939,7 +1085,7 @@ class ManifestProcessor:
             kind: str = manifest_data.get("kind", "unknown")
             metadata = manifest_data.get("metadata", {})
             name: str = metadata.get("name", "unknown")
-            namespace: str = metadata.get("namespace", default_namespace or "default")
+            namespace: str = metadata.get("namespace", default_namespace or "gco-jobs")
 
             # Ensure namespace is set in manifest
             if "namespace" not in metadata and namespace:
@@ -1014,7 +1160,7 @@ class ManifestProcessor:
                 api_version=manifest_data.get("apiVersion", "unknown"),
                 kind=manifest_data.get("kind", "unknown"),
                 name=manifest_data.get("metadata", {}).get("name", "unknown"),
-                namespace=manifest_data.get("metadata", {}).get("namespace", "default"),
+                namespace=manifest_data.get("metadata", {}).get("namespace", "gco-jobs"),
                 status="failed",
                 message=f"API error: {e.reason}",
             )
@@ -1024,7 +1170,7 @@ class ManifestProcessor:
                 api_version=manifest_data.get("apiVersion", "unknown"),
                 kind=manifest_data.get("kind", "unknown"),
                 name=manifest_data.get("metadata", {}).get("name", "unknown"),
-                namespace=manifest_data.get("metadata", {}).get("namespace", "default"),
+                namespace=manifest_data.get("metadata", {}).get("namespace", "gco-jobs"),
                 status="failed",
                 message=str(e),
             )
@@ -1079,23 +1225,17 @@ class ManifestProcessor:
             )
             raise ValueError(f"Unknown resource type: {api_version}/{kind}") from e
 
-    async def _create_resource(self, manifest_data: dict[str, Any]) -> bool:
-        """Create a new resource from manifest using dynamic client"""
+    async def _create_resource(self, manifest_data: dict[str, Any]) -> Any:
+        """Create a resource and return the API object, including server identity."""
         try:
             api_version = manifest_data.get("apiVersion", "")
             kind = manifest_data.get("kind", "")
             namespace = manifest_data.get("metadata", {}).get("namespace")
 
-            # Get the API resource
             api_resource = self._get_api_resource(api_version, kind)
-
-            # Create the resource
             if namespace and api_resource.namespaced:
-                api_resource.create(body=manifest_data, namespace=namespace)
-            else:
-                api_resource.create(body=manifest_data)
-
-            return True
+                return api_resource.create(body=manifest_data, namespace=namespace)
+            return api_resource.create(body=manifest_data)
         except Exception as e:
             logger.error(f"Error creating resource: {e}")
             raise
@@ -1354,9 +1494,25 @@ def create_manifest_processor_from_env() -> ManifestProcessor:
             "REQUIRE_ACCELERATOR_TOLERATION", "true"
         ).lower()
         == "true",
-        "allowed_namespaces": os.getenv("ALLOWED_NAMESPACES", "default,gco-jobs").split(","),
+        "allowed_namespaces": (
+            ["gco-jobs"]
+            if os.getenv("ALLOWED_NAMESPACES") is None
+            else [
+                namespace.strip()
+                for namespace in os.environ["ALLOWED_NAMESPACES"].split(",")
+                if namespace.strip()
+            ]
+        ),
         "validation_enabled": os.getenv("VALIDATION_ENABLED", "true").lower() == "true",
     }
+
+    allowed_kinds_env = os.getenv("ALLOWED_KINDS")
+    if allowed_kinds_env is not None:
+        # An absent variable uses the authoritative defaults; an explicitly
+        # empty value is a deliberate deny-all policy and must stay empty.
+        config_dict["allowed_kinds"] = [
+            kind.strip() for kind in allowed_kinds_env.split(",") if kind.strip()
+        ]
 
     # Image registry allowlist — sourced from the same CDK env vars the
     # queue_processor reads, so an attacker who holds sqs:SendMessage on

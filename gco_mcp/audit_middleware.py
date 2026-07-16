@@ -24,9 +24,16 @@ tests that construct a Context directly).
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
-from audit import audit_elicitations_var, audit_messages_var
+from audit import (
+    _sanitize_value,
+    _truncate_string,
+    audit_elicitations_var,
+    audit_messages_var,
+    audit_resource_read,
+)
 from fastmcp.server.context import Context
 from fastmcp.server.middleware import Middleware
 
@@ -36,6 +43,8 @@ from fastmcp.server.middleware import Middleware
 # module-level boolean: if a re-import re-runs this module, the same
 # marker survives because the patched method on ``Context`` survives.
 _SPY_MARKER = "_gco_audit_spy"
+_MAX_CAPTURED_MESSAGES = 100
+_MAX_CAPTURED_ELICITATIONS = 100
 
 
 def _install_context_patches() -> None:
@@ -50,35 +59,33 @@ def _install_context_patches() -> None:
 
     async def _spy_warning(self: Context, message: str, *args: Any, **kwargs: Any) -> Any:
         lst = audit_messages_var.get()
-        if lst is not None:
-            lst.append({"level": "warning", "message": str(message)})
+        if lst is not None and len(lst) < _MAX_CAPTURED_MESSAGES:
+            lst.append({"level": "warning", "message": _truncate_string(str(message))})
         return await _orig_warning(self, message, *args, **kwargs)
 
     async def _spy_info(self: Context, message: str, *args: Any, **kwargs: Any) -> Any:
         lst = audit_messages_var.get()
-        if lst is not None:
-            lst.append({"level": "info", "message": str(message)})
+        if lst is not None and len(lst) < _MAX_CAPTURED_MESSAGES:
+            lst.append({"level": "info", "message": _truncate_string(str(message))})
         return await _orig_info(self, message, *args, **kwargs)
 
     async def _spy_error(self: Context, message: str, *args: Any, **kwargs: Any) -> Any:
         lst = audit_messages_var.get()
-        if lst is not None:
-            lst.append({"level": "error", "message": str(message)})
+        if lst is not None and len(lst) < _MAX_CAPTURED_MESSAGES:
+            lst.append({"level": "error", "message": _truncate_string(str(message))})
         return await _orig_error(self, message, *args, **kwargs)
 
     async def _spy_elicit(self: Context, message: str, *args: Any, **kwargs: Any) -> Any:
         result = await _orig_elicit(self, message, *args, **kwargs)
         lst = audit_elicitations_var.get()
-        if lst is not None:
+        if lst is not None and len(lst) < _MAX_CAPTURED_ELICITATIONS:
             entry: dict[str, Any] = {
-                "message": str(message),
-                "action": getattr(result, "action", None),
+                "message": _truncate_string(str(message)),
+                "action": _sanitize_value(getattr(result, "action", None), depth=0, seen=set()),
             }
             data = getattr(result, "data", None)
             if data is not None:
-                # Stringify to avoid leaking arbitrary user objects through
-                # the audit log; the audit log is a JSON-line stream.
-                entry["data"] = data if isinstance(data, (str, int, float, bool)) else str(data)
+                entry["data"] = _sanitize_value(data, depth=0, seen=set())
             lst.append(entry)
         return result
 
@@ -115,6 +122,30 @@ class AuditCaptureMiddleware(Middleware):
         finally:
             audit_messages_var.reset(msg_token)
             audit_elicitations_var.reset(elic_token)
+
+    async def on_read_resource(self, context: Any, call_next: Any) -> Any:
+        """Audit every static and templated resource read in one place."""
+        started = time.time()
+        uri = getattr(getattr(context, "message", None), "uri", "")
+        fastmcp_context = getattr(context, "fastmcp_context", None)
+        try:
+            result = await call_next(context)
+        except Exception as exc:
+            audit_resource_read(
+                uri,
+                status="error",
+                duration_ms=(time.time() - started) * 1000,
+                error=str(exc),
+                ctx=fastmcp_context,
+            )
+            raise
+        audit_resource_read(
+            uri,
+            status="success",
+            duration_ms=(time.time() - started) * 1000,
+            ctx=fastmcp_context,
+        )
+        return result
 
 
 # Install patches eagerly at module import so callers that build their own

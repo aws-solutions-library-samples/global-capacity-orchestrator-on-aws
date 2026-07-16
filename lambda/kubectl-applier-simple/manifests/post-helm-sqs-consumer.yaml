@@ -13,13 +13,15 @@
 #   This is NOT an HPA — each pod is a short-lived Job, not a long-running Deployment.
 #
 # Disabling: Set queue_processor.enabled = false in cdk.json, then redeploy.
-#   See examples/keda-scaled-job.yaml for a starting point to build your own consumer.
+#   The applier prunes only the exact built-in gco-system/sqs-queue-processor
+#   ScaledJob; unrelated KEDA resources are left untouched. See
+#   examples/keda-scaled-job.yaml for a safe, non-consuming scaling example.
 #
 # Configuration (cdk.json):
 #   queue_processor.enabled:                true/false — toggle the built-in consumer
 #   queue_processor.polling_interval:       how often KEDA checks the queue (seconds)
 #   queue_processor.max_concurrent_jobs:    max consumer pods running in parallel
-#   queue_processor.messages_per_job:       SQS messages that trigger one consumer pod
+#   queue_processor.messages_per_job:       target queued messages per active Job
 #
 # Validation policy (shared with the REST manifest processor, cdk.json →
 # job_validation_policy):
@@ -83,6 +85,8 @@ spec:
             value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
           - name: ALLOWED_NAMESPACES
             value: "{{QP_ALLOWED_NAMESPACES}}"
+          - name: ALLOWED_KINDS
+            value: "{{QP_ALLOWED_KINDS}}"
           - name: MAX_GPU_PER_MANIFEST
             value: "{{QP_MAX_GPU_PER_MANIFEST}}"
           - name: MAX_CPU_PER_MANIFEST
@@ -159,6 +163,8 @@ spec:
   - type: aws-sqs-queue
     metadata:
       queueURL: "{{JOB_QUEUE_URL}}"
-      queueLength: "{{QP_MESSAGES_PER_JOB}}"  # Messages per triggered pod
+      # KEDA target queue depth per active Job. Each queue-processor Job still
+      # receives and processes at most one SQS message before exiting.
+      queueLength: "{{QP_MESSAGES_PER_JOB}}"
       awsRegion: "{{REGION}}"
       identityOwner: operator

@@ -9,6 +9,12 @@ metadata:
     app: gco
     project: gco
   annotations:
+    # The ALB terminates deployment-local authenticated TLS. There is no HTTP
+    # listener; pod targets remain HTTP-only inside the cluster boundary.
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: "{{BACKEND_TLS_CERTIFICATE_ARN}}"
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/backend-protocol: HTTP
     alb.ingress.kubernetes.io/healthcheck-path: /healthz
     alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
     alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
@@ -27,6 +33,17 @@ spec:
                 port:
                   number: 80
           - path: /api/v1/manifests
+            pathType: Prefix
+            backend:
+              service:
+                name: manifest-processor
+                port:
+                  number: 80
+          # All inference traffic terminates at the authenticated manifest
+          # processor proxy. Per-endpoint Ingresses are deliberately forbidden:
+          # they exposed model servers directly through Global Accelerator and
+          # bypassed API Gateway IAM authentication.
+          - path: /inference
             pathType: Prefix
             backend:
               service:

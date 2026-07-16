@@ -356,6 +356,41 @@ class TestHandleTask:
         mock_uninstall.assert_called_once()
         mock_install.assert_not_called()
 
+    def test_uninstall_failure_raises(self):
+        event = dict(self._BASE_EVENT)
+        event["Action"] = "uninstall_chart"
+        with (
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc"),
+            patch.object(helm_handler, "uninstall_chart", return_value=(False, "api timeout")),
+            patch.object(helm_handler, "_record_addon_status") as mock_status,
+            patch.object(helm_handler.os, "remove"),
+            pytest.raises(RuntimeError, match="helm uninstall keda failed"),
+        ):
+            helm_handler.handle_task(event)
+
+        mock_status.assert_called_once_with("keda", "failed", "api timeout")
+
+    def test_not_found_uninstall_remains_idempotent_success(self):
+        with patch.object(
+            helm_handler, "run_helm", return_value=(1, "", "release: not found")
+        ) as mock_run:
+            success, message = helm_handler.uninstall_chart("keda", "keda", "/tmp/kc")
+
+        assert success is True
+        assert "already uninstalled" in message
+        args = mock_run.call_args.args[0]
+        assert args[args.index("--timeout") + 1] == helm_handler.HELM_UNINSTALL_TIMEOUT
+        assert mock_run.call_args.kwargs["command_timeout_seconds"] == 150
+
+    def test_generic_not_found_uninstall_is_failure(self):
+        """A Kubernetes/resource NotFound must not be mistaken for release absence."""
+        error = 'Error: services "keda-operator" not found while uninstalling release'
+        with patch.object(helm_handler, "run_helm", return_value=(1, "", error)):
+            success, message = helm_handler.uninstall_chart("keda", "keda", "/tmp/kc")
+
+        assert success is False
+        assert error in message
+
     def test_install_failure_raises(self):
         with (
             patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc"),
@@ -374,6 +409,29 @@ class TestHandleTask:
             helm_handler.handle_task(dict(self._BASE_EVENT))
         mock_remove.assert_called_once_with("/tmp/kc")
 
+    def test_legacy_delete_reports_failed_uninstall_to_cloudformation(self):
+        event = {
+            "RequestType": "Delete",
+            "LogicalResourceId": "HelmCharts",
+            "PhysicalResourceId": "helm-charts",
+            "ResourceProperties": {
+                "ClusterName": "gco-us-east-1",
+                "Region": "us-east-1",
+            },
+        }
+        charts = {"charts": {"keda": {"enabled": True, "namespace": "keda"}}}
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=charts),
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc"),
+            patch.object(helm_handler, "uninstall_chart", return_value=(False, "forbidden")),
+            patch.object(helm_handler, "send_response") as mock_send,
+            patch.object(helm_handler.os, "remove"),
+        ):
+            helm_handler.lambda_handler(event, MagicMock())
+
+        assert mock_send.call_args.args[2] == helm_handler.FAILED
+        assert "keda" in mock_send.call_args.args[5]
+
     def test_lambda_handler_dispatches_action_events(self):
         with patch.object(
             helm_handler, "handle_task", return_value={"chart": "keda", "status": "installed"}
@@ -381,3 +439,52 @@ class TestHandleTask:
             out = helm_handler.lambda_handler(dict(self._BASE_EVENT), MagicMock())
         assert out["status"] == "installed"
         mock_task.assert_called_once()
+
+
+class TestHealthMonitorQuiesce:
+    """Delete-time quiescence must scale to zero and wait for all replicas."""
+
+    def test_scale_and_wait_succeed(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [_completed(0), _completed(0)]
+            success, message = helm_handler.quiesce_health_monitor("/tmp/kc")
+
+        assert success is True
+        assert message == "Health monitor quiesced"
+        scale_command = mock_run.call_args_list[0].args[0]
+        wait_command = mock_run.call_args_list[1].args[0]
+        assert "deployment/health-monitor" in scale_command
+        assert "--replicas=0" in scale_command
+        assert "--for=delete" in wait_command
+        assert "--selector=app=health-monitor" in wait_command
+
+    def test_scale_failure_is_not_masked(self):
+        with patch.object(
+            helm_handler.subprocess,
+            "run",
+            return_value=_completed(1, stderr="Error from server (Forbidden): denied"),
+        ):
+            success, message = helm_handler.quiesce_health_monitor("/tmp/kc")
+
+        assert success is False
+        assert "Forbidden" in message
+
+    def test_handle_task_surfaces_quiesce_failure_and_cleans_kubeconfig(self):
+        event = {
+            "Action": "quiesce_health_monitor",
+            "ClusterName": "gco-us-east-1",
+            "Region": "us-east-1",
+        }
+        with (
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc"),
+            patch.object(
+                helm_handler,
+                "quiesce_health_monitor",
+                return_value=(False, "pods remain"),
+            ),
+            patch.object(helm_handler.os, "remove") as mock_remove,
+            pytest.raises(RuntimeError, match="pods remain"),
+        ):
+            helm_handler.handle_task(event)
+
+        mock_remove.assert_called_once_with("/tmp/kc")

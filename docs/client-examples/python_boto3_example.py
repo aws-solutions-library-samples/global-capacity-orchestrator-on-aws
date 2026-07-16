@@ -13,26 +13,28 @@ Usage:
 """
 
 import json
+from pathlib import Path
 
 import boto3
 import requests
 from aws_requests_auth.aws_auth import AWSRequestsAuth
 
 
-def get_api_endpoint(region: str | None = None) -> str:
+def get_api_endpoint(region: str, project_name: str = "gco") -> str:
     """
     Get the API Gateway endpoint URL from CloudFormation stack outputs.
 
     Args:
         region: AWS region where API Gateway stack is deployed.
-                If not provided, reads from cdk.json or defaults to us-east-2.
+        project_name: Deployment project prefix (defaults to ``gco``).
 
     Returns:
         API Gateway invoke URL
     """
     cfn = boto3.client("cloudformation", region_name=region)
 
-    response = cfn.describe_stacks(StackName="gco-api-gateway")
+    stack_name = f"{project_name}-api-gateway"
+    response = cfn.describe_stacks(StackName=stack_name)
     outputs = response["Stacks"][0]["Outputs"]
 
     for output in outputs:
@@ -40,7 +42,7 @@ def get_api_endpoint(region: str | None = None) -> str:
             # Remove trailing slash if present
             return output["OutputValue"].rstrip("/")
 
-    raise ValueError("ApiEndpoint not found in stack gco-api-gateway")
+    raise ValueError(f"ApiEndpoint not found in stack {stack_name}")
 
 
 def create_aws_auth(api_host: str, region: str) -> AWSRequestsAuth:
@@ -56,11 +58,17 @@ def create_aws_auth(api_host: str, region: str) -> AWSRequestsAuth:
     """
     session = boto3.Session()
     credentials = session.get_credentials()
+    if credentials is None:
+        raise RuntimeError(
+            "No AWS credentials are available. Configure a profile, environment credentials, "
+            "or an IAM role before running this example."
+        )
+    frozen = credentials.get_frozen_credentials()
 
     return AWSRequestsAuth(
-        aws_access_key=credentials.access_key,
-        aws_secret_access_key=credentials.secret_key,
-        aws_token=credentials.token,  # For temporary credentials (STS, IAM roles)
+        aws_access_key=frozen.access_key,
+        aws_secret_access_key=frozen.secret_key,
+        aws_token=frozen.token,  # For temporary credentials (STS, IAM roles)
         aws_host=api_host,
         aws_region=region,
         aws_service="execute-api",
@@ -71,7 +79,7 @@ def submit_manifests(
     api_endpoint: str,
     auth: AWSRequestsAuth,
     manifests: list,
-    namespace: str = None,
+    namespace: str | None = None,
     dry_run: bool = False,
 ) -> dict:
     """
@@ -120,35 +128,33 @@ def get_health(api_endpoint: str, auth: AWSRequestsAuth) -> dict:
     return response.json()
 
 
-def get_api_gateway_region() -> str:
-    """Get API Gateway region from cdk.json or default to us-east-2."""
-    import json
-    from pathlib import Path
+def get_deployment_config() -> tuple[str, str]:
+    """Return ``(project_name, API Gateway region)`` from ``cdk.json``.
 
-    # Try to read from cdk.json
-    cdk_json_path = Path(__file__).parent.parent.parent / "cdk.json"
-    if cdk_json_path.exists():
-        try:
-            with open(cdk_json_path, encoding="utf-8") as f:
-                data = json.load(f)
-                deployment_regions = data.get("context", {}).get("deployment_regions", {})
-                if "api_gateway" in deployment_regions:
-                    return deployment_regions["api_gateway"]
-        except Exception:
-            pass
-
-    # Default to us-east-2
-    return "us-east-2"
+    The stock values are used when the file is unavailable or malformed. AWS
+    credentials still come from boto3's normal provider chain, including
+    ``AWS_PROFILE``, SSO, web identity, containers, and instance roles.
+    """
+    cdk_json_path = Path(__file__).resolve().parents[2] / "cdk.json"
+    try:
+        with cdk_json_path.open(encoding="utf-8") as file:
+            context = json.load(file).get("context", {})
+        project_name = str(context.get("project_name") or "gco")
+        deployment_regions = context.get("deployment_regions", {})
+        api_region = str(deployment_regions.get("api_gateway") or "us-east-2")
+        return project_name, api_region
+    except OSError, TypeError, ValueError:
+        return "gco", "us-east-2"
 
 
 def main():
-    # Configuration - reads from cdk.json or defaults to us-east-2
-    API_REGION = get_api_gateway_region()
-    print(f"Using API Gateway region: {API_REGION}")
+    project_name, api_region = get_deployment_config()
+    stack_name = f"{project_name}-api-gateway"
+    print(f"Using API Gateway region: {api_region}")
 
     # Get API Gateway endpoint from CloudFormation
-    print("Getting API Gateway endpoint from stack gco-api-gateway...")
-    api_endpoint = get_api_endpoint(API_REGION)
+    print(f"Getting API Gateway endpoint from stack {stack_name}...")
+    api_endpoint = get_api_endpoint(api_region, project_name)
     print(f"API Endpoint: {api_endpoint}")
 
     # Extract host from endpoint URL
@@ -156,7 +162,7 @@ def main():
 
     # Create AWS authentication
     print("Creating AWS SigV4 authentication...")
-    auth = create_aws_auth(api_host, API_REGION)
+    auth = create_aws_auth(api_host, api_region)
 
     # Example 1: Simple Kubernetes Job
     print("\n=== Example 1: Submit a simple Job ===")

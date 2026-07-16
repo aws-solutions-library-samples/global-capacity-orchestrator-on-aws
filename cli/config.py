@@ -17,6 +17,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import Any
 
@@ -80,9 +81,8 @@ class GCOConfig:
     api_gateway_stack_name: str = "gco-api-gateway"
     regional_stack_prefix: str = "gco"
 
-    # Default namespaces
+    # Default namespace for namespaced workload resources
     default_namespace: str = "gco-jobs"
-    allowed_namespaces: list[str] = field(default_factory=lambda: ["default", "gco-jobs"])
 
     # Capacity checking
     spot_price_history_days: int = 7
@@ -102,6 +102,10 @@ class GCOConfig:
 
     # API access mode
     use_regional_api: bool = False  # Use regional APIs for private access
+
+    # Tracks fields explicitly supplied by a file/environment source so a
+    # value equal to the dataclass default can still override an earlier source.
+    _specified_fields: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         # The stack names and regional prefix always derive from
@@ -125,26 +129,44 @@ class GCOConfig:
 
     @classmethod
     def from_file(cls, config_path: str | None = None) -> GCOConfig:
-        """Load configuration from file."""
+        """Load configuration from a file, or defaults if no default file exists."""
+        explicit_path = config_path is not None
         if config_path is None:
-            # Check default locations
             default_paths = [
                 Path.cwd() / ".gco.yaml",
                 Path.cwd() / ".gco.json",
                 Path.home() / ".gco" / "config.yaml",
                 Path.home() / ".gco" / "config.json",
             ]
-            for path in default_paths:
-                if path.exists():
-                    config_path = str(path)
-                    break
+            config_path = next((str(path) for path in default_paths if path.exists()), None)
 
-        if config_path and Path(config_path).exists():
-            with open(config_path, encoding="utf-8") as f:
-                data = json.load(f) if config_path.endswith(".json") else yaml.safe_load(f)
-                return cls(**{k: v for k, v in data.items() if hasattr(cls, k)})
+        if config_path is None:
+            return cls()
 
-        return cls()
+        path = Path(config_path).expanduser()
+        if not path.exists():
+            if explicit_path:
+                raise FileNotFoundError(f"Configuration file not found: {path}")
+            return cls()
+
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f) if path.suffix.lower() == ".json" else yaml.safe_load(f)
+
+        # ``yaml.safe_load`` returns None for an empty document.
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            raise ValueError(f"Configuration file must contain a mapping: {path}")
+
+        valid_fields = {
+            item.name
+            for item in dataclass_fields(cls)
+            if item.init and not item.name.startswith("_")
+        }
+        values = {key: value for key, value in data.items() if key in valid_fields}
+        config = cls(**values)
+        config._specified_fields = set(values)
+        return config
 
     @classmethod
     def from_env(cls) -> GCOConfig:
@@ -161,17 +183,17 @@ class GCOConfig:
             "GCO_OUTPUT_FORMAT": "output_format",
             "GCO_VERBOSE": "verbose",
             "GCO_CACHE_DIR": "cache_dir",
+            "GCO_REGIONAL_API": "use_regional_api",
         }
 
         for env_var, attr in env_mappings.items():
             value: Any = os.environ.get(env_var)
             if value is not None:
-                if attr == "verbose":
+                if attr in {"verbose", "use_regional_api"}:
                     setattr(config, attr, value.lower() in ("true", "1", "yes"))
-                elif attr == "allowed_namespaces":
-                    setattr(config, attr, value.split(","))
                 else:
                     setattr(config, attr, value)
+                config._specified_fields.add(attr)
 
         return config
 
@@ -187,7 +209,6 @@ class GCOConfig:
             "api_gateway_stack_name": self.api_gateway_stack_name,
             "regional_stack_prefix": self.regional_stack_prefix,
             "default_namespace": self.default_namespace,
-            "allowed_namespaces": self.allowed_namespaces,
             "spot_price_history_days": self.spot_price_history_days,
             "capacity_check_timeout": self.capacity_check_timeout,
             "efs_mount_path": self.efs_mount_path,
@@ -210,13 +231,13 @@ class GCOConfig:
             yaml.dump(self.to_dict(), f, default_flow_style=False)
 
 
-def get_config() -> GCOConfig:
+def get_config(config_path: str | None = None) -> GCOConfig:
     """Get merged configuration from cdk.json, file, and environment.
 
     Configuration is loaded in this order (later sources override earlier):
     1. Default values
-    2. cdk.json deployment_regions (if present)
-    3. ~/.gco/config.yaml or config.json
+    2. cdk.json deployment regions and project name (if present)
+    3. ``config_path`` when supplied, otherwise the first default config file
     4. Environment variables (GCO_*)
     """
     # Start with defaults
@@ -240,41 +261,31 @@ def get_config() -> GCOConfig:
         if cdk_regions.get("regional"):
             config.default_region = cdk_regions["regional"][0]
 
-    # Override with file config
-    file_config = GCOConfig.from_file()
-    for attr in [
-        "project_name",
-        "default_region",
-        "api_gateway_region",
-        "global_region",
-        "monitoring_region",
-        "default_namespace",
-        "output_format",
-        "verbose",
-        "cache_dir",
-    ]:
-        file_value = getattr(file_config, attr)
-        default_value = getattr(GCOConfig(), attr)
-        if file_value != default_value:
-            setattr(config, attr, file_value)
+    # Merge only fields explicitly supplied by real file/env loaders. For
+    # callers/tests that construct a GCOConfig directly, retain the historical
+    # non-default inference as a compatibility fallback.
+    derived_fields = {"global_stack_name", "api_gateway_stack_name", "regional_stack_prefix"}
+    mergeable_fields = [
+        item.name
+        for item in dataclass_fields(GCOConfig)
+        if item.init and item.name not in derived_fields and not item.name.startswith("_")
+    ]
+    defaults = GCOConfig()
 
-    # Override with environment variables
-    env_config = GCOConfig.from_env()
-    for attr in [
-        "project_name",
-        "default_region",
-        "api_gateway_region",
-        "global_region",
-        "monitoring_region",
-        "default_namespace",
-        "output_format",
-        "verbose",
-        "cache_dir",
-    ]:
-        env_value = getattr(env_config, attr)
-        default_value = getattr(GCOConfig(), attr)
-        if env_value != default_value:
-            setattr(config, attr, env_value)
+    def apply_overrides(source: GCOConfig) -> None:
+        specified = set(source._specified_fields)
+        if not specified:
+            specified = {
+                attr
+                for attr in mergeable_fields
+                if getattr(source, attr) != getattr(defaults, attr)
+            }
+        for attr in mergeable_fields:
+            if attr in specified:
+                setattr(config, attr, getattr(source, attr))
+
+    apply_overrides(GCOConfig.from_file(config_path))
+    apply_overrides(GCOConfig.from_env())
 
     # Stack names / regional prefix always track the final project_name (#139),
     # regardless of which source set it.

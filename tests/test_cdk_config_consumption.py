@@ -178,6 +178,7 @@ def test_discovery_finds_expected_blocks() -> None:
         "deployment_regions",
         "eks_cluster",
         "global_accelerator",
+        "backend_tls",
         "alb_config",
         "api_gateway",
         "waf",

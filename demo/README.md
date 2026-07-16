@@ -7,7 +7,7 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 
 ![GCO Live Demo](live_demo.gif)
 
-> Automated demo showing costs, capacity-aware routing, 4 schedulers running simultaneously
+> Automated demo showing costs, capacity-aware placement, 4 schedulers running simultaneously
 > (Volcano, Kueue, YuniKorn, Slurm), high-performance storage (FSx, Valkey, EFS), and live
 > LLM inference — all on one platform. Re-record with `bash demo/record_demo.sh`.
 

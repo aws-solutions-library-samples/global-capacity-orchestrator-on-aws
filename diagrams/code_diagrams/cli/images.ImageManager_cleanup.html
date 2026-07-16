@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,20 +205,20 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2303=>operation: 'Delete every untagged image across one or all project repos.'
-cond2306=>operation: raise ValueError('cleanup() requires either a name or all=True') if  not name and (not all)
-op2316=>operation: repos: list[str]
-cond2319=>condition: if name
-op2323=>operation: validated = self._validate_name(name)
-op2325=>operation: repos = [f'{self._repo_prefix}/{validated}']
-op2332=>operation: ecr = self._ecr_client()
-op2334=>operation: repos_touched = 0
-op2336=>operation: tags_deleted = 0
-op2338=>operation: bytes_freed = 0
-cond2341=>condition: for repo_name in repos
-op2345=>operation: untagged_ids: list[dict[str, str]] = []
-op2347=>operation: untagged_size = 0
-op2350=>operation: paginator = ecr.get_paginator('describe_images')
+        <div><textarea id="code" style="width: 100%;" rows="11">op3859=>operation: 'Delete every untagged image across one or all project repos.'
+cond3862=>operation: raise ValueError('cleanup() requires either a name or all=True') if  not name and (not all)
+op3872=>operation: repos: list[str]
+cond3875=>condition: if name
+op3879=>operation: validated = self._validate_name(name)
+op3881=>operation: repos = [f'{self._repo_prefix}/{validated}']
+op3888=>operation: ecr = self._ecr_client()
+op3890=>operation: repos_touched = 0
+op3892=>operation: tags_deleted = 0
+op3894=>operation: bytes_freed = 0
+cond3897=>condition: for repo_name in repos
+op3901=>operation: untagged_ids: list[dict[str, str]] = []
+op3903=>operation: untagged_size = 0
+op3906=>operation: paginator = ecr.get_paginator('describe_images')
 for page in paginator.paginate(repositoryName=repo_name, filter={'tagStatus': 'UNTAGGED'}):
     for detail in page.get('imageDetails', []):
         digest = detail.get('imageDigest')
@@ -228,52 +228,52 @@ for page in paginator.paginate(repositoryName=repo_name, filter={'tagStatus': 'U
         size = detail.get('imageSizeInBytes') or 0
         if isinstance(size, int):
             untagged_size += size
-cond2349=>condition: exception raised?
-cond2352=>condition: except ClientError as e
-sub2356=>subroutine: logger.debug('describe_images for cleanup of %s failed: %s', repo_name, e)
-sub2358=>subroutine: continue
-cond2364=>operation: continue if  not untagged_ids
-op2374=>operation: repos_touched += 1
-cond2377=>condition: for chunk_start in range(0, len(untagged_ids), 100)
-op2381=>operation: chunk = untagged_ids[chunk_start:chunk_start + 100]
-op2383=>operation: resp = ecr.batch_delete_image(repositoryName=repo_name, imageIds=chunk)
-op2385=>operation: tags_deleted += len(resp.get('imageIds', []))
-op2389=>operation: bytes_freed += untagged_size
-io2396=>inputoutput: output: {'repos_touched': repos_touched, 'tags_deleted': tags_deleted, 'bytes_freed': bytes_freed}
-e2394=>end: end function return
-op2329=>operation: repos = [r['name'] for r in self.list_repos()]
+cond3905=>condition: exception raised?
+cond3908=>condition: except ClientError as e
+sub3912=>subroutine: logger.debug('describe_images for cleanup of %s failed: %s', repo_name, e)
+sub3914=>subroutine: continue
+cond3920=>operation: continue if  not untagged_ids
+op3930=>operation: repos_touched += 1
+cond3933=>condition: for chunk_start in range(0, len(untagged_ids), 100)
+op3937=>operation: chunk = untagged_ids[chunk_start:chunk_start + 100]
+op3939=>operation: resp = ecr.batch_delete_image(repositoryName=repo_name, imageIds=chunk)
+op3941=>operation: tags_deleted += len(resp.get('imageIds', []))
+op3945=>operation: bytes_freed += untagged_size
+io3952=>inputoutput: output: {'repos_touched': repos_touched, 'tags_deleted': tags_deleted, 'bytes_freed': bytes_freed}
+e3950=>end: end function return
+op3885=>operation: repos = [r['name'] for r in self.list_repos()]
 
-op2303->cond2306
-cond2306->op2316
-op2316->cond2319
-cond2319(yes)->op2323
-op2323->op2325
-op2325->op2332
-op2332->op2334
-op2334->op2336
-op2336->op2338
-op2338->cond2341
-cond2341(yes)->op2345
-op2345->op2347
-op2347->op2350
-op2350->cond2349
-cond2349(yes)->cond2352
-cond2352(yes)->sub2356
-sub2356->sub2358
-cond2352(no)->cond2364
-cond2364->op2374
-op2374->cond2377
-cond2377(yes)->op2381
-op2381->op2383
-op2383->op2385
-op2385(left)->cond2377
-cond2377(no)->op2389
-op2389(left)->cond2341
-cond2349(no)->cond2364
-cond2341(no)->io2396
-io2396->e2394
-cond2319(no)->op2329
-op2329->op2332
+op3859->cond3862
+cond3862->op3872
+op3872->cond3875
+cond3875(yes)->op3879
+op3879->op3881
+op3881->op3888
+op3888->op3890
+op3890->op3892
+op3892->op3894
+op3894->cond3897
+cond3897(yes)->op3901
+op3901->op3903
+op3903->op3906
+op3906->cond3905
+cond3905(yes)->cond3908
+cond3908(yes)->sub3912
+sub3912->sub3914
+cond3908(no)->cond3920
+cond3920->op3930
+op3930->cond3933
+cond3933(yes)->op3937
+op3937->op3939
+op3939->op3941
+op3941(left)->cond3933
+cond3933(no)->op3945
+op3945(left)->cond3897
+cond3905(no)->cond3920
+cond3897(no)->io3952
+io3952->e3950
+cond3875(no)->op3885
+op3885->op3888
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

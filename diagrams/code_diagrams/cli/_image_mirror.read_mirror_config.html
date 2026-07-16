@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,30 +205,30 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3447=>operation: 'Return ``{enabled, ecr_namespace}`` from cdk.json ``volcano_image_mirror``.\n\n    Defaults to disabled / ``<project_name>/dockerhub`` (``gco/dockerhub`` for\n    the stock project) when the block is absent, so a second deployment mirrors\n    into its own ECR namespace (#139).\n    Used by the deploy path to decide whether to auto-mirror. (The cdk.json key\n    is still named ``volcano_image_mirror`` — Volcano is the only consumer today\n    — but the mirror itself is general; see :func:`collect_source_refs`.)\n    '
-op3452=>operation: with open(cdk_json_path, encoding='utf-8') as f:
+        <div><textarea id="code" style="width: 100%;" rows="11">op5104=>operation: 'Return ``{enabled, ecr_namespace}`` from cdk.json ``volcano_image_mirror``.\n\n    Defaults to disabled / ``<project_name>/dockerhub`` (``gco/dockerhub`` for\n    the stock project) when the block is absent, so a second deployment mirrors\n    into its own ECR namespace (#139).\n    Used by the deploy path to decide whether to auto-mirror. (The cdk.json key\n    is still named ``volcano_image_mirror`` — Volcano is the only consumer today\n    — but the mirror itself is general; see :func:`collect_source_refs`.)\n    '
+op5109=>operation: with open(cdk_json_path, encoding='utf-8') as f:
     ctx = json.load(f).get('context', {}) or {}
-cond3449=>condition: exception raised?
-cond3454=>condition: except (OSError, json.JSONDecodeError)
-io3461=>inputoutput: output: {'enabled': False, 'ecr_namespace': _DEFAULT_NAMESPACE}
-e3459=>end: end function return
-op3467=>operation: default_namespace = f"{ctx.get('project_name') or 'gco'}/dockerhub"
-op3469=>operation: block = ctx.get('volcano_image_mirror') or {}
-op3471=>operation: namespace = str(block.get('ecr_namespace', default_namespace)).strip('/') or default_namespace
-io3476=>inputoutput: output: {'enabled': bool(block.get('enabled', False)), 'ecr_namespace': namespace}
-e3474=>end: end function return
+cond5106=>condition: exception raised?
+cond5111=>condition: except (OSError, json.JSONDecodeError)
+io5118=>inputoutput: output: {'enabled': False, 'ecr_namespace': _DEFAULT_NAMESPACE}
+e5116=>end: end function return
+op5124=>operation: default_namespace = f"{ctx.get('project_name') or 'gco'}/dockerhub"
+op5126=>operation: block = ctx.get('volcano_image_mirror') or {}
+op5128=>operation: namespace = str(block.get('ecr_namespace', default_namespace)).strip('/') or default_namespace
+io5133=>inputoutput: output: {'enabled': bool(block.get('enabled', False)), 'ecr_namespace': namespace}
+e5131=>end: end function return
 
-op3447->op3452
-op3452->cond3449
-cond3449(yes)->cond3454
-cond3454(yes)->io3461
-io3461->e3459
-cond3454(no)->op3467
-op3467->op3469
-op3469->op3471
-op3471->io3476
-io3476->e3474
-cond3449(no)->op3467
+op5104->op5109
+op5109->cond5106
+cond5106(yes)->cond5111
+cond5111(yes)->io5118
+io5118->e5116
+cond5111(no)->op5124
+op5124->op5126
+op5126->op5128
+op5128->io5133
+io5133->e5131
+cond5106(no)->op5124
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

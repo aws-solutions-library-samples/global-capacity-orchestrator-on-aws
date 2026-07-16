@@ -33,6 +33,7 @@ import pytest
 # tests/test_mcp_feature_flags.py.
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
+import cli_runner  # noqa: E402
 from tools._long_task import _run_long_task  # noqa: E402
 
 
@@ -477,40 +478,43 @@ async def test_run_long_task_writes_disk_status_artifacts(tmp_path, monkeypatch)
 
 
 async def test_run_long_task_tool_name_derived_from_gco_argv(tmp_path, monkeypatch) -> None:
-    """When argv looks like ``gco stacks deploy-all -y``, the recorded
-    ``tool`` field is ``stacks_deploy_all`` so operators reading the
-    status directory can tell at a glance what the task was doing,
-    without grovelling through the argv array."""
+    """A logical ``gco`` argv records a readable tool name while spawning the
+    version-matched executable from the MCP environment at the project root."""
     monkeypatch.setenv("GCO_TASK_STATUS_DIR", str(tmp_path))
     monkeypatch.delenv("GCO_DISABLE_TASK_STATUS", raising=False)
 
     progress = _FakeProgress()
     ctx = _FakeCtx()
-    # Argv mirrors what tools.stacks.deploy_all builds.
-    argv = [
+    child_argv = [
         sys.executable,
         "-c",
         "print('done', flush=True)",
     ]
-    # We can't actually run "gco stacks deploy-all" in a unit test, so
-    # patch the subprocess spawn to capture the argv our wrapper builds
-    # and feed our short python invocation instead. The name derivation
-    # logic only looks at argv[0:3], so we test it directly with a
-    # synthetic argv.
-    from tools._long_task import _run_long_task as runner
-
-    fake_argv = ["gco", "stacks", "deploy-all", "-y"]
-    # Substitute the spawn so we don't actually try to execute "gco".
-    from unittest.mock import patch
-
+    logical_argv = ["gco", "stacks", "deploy-all", "-y"]
     real_spawn = asyncio.create_subprocess_exec
+    observed: dict[str, object] = {}
 
     async def fake_spawn(*spawn_argv, **kwargs):
-        # Ignore the gco argv; run a benign quick command instead.
-        return await real_spawn(*argv, **kwargs)
+        observed["argv"] = spawn_argv
+        observed["cwd"] = kwargs.get("cwd")
+        # Run a benign quick command instead of the real GCO operation.
+        return await real_spawn(*child_argv, **kwargs)
 
     with patch("tools._long_task.asyncio.create_subprocess_exec", side_effect=fake_spawn):
-        result = await runner(fake_argv, ctx=ctx, progress=progress, is_stack_op=False)
+        result = await _run_long_task(
+            logical_argv,
+            ctx=ctx,
+            progress=progress,
+            is_stack_op=False,
+        )
+
+    assert observed["argv"] == (
+        cli_runner._gco_executable(),
+        "stacks",
+        "deploy-all",
+        "-y",
+    )
+    assert observed["cwd"] == str(cli_runner.PROJECT_ROOT)
 
     parsed = json.loads(result)
     task_id = parsed["task_id"]
@@ -518,6 +522,36 @@ async def test_run_long_task_tool_name_derived_from_gco_argv(tmp_path, monkeypat
 
     record = json.loads((tmp_path / f"{task_id}.json").read_text())
     assert record["tool"] == "stacks_deploy_all"
+    # Status records preserve the logical command, not a machine-specific
+    # resolved executable path.
+    assert record["argv"] == logical_argv
+
+
+async def test_run_long_task_reuses_safe_protocol_task_id(tmp_path, monkeypatch) -> None:
+    """A safe FastMCP task ID is reused for the disk status/log pair."""
+    monkeypatch.setenv("GCO_TASK_STATUS_DIR", str(tmp_path))
+    monkeypatch.delenv("GCO_DISABLE_TASK_STATUS", raising=False)
+
+    progress = _FakeProgress()
+    ctx = _FakeCtx()
+    task_context = MagicMock(spec=["task_id"])
+    task_context.task_id = "protocol-task-123"
+
+    with patch(
+        "fastmcp.server.dependencies.get_task_context",
+        return_value=task_context,
+    ):
+        result = await _run_long_task(
+            [sys.executable, "-c", "print('done', flush=True)"],
+            ctx=ctx,
+            progress=progress,
+            is_stack_op=False,
+        )
+
+    parsed = json.loads(result)
+    assert parsed["task_id"] == "protocol-task-123"
+    assert (tmp_path / "protocol-task-123.json").is_file()
+    assert (tmp_path / "protocol-task-123.log").is_file()
 
 
 async def test_run_long_task_failure_writes_failed_state_to_disk(tmp_path, monkeypatch) -> None:
@@ -1040,3 +1074,105 @@ class TestFormatDuration:
         assert _format_duration(7200) == "2h00m00s"
         # Multi-day operation — the hour count climbs without rolling.
         assert _format_duration(86400) == "24h00m00s"
+
+
+async def test_bounded_stream_reader_truncates_oversized_line(monkeypatch) -> None:
+    """A no-newline stream is chunked and explicitly truncated below its limit."""
+    import tools._long_task as long_task_mod
+
+    monkeypatch.setattr(long_task_mod, "_STREAM_READ_BYTES", 7)
+    monkeypatch.setattr(long_task_mod, "_STREAM_LINE_MAX_BYTES", 64)
+    reader = asyncio.StreamReader(limit=8)
+    reader.feed_data(b"x" * 10_000)
+    reader.feed_eof()
+
+    lines = [line async for line in long_task_mod._bounded_stream_lines(reader)]
+
+    assert len(lines) == 1
+    assert lines[0].endswith("...[truncated]")
+    assert len(lines[0].encode("utf-8")) <= 64
+
+
+async def test_long_task_bounds_failed_events_and_diagnostic_lines() -> None:
+    """Failure payloads retain only a bounded tail of bounded event lines."""
+    import tools._long_task as long_task_mod
+    from fastmcp.exceptions import ToolError
+
+    progress = _FakeProgress()
+    ctx = _FakeCtx()
+    script = (
+        "import sys\n"
+        "for i in range(30):\n"
+        " print(f'CREATE_FAILED gco-stack-{i} ' + 'x' * 10000, flush=True)\n"
+        "sys.exit(1)\n"
+    )
+
+    with pytest.raises(ToolError) as excinfo:
+        await _run_long_task(
+            [sys.executable, "-c", script],
+            ctx=ctx,
+            progress=progress,
+            is_stack_op=False,
+        )
+
+    payload = json.loads(str(excinfo.value))
+    assert len(payload["failed_events"]) == long_task_mod._FAILED_EVENT_LINES
+    assert all(
+        len(line.encode("utf-8")) <= long_task_mod._DIAGNOSTIC_LINE_MAX_BYTES
+        for line in payload["failed_events"]
+    )
+    assert "gco-stack-29" in payload["failed_events"][-1]
+
+
+async def test_client_notification_failures_do_not_abort_subprocess() -> None:
+    class BrokenClient:
+        async def set_total(self, _total: int) -> None:
+            raise RuntimeError("client disconnected")
+
+        async def set_message(self, _message: str) -> None:
+            raise RuntimeError("client disconnected")
+
+        async def increment(self) -> None:
+            raise RuntimeError("client disconnected")
+
+        async def info(self, _message: str) -> None:
+            raise RuntimeError("client disconnected")
+
+    result = await _run_long_task(
+        [sys.executable, "-c", "print('✅  gco-global', flush=True)"],
+        ctx=BrokenClient(),
+        progress=BrokenClient(),
+        is_stack_op=False,
+        total_units=1,
+    )
+
+    payload = json.loads(result)
+    assert payload["status"] == "ok"
+    assert payload["stacks_completed"] == 1
+
+
+async def test_spawn_failure_leaves_terminal_pre_spawn_status(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("GCO_TASK_STATUS_DIR", str(tmp_path))
+    monkeypatch.delenv("GCO_DISABLE_TASK_STATUS", raising=False)
+
+    with (
+        patch(
+            "tools._long_task.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            side_effect=FileNotFoundError("missing executable"),
+        ),
+        pytest.raises(FileNotFoundError, match="missing executable"),
+    ):
+        await _run_long_task(
+            ["missing-gco"],
+            ctx=_FakeCtx(),
+            progress=_FakeProgress(),
+            is_stack_op=False,
+        )
+
+    status_files = list(tmp_path.glob("*.json"))
+    assert len(status_files) == 1
+    record = json.loads(status_files[0].read_text(encoding="utf-8"))
+    assert record["state"] == "failed"
+    assert record["pid"] is None
+    assert "FileNotFoundError" in record["error"]

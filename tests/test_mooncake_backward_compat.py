@@ -1,21 +1,23 @@
-"""Endpoints without a ``mooncake`` block keep their classic single-instance shape.
+"""Endpoints without a ``mooncake`` block keep their classic workload shape.
 
 An endpoint spec that carries no ``mooncake`` block is an ordinary inference
-endpoint and must reconcile exactly as it always has: one Deployment at the
-configured replica count, one Service, and one Ingress — and nothing else. No
-role-split prefill/decode Deployments, no prefill-decode proxy, no per-role
-autoscaler, and no shared per-region master StatefulSet may appear.
+endpoint and reconciles to one Deployment at the configured replica count and
+one ClusterIP Service. It deliberately has no endpoint-specific Ingress: all
+public requests traverse the shared platform Ingress and authenticated manifest
+processor before reaching that Service. No role-split prefill/decode
+Deployments, prefill-decode proxy, per-role autoscaler, or shared per-region
+master StatefulSet may appear.
 
 :meth:`InferenceMonitor._reconcile_mooncake` is the branch that recognises the
 distributed shape; for a plain spec it returns ``None`` to hand control back to
 the single-instance path. :meth:`InferenceMonitor._reconcile_running` is that
-path, and on a first reconcile (no Deployment yet) it lays down the one-each
-object set.
+path, and on a first reconcile (no Deployment yet) it creates the Deployment
+and Service while removing any historical direct Ingress.
 
 These checks generate a wide spread of plain specs — varied images, replica
 counts, ports, and accelerators — and confirm that for every one of them the
 distributed branch declines and the single-instance reconcile materialises
-precisely one Deployment, one Service, and one Ingress with no distributed
+precisely one Deployment and one Service, with no direct Ingress or distributed
 extras.
 """
 
@@ -31,8 +33,8 @@ from kubernetes.client.rest import ApiException
 OWN_REGION = "us-east-1"
 NAMESPACE = "gco-inference"
 
-# A mix of server images: vLLM/TGI take the root-path serving branch, plain
-# images do not, so both Ingress shapes are exercised.
+# A mix of server images: vLLM/TGI take the root-path serving branch while
+# plain images do not, so both container argument shapes are exercised.
 IMAGES = [
     "vllm/vllm-openai:v0.6.0",
     "ghcr.io/huggingface/text-generation-inference:2.0",
@@ -130,12 +132,13 @@ def test_plain_spec_declines_the_distributed_branch(bundle: dict) -> None:
 
 @settings(max_examples=150, deadline=None)
 @given(bundle=_plain_endpoints())
-def test_plain_spec_reconciles_to_one_deployment_service_ingress(bundle: dict) -> None:
-    """A plain endpoint materialises exactly one Deployment, Service, and Ingress.
+def test_plain_spec_reconciles_to_one_deployment_and_service(bundle: dict) -> None:
+    """A plain endpoint creates one Deployment and one internal Service.
 
-    On a first reconcile the single-instance path creates precisely the classic
-    trio and adds none of the distributed extras: no role-split Deployments, no
-    proxy, no autoscaler, and no shared master StatefulSet.
+    On a first reconcile the single-instance path creates exactly those two
+    workload objects, removes the historical endpoint Ingress if present, and
+    adds none of the distributed extras: no role-split Deployments, proxy,
+    per-role autoscaler, or shared master StatefulSet.
     """
     monitor = _make_monitor()
 
@@ -151,10 +154,14 @@ def test_plain_spec_reconciles_to_one_deployment_service_ingress(bundle: dict) -
     assert result["action"] == "create"
     assert result["endpoint"] == bundle["name"]
 
-    # Exactly one Deployment, one Service, one Ingress — the classic trio.
+    # Exactly one Deployment and one ClusterIP Service are materialized. The
+    # old direct Ingress is removed rather than recreated.
     assert monitor.apps_v1.create_namespaced_deployment.call_count == 1
     assert monitor.core_v1.create_namespaced_service.call_count == 1
-    assert monitor.networking_v1.create_namespaced_ingress.call_count == 1
+    monitor.networking_v1.create_namespaced_ingress.assert_not_called()
+    monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
+    delete_args = monitor.networking_v1.delete_namespaced_ingress.call_args.args
+    assert delete_args[:2] == (f"inference-{bundle['name']}", NAMESPACE)
 
     # The single created Deployment carries the endpoint's configured replicas.
     _, created = monitor.apps_v1.create_namespaced_deployment.call_args[0][:2]

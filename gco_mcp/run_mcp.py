@@ -16,49 +16,52 @@ Add to Kiro MCP config (.kiro/settings/mcp.json):
         }
     }
 
-This file is a thin entrypoint. The actual implementation lives in the
-``gco_mcp/`` directory:
+This file is a thin entrypoint. The implementation lives under
+``gco_mcp/``; the two package registries are the authoritative module lists:
 
     gco_mcp/
-    ├── server.py           — FastMCP instance and instructions
-    ├── audit.py            — Audit logging, sanitization, decorator
-    ├── iam.py              — IAM role assumption
-    ├── cli_runner.py       — _run_cli() subprocess wrapper
-    ├── version.py          — Project version management
-    ├── tools/              — MCP tool definitions (one file per domain)
-    │   ├── jobs.py
-    │   ├── capacity.py
-    │   ├── inference.py
-    │   ├── costs.py
-    │   ├── stacks.py
-    │   ├── storage.py
-    │   └── models.py
-    └── resources/          — MCP resource definitions (one file per scheme)
-        ├── docs.py         — docs:// (documentation + examples with metadata)
-        ├── source.py       — source:// (full source code browser)
-        ├── k8s.py          — k8s:// (cluster manifests)
-        ├── iam_policies.py — iam:// (IAM policy templates)
-        ├── infra.py        — infra:// (Dockerfiles, Helm, CI/CD)
-        ├── ci.py           — ci:// (GitHub Actions, workflows)
-        ├── demos.py        — demos:// (walkthroughs, scripts)
-        ├── clients.py      — clients:// (API client examples)
-        ├── scripts.py      — scripts:// (utility scripts)
-        ├── tests.py        — tests:// (test suite docs and patterns)
-        └── config.py       — config:// (CDK config, feature toggles, env vars)
+    ├── server.py           — FastMCP singleton, transforms, and middleware
+    ├── feature_flags.py    — Environment-driven tool gates
+    ├── audit.py            — Structured tool/resource/startup audit logging
+    ├── audit_middleware.py — Per-request message and elicitation capture
+    ├── iam.py              — Optional startup role assumption
+    ├── cli_runner.py       — Bounded gco CLI subprocess wrapper
+    ├── local_data.py       — Confined local-path and snapshot helpers
+    ├── mission/            — Goal-directed Mission engine
+    ├── metric_readers/     — Canonical metric-source adapters
+    ├── mission_judge/      — Semantic-progress scorer
+    ├── tools/
+    │   ├── __init__.py     — Registers all tool-domain modules
+    │   └── README.md       — Complete per-module and per-tool catalog
+    └── resources/
+        ├── __init__.py     — Registers every static/live resource module
+        └── README.md       — Complete URI-family and module catalog
 """
 
 import sys
 from pathlib import Path
 
-# Ensure the project root is on the path so CLI modules can be imported
-PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+# The file is supported both as ``python gco_mcp/run_mcp.py`` and as
+# ``import gco_mcp.run_mcp``. Alias the two names before importing the shared
+# server so either route observes one module and one FastMCP singleton.
+_THIS_MODULE = sys.modules[__name__]
+if __name__ in {"run_mcp", "__main__"}:
+    sys.modules.setdefault("gco_mcp.run_mcp", _THIS_MODULE)
+if __name__ in {"gco_mcp.run_mcp", "__main__"}:
+    sys.modules.setdefault("run_mcp", _THIS_MODULE)
 
-# Ensure the gco_mcp/ directory is on the path so internal modules can import
-# each other without a package prefix (avoids shadowing the ``mcp`` PyPI
-# package that fastmcp depends on).
-MCP_DIR = Path(__file__).parent
-sys.path.insert(0, str(MCP_DIR))
+# ``importlib.reload`` retains a module's globals. Record whether this is an
+# explicit same-process reload so compatibility rebinds do not re-register
+# every flagged tool during a normal, clean server startup.
+_IS_RELOAD = bool(globals().get("_RUN_MCP_IMPORT_COMPLETE", False))
+
+# Direct script execution starts with only gco_mcp/ on sys.path. Add each
+# required root at most once; package imports need no mutation.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MCP_DIR = Path(__file__).resolve().parent
+for _path in (str(PROJECT_ROOT), str(MCP_DIR)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 # --- Re-export everything the existing tests expect on ``run_mcp.*`` ---
 
@@ -82,7 +85,15 @@ from resources import register_all_resources  # noqa: E402
 from tools import register_all_tools  # noqa: E402
 
 register_all_tools()
-register_all_resources()
+if _IS_RELOAD:
+    # Static resources already live on the shared FastMCP singleton. Mission
+    # resources are the sole flag-gated family and may need to appear after a
+    # test or embedding process deliberately changes flags and reloads us.
+    from resources import mission as _mission_resources
+
+    _mission_resources.register(mcp)
+else:
+    register_all_resources()
 
 # --- Re-export tool functions for backward compat with existing tests ---
 # Tests call e.g. run_mcp.list_jobs(), so we import them into this namespace.
@@ -96,6 +107,7 @@ import feature_flags as _feature_flags  # noqa: E402
 from tools.analytics import (  # noqa: E402, F401
     analytics_doctor,
     analytics_login_url,
+    analytics_status,
     analytics_user_add,
     analytics_users_list,
     disable_analytics,
@@ -111,14 +123,22 @@ from tools.capacity import (  # noqa: E402, F401
     check_capacity,
     find_capacity_blocks,
     find_capacity_reservations,
+    instance_info,
     list_reservations,
+    recommend_capacity,
     recommend_region,
     reservation_check,
     spot_prices,
 )
 from tools.cluster import cluster_tunnel_command  # noqa: E402, F401
 from tools.config import config_get  # noqa: E402, F401
-from tools.costs import cost_by_region, cost_forecast, cost_summary, cost_trend  # noqa: E402, F401
+from tools.costs import (  # noqa: E402, F401
+    cost_by_region,
+    cost_forecast,
+    cost_summary,
+    cost_trend,
+    cost_workloads,
+)
 from tools.dag import dag_run, dag_validate  # noqa: E402, F401
 from tools.docs import find_docs  # noqa: E402, F401
 from tools.examples import find_examples  # noqa: E402, F401
@@ -140,6 +160,7 @@ from tools.images import (  # noqa: E402, F401
 from tools.inference import (  # noqa: E402, F401
     canary_deploy,
     chat_inference,
+    configure_mooncake_store,
     deploy_disaggregated_inference,
     deploy_inference,
     inference_health,
@@ -162,8 +183,12 @@ from tools.jobs import (  # noqa: E402, F401
     get_job,
     get_job_events,
     get_job_logs,
+    get_job_metrics,
+    get_job_pods,
+    get_pod_logs,
     list_jobs,
     queue_status,
+    retry_job,
     submit_job_api,
     submit_job_sqs,
 )
@@ -188,6 +213,7 @@ from tools.nodepools import (  # noqa: E402, F401
 )
 from tools.queue import queue_get, queue_list, queue_stats, queue_submit  # noqa: E402, F401
 from tools.stacks import (  # noqa: E402, F401
+    addons_status,
     aurora_status,
     disable_aurora,
     disable_fsx,
@@ -210,7 +236,6 @@ from tools.storage import (  # noqa: E402, F401
     list_file_systems,
     list_storage_buckets,
     list_storage_contents,
-    upload_to_regional_bucket,
 )
 from tools.tasks import task_status, task_tail  # noqa: E402, F401
 from tools.templates import (  # noqa: E402, F401
@@ -236,7 +261,7 @@ with _contextlib.suppress(ImportError):
     )
 
 with _contextlib.suppress(ImportError):
-    from tools.stacks import bootstrap_cdk, deploy_all, deploy_stack  # noqa: F401
+    from tools.stacks import addons_install, bootstrap_cdk, deploy_all, deploy_stack  # noqa: F401
 
 with _contextlib.suppress(ImportError):
     from tools.stacks import destroy_all, destroy_stack  # noqa: F401
@@ -273,19 +298,20 @@ with _contextlib.suppress(ImportError):
 with _contextlib.suppress(ImportError):
     from tools.queue import cancel_queue_job  # noqa: F401
 
+with _contextlib.suppress(ImportError):
+    from tools.tasks import task_prune  # noqa: F401
+
 # Model-upload gated tool — present only when GCO_ENABLE_MODEL_UPLOAD
 # (or GCO_ENABLE_ALL_TOOLS) is set.
 with _contextlib.suppress(ImportError):
     from tools.models import models_upload  # noqa: F401
 
-# Local-metrics, semantic-progress, and mission gated tools. Each family
-# registers its tools at import time inside an ``if is_enabled(...)`` module-body
-# gate, so when the flag is unset the names don't exist and the import is a
-# no-op. Unlike the gated families above they intentionally carry NO
-# importlib.reload rebind block: nothing accesses them as ``run_mcp.<name>``
-# after a mid-process flag flip, and forcing a reload would re-execute the gated
-# body and re-register the tools on the live singleton (the Mission suite guards
-# against exactly that cross-test registration leak).
+with _contextlib.suppress(ImportError):
+    from tools.storage import upload_to_regional_bucket  # noqa: F401
+
+# Local-metrics, local-storage, semantic-progress, and Mission tools also use
+# import-time gates. The imports are no-ops when disabled; the explicit reload
+# compatibility blocks below rebind them only during ``importlib.reload``.
 with _contextlib.suppress(ImportError):
     from tools.metrics import metrics_from_local_file  # noqa: F401
 
@@ -308,22 +334,27 @@ with _contextlib.suppress(ImportError):
         mission_status,
     )
 
-# Also make reserve_capacity available after module reload (tests use
-# importlib.reload with GCO_ENABLE_CAPACITY_PURCHASE=true). is_enabled()
-# folds in the umbrella GCO_ENABLE_ALL_TOOLS so the per-flag and the
-# umbrella both yield the same module-level rebinds.
-if _feature_flags.is_enabled(_feature_flags.FLAG_CAPACITY_PURCHASE):
+# Explicit reload compatibility for the two gated families in capacity.py.
+# A clean startup has just imported the module under the final environment and
+# must not reload it: doing so used to emit duplicate-component warnings for
+# every unconditional capacity tool.
+if _IS_RELOAD and (
+    _feature_flags.is_enabled(_feature_flags.FLAG_CAPACITY_PURCHASE)
+    or _feature_flags.is_enabled(_feature_flags.FLAG_DESTRUCTIVE_OPERATIONS)
+):
     from tools import capacity as _cap_mod  # noqa: E402
 
     _importlib.reload(_cap_mod)
-    if hasattr(_cap_mod, "reserve_capacity"):
-        reserve_capacity = _cap_mod.reserve_capacity  # noqa: F811
+    for _name in ("reserve_capacity", "create_reservation", "cancel_reservation"):
+        if hasattr(_cap_mod, _name):
+            globals()[_name] = getattr(_cap_mod, _name)
 
 # Reload tools.images when image-publish or destructive flags are set so
 # the gated build/push/delete tools are present after a test
 # ``importlib.reload(run_mcp)`` cycle. Mirrors the reserve_capacity pattern.
-if _feature_flags.is_enabled(_feature_flags.FLAG_IMAGE_PUBLISH) or _feature_flags.is_enabled(
-    _feature_flags.FLAG_DESTRUCTIVE_OPERATIONS
+if _IS_RELOAD and (
+    _feature_flags.is_enabled(_feature_flags.FLAG_IMAGE_PUBLISH)
+    or _feature_flags.is_enabled(_feature_flags.FLAG_DESTRUCTIVE_OPERATIONS)
 ):
     from tools import images as _img_mod  # noqa: E402
 
@@ -343,9 +374,10 @@ if _feature_flags.is_enabled(_feature_flags.FLAG_IMAGE_PUBLISH) or _feature_flag
 # Reload tools.stacks when either infrastructure flag is set so the
 # gated deploy/destroy/bootstrap tools are present after a test
 # ``importlib.reload(run_mcp)`` cycle. Mirrors the reserve_capacity pattern.
-if _feature_flags.is_enabled(
-    _feature_flags.FLAG_INFRASTRUCTURE_DEPLOY
-) or _feature_flags.is_enabled(_feature_flags.FLAG_INFRASTRUCTURE_DESTROY):
+if _IS_RELOAD and (
+    _feature_flags.is_enabled(_feature_flags.FLAG_INFRASTRUCTURE_DEPLOY)
+    or _feature_flags.is_enabled(_feature_flags.FLAG_INFRASTRUCTURE_DESTROY)
+):
     from tools import stacks as _stacks_mod  # noqa: E402
 
     _importlib.reload(_stacks_mod)
@@ -353,6 +385,7 @@ if _feature_flags.is_enabled(
         "deploy_stack",
         "deploy_all",
         "bootstrap_cdk",
+        "addons_install",
         "destroy_stack",
         "destroy_all",
     ):
@@ -365,7 +398,7 @@ if _feature_flags.is_enabled(
 _DESTRUCTIVE_FLAG_ON = _feature_flags.is_enabled(_feature_flags.FLAG_DESTRUCTIVE_OPERATIONS)
 _MODEL_UPLOAD_FLAG_ON = _feature_flags.is_enabled(_feature_flags.FLAG_MODEL_UPLOAD)
 
-if _DESTRUCTIVE_FLAG_ON:
+if _IS_RELOAD and _DESTRUCTIVE_FLAG_ON:
     from tools import jobs as _jobs_mod  # noqa: E402
 
     _importlib.reload(_jobs_mod)
@@ -414,16 +447,64 @@ if _DESTRUCTIVE_FLAG_ON:
     if hasattr(_mon_mod, "monitoring_user_remove"):
         globals()["monitoring_user_remove"] = _mon_mod.monitoring_user_remove
 
+    from tools import tasks as _tasks_mod  # noqa: E402
+
+    _importlib.reload(_tasks_mod)
+    if hasattr(_tasks_mod, "task_prune"):
+        globals()["task_prune"] = _tasks_mod.task_prune
+
 # tools.models is reloaded if either the destructive flag (delete_model)
 # or the model-upload flag (models_upload) is set, so do it once here
 # regardless of which (or both) flipped.
-if _DESTRUCTIVE_FLAG_ON or _MODEL_UPLOAD_FLAG_ON:
+if _IS_RELOAD and (_DESTRUCTIVE_FLAG_ON or _MODEL_UPLOAD_FLAG_ON):
     from tools import models as _models_mod  # noqa: E402
 
     _importlib.reload(_models_mod)
     for _name in ("delete_model", "models_upload"):
         if hasattr(_models_mod, _name):
             globals()[_name] = getattr(_models_mod, _name)
+
+if _IS_RELOAD and (
+    _MODEL_UPLOAD_FLAG_ON or _feature_flags.is_enabled(_feature_flags.FLAG_LOCAL_STORAGE_SYNC)
+):
+    from tools import storage as _storage_mod  # noqa: E402
+
+    _importlib.reload(_storage_mod)
+    for _name in ("upload_to_regional_bucket", "sync_storage_bucket"):
+        if hasattr(_storage_mod, _name):
+            globals()[_name] = getattr(_storage_mod, _name)
+
+if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_LOCAL_METRICS):
+    from tools import metrics as _metrics_mod  # noqa: E402
+
+    _importlib.reload(_metrics_mod)
+    if hasattr(_metrics_mod, "metrics_from_local_file"):
+        metrics_from_local_file = _metrics_mod.metrics_from_local_file
+
+if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_SEMANTIC_PROGRESS):
+    from tools import semantic_progress as _semantic_progress_mod  # noqa: E402
+
+    _importlib.reload(_semantic_progress_mod)
+    if hasattr(_semantic_progress_mod, "metrics_semantic_progress"):
+        metrics_semantic_progress = _semantic_progress_mod.metrics_semantic_progress
+
+if _IS_RELOAD and _feature_flags.is_enabled(_feature_flags.FLAG_MISSION):
+    from tools import mission as _mission_tools_mod  # noqa: E402
+
+    _importlib.reload(_mission_tools_mod)
+    for _name in (
+        "mission_start",
+        "mission_status",
+        "mission_iterate",
+        "mission_checkpoint",
+        "mission_complete",
+        "mission_abort",
+        "mission_resume",
+        "mission_history",
+        "mission_list",
+    ):
+        if hasattr(_mission_tools_mod, _name):
+            globals()[_name] = getattr(_mission_tools_mod, _name)
 
 # --- Re-export resource directory constants for tests ---
 from resources.ci import (  # noqa: E402, F401
@@ -438,11 +519,13 @@ from resources.ci import (  # noqa: E402, F401
 from resources.docs import DOCS_DIR, EXAMPLES_DIR  # noqa: E402, F401
 from resources.infra import DOCKERFILES_DIR, HELM_CHARTS_FILE  # noqa: E402, F401
 from resources.k8s import MANIFESTS_DIR  # noqa: E402, F401
+from resources.self import _TOOL_GATING_TABLE  # noqa: E402
 
-# Declare every name that is intentionally re-exported for tests and
-# downstream consumers. This silences unused-import warnings from static
-# analyzers that don't recognise the per-line ruff markers above.
-__all__ = [
+# Declare every candidate name that is intentionally re-exported for tests and
+# downstream consumers. The final ``__all__`` below filters gated names against
+# both the current environment and actual module globals, so ``from run_mcp
+# import *`` never advertises an unavailable attribute.
+_PUBLIC_EXPORTS = [
     "DOCKERFILES_DIR",
     "DOCS_DIR",
     "EXAMPLES_DIR",
@@ -458,9 +541,12 @@ __all__ = [
     "_MCP_SERVER_VERSION",
     "_PROJECT_VERSION",
     "_sanitize_arguments",
+    "addons_install",
+    "addons_status",
     "ai_recommend",
     "analytics_doctor",
     "analytics_login_url",
+    "analytics_status",
     "analytics_user_add",
     "analytics_user_remove",
     "analytics_users_list",
@@ -482,10 +568,12 @@ __all__ = [
     "cluster_health",
     "cluster_tunnel_command",
     "config_get",
+    "configure_mooncake_store",
     "cost_by_region",
     "cost_forecast",
     "cost_summary",
     "cost_trend",
+    "cost_workloads",
     "create_reservation",
     "dag_run",
     "dag_validate",
@@ -522,7 +610,10 @@ __all__ = [
     "get_job",
     "get_job_events",
     "get_job_logs",
+    "get_job_metrics",
+    "get_job_pods",
     "get_model_uri",
+    "get_pod_logs",
     "get_project_version",
     "images_build",
     "images_cleanup",
@@ -546,6 +637,7 @@ __all__ = [
     "images_uri",
     "inference_health",
     "inference_status",
+    "instance_info",
     "invoke_inference",
     "list_endpoint_models",
     "list_file_systems",
@@ -588,9 +680,11 @@ __all__ = [
     "queue_stats",
     "queue_status",
     "queue_submit",
+    "recommend_capacity",
     "recommend_region",
     "reservation_check",
     "reserve_capacity",
+    "retry_job",
     "rollback_canary",
     "scale_inference",
     "set_mooncake_topology",
@@ -605,6 +699,7 @@ __all__ = [
     "submit_job_api",
     "submit_job_sqs",
     "sync_storage_bucket",
+    "task_prune",
     "task_status",
     "task_tail",
     "templates_create",
@@ -619,23 +714,38 @@ __all__ = [
     "webhooks_list",
 ]
 
-# --- Startup ---
-
-emit_startup_log()
-
-try:
-    assume_mcp_role()
-except Exception:
-    raise
+__all__ = [
+    name
+    for name in _PUBLIC_EXPORTS
+    if name in globals()
+    and (name not in _TOOL_GATING_TABLE or _feature_flags.is_enabled(_TOOL_GATING_TABLE[name]))
+]
 
 # =============================================================================
 # ENTRYPOINT
 # =============================================================================
 
 
+def _initialize_runtime() -> None:
+    """Perform external startup effects exactly once per process invocation.
+
+    Importing ``run_mcp`` is now safe for documentation tooling and tests: it
+    does not emit a startup audit record or mutate the ambient boto3 session by
+    assuming a role. Those effects happen only when the server is actually run.
+    """
+    emit_startup_log()
+    assume_mcp_role()
+
+
 def main() -> None:
-    """Entry point for the gco-mcp console script: start the MCP server loop."""
+    """Start the MCP server after applying runtime identity and audit setup."""
+    _initialize_runtime()
     mcp.run()
+
+
+# Set only after registration/re-export initialization has completed. Python's
+# reload machinery preserves this sentinel in the module dictionary.
+_RUN_MCP_IMPORT_COMPLETE = True
 
 
 if __name__ == "__main__":

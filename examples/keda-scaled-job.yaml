@@ -1,135 +1,89 @@
-# KEDA ScaledJob Example — Custom SQS Consumer
+# KEDA ScaledJob Example — Safe SQS Scaling Demonstration
 #
-# A starting point for CUSTOM SQS-triggered workloads. NOT required for
-# basic SQS job submission — GCO ships with a built-in SQS consumer
-# (post-helm-sqs-consumer.yaml) that automatically processes manifests
-# submitted via `gco jobs submit-sqs`.
+# This example demonstrates only how KEDA turns SQS queue depth into Kubernetes
+# Jobs. The worker intentionally has no AWS credentials and never calls
+# ReceiveMessage or DeleteMessage, so it cannot consume or acknowledge messages.
 #
-# Use this example when you want to process messages from your own queue,
-# run different consumer logic, or scale a different workload on queue depth.
+# IMPORTANT: use a disposable demo queue. Do NOT set queueURL to GCO's
+# JobQueueUrl: this non-consuming observer would repeatedly scale while real job
+# submissions remained queued. GCO's built-in, validated consumer is defined in
+# lambda/kubectl-applier-simple/manifests/post-helm-sqs-consumer.yaml.
 #
 # Prerequisites:
 #   - KEDA (enabled by default)
-#   - Regional stack deployed (creates the built-in SQS queue)
+#   - A disposable SQS queue containing synthetic messages
+#   - KEDA operator read-only queue-metric permission for that demo queue
 #
 # Usage:
-#   # Edit the manifest to set JOB_QUEUE_URL and REGION, then:
-#   kubectl apply -f examples/keda-scaled-job.yaml
+#   1. Replace the obvious demo queue URL and region below.
+#   2. Apply this manifest and observe Jobs scale from queue depth.
+#   3. Delete the ScaledJob when finished; this example never drains the queue.
 #
 # Docs:
 #   - KEDA SQS scaler: https://keda.sh/docs/latest/scalers/aws-sqs/
 #   - GCO guide: ../docs/KEDA.md
 
 ---
-# ScaledJob - scales job replicas based on regional SQS queue depth
 apiVersion: keda.sh/v1alpha1
 kind: ScaledJob
 metadata:
-  name: sqs-job-processor
+  name: sqs-scaling-observer
   namespace: gco-jobs
 spec:
   jobTargetRef:
     parallelism: 1
     completions: 1
-    backoffLimit: 3
+    backoffLimit: 0
     template:
       metadata:
         labels:
-          app: sqs-processor
-          gco.io/job-type: sqs-triggered
+          app: sqs-scaling-observer
+          gco.io/job-type: safe-scaling-demo
       spec:
-        serviceAccountName: gco-service-account
+        # The observer neither calls AWS nor Kubernetes APIs.
+        automountServiceAccountToken: false
         securityContext:
           runAsNonRoot: true
           runAsUser: 1000
           runAsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
         containers:
-        - name: processor
-          image: python:3.14.6-slim
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-          command: ["/bin/sh", "-c"]
-          args:
-          - |
-            pip install -q boto3
-            python << 'EOF'
-            import os
-            import json
-            import boto3
-            import time
-
-            queue_url = os.environ.get("JOB_QUEUE_URL")
-            region = os.environ.get("AWS_REGION", "us-east-1")
-
-            if not queue_url:
-                print("ERROR: JOB_QUEUE_URL not set")
-                exit(1)
-
-            sqs = boto3.client("sqs", region_name=region)
-
-            # Receive and process one message
-            response = sqs.receive_message(
-                QueueUrl=queue_url,
-                MaxNumberOfMessages=1,
-                WaitTimeSeconds=5,
-                MessageAttributeNames=["All"]
-            )
-
-            messages = response.get("Messages", [])
-            if not messages:
-                print("No messages to process")
-                exit(0)
-
-            message = messages[0]
-            receipt_handle = message["ReceiptHandle"]
-            body = json.loads(message["Body"])
-
-            job_id = body.get("job_id", "unknown")
-            manifests = body.get("manifests", [])
-            print(f"Processing job: {job_id}")
-            print(f"Manifests: {len(manifests)}")
-
-            # Simulate processing
-            time.sleep(10)
-
-            # Delete message after successful processing
-            sqs.delete_message(
-                QueueUrl=queue_url,
-                ReceiptHandle=receipt_handle
-            )
-
-            print("Job processed successfully!")
-            EOF
-          env:
-          - name: JOB_QUEUE_URL
-            value: "{{JOB_QUEUE_URL}}"
-          - name: AWS_REGION
-            value: "{{REGION}}"
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "256Mi"
+          - name: observer
+            image: python:3.14.6-slim
+            command: ["python", "-c"]
+            args:
+              - >-
+                print("KEDA created this Job from demo queue depth. "
+                "This safe observer does not receive or delete SQS messages.")
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop:
+                  - ALL
+            resources:
+              requests:
+                cpu: "50m"
+                memory: "64Mi"
+              limits:
+                cpu: "100m"
+                memory: "128Mi"
         restartPolicy: Never
 
-  # Scaling configuration
-  pollingInterval: 15            # Check queue every 15 seconds
-  successfulJobsHistoryLimit: 10 # Keep 10 successful jobs
-  failedJobsHistoryLimit: 5      # Keep 5 failed jobs
-  maxReplicaCount: 20            # Maximum concurrent jobs
-  minReplicaCount: 0             # Scale to zero when queue is empty
+  pollingInterval: 15
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  maxReplicaCount: 5
+  minReplicaCount: 0
 
-  # SQS trigger - scales based on regional job queue
-  # KEDA operator uses its IRSA role for SQS access (no TriggerAuthentication needed)
+  # The KEDA operator reads queue depth with its own identity. queueLength is the
+  # target number of queued messages per active Job, not a number this worker
+  # receives or drains.
   triggers:
-  - type: aws-sqs-queue
-    metadata:
-      queueURL: "{{JOB_QUEUE_URL}}"
-      queueLength: "5"
-      awsRegion: "{{REGION}}"
-      identityOwner: operator
+    - type: aws-sqs-queue
+      metadata:
+        queueURL: "https://sqs.us-east-1.amazonaws.com/111122223333/REPLACE-WITH-DISPOSABLE-DEMO-QUEUE"
+        queueLength: "5"
+        awsRegion: "us-east-1"
+        identityOwner: operator

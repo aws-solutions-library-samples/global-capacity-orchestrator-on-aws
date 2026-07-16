@@ -17,13 +17,14 @@ AWS Lambda functions that power GCO's infrastructure layer. These are deployed a
 | `helm-installer/` | Installs Helm charts (KEDA, Volcano, KubeRay, Kueue) into EKS clusters during deployment. |
 | `helm-orchestrator/` | CloudFormation custom-resource provider (async `cr.Provider`) that starts and polls the Helm-install Step Functions state machine. Does no Helm/Kubernetes work itself — the per-chart tasks run in `helm-installer`. |
 | `image-lookup/` | CloudFormation custom resource that adopts-or-creates `gco/<name>` ECR repositories so retained repos from a prior deploy are rebound rather than failing the stack with `RepositoryAlreadyExistsException`. Honors `gco:retain=true` on Delete. |
-| `api-gateway-proxy/` | Proxies requests from the global API Gateway through Global Accelerator to regional ALBs. Injects the secret authentication header. |
-| `regional-api-proxy/` | Proxies requests from regional API Gateways directly to the internal NLB via VPC Link. Used for private cluster access. |
-| `cross-region-aggregator/` | Aggregates job status, health, and inference data across all deployed regions into a single response. Powers the global API endpoints. |
-| `secret-rotation/` | Rotates the authentication secret in AWS Secrets Manager on a daily schedule. Ensures zero-downtime rotation. |
+| `api-gateway-proxy/` | Proxies IAM-authenticated global requests through Global Accelerator to regional ALBs using request-bound HMAC plus strict deployment-local private-root TLS. |
+| `regional-api-proxy/` | VPC proxy behind every regional aggregation bridge; resolves/verifies its internal ALB and uses HMAC plus private-root TLS. Direct user invocation is optional. |
+| `cross-region-aggregator/` | Discovers deterministic regional API Gateway stacks and aggregates their SigV4-authenticated AWS-TLS responses; it never connects directly to ALBs. |
+| `secret-rotation/` | Rotates the backend HMAC key in AWS Secrets Manager on a daily schedule with overlap-safe validation. |
+| `tls-certificate-manager/` | Bootstraps the KMS-encrypted deployment-local root, rotates short-lived regional ACM leaves in place, publishes public trust, and manages staged root rollover. |
+| `tls-shared/` | Canonical strict private-root TLS/SNI client used by backend proxy packages. |
 | `ga-registration/` | Registers regional ALB endpoints with AWS Global Accelerator during stack deployment. |
-| `alb-header-validator/` | ALB Lambda target that validates the secret authentication header on incoming requests. |
-| `proxy-shared/` | Shared utilities used by the API Gateway and regional proxy Lambda functions. |
+| `proxy-shared/` | Shared request-signing, header-sanitization, URL-building, timeout, and retry utilities used by both API Gateway proxy Lambda functions. |
 
 ## Build
 
@@ -42,20 +43,21 @@ The GCO CLI handles this automatically during `gco stacks deploy`.
 ## Architecture
 
 ```text
-API Gateway → api-gateway-proxy → Global Accelerator → ALB → EKS
-                                                         ↑
-                                              alb-header-validator
-                                              (validates secret header)
+API Gateway → api-gateway-proxy (HMAC) → Global Accelerator (TCP/443 pass-through)
+  → regional ALB (private-root TLS) → EKS pod (HTTP)
+                                      ↓
+                         AuthenticationMiddleware
+                         (validates exact request)
 
-Regional API → regional-api-proxy → Internal NLB → EKS
+Global API → cross-region-aggregator → regional API (AWS TLS + SigV4)
+  → regional-api-proxy (HMAC) → regional ALB (private-root TLS) → EKS pod
 
 CDK Deploy → kubectl-applier-simple → EKS (applies manifests)
            → helm-orchestrator → Step Functions → helm-installer → EKS (installs Helm charts)
            → ga-registration → Global Accelerator (registers endpoints)
 
-Scheduled → secret-rotation → Secrets Manager (daily rotation)
-
-Global API → cross-region-aggregator → DynamoDB/SSM (aggregates all regions)
+Scheduled → secret-rotation → HMAC secret
+          → tls-certificate-manager → stable regional ACM certificate ARNs
 ```
 
 ## Control-Flow Diagrams
@@ -73,13 +75,14 @@ JavaScript can't run.
 | `api-gateway-proxy` | [HTML](../diagrams/code_diagrams/lambda/api-gateway-proxy/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/api-gateway-proxy/handler.lambda_handler.png) |
 | `regional-api-proxy` | [HTML](../diagrams/code_diagrams/lambda/regional-api-proxy/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/regional-api-proxy/handler.lambda_handler.png) |
 | `cross-region-aggregator` | [HTML](../diagrams/code_diagrams/lambda/cross-region-aggregator/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/cross-region-aggregator/handler.lambda_handler.png) |
-| `alb-header-validator` | [HTML](../diagrams/code_diagrams/lambda/alb-header-validator/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/alb-header-validator/handler.lambda_handler.png) |
 | `drift-detection` | [HTML](../diagrams/code_diagrams/lambda/drift-detection/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/drift-detection/handler.lambda_handler.png) |
 | `ga-registration` | [HTML](../diagrams/code_diagrams/lambda/ga-registration/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/ga-registration/handler.lambda_handler.png) |
 | `helm-installer` | [HTML](../diagrams/code_diagrams/lambda/helm-installer/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/helm-installer/handler.lambda_handler.png) |
 | `image-lookup` | [HTML](../diagrams/code_diagrams/lambda/image-lookup/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/image-lookup/handler.lambda_handler.png) |
 | `kubectl-applier-simple` | [HTML](../diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.png) |
 | `secret-rotation` | [HTML](../diagrams/code_diagrams/lambda/secret-rotation/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/secret-rotation/handler.lambda_handler.png) |
+| `tls-certificate-manager` | [HTML](../diagrams/code_diagrams/lambda/tls-certificate-manager/handler.lambda_handler.html) · [PNG](../diagrams/code_diagrams/lambda/tls-certificate-manager/handler.lambda_handler.png) |
+| `tls-shared.get_backend_http_pool` | [HTML](../diagrams/code_diagrams/lambda/tls-shared/backend_tls.get_backend_http_pool.html) · [PNG](../diagrams/code_diagrams/lambda/tls-shared/backend_tls.get_backend_http_pool.png) |
 
 Regenerate with `python diagrams/code_diagrams/generate.py` after
 editing a handler's control flow.

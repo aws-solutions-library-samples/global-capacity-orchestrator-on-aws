@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,32 +205,58 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op267=>operation: '\n    Proxy authenticated API Gateway requests to internal ALB.\n\n    This Lambda runs inside the VPC and can reach the internal ALB directly.\n\n    Args:\n        event: API Gateway proxy event containing HTTP request details\n        context: Lambda context object\n\n    Returns:\n        API Gateway proxy response with status code, headers, and body\n    '
-op269=>operation: alb_endpoint = os.environ['ALB_ENDPOINT']
-op271=>operation: secret_token = get_secret_token()
-op273=>operation: http_method = event['httpMethod']
-op275=>operation: path = event['path']
-op277=>operation: query_string = event.get('queryStringParameters') or {}
-op279=>operation: headers = dict(event.get('headers') or {})
-op281=>operation: body = event.get('body') or ''
-op283=>operation: target_url = build_target_url(alb_endpoint, path, query_string)
-op285=>operation: headers['X-GCO-Auth-Token'] = secret_token
-cond288=>operation: headers.pop(h, None) while  h in ['Host', 'host', 'X-Forwarded-For', 'X-Forwarded-Proto', 'X-Forwarded-Port']
-io300=>inputoutput: output: forward_request(target_url, http_method, headers, body)
-e298=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op331=>operation: 'Proxy one IAM-authenticated API Gateway request to the internal ALB.'
+op336=>operation: signing_key = get_secret_token()
+cond333=>condition: exception raised?
+cond338=>condition: except (KeyError, RuntimeError)
+io345=>inputoutput: output: _error_response(503, 'Backend authentication is temporarily unavailable')
+e343=>end: end function return
+op354=>operation: alb_endpoint = _resolve_registered_endpoint()
+cond351=>condition: exception raised?
+cond356=>condition: except RuntimeError as exc
+sub360=>subroutine: _LOGGER.warning('Regional backend resolution failed: %s', exc)
+io365=>inputoutput: output: _error_response(502, 'Regional backend is temporarily unavailable')
+e363=>end: end function return
+op371=>operation: http_method = event['httpMethod']
+op373=>operation: path = event['path']
+op375=>operation: query_string = event.get('multiValueQueryStringParameters') or event.get('queryStringParameters') or {}
+op377=>operation: headers = dict(event.get('headers') or {})
+op379=>operation: body = event.get('body') or ''
+cond382=>condition: if event.get('isBase64Encoded')
+io389=>inputoutput: output: _error_response(415, 'Base64-encoded request bodies are not supported')
+e387=>end: end function return
+op395=>operation: target_url = build_target_url(alb_endpoint, path, query_string)
+op397=>operation: headers = sanitize_request_headers(headers)
+sub399=>subroutine: headers.update(build_signed_headers(signing_key, http_method, target_url, body))
+io404=>inputoutput: output: forward_request(target_url, http_method, headers, body, timeout=_get_request_timeout_seconds(context))
+e402=>end: end function return
 
-op267->op269
-op269->op271
-op271->op273
-op273->op275
-op275->op277
-op277->op279
-op279->op281
-op281->op283
-op283->op285
-op285->cond288
-cond288->io300
-io300->e298
+op331->op336
+op336->cond333
+cond333(yes)->cond338
+cond338(yes)->io345
+io345->e343
+cond338(no)->op354
+op354->cond351
+cond351(yes)->cond356
+cond356(yes)->sub360
+sub360->io365
+io365->e363
+cond356(no)->op371
+op371->op373
+op373->op375
+op375->op377
+op377->op379
+op379->cond382
+cond382(yes)->io389
+io389->e387
+cond382(no)->op395
+op395->op397
+op397->sub399
+sub399->io404
+io404->e402
+cond351(no)->op371
+cond333(no)->op354
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

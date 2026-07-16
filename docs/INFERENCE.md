@@ -31,70 +31,95 @@ Key capabilities:
 
 ## Architecture
 
-Inference serving uses a reconciliation pattern similar to Kubernetes controllers:
+Inference serving has a DynamoDB-backed control plane and an authenticated
+request plane. Endpoint workloads never receive direct public ALB rules.
 
 ```text
-User → gco inference deploy
-         │
-         ▼
-    DynamoDB (desired state)
-         │
-         ▼ (each region's inference_monitor polls)
-    ┌────────────────┐    ┌────────────────┐
-    │  us-east-1     │    │  eu-west-1     │
-    │  ┌──────────┐  │    │  ┌──────────┐  │
-    │  │ init:    │  │    │  │ init:    │  │
-    │  │ S3 sync  │  │    │  │ S3 sync  │  │
-    │  └────┬─────┘  │    │  └────┬─────┘  │
-    │  ┌────▼─────┐  │    │  ┌────▼─────┐  │
-    │  │ Inference│  │    │  │ Inference│  │
-    │  │ (GPU)    │  │    │  │ (GPU)    │  │
-    │  └────┬─────┘  │    │  └────┬─────┘  │
-    │  ┌────▼─────┐  │    │  ┌────▼─────┐  │
-    │  │ Service  │  │    │  │ Service  │  │
-    │  └────┬─────┘  │    │  └────┬─────┘  │
-    │  ┌────▼─────┐  │    │  ┌────▼─────┐  │
-    │  │ Ingress  │  │    │  │ Ingress  │  │
-    │  │ (ALB)    │  │    │  │ (ALB)    │  │
-    │  └────┬─────┘  │    │  └────┬─────┘  │
-    └───────┼────────┘    └───────┼────────┘
-            │                     │
-            └──────┬──────────────┘
-                   ▼
-          Global Accelerator
-          (anycast IPs, health routing)
-                   │
-                   ▼
-              End Users
-         (nearest healthy region)
+Control plane
+─────────────
+User / automation → gco inference deploy → DynamoDB desired state
+                                                │
+                              regional inference_monitor polls
+                                                │
+                 ┌──────────────────────────────┴──────────────────────────────┐
+                 ▼                                                             ▼
+        us-east-1 EKS                                                eu-west-1 EKS
+   Deployment + ClusterIP Service                               Deployment + ClusterIP Service
+   optional HPA/KEDA + model sync                               optional HPA/KEDA + model sync
+
+Authenticated request plane
+───────────────────────────
+Client (SigV4)
+      │
+      ▼
+edge-optimized API Gateway (AWS-managed TLS + SigV4)
+      │
+      ▼
+global proxy Lambda (request-bound HMAC) → Global Accelerator (TCP/443 pass-through)
+                                                │
+                                                ▼
+                                  internal regional ALB (private-root TLS)
+                                                │ HTTP after termination
+                                                ▼
+                                              authenticated manifest processor
+                                                                │
+                                                                ▼
+                                               endpoint ClusterIP Service → pod
 ```
 
 ### How It Works
 
-1. `gco inference deploy` writes the endpoint spec to a DynamoDB table (`gco-inference-endpoints`)
-2. The `inference_monitor` service running in each target region polls the table every 15 seconds
-3. For each endpoint targeting its region, the monitor reconciles desired state with actual K8s resources:
-   - Creates/updates Deployments, Services, and Ingress rules
-   - Recreates any missing resources (self-healing)
-   - Purges fully-deleted endpoints from DynamoDB automatically
+1. `gco inference deploy` writes the endpoint spec to the global
+   `gco-inference-endpoints` DynamoDB table.
+2. The `inference_monitor` in each target region polls the table every 15
+   seconds and reconciles the local workload.
+3. For a plain endpoint, the monitor creates or updates a Deployment and
+   ClusterIP Service, plus an HPA or KEDA ScaledObject when requested. Mooncake
+   endpoints add role workloads, internal Services, and a PD proxy.
+4. The monitor removes historical `inference-{name}` Ingresses rather than
+   recreating them. The shared `gco-system/gco-ingress` is the only ALB route
+   for inference traffic.
+5. API Gateway authenticates the client with IAM over AWS-managed TLS. The
+   global Lambda binds the method, target, body digest, timestamp, and nonce
+   into a short-lived HMAC envelope, then uses strict private-root TLS through
+   Global Accelerator to a healthy regional ALB. Global Accelerator forwards
+   TCP/443 and never terminates TLS; the ALB forwards HTTP to the manifest
+   processor after termination.
+6. The manifest processor validates that envelope, checks endpoint state and an
+   allowlist of serving paths, then forwards to a strictly derived in-cluster
+   Service name. Mooncake admin, metrics, debug, and documentation paths are
+   never forwarded.
 
-### Shared ALB
+### Shared Internal ALB
 
-All inference endpoints share the same ALB as the main GCO services via EKS Auto Mode's `IngressClassParams` with `group.name: gco`. This means:
+Each region has one internal ALB managed from the shared platform Ingress,
+registered with Global Accelerator, and configured with a short-lived regional
+ACM leaf for `backend.<project>.gco.internal`. The proxy sends and verifies that
+identity through explicit SNI while connecting to the accelerator DNS name.
+This keeps the public boundary narrow:
 
-- One ALB per region (cost-efficient, registered with Global Accelerator)
-- Inference requests route through the same ALB as job management APIs
-- URL rewrite transforms strip the `/inference/{name}` prefix before forwarding to the pod
-- The inference_monitor creates an ExternalName proxy Service in `gco-system` so the Ingress can reference the inference pod Service across namespaces
+- The ALB exposes the platform `gco-ingress`, not one Ingress per model.
+- `/inference/*` first reaches the authenticated manifest processor.
+- Plain endpoints resolve to `<name>.gco-inference.svc.cluster.local`; split
+  Mooncake endpoints resolve to `<name>-proxy` in the same namespace.
+- No ExternalName bridge, endpoint-specific target group, direct Global
+  Accelerator URL, or public model Service is required.
 
 ### Self-Healing
 
-The health monitor periodically verifies the ALB hostname stored in SSM matches the actual ALB from the Kubernetes Ingress status. If the ALB changes (e.g., due to cluster recreation or IngressClassParams updates), SSM is updated automatically so the cross-region aggregator and API Gateway proxy continue routing correctly.
+The inference monitor recreates missing endpoint Deployments and Services,
+reconciles images and replica counts, and reports per-region readiness or
+errors to DynamoDB. When `model_source` is set, the Deployment includes an init
+container that syncs model weights from S3 to regional EFS.
 
-- If `model_source` is set, adds an init container that syncs model weights from S3 to local EFS
-- Reports per-region status (replicas ready, errors) back to DynamoDB
-
-1. State transitions (`deploying` → `running` → `stopped` → `deleted`) are driven by the CLI and reconciled by the monitor
+Separately, the health monitor verifies that the ALB hostname stored in SSM
+matches the shared Kubernetes Ingress status. If cluster recreation changes the
+ALB, SSM is refreshed so the regional VPC proxy and Global Accelerator
+registration use the current internal endpoint. The global aggregator discovers
+regional API Gateway outputs through CloudFormation and never reads this ALB
+registry. Endpoint state transitions
+(`deploying` → `running` → `stopped` → `deleted`) remain driven by the CLI and
+regional reconciliation.
 
 ### Inference-Optimized nodepool
 
@@ -162,7 +187,7 @@ This happens automatically in every target region, so model weights are always l
 ```bash
 # Deploy vLLM serving a model (downloads from HuggingFace at startup)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.22.0 \
+  -i vllm/vllm-openai:v0.24.0 \
   --gpu-count 1 \
   -e MODEL=meta-llama/Llama-3.1-8B-Instruct
 ```
@@ -175,7 +200,7 @@ gco models upload ./llama3-weights/ --name llama3-8b
 
 # Deploy with model sync from S3
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.22.0 \
+  -i vllm/vllm-openai:v0.24.0 \
   --gpu-count 1 \
   --model-source $(gco models uri llama3-8b) \
   -e MODEL=/models/my-llm
@@ -201,11 +226,18 @@ gco inference deploy ENDPOINT_NAME \
 
 ### What Gets Created
 
-For each target region, the inference_monitor creates:
+For each target region, the inference monitor creates:
 
-- **Deployment** — Runs the inference container with GPU resource requests, optional init container for S3 model sync
-- **Service** — ClusterIP service exposing the container port
-- **Ingress rule** — ALB path at `/inference/<endpoint-name>` for external access via Global Accelerator
+- **Deployment** — Runs the inference container with GPU resources and an
+  optional init container for S3 model sync.
+- **ClusterIP Service** — Gives the authenticated platform proxy a stable,
+  in-cluster destination.
+- **Optional autoscaler** — A native HPA for CPU/memory metrics or KEDA
+  ScaledObject when GPU metrics are requested.
+
+The shared platform Ingress already owns `/inference/*`; no endpoint-specific
+Ingress, public Service, or ALB target group is created. On upgrades, the
+monitor deletes historical direct Ingresses if they still exist.
 
 ## Supported Frameworks
 
@@ -213,7 +245,7 @@ GCO works with any containerized inference server. These frameworks have example
 
 | Framework | Image Example | Default Port | Health Path | Use Case |
 |-----------|--------------|-------------|-------------|----------|
-| vLLM | `vllm/vllm-openai:v0.22.0` | 8000 | `/health` | OpenAI-compatible LLM serving |
+| vLLM | `vllm/vllm-openai:v0.24.0` | 8000 | `/health` | OpenAI-compatible LLM serving |
 | TGI | `ghcr.io/huggingface/text-generation-inference:3.3.7` | 8080 | `/health` | HuggingFace model serving |
 | Triton | `nvcr.io/nvidia/tritonserver:24.01-py3` | 8000 | `/v2/health/ready` | Multi-framework model serving |
 | TorchServe | `pytorch/torchserve:latest-gpu` | 8080 | `/ping` | PyTorch model serving |
@@ -223,7 +255,7 @@ GCO works with any containerized inference server. These frameworks have example
 
 ```bash
 gco inference deploy vllm-llama3 \
-  -i vllm/vllm-openai:v0.22.0 \
+  -i vllm/vllm-openai:v0.24.0 \
   --gpu-count 1 \
   -e MODEL=meta-llama/Llama-3.1-8B-Instruct \
   -e MAX_MODEL_LEN=4096
@@ -283,7 +315,10 @@ When `--mooncake-mode disaggregated` is set:
 - A shared Mooncake transfer engine enables zero-copy KV cache transfer between roles via RDMA/TCP
 - The `--image` flag is optional; when omitted, the upstream `vllm/vllm-openai` image (which bundles the Mooncake transfer engine) is used by default. The PD proxy defaults to that same image — override it with `--mooncake-proxy-image`
 - `--prefill-replicas` and `--decode-replicas` set the initial replica count for each role (both default to 1)
-- The public Ingress publishes only the endpoint's `/inference/{name}/v1` serving paths; the proxy's `/instances/add` admin path is never exposed externally
+- The shared authenticated `/inference/{name}/...` route forwards allowlisted
+  serving requests to the proxy's ClusterIP Service. No endpoint-specific
+  Ingress is created, and the proxy's `/instances/add` admin path is blocked by
+  the platform inference proxy.
 
 #### Proxy admin key
 
@@ -344,17 +379,24 @@ The `store` and `both` modes enable the shared KV-cache store automatically — 
 ### Architecture
 
 ```text
-                 ┌──────────────────────────────────────┐
-                 │        Mooncake Transfer Engine      │
-                 │   (zero-copy KV cache via RDMA/TCP)  │
-                 └────────────┬─────────────┬───────────┘
-                              │             │
-              ┌───────────────▼──┐    ┌─────▼──────────────┐
-              │  Prefill Pods    │    │   Decode Pods      │
-              │  (compute-bound) │    │   (memory-bound)   │
-              │  {name}-prefill  │    │   {name}-decode    │
-              │  GPU-saturated   │    │   Streaming tokens │
-              └──────────────────┘    └────────────────────┘
+API Gateway (AWS TLS + SigV4) → HMAC proxy → Global Accelerator (TCP/443)
+  → internal ALB (private-root TLS) → authenticated manifest processor (HTTP)
+                                                          │
+                                                          ▼
+                                                {name}-proxy Service
+                                                          │
+                                                PD proxy Deployment
+                                             ┌────────────┴────────────┐
+                                             ▼                         ▼
+                                 {name}-prefill Service     {name}-decode Service
+                                             │                         │
+                                             ▼                         ▼
+                                      Prefill Pods                Decode Pods
+                                   (compute-bound)              (memory-bound)
+                                             └────────────┬────────────┘
+                                                          │
+                                              Mooncake transfer engine
+                                                 (RDMA/TCP KV transfer)
 ```
 
 ### Shared KV-Cache Store
@@ -432,14 +474,14 @@ Inference endpoints support automatic scaling based on resource utilization. Whe
 ```bash
 # Deploy with autoscaling enabled
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.22.0 \
+  -i vllm/vllm-openai:v0.24.0 \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric cpu:70 --autoscale-metric memory:80
 
 # Scale on GPU utilization (routed through KEDA + CloudWatch)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.22.0 \
+  -i vllm/vllm-openai:v0.24.0 \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric gpu:60
@@ -464,7 +506,7 @@ The HPA respects `--min-replicas` (default: 1) and `--max-replicas` (default: 10
 
 ```bash
 # Triggers a rolling update in all target regions
-gco inference update-image my-llm -i vllm/vllm-openai:v0.22.0
+gco inference update-image my-llm -i vllm/vllm-openai:v0.24.0
 ```
 
 ### Stop and Start
@@ -489,11 +531,11 @@ gco inference delete my-llm -y
 Canary deployments let you test a new model version with a percentage of traffic before fully rolling it out. The primary deployment continues serving most traffic while the canary receives a configurable slice.
 
 ```bash
-# Start a canary: 10% traffic to v0.9.0, 90% stays on current primary
-gco inference canary my-llm -i vllm/vllm-openai:v0.22.0 --weight 10
+# Start a canary: 10% traffic to the candidate image; 90% stays on the current primary
+gco inference canary my-llm -i vllm/vllm-openai:v0.24.0 --weight 10
 
 # Increase canary traffic to 25%
-gco inference canary my-llm -i vllm/vllm-openai:v0.22.0 --weight 25
+gco inference canary my-llm -i vllm/vllm-openai:v0.24.0 --weight 25
 
 # Happy with the canary? Promote it to primary (100% traffic)
 gco inference promote my-llm -y
@@ -506,7 +548,10 @@ How it works:
 
 - `canary` stores the canary config (image, weight, replicas) in the endpoint spec in DynamoDB
 - The inference_monitor creates a second deployment (`{name}-canary`) and service in each target region
-- The ingress is updated with ALB weighted routing annotations to split traffic
+- The authenticated manifest-processor proxy samples the configured weight
+  only after the local canary status reports the expected image and every
+  desired canary replica Ready; otherwise all requests stay on the primary
+  Service.
 - `promote` swaps the primary image to the canary image and removes the canary
 - `rollback` removes the canary deployment and restores 100% traffic to the primary
 
@@ -516,10 +561,10 @@ Use spot instances to reduce inference serving costs. Spot GPU instances can be 
 
 ```bash
 # Deploy on spot instances
-gco inference deploy my-llm -i vllm/vllm-openai:v0.22.0 --gpu-count 1 --capacity-type spot
+gco inference deploy my-llm -i vllm/vllm-openai:v0.24.0 --gpu-count 1 --capacity-type spot
 
 # Deploy on on-demand (default, guaranteed availability)
-gco inference deploy my-llm -i vllm/vllm-openai:v0.22.0 --gpu-count 1 --capacity-type on-demand
+gco inference deploy my-llm -i vllm/vllm-openai:v0.24.0 --gpu-count 1 --capacity-type on-demand
 ```
 
 When `--capacity-type spot` is set, the inference_monitor adds a `karpenter.sh/capacity-type: spot` node selector to the deployment. Karpenter then provisions spot GPU instances for those pods.
@@ -601,11 +646,11 @@ The MCP server exposes a dedicated `chat_inference` tool that accepts a messages
 Verify an endpoint is ready before sending requests:
 
 ```bash
-# Check health (routes via Global Accelerator to nearest region)
+# Check health (API Gateway authentication, then GA healthy-region routing)
 gco inference health my-llm
 
-# Check a specific region
-gco inference health my-llm -r us-east-1
+# Check a specific region (requires authorized direct regional API access)
+gco --regional-api inference health my-llm -r us-east-1
 ```
 
 Returns HTTP status and round-trip latency in milliseconds.
@@ -631,7 +676,9 @@ The MCP server exposes four inference interaction tools so AI agents can use you
 | `inference_health` | Health check with latency reporting |
 | `list_endpoint_models` | Discover loaded models via `/v1/models` |
 
-Both `invoke_inference` and `chat_inference` support a `stream` parameter. When enabled, the request is sent with streaming mode, which reduces time-to-first-token for long generations.
+Both `invoke_inference` and `chat_inference` return buffered responses. They do
+not expose a `stream` parameter because API Gateway and Lambda buffer this
+request path rather than providing end-to-end response streaming.
 
 ## Valkey K/V Cache
 
@@ -726,25 +773,29 @@ By default, `gco inference deploy` targets all deployed regions. This is the rec
 ```bash
 # Deploy to all regions (recommended — ensures consistent global routing)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.22.0
+  -i vllm/vllm-openai:v0.24.0
 
 # Deploy to specific regions (use with caution — see note below)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.22.0 \
+  -i vllm/vllm-openai:v0.24.0 \
   -r us-east-1 -r eu-west-1
 ```
 
 > **Routing caveat:** If you deploy to a subset of regions, Global Accelerator may route users to a region where the endpoint doesn't exist. The CLI warns you about this. For production inference, deploy to all regions or ensure your users only connect from regions where the endpoint is available.
 
-### Global Accelerator Routing
+### Authenticated Global Routing
 
-Once deployed, inference endpoints are accessible through Global Accelerator at:
+Use the API Gateway stack's `ApiEndpoint` output as the endpoint base URL:
 
 ```text
-https://<GA_ENDPOINT>/inference/<endpoint-name>/
+<ApiEndpoint>/inference/<endpoint-name>/
 ```
 
-Global Accelerator automatically routes requests to the nearest healthy region. If a region becomes unhealthy, traffic fails over to the next closest region.
+API Gateway is the public entry point and requires AWS IAM (SigV4)
+authentication. After authentication, the global proxy sends a request-bound
+HMAC envelope through Global Accelerator, which selects the nearest healthy
+regional internal ALB. Global Accelerator and the ALB are routing layers behind
+the API; their addresses are not supported client entry points.
 
 ### Per-Region Status
 
@@ -758,7 +809,7 @@ gco inference status my-llm
   Endpoint: my-llm
   ------------------------------------------------------------
   State:     running
-  Image:     vllm/vllm-openai:v0.22.0
+  Image:     vllm/vllm-openai:v0.24.0
   Replicas:  2
   GPUs:      1
   Port:      8000
@@ -820,7 +871,7 @@ gco models upload ./llama3-weights/ --name llama3-8b
 
 # 3. Deploy the endpoint
 gco inference deploy vllm-llama3 \
-  -i vllm/vllm-openai:v0.22.0 \
+  -i vllm/vllm-openai:v0.24.0 \
   --gpu-count 1 \
   --model-source $(gco models uri llama3-8b) \
   -e MODEL=/models/vllm-llama3 \
@@ -829,16 +880,15 @@ gco inference deploy vllm-llama3 \
 # 4. Monitor deployment
 gco inference status vllm-llama3
 
-# 5. Test the endpoint
-curl https://GA_ENDPOINT/inference/vllm-llama3/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "/models/vllm-llama3", "prompt": "Hello", "max_tokens": 50}'
+# 5. Test the endpoint through the authenticated API path
+gco inference invoke vllm-llama3 \
+  -p "Hello" --max-tokens 50
 
 # 6. Scale up for production
 gco inference scale vllm-llama3 --replicas 3
 
 # 7. Update to a new version
-gco inference update-image vllm-llama3 -i vllm/vllm-openai:v0.22.0
+gco inference update-image vllm-llama3 -i vllm/vllm-openai:v0.24.0
 
 # 8. Clean up
 gco inference delete vllm-llama3 -y

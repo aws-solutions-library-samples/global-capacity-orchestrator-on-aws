@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -16,6 +16,14 @@ from cli.config import GCOConfig, get_config
 from .checker import CapacityChecker
 
 logger = logging.getLogger(__name__)
+
+_TELEMETRY_MISSING_SIGNAL_PENALTY = 1000.0
+_SCORED_TELEMETRY_SIGNALS = frozenset({"queue", "gpu"})
+
+
+def _missing_scored_signal_count(capacity: RegionCapacity) -> int:
+    """Return the number of unavailable signals used for placement scoring."""
+    return len(_SCORED_TELEMETRY_SIGNALS.intersection(capacity.unavailable_signals))
 
 
 @dataclass
@@ -32,6 +40,9 @@ class RegionCapacity:
     total_gpus: int = 0
     avg_wait_time_seconds: int = 0
     recommendation_score: float = 0.0
+    telemetry_status: str = "unknown"
+    unavailable_signals: list[str] = field(default_factory=list)
+    telemetry_errors: list[str] = field(default_factory=list)
 
 
 class MultiRegionCapacityChecker:
@@ -53,23 +64,31 @@ class MultiRegionCapacityChecker:
         self._last_region_errors: list[str] = []
 
     def get_region_capacity(self, region: str) -> RegionCapacity:
-        """Get capacity information for a single region."""
+        """Get capacity information while retaining telemetry uncertainty."""
         from cli.aws_client import get_aws_client
 
         aws_client = get_aws_client(self.config)
         stack = aws_client.get_regional_stack(region)
-
-        if not stack:
-            return RegionCapacity(region=region)
-
         capacity = RegionCapacity(region=region)
 
-        # Get queue depth from SQS
+        if not stack:
+            capacity.telemetry_status = "unavailable"
+            capacity.unavailable_signals = ["queue", "gpu", "cpu"]
+            capacity.telemetry_errors = ["Regional stack was not found"]
+            capacity.recommendation_score = (
+                len(_SCORED_TELEMETRY_SIGNALS) * _TELEMETRY_MISSING_SIGNAL_PENALTY
+            )
+            return capacity
+
+        available = {"queue": False, "gpu": False, "cpu": False}
+
+        # Get queue depth from SQS.
         try:
             cfn = self._session.client("cloudformation", region_name=region)
             response = cfn.describe_stacks(StackName=stack.stack_name)
             outputs = {
-                o["OutputKey"]: o["OutputValue"] for o in response["Stacks"][0].get("Outputs", [])
+                output["OutputKey"]: output["OutputValue"]
+                for output in response["Stacks"][0].get("Outputs", [])
             }
 
             queue_url = outputs.get("JobQueueUrl")
@@ -84,63 +103,91 @@ class MultiRegionCapacityChecker:
                 )["Attributes"]
                 capacity.queue_depth = int(attrs.get("ApproximateNumberOfMessages", 0))
                 capacity.running_jobs = int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0))
+                available["queue"] = True
+            else:
+                capacity.telemetry_errors.append("Job queue URL was not present in stack outputs")
         except ClientError as e:
             logger.debug("Failed to get queue metrics for %s: %s", region, e)
+            capacity.telemetry_errors.append(f"Queue telemetry failed: {e}")
         except Exception as e:
             logger.warning("Unexpected error getting queue metrics for %s: %s", region, e)
+            capacity.telemetry_errors.append(f"Queue telemetry failed: {e}")
 
-        # Get cluster metrics from CloudWatch (if available)
+        # Query GPU and CPU independently so one failed metric does not erase
+        # the other useful signal.
         try:
             cloudwatch = self._session.client("cloudwatch", region_name=region)
-
-            # Get GPU utilization from Container Insights
-            response = cloudwatch.get_metric_statistics(
-                Namespace="ContainerInsights",
-                MetricName="node_gpu_utilization",
-                Dimensions=[{"Name": "ClusterName", "Value": stack.cluster_name}],
-                StartTime=datetime.now(UTC) - timedelta(minutes=5),
-                EndTime=datetime.now(UTC),
-                Period=300,
-                Statistics=["Average"],
-            )
-            if response["Datapoints"]:
-                capacity.gpu_utilization = response["Datapoints"][0]["Average"]
-
-            # Get CPU utilization
-            response = cloudwatch.get_metric_statistics(
-                Namespace="ContainerInsights",
-                MetricName="node_cpu_utilization",
-                Dimensions=[{"Name": "ClusterName", "Value": stack.cluster_name}],
-                StartTime=datetime.now(UTC) - timedelta(minutes=5),
-                EndTime=datetime.now(UTC),
-                Period=300,
-                Statistics=["Average"],
-            )
-            if response["Datapoints"]:
-                capacity.cpu_utilization = response["Datapoints"][0]["Average"]
-
-        except ClientError as e:
-            logger.debug("Failed to get CloudWatch metrics for %s: %s", region, e)
         except Exception as e:
-            logger.warning("Unexpected error getting CloudWatch metrics for %s: %s", region, e)
+            logger.warning("Failed to create CloudWatch client for %s: %s", region, e)
+            capacity.telemetry_errors.append(f"CloudWatch telemetry failed: {e}")
+        else:
+            metric_specs = (
+                ("gpu", "node_gpu_utilization", "gpu_utilization"),
+                ("cpu", "node_cpu_utilization", "cpu_utilization"),
+            )
+            for signal, metric_name, attribute in metric_specs:
+                try:
+                    response = cloudwatch.get_metric_statistics(
+                        Namespace="ContainerInsights",
+                        MetricName=metric_name,
+                        Dimensions=[{"Name": "ClusterName", "Value": stack.cluster_name}],
+                        StartTime=datetime.now(UTC) - timedelta(minutes=5),
+                        EndTime=datetime.now(UTC),
+                        Period=300,
+                        Statistics=["Average"],
+                    )
+                    datapoints = response.get("Datapoints", [])
+                    if datapoints:
+                        setattr(capacity, attribute, datapoints[0]["Average"])
+                        available[signal] = True
+                    else:
+                        capacity.telemetry_errors.append(
+                            f"{signal.upper()} telemetry returned no datapoints"
+                        )
+                except ClientError as e:
+                    logger.debug("Failed to get %s metrics for %s: %s", signal, region, e)
+                    capacity.telemetry_errors.append(f"{signal.upper()} telemetry failed: {e}")
+                except Exception as e:
+                    logger.warning(
+                        "Unexpected error getting %s metrics for %s: %s", signal, region, e
+                    )
+                    capacity.telemetry_errors.append(f"{signal.upper()} telemetry failed: {e}")
 
-        # Calculate recommendation score (lower is better)
-        # Factors: queue depth, GPU utilization, running jobs
-        capacity.recommendation_score = (
+        capacity.unavailable_signals = [
+            signal for signal, is_available in available.items() if not is_available
+        ]
+        if not capacity.unavailable_signals:
+            capacity.telemetry_status = "complete"
+        elif len(capacity.unavailable_signals) == len(available):
+            capacity.telemetry_status = "unavailable"
+        else:
+            capacity.telemetry_status = "partial"
+
+        base_score = (
             capacity.queue_depth * 10 + capacity.gpu_utilization + capacity.running_jobs * 5
         )
-
+        missing_scored_signals = _SCORED_TELEMETRY_SIGNALS.intersection(
+            capacity.unavailable_signals
+        )
+        capacity.recommendation_score = base_score + (
+            len(missing_scored_signals) * _TELEMETRY_MISSING_SIGNAL_PENALTY
+        )
         return capacity
 
     def get_all_regions_capacity(self) -> list[RegionCapacity]:
         """Get capacity information for all deployed regions."""
         from cli.aws_client import get_aws_client
 
-        aws_client = get_aws_client(self.config)
-        stacks = aws_client.discover_regional_stacks()
+        self._last_region_errors = []
+        try:
+            aws_client = get_aws_client(self.config)
+            stacks = aws_client.discover_regional_stacks()
+        except Exception as e:
+            logger.warning("Failed to discover regional stacks: %s", e)
+            self._last_region_errors.append(f"region discovery: {e}")
+            return []
 
         capacities = []
-        self._last_region_errors = []
         for region in stacks:
             try:
                 capacity = self.get_region_capacity(region)
@@ -179,6 +226,7 @@ class MultiRegionCapacityChecker:
         capacities = self.get_all_regions_capacity()
 
         if not capacities:
+            conservative_score = len(_SCORED_TELEMETRY_SIGNALS) * _TELEMETRY_MISSING_SIGNAL_PENALTY
             if self._last_region_errors:
                 # The emptiness is due to underlying AWS failures, not an absence
                 # of configured regions — surface the real error instead of a
@@ -187,14 +235,28 @@ class MultiRegionCapacityChecker:
                 return {
                     "region": self.config.default_region,
                     "reason": f"Capacity checks failed for all regions: {details}",
-                    "score": 0,
+                    "score": conservative_score,
                     "error": details,
+                    "telemetry_status": "unavailable",
                 }
             return {
                 "region": self.config.default_region,
                 "reason": "No capacity data available, using default region",
-                "score": 0,
+                "score": conservative_score,
+                "telemetry_status": "unavailable",
             }
+
+        # If every region lacks cluster telemetry, prefer the configured
+        # default as a deterministic fallback rather than treating zero-valued
+        # failed measurements as evidence of ideal capacity.
+        if all(cap.telemetry_status == "unavailable" for cap in capacities):
+            capacities = sorted(
+                capacities,
+                key=lambda cap: (
+                    cap.region != self.config.default_region,
+                    cap.recommendation_score,
+                ),
+            )
 
         # When instance_type is provided, use weighted scoring with capacity data
         if instance_type:
@@ -204,25 +266,43 @@ class MultiRegionCapacityChecker:
         return self._simple_recommend(capacities)
 
     def _simple_recommend(self, capacities: list[RegionCapacity]) -> dict[str, Any]:
-        """Simple recommendation using the existing composite score."""
-        sorted_capacities = sorted(capacities, key=lambda x: x.recommendation_score)
+        """Recommend observed capacity before comparing numeric load scores."""
+        all_unavailable = all(cap.telemetry_status == "unavailable" for cap in capacities)
+        sorted_capacities = sorted(
+            capacities,
+            key=lambda cap: (
+                cap.region != self.config.default_region if all_unavailable else False,
+                _missing_scored_signal_count(cap),
+                cap.recommendation_score,
+                cap.region,
+            ),
+        )
         best = sorted_capacities[0]
 
         reasons = []
-        if best.queue_depth == 0:
-            reasons.append("empty queue")
-        elif best.queue_depth < 5:
-            reasons.append(f"low queue depth ({best.queue_depth})")
+        if best.telemetry_errors:
+            if best.telemetry_status == "unavailable":
+                reasons.append("capacity telemetry unavailable; using conservative fallback")
+            else:
+                reasons.append("capacity telemetry is partial")
 
-        if best.gpu_utilization < 50:
-            reasons.append(f"{100 - best.gpu_utilization:.0f}% GPU available")
-        elif best.gpu_utilization < 80:
-            reasons.append(f"moderate GPU utilization ({best.gpu_utilization:.0f}%)")
+        if "queue" not in best.unavailable_signals:
+            if best.queue_depth == 0:
+                reasons.append("empty queue")
+            elif best.queue_depth < 5:
+                reasons.append(f"low queue depth ({best.queue_depth})")
 
-        if best.running_jobs == 0:
-            reasons.append("no running jobs")
-        elif best.running_jobs < 5:
-            reasons.append(f"few running jobs ({best.running_jobs})")
+        if "gpu" not in best.unavailable_signals:
+            if best.gpu_utilization < 50:
+                reasons.append(f"{100 - best.gpu_utilization:.0f}% GPU available")
+            elif best.gpu_utilization < 80:
+                reasons.append(f"moderate GPU utilization ({best.gpu_utilization:.0f}%)")
+
+        if "queue" not in best.unavailable_signals:
+            if best.running_jobs == 0:
+                reasons.append("no running jobs")
+            elif best.running_jobs < 5:
+                reasons.append(f"few running jobs ({best.running_jobs})")
 
         reason = ", ".join(reasons) if reasons else "best overall capacity"
 
@@ -233,12 +313,15 @@ class MultiRegionCapacityChecker:
             "queue_depth": best.queue_depth,
             "gpu_utilization": best.gpu_utilization,
             "running_jobs": best.running_jobs,
+            "telemetry_status": best.telemetry_status,
+            "telemetry_errors": best.telemetry_errors or None,
             "all_regions": [
                 {
                     "region": c.region,
                     "score": c.recommendation_score,
                     "queue_depth": c.queue_depth,
                     "gpu_utilization": c.gpu_utilization,
+                    "telemetry_status": c.telemetry_status,
                 }
                 for c in sorted_capacities
             ],
@@ -306,6 +389,7 @@ class MultiRegionCapacityChecker:
                 running_jobs=cap.running_jobs,
                 capacity_block_trend=cb_trend,
             )
+            missing_scored_signals = _missing_scored_signal_count(cap)
 
             scored_regions.append(
                 {
@@ -317,14 +401,29 @@ class MultiRegionCapacityChecker:
                     "spot_placement_score": spot_score,
                     "spot_price_ratio": spot_price_ratio,
                     "capacity_block_trend": cb_trend,
+                    "telemetry_status": cap.telemetry_status,
+                    "telemetry_errors": cap.telemetry_errors or None,
+                    "unavailable_scored_signals": missing_scored_signals,
                 }
             )
 
-        scored_regions.sort(key=lambda x: x["score"])
+        scored_regions.sort(
+            key=lambda item: (
+                item["unavailable_scored_signals"],
+                item["score"],
+                item["region"],
+            )
+        )
         best = scored_regions[0]
 
         # Build justification from the signals
         reasons = []
+        if best.get("telemetry_errors"):
+            if best["telemetry_status"] == "unavailable":
+                reasons.append("cluster telemetry unavailable")
+            else:
+                reasons.append("cluster telemetry is partial")
+
         if best["spot_placement_score"] >= 0.7:
             reasons.append(f"high spot availability ({best['spot_placement_score']:.0%})")
         elif best["spot_placement_score"] >= 0.4:
@@ -333,18 +432,30 @@ class MultiRegionCapacityChecker:
         if best["spot_price_ratio"] < 0.5:
             reasons.append(f"good spot savings ({1 - best['spot_price_ratio']:.0%} off on-demand)")
 
-        if best["queue_depth"] == 0:
-            reasons.append("empty queue")
-        elif best["queue_depth"] < 5:
-            reasons.append(f"low queue depth ({best['queue_depth']})")
+        if "queue" not in next(
+            cap.unavailable_signals for cap in capacities if cap.region == best["region"]
+        ):
+            if best["queue_depth"] == 0:
+                reasons.append("empty queue")
+            elif best["queue_depth"] < 5:
+                reasons.append(f"low queue depth ({best['queue_depth']})")
 
-        if best["gpu_utilization"] < 50:
+        if (
+            "gpu"
+            not in next(
+                cap.unavailable_signals for cap in capacities if cap.region == best["region"]
+            )
+            and best["gpu_utilization"] < 50
+        ):
             reasons.append(f"{100 - best['gpu_utilization']:.0f}% GPU available")
 
-        if best["running_jobs"] == 0:
-            reasons.append("no running jobs")
-        elif best["running_jobs"] < 5:
-            reasons.append(f"few running jobs ({best['running_jobs']})")
+        if "queue" not in next(
+            cap.unavailable_signals for cap in capacities if cap.region == best["region"]
+        ):
+            if best["running_jobs"] == 0:
+                reasons.append("no running jobs")
+            elif best["running_jobs"] < 5:
+                reasons.append(f"few running jobs ({best['running_jobs']})")
 
         if best.get("capacity_block_trend", 0) > 0.2:
             reasons.append("capacity block availability trending up")
@@ -362,6 +473,8 @@ class MultiRegionCapacityChecker:
             "running_jobs": best["running_jobs"],
             "instance_type": instance_type,
             "scoring_method": "weighted",
+            "telemetry_status": best["telemetry_status"],
+            "telemetry_errors": best["telemetry_errors"],
             "all_regions": scored_regions,
         }
 

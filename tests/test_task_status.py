@@ -25,6 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gco_mcp"))
 
+from tools import _task_status as task_status_module  # noqa: E402
 from tools._task_status import (  # noqa: E402  (sys.path append above)
     TaskStatusWriter,
     get_task,
@@ -268,6 +269,104 @@ class TestTailLog:
         log.write_text("only one line\n")
         assert tail_log("tail-3", lines=100) == ["only one line"]
 
+    def test_tail_caps_caller_lines_and_bytes(
+        self,
+        status_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(task_status_module, "_TASK_TAIL_MAX_BYTES", 64)
+        monkeypatch.setattr(task_status_module, "_TASK_TAIL_MAX_LINES", 2)
+        (status_root / "bounded.log").write_bytes(b"x" * 512)
+
+        result = tail_log("bounded", lines=10_000)
+
+        assert len(result) == 1
+        assert result[0].startswith("...[truncated]")
+        assert len(result[0].encode("utf-8")) <= 64
+
+
+class TestTaskArtifactSecurity:
+    def test_invalid_task_ids_fail_closed(self, status_root: Path) -> None:
+        for task_id in ("../escape", "..", ".", "/absolute", "nested/name", "nested\\name"):
+            assert get_task(task_id) is None
+            assert tail_log(task_id) == []
+
+    def test_symlink_artifacts_are_never_followed(self, status_root: Path) -> None:
+        victim_json = status_root.parent / "victim.json"
+        victim_log = status_root.parent / "victim.log"
+        victim_json.write_text(json.dumps({"task_id": "victim"}), encoding="utf-8")
+        victim_log.write_text("host secret\n", encoding="utf-8")
+        (status_root / "escape.json").symlink_to(victim_json)
+        (status_root / "escape.log").symlink_to(victim_log)
+
+        assert get_task("escape") is None
+        assert tail_log("escape") == []
+        assert list_tasks() == []
+
+    def test_hard_link_artifacts_are_rejected(self, status_root: Path) -> None:
+        victim_json = status_root.parent / "hard-victim.json"
+        victim_log = status_root.parent / "hard-victim.log"
+        victim_json.write_text(json.dumps({"task_id": "hard"}), encoding="utf-8")
+        victim_log.write_text("host secret\n", encoding="utf-8")
+        try:
+            os.link(victim_json, status_root / "hard.json")
+            os.link(victim_log, status_root / "hard.log")
+        except OSError as exc:
+            pytest.skip(f"hard links unavailable: {exc}")
+
+        assert get_task("hard") is None
+        assert tail_log("hard") == []
+        assert list_tasks() == []
+
+    def test_planted_log_symlink_is_not_truncated(self, status_root: Path) -> None:
+        victim = status_root.parent / "do-not-truncate.log"
+        victim.write_text("preserve me", encoding="utf-8")
+        (status_root / "predictable.log").symlink_to(victim)
+
+        writer = TaskStatusWriter(
+            task_id="predictable",
+            tool="deploy_all",
+            argv=[],
+            pid=os.getpid(),
+        )
+        try:
+            assert writer._log_fp is None
+        finally:
+            writer.finish(state="cancelled")
+
+        assert victim.read_text(encoding="utf-8") == "preserve me"
+
+    def test_writer_uses_private_modes_and_bounded_log(
+        self,
+        status_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        if os.name != "posix":
+            pytest.skip("POSIX permission contract")
+        monkeypatch.setattr(task_status_module, "_TASK_LOG_LINE_MAX_BYTES", 64)
+        monkeypatch.setattr(task_status_module, "_TASK_LOG_MAX_BYTES", 128)
+
+        writer = TaskStatusWriter(
+            task_id="bounded-writer",
+            tool="t" * 2_000,
+            argv=["a" * 10_000] * 200,
+            pid=os.getpid(),
+        )
+        writer.record_line("x" * 10_000, stream="stdout")
+        writer.record_line("y" * 10_000, stream="stderr")
+        writer.record_line("z" * 10_000, stream="stdout")
+        writer.finish(state="succeeded", exit_code=0)
+
+        status_path = status_root / "bounded-writer.json"
+        log_path = status_root / "bounded-writer.log"
+        record = json.loads(status_path.read_text(encoding="utf-8"))
+        assert record["log_truncated"] is True
+        assert len(record["argv"]) == task_status_module._STATUS_ARG_MAX_ITEMS + 1
+        assert len(log_path.read_bytes()) <= task_status_module._TASK_LOG_MAX_BYTES
+        assert status_root.stat().st_mode & 0o777 == 0o700
+        assert status_path.stat().st_mode & 0o777 == 0o600
+        assert log_path.stat().st_mode & 0o777 == 0o600
+
 
 class TestListAndPrune:
     def test_list_tasks_newest_first(self, status_root: Path) -> None:
@@ -377,3 +476,93 @@ class TestConcurrentWriters:
             assert "worker-a" in line
         for line in b["tail"]:
             assert "worker-b" in line
+
+
+class TestWriterFailureAndAutomaticRetention:
+    def test_set_pid_updates_pre_spawn_status(self, status_root: Path) -> None:
+        writer = TaskStatusWriter(
+            task_id="pre-spawn",
+            tool="deploy_all",
+            argv=["gco", "stacks", "deploy-all"],
+            pid=None,
+        )
+        try:
+            initial = json.loads((status_root / "pre-spawn.json").read_text())
+            assert initial["pid"] is None
+            writer.set_pid(os.getpid())
+            updated = json.loads((status_root / "pre-spawn.json").read_text())
+            assert updated["pid"] == os.getpid()
+        finally:
+            writer.finish(state="cancelled")
+
+    def test_initial_status_failure_disables_log_creation(
+        self,
+        status_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fail_write(_target: Path, _payload: dict[str, object]) -> None:
+            raise OSError("status unavailable")
+
+        monkeypatch.setattr(task_status_module, "_atomic_write_json", fail_write)
+        writer = TaskStatusWriter(
+            task_id="no-anchor",
+            tool="deploy_all",
+            argv=[],
+            pid=None,
+        )
+        writer.finish(state="failed", error="spawn failed")
+
+        assert writer._enabled is False
+        assert not (status_root / "no-anchor.json").exists()
+        assert not (status_root / "no-anchor.log").exists()
+
+    def test_unusable_status_root_never_breaks_writer(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        blocked = tmp_path / "not-a-directory"
+        blocked.write_text("occupied", encoding="utf-8")
+        monkeypatch.setenv("GCO_TASK_STATUS_DIR", str(blocked))
+
+        writer = TaskStatusWriter(
+            task_id="disabled-disk",
+            tool="deploy_all",
+            argv=[],
+            pid=None,
+        )
+        writer.set_pid(os.getpid())
+        writer.record_line("still runs", stream="stdout")
+        writer.finish(state="succeeded", exit_code=0)
+
+        assert writer._enabled is False
+        assert blocked.read_text(encoding="utf-8") == "occupied"
+
+    def test_new_writer_prunes_after_creation_and_sweeps_orphan_logs(
+        self,
+        status_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(task_status_module, "_TASK_RETENTION", 2)
+        for index in range(2):
+            status_path = status_root / f"old-{index}.json"
+            status_path.write_text(json.dumps({"task_id": f"old-{index}"}), encoding="utf-8")
+            (status_root / f"old-{index}.log").write_text("old\n", encoding="utf-8")
+            timestamp = time.time() - (20 - index)
+            os.utime(status_path, (timestamp, timestamp))
+        (status_root / "orphan.log").write_text("unanchored\n", encoding="utf-8")
+
+        writer = TaskStatusWriter(
+            task_id="current",
+            tool="deploy_all",
+            argv=[],
+            pid=os.getpid(),
+        )
+        writer.finish(state="succeeded", exit_code=0)
+
+        retained = {path.stem for path in status_root.glob("*.json")}
+        assert retained == {"current", "old-1"}
+        assert (status_root / "current.log").exists()
+        assert (status_root / "old-1.log").exists()
+        assert not (status_root / "old-0.log").exists()
+        assert not (status_root / "orphan.log").exists()

@@ -55,7 +55,7 @@ spec:
       spec:
         containers:
         - name: ray-head
-          image: rayproject/ray:2.55.1-py312
+          image: rayproject/ray:2.54.1-py312
           resources:
             requests:
               cpu: "2"
@@ -74,7 +74,7 @@ spec:
       spec:
         containers:
         - name: ray-worker
-          image: rayproject/ray:2.55.1-py312
+          image: rayproject/ray:2.54.1-py312
           resources:
             requests:
               cpu: "2"
@@ -92,7 +92,7 @@ spec:
       spec:
         containers:
         - name: ray-worker
-          image: rayproject/ray:2.55.1-py312
+          image: rayproject/ray:2.54.1-py312
           resources:
             requests:
               cpu: "4"
@@ -189,7 +189,7 @@ workerGroupSpecs:
     spec:
       containers:
       - name: ray-worker
-        image: rayproject/ray:2.55.1-py312
+        image: rayproject/ray:2.54.1-py312
         resources:
           requests:
             cpu: "4"
@@ -272,7 +272,7 @@ securityContext:
     drop: ["ALL"]
 ```
 
-GCO's default network policies in `gco-jobs` allow egress to AWS APIs and HTTPS. Ray head/worker communication uses ports 6379 (GCS), 8265 (dashboard), and 10001 (client) — these work within the namespace by default.
+GCO's default network policies add an exact-label rule for the shipped `ray-cluster`: ingress and egress are allowed only between pods carrying `ray.io/cluster: ray-cluster`. Ray allocates additional worker and object-manager ports dynamically, so this peer-scoped rule intentionally does not restrict ports; it does not admit unrelated `gco-jobs` pods. If you change `metadata.name`, add an equivalent peer-scoped policy for the new `ray.io/cluster` label.
 
 ## Customization
 

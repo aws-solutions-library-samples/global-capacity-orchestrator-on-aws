@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,50 +205,50 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub1759=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op1761=>operation: self.config = config
-op1763=>operation: self.regional_endpoints: dict[str, str] = {}
-op1765=>operation: self.endpoint_groups: dict[str, ga.EndpointGroup] = {}
-op1767=>operation: ga_config = self.config.get_global_accelerator_config()
-op1769=>operation: self.accelerator_name = ga_config['name']
-sub1771=>subroutine: self._create_dynamodb_tables()
-sub1773=>subroutine: self._create_model_bucket()
-sub1775=>subroutine: self._create_cluster_shared_kms_key()
-sub1777=>subroutine: self._create_cluster_shared_bucket()
-sub1779=>subroutine: self._publish_cluster_shared_bucket_ssm_params()
-sub1781=>subroutine: self._create_backup_plan()
-op1783=>operation: self.images_config = _parse_images_config(self.node.try_get_context('images'))
-sub1785=>subroutine: self._create_image_replication_rule()
-sub1787=>subroutine: self._create_image_lookup_lambda()
-cond1790=>operation: self._create_capacity_poller() if  self.config.get_capacity_history_enabled()
-op1800=>operation: self.accelerator = ga.Accelerator(self, 'GCOAccelerator', accelerator_name=self.accelerator_name, enabled=True)
-op1802=>operation: self.accelerator_id = Fn.select(1, Fn.split('/', self.accelerator.accelerator_arn))
-op1804=>operation: self.listener = self.accelerator.add_listener('GCOListener', port_ranges=[ga.PortRange(from_port=80, to_port=80), ga.PortRange(from_port=443, to_port=443)], protocol=ga.ConnectionProtocol.TCP, client_affinity=self._resolve_client_affinity(ga_config))
-cond1807=>operation: self._create_endpoint_group(region) while  region in self.config.get_regions()
-sub1816=>subroutine: self._create_outputs()
-sub1818=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub1928=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op1930=>operation: self.config = config
+op1932=>operation: self.regional_endpoints: dict[str, str] = {}
+op1934=>operation: self.endpoint_groups: dict[str, ga.EndpointGroup] = {}
+op1936=>operation: ga_config = self.config.get_global_accelerator_config()
+op1938=>operation: self.accelerator_name = ga_config.get('name') or f'{self.config.get_project_name()}-accelerator'
+sub1940=>subroutine: self._create_dynamodb_tables()
+sub1942=>subroutine: self._create_model_bucket()
+sub1944=>subroutine: self._create_cluster_shared_kms_key()
+sub1946=>subroutine: self._create_cluster_shared_bucket()
+sub1948=>subroutine: self._publish_cluster_shared_bucket_ssm_params()
+sub1950=>subroutine: self._create_backup_plan()
+op1952=>operation: self.images_config = _parse_images_config(self.node.try_get_context('images'))
+sub1954=>subroutine: self._create_image_replication_rule()
+sub1956=>subroutine: self._create_image_lookup_lambda()
+cond1959=>operation: self._create_capacity_poller() if  self.config.get_capacity_history_enabled()
+op1969=>operation: self.accelerator = ga.Accelerator(self, 'GCOAccelerator', accelerator_name=self.accelerator_name, enabled=True)
+op1971=>operation: self.accelerator_id = Fn.select(1, Fn.split('/', self.accelerator.accelerator_arn))
+op1973=>operation: self.listener = self.accelerator.add_listener('GCOListener', port_ranges=[ga.PortRange(from_port=443, to_port=443)], protocol=ga.ConnectionProtocol.TCP, client_affinity=self._resolve_client_affinity(ga_config))
+cond1976=>operation: self._create_endpoint_group(region) while  region in self.config.get_regions()
+sub1985=>subroutine: self._create_outputs()
+sub1987=>subroutine: self._apply_nag_suppressions()
 
-sub1759->op1761
-op1761->op1763
-op1763->op1765
-op1765->op1767
-op1767->op1769
-op1769->sub1771
-sub1771->sub1773
-sub1773->sub1775
-sub1775->sub1777
-sub1777->sub1779
-sub1779->sub1781
-sub1781->op1783
-op1783->sub1785
-sub1785->sub1787
-sub1787->cond1790
-cond1790->op1800
-op1800->op1802
-op1802->op1804
-op1804->cond1807
-cond1807->sub1816
-sub1816->sub1818
+sub1928->op1930
+op1930->op1932
+op1932->op1934
+op1934->op1936
+op1936->op1938
+op1938->sub1940
+sub1940->sub1942
+sub1942->sub1944
+sub1944->sub1946
+sub1946->sub1948
+sub1948->sub1950
+sub1950->op1952
+op1952->sub1954
+sub1954->sub1956
+sub1956->cond1959
+cond1959->op1969
+op1969->op1971
+op1971->op1973
+op1973->cond1976
+cond1976->sub1985
+sub1985->sub1987
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

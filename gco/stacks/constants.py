@@ -31,14 +31,15 @@ LAMBDA_PYTHON_RUNTIME = "PYTHON_3_14"
 # ---------------------------------------------------------------------------
 # API Gateway Auth Secret
 # ---------------------------------------------------------------------------
-# Physical name of the Secrets Manager secret that holds the token API Gateway
-# uses to authenticate requests to the regional ALBs. It is created by
+# Physical name of the Secrets Manager secret that holds the rotating HMAC
+# signing key used by trusted API Gateway proxy Lambdas. It is created by
 # ``GCOApiGatewayGlobalStack`` (in the ``api_gateway`` region) and read by the
-# regional service-account role and the regional API proxy Lambda.
+# regional service-account role and regional API proxy Lambda. The historical
+# ``api-gateway-auth-token`` suffix is retained to avoid replacing deployments.
 
 
 def api_gateway_auth_secret_name(project_name: str) -> str:
-    """Secrets Manager secret name for the API Gateway → ALB auth token.
+    """Secrets Manager name for the proxy-to-backend HMAC signing key.
 
     Derived from ``project_name`` (``<project_name>/api-gateway-auth-token``)
     so two deployments in the same account+region do not collide on the secret
@@ -64,6 +65,53 @@ def api_gateway_auth_secret_name(project_name: str) -> str:
     stack's ``project_name`` rather than re-typing the name.
     """
     return f"{project_name}/api-gateway-auth-token"  # nosec B105 — secret path/name, not a credential
+
+
+def cross_region_aggregator_role_name(project_name: str) -> str:
+    """IAM role name used by regional API resource-policy principals.
+
+    IAM roles are global within an account, and the role ARN is embedded in
+    API Gateway resource policies synthesized in other regions. A deterministic
+    project-scoped physical name avoids an unsupported cross-region
+    CloudFormation export. ``project_name`` is validated at 31 characters, so
+    this 24-character suffix keeps the result below IAM's 64-character limit.
+    """
+    return f"{project_name}-cross-region-aggregator"
+
+
+# ---------------------------------------------------------------------------
+# Backend TLS private PKI
+# ---------------------------------------------------------------------------
+
+
+def backend_tls_server_name(project_name: str) -> str:
+    """Private certificate identity asserted by every backend TLS client.
+
+    The name deliberately does not need public DNS. Proxy clients connect to
+    Global Accelerator or an internal ALB's real DNS name while sending this
+    value as SNI and verifying it against the deployment-local root CA.
+    """
+    return f"backend.{project_name}.gco.internal"
+
+
+def backend_tls_root_secret_name(project_name: str) -> str:
+    """Secrets Manager name containing the deployment-local root private key."""
+    return f"{project_name}/backend-tls/root-ca"
+
+
+def backend_tls_root_ca_parameter_name(project_name: str) -> str:
+    """SSM parameter containing only the public root trust bundle."""
+    return f"/{project_name}/backend-tls/root-ca.pem"
+
+
+def backend_tls_certificate_parameter_prefix(project_name: str) -> str:
+    """SSM prefix under which regional imported-certificate ARNs are stored."""
+    return f"/{project_name}/backend-tls/certificate-arn/"
+
+
+def backend_tls_certificate_arn_parameter_name(project_name: str, region: str) -> str:
+    """SSM parameter containing one region's stable imported ACM ARN."""
+    return f"{backend_tls_certificate_parameter_prefix(project_name)}{region}"
 
 
 # ---------------------------------------------------------------------------

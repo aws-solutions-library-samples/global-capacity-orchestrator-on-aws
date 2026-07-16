@@ -320,7 +320,7 @@ if [ "${SKIP_INFERENCE:-}" != "1" ]; then
     narrate "Pre-deploying inference endpoint (GPU will provision in background)..."
     # Retry deploy in case the previous endpoint hasn't been fully cleaned up yet
     for _ in $(seq 1 5); do
-        DEPLOY_OUTPUT=$(gco inference deploy "$INFERENCE_NAME" -i vllm/vllm-openai:v0.22.0 \
+        DEPLOY_OUTPUT=$(gco inference deploy "$INFERENCE_NAME" -i vllm/vllm-openai:v0.24.0 \
             --gpu-count 1 --replicas 1 -r "$REGION" \
             --extra-args '--model' --extra-args 'facebook/opt-125m' \
             2>&1 || true)
@@ -787,15 +787,10 @@ if [ "$INFERENCE_READY" = "true" ]; then
     success "Inference endpoint is live."
     spacer
 
-    # Wait for the ALB target group to register and pass health checks.
-    # The pod is Running but the ALB needs ~30s to register the target
-    # and pass 2 consecutive health checks (15s interval).
-    narrate "Waiting for ALB target group to register the new endpoint..."
-    countdown "ALB target group warmup" 45
-
     highlight "Sending a prompt to the endpoint"
-    narrate "This routes through API Gateway → Global Accelerator → ALB → vLLM pod."
-    narrate "The entire path is IAM-authenticated (SigV4)."
+    narrate "The shared inference route is already registered on the internal ALB."
+    narrate "Requests traverse API Gateway → Global Accelerator → ALB → authenticated proxy → vLLM."
+    narrate "API Gateway validates SigV4; the private backend hop uses private-root TLS plus a request-bound HMAC."
     run_cmd "gco inference invoke $INFERENCE_NAME -p 'The benefits of GPU orchestration for ML workloads are: 1)' --max-tokens 80" || true
     sleep "$PAUSE_LONG"
 
@@ -807,7 +802,7 @@ fi
 
 spacer
 highlight "Cleaning up the inference endpoint"
-narrate "This deletes the Deployment, Service, and Ingress. The GPU node"
+narrate "This deletes the endpoint Deployment and internal Service. The GPU node"
 narrate "scales back to zero automatically once the pod is gone."
 run_cmd "gco inference delete $INFERENCE_NAME -y" || true
 

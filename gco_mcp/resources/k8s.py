@@ -2,9 +2,9 @@
 the GCO MCP server.
 
 The static ``k8s://gco/manifests/...`` paths surface the cluster-bootstrap
-manifests that ship under ``lambda/kubectl-applier-simple/manifests``. The
-live ``gco://k8s/{namespace}/{kind}/{name}`` template wraps ``kubectl get``
-so an LLM can pin any cluster resource for inspection across turns.
+manifests that ship under ``lambda/kubectl-applier-simple/manifests``. Live
+reads require ``gco://k8s/{region}/{namespace}/{kind}/{name}`` so kubectl is
+always pinned to an account-qualified regional EKS context.
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from typing import Any
 
 import cli_runner
 from server import mcp
+
+from resources._eks import eks_context_for_region, is_valid_region
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 MANIFESTS_DIR = PROJECT_ROOT / "lambda" / "kubectl-applier-simple" / "manifests"
@@ -58,16 +60,44 @@ def k8s_manifest_resource(filename: str) -> str:
 
 
 def _k8s_live_resource(namespace: str, kind: str, name: str) -> str:
-    """Return the live YAML for ``<kind>/<name>`` in ``<namespace>``."""
-    if not _K8S_NAME_RE.match(namespace):
+    """Fail closed for the legacy URI that did not identify a cluster."""
+    return json.dumps(
+        {
+            "error": "explicit region required",
+            "code": "eks_region_required",
+            "use": f"gco://k8s/{{region}}/{namespace}/{kind}/{name}",
+        }
+    )
+
+
+def _k8s_live_resource_for_region(region: str, namespace: str, kind: str, name: str) -> str:
+    """Return live YAML from an explicitly selected regional EKS cluster."""
+    if not is_valid_region(region):
+        return json.dumps({"error": "invalid region", "value": region})
+    if not _K8S_NAME_RE.fullmatch(namespace):
         return json.dumps({"error": "invalid namespace", "value": namespace})
-    if not _K8S_KIND_RE.match(kind):
+    if not _K8S_KIND_RE.fullmatch(kind):
         return json.dumps({"error": "invalid kind", "value": kind})
-    if not _K8S_NAME_RE.match(name):
+    if not _K8S_NAME_RE.fullmatch(name):
         return json.dumps({"error": "invalid name", "value": name})
     try:
-        result = cli_runner.subprocess.run(  # type: ignore[attr-defined] # nosemgrep: dangerous-subprocess-use-audit - shell=False; every argv element is regex-validated above
-            ["kubectl", "get", kind, name, "-n", namespace, "-o", "yaml"],
+        context_arn = eks_context_for_region(region)
+    except Exception as exc:  # AWS credential/session failures become resource errors
+        return json.dumps({"error": "unable to resolve EKS context", "detail": str(exc)[:200]})
+    try:
+        result = cli_runner.subprocess.run(  # type: ignore[attr-defined] # nosemgrep: dangerous-subprocess-use-audit - shell=False; every caller-controlled argv element is regex-validated and context is constructed internally
+            [
+                "kubectl",
+                "get",
+                kind,
+                name,
+                "-n",
+                namespace,
+                "-o",
+                "yaml",
+                "--context",
+                context_arn,
+            ],
             capture_output=True,
             text=True,
             timeout=_KUBECTL_TIMEOUT_SECONDS,
@@ -93,3 +123,6 @@ def register(mcp_instance: Any) -> None:
     alongside the rest of the live-state modules.
     """
     mcp_instance.resource("gco://k8s/{namespace}/{kind}/{name}")(_k8s_live_resource)
+    mcp_instance.resource("gco://k8s/{region}/{namespace}/{kind}/{name}")(
+        _k8s_live_resource_for_region
+    )

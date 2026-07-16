@@ -1,17 +1,20 @@
 """
 Tests for gco/services/auth_middleware.py.
 
-Exercises the FastAPI authentication middleware that validates the
-x-gco-auth-token header against tokens cached from Secrets Manager,
-including the unauthenticated-path allowlist (/healthz, /readyz,
-/metrics, /api/v1/health), the explicit GCO_DEV_MODE bypass,
-AWSCURRENT/AWSPENDING dual-token rotation, and the stale-cache
-fallback that keeps old tokens valid when Secrets Manager is briefly
-unavailable. Uses autouse fixtures to reset the module-level token
-cache and client between tests so cached state doesn't leak.
+Exercises the FastAPI authentication middleware that validates unique,
+short-lived HMAC request envelopes using signing keys cached from Secrets
+Manager. Coverage includes the unauthenticated-path allowlist (/healthz,
+/readyz, /metrics, /api/v1/health), the explicit GCO_DEV_MODE bypass,
+AWSCURRENT/AWSPENDING key rotation, replay rejection, bounded stale-cache
+fallback, and refresh throttling. An autouse fixture resets all module-level
+cache, timing, client, and nonce state between tests.
 """
 
+import hashlib
+import hmac
 import os
+import secrets
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,17 +31,42 @@ from gco.services.auth_middleware import (
 )
 
 
+def _signed_headers(
+    signing_key: str,
+    method: str,
+    target: str,
+    body: str = "",
+    *,
+    nonce: str | None = None,
+) -> dict[str, str]:
+    """Build the same one-request HMAC envelope as the trusted proxy Lambda."""
+    timestamp = str(int(time.time()))
+    request_nonce = nonce or secrets.token_hex(16)
+    content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    canonical = "\n".join(["v1", timestamp, request_nonce, method.upper(), target, content_hash])
+    signature = hmac.new(
+        signing_key.encode("utf-8"),
+        canonical.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        "x-gco-signature-version": "v1",
+        "x-gco-signature": signature,
+        "x-gco-timestamp": timestamp,
+        "x-gco-nonce": request_nonce,
+        "x-gco-content-sha256": content_hash,
+    }
+
+
 @pytest.fixture(autouse=True)
 def reset_cache():
-    """Reset module-level cache before each test."""
+    """Reset signing-key cache, monotonic timers, client, and replay nonces."""
     import gco.services.auth_middleware as auth_module
 
-    auth_module._cached_tokens = set()
-    auth_module._cache_timestamp = 0
+    clear_token_cache()
     auth_module._secrets_client = None
     yield
-    auth_module._cached_tokens = set()
-    auth_module._cache_timestamp = 0
+    clear_token_cache()
     auth_module._secrets_client = None
 
 
@@ -141,55 +169,77 @@ class TestUnauthenticatedPaths:
 
 
 class TestAuthenticatedPaths:
-    """Tests for authenticated path handling."""
+    """Tests for signed backend request handling."""
 
-    def test_valid_token_allows_request(self, app_with_middleware):
-        """Test valid token allows request through."""
-        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-token"}):
+    def test_valid_signature_allows_request(self, app_with_middleware):
+        """A valid per-request envelope allows the request through."""
+        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-key"}):
             client = TestClient(app_with_middleware, raise_server_exceptions=False)
-            response = client.post("/api/v1/manifests", headers={"x-gco-auth-token": "valid-token"})
+            response = client.post(
+                "/api/v1/manifests",
+                headers=_signed_headers("valid-key", "POST", "/api/v1/manifests"),
+            )
             assert response.status_code == 200
 
-    def test_invalid_token_raises_exception(self, app_with_middleware):
-        """Test invalid token raises HTTPException."""
-        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-token"}):
+    def test_signature_from_unknown_key_raises_exception(self, app_with_middleware):
+        """An otherwise well-formed envelope signed by another key is rejected."""
+        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-key"}):
             client = TestClient(app_with_middleware, raise_server_exceptions=True)
             with pytest.raises(HTTPException) as exc_info:
-                client.post("/api/v1/manifests", headers={"x-gco-auth-token": "wrong-token"})
+                client.post(
+                    "/api/v1/manifests",
+                    headers=_signed_headers("wrong-key", "POST", "/api/v1/manifests"),
+                )
             assert exc_info.value.status_code == 403
 
-    def test_missing_token_raises_exception(self, app_with_middleware):
-        """Test missing token raises HTTPException."""
-        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-token"}):
+    def test_missing_signature_raises_exception(self, app_with_middleware):
+        """A request without an HMAC envelope is rejected."""
+        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-key"}):
             client = TestClient(app_with_middleware, raise_server_exceptions=True)
             with pytest.raises(HTTPException) as exc_info:
                 client.post("/api/v1/manifests")
             assert exc_info.value.status_code == 403
 
-    def test_empty_token_raises_exception(self, app_with_middleware):
-        """Test empty token raises HTTPException."""
-        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-token"}):
+    def test_incomplete_signature_raises_exception(self, app_with_middleware):
+        """A partial envelope cannot be treated as backend authentication."""
+        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-key"}):
             client = TestClient(app_with_middleware, raise_server_exceptions=True)
             with pytest.raises(HTTPException) as exc_info:
-                client.post("/api/v1/manifests", headers={"x-gco-auth-token": ""})
+                client.post(
+                    "/api/v1/manifests",
+                    headers={"x-gco-signature-version": "v1", "x-gco-signature": ""},
+                )
             assert exc_info.value.status_code == 403
 
-    def test_pending_token_allowed_during_rotation(self, app_with_middleware):
-        """Test AWSPENDING token is accepted during rotation."""
+    def test_pending_key_allowed_during_rotation(self, app_with_middleware):
+        """AWSCURRENT and AWSPENDING keys can sign distinct requests during rotation."""
         with patch(
             "gco.services.auth_middleware.get_valid_tokens",
-            return_value={"current-token", "pending-token"},
+            return_value={"current-key", "pending-key"},
         ):
             client = TestClient(app_with_middleware, raise_server_exceptions=False)
-            # Both tokens should work
             response1 = client.post(
-                "/api/v1/manifests", headers={"x-gco-auth-token": "current-token"}
+                "/api/v1/manifests",
+                headers=_signed_headers("current-key", "POST", "/api/v1/manifests"),
             )
             response2 = client.post(
-                "/api/v1/manifests", headers={"x-gco-auth-token": "pending-token"}
+                "/api/v1/manifests",
+                headers=_signed_headers("pending-key", "POST", "/api/v1/manifests"),
             )
             assert response1.status_code == 200
             assert response2.status_code == 200
+
+    def test_replayed_envelope_is_rejected(self, app_with_middleware):
+        """The same valid nonce cannot authenticate two backend requests."""
+        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-key"}):
+            client = TestClient(app_with_middleware, raise_server_exceptions=False)
+            headers = _signed_headers("valid-key", "POST", "/api/v1/manifests")
+
+            first = client.post("/api/v1/manifests", headers=headers)
+            replay = client.post("/api/v1/manifests", headers=headers)
+
+            assert first.status_code == 200
+            assert replay.status_code == 403
 
 
 class TestDevelopmentMode:
@@ -314,13 +364,19 @@ class TestGetSecretToken:
         """Test clear_token_cache resets the cache."""
         import gco.services.auth_middleware as auth_module
 
-        auth_module._cached_tokens = {"old-token"}
-        auth_module._cache_timestamp = 999999
+        auth_module._cached_tokens = {"old-key"}
+        auth_module._cache_timestamp = 999999.0
+        auth_module._last_successful_refresh = 999999.0
+        auth_module._last_refresh_attempt = 999999.0
+        auth_module._seen_nonces["0" * 32] = time.time() + 30
 
         clear_token_cache()
 
         assert auth_module._cached_tokens == set()
-        assert auth_module._cache_timestamp == 0
+        assert auth_module._cache_timestamp == 0.0
+        assert auth_module._last_successful_refresh == 0.0
+        assert auth_module._last_refresh_attempt == 0.0
+        assert auth_module._seen_nonces == {}
 
 
 class TestGetSecretsClient:
@@ -396,84 +452,73 @@ class TestMiddlewareLogging:
             patch("gco.services.auth_middleware.logger") as mock_logger,
         ):
             client = TestClient(app_with_middleware, raise_server_exceptions=False)
-            client.post("/api/v1/manifests", headers={"x-gco-auth-token": "invalid"})
+            client.post(
+                "/api/v1/manifests",
+                headers=_signed_headers("invalid-key", "POST", "/api/v1/manifests"),
+            )
             mock_logger.warning.assert_called()
 
 
 class TestHeaderCaseSensitivity:
-    """Tests for header case handling."""
+    """Tests for signature header case handling."""
 
-    def test_lowercase_header_works(self, app_with_middleware):
-        """Test lowercase header name works."""
-        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-token"}):
+    def test_lowercase_headers_work(self, app_with_middleware):
+        """The lowercase names generated by the proxy are accepted."""
+        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-key"}):
             client = TestClient(app_with_middleware)
-            response = client.post("/api/v1/manifests", headers={"x-gco-auth-token": "valid-token"})
+            response = client.post(
+                "/api/v1/manifests",
+                headers=_signed_headers("valid-key", "POST", "/api/v1/manifests"),
+            )
             assert response.status_code == 200
 
-    def test_mixed_case_header_works(self, app_with_middleware):
-        """Test mixed case header name works (HTTP headers are case-insensitive)."""
-        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-token"}):
+    def test_mixed_case_headers_work(self, app_with_middleware):
+        """HTTP case-insensitivity applies to every signature field."""
+        with patch("gco.services.auth_middleware.get_valid_tokens", return_value={"valid-key"}):
+            headers = {
+                "-".join(part.capitalize() for part in name.split("-")): value
+                for name, value in _signed_headers("valid-key", "POST", "/api/v1/manifests").items()
+            }
             client = TestClient(app_with_middleware)
-            response = client.post("/api/v1/manifests", headers={"X-GCO-Auth-Token": "valid-token"})
+            response = client.post("/api/v1/manifests", headers=headers)
             assert response.status_code == 200
 
 
 class TestSecretRotation:
-    """Tests for secret rotation support."""
+    """Tests for signing-key rotation support."""
 
-    def test_accepts_current_token(self, app_with_middleware):
-        """Test accepts AWSCURRENT token."""
+    @pytest.mark.parametrize("signing_key", ["current-key", "pending-key"])
+    def test_accepts_current_and_pending_keys(self, app_with_middleware, signing_key):
+        """Both AWSCURRENT and AWSPENDING keys authenticate fresh envelopes."""
         with patch(
             "gco.services.auth_middleware.get_valid_tokens",
-            return_value={"current-token", "pending-token"},
+            return_value={"current-key", "pending-key"},
         ):
             client = TestClient(app_with_middleware)
             response = client.post(
-                "/api/v1/manifests", headers={"x-gco-auth-token": "current-token"}
+                "/api/v1/manifests",
+                headers=_signed_headers(signing_key, "POST", "/api/v1/manifests"),
             )
             assert response.status_code == 200
 
-    def test_accepts_pending_token(self, app_with_middleware):
-        """Test accepts AWSPENDING token during rotation."""
+    def test_rejects_old_key_after_rotation(self, app_with_middleware):
+        """An old key no longer authenticates once it leaves the cache."""
         with patch(
             "gco.services.auth_middleware.get_valid_tokens",
-            return_value={"current-token", "pending-token"},
-        ):
-            client = TestClient(app_with_middleware)
-            response = client.post(
-                "/api/v1/manifests", headers={"x-gco-auth-token": "pending-token"}
-            )
-            assert response.status_code == 200
-
-    def test_rejects_old_token_after_rotation(self, app_with_middleware):
-        """Test rejects old token after rotation completes."""
-        with patch(
-            "gco.services.auth_middleware.get_valid_tokens",
-            return_value={"new-current-token"},  # Old token no longer valid
+            return_value={"new-current-key"},
         ):
             client = TestClient(app_with_middleware, raise_server_exceptions=True)
             with pytest.raises(HTTPException) as exc_info:
-                client.post("/api/v1/manifests", headers={"x-gco-auth-token": "old-token"})
+                client.post(
+                    "/api/v1/manifests",
+                    headers=_signed_headers("old-key", "POST", "/api/v1/manifests"),
+                )
             assert exc_info.value.status_code == 403
 
 
 # =============================================================================
 # Additional coverage tests for gco/services/auth_middleware.py
 # =============================================================================
-
-
-@pytest.fixture(autouse=True)
-def reset_auth_cache_extended():
-    """Reset auth middleware cache before each test."""
-    import gco.services.auth_middleware as auth_module
-
-    auth_module._cached_tokens = set()
-    auth_module._cache_timestamp = 0
-    auth_module._secrets_client = None
-    yield
-    auth_module._cached_tokens = set()
-    auth_module._cache_timestamp = 0
-    auth_module._secrets_client = None
 
 
 class TestAuthMiddlewareErrorHandlingExtended:
@@ -593,45 +638,33 @@ class TestAuthMiddlewareErrorHandlingExtended:
             patch("gco.services.auth_middleware.logger") as mock_logger,
         ):
             client = TestClient(app, raise_server_exceptions=False)
-            response = client.post("/api/v1/test", headers={"x-gco-auth-token": "invalid-token"})
-            assert response.status_code in [403, 500]
+            response = client.post(
+                "/api/v1/test",
+                headers=_signed_headers("invalid-key", "POST", "/api/v1/test"),
+            )
+            assert response.status_code == 403
             mock_logger.warning.assert_called()
 
 
 # =============================================================================
-# Stale cache fallback tests
+# Bounded stale cache and refresh-throttle tests
 # =============================================================================
 
 
-@pytest.fixture(autouse=False)
-def reset_auth_cache_stale():
-    """Reset auth middleware cache before each stale-cache test."""
-    import gco.services.auth_middleware as auth_module
-
-    auth_module._cached_tokens = set()
-    auth_module._cache_timestamp = 0
-    auth_module._secrets_client = None
-    yield
-    auth_module._cached_tokens = set()
-    auth_module._cache_timestamp = 0
-    auth_module._secrets_client = None
-
-
 class TestAuthMiddlewareStaleCacheFallback:
-    """Tests for stale cache fallback when Secrets Manager is unavailable."""
+    """Tests for bounded stale-key use when Secrets Manager is unavailable."""
 
-    def test_keeps_stale_tokens_on_refresh_failure(self, reset_auth_cache_stale):
-        """When SM fails during refresh, stale tokens are kept instead of clearing."""
-        import time
-
+    def test_returns_bounded_stale_keys_without_extending_their_age(self):
+        """A failed refresh preserves, but does not make stale keys younger."""
         import gco.services.auth_middleware as auth_module
-        from gco.services.auth_middleware import _refresh_cache
 
-        # Seed the cache with a valid token
-        auth_module._cached_tokens = {"stale-token"}
-        auth_module._cache_timestamp = time.time() - 400  # expired
+        now = time.monotonic()
+        original_refresh = now - auth_module.CACHE_TTL_SECONDS - 1
+        auth_module._cached_tokens = {"stale-key"}
+        auth_module._cache_timestamp = original_refresh
+        auth_module._last_successful_refresh = original_refresh
+        auth_module._last_refresh_attempt = 0.0
 
-        # SM fails completely
         with (
             patch.dict(
                 "os.environ",
@@ -642,53 +675,51 @@ class TestAuthMiddlewareStaleCacheFallback:
                 side_effect=Exception("SM unavailable"),
             ),
         ):
-            _refresh_cache()
-            # Stale token should still be there
-            assert "stale-token" in auth_module._cached_tokens
-            # Timestamp should be extended so we don't retry immediately
-            assert auth_module._cache_timestamp > time.time() - 10
+            assert get_valid_tokens() == {"stale-key"}
 
-    def test_keeps_stale_tokens_when_awscurrent_fails(self, reset_auth_cache_stale):
-        """When AWSCURRENT fetch fails but we have stale tokens, keep them."""
-        import time
+        assert auth_module._last_successful_refresh == original_refresh
+        assert auth_module._cache_timestamp == original_refresh
+        assert auth_module._last_refresh_attempt >= now
 
+    def test_refresh_failure_is_throttled(self):
+        """Repeated requests within CACHE_RETRY_SECONDS do not hammer Secrets Manager."""
+        import gco.services.auth_middleware as auth_module
+
+        now = time.monotonic()
+        auth_module._cached_tokens = {"stale-key"}
+        auth_module._cache_timestamp = now - auth_module.CACHE_TTL_SECONDS - 1
+        auth_module._last_successful_refresh = auth_module._cache_timestamp
+        auth_module._last_refresh_attempt = now
+
+        with patch("gco.services.auth_middleware._refresh_cache") as refresh:
+            assert get_valid_tokens() == {"stale-key"}
+
+        refresh.assert_not_called()
+
+    def test_keys_older_than_max_stale_age_are_rejected(self):
+        """A cached key cannot fail open beyond CACHE_MAX_STALE_SECONDS."""
+        import gco.services.auth_middleware as auth_module
+
+        now = time.monotonic()
+        auth_module._cached_tokens = {"expired-key"}
+        auth_module._cache_timestamp = now - auth_module.CACHE_MAX_STALE_SECONDS - 1
+        auth_module._last_successful_refresh = auth_module._cache_timestamp
+        auth_module._last_refresh_attempt = now
+
+        assert get_valid_tokens() == set()
+
+    def test_successful_refresh_replaces_keys_and_monotonic_timestamps(self):
+        """A successful refresh replaces old keys and records monotonic timing state."""
         import gco.services.auth_middleware as auth_module
         from gco.services.auth_middleware import _refresh_cache
 
-        auth_module._cached_tokens = {"old-token"}
-        auth_module._cache_timestamp = time.time() - 400
-
-        mock_secrets = MagicMock()
-        mock_secrets.get_secret_value.side_effect = Exception("Throttled")
-        mock_secrets.exceptions.ResourceNotFoundException = type(
-            "ResourceNotFoundException", (Exception,), {}
-        )
-
-        with (
-            patch.dict(
-                "os.environ",
-                {"AUTH_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:123:secret:test"},
-            ),
-            patch("gco.services.auth_middleware.get_secrets_client", return_value=mock_secrets),
-        ):
-            _refresh_cache()
-            assert "old-token" in auth_module._cached_tokens
-
-    def test_replaces_tokens_on_successful_refresh(self, reset_auth_cache_stale):
-        """On successful refresh, old tokens are replaced with new ones."""
-        import time
-
-        import gco.services.auth_middleware as auth_module
-        from gco.services.auth_middleware import _refresh_cache
-
-        auth_module._cached_tokens = {"old-token"}
-        auth_module._cache_timestamp = time.time() - 400
-
+        auth_module._cached_tokens = {"old-key"}
+        before = time.monotonic()
         mock_secrets = MagicMock()
 
         def mock_get(SecretId, VersionStage):
             if VersionStage == "AWSCURRENT":
-                return {"SecretString": '{"token": "new-token"}'}
+                return {"SecretString": '{"token": "new-key"}'}
             raise mock_secrets.exceptions.ResourceNotFoundException()
 
         mock_secrets.get_secret_value.side_effect = mock_get
@@ -703,6 +734,9 @@ class TestAuthMiddlewareStaleCacheFallback:
             ),
             patch("gco.services.auth_middleware.get_secrets_client", return_value=mock_secrets),
         ):
-            _refresh_cache()
-            assert "new-token" in auth_module._cached_tokens
-            assert "old-token" not in auth_module._cached_tokens
+            assert _refresh_cache() is True
+
+        assert auth_module._cached_tokens == {"new-key"}
+        assert auth_module._last_successful_refresh >= before
+        assert auth_module._last_refresh_attempt == auth_module._last_successful_refresh
+        assert auth_module._cache_timestamp == auth_module._last_successful_refresh

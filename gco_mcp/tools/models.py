@@ -2,10 +2,12 @@
 
 import asyncio
 import contextlib
+import json
 
 import cli_runner
 from audit import audit_logged
 from feature_flags import FLAG_DESTRUCTIVE_OPERATIONS, FLAG_MODEL_UPLOAD, is_enabled
+from local_data import resolve_local_path, stage_upload_path
 from server import mcp
 
 
@@ -54,18 +56,44 @@ if is_enabled(FLAG_MODEL_UPLOAD):
     ) -> str:
         """[gated by GCO_ENABLE_MODEL_UPLOAD] data-upload.
 
-        `gco models upload` — upload model weights from a local path to the
-        central S3 bucket. The CLI handles multipart uploads and progress
-        reporting; this tool surface returns the final result JSON. Uploads
-        target the central bucket (no region option — use upload_to_regional_bucket
-        for a region's regional bucket).
+        Upload model weights from a source confined beneath
+        ``GCO_STORAGE_LOCAL_ROOT``. Relative paths are resolved beneath that
+        root rather than the MCP process's working directory. The source is
+        exposed to the CLI through a private descriptor-backed snapshot;
+        descendant links, special files, hard links, and filesystem crossings
+        fail closed.
 
         Args:
             model_name: Model name in the registry.
-            source_path: Local file or directory to upload.
+            source_path: Root-relative local file or directory to upload.
         """
-        args = ["models", "upload", source_path, "--name", model_name]
-        return await asyncio.to_thread(cli_runner._run_cli, *args)
+        try:
+            local_contract = resolve_local_path(
+                source_path,
+                require_exists=True,
+                purpose="Model upload",
+            )
+        except (OSError, ValueError) as exc:
+            return json.dumps({"error": str(exc), "code": "local_data_path_rejected"})
+
+        def _upload_from_staged_path() -> str:
+            with stage_upload_path(local_contract) as staged:
+                return cli_runner._run_cli(
+                    "models",
+                    "upload",
+                    staged.argument,
+                    "--name",
+                    model_name,
+                    pass_fds=(staged.directory_fd,),
+                )
+
+        try:
+            # Keep staging, descriptor inheritance, subprocess execution, and
+            # cleanup in one worker. If the awaiting MCP request is cancelled,
+            # the worker retains the private snapshot until the CLI exits.
+            return await asyncio.to_thread(_upload_from_staged_path)
+        except (OSError, ValueError) as exc:
+            return json.dumps({"error": str(exc), "code": "local_data_path_rejected"})
 
 
 # =============================================================================

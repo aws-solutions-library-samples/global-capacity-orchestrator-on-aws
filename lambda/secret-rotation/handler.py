@@ -1,18 +1,17 @@
 """
-Secrets Manager rotation Lambda for GCO auth token.
+Secrets Manager rotation Lambda for the GCO backend HMAC signing key.
 
-This Lambda handles the 4-step rotation protocol for the API Gateway auth token:
-1. createSecret - Generate a new random token and store as AWSPENDING
+This Lambda handles the four-step rotation protocol for the API Gateway
+proxy-to-backend signing key:
+1. createSecret - Generate a new random key and store it as AWSPENDING
 2. setSecret - No-op (no external system to update)
-3. testSecret - No-op (token is self-validating)
+3. testSecret - Validate the pending key's structure
 4. finishSecret - Move AWSPENDING to AWSCURRENT
 
-The rotation is simple because the token is just a random string used for
-internal service-to-service authentication. There's no external database
-or service that needs to be updated with the new credentials.
-
-Multi-region replication ensures all regions receive the new token automatically.
-Services validate against both AWSCURRENT and AWSPENDING during the rotation window.
+The key is a cryptographically random string used only to compute and verify
+request-bound HMAC envelopes; it is never transmitted to the backend.
+Multi-region replication distributes new versions automatically. Proxies and
+services accept both AWSCURRENT and AWSPENDING during the rotation window.
 """
 
 import json
@@ -34,9 +33,9 @@ import boto3
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Token configuration
+# Signing-key configuration
 TOKEN_LENGTH = 64
-# Use alphanumeric characters only (no punctuation for header safety)
+# Alphanumeric output keeps the existing secret JSON schema and avoids escaping.
 TOKEN_ALPHABET = string.ascii_letters + string.digits
 
 
@@ -97,7 +96,7 @@ def create_secret(client: Any, secret_id: str, token: str) -> None:
     # Create the secret value structure (matching original format)
     secret_value = json.dumps(
         {
-            "description": "GCO API Gateway auth token",
+            "description": "GCO backend HMAC signing key",
             "token": new_token,
         }
     )
@@ -117,8 +116,8 @@ def set_secret(client: Any, secret_id: str, token: str) -> None:
     """
     Set the secret in the target system.
 
-    For GCO's auth token, there's no external system to update.
-    The token is validated by services reading from Secrets Manager.
+    For GCO's HMAC signing key, there is no external system to update.
+    Proxies and services read staged versions directly from Secrets Manager.
 
     Args:
         client: Secrets Manager boto3 client
@@ -127,15 +126,15 @@ def set_secret(client: Any, secret_id: str, token: str) -> None:
     """
     # No-op: No external system to update
     # Services read directly from Secrets Manager and validate both versions
-    logger.info("setSecret: No external system to update (token is self-validating)")
+    logger.info("setSecret: No external system to update")
 
 
 def test_secret(client: Any, secret_id: str, token: str) -> None:
     """
     Test that the pending secret is valid.
 
-    For GCO's auth token, we just verify the secret can be retrieved
-    and has the expected structure.
+    For GCO's signing key, verify that the staged value can be retrieved
+    and has the expected structure and length.
 
     Args:
         client: Secrets Manager boto3 client

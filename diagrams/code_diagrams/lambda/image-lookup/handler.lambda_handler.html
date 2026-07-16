@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,32 +205,32 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2842=>operation: 'Lookup-or-create custom resource handler for ECR repositories.\n\n    Dispatches on ``event["RequestType"]`` and returns the standard\n    CloudFormation custom resource response shape. The CDK Provider\n    framework wraps this dict into the protocol-required envelope.\n    '
-op2844=>operation: request_type = event.get('RequestType', '')
-op2846=>operation: properties = event.get('ResourceProperties', {}) or {}
-op2848=>operation: physical_id = event.get('PhysicalResourceId', '')
-sub2850=>subroutine: logger.info('Image-Lookup CR event: %s for %s', request_type, properties.get('RepositoryName'))
-op2852=>operation: ecr = _ecr_client()
-cond2855=>condition: if request_type in ('Create', 'Update')
-io2862=>inputoutput: output: _handle_create_or_update(ecr, properties)
-e2860=>end: end function return
-cond2869=>condition: if request_type == 'Delete'
-io2876=>inputoutput: output: _handle_delete(ecr, properties, physical_id)
-e2874=>end: end function return
-sub2882=>subroutine: raise ValueError(f'Unsupported RequestType: {request_type!r}')
+        <div><textarea id="code" style="width: 100%;" rows="11">op4499=>operation: 'Lookup-or-create custom resource handler for ECR repositories.\n\n    Dispatches on ``event["RequestType"]`` and returns the standard\n    CloudFormation custom resource response shape. The CDK Provider\n    framework wraps this dict into the protocol-required envelope.\n    '
+op4501=>operation: request_type = event.get('RequestType', '')
+op4503=>operation: properties = event.get('ResourceProperties', {}) or {}
+op4505=>operation: physical_id = event.get('PhysicalResourceId', '')
+sub4507=>subroutine: logger.info('Image-Lookup CR event: %s for %s', request_type, properties.get('RepositoryName'))
+op4509=>operation: ecr = _ecr_client()
+cond4512=>condition: if request_type in ('Create', 'Update')
+io4519=>inputoutput: output: _handle_create_or_update(ecr, properties)
+e4517=>end: end function return
+cond4526=>condition: if request_type == 'Delete'
+io4533=>inputoutput: output: _handle_delete(ecr, properties, physical_id)
+e4531=>end: end function return
+sub4539=>subroutine: raise ValueError(f'Unsupported RequestType: {request_type!r}')
 
-op2842->op2844
-op2844->op2846
-op2846->op2848
-op2848->sub2850
-sub2850->op2852
-op2852->cond2855
-cond2855(yes)->io2862
-io2862->e2860
-cond2855(no)->cond2869
-cond2869(yes)->io2876
-io2876->e2874
-cond2869(no)->sub2882
+op4499->op4501
+op4501->op4503
+op4503->op4505
+op4505->sub4507
+sub4507->op4509
+op4509->cond4512
+cond4512(yes)->io4519
+io4519->e4517
+cond4512(no)->cond4526
+cond4526(yes)->io4533
+io4533->e4531
+cond4526(no)->sub4539
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

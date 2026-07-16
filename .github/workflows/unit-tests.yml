@@ -57,6 +57,8 @@ jobs:
     name: "changes"
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    permissions:
+      pull-requests: read
     if: github.event_name == 'pull_request'
     outputs:
       deps: ${{ steps.filter.outputs.deps }}

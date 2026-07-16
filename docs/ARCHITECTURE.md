@@ -42,10 +42,12 @@ GCO (Global Capacity Orchestrator on AWS) is a multi-region Kubernetes platform 
 
 **AWS Global Accelerator**
 
-- Single global endpoint for all regions
-- Automatic health-based routing
+- Private acceleration plane behind the IAM-authenticated global API
+- Registers each region's internal platform ALB as an endpoint
+- Exposes only a TCP/443 listener; it is a Layer 4 pass-through and never terminates TLS
+- Automatic health-based regional routing and failover
 - DDoS protection via AWS Shield
-- Reduces latency by routing to nearest healthy region
+- Carries proxy-signed HTTPS requests over the AWS network to the ALB TLS listener
 
 ### 2. Regional Layer
 
@@ -53,9 +55,9 @@ Each region contains:
 
 **VPC Configuration**
 
-- Spans every Availability Zone in the region (one public + one private subnet per AZ)
-- Public subnets (24-bit CIDR) for ALB
-- Private subnets (24-bit CIDR) for EKS nodes
+- Spans every supported Availability Zone in the region (one public + one private subnet per AZ)
+- Public subnets host NAT gateways; the platform ALB is not internet-facing
+- Private subnets host EKS nodes, VPC Lambdas, and the internal platform ALB
 - 2 NAT Gateways for high availability
 - VPC endpoints for AWS services
 - VPC Flow Logs enabled (CloudWatch Logs, 30-day retention)
@@ -64,36 +66,37 @@ Each region contains:
 
 - Kubernetes 1.36
 - Managed control plane
+- Private API endpoint by default; public API access is disabled by the stock configuration
 - Control plane logging enabled (API, Audit, Authenticator, Controller Manager, Scheduler)
-- Auto-scaling compute via nodepools:
-  - `system`: Core Kubernetes components
-  - `general-purpose`: Standard workloads
-  - `gpu-x86`: NVIDIA GPU instances (g4dn, g5)
-  - `gpu-arm`: ARM64 GPU instances (g5g)
-  - `inference`: Long-running inference pods (WhenEmpty consolidation)
-  - `gpu-efa-pool`: EFA-enabled instances for distributed training (p4d, p5)
+- Auto-scaling compute via built-in and custom NodePools:
+  - `system`, `general-purpose`: EKS Auto Mode built-ins
+  - `gpu-x86-pool`: NVIDIA x86 GPU workloads
+  - `gpu-arm-pool`: NVIDIA ARM64 GPU workloads
+  - `gpu-inference-pool`: long-running inference workloads
+  - `gpu-efa-pool`: EFA-enabled distributed GPU workloads
+  - `mooncake-efa-pool`: EFA-enabled disaggregated inference
+  - `neuron-pool`: AWS Inferentia and Trainium workloads
+  - `cpu-general-pool`: general CPU workloads with project-specific limits
 
 **Application Load Balancer**
 
-- Internet-facing
-- Security group restricts to Global Accelerator IPs only
-- Routes traffic to Kubernetes services via Ingress
+- One internal application ALB per region, selected through the platform IngressClass
+- HTTPS/443 listener with a short-lived regional ACM leaf issued by the deployment-local private root
+- Leaf identity is `backend.<project>.gco.internal`; backend clients send and verify it through explicit SNI while connecting to dynamic accelerator or ALB DNS names
+- Registered with Global Accelerator and recorded in the global-region SSM registry
+- Routes `/api/v1/*` and `/inference/*` through authenticated platform services
+- Ownership is verified by account, region, load-balancer type/scheme, EKS cluster tags, and platform-Ingress tags before a regional proxy forwards traffic
+- Terminates private-root TLS; the final ALB-to-Kubernetes-pod target-group hop remains HTTP
 
-**Regional API Gateway** (created by regional stack)
+**Regional API Gateway Bridge** (separate stack)
 
-- REST API with regional endpoint
-- IAM authentication (SigV4)
-- VPC Link to internal NLB for direct service access
-- Endpoints:
-  - `POST /api/v1/manifests` - Submit manifest
-  - `GET /api/v1/manifests` - List manifests
-  - `GET /api/v1/health` - Health check
-
-**Network Load Balancer (Internal)**
-
-- Private subnets only
-- Routes regional API Gateway → Kubernetes services
-- Cross-zone load balancing enabled
+- Created in every workload region because the centralized aggregator cannot join arbitrary regional VPCs
+- Regional REST API uses AWS-managed TLS and IAM authentication (SigV4)
+- Its resource policy always admits the exact aggregator role
+- `api_gateway.regional_api_enabled=true` additionally admits IAM-authorized principals from the deployment account for direct region-pinned access; it does not control bridge deployment
+- VPC Lambda resolves and verifies the internal ALB from `/<project>/alb-hostname-<region>`
+- The Lambda signs the request with HMAC and uses private-root TLS to the ALB
+- Proxies `/api/v1/*` and `/inference/*` without a VPC Link or Network Load Balancer
 
 **Amazon EFS (Elastic File System)**
 
@@ -119,14 +122,26 @@ Each region contains:
 
 - Single authenticated entry point for all regions
 - IAM authentication (SigV4) required for all requests
-- Lambda proxy adds secret header for backend validation
+- Lambda proxy signs each exact backend request with a short-lived HMAC envelope
 - Forwards requests to Global Accelerator
 
 **Lambda Proxy**
 
-- Retrieves auth secret from Secrets Manager
-- Adds X-GCO-Auth-Token header to requests
-- Forwards to Global Accelerator endpoint
+- Retrieves the backend HMAC signing key from Secrets Manager through a bounded cache
+- Reads only the public private-root trust bundle from project-scoped SSM
+- Allowlists supported end-to-end headers
+- Signs the version, timestamp, nonce, method, exact path/query, and body digest
+- Never transmits the reusable signing key
+- Uses strict private-root TLS through Global Accelerator with explicit SNI/hostname assertion
+- Retries only safe read-only methods
+
+**Cross-Region Aggregator**
+
+- Discovers deterministic `<project>-regional-api-<region>` CloudFormation stacks and their `RegionalApiEndpoint` outputs
+- Validates each endpoint as that region's AWS `execute-api` HTTPS `/prod` URL
+- Signs every regional request with SigV4 and uses the AWS-managed API Gateway TLS chain
+- Fails closed when any required bridge cannot be discovered; bounded stale discovery is allowed only within the configured process cache window
+- Never reads the HMAC secret, ALB-hostname registry, public private-root trust bundle, or root secret; each regional VPC proxy owns the HMAC/private-root ALB hop
 
 ### 4. Kubernetes Layer
 
@@ -178,7 +193,14 @@ Each region contains:
 - Async custom-resource provider polls the execution every 60 seconds
 - Eliminates the old single-Lambda 15-minute ceiling — slow charts
   (cold image pulls) retry independently without failing the deploy
-- Charts installed: KEDA (mandatory), kueue, Volcano, KubeRay
+- Charts installed in dependency order:
+  - KEDA (mandatory)
+  - AWS EFA and Neuron device plugins
+  - Volcano and KubeRay
+  - cert-manager
+  - kube-prometheus-stack when cluster observability is enabled
+  - Kueue last, after its dependencies
+  - Slurm/Slinky and YuniKorn only when their opt-in flags are enabled
 
 **Function Flow:**
 
@@ -193,22 +215,26 @@ Each region contains:
 ### Manifest Submission
 
 ```text
-User → API Gateway (IAM Auth) → Lambda Proxy → Global Accelerator
-  → Regional ALB → Kubernetes Ingress → Manifest Processor Pod
+User → API Gateway (IAM Auth, AWS-managed TLS) → Lambda Proxy
+  → Global Accelerator (TCP/443 pass-through) → Internal Regional ALB (private-root TLS)
+  → Kubernetes Ingress → Manifest Processor Pod (HTTP target group)
   → Kubernetes API → Workload Scheduled → Node Provisioned
 ```
 
 ### Authentication Flow
 
 ```text
-User Request (SigV4 signed) → API Gateway (IAM Auth)
-  → Validates SigV4 signature and IAM permissions
-  → Lambda Proxy retrieves secret from Secrets Manager
-  → Lambda adds X-GCO-Auth-Token header
-  → Request forwarded to Global Accelerator
-  → Regional ALB validates secret header
+User Request (SigV4 signed) → API Gateway (AWS-managed TLS + IAM Auth)
+  → Lambda Proxy retrieves the HMAC signing key and public root bundle
+  → Lambda signs the exact backend request with a short-lived envelope
+  → Private-root TLS traverses Global Accelerator unchanged to the ALB
+  → Backend middleware validates freshness, integrity, body digest, and nonce replay
   → Manifest Processor processes request
 ```
+
+For `/api/v1/global/*`, the API invokes the aggregator instead. The aggregator
+uses AWS-managed TLS and SigV4 to each regional API Gateway; that bridge's VPC
+Lambda then performs the HMAC-signed, private-root-TLS hop to its internal ALB.
 
 ### Node Provisioning (EKS Auto Mode)
 
@@ -224,7 +250,7 @@ Pod Pending → Karpenter detects unschedulable pod
 
 ### Compliance Frameworks
 
-GCO is validated against multiple compliance frameworks using CDK-nag:
+GCO synthesizes five cdk-nag policy-validation rule packs:
 
 - **AWS Solutions**: Best practices for AWS architectures
 - **HIPAA Security**: Healthcare compliance requirements
@@ -232,23 +258,23 @@ GCO is validated against multiple compliance frameworks using CDK-nag:
 - **PCI DSS 3.2.1**: Payment card industry standards
 - **Serverless**: Best practices for serverless architectures
 
-All compliance checks run during `cdk synth` and deployment. Suppressions are documented in `gco/stacks/nag_suppressions.py` with justifications for each exception.
+The rule packs run during `cdk synth` and deployment. They are automated control checks, not certifications. Acknowledgments are documented in `gco/stacks/nag_suppressions.py` with a scoped reason for each accepted finding.
 
 ### Network Security
 
 **Layers of Defense:**
 
-1. Global Accelerator (DDoS protection)
-2. ALB Security Group (Global Accelerator IPs only)
-3. VPC isolation (private subnets)
-4. Security groups (least-privilege)
+1. API Gateway IAM authorization, account-scoped resource policy, WAF, and throttling
+2. Request-bound HMAC authentication between trusted proxies and backend services
+3. Internal ALB and private-subnet isolation
+4. Security groups, Kubernetes NetworkPolicies, and RBAC
 
 **EKS Cluster Security:**
 
 - Private endpoint enabled
-- Public endpoint enabled (for kubectl access)
-- Cluster security group controls access
-- Pod security standards enforced
+- Public endpoint disabled by default
+- Cluster security group controls VPC access
+- Pod security controls and admission-time workload validation enforced
 
 ### IAM Security
 
@@ -269,7 +295,12 @@ All compliance checks run during `cdk synth` and deployment. Suppressions are do
 ### Data Security
 
 - **At Rest**: EBS volumes and EFS encrypted with AWS KMS
-- **In Transit**: TLS 1.2+ for all connections (including EFS mounts)
+- **Client and AWS API Transit**: AWS-managed TLS protects API Gateway and AWS service API connections; aggregator-to-regional-API calls also require SigV4
+- **Private Backend Transit**: Global proxy → Global Accelerator → ALB and regional VPC proxy → ALB use deployment-local private-root TLS with explicit `backend.<project>.gco.internal` SNI and hostname verification; Global Accelerator is Layer 4 and does not terminate TLS
+- **Post-Termination Hop**: ALB target groups use HTTP to Kubernetes pods after the authenticated TLS listener terminates the connection
+- **Private-Key Boundary**: Only the certificate-manager role can read the customer-managed-KMS-encrypted root secret; backend clients read public SSM trust only
+- **Request Authentication**: HMAC adds integrity, freshness, and replay defense, not encryption
+- **EFS Transit**: TLS-enabled mounts
 - **Secrets**: Kubernetes secrets encrypted in etcd
 - **Logs**: CloudWatch Logs encrypted
 
@@ -281,7 +312,7 @@ All compliance checks run during `cdk synth` and deployment. Suppressions are do
 
 - Health Monitor: 2-10 replicas (HPA)
 - Manifest Processor: 3-20 replicas (HPA)
-- User workloads: Unlimited (within nodepool limits)
+- User workload scale is bounded by configured NodePool limits, Kubernetes quotas, AWS service quotas, and available EC2 capacity
 
 **Compute Layer:**
 
@@ -299,15 +330,15 @@ All compliance checks run during `cdk synth` and deployment. Suppressions are do
 
 ### Regional Scaling
 
-- Deploy to additional regions independently
-- Global Accelerator automatically includes new regions
-- No cross-region dependencies
+- Add configured regional stacks independently after the global control-plane stacks exist
+- Global Accelerator registration and the global-region SSM registry connect each regional backend to the shared API path
+- A regional compute failure does not require another regional cluster to remain healthy
 
 ## High Availability
 
 ### Regional HA
 
-- **Multi-AZ**: All components span 3 AZs
+- **Multi-AZ networking**: The VPC spans every supported AZ; EKS and the internal ALB use multi-AZ infrastructure
 - **NAT Gateways**: 2 for redundancy
 - **ALB**: Multi-AZ by default
 - **EKS Control Plane**: Multi-AZ managed by AWS
@@ -378,9 +409,9 @@ All compliance checks run during `cdk synth` and deployment. Suppressions are do
 
 **Regional Failure:**
 
-1. Global Accelerator routes to healthy region
-2. No manual intervention required
-3. RTO: < 1 minute
+1. Global Accelerator routes new backend requests to another healthy registered region
+2. Operators investigate and restore the failed regional stack
+3. Actual recovery time depends on health-check convergence, workload state, and replacement capacity; no fixed sub-minute RTO is guaranteed
 
 **Cluster Failure:**
 
@@ -464,67 +495,41 @@ See `examples/efs-output-job.yaml` for a complete example.
 - **Access Control**: File system policy restricts to VPC
 - **IRSA**: EFS CSI driver uses IAM role (no static credentials)
 
-## Scale Potential: Back-of-the-Envelope Calculation
+## Scale Potential: Capacity Envelope
 
-This section provides a theoretical upper bound for GCO's throughput when deployed globally. These numbers illustrate why a multi-region orchestration platform matters for large-scale AI/ML workloads.
+GCO scales by adding regional EKS stacks, but there is no defensible fixed
+"regions × EKS maximum" job count. A deployable capacity estimate must use the
+regions actually configured and the lowest applicable limit at each layer.
 
-### Assumptions
+### Request Path
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| AWS Regions | 34 | Commercial regions (38 total minus 2 for GovCloud and 2 for Sovereign) |
-| Nodes per cluster | 100,000 | EKS hard limit |
-| GPUs per g5.xlarge | 1 | Single A10G GPU |
-| GPUs per g5.48xlarge | 8 | Eight A10G GPUs |
+The stock global API stage is configured for 1,000 requests/second with a
+2,000-request burst (both configurable in `cdk.json`). That is one shared API
+Gateway stage limit; it is **not multiplied by the number of backend regions**.
+The WAF per-source-IP rate rule, Lambda concurrency, Global Accelerator health,
+ALB target capacity, manifest-processor replicas, and Kubernetes API throughput
+can impose lower limits.
 
-### Maximum Concurrent GPU Jobs (Global)
+### Compute Path
 
-**Conservative estimate (g5.xlarge, 1 GPU each):**
+For each configured region, usable workload capacity is bounded by all of:
+
+- Custom NodePool CPU, memory, architecture, accelerator, and instance-family limits
+- EC2 On-Demand/Spot quotas and real-time capacity for the requested instance types
+- EKS and Kubernetes service quotas
+- Namespace/resource quotas and GCO manifest-validation policy
+- Storage, network, and scheduler throughput
+- Budget and organizational controls
+
+The safe planning formula is therefore:
 
 ```text
-34 regions × 100,000 nodes × 1 GPU = 3,400,000 concurrent GPU jobs
+regional usable capacity = min(NodePool limits, service quotas, available EC2 capacity,
+                               workload-policy limits, operational budget)
+global usable capacity   = sum(regional usable capacity for configured healthy regions)
 ```
 
-**High-density estimate (g5.48xlarge, 8 GPUs each):**
-
-```text
-34 regions × 100,000 nodes × 8 GPUs = 27,200,000 concurrent GPUs
-```
-
-### Submission Throughput (assuming 1,000 manifests/sec)
-
-```text
-34 regions × 1,000 manifests/sec = 34,000 job submissions/second
-```
-
-### What This Means
-
-| Metric | Single Region | Full Global (34 Regions) |
-|--------|---------------|--------------------------|
-| Max GPU nodes | 100,000 | 3,400,000 |
-| Job submission rate | 1,000/sec | 34,000/sec |
-
-### Real-World Considerations
-
-These are theoretical maximums. Actual limits depend on:
-
-- **AWS Service Quotas**: Default limits are much lower; requires quota increases
-- **EC2 Capacity**: GPU instance availability varies by region and time
-- **Cost**: Running at full scale would cost millions per hour
-- **nodepool Limits**: Current config limits GPU pools to 1,000-1,500 vCPUs per region
-
-**Current nodepool limits (per region):**
-
-- `gpu-x86-pool`: 1,000 vCPUs / 4,000Gi memory (~166 g5.xlarge nodes)
-- `gpu-arm-pool`: 500 vCPUs / 2,000Gi memory (125 g5g.xlarge nodes)
-
-To increase throughput, increase nodepool limits in the manifests and request AWS quota increases.
-
-### Why This Matters
-
-Traditional single-cluster approaches hit scaling walls quickly. GCO's multi-region architecture means:
-
-1. **No single point of failure** - One region's issues don't affect others
-2. **Linear horizontal scaling** - Add regions to add capacity
-3. **Geographic distribution** - Run jobs closer to data sources
-4. **Capacity arbitrage** - Route to regions with available GPU capacity
+Use `gco capacity`, AWS Service Quotas, and the deployed NodePool manifests to
+measure those inputs. Request quota increases and validate load incrementally;
+do not treat an AWS theoretical cluster maximum or the current count of AWS
+regions as deployable capacity.

@@ -16,7 +16,7 @@
                 var btn = document.getElementById("run"),
                     cd = document.getElementById("code"),
                     chart;
-                    
+
                 (btn.onclick = function () {
                     var code = cd.value;
 
@@ -115,14 +115,14 @@
                     // output download link for base64 PNG converted on download from base64
                     var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
                     document.getElementById("pngbase64").innerHTML=pngOutHtml;
-                    });    
+                    });
                     // output download link for base64 SVG converted on download from base64
                     var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
                         document.getElementById("svgbase64").innerHTML=svgOutHtml;
                     })();
 
                             };
-                 
+
 
 // derived from https://stackoverflow.com/a/64800570
 // we need to use web browser canvas to generate a image. In this case png
@@ -190,7 +190,7 @@ function base64ToSvgDocument(base64) {
     svg = svg.substring(svg.indexOf('<svg'));
     let parser = new DOMParser();
     return parser.parseFromString(svg, "image/svg+xml");
-} 
+}
         </script>
 
         <script>
@@ -205,20 +205,20 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op912=>operation: 'Authenticate a Cognito user via the ADMIN_USER_PASSWORD_AUTH flow.\n\n    Uses ``admin_initiate_auth`` which sends the password over TLS\n    directly (no client-side SRP math). This requires the user pool\n    client to have ``ALLOW_ADMIN_USER_PASSWORD_AUTH`` enabled and the\n    caller to have ``cognito-idp:AdminInitiateAuth`` permission.\n\n    Returns a dict with ``IdToken``, ``AccessToken``, and\n    ``RefreshToken`` on success. Raises ``botocore.exceptions.ClientError``\n    for Cognito-side failures (``NotAuthorizedException``,\n    ``UserNotFoundException``, etc.).\n    '
-op914=>operation: import boto3
-op916=>operation: cognito = boto3.client('cognito-idp', region_name=region)
-op918=>operation: response = cognito.admin_initiate_auth(UserPoolId=pool_id, ClientId=client_id, AuthFlow='ADMIN_USER_PASSWORD_AUTH', AuthParameters={'USERNAME': username, 'PASSWORD': password})
-op920=>operation: tokens = response.get('AuthenticationResult') or {}
-io925=>inputoutput: output: {'IdToken': str(tokens.get('IdToken', '')), 'AccessToken': str(tokens.get('AccessToken', '')), 'RefreshToken': str(tokens.get('RefreshToken', ''))}
-e923=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op1043=>operation: 'Authenticate a Cognito user via the ADMIN_USER_PASSWORD_AUTH flow.\n\n    Uses ``admin_initiate_auth`` which sends the password over TLS\n    directly (no client-side SRP math). This requires the user pool\n    client to have ``ALLOW_ADMIN_USER_PASSWORD_AUTH`` enabled and the\n    caller to have ``cognito-idp:AdminInitiateAuth`` permission.\n\n    Returns a dict with ``IdToken``, ``AccessToken``, and\n    ``RefreshToken`` on success. Raises ``botocore.exceptions.ClientError``\n    for Cognito-side failures (``NotAuthorizedException``,\n    ``UserNotFoundException``, etc.).\n    '
+op1045=>operation: import boto3
+op1047=>operation: cognito = boto3.client('cognito-idp', region_name=region)
+op1049=>operation: response = cognito.admin_initiate_auth(UserPoolId=pool_id, ClientId=client_id, AuthFlow='ADMIN_USER_PASSWORD_AUTH', AuthParameters={'USERNAME': username, 'PASSWORD': password})
+op1051=>operation: tokens = response.get('AuthenticationResult') or {}
+io1056=>inputoutput: output: {'IdToken': str(tokens.get('IdToken', '')), 'AccessToken': str(tokens.get('AccessToken', '')), 'RefreshToken': str(tokens.get('RefreshToken', ''))}
+e1054=>end: end function return
 
-op912->op914
-op914->op916
-op916->op918
-op918->op920
-op920->io925
-io925->e923
+op1043->op1045
+op1045->op1047
+op1047->op1049
+op1049->op1051
+op1051->io1056
+io1056->e1054
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)

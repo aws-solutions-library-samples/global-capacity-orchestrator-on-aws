@@ -30,11 +30,16 @@ class TestCanaryDeploy:
 
     @patch("cli.inference.get_aws_client")
     def test_canary_deploy_success(self, mock_aws):
+        original_spec = {
+            "image": "vllm/vllm-openai:v0.8.0",
+            "replicas": 2,
+            "env": {"MODEL_REVISION": "stable"},
+        }
         mock_store = MagicMock()
         mock_store.get_endpoint.return_value = {
             "endpoint_name": "my-llm",
             "desired_state": "running",
-            "spec": {"image": "vllm/vllm-openai:v0.8.0", "replicas": 2},
+            "spec": original_spec,
         }
         mock_store.update_spec.return_value = {
             "endpoint_name": "my-llm",
@@ -49,11 +54,19 @@ class TestCanaryDeploy:
         manager._aws_client = mock_aws.return_value
 
         with patch.object(manager, "_get_store", return_value=mock_store):
-            result = manager.canary_deploy("my-llm", "vllm/vllm-openai:v0.9.0", weight=10)
+            result = manager.canary_deploy("my-llm", " vllm/vllm-openai:v0.9.0 ", weight=10)
 
         assert result is not None
         assert result["spec"]["canary"]["image"] == "vllm/vllm-openai:v0.9.0"
-        mock_store.update_spec.assert_called_once()
+        submitted_spec = mock_store.update_spec.call_args.args[1]
+        assert submitted_spec["canary"] == {
+            "image": "vllm/vllm-openai:v0.9.0",
+            "weight": 10,
+            "replicas": 1,
+        }
+        assert submitted_spec is not original_spec
+        assert submitted_spec["env"] is not original_spec["env"]
+        assert "canary" not in original_spec
 
     @patch("cli.inference.get_aws_client")
     def test_canary_deploy_not_found(self, mock_aws):
@@ -69,17 +82,35 @@ class TestCanaryDeploy:
 
         assert result is None
 
-    @patch("cli.inference.get_aws_client")
-    def test_canary_deploy_invalid_weight(self, mock_aws):
+    @pytest.mark.parametrize("weight", [0, 100, -1, True, 10.5, "10"])
+    def test_canary_deploy_invalid_weight(self, weight):
         manager = InferenceManager.__new__(InferenceManager)
         manager.config = MagicMock()
-        manager._aws_client = mock_aws.return_value
+        manager._aws_client = MagicMock()
 
-        with pytest.raises(ValueError, match="weight must be between 1 and 99"):
-            manager.canary_deploy("my-llm", "image:v2", weight=0)
+        with pytest.raises(
+            ValueError,
+            match="Canary weight must be an integer between 1 and 99",
+        ):
+            manager.canary_deploy("my-llm", "image:v2", weight=weight)
 
-        with pytest.raises(ValueError, match="weight must be between 1 and 99"):
-            manager.canary_deploy("my-llm", "image:v2", weight=100)
+    @pytest.mark.parametrize("image", [None, "", "   ", 123])
+    def test_canary_deploy_invalid_image(self, image):
+        manager = InferenceManager.__new__(InferenceManager)
+        manager.config = MagicMock()
+        manager._aws_client = MagicMock()
+
+        with pytest.raises(ValueError, match="Canary image must be a non-empty string"):
+            manager.canary_deploy("my-llm", image)
+
+    @pytest.mark.parametrize("replicas", [0, -1, True, 1.5, "1"])
+    def test_canary_deploy_invalid_replicas(self, replicas):
+        manager = InferenceManager.__new__(InferenceManager)
+        manager.config = MagicMock()
+        manager._aws_client = MagicMock()
+
+        with pytest.raises(ValueError, match="Canary replicas must be a positive integer"):
+            manager.canary_deploy("my-llm", "image:v2", replicas=replicas)
 
     @patch("cli.inference.get_aws_client")
     def test_canary_deploy_stopped_endpoint(self, mock_aws):
@@ -122,19 +153,51 @@ class TestCanaryDeploy:
         assert spec["canary"]["weight"] == 25
         assert spec["canary"]["replicas"] == 3
 
+    @patch("cli.inference.get_aws_client")
+    def test_canary_deploy_rejects_mooncake_endpoint(self, mock_aws):
+        original_spec = {
+            "image": "old:v1",
+            "mooncake": {"mode": "store", "store": {"enabled": True}},
+        }
+        mock_store = MagicMock()
+        mock_store.get_endpoint.return_value = {
+            "endpoint_name": "my-llm",
+            "desired_state": "running",
+            "spec": original_spec,
+        }
+
+        manager = InferenceManager.__new__(InferenceManager)
+        manager.config = MagicMock()
+        manager._aws_client = mock_aws.return_value
+
+        with (
+            patch.object(manager, "_get_store", return_value=mock_store),
+            pytest.raises(
+                ValueError,
+                match="Canary deployments are not supported for Mooncake endpoints",
+            ),
+        ):
+            manager.canary_deploy("my-llm", "new:v2")
+
+        mock_store.update_spec.assert_not_called()
+        assert "canary" not in original_spec
+
 
 class TestPromoteCanary:
     """Tests for promote_canary method."""
 
     @patch("cli.inference.get_aws_client")
     def test_promote_success(self, mock_aws):
+        original_spec = {
+            "image": "old:v1",
+            "region_image_uris": {"us-east-1": "regional-old:v1"},
+            "env": {"MODEL_REVISION": "stable"},
+            "canary": {"image": " new:v2 ", "weight": 10, "replicas": 1},
+        }
         mock_store = MagicMock()
         mock_store.get_endpoint.return_value = {
             "endpoint_name": "my-llm",
-            "spec": {
-                "image": "old:v1",
-                "canary": {"image": "new:v2", "weight": 10, "replicas": 1},
-            },
+            "spec": original_spec,
         }
         mock_store.update_spec.return_value = {
             "endpoint_name": "my-llm",
@@ -149,11 +212,15 @@ class TestPromoteCanary:
             result = manager.promote_canary("my-llm")
 
         assert result is not None
-        # Verify the spec passed to update_spec has the canary image as primary
-        call_args = mock_store.update_spec.call_args[0]
-        spec = call_args[1]
-        assert spec["image"] == "new:v2"
-        assert "canary" not in spec
+        submitted_spec = mock_store.update_spec.call_args.args[1]
+        assert submitted_spec["image"] == "new:v2"
+        assert "canary" not in submitted_spec
+        assert "region_image_uris" not in submitted_spec
+        assert submitted_spec is not original_spec
+        assert submitted_spec["env"] is not original_spec["env"]
+        assert original_spec["image"] == "old:v1"
+        assert "canary" in original_spec
+        assert "region_image_uris" in original_spec
 
     @patch("cli.inference.get_aws_client")
     def test_promote_not_found(self, mock_aws):
@@ -187,23 +254,72 @@ class TestPromoteCanary:
         ):
             manager.promote_canary("my-llm")
 
-
-class TestRollbackCanary:
-    """Tests for rollback_canary method."""
-
     @patch("cli.inference.get_aws_client")
-    def test_rollback_success(self, mock_aws):
+    def test_promote_rejects_mooncake_endpoint(self, mock_aws):
         mock_store = MagicMock()
         mock_store.get_endpoint.return_value = {
             "endpoint_name": "my-llm",
             "spec": {
                 "image": "old:v1",
-                "canary": {"image": "new:v2", "weight": 10},
+                "mooncake": {"mode": "store"},
+                "canary": {"image": "new:v2"},
             },
+        }
+
+        manager = InferenceManager.__new__(InferenceManager)
+        manager.config = MagicMock()
+        manager._aws_client = mock_aws.return_value
+
+        with (
+            patch.object(manager, "_get_store", return_value=mock_store),
+            pytest.raises(
+                ValueError,
+                match="Canary promotion is not supported for Mooncake endpoints",
+            ),
+        ):
+            manager.promote_canary("my-llm")
+
+        mock_store.update_spec.assert_not_called()
+
+    @patch("cli.inference.get_aws_client")
+    def test_promote_rejects_invalid_canary_image(self, mock_aws):
+        mock_store = MagicMock()
+        mock_store.get_endpoint.return_value = {
+            "endpoint_name": "my-llm",
+            "spec": {"image": "old:v1", "canary": {"image": "   "}},
+        }
+
+        manager = InferenceManager.__new__(InferenceManager)
+        manager.config = MagicMock()
+        manager._aws_client = mock_aws.return_value
+
+        with (
+            patch.object(manager, "_get_store", return_value=mock_store),
+            pytest.raises(ValueError, match="has an invalid 'image' field"),
+        ):
+            manager.promote_canary("my-llm")
+
+        mock_store.update_spec.assert_not_called()
+
+
+class TestRollbackCanary:
+    """Tests for rollback_canary method."""
+
+    @patch("cli.inference.get_aws_client")
+    def test_rollback_repairs_legacy_mooncake_canary_record(self, mock_aws):
+        original_spec = {
+            "image": "old:v1",
+            "mooncake": {"mode": "store", "store": {"enabled": True}},
+            "canary": {"image": "new:v2", "weight": 10},
+        }
+        mock_store = MagicMock()
+        mock_store.get_endpoint.return_value = {
+            "endpoint_name": "my-llm",
+            "spec": original_spec,
         }
         mock_store.update_spec.return_value = {
             "endpoint_name": "my-llm",
-            "spec": {"image": "old:v1"},
+            "spec": {"image": "old:v1", "mooncake": original_spec["mooncake"]},
         }
 
         manager = InferenceManager.__new__(InferenceManager)
@@ -214,10 +330,13 @@ class TestRollbackCanary:
             result = manager.rollback_canary("my-llm")
 
         assert result is not None
-        call_args = mock_store.update_spec.call_args[0]
-        spec = call_args[1]
-        assert spec["image"] == "old:v1"
-        assert "canary" not in spec
+        submitted_spec = mock_store.update_spec.call_args.args[1]
+        assert submitted_spec["image"] == "old:v1"
+        assert submitted_spec["mooncake"] == original_spec["mooncake"]
+        assert "canary" not in submitted_spec
+        assert submitted_spec is not original_spec
+        assert submitted_spec["mooncake"] is not original_spec["mooncake"]
+        assert "canary" in original_spec
 
     @patch("cli.inference.get_aws_client")
     def test_rollback_not_found(self, mock_aws):
@@ -250,6 +369,90 @@ class TestRollbackCanary:
             pytest.raises(ValueError, match="no active canary"),
         ):
             manager.rollback_canary("my-llm")
+
+
+# =============================================================================
+# Authenticated Inference Proxy Canary Routing Tests
+# =============================================================================
+
+
+class TestInferenceProxyCanaryRouting:
+    """Canary traffic is gated on observed, matching local readiness."""
+
+    @staticmethod
+    def _endpoint(canary_status):
+        return {
+            "spec": {
+                "image": "old:v1",
+                "canary": {"image": "new:v2", "weight": 10, "replicas": 2},
+            },
+            "region_status": {"us-east-1": {"state": "running", "canary": canary_status}},
+        }
+
+    def test_routes_to_fully_ready_matching_canary(self):
+        from gco.services.api_routes.inference_proxy import _target_service
+
+        endpoint = self._endpoint(
+            {
+                "state": "running",
+                "image": "new:v2",
+                "weight": 10,
+                "replicas_ready": 2,
+                "replicas_desired": 2,
+            }
+        )
+        with (
+            patch.dict("os.environ", {"REGION": "us-east-1"}),
+            patch("gco.services.api_routes.inference_proxy.secrets.randbelow", return_value=0),
+        ):
+            assert _target_service(endpoint, "my-llm") == "my-llm-canary"
+
+    @pytest.mark.parametrize(
+        "status_override",
+        [
+            {"state": "creating"},
+            {"image": "different:v2"},
+            {"replicas_ready": 1},
+            {"replicas_desired": 0, "replicas_ready": 0},
+        ],
+    )
+    def test_routes_to_primary_until_matching_canary_is_fully_ready(self, status_override):
+        from gco.services.api_routes.inference_proxy import _target_service
+
+        canary_status = {
+            "state": "running",
+            "image": "new:v2",
+            "weight": 10,
+            "replicas_ready": 2,
+            "replicas_desired": 2,
+        }
+        canary_status.update(status_override)
+        endpoint = self._endpoint(canary_status)
+        with (
+            patch.dict("os.environ", {"REGION": "us-east-1"}),
+            patch("gco.services.api_routes.inference_proxy.secrets.randbelow", return_value=0),
+        ):
+            assert _target_service(endpoint, "my-llm") == "my-llm"
+
+    def test_mooncake_split_topology_routes_to_proxy_service(self):
+        from gco.services.api_routes.inference_proxy import _target_service
+
+        endpoint = {
+            "spec": {
+                "image": "image:v1",
+                "mooncake": {"mode": "disaggregated"},
+            }
+        }
+        assert _target_service(endpoint, "my-llm") == "my-llm-proxy"
+
+    def test_proxy_routes_expose_only_supported_methods(self):
+        from gco.services.api_routes.inference_proxy import router
+
+        methods_by_path = {route.path: route.methods for route in router.routes}
+        assert methods_by_path == {
+            "/inference/{endpoint_name}": {"GET", "HEAD", "POST"},
+            "/inference/{endpoint_name}/{upstream_path:path}": {"GET", "HEAD", "POST"},
+        }
 
 
 # =============================================================================

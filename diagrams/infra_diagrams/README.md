@@ -67,35 +67,38 @@ After running the generator, diagrams are saved to `diagrams/infra_diagrams/`:
 | Diagram | Description |
 |---------|-------------|
 | `global-stack.png` | Global Accelerator and endpoint groups |
-| `api-gateway-stack.png` | API Gateway with IAM authentication |
+| `api-gateway-stack.png` | Global API Gateway, HMAC proxy/secret rotation, SigV4 aggregator, and backend TLS certificate manager |
 | `regional-stack.png` | EKS cluster, ALB, SQS, EFS, and services |
-| `regional-api-stack.png` | Regional API Gateway with VPC Lambda (private access). The regional stack is synthesized alongside it (its VPC construct is a constructor input), but the diagram is scoped to the regional-api stack via `--include`. |
+| `regional-api-stack.png` | Always-deployed aggregation bridge with a VPC Lambda; direct caller access is a separate policy opt-in. The regional stack is synthesized alongside it (its VPC construct is a constructor input), but the diagram is scoped to the regional-api stack via `--include`. |
 | `monitoring-stack.png` | CloudWatch dashboards, alarms, and SNS. The full app is synthesized so the monitoring stack can read attributes from the other stacks, but the diagram is scoped to the monitoring stack via `--include`. |
 | `analytics-stack.png` | SageMaker Studio, EMR Serverless, Cognito, and the presigned-URL Lambda |
-| `full-architecture.png` | Complete infrastructure (collapsed overview) |
-| `full-architecture-detailed.png` | Complete infrastructure (expanded, `--no-collapse`) |
+| `full-architecture.png` | Complete infrastructure (collapsed overview), including the optional analytics stack and its API Gateway wiring |
+| `full-architecture-detailed.png` | Complete infrastructure (expanded, `--no-collapse`), including the optional analytics stack |
 
 ## Stack Overview
 
 ### Global Stack
 
 - AWS Global Accelerator
-- TCP Listeners (ports 80, 443)
-- Endpoint groups per region
+- TCP listener on port 443 only; Layer 4 pass-through does not terminate TLS
+- HTTPS/443 endpoint groups per region
 - SSM parameters for cross-region sharing
 
 ### API Gateway Stack
 
-- REST API with IAM authentication
-- Lambda proxy function
-- Secrets Manager for API keys
+- REST API with IAM authentication and AWS-managed client TLS
+- Global HMAC proxy and SigV4 cross-region aggregator
+- KMS-encrypted HMAC and private-root Secrets Manager secrets
+- Scheduled TLS manager that reimports short-lived leaves into stable regional ACM ARNs
+- Public root trust and certificate ARN publication in SSM
 - WAF WebACL with AWS managed rules
-- CloudWatch logging
+- CloudWatch logging, expiry metrics, alarms, and encrypted rotation DLQ
 
 ### Regional Stack
 
 - EKS cluster with Auto Mode
-- Application Load Balancer
+- Internal Application Load Balancer with HTTPS/443 private-root ACM certificate
+- HTTP target-group hop from ALB to Kubernetes pods after TLS termination
 - SQS job queue with DLQ
 - EFS for persistent storage
 - Manifest processor deployment
@@ -105,10 +108,10 @@ After running the generator, diagrams are saved to `diagrams/infra_diagrams/`:
 
 ### Regional API Gateway Stack
 
-- Regional REST API with IAM authentication
-- VPC Lambda proxy function
-- Direct access to internal ALB
-- Used when public access is disabled
+- Always-deployed regional REST API with AWS-managed TLS and IAM authentication
+- Resource policy always admits the exact aggregator role
+- Optional policy admission for other same-account direct callers
+- VPC Lambda proxy with HMAC signing and private-root TLS to the internal ALB
 
 ### Monitoring Stack
 

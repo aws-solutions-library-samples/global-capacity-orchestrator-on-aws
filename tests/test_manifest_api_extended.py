@@ -478,7 +478,7 @@ class TestValidateManifestsEndpoint:
         mock_processor.cluster_id = "test-cluster"
         mock_processor.region = "us-east-1"
 
-        def validate_side_effect(manifest):
+        def validate_side_effect(manifest, _default_namespace=None):
             if manifest.get("metadata", {}).get("name") == "invalid":
                 return (False, "Invalid manifest")
             return (True, None)

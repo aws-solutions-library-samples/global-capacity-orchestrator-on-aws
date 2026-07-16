@@ -67,26 +67,42 @@ kubectl get nodes
 
 ## Secret Rotation Fails
 
-**Symptoms:** CloudWatch alarm fires for secret rotation failure. API requests start failing with 403 after the old secret expires. The `secret-rotation` Lambda shows errors in CloudWatch Logs.
+**Symptoms:** The rotation alarm fires, the rotation function reports an error, or proxy/backend authentication begins returning 503/401 responses because no valid current or pending signing key can be loaded.
 
 **Diagnosis:**
 
 ```bash
-# 1. Check the rotation Lambda logs
-aws logs filter-log-events \
-  --log-group-name /aws/lambda/gco-secret-rotation \
-  --filter-pattern "ERROR" \
-  --start-time $(date -d '1 hour ago' +%s000)
+# Set these for your deployment
+PROJECT_NAME=${PROJECT_NAME:-gco}
+API_REGION=${API_REGION:-us-east-2}
+API_STACK="${PROJECT_NAME}-api-gateway"
+SECRET_ID="${PROJECT_NAME}/api-gateway-auth-token"
 
-# 2. Check the secret's rotation status
+# 1. Discover the generated rotation function and its log group
+ROTATION_FUNCTION=$(aws cloudformation list-stack-resources \
+  --stack-name "$API_STACK" --region "$API_REGION" \
+  --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function' && contains(LogicalResourceId, 'SecretRotationFunction')].PhysicalResourceId | [0]" \
+  --output text)
+ROTATION_LOG_GROUP=$(aws lambda get-function-configuration \
+  --function-name "$ROTATION_FUNCTION" --region "$API_REGION" \
+  --query 'LoggingConfig.LogGroup' --output text)
+START_TIME_MS=$(python3 -c 'import time; print(int((time.time() - 3600) * 1000))')
+aws logs filter-log-events \
+  --log-group-name "$ROTATION_LOG_GROUP" \
+  --filter-pattern "ERROR" \
+  --start-time "$START_TIME_MS" \
+  --region "$API_REGION"
+
+# 2. Check the signing key's rotation stages
 aws secretsmanager describe-secret \
-  --secret-id gco-auth-token \
+  --secret-id "$SECRET_ID" --region "$API_REGION" \
   --query '{LastRotated: LastRotatedDate, NextRotation: NextRotationDate, Versions: VersionIdsToStages}'
 
-# 3. Check if AWSPENDING version exists (stuck rotation)
+# 3. Check whether AWSPENDING exists (a missing stage returns ResourceNotFoundException)
 aws secretsmanager get-secret-value \
-  --secret-id gco-auth-token \
-  --version-stage AWSPENDING 2>&1
+  --secret-id "$SECRET_ID" \
+  --version-stage AWSPENDING \
+  --region "$API_REGION" >/dev/null
 ```
 
 **Resolution:**
@@ -97,13 +113,15 @@ aws secretsmanager get-secret-value \
 
    ```bash
    # Cancel the stuck rotation
-   aws secretsmanager cancel-rotate-secret --secret-id gco-auth-token
+   aws secretsmanager cancel-rotate-secret \
+     --secret-id "$SECRET_ID" --region "$API_REGION"
 
    # Trigger a fresh rotation
-   aws secretsmanager rotate-secret --secret-id gco-auth-token
+   aws secretsmanager rotate-secret \
+     --secret-id "$SECRET_ID" --region "$API_REGION"
    ```
 
-3. **If API requests are failing with 403 right now:** The auth middleware caches tokens for 5 minutes. After fixing the secret, wait up to 5 minutes for caches to refresh, or restart the manifest-processor pods to force a cache clear:
+3. **If requests are failing now:** Trusted proxies and backend middleware use bounded key caches and accept the rotation stages needed for overlap. After restoring valid `AWSCURRENT`/`AWSPENDING` state, allow the cache window to elapse. If an urgent refresh is required, restart the manifest processor in each affected region; do not distribute the signing key to clients:
 
    ```bash
    kubectl rollout restart deployment/manifest-processor -n gco-system
@@ -117,31 +135,31 @@ aws secretsmanager get-secret-value \
 
 **Symptoms:** Traffic is not reaching a specific region even though the EKS cluster is healthy. `gco capacity status` shows the region as healthy but no jobs are landing there.
 
-**Diagnosis:** Replace `<LISTENER_ARN>`, `<ENDPOINT_GROUP_ARN>`, and
-`<TARGET_GROUP_ARN>` with the Global Accelerator listener ARN, endpoint-group
-ARN, and ALB target-group ARN respectively, and `<REGION>` with the affected
-AWS region:
+**Diagnosis:** Replace `<ENDPOINT_GROUP_ARN>` and `<TARGET_GROUP_ARN>` with the
+standard Global Accelerator endpoint-group ARN and ALB target-group ARN, and
+`<REGION>` with the affected AWS region:
 
 ```bash
-# 1. Check GA endpoint group health
-aws globalaccelerator list-endpoint-groups \
-  --listener-arn <LISTENER_ARN> \
-  --query 'EndpointGroups[].{Region:EndpointGroupRegion,Health:HealthState}'
+# 1. Inspect registered endpoints and their health
+aws globalaccelerator describe-endpoint-group \
+  --endpoint-group-arn <ENDPOINT_GROUP_ARN> \
+  --query 'EndpointGroup.{Region:EndpointGroupRegion,Endpoints:EndpointDescriptions[].{Id:EndpointId,Health:HealthState,Reason:HealthReason}}' \
+  --region us-west-2
 
-# 2. Check if the ALB is registered with GA
-aws globalaccelerator list-custom-routing-endpoints \
-  --endpoint-group-arn <ENDPOINT_GROUP_ARN>
-
-# 3. Check ALB health in the region
+# 2. Check ALB target health in the workload region
 aws elbv2 describe-target-health \
   --target-group-arn <TARGET_GROUP_ARN> \
   --region <REGION>
 
-# 4. Check the GA registration Lambda logs
-aws logs filter-log-events \
-  --log-group-name /aws/lambda/gco-ga-registration-<REGION> \
-  --filter-pattern "ERROR" \
-  --region <REGION>
+# 3. Discover the generated GA-registration function and inspect its logs
+GA_FUNCTION=$(aws cloudformation list-stack-resources \
+  --stack-name gco-<REGION> --region <REGION> \
+  --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function' && contains(LogicalResourceId, 'GaRegistration')].PhysicalResourceId | [0]" \
+  --output text)
+GA_LOG_GROUP=$(aws lambda get-function-configuration \
+  --function-name "$GA_FUNCTION" --region <REGION> \
+  --query 'LoggingConfig.LogGroup' --output text)
+aws logs tail "$GA_LOG_GROUP" --since 1h --region <REGION>
 ```
 
 **Resolution:**
@@ -181,22 +199,25 @@ aws sqs receive-message \
   --max-number-of-messages 1 \
   --region <REGION>
 
-# 4. Check queue processor logs
-kubectl logs -n gco-system deployment/sqs-consumer --tail=100
+# 4. Inspect KEDA consumer Jobs and recent logs
+kubectl get scaledjob,pods -n gco-system -l app=queue-processor
+kubectl logs -n gco-system -l app=queue-processor --all-containers \
+  --prefix --tail=100
 ```
 
 **Resolution:**
 
-1. **If messages are malformed YAML:** The DLQ message body contains the original manifest. Fix the YAML and resubmit via `gco jobs submit-sqs`.
+1. **If a message body or manifest is malformed:** The DLQ preserves the original message for inspection. Correct the submission and resubmit it with `gco jobs submit-sqs`; do not manually acknowledge the bad message from the main queue.
 
-2. **If the queue processor is crashing:** Check pod status and restart:
+2. **If a queue-processor Job is crashing:** Inspect the built-in KEDA `ScaledJob` and its short-lived Job pods, fix the image or deployment configuration, and redeploy the regional stack:
 
    ```bash
-   kubectl get pods -n gco-system -l app=sqs-consumer
-   kubectl rollout restart deployment/sqs-consumer -n gco-system
+   kubectl describe scaledjob/sqs-queue-processor -n gco-system
+   kubectl get jobs,pods -n gco-system -l app=queue-processor
+   gco stacks deploy gco-<REGION> -y
    ```
 
-3. **If messages are valid but failing validation:** Check resource limits in `cdk.json` under `manifest_processor`. The job may exceed CPU/memory/GPU limits.
+3. **If manifests are rejected:** Check `job_validation_policy` in `cdk.json`, including `allowed_kinds`, `allowed_namespaces`, resource quotas, image registries, and security controls. Rejected, unsupported, and apply-failed messages are deliberately left unacknowledged so SQS retries them and eventually moves them to the DLQ. Change policy/RBAC intentionally, redeploy, and only then replay the DLQ.
 
 4. **To replay DLQ messages** (after fixing the root cause), where
    `<DLQ_ARN>` is the dead-letter queue ARN and `<MAIN_QUEUE_ARN>` is the main
@@ -224,39 +245,41 @@ kubectl logs -n gco-system deployment/sqs-consumer --tail=100
 # 1. Dry-run the manifest to see the exact error
 gco jobs submit my-job.yaml -n gco-jobs --dry-run
 
-# 2. Check current resource limits
-gco config-cmd show | grep -A5 resource_quotas
+# 2. Inspect the deployed-policy source of truth
+jq '.context.job_validation_policy.resource_quotas' cdk.json
 
-# 3. Check allowed namespaces
-gco config-cmd show | grep -A5 allowed_namespaces
+# 3. Check allowed namespaces in the same deployment policy
+jq '.context.job_validation_policy.allowed_namespaces' cdk.json
 ```
 
 **Resolution:**
 
-1. **Resource limit exceeded:** Update `resource_quotas` in `cdk.json` and redeploy:
+1. **Resource limit exceeded:** Update the shared quota in `cdk.json` and redeploy:
 
    ```json
-   "manifest_processor": {
-     "max_cpu_per_manifest": "32",
-     "max_memory_per_manifest": "128Gi",
-     "max_gpu_per_manifest": 8
+   "job_validation_policy": {
+     "resource_quotas": {
+       "max_cpu_per_manifest": "32",
+       "max_memory_per_manifest": "128Gi",
+       "max_gpu_per_manifest": 8
+     }
    }
    ```
 
    Then: `gco stacks deploy gco-<REGION> -y`
 
-2. **Namespace not allowed:** Add the namespace to `allowed_namespaces` in `cdk.json`:
+2. **Namespace not allowed:** The stock submission namespace is only `gco-jobs`, matching its namespace-scoped write Role. To opt into another namespace, first grant the manifest-processor service account an intentionally scoped Role/RoleBinding there, then add that namespace to the shared policy and redeploy. Do not add `default` merely to bypass validation.
 
    ```json
-   "manifest_processor": {
-     "allowed_namespaces": ["default", "gco-jobs", "my-namespace"]
+   "job_validation_policy": {
+     "allowed_namespaces": ["gco-jobs", "my-namespace"]
    }
    ```
 
-3. **Untrusted image source:** Add the registry to `trusted_registries` in `cdk.json`:
+3. **Untrusted image source:** Add the registry to the shared image policy and redeploy:
 
    ```json
-   "manifest_processor": {
+   "job_validation_policy": {
      "trusted_registries": ["docker.io", "gcr.io", "my-registry.example.com"]
    }
    ```
@@ -270,34 +293,39 @@ gco config-cmd show | grep -A5 allowed_namespaces
 **Diagnosis:**
 
 ```bash
-# 1. Check API Gateway latency metrics
+PROJECT_NAME=${PROJECT_NAME:-gco}
+API_REGION=${API_REGION:-us-east-2}
+API_STACK="${PROJECT_NAME}-api-gateway"
+START_TIME=$(python3 -c 'from datetime import UTC, datetime, timedelta; print((datetime.now(UTC) - timedelta(hours=1)).isoformat())')
+END_TIME=$(python3 -c 'from datetime import UTC, datetime; print(datetime.now(UTC).isoformat())')
+
+# 1. Check average API Gateway latency (inspect p99 separately in CloudWatch)
 aws cloudwatch get-metric-statistics \
   --namespace AWS/ApiGateway \
   --metric-name Latency \
-  --dimensions Name=ApiName,Value=gco-global \
-  --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
-  --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
-  --period 300 --statistics Average p99
+  --dimensions Name=ApiName,Value="${PROJECT_NAME}-global-api" \
+  --start-time "$START_TIME" \
+  --end-time "$END_TIME" \
+  --period 300 --statistics Average \
+  --region "$API_REGION"
 
-# 2. Check X-Ray traces (if tracing is enabled)
-# Open X-Ray console → Traces → filter by service "gco"
+# 2. Discover the generated proxy function and inspect cold-start records
+PROXY_FUNCTION=$(aws cloudformation list-stack-resources \
+  --stack-name "$API_STACK" --region "$API_REGION" \
+  --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function' && contains(LogicalResourceId, 'ApiGatewayProxyFunction')].PhysicalResourceId | [0]" \
+  --output text)
+PROXY_LOG_GROUP=$(aws lambda get-function-configuration \
+  --function-name "$PROXY_FUNCTION" --region "$API_REGION" \
+  --query 'LoggingConfig.LogGroup' --output text)
+aws logs tail "$PROXY_LOG_GROUP" \
+  --since 1h --filter-pattern INIT_START --region "$API_REGION"
 
-# 3. Check Lambda cold starts
-aws logs filter-log-events \
-  --log-group-name /aws/lambda/gco-api-proxy \
-  --filter-pattern "INIT_START"
+# 3. Use the X-Ray console or service map when tracing is enabled
 ```
 
 **Resolution:**
 
-1. **Lambda cold starts:** The proxy Lambda has a 29s timeout. Cold starts add 1-3s. If cold starts are frequent, consider provisioned concurrency:
-
-   ```bash
-   aws lambda put-provisioned-concurrency-config \
-     --function-name gco-api-proxy \
-     --qualifier $LATEST \
-     --provisioned-concurrent-executions 5
-   ```
+1. **Lambda cold starts:** Confirm cold starts are a material share of latency before changing concurrency. API Gateway invokes the unqualified function today; provisioned concurrency requires a published Lambda version or alias and the integration must target that alias. Model that change in CDK and redeploy—`$LATEST` does not support provisioned concurrency, and an out-of-band CLI setting would create stack drift.
 
 2. **Global Accelerator routing latency:** Check if traffic is being routed to the nearest region. Use `traceroute` to the GA endpoint to verify.
 

@@ -580,7 +580,7 @@ Deploy an inference endpoint from a notebook:
 
 ```bash
 gco inference deploy exploration-llm \
-  --image vllm/vllm-openai:v0.22.0 \
+  --image vllm/vllm-openai:v0.24.0 \
   --replicas 1 --gpu-count 1 \
   --region us-east-1
 ```

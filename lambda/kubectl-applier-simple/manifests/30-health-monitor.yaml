@@ -83,6 +83,20 @@ spec:
               value: "{{CLUSTER_NAME}}"
             - name: REGION
               value: "{{REGION}}"
+            # Stable, replica-unique identity and namespace for Kubernetes
+            # Lease leader election. Followers continue serving health checks.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: ALB_SYNC_LEASE_NAME
+              value: "gco-health-monitor-alb-sync"
+            - name: ALB_SYNC_LEASE_DURATION
+              value: "90"
             - name: AUTH_SECRET_ARN
               value: "{{AUTH_SECRET_ARN}}"
             - name: DYNAMODB_REGION
@@ -96,7 +110,7 @@ spec:
             - name: GLOBAL_REGION
               value: "{{GLOBAL_REGION}}"
             - name: AWS_ROLE_ARN
-              value: "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+              value: "{{HEALTH_MONITOR_ROLE_ARN}}"
             - name: AWS_WEB_IDENTITY_TOKEN_FILE
               value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
             - name: CPU_THRESHOLD

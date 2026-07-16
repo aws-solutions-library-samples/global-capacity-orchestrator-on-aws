@@ -27,15 +27,15 @@ handler = load_lambda_module("cross-region-aggregator")
 
 @pytest.fixture(autouse=True)
 def _reset_endpoints_cache():
-    """Prime the endpoints cache TTL so tests that set
-    ``handler._cached_endpoints`` directly don't fall through to a
-    real SSM call. See the identical fixture in
-    ``test_cross_region_aggregator.py`` for the full rationale —
-    a freshly-loaded module has ``_endpoints_cache_time = 0``, and
-    without this fixture the TTL check always fails.
-    """
-    handler._endpoints_cache_time = time.time()
-    yield
+    """Reset endpoint state and stub SigV4 signing for transport-focused tests."""
+    handler._cached_endpoints = None
+    handler._endpoints_cache_time = time.monotonic()
+    with patch.object(
+        handler,
+        "_sigv4_headers",
+        return_value={"Authorization": "AWS4-HMAC-SHA256 test-signature"},
+    ):
+        yield
 
 
 class TestQueryRegion503Handling:
@@ -43,8 +43,6 @@ class TestQueryRegion503Handling:
 
     def test_503_with_valid_json_returns_success(self):
         """503 from health endpoint with JSON body should be treated as success."""
-
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
 
         mock_response = MagicMock()
         mock_response.status = 503
@@ -56,7 +54,11 @@ class TestQueryRegion503Handling:
         mock_http.request.return_value = mock_response
 
         with patch.object(handler, "http", mock_http):
-            result = handler.query_region("us-east-1", "alb.example.com", "/api/v1/health")
+            result = handler.query_region(
+                "us-east-1",
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod",
+                "/api/v1/health",
+            )
 
             assert result["_status"] == "success"
             assert result["_region"] == "us-east-1"
@@ -64,8 +66,6 @@ class TestQueryRegion503Handling:
 
     def test_503_with_invalid_json_returns_error(self):
         """503 with non-JSON body should be treated as error."""
-
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
 
         mock_response = MagicMock()
         mock_response.status = 503
@@ -75,15 +75,17 @@ class TestQueryRegion503Handling:
         mock_http.request.return_value = mock_response
 
         with patch.object(handler, "http", mock_http):
-            result = handler.query_region("us-east-1", "alb.example.com", "/api/v1/health")
+            result = handler.query_region(
+                "us-east-1",
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod",
+                "/api/v1/health",
+            )
 
             assert result["_status"] == "error"
             assert "HTTP 503" in result["_error"]
 
     def test_503_with_unicode_error_returns_error(self):
         """503 with undecodable body should be treated as error."""
-
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
 
         mock_response = MagicMock()
         mock_response.status = 503
@@ -94,7 +96,11 @@ class TestQueryRegion503Handling:
         mock_http.request.return_value = mock_response
 
         with patch.object(handler, "http", mock_http):
-            result = handler.query_region("us-east-1", "alb.example.com", "/api/v1/health")
+            result = handler.query_region(
+                "us-east-1",
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod",
+                "/api/v1/health",
+            )
 
             assert result["_status"] == "error"
 
@@ -104,8 +110,6 @@ class TestQueryRegionDeleteMethod:
 
     def test_delete_with_body(self):
         """DELETE request should send body correctly."""
-
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
 
         mock_response = MagicMock()
         mock_response.status = 200
@@ -118,7 +122,11 @@ class TestQueryRegionDeleteMethod:
 
         with patch.object(handler, "http", mock_http):
             result = handler.query_region(
-                "us-east-1", "alb.example.com", "/api/v1/jobs", "DELETE", body
+                "us-east-1",
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod",
+                "/api/v1/jobs",
+                "DELETE",
+                body,
             )
 
             assert result["_status"] == "success"
@@ -129,8 +137,6 @@ class TestQueryRegionDeleteMethod:
     def test_delete_without_body(self):
         """DELETE request without body should send None."""
 
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps({"deleted_count": 0}).encode("utf-8")
@@ -139,7 +145,12 @@ class TestQueryRegionDeleteMethod:
         mock_http.request.return_value = mock_response
 
         with patch.object(handler, "http", mock_http):
-            handler.query_region("us-east-1", "alb.example.com", "/api/v1/jobs", "DELETE")
+            handler.query_region(
+                "us-east-1",
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod",
+                "/api/v1/jobs",
+                "DELETE",
+            )
 
             call_args = mock_http.request.call_args
             assert call_args[1]["body"] is None
@@ -152,10 +163,9 @@ class TestAggregateJobsLimitTrimming:
         """Jobs should be trimmed to the requested limit after aggregation."""
 
         handler._cached_endpoints = {
-            "us-east-1": "alb-1.example.com",
-            "us-west-2": "alb-2.example.com",
+            "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod",
+            "us-west-2": "https://west123.execute-api.us-west-2.amazonaws.com/prod",
         }
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
 
         def mock_request(*args, **kwargs):
             response = MagicMock()
@@ -185,9 +195,9 @@ class TestAggregateJobsLimitTrimming:
     def test_jobs_sorted_by_creation_time_descending(self):
         """Jobs should be sorted by creationTimestamp descending."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_response = MagicMock()
         mock_response.status = 200
         jobs = [
@@ -209,9 +219,9 @@ class TestAggregateJobsLimitTrimming:
     def test_aggregate_jobs_with_namespace_and_status_filters(self):
         """Namespace and status filters should be passed as query params."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps({"jobs": [], "count": 0, "total": 0}).encode("utf-8")
@@ -237,11 +247,9 @@ class TestAggregateHealthAllUnhealthy:
         """When all regions fail, overall_status should be 'unhealthy'."""
 
         handler._cached_endpoints = {
-            "us-east-1": "alb-1.example.com",
-            "us-west-2": "alb-2.example.com",
+            "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod",
+            "us-west-2": "https://west123.execute-api.us-west-2.amazonaws.com/prod",
         }
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
         mock_response = MagicMock()
         mock_response.status = 500
 
@@ -258,9 +266,9 @@ class TestAggregateHealthAllUnhealthy:
     def test_all_regions_exception(self):
         """When all regions return errors, overall_status should be 'unhealthy'."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_http = MagicMock()
         mock_http.request.side_effect = Exception("Network error")
 
@@ -277,8 +285,6 @@ class TestAggregateHealthAllUnhealthy:
         """When no endpoints exist, should return unhealthy with 0 regions."""
 
         handler._cached_endpoints = {}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
         result = handler.aggregate_health()
 
         assert result["total_regions"] == 0
@@ -292,9 +298,9 @@ class TestBulkDeleteActualDeletion:
     def test_bulk_delete_actual(self):
         """Actual deletion should report deleted counts."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps(
@@ -316,9 +322,9 @@ class TestBulkDeleteActualDeletion:
     def test_bulk_delete_with_older_than_days(self):
         """older_than_days should be included in request body."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps(
@@ -340,11 +346,9 @@ class TestBulkDeleteActualDeletion:
         """Errors from some regions should be reported."""
 
         handler._cached_endpoints = {
-            "us-east-1": "alb-1.example.com",
-            "us-west-2": "alb-2.example.com",
+            "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod",
+            "us-west-2": "https://west123.execute-api.us-west-2.amazonaws.com/prod",
         }
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
         call_count = [0]
 
         def mock_request(*args, **kwargs):
@@ -377,9 +381,9 @@ class TestLambdaHandlerEdgeCases:
     def test_handler_null_query_params(self):
         """Handler should handle null queryStringParameters."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps({"jobs": [], "count": 0, "total": 0}).encode("utf-8")
@@ -400,9 +404,9 @@ class TestLambdaHandlerEdgeCases:
     def test_handler_missing_query_params_key(self):
         """Handler should handle missing queryStringParameters key."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps({"jobs": [], "count": 0, "total": 0}).encode("utf-8")
@@ -422,9 +426,9 @@ class TestLambdaHandlerEdgeCases:
     def test_handler_delete_with_null_body(self):
         """DELETE handler should handle null body."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps(
@@ -459,9 +463,9 @@ class TestLambdaHandlerEdgeCases:
     def test_handler_get_jobs_with_custom_limit(self):
         """GET jobs should respect custom limit parameter."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps({"jobs": [], "count": 0, "total": 0}).encode("utf-8")
@@ -484,9 +488,9 @@ class TestLambdaHandlerEdgeCases:
     def test_handler_missing_http_method_defaults_to_get(self):
         """Missing httpMethod should default to GET."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps({"status": "healthy"}).encode("utf-8")
@@ -508,14 +512,13 @@ class TestAggregateMetricsEdgeCases:
         """Metrics aggregation should report errors from failed regions."""
 
         handler._cached_endpoints = {
-            "us-east-1": "alb-1.example.com",
-            "us-west-2": "alb-2.example.com",
+            "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod",
+            "us-west-2": "https://west123.execute-api.us-west-2.amazonaws.com/prod",
         }
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
 
         def mock_request(method, url, **kwargs):
             response = MagicMock()
-            if "alb-1" in url:
+            if "east123" in url:
                 response.status = 200
                 response.data = json.dumps(
                     {"cluster_id": "gco-us-east-1", "templates_count": 3}
@@ -538,9 +541,9 @@ class TestAggregateMetricsEdgeCases:
     def test_aggregate_metrics_with_exception(self):
         """Metrics aggregation should handle exceptions from regions."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_http = MagicMock()
         mock_http.request.side_effect = Exception("Connection refused")
 

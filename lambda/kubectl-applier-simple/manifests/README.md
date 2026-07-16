@@ -27,11 +27,19 @@ Two passes, driven by the convergence pipeline:
 
 Two behaviors are worth knowing:
 
-- **Feature gating by placeholder.** Every `{{VARIABLE}}` is substituted at
-  deploy time (see [Template Variables](#template-variables)). If a file still
+- **Feature convergence by placeholder.** Every `{{VARIABLE}}` is substituted
+  at deploy time (see [Template Variables](#template-variables)). If a file still
   contains an `UPPER_SNAKE` placeholder *after* substitution, the handler skips
-  it — that is how optional features (FSx, Valkey, Aurora pgvector, cluster
-  observability, the queue processor) turn themselves off.
+  applying that file and deletes only the exact resources inventoried for that
+  disabled feature. FSx convergence removes the three managed PVCs, PVs, and
+  StorageClass; Valkey and Aurora convergence removes their namespaced
+  ConfigMaps; observability convergence removes its managed storage, exporters,
+  dashboards, monitors, rotation job, service account, and bindings; queue
+  convergence removes its managed `ScaledJob`. Missing resources are no-ops,
+  while any other deletion error fails the deployment rather than leaving stale
+  resources silently active. Disabling FSx detaches the managed Kubernetes
+  storage objects and can disrupt workloads that still reference those claims;
+  it does not erase the external FSx file system itself.
 - **Numbers order files, they don't identify them.** The prefix only sets apply
   order within a pass. Gaps between decade blocks are intentional headroom for
   future inserts; a missing number has no effect.
@@ -82,11 +90,11 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | File | Contents |
 |------|----------|
 | `20-storage-efs.yaml` | EFS `StorageClass` + PVCs in all namespaces (dynamic provisioning) |
-| `21-storage-fsx.yaml` | FSx Lustre `StorageClass` + PVs + PVCs — **skipped when FSx disabled** |
+| `21-storage-fsx.yaml` | FSx Lustre `StorageClass` + PVs + PVCs — **pruned when FSx is disabled** |
 | `22-storage-cluster-shared-bucket.yaml` | `gco-cluster-shared-bucket` `ConfigMap` (name/ARN/region) in all namespaces — always present |
-| `23-storage-valkey.yaml` | Valkey endpoint `ConfigMap` in all namespaces — **skipped when Valkey disabled** |
-| `24-storage-aurora-pgvector.yaml` | `gco-aurora-pgvector` `ConfigMap` (endpoint/port/secret/db) in all namespaces — **skipped when Aurora pgvector disabled** |
-| `25-storage-observability-gp3.yaml` | `gco-observability-gp3` `StorageClass` backing Prometheus/Grafana/Alertmanager PVCs — **skipped when observability disabled** |
+| `23-storage-valkey.yaml` | Valkey endpoint `ConfigMap` in all namespaces — **pruned when Valkey is disabled** |
+| `24-storage-aurora-pgvector.yaml` | `gco-aurora-pgvector` `ConfigMap` (endpoint/port/secret/db) in all namespaces — **pruned when Aurora pgvector is disabled** |
+| `25-storage-observability-gp3.yaml` | `gco-observability-gp3` `StorageClass` backing Prometheus/Grafana/Alertmanager PVCs — **pruned when observability is disabled** |
 
 ### System Services (30–39)
 
@@ -113,7 +121,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | File | Contents |
 |------|----------|
 | `50-nvidia-device-plugin.yaml` | NVIDIA device plugin `DaemonSet` (advertises `nvidia.com/gpu`) |
-| `51-dcgm-exporter.yaml` | DCGM exporter `DaemonSet` + device-counters `ConfigMap` (GPU metrics for Prometheus) — **skipped when observability disabled** |
+| `51-dcgm-exporter.yaml` | DCGM exporter `DaemonSet` + device-counters `ConfigMap` (GPU metrics for Prometheus) — **pruned when observability is disabled** |
 
 ### Post-Helm (applied after Helm installs CRDs)
 

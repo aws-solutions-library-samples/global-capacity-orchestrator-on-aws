@@ -36,8 +36,9 @@ Usage::
     # Validate both directories with the real kubeconform binary (the CI gate):
     python3 .github/scripts/validate_k8s_manifests.py
 
-    # Validate a specific directory/pattern:
-    python3 .github/scripts/validate_k8s_manifests.py --path examples
+    # Validate a specific directory, file, or quoted glob. --path is repeatable:
+    python3 .github/scripts/validate_k8s_manifests.py --path examples/simple-job.yaml
+    python3 .github/scripts/validate_k8s_manifests.py --path 'examples/**/*.yaml'
 
     # Point at a different kubeconform binary:
     python3 .github/scripts/validate_k8s_manifests.py --kubeconform-binary /usr/local/bin/kubeconform
@@ -48,14 +49,15 @@ Exit codes::
     1  one or more manifests failed validation
     2  unexpected I/O / argument error (kubeconform missing, directory absent)
 
-The module is importable from the test suite — call ``render_placeholders()``
-or ``iter_target_files()`` directly to exercise the logic without invoking
-the binary.
+The module is importable from the test suite — call ``render_placeholders()``,
+``collect_target_files()``, or ``iter_target_files()`` directly to exercise the
+logic without invoking the binary.
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import re
 import shutil
@@ -153,41 +155,120 @@ def render_placeholders(text: str) -> str:
     return _PLACEHOLDER_RE.sub(_GENERIC_STUB, text)
 
 
-def iter_target_files(target_dirs: tuple[str, ...] = DEFAULT_TARGET_DIRS) -> list[Path]:
-    """List every manifest candidate under the given directories.
-
-    Only ``*.yaml``/``*.yml`` directly inside each directory (no recursion —
-    neither target nests further today; a future subdirectory would need an
-    explicit decision about whether it's in scope). Filters out
-    ``NON_MANIFEST_FILENAMES`` by name.
-    """
+def _manifest_files_in_directory(directory: Path) -> list[Path]:
+    """Return supported direct-child manifests from one directory."""
     files: list[Path] = []
-    for rel_dir in target_dirs:
-        directory = _REPO_ROOT / rel_dir
-        if not directory.is_dir():
-            continue
-        for pattern in ("*.yaml", "*.yml"):
-            for path in sorted(directory.glob(pattern)):
-                if path.name in NON_MANIFEST_FILENAMES:
-                    continue
-                files.append(path)
+    for pattern in ("*.yaml", "*.yml"):
+        for path in sorted(directory.glob(pattern)):
+            if path.name not in NON_MANIFEST_FILENAMES:
+                files.append(path.resolve())
     return files
 
 
-def render_tree(files: list[Path], dest: Path) -> None:
-    """Render every file into ``dest`` (flat — filenames are unique per source dir).
+def collect_target_files(targets: tuple[str, ...]) -> tuple[list[Path], list[str]]:
+    """Resolve every explicit directory, file, or glob independently.
 
-    Files with no ``{{`` token are copied byte-for-byte; templated files are
-    rendered through ``render_placeholders``. kubeconform is pointed at
-    ``dest`` instead of the real paths so the reported ``filename`` in
-    kubeconform's own output stays close to the original (same basename),
-    while the content it actually parses is the rendered version.
+    Valid files are returned even when another input is invalid so callers can
+    still validate and report them. Errors preserve one entry per bad explicit
+    input. Directories retain the historical direct-child-only behavior; quoted
+    globs can opt into recursion with ``**``.
     """
+    files: list[Path] = []
+    errors: list[str] = []
+    seen: set[Path] = set()
+
+    def add(path: Path) -> None:
+        resolved = path.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            files.append(resolved)
+
+    for raw_target in targets:
+        expanded = Path(raw_target).expanduser()
+        resolved_input = expanded if expanded.is_absolute() else _REPO_ROOT / expanded
+
+        if glob.has_magic(str(expanded)):
+            matches = [
+                Path(match) for match in sorted(glob.glob(str(resolved_input), recursive=True))
+            ]
+            matched_manifests: list[Path] = []
+            for match in matches:
+                if match.is_dir():
+                    matched_manifests.extend(_manifest_files_in_directory(match))
+                elif (
+                    match.is_file()
+                    and match.suffix in (".yaml", ".yml")
+                    and match.name not in NON_MANIFEST_FILENAMES
+                ):
+                    matched_manifests.append(match.resolve())
+            if not matched_manifests:
+                errors.append(f"{raw_target}: glob matched no Kubernetes YAML manifests")
+                continue
+            for path in matched_manifests:
+                add(path)
+            continue
+
+        if not resolved_input.exists():
+            errors.append(f"{raw_target}: path does not exist")
+            continue
+        if resolved_input.is_dir():
+            directory_files = _manifest_files_in_directory(resolved_input)
+            if not directory_files:
+                errors.append(f"{raw_target}: directory contains no Kubernetes YAML manifests")
+                continue
+            for path in directory_files:
+                add(path)
+            continue
+        if resolved_input.is_file():
+            if resolved_input.suffix not in (".yaml", ".yml"):
+                errors.append(f"{raw_target}: explicit file is not .yaml or .yml")
+            elif resolved_input.name in NON_MANIFEST_FILENAMES:
+                errors.append(f"{raw_target}: explicit file is not a Kubernetes manifest")
+            else:
+                add(resolved_input)
+            continue
+        errors.append(f"{raw_target}: unsupported input type")
+
+    return files, errors
+
+
+def iter_target_files(target_dirs: tuple[str, ...] = DEFAULT_TARGET_DIRS) -> list[Path]:
+    """Compatibility wrapper returning valid manifest files only.
+
+    Use :func:`collect_target_files` when input errors must be surfaced.
+    """
+    files, _errors = collect_target_files(target_dirs)
+    return files
+
+
+def _rendered_relative_path(path: Path) -> Path:
+    """Return a collision-safe relative location for a rendered source file."""
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(_REPO_ROOT.resolve())
+    except ValueError:
+        # Explicit absolute paths outside the repository are still supported.
+        # Preserve their path below a marker rather than flattening basenames.
+        return Path("_external", *resolved.parts[1:])
+
+
+def render_tree(files: list[Path], dest: Path) -> list[Path]:
+    """Render files beneath ``dest`` while preserving source-relative paths.
+
+    Repository files retain their repository-relative path, preventing files
+    with the same basename in different inputs from overwriting one another.
+    Returns the rendered paths for callers/tests that need the mapping.
+    """
+    rendered_paths: list[Path] = []
     dest.mkdir(parents=True, exist_ok=True)
     for path in files:
         text = path.read_text(encoding="utf-8")
         rendered = render_placeholders(text) if "{{" in text else text
-        (dest / path.name).write_text(rendered, encoding="utf-8")
+        rendered_path = dest / _rendered_relative_path(path)
+        rendered_path.parent.mkdir(parents=True, exist_ok=True)
+        rendered_path.write_text(rendered, encoding="utf-8")
+        rendered_paths.append(rendered_path)
+    return rendered_paths
 
 
 def run_kubeconform(
@@ -262,8 +343,9 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         dest="paths",
         help=(
-            "Directory to scan (relative to repo root). Repeatable. "
-            "Defaults to both lambda/kubectl-applier-simple/manifests and examples."
+            "Directory, YAML file, or glob to validate (relative to repo root or absolute). "
+            "Repeatable; quote glob patterns so Python expands them. Defaults to both "
+            "lambda/kubectl-applier-simple/manifests and examples."
         ),
     )
     parser.add_argument(
@@ -285,11 +367,21 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _print_input_errors(errors: list[str]) -> None:
+    if not errors:
+        return
+    print(f"ERROR: {len(errors)} manifest input problem(s) found:", file=sys.stderr)
+    for error in errors:
+        print(f"  - {error}", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    target_dirs = tuple(args.paths) if args.paths else DEFAULT_TARGET_DIRS
+    targets = tuple(args.paths) if args.paths else DEFAULT_TARGET_DIRS
+    files, input_errors = collect_target_files(targets)
 
     if shutil.which(args.kubeconform_binary) is None:
+        _print_input_errors(input_errors)
         print(
             f"ERROR: '{args.kubeconform_binary}' not found on PATH. "
             "Install it (see Dockerfile.dev / docs/MAINTENANCE.md) or pass "
@@ -298,9 +390,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    files = iter_target_files(target_dirs)
     if not files:
-        print(f"ERROR: no *.yaml/*.yml files found under {target_dirs}", file=sys.stderr)
+        _print_input_errors(input_errors)
+        if not input_errors:
+            print(f"ERROR: no *.yaml/*.yml files found for {targets}", file=sys.stderr)
         return 2
 
     with tempfile.TemporaryDirectory(prefix="gco-k8s-validate-") as tmp:
@@ -334,14 +427,21 @@ def main(argv: list[str] | None = None) -> int:
             "yet, add it to SCHEMA_UNAVAILABLE_SKIPS in "
             "validate_k8s_manifests.py with a comment explaining why)."
         )
-        return 1
 
-    if rc != 0 and not result:
-        # kubeconform exited non-zero but produced no parseable JSON —
-        # something went wrong beyond a normal validation failure (crash,
-        # bad flag, etc). Surface it rather than silently reporting success.
-        print("ERROR: kubeconform exited non-zero with no parseable output.", file=sys.stderr)
+    _print_input_errors(input_errors)
+
+    runtime_failure = rc != 0 and not failures
+    if runtime_failure:
+        # A non-zero process result without resource validation failures is an
+        # invocation/runtime error, even if a partial JSON document was emitted.
+        print("ERROR: kubeconform exited non-zero without validation failures.", file=sys.stderr)
+
+    # Input/runtime errors take precedence, but valid supplied files were still
+    # rendered and validated above so one missing path cannot mask their report.
+    if input_errors or runtime_failure:
         return 2
+    if failures:
+        return 1
 
     print(
         f"OK: {summary.get('valid', 0)} manifest(s) are schema-valid "

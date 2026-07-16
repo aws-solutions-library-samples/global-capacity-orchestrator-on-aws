@@ -204,7 +204,13 @@ class TestModelManager:
         mock_s3 = MagicMock()
         paginator = MagicMock()
         paginator.paginate.return_value = [
-            {"Contents": [{"Key": "models/m/a.bin"}, {"Key": "models/m/b.bin"}]}
+            {
+                "Versions": [
+                    {"Key": "models/m/a.bin", "VersionId": "v2"},
+                    {"Key": "models/m/b.bin", "VersionId": "v1"},
+                ],
+                "DeleteMarkers": [],
+            }
         ]
         mock_s3.get_paginator.return_value = paginator
         manager._bucket_name = "bucket"
@@ -213,15 +219,21 @@ class TestModelManager:
             deleted = manager.delete_model("m")
 
         assert deleted == 2
+        mock_s3.get_paginator.assert_called_once_with("list_object_versions")
         mock_s3.delete_objects.assert_called_once_with(
             Bucket="bucket",
-            Delete={"Objects": [{"Key": "models/m/a.bin"}, {"Key": "models/m/b.bin"}]},
+            Delete={
+                "Objects": [
+                    {"Key": "models/m/a.bin", "VersionId": "v2"},
+                    {"Key": "models/m/b.bin", "VersionId": "v1"},
+                ]
+            },
         )
 
     def test_delete_model_empty(self, manager):
         mock_s3 = MagicMock()
         paginator = MagicMock()
-        paginator.paginate.return_value = [{"Contents": []}]
+        paginator.paginate.return_value = [{"Versions": [], "DeleteMarkers": []}]
         mock_s3.get_paginator.return_value = paginator
         manager._bucket_name = "bucket"
 
@@ -235,8 +247,14 @@ class TestModelManager:
         mock_s3 = MagicMock()
         paginator = MagicMock()
         paginator.paginate.return_value = [
-            {"Contents": [{"Key": "models/m/a.bin"}]},
-            {"Contents": [{"Key": "models/m/b.bin"}]},
+            {
+                "Versions": [{"Key": "models/m/a.bin", "VersionId": "v1"}],
+                "DeleteMarkers": [],
+            },
+            {
+                "Versions": [{"Key": "models/m/b.bin", "VersionId": "v3"}],
+                "DeleteMarkers": [],
+            },
         ]
         mock_s3.get_paginator.return_value = paginator
         manager._bucket_name = "bucket"
@@ -245,6 +263,73 @@ class TestModelManager:
             deleted = manager.delete_model("m")
 
         assert deleted == 2
+        assert mock_s3.delete_objects.call_count == 2
+
+    def test_delete_model_removes_prior_versions_and_delete_markers(self, manager):
+        mock_s3 = MagicMock()
+        paginator = MagicMock()
+        paginator.paginate.return_value = [
+            {
+                "Versions": [
+                    {"Key": "models/m/weights.bin", "VersionId": "current"},
+                    {"Key": "models/m/weights.bin", "VersionId": "prior"},
+                ],
+                "DeleteMarkers": [{"Key": "models/m/config.json", "VersionId": "marker"}],
+            }
+        ]
+        mock_s3.get_paginator.return_value = paginator
+        manager._bucket_name = "bucket"
+
+        with patch.object(manager, "_get_s3_client", return_value=mock_s3):
+            deleted = manager.delete_model("m")
+
+        assert deleted == 2
+        identifiers = mock_s3.delete_objects.call_args.kwargs["Delete"]["Objects"]
+        assert identifiers == [
+            {"Key": "models/m/weights.bin", "VersionId": "current"},
+            {"Key": "models/m/weights.bin", "VersionId": "prior"},
+            {"Key": "models/m/config.json", "VersionId": "marker"},
+        ]
+
+    def test_delete_model_raises_after_per_object_errors_and_continues(self, manager):
+        mock_s3 = MagicMock()
+        paginator = MagicMock()
+        paginator.paginate.return_value = [
+            {
+                "Versions": [
+                    {"Key": "models/m/a.bin", "VersionId": "v1"},
+                    {"Key": "models/m/b.bin", "VersionId": "v1"},
+                ],
+                "DeleteMarkers": [],
+            },
+            {
+                "Versions": [{"Key": "models/m/c.bin", "VersionId": "v2"}],
+                "DeleteMarkers": [],
+            },
+        ]
+        mock_s3.get_paginator.return_value = paginator
+        mock_s3.delete_objects.side_effect = [
+            {
+                "Deleted": [{"Key": "models/m/a.bin", "VersionId": "v1"}],
+                "Errors": [
+                    {
+                        "Key": "models/m/b.bin",
+                        "VersionId": "v1",
+                        "Code": "AccessDenied",
+                        "Message": "denied",
+                    }
+                ],
+            },
+            {"Deleted": [{"Key": "models/m/c.bin", "VersionId": "v2"}]},
+        ]
+        manager._bucket_name = "bucket"
+
+        with (
+            patch.object(manager, "_get_s3_client", return_value=mock_s3),
+            pytest.raises(RuntimeError, match=r"models/m/b\.bin.*AccessDenied.*denied"),
+        ):
+            manager.delete_model("m")
+
         assert mock_s3.delete_objects.call_count == 2
 
 

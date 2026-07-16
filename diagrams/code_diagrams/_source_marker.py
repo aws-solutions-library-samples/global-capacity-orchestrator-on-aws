@@ -146,8 +146,8 @@ def strip_all_markers(project_root: Path) -> int:
     """Remove every marker block under ``project_root``.
 
     Walks the standard source roots — ``app.py``, ``cli/``, ``gco/``,
-    and ``lambda/`` (excluding the kubectl-applier-simple-build and
-    helm-installer-build packaged bundles) — and rewrites any file
+    ``gco_mcp/``, and ``lambda/`` (excluding the kubectl-applier-simple-build
+    and helm-installer-build packaged bundles) — and rewrites any file
     that actually contains a marker. Files without the sentinel are
     left untouched (even if they have triple-blank-line runs
     unrelated to this feature). Returns the number of files modified.
@@ -157,6 +157,7 @@ def strip_all_markers(project_root: Path) -> int:
         project_root / "app.py",
         *(project_root / "cli").rglob("*.py"),
         *(project_root / "gco").rglob("*.py"),
+        *(project_root / "gco_mcp").rglob("*.py"),
         *(project_root / "lambda").rglob("*.py"),
     ]
     skip_fragments = ("kubectl-applier-simple-build", "helm-installer-build")

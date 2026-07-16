@@ -13,21 +13,21 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 116 tools; with every flag enabled the
-ceiling is 153. See [Feature Flags](../README.md#feature-flags) for the
+default registration the server exposes 125 tools; with every flag enabled the
+ceiling is 165. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
 |------|-------|-------------|
-| `jobs.py` | 9 | `list_jobs`, `submit_job_sqs`, `submit_job_api`, `get_job`, `get_job_logs`, `get_job_events`, `delete_job` (gated), `cluster_health`, `queue_status` |
-| `capacity.py` | 16 | `check_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `find_capacity_blocks`, `find_capacity_reservations`, `capacity_history_show`, `capacity_history_stats`, `capacity_history_patterns`, `capacity_predict`, `reserve_capacity` (gated), `create_reservation` (gated), `cancel_reservation` (gated) |
-| `inference.py` | 19 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `mooncake_topology_status`, `populate_kv_cache` |
-| `costs.py` | 4 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast` |
-| `stacks.py` | 20 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `valkey_status`, `aurora_status`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated) |
-| `storage.py` | 7 | `list_storage_contents`, `list_file_systems`, `list_storage_buckets`, `files_get`, `files_access_points`, `upload_to_regional_bucket`, `sync_storage_bucket` (gated by `GCO_ENABLE_LOCAL_STORAGE_SYNC`) |
+| `jobs.py` | 13 | `list_jobs`, `submit_job_sqs`, `submit_job_api`, `get_job`, `get_job_logs`, `get_job_events`, `get_job_pods`, `get_pod_logs`, `get_job_metrics`, `retry_job`, `delete_job` (gated), `cluster_health`, `queue_status` |
+| `capacity.py` | 18 | `check_capacity`, `instance_info`, `recommend_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `find_capacity_blocks`, `find_capacity_reservations`, `capacity_history_show`, `capacity_history_stats`, `capacity_history_patterns`, `capacity_predict`, `reserve_capacity` (gated), `create_reservation` (gated), `cancel_reservation` (gated) |
+| `inference.py` | 20 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `configure_mooncake_store`, `mooncake_topology_status`, `populate_kv_cache` |
+| `costs.py` | 5 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast`, `cost_workloads` |
+| `stacks.py` | 22 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `addons_status`, `valkey_status`, `aurora_status`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `addons_install` (gated), `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated) |
+| `storage.py` | 7 | `list_storage_contents`, `list_file_systems`, `list_storage_buckets`, `files_get`, `files_access_points`, `upload_to_regional_bucket` (gated by `GCO_ENABLE_MODEL_UPLOAD`), `sync_storage_bucket` (gated by `GCO_ENABLE_LOCAL_STORAGE_SYNC`) |
 | `models.py` | 4 | `list_models`, `get_model_uri`, `models_upload` (gated), `delete_model` (gated) |
 | `nodepools.py` | 5 | `nodepools_list`, `nodepools_describe`, `nodepools_create_odcr`, `nodepools_create_capacity_block`, `delete_nodepool` (gated) |
-| `analytics.py` | 7 | `analytics_doctor`, `analytics_login_url`, `analytics_users_list`, `enable_analytics`, `disable_analytics`, `analytics_user_add`, `analytics_user_remove` (gated) |
+| `analytics.py` | 8 | `analytics_doctor`, `analytics_status`, `analytics_login_url`, `analytics_users_list`, `enable_analytics`, `disable_analytics`, `analytics_user_add`, `analytics_user_remove` (gated) |
 | `monitoring.py` | 6 | `monitoring_status`, `monitoring_users_list`, `enable_monitoring`, `disable_monitoring`, `monitoring_user_add`, `monitoring_user_remove` (gated) |
 | `cluster.py` | 1 | `cluster_tunnel_command` |
 | `templates.py` | 5 | `templates_list`, `templates_get`, `templates_create`, `templates_run`, `delete_template` (gated) |
@@ -41,7 +41,7 @@ flag-to-tool mapping.
 | `mission.py` | 9 | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list` — all gated by `GCO_ENABLE_MISSION` |
 | `docs.py` | 1 | `find_docs` (documentation discovery) |
 | `examples.py` | 1 | `find_examples` (example-manifest discovery) |
-| `tasks.py` | 2 | `task_status`, `task_tail` (read-only observability for long-running tools) |
+| `tasks.py` | 3 | `task_status`, `task_tail` (read-only observability), `task_prune` (gated local cleanup) |
 
 ## Tool Reference
 
@@ -56,8 +56,12 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `get_job` | Get details of a specific job. |
 | `get_job_events` | Get Kubernetes events for a job (useful for debugging). |
 | `get_job_logs` | Get logs from a job. |
+| `get_job_metrics` | Get CPU and memory usage for all pods in a job. |
+| `get_job_pods` | Get pod details, placement, and container status for a job. |
+| `get_pod_logs` | Get a bounded log tail from one specific pod belonging to a job. |
 | `list_jobs` | List jobs across GCO clusters. |
 | `queue_status` | View SQS queue status (pending, in-flight, DLQ counts). |
+| `retry_job` | Retry a failed job by creating a new Job while preserving the original. |
 | `submit_job_api` | Submit a job via the authenticated API Gateway (SigV4). |
 | `submit_job_sqs` | Submit a job via SQS queue (recommended for production). |
 
@@ -76,7 +80,9 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `create_reservation` | Create a new On-Demand Capacity Reservation (ODCR) (gated by `GCO_ENABLE_CAPACITY_PURCHASE`). |
 | `find_capacity_blocks` | Find EC2 Capacity Blocks across regions x durations x a start-date window in one consolidated, ranked, de-duplicated report. |
 | `find_capacity_reservations` | Find existing ODCRs across regions in one parallel, ranked, priced report. |
+| `instance_info` | Get hardware and pricing metadata for an EC2 instance type. |
 | `list_reservations` | List On-Demand Capacity Reservations (ODCRs) across regions. |
+| `recommend_capacity` | Recommend spot or on-demand capacity for a workload. |
 | `recommend_region` | Get optimal region recommendation based on capacity. |
 | `reservation_check` | Check ODCR and Capacity Block availability (multi-region, date-window, duration in hours or days). |
 | `reserve_capacity` | Purchase a Capacity Block offering by its ID. |
@@ -87,13 +93,14 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | Tool | Description |
 |------|-------------|
 | `canary_deploy` | Start a canary deployment (A/B test a new image version). |
-| `chat_inference` | Send a multi-turn chat conversation to an inference endpoint. |
+| `chat_inference` | Send a buffered multi-turn chat conversation to an inference endpoint. |
+| `configure_mooncake_store` | Update a Mooncake endpoint's shared KV-cache store configuration. |
 | `delete_inference` | Delete an inference endpoint. |
 | `deploy_disaggregated_inference` | Deploy a split prefill/decode (XpYd) inference endpoint. |
 | `deploy_inference` | Deploy an inference endpoint across regions. |
 | `inference_health` | Check if an inference endpoint is healthy and ready to serve requests. |
 | `inference_status` | Get detailed status of an inference endpoint including per-region breakdown. |
-| `invoke_inference` | Send a prompt to an inference endpoint and return the generated text. |
+| `invoke_inference` | Send a prompt to an inference endpoint and return the buffered generated text. |
 | `list_endpoint_models` | List models loaded on an inference endpoint. |
 | `list_inference_endpoints` | List all inference endpoints. |
 | `mooncake_topology_status` | Show a disaggregated endpoint's per-role topology status. |
@@ -114,11 +121,14 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `cost_forecast` | Forecast GCO costs for the next N days. |
 | `cost_summary` | Get total GCO spend broken down by AWS service. |
 | `cost_trend` | Get daily cost trend. |
+| `cost_workloads` | Estimate accumulated and hourly cost for running workloads. |
 
 ### `stacks.py`
 
 | Tool | Description |
 |------|-------------|
+| `addons_install` | `gco stacks addons install` — start an idempotent Helm add-on re-convergence (gated by `GCO_ENABLE_INFRASTRUCTURE_DEPLOY`). |
+| `addons_status` | `gco stacks addons status` — show per-chart Helm add-on status from SSM. |
 | `aurora_status` | `gco stacks aurora status` — show Aurora database stack status. |
 | `bootstrap_cdk` | `gco stacks bootstrap` — bootstrap CDK in an AWS account/region. |
 | `deploy_all` | `gco stacks deploy-all` — deploy every CDK stack in dependency order. |
@@ -150,7 +160,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `list_storage_buckets` | List deployed GCO S3 buckets and their human-friendly aliases. |
 | `list_storage_contents` | List contents of shared EFS storage. |
 | `sync_storage_bucket` | Sync between a GCO S3 bucket and a confined local path using explicit `download` (default) or `upload` direction; neither direction deletes destination-only data (gated by `GCO_ENABLE_LOCAL_STORAGE_SYNC` and confined to `GCO_STORAGE_LOCAL_ROOT`). |
-| `upload_to_regional_bucket` | `gco models upload-regional` — upload local files to a region's regional bucket. |
+| `upload_to_regional_bucket` | `gco models upload-regional` — upload a descriptor-backed snapshot of a source confined beneath `GCO_STORAGE_LOCAL_ROOT` to a regional bucket (gated by `GCO_ENABLE_MODEL_UPLOAD`; links, special files, and filesystem crossings fail closed). |
 
 ### `models.py`
 
@@ -159,7 +169,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `delete_model` | `gco models delete` — delete a model from the central S3 bucket. |
 | `get_model_uri` | Get the S3 URI for a model (for use with --model-source). |
 | `list_models` | List all uploaded model weights in the S3 bucket. |
-| `models_upload` | data-upload. |
+| `models_upload` | Upload a descriptor-backed snapshot of a source confined beneath `GCO_STORAGE_LOCAL_ROOT` to the central model bucket (gated by `GCO_ENABLE_MODEL_UPLOAD`; links, special files, and filesystem crossings fail closed). |
 
 ### `nodepools.py`
 
@@ -176,6 +186,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | Tool | Description |
 |------|-------------|
 | `analytics_doctor` | `gco analytics doctor` — run analytics environment health checks. |
+| `analytics_status` | `gco analytics status` — show the analytics environment configuration. |
 | `analytics_login_url` | `gco analytics studio login` — get a SageMaker Studio presigned login URL. |
 | `analytics_user_add` | `gco analytics users add` — create a Cognito user in the analytics pool. |
 | `analytics_user_remove` | `gco analytics users remove` — delete a Cognito user from the analytics user pool. |
@@ -314,6 +325,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 |------|-------------|
 | `task_status` | Return live status of long-running tools. |
 | `task_tail` | Return the last N lines of a long-running task's raw output log. |
+| `task_prune` | Delete old local task records while retaining the newest N (gated by `GCO_ENABLE_DESTRUCTIVE_OPERATIONS`). |
 
 ## How Tools Work
 

@@ -165,6 +165,31 @@ class TestHealthStatusExtended:
         )
         assert not status.is_healthy()
 
+    def test_disabled_thresholds_do_not_make_status_unhealthy(self):
+        thresholds = ResourceThresholds(
+            cpu_threshold=-1,
+            memory_threshold=-1,
+            gpu_threshold=-1,
+            pending_pods_threshold=-1,
+            pending_requested_cpu_vcpus=-1,
+            pending_requested_memory_gb=-1,
+            pending_requested_gpus=-1,
+        )
+        status = HealthStatus(
+            cluster_id="test-cluster",
+            region="us-east-1",
+            timestamp=datetime.now(),
+            status="healthy",
+            resource_utilization=ResourceUtilization(cpu=100, memory=100, gpu=100),
+            thresholds=thresholds,
+            active_jobs=5,
+            pending_pods=100,
+            pending_requested=RequestedResources(cpu_vcpus=500, memory_gb=1000, gpus=64),
+        )
+
+        assert status.is_healthy()
+        assert status.get_threshold_violations() == []
+
     def test_get_threshold_violations_gpu(self, thresholds):
         """Test getting GPU threshold violations."""
         high_util = ResourceUtilization(cpu=50.0, memory=50.0, gpu=95.0)
@@ -263,7 +288,7 @@ class TestKubernetesManifestExtended:
         manifest = KubernetesManifest(
             apiVersion="v1", kind="ConfigMap", metadata={"name": "test"}, data={}
         )
-        assert manifest.get_namespace() == "default"
+        assert manifest.get_namespace() == "gco-jobs"
 
     def test_get_namespace_explicit(self):
         """Test manifest with explicit namespace."""

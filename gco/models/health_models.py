@@ -101,62 +101,95 @@ class HealthStatus:
             raise ValueError("Status must be 'healthy' or 'unhealthy'")
 
     def is_healthy(self) -> bool:
-        """Check if the cluster is healthy based on resource thresholds"""
-        # Check utilization thresholds
-        utilization_ok = (
-            self.resource_utilization.cpu <= self.thresholds.cpu_threshold
-            and self.resource_utilization.memory <= self.thresholds.memory_threshold
-            and self.resource_utilization.gpu <= self.thresholds.gpu_threshold
+        """Check if the cluster is healthy based on enabled thresholds."""
+        utilization_ok = all(
+            self.thresholds.is_disabled(name) or value <= getattr(self.thresholds, name)
+            for name, value in (
+                ("cpu_threshold", self.resource_utilization.cpu),
+                ("memory_threshold", self.resource_utilization.memory),
+                ("gpu_threshold", self.resource_utilization.gpu),
+            )
         )
 
-        # Check pending pods threshold
-        pending_ok = self.pending_pods <= self.thresholds.pending_pods_threshold
+        pending_ok = (
+            self.thresholds.is_disabled("pending_pods_threshold")
+            or self.pending_pods <= self.thresholds.pending_pods_threshold
+        )
 
-        # Check pending requested resources thresholds
         pending_resources_ok = True
         if self.pending_requested:
-            pending_resources_ok = (
-                self.pending_requested.cpu_vcpus <= self.thresholds.pending_requested_cpu_vcpus
-                and self.pending_requested.memory_gb <= self.thresholds.pending_requested_memory_gb
-                and self.pending_requested.gpus <= self.thresholds.pending_requested_gpus
+            pending_resources_ok = all(
+                self.thresholds.is_disabled(name) or value <= getattr(self.thresholds, name)
+                for name, value in (
+                    (
+                        "pending_requested_cpu_vcpus",
+                        self.pending_requested.cpu_vcpus,
+                    ),
+                    (
+                        "pending_requested_memory_gb",
+                        self.pending_requested.memory_gb,
+                    ),
+                    ("pending_requested_gpus", self.pending_requested.gpus),
+                )
             )
 
         return utilization_ok and pending_ok and pending_resources_ok
 
     def get_threshold_violations(self) -> list[str]:
-        """Get list of threshold violations"""
+        """Get violations for enabled thresholds only."""
         violations = []
 
-        if self.resource_utilization.cpu > self.thresholds.cpu_threshold:
+        if (
+            not self.thresholds.is_disabled("cpu_threshold")
+            and self.resource_utilization.cpu > self.thresholds.cpu_threshold
+        ):
             violations.append(
                 f"CPU: {self.resource_utilization.cpu:.1f}% > {self.thresholds.cpu_threshold}%"
             )
 
-        if self.resource_utilization.memory > self.thresholds.memory_threshold:
+        if (
+            not self.thresholds.is_disabled("memory_threshold")
+            and self.resource_utilization.memory > self.thresholds.memory_threshold
+        ):
             violations.append(
                 f"Memory: {self.resource_utilization.memory:.1f}% > {self.thresholds.memory_threshold}%"
             )
 
-        if self.resource_utilization.gpu > self.thresholds.gpu_threshold:
+        if (
+            not self.thresholds.is_disabled("gpu_threshold")
+            and self.resource_utilization.gpu > self.thresholds.gpu_threshold
+        ):
             violations.append(
                 f"GPU: {self.resource_utilization.gpu:.1f}% > {self.thresholds.gpu_threshold}%"
             )
 
-        if self.pending_pods > self.thresholds.pending_pods_threshold:
+        if (
+            not self.thresholds.is_disabled("pending_pods_threshold")
+            and self.pending_pods > self.thresholds.pending_pods_threshold
+        ):
             violations.append(
                 f"Pending Pods: {self.pending_pods} > {self.thresholds.pending_pods_threshold}"
             )
 
         if self.pending_requested:
-            if self.pending_requested.cpu_vcpus > self.thresholds.pending_requested_cpu_vcpus:
+            if (
+                not self.thresholds.is_disabled("pending_requested_cpu_vcpus")
+                and self.pending_requested.cpu_vcpus > self.thresholds.pending_requested_cpu_vcpus
+            ):
                 violations.append(
                     f"Pending CPU: {self.pending_requested.cpu_vcpus:.1f} vCPUs > {self.thresholds.pending_requested_cpu_vcpus} vCPUs"
                 )
-            if self.pending_requested.memory_gb > self.thresholds.pending_requested_memory_gb:
+            if (
+                not self.thresholds.is_disabled("pending_requested_memory_gb")
+                and self.pending_requested.memory_gb > self.thresholds.pending_requested_memory_gb
+            ):
                 violations.append(
                     f"Pending Memory: {self.pending_requested.memory_gb:.1f} GB > {self.thresholds.pending_requested_memory_gb} GB"
                 )
-            if self.pending_requested.gpus > self.thresholds.pending_requested_gpus:
+            if (
+                not self.thresholds.is_disabled("pending_requested_gpus")
+                and self.pending_requested.gpus > self.thresholds.pending_requested_gpus
+            ):
                 violations.append(
                     f"Pending GPUs: {self.pending_requested.gpus} > {self.thresholds.pending_requested_gpus}"
                 )

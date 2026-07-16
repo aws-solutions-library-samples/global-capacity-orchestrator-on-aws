@@ -1,9 +1,8 @@
 """
 Tests for the cross-region aggregator Lambda (lambda/cross-region-aggregator).
 
-Covers the full request pipeline: Secrets Manager token fetch with
-in-memory caching, SSM-based regional endpoint discovery, per-region
-HTTP queries via urllib3, and the higher-level aggregate_* helpers
+Covers CloudFormation-based regional API discovery, per-region SigV4
+requests over AWS-managed HTTPS, and the higher-level aggregate_* helpers
 that merge job lists, health status, metrics, and bulk-delete results
 across every discovered region. Also drives the API Gateway Lambda
 handler surface.
@@ -29,139 +28,112 @@ handler = load_lambda_module("cross-region-aggregator")
 
 @pytest.fixture(autouse=True)
 def _reset_endpoints_cache():
-    """Prime the endpoints cache TTL so tests that set
-    ``handler._cached_endpoints`` directly don't fall through to a
-    real SSM call. The cache is only consulted when
-    ``(time.time() - _endpoints_cache_time) < _ENDPOINTS_CACHE_TTL``;
-    a freshly-loaded module has ``_endpoints_cache_time = 0``, which
-    always fails the TTL check.
-
-    Tests in this file either (a) set ``_cached_endpoints`` then call
-    handler functions that read through the cache, or (b) explicitly
-    test the SSM path by setting ``_cached_endpoints = None`` and
-    patching ``boto3.client``. Case (a) relies on the cache actually
-    being honored; case (b) bypasses the TTL check by nulling the
-    cache up front. Stamping ``_endpoints_cache_time = time.time()``
-    here supports case (a) without interfering with case (b).
-    """
-    handler._endpoints_cache_time = time.time()
-    yield
+    """Reset endpoint state and stub SigV4 signing for transport-focused tests."""
+    handler._cached_endpoints = None
+    handler._endpoints_cache_time = time.monotonic()
+    with patch.object(
+        handler,
+        "_sigv4_headers",
+        return_value={"Authorization": "AWS4-HMAC-SHA256 test-signature"},
+    ):
+        yield
 
 
-class TestGetSecretToken:
-    """Tests for get_secret_token function."""
+class TestGetRegionalEndpoints:
+    """Tests for fail-closed regional API stack discovery."""
 
-    def test_get_secret_token_success(self):
-        """Test successful secret retrieval."""
+    def test_get_regional_endpoints_success(self):
+        endpoints_by_region = {
+            "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod/",
+            "us-west-2": "https://west123.execute-api.us-west-2.amazonaws.com/prod/",
+        }
 
-        get_secret_token = handler.get_secret_token
+        def client(service_name, region_name=None):
+            assert service_name == "cloudformation"
+            mock_cfn = MagicMock()
+            mock_cfn.describe_stacks.return_value = {
+                "Stacks": [
+                    {
+                        "Outputs": [
+                            {
+                                "OutputKey": "RegionalApiEndpoint",
+                                "OutputValue": endpoints_by_region[region_name],
+                            }
+                        ]
+                    }
+                ]
+            }
+            return mock_cfn
 
-        # Reset cache
-        handler._cached_secret = None
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "PROJECT_NAME": "gco",
+                    "TARGET_REGIONS": json.dumps(["us-east-1", "us-west-2"]),
+                },
+            ),
+            patch.object(handler.boto3, "client", side_effect=client),
+        ):
+            endpoints = handler.get_regional_endpoints()
 
-        mock_secrets = MagicMock()
-        mock_secrets.get_secret_value.return_value = {
-            "SecretString": json.dumps({"token": "test-token-123"})
+        assert endpoints == {
+            "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod",
+            "us-west-2": "https://west123.execute-api.us-west-2.amazonaws.com/prod",
+        }
+
+    def test_missing_regional_bridge_fails_closed(self):
+        mock_cfn = MagicMock()
+        mock_cfn.describe_stacks.return_value = {"Stacks": []}
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"PROJECT_NAME": "gco", "TARGET_REGIONS": '["us-east-1"]'},
+            ),
+            patch.object(handler.boto3, "client", return_value=mock_cfn),
+            pytest.raises(RuntimeError, match="regional API bridges are unavailable"),
+        ):
+            handler.get_regional_endpoints()
+
+    def test_invalid_regional_bridge_url_fails_closed(self):
+        mock_cfn = MagicMock()
+        mock_cfn.describe_stacks.return_value = {
+            "Stacks": [
+                {
+                    "Outputs": [
+                        {
+                            "OutputKey": "RegionalApiEndpoint",
+                            "OutputValue": "http://internal-alb.example.com",
+                        }
+                    ]
+                }
+            ]
         }
 
         with (
             patch.dict(
                 "os.environ",
-                {"SECRET_ARN": "arn:aws:secretsmanager:us-east-1:123456789012:secret:test"},
+                {"PROJECT_NAME": "gco", "TARGET_REGIONS": '["us-east-1"]'},
             ),
-            patch.object(handler, "secrets_client", mock_secrets),
+            patch.object(handler.boto3, "client", return_value=mock_cfn),
+            pytest.raises(RuntimeError, match="regional API bridges are unavailable"),
         ):
-            token = get_secret_token()
-            assert token == "test-token-123"  # nosec B105 - test assertion against fixture value, not a real credential
-
-    def test_get_secret_token_cached(self):
-        """Test that secret is cached."""
-
-        handler._cached_secret = "cached-token"  # nosec B105 - test fixture, not a real credential
-
-        token = handler.get_secret_token()
-        assert token == "cached-token"  # nosec B105 - test assertion against fixture value, not a real credential
-
-
-class TestGetRegionalEndpoints:
-    """Tests for get_regional_endpoints function."""
-
-    def test_get_regional_endpoints_success(self):
-        """Test successful endpoint retrieval from SSM."""
-
-        handler._cached_endpoints = None
-
-        mock_ssm = MagicMock()
-        mock_paginator = MagicMock()
-        mock_paginator.paginate.return_value = [
-            {
-                "Parameters": [
-                    {
-                        "Name": "/gco/alb-hostname-us-east-1",
-                        "Value": "alb-us-east-1.example.com",
-                    },
-                    {
-                        "Name": "/gco/alb-hostname-us-west-2",
-                        "Value": "alb-us-west-2.example.com",
-                    },
-                ]
-            }
-        ]
-        mock_ssm.get_paginator.return_value = mock_paginator
-
-        with (
-            patch.dict("os.environ", {"PROJECT_NAME": "gco", "GLOBAL_REGION": "us-east-2"}),
-            patch("boto3.client", return_value=mock_ssm),
-        ):
-            endpoints = handler.get_regional_endpoints()
-            assert "us-east-1" in endpoints
-            assert "us-west-2" in endpoints
-            assert endpoints["us-east-1"] == "alb-us-east-1.example.com"
-            assert endpoints["us-west-2"] == "alb-us-west-2.example.com"
-
-    def test_get_regional_endpoints_empty(self):
-        """Test empty endpoints when no SSM parameters found."""
-
-        handler._cached_endpoints = None
-
-        mock_ssm = MagicMock()
-        mock_paginator = MagicMock()
-        mock_paginator.paginate.return_value = [{"Parameters": []}]
-        mock_ssm.get_paginator.return_value = mock_paginator
-
-        with (
-            patch.dict("os.environ", {"PROJECT_NAME": "gco", "GLOBAL_REGION": "us-east-2"}),
-            patch("boto3.client", return_value=mock_ssm),
-        ):
-            endpoints = handler.get_regional_endpoints()
-            assert endpoints == {}
-
-    def test_get_regional_endpoints_ssm_error(self):
-        """Test graceful handling of SSM errors."""
-
-        handler._cached_endpoints = None
-
-        mock_ssm = MagicMock()
-        mock_ssm.get_paginator.side_effect = Exception("SSM access denied")
-
-        with (
-            patch.dict("os.environ", {"PROJECT_NAME": "gco", "GLOBAL_REGION": "us-east-2"}),
-            patch("boto3.client", return_value=mock_ssm),
-        ):
-            endpoints = handler.get_regional_endpoints()
-            # Should return empty dict on error, not raise
-            assert endpoints == {}
+            handler.get_regional_endpoints()
 
     def test_get_regional_endpoints_cached(self):
-        """Test that endpoints are cached."""
-
         handler._cached_endpoints = {
-            "us-east-1": "cached-alb.example.com",
+            "us-east-1": "https://cached1.execute-api.us-east-1.amazonaws.com/prod",
         }
+        handler._endpoints_cache_time = time.monotonic()
 
-        # Should return cached value without calling SSM
-        endpoints = handler.get_regional_endpoints()
-        assert endpoints == {"us-east-1": "cached-alb.example.com"}
+        with patch.object(handler.boto3, "client") as mock_client:
+            endpoints = handler.get_regional_endpoints()
+
+        assert endpoints == {
+            "us-east-1": "https://cached1.execute-api.us-east-1.amazonaws.com/prod"
+        }
+        mock_client.assert_not_called()
 
 
 class TestQueryRegion:
@@ -169,8 +141,6 @@ class TestQueryRegion:
 
     def test_query_region_success(self):
         """Test successful region query."""
-
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
 
         mock_response = MagicMock()
         mock_response.status = 200
@@ -182,7 +152,7 @@ class TestQueryRegion:
         with patch.object(handler, "http", mock_http):
             result = handler.query_region(
                 "us-east-1",
-                "alb.example.com",
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod",
                 "/api/v1/jobs",
                 "GET",
             )
@@ -190,10 +160,38 @@ class TestQueryRegion:
             assert result["_region"] == "us-east-1"
             assert result["_status"] == "success"
 
+    def test_query_region_uses_sigv4(self):
+        """The aggregator signs the exact execute-api request with its IAM role."""
+        mock_response = MagicMock(status=200, data=b"{}")
+        mock_http = MagicMock()
+        mock_http.request.return_value = mock_response
+        signed_headers = {
+            "Authorization": "AWS4-HMAC-SHA256 Credential=test",
+            "X-Amz-Date": "20260715T120000Z",
+        }
+
+        with (
+            patch.object(handler, "http", mock_http),
+            patch.object(handler, "_sigv4_headers", return_value=signed_headers) as mock_sign,
+        ):
+            handler.query_region(
+                "us-east-1",
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod",
+                "/api/v1/jobs",
+                "GET",
+                query_params={"namespace": "gco-jobs"},
+            )
+
+        requested_url = mock_http.request.call_args.args[1]
+        assert requested_url == (
+            "https://abc123.execute-api.us-east-1.amazonaws.com/prod/api/v1/jobs?namespace=gco-jobs"
+        )
+        assert requested_url.startswith("https://")
+        assert mock_http.request.call_args.kwargs["headers"] == signed_headers
+        mock_sign.assert_called_once_with("us-east-1", "GET", requested_url, None)
+
     def test_query_region_with_query_params(self):
         """Test region query with query parameters."""
-
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
 
         mock_response = MagicMock()
         mock_response.status = 200
@@ -205,7 +203,7 @@ class TestQueryRegion:
         with patch.object(handler, "http", mock_http):
             handler.query_region(
                 "us-east-1",
-                "alb.example.com",
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod",
                 "/api/v1/jobs",
                 "GET",
                 query_params={"namespace": "default", "status": "running"},
@@ -219,8 +217,6 @@ class TestQueryRegion:
     def test_query_region_error(self):
         """Test region query with HTTP error."""
 
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
         mock_response = MagicMock()
         mock_response.status = 500
 
@@ -230,7 +226,7 @@ class TestQueryRegion:
         with patch.object(handler, "http", mock_http):
             result = handler.query_region(
                 "us-east-1",
-                "alb.example.com",
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod",
                 "/api/v1/jobs",
             )
 
@@ -240,20 +236,18 @@ class TestQueryRegion:
     def test_query_region_exception(self):
         """Test region query with exception."""
 
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
         mock_http = MagicMock()
         mock_http.request.side_effect = Exception("Connection timeout")
 
         with patch.object(handler, "http", mock_http):
             result = handler.query_region(
                 "us-east-1",
-                "alb.example.com",
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod",
                 "/api/v1/jobs",
             )
 
             assert result["_status"] == "error"
-            assert "Connection timeout" in result["_error"]
+            assert result["_error"] == "Authenticated regional API request failed"
 
 
 class TestAggregateJobs:
@@ -263,11 +257,9 @@ class TestAggregateJobs:
         """Test successful job aggregation."""
 
         handler._cached_endpoints = {
-            "us-east-1": "alb-us-east-1.example.com",
-            "us-west-2": "alb-us-west-2.example.com",
+            "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod",
+            "us-west-2": "https://west123.execute-api.us-west-2.amazonaws.com/prod",
         }
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps(
@@ -294,10 +286,9 @@ class TestAggregateJobs:
         """Test job aggregation with some region errors."""
 
         handler._cached_endpoints = {
-            "us-east-1": "alb-us-east-1.example.com",
-            "us-west-2": "alb-us-west-2.example.com",
+            "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod",
+            "us-west-2": "https://west123.execute-api.us-west-2.amazonaws.com/prod",
         }
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
 
         def mock_request(*args, **kwargs):
             url = args[1]
@@ -329,11 +320,9 @@ class TestAggregateHealth:
         """Test health aggregation when all regions are healthy."""
 
         handler._cached_endpoints = {
-            "us-east-1": "alb-us-east-1.example.com",
-            "us-west-2": "alb-us-west-2.example.com",
+            "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod",
+            "us-west-2": "https://west123.execute-api.us-west-2.amazonaws.com/prod",
         }
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps(
@@ -358,11 +347,9 @@ class TestAggregateHealth:
         """Test health aggregation when some regions are unhealthy."""
 
         handler._cached_endpoints = {
-            "us-east-1": "alb-us-east-1.example.com",
-            "us-west-2": "alb-us-west-2.example.com",
+            "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod",
+            "us-west-2": "https://west123.execute-api.us-west-2.amazonaws.com/prod",
         }
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
         call_count = [0]
 
         def mock_request(*args, **kwargs):
@@ -394,10 +381,8 @@ class TestAggregateMetrics:
         """Test successful metrics aggregation."""
 
         handler._cached_endpoints = {
-            "us-east-1": "alb-us-east-1.example.com",
+            "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod",
         }
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps(
@@ -426,10 +411,8 @@ class TestBulkDeleteJobs:
         """Test bulk delete with dry run."""
 
         handler._cached_endpoints = {
-            "us-east-1": "alb-us-east-1.example.com",
+            "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod",
         }
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps(
@@ -462,9 +445,9 @@ class TestLambdaHandler:
     def test_handler_get_jobs(self):
         """Test handler for GET /global/jobs."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps({"jobs": [], "count": 0, "total": 0}).encode("utf-8")
@@ -488,9 +471,9 @@ class TestLambdaHandler:
     def test_handler_get_health(self):
         """Test handler for GET /global/health."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps({"status": "healthy"}).encode("utf-8")
@@ -513,9 +496,9 @@ class TestLambdaHandler:
     def test_handler_get_status(self):
         """Test handler for GET /global/status."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps({"cluster_id": "test"}).encode("utf-8")
@@ -536,9 +519,9 @@ class TestLambdaHandler:
     def test_handler_delete_jobs(self):
         """Test handler for DELETE /global/jobs."""
 
-        handler._cached_endpoints = {"us-east-1": "alb.example.com"}
-        handler._cached_secret = "test-token"  # nosec B105 - test fixture, not a real credential
-
+        handler._cached_endpoints = {
+            "us-east-1": "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.data = json.dumps(
@@ -555,12 +538,16 @@ class TestLambdaHandler:
             event = {
                 "httpMethod": "DELETE",
                 "path": "/api/v1/global/jobs",
-                "body": json.dumps({"dry_run": True, "status": "completed"}),
+                "body": json.dumps(
+                    {"dry_run": True, "status": "completed", "label_selector": "team=ml"}
+                ),
             }
 
             result = handler.lambda_handler(event, None)
 
             assert result["statusCode"] == 200
+            forwarded = json.loads(mock_http.request.call_args.kwargs["body"].decode("utf-8"))
+            assert forwarded["label_selector"] == "team=ml"
 
     def test_handler_not_found(self):
         """Test handler for unknown path."""

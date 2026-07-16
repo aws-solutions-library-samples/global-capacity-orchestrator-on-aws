@@ -7,7 +7,7 @@ These files used to sit at the repository root. They were moved here to keep the
 root tree small. The tools no longer discover them automatically at the root, so
 every consumer now points at them explicitly — each section below says where.
 
-## Contents
+## Table of Contents
 
 - [`.checkov.yaml`](#checkovyaml)
 - [`.gitleaks.toml`](#gitleakstoml)

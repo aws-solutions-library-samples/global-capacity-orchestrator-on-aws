@@ -34,9 +34,15 @@ COPY pyproject.toml ./
 COPY gco/ ./gco/
 COPY cli/ ./cli/
 RUN for attempt in 1 2 3; do \
-        pip install --no-cache-dir \
+        if pip install --no-cache-dir \
             --retries 10 --timeout 120 --resume-retries 5 \
-            -r requirements-lock.txt && break; \
+            -r requirements-lock.txt; then \
+            break; \
+        fi; \
+        if [ "${attempt}" -eq 3 ]; then \
+            echo "pip install failed after ${attempt} attempts" >&2; \
+            exit 1; \
+        fi; \
         echo "pip install attempt ${attempt} failed; retrying in 10s..."; \
         sleep 10; \
     done \

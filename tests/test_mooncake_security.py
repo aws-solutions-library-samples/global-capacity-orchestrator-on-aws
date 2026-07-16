@@ -6,13 +6,13 @@ guarantees that keep that surface closed:
 
 - The prefill-decode proxy fronts a privileged admin path, so it never starts
   without a usable admin key. A *named* admin Secret that is missing or carries
-  an empty ``ADMIN_API_KEY`` rejects the proxy, and no proxy Deployment,
-  Service, or Ingress is created. When the spec names no Secret, the monitor
-  auto-provisions a ``{name}-admin`` Secret with a generated key instead.
+  an empty ``ADMIN_API_KEY`` rejects the proxy, and no proxy Deployment or
+  Service is created. When the spec names no Secret, the monitor auto-provisions
+  a ``{name}-admin`` Secret with a generated key instead.
 - On the happy path the admin key reaches the container only through a Secret
-  reference — never as an inline environment value or a command argument — and
-  the public Ingress publishes only the ``/v1`` serving prefix, leaving the
-  ``/instances/add`` admin path off the public surface entirely.
+  reference — never as an inline environment value or command argument. The
+  proxy remains an internal ClusterIP Service; reconciliation creates no
+  endpoint-specific Ingress and removes historical direct routes.
 - The intra-namespace allow rules are widening rules layered on top of a
   default-deny posture. When an allow rule cannot be applied, the failure names
   the offending rule and the default-deny policy is never read, modified, or
@@ -245,15 +245,14 @@ def test_admin_key_injected_only_by_secret_reference(monitor):
     The proxy container gets an ``ADMIN_API_KEY`` environment entry sourced from
     the named Secret's key. The entry carries no inline value, no other
     environment value or command argument carries the key material, and the
-    public Ingress still publishes only the ``/v1`` serving prefix.
+    proxy remains reachable only through its internal ClusterIP Service behind
+    the shared authenticated route.
     """
     import base64
 
     from gco.services.inference_monitor import (
         ADMIN_API_KEY_SECRET_DATA_KEY,
         PD_PROXY_ADMIN_API_KEY_ENV,
-        PD_PROXY_ADMIN_PATH,
-        PD_PROXY_PUBLIC_PATH_PREFIX,
         PD_PROXY_SCRIPT_PATH,
     )
 
@@ -293,14 +292,20 @@ def test_admin_key_injected_only_by_secret_reference(monitor):
     for token in container.command:
         assert key_material not in token
 
-    # The public Ingress still exposes only the endpoint-scoped serving prefix.
-    ing_args, _ = monitor.networking_v1.create_namespaced_ingress.call_args
-    ingress = ing_args[1]
-    paths = [p for rule in ingress.spec.rules for p in rule.http.paths]
-    assert [p.path for p in paths] == [f"/inference/endpoint{PD_PROXY_PUBLIC_PATH_PREFIX}"]
-    rendered = {p.path for p in paths}
-    assert PD_PROXY_ADMIN_PATH not in rendered
-    assert all("/instances" not in p for p in rendered)
+    # The Service is ClusterIP-only, and reconciliation cannot create a direct
+    # endpoint Ingress that would expose the proxy's admin API. Both historical
+    # names are removed so upgrades close the old bypass as well.
+    svc_args, _ = monitor.core_v1.create_namespaced_service.call_args
+    assert svc_args[1].spec.type == "ClusterIP"
+    monitor.networking_v1.create_namespaced_ingress.assert_not_called()
+    monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
+    deleted = [
+        call.args[:2] for call in monitor.networking_v1.delete_namespaced_ingress.call_args_list
+    ]
+    assert deleted == [
+        ("inference-endpoint", "gco-inference"),
+        ("inference-endpoint-proxy", "gco-inference"),
+    ]
 
 
 # =============================================================================

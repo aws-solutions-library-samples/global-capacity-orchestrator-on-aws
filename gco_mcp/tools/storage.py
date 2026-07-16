@@ -2,15 +2,12 @@
 
 import asyncio
 import json
-import os
-import stat
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
 import cli_runner
 from audit import audit_logged
-from feature_flags import FLAG_LOCAL_STORAGE_SYNC, is_enabled
+from feature_flags import FLAG_LOCAL_STORAGE_SYNC, FLAG_MODEL_UPLOAD, is_enabled
+from local_data import LocalPathContract, resolve_local_path, stage_upload_path
 from server import mcp
 
 
@@ -103,89 +100,72 @@ async def files_access_points(region: str | None = None) -> str:
 # =============================================================================
 
 
-@mcp.tool(tags={"low-risk", "storage"})
-@audit_logged
-async def upload_to_regional_bucket(local_path: str, region: str, prefix: str = "uploads") -> str:
-    """`gco models upload-regional` — upload local files to a region's regional bucket.
+if is_enabled(FLAG_MODEL_UPLOAD):
 
-    Objects are written to the target region's general-purpose
-    gco-regional-shared-<account>-<region> bucket, resolved from that region's
-    own SSM parameter. The bucket is general purpose and usable by any
-    in-region workload.
+    @mcp.tool(tags={"data-upload", "storage", "local-filesystem"})
+    @audit_logged
+    async def upload_to_regional_bucket(
+        local_path: str, region: str, prefix: str = "uploads"
+    ) -> str:
+        """[gated by GCO_ENABLE_MODEL_UPLOAD] Upload local data to a regional bucket.
 
-    Args:
-        local_path: Local file or directory to upload.
-        region: Target region whose regional bucket receives the objects.
-        prefix: S3 prefix for uploaded objects (default: "uploads").
-    """
-    return await asyncio.to_thread(
-        cli_runner._run_cli,
-        "models",
-        "upload-regional",
-        local_path,
-        "-r",
-        region,
-        "--prefix",
-        prefix,
-    )
+        The source must resolve beneath ``GCO_STORAGE_LOCAL_ROOT``. Relative
+        paths such as ``model.bin`` and ``./datasets`` are interpreted relative
+        to that root, never relative to the MCP process working directory. The
+        CLI receives a private descriptor-backed snapshot; descendant links,
+        special files, hard links, and filesystem crossings fail closed.
+
+        Args:
+            local_path: Root-relative local file or directory to upload.
+            region: Target region whose regional bucket receives the objects.
+            prefix: S3 prefix for uploaded objects (default: ``uploads``).
+        """
+        try:
+            local_contract = _resolve_upload_local_path(local_path)
+        except (OSError, ValueError) as exc:
+            return json.dumps({"error": str(exc), "code": "local_data_path_rejected"})
+
+        def _upload_from_staged_path() -> str:
+            with stage_upload_path(local_contract) as staged:
+                return cli_runner._run_cli(
+                    "models",
+                    "upload-regional",
+                    staged.argument,
+                    "-r",
+                    region,
+                    "--prefix",
+                    prefix,
+                    pass_fds=(staged.directory_fd,),
+                )
+
+        try:
+            # Run the staging context in the worker so cancellation cannot
+            # unlink its descriptor-backed snapshot while the CLI still reads.
+            return await asyncio.to_thread(_upload_from_staged_path)
+        except (OSError, ValueError) as exc:
+            return json.dumps({"error": str(exc), "code": "local_data_path_rejected"})
 
 
-@dataclass(frozen=True)
-class _SyncLocalContract:
-    """Root-relative argument plus the root identity the CLI must pin."""
-
-    local_argument: str
-    root: Path
-    device: int
-    inode: int
+# Backward-compatible private name retained for focused tests and callers.
+_SyncLocalContract = LocalPathContract
 
 
 def _resolve_sync_local_path(
     local_path: str,
     *,
     require_exists: bool,
-) -> _SyncLocalContract:
+) -> LocalPathContract:
     """Issue an identity-bound confinement contract for an MCP sync path."""
-    configured_root = os.environ.get("GCO_STORAGE_LOCAL_ROOT", "").strip()
-    if not configured_root:
-        raise ValueError("GCO_STORAGE_LOCAL_ROOT must be set before enabling local storage sync")
-    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
-        raise ValueError(
-            "Local storage sync requires descriptor-relative no-follow filesystem support"
-        )
-
-    root = Path(configured_root).expanduser().resolve(strict=True)
-    root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    root_fd = os.open(root, root_flags)
-    try:
-        root_stat = os.fstat(root_fd)
-    finally:
-        os.close(root_fd)
-    if not stat.S_ISDIR(root_stat.st_mode):
-        raise ValueError(f"GCO_STORAGE_LOCAL_ROOT is not a directory: {root}")
-
-    supplied = Path(local_path).expanduser()
-    candidate = supplied if supplied.is_absolute() else root / supplied
-    lexical = Path(os.path.abspath(candidate))
-    try:
-        relative = lexical.relative_to(root)
-    except ValueError as exc:
-        raise ValueError(
-            f"Local sync path must stay within GCO_STORAGE_LOCAL_ROOT: {local_path}"
-        ) from exc
-
-    resolved = lexical.resolve()
-    if not resolved.is_relative_to(root):
-        raise ValueError(f"Local sync path must stay within GCO_STORAGE_LOCAL_ROOT: {local_path}")
-    if require_exists and not lexical.exists():
-        raise ValueError(f"Local upload source does not exist: {local_path}")
-
-    return _SyncLocalContract(
-        local_argument=str(relative) if relative.parts else ".",
-        root=root,
-        device=root_stat.st_dev,
-        inode=root_stat.st_ino,
+    return resolve_local_path(
+        local_path,
+        require_exists=require_exists,
+        purpose="Local sync",
     )
+
+
+def _resolve_upload_local_path(local_path: str) -> LocalPathContract:
+    """Resolve an existing short-upload source beneath the shared local root."""
+    return resolve_local_path(local_path, require_exists=True, purpose="Local upload")
 
 
 # Storage sync reads or writes the MCP host's filesystem and may transfer a

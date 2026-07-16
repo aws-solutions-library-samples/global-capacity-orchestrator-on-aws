@@ -10,14 +10,14 @@ Registration (deploy time):
     1. Waits for the ALB to be created and become active
     2. Uses multiple detection methods (tags, Ingress status, name prefix)
     3. Registers that ALB with Global Accelerator
-    4. Stores the ALB hostname in SSM for cross-region aggregation
+    4. Stores the ALB hostname in SSM for verified regional-proxy resolution
     5. Handles idempotency (won't fail if ALB already registered)
 
 Deregistration (destroy time — issue #130):
     Registration is one-directional, so without a teardown hook the endpoint
     group keeps referencing the (LB-controller-deleted) ALB and Global
-    Accelerator keeps its `global_accelerator_managed` ENIs pinned in the VPC's
-    public subnets — blocking subnet deletion and leaving the stack in
+    Accelerator keeps its `global_accelerator_managed` ENIs pinned in the VPC
+    subnets used by the ALB — blocking subnet deletion and leaving the stack in
     DELETE_FAILED. On delete this Lambda removes the endpoint(s) from the group
     and waits for the accelerator to redeploy (return to DEPLOYED), which is
     when Global Accelerator releases those managed ENIs.
@@ -31,15 +31,17 @@ Entrypoints (all share this module's helpers):
       (`handle_delete`). Responds via the CloudFormation ResponseURL protocol.
     - `on_delete_event`: the delete-time deregistration guard, invoked through a
       CDK `cr.Provider`. A no-op on Create/Update (registration stays owned by
-      the state machine); on Delete it deregisters and waits so the accelerator
-      releases its ENIs before CloudFormation deletes the public subnets.
+      the state machine); on Delete it deregisters, waits for the accelerator
+      to release its ENIs, and removes the region's SSM registry entry.
 
 SSM Parameter Storage:
     The ALB hostname is stored in SSM Parameter Store at:
     /{project_name}/alb-hostname-{region}
 
-    This allows the cross-region aggregator Lambda to discover all regional
-    endpoints without hardcoding them in environment variables.
+    The VPC-attached regional API proxy uses this registry to resolve and then
+    verify its regional internal ALB. The centralized aggregator does not read
+    this parameter; it discovers regional API Gateway outputs through
+    CloudFormation and invokes those bridges with SigV4.
 
 Environment Variables (from CloudFormation properties):
     ClusterName: EKS cluster name
@@ -47,7 +49,8 @@ Environment Variables (from CloudFormation properties):
     EndpointGroupArn: Global Accelerator endpoint group ARN
     IngressName: Kubernetes Ingress name (default: gco-ingress)
     Namespace: Kubernetes namespace (default: gco-system)
-    GlobalRegion: Region for SSM parameters (default: us-east-2)
+    RegistryRegion: Region that owns the SSM endpoint registry
+    GlobalRegion: Backwards-compatible alias for RegistryRegion
     ProjectName: Project name for SSM paths (default: gco)
 """
 
@@ -92,11 +95,12 @@ ALB_DELETION_WAIT_SECONDS = 180  # 3 minutes for ALB deletion during cleanup
 # After endpoints are removed, GA transitions the accelerator IN_PROGRESS ->
 # DEPLOYED and only releases its `global_accelerator_managed` ENIs once it is
 # back to DEPLOYED. Teardown must wait for that release before CloudFormation
-# deletes the public subnets those ENIs occupy (see issue #130). Kept under the
+# deletes the ALB subnets those ENIs occupy (see issue #130). Kept under the
 # 14-minute ceiling recommended for cr.Provider onEvent handlers (all framework
 # functions time out at 15 minutes).
 GA_DEPLOYED_WAIT_SECONDS = 720  # 12 minutes waiting for the accelerator to redeploy
 GA_DEPLOYED_POLL_INTERVAL = 15  # Poll accelerator status every 15 seconds
+DEFAULT_REGISTRY_REGION = "us-east-2"
 
 
 def send_response(
@@ -173,12 +177,12 @@ def get_k8s_client(cluster_name: str, region: str) -> tuple[str, str, str]:
 def find_alb_by_ingress_hostname(
     elb_client: Any, hostname: str
 ) -> tuple[str | None, str | None, str | None]:
-    """Find ALB by its DNS hostname (most deterministic method).
+    """Find the internal platform ALB by DNS hostname.
 
-    Given a hostname from the Ingress status, look up the matching ALB
-    in the ELBv2 API. This is the most reliable approach because the
-    Ingress status is the single source of truth for which ALB was
-    created by the load balancer controller.
+    Given a hostname from the Ingress status, look up the matching internal
+    application load balancer in the ELBv2 API. The Ingress status is the
+    source of truth for which load balancer the controller created, while the
+    type and scheme checks fail closed against NLBs and internet-facing ALBs.
 
     Returns:
         Tuple of (dns_name, arn, state) or (None, None, None) if not found
@@ -186,7 +190,11 @@ def find_alb_by_ingress_hostname(
     try:
         albs = elb_client.describe_load_balancers()["LoadBalancers"]
         for alb in albs:
-            if alb.get("Type") == "application" and alb["DNSName"] == hostname:
+            if (
+                alb.get("Type") == "application"
+                and alb.get("Scheme") == "internal"
+                and alb.get("DNSName") == hostname
+            ):
                 state = alb.get("State", {}).get("Code", "unknown")
                 logger.info(f"Found ALB by hostname: {alb['LoadBalancerName']} (state: {state})")
                 return alb["DNSName"], alb["LoadBalancerArn"], state
@@ -198,13 +206,15 @@ def find_alb_by_ingress_hostname(
 def find_platform_alb_by_tags(
     elb_client: Any, cluster_name: str
 ) -> tuple[str | None, str | None, str | None]:
-    """Find the platform ALB by tags (fallback when Ingress status is empty).
+    """Find the internal platform ALB by tags when Ingress status is empty.
 
-    Only matches ALBs (not NLBs) that belong to the platform ingress group.
-    Explicitly excludes inference ALBs and any non-ALB load balancers.
+    Only matches internal ALBs that belong to the platform ingress group.
+    Explicitly excludes inference ALBs, internet-facing ALBs, and non-ALB load
+    balancers.
 
     The platform ALB is identified by:
     - Type: application (not network or gateway)
+    - Scheme: internal (never internet-facing)
     - Cluster tag matching
     - Ingress stack tag that does NOT contain 'inference'
 
@@ -213,8 +223,13 @@ def find_platform_alb_by_tags(
     """
     try:
         all_lbs = elb_client.describe_load_balancers()["LoadBalancers"]
-        # CRITICAL: Only consider ALBs — NLBs (Slurm, etc.) must never be registered
-        albs = [a for a in all_lbs if a.get("Type") == "application"]
+        # CRITICAL: Only internal ALBs are valid. NLBs (Slurm, etc.) and
+        # internet-facing ALBs must never be registered.
+        albs = [
+            alb
+            for alb in all_lbs
+            if alb.get("Type") == "application" and alb.get("Scheme") == "internal"
+        ]
         if not albs:
             return None, None, None
 
@@ -239,23 +254,19 @@ def find_platform_alb_by_tags(
             if not cluster_match:
                 continue
 
-            # Determine the ingress stack/group name from tags
-            stack = tags.get("ingress.eks.amazonaws.com/stack", "") or tags.get(
-                "ingress.k8s.aws/stack", ""
-            )
-
-            # Safety net: skip any stale inference ALBs left from previous
-            # deployments that used a separate inference IngressClass.
-            # Current architecture uses a single ALB for all traffic.
-            if "inference" in stack.lower():
-                logger.debug(f"Skipping inference ALB: {alb['LoadBalancerName']} (stack={stack})")
+            # Accept only the platform Ingress ownership tags emitted by EKS
+            # Auto Mode or the self-managed AWS Load Balancer Controller. Check
+            # each key independently so an unrelated tag cannot mask a valid
+            # ownership marker on the other controller's key.
+            auto_stack = tags.get("ingress.eks.amazonaws.com/stack")
+            controller_stack = tags.get("ingress.k8s.aws/stack")
+            stack_match = auto_stack == "gco" or controller_stack == "gco-system/gco-ingress"
+            if not stack_match:
+                logger.debug(
+                    f"Skipping ALB without the GCO platform ingress tag: {alb['LoadBalancerName']}"
+                )
                 continue
-
-            # Must have an ingress stack tag (proves it's an Ingress-created ALB,
-            # not a Service-created NLB that somehow passed the type filter)
-            if not stack:
-                logger.debug(f"Skipping ALB without ingress stack tag: {alb['LoadBalancerName']}")
-                continue
+            stack = "gco" if auto_stack == "gco" else "gco-system/gco-ingress"
 
             state = alb.get("State", {}).get("Code", "unknown")
             logger.info(
@@ -420,33 +431,42 @@ def register_alb_with_ga(ga_client: Any, endpoint_group_arn: str, alb_arn: str) 
             raise
 
 
-def ensure_http_health_check(
+def ensure_https_health_check(
     ga_client: Any,
     endpoint_group_arn: str,
     health_check_path: str = "/api/v1/health",
 ) -> None:
-    """Ensure the GA endpoint group uses HTTP health checks instead of TCP.
+    """Keep the endpoint-group health contract aligned with HTTPS-only ALBs.
 
-    TCP health checks only verify the port is open. HTTP health checks verify
-    the backend services are actually responding, which is critical for
-    accurate health-based routing.
-
-    This is a safety net — the CDK stack should configure this, but if the
-    endpoint group was created with defaults (TCP), this fixes it.
+    Global Accelerator derives Application Load Balancer endpoint health from
+    the ALB target groups, so these probe settings are not used while the
+    endpoint remains an ALB. Enforcing HTTPS/443 here still prevents an
+    accidental plaintext fallback if the endpoint type changes later and
+    repairs endpoint groups created by older releases.
     """
     try:
         endpoint_group = ga_client.describe_endpoint_group(EndpointGroupArn=endpoint_group_arn)
         eg = endpoint_group.get("EndpointGroup", {})
         current_protocol = eg.get("HealthCheckProtocol", "TCP")
+        current_port = int(eg.get("HealthCheckPort", 0))
         current_path = eg.get("HealthCheckPath", "")
 
-        if current_protocol == "HTTP" and current_path == health_check_path:
-            logger.info(f"Health check already configured: HTTP {health_check_path}")
+        if (
+            current_protocol == "HTTPS"
+            and current_port == 443
+            and current_path == health_check_path
+        ):
+            logger.info(f"Health check already configured: HTTPS 443 {health_check_path}")
             return
 
-        logger.info(f"Updating health check from {current_protocol} to HTTP {health_check_path}")
+        logger.info(
+            "Updating health check from %s/%s to HTTPS/443 %s",
+            current_protocol,
+            current_port,
+            health_check_path,
+        )
 
-        # Preserve existing endpoints when updating the endpoint group
+        # Preserve existing endpoints when updating the endpoint group.
         existing_endpoints = [
             {
                 "EndpointId": ep["EndpointId"],
@@ -458,28 +478,40 @@ def ensure_http_health_check(
 
         ga_client.update_endpoint_group(
             EndpointGroupArn=endpoint_group_arn,
-            HealthCheckPort=80,
-            HealthCheckProtocol="HTTP",
+            HealthCheckPort=443,
+            HealthCheckProtocol="HTTPS",
             HealthCheckPath=health_check_path,
             HealthCheckIntervalSeconds=30,
             ThresholdCount=3,
             EndpointConfigurations=existing_endpoints,
         )
-        logger.info("Health check updated to HTTP successfully")
+        logger.info("Health check contract updated to HTTPS/443 successfully")
     except ClientError as e:
         logger.warning(f"Failed to update health check configuration: {e}")
-        # Non-fatal — the endpoint is still registered, just with TCP health checks
+        # Non-fatal: ALB target-group health remains authoritative for GA.
+
+
+def _get_registry_region(properties: dict[str, Any], default: str | None = None) -> str | None:
+    """Return the configured SSM registry region.
+
+    ``RegistryRegion`` names the setting by its purpose. ``GlobalRegion`` is
+    accepted for backwards compatibility with existing state-machine and
+    legacy custom-resource payloads.
+    """
+    value = properties.get("RegistryRegion") or properties.get("GlobalRegion") or default
+    return str(value) if value else None
 
 
 def store_alb_hostname_in_ssm(
-    region: str, alb_hostname: str, global_region: str, project_name: str
+    region: str, alb_hostname: str, registry_region: str, project_name: str
 ) -> None:
-    """Store ALB hostname in SSM Parameter Store for cross-region aggregation.
+    """Store the ALB hostname for verified regional-proxy resolution.
 
-    The parameter is stored in the global region so the cross-region aggregator
-    can discover all regional ALB endpoints.
+    The parameter lives in the global registry region. Regional VPC proxies
+    read it, then independently verify ALB ownership and tags before routing.
+    Global aggregation discovers regional API Gateway stacks instead.
     """
-    ssm_client = boto3.client("ssm", region_name=global_region)
+    ssm_client = boto3.client("ssm", region_name=registry_region)
     parameter_name = f"/{project_name}/alb-hostname-{region}"
 
     try:
@@ -496,9 +528,9 @@ def store_alb_hostname_in_ssm(
         raise
 
 
-def delete_alb_hostname_from_ssm(region: str, global_region: str, project_name: str) -> None:
-    """Delete ALB hostname from SSM Parameter Store during cleanup."""
-    ssm_client = boto3.client("ssm", region_name=global_region)
+def delete_alb_hostname_from_ssm(region: str, registry_region: str, project_name: str) -> None:
+    """Delete ALB hostname from the configured SSM registry during cleanup."""
+    ssm_client = boto3.client("ssm", region_name=registry_region)
     parameter_name = f"/{project_name}/alb-hostname-{region}"
 
     try:
@@ -558,7 +590,7 @@ def wait_for_accelerator_deployed(
     Global Accelerator only releases its ``global_accelerator_managed`` ENIs
     from a region's subnets once the accelerator finishes redeploying after an
     endpoint change (it reports ``IN_PROGRESS`` until then). During teardown we
-    must wait for that release before CloudFormation deletes the public subnets
+    must wait for that release before CloudFormation deletes the ALB subnets
     those ENIs occupy — otherwise subnet deletion fails and the stack is left in
     DELETE_FAILED (see issue #130).
 
@@ -601,8 +633,8 @@ def deregister_alb_from_ga(ga_client: Any, endpoint_group_arn: str) -> None:
     (the convergence state machine's final task adds the Ingress-created ALB at
     deploy time), so without this the endpoint group keeps referencing the
     LB-controller-deleted ALB and Global Accelerator keeps
-    ``global_accelerator_managed`` ENIs pinned in the VPC's public subnets,
-    blocking subnet — and stack — deletion (see issue #130).
+    ``global_accelerator_managed`` ENIs pinned in the VPC subnets used by the
+    ALB, blocking subnet — and stack — deletion (see issue #130).
     """
     remove_ga_endpoints(ga_client, endpoint_group_arn)
     wait_for_accelerator_deployed(ga_client, endpoint_group_arn)
@@ -660,11 +692,12 @@ def handle_delete(
     endpoint_group_arn = props["EndpointGroupArn"]
     ingress_name = props.get("IngressName", "gco-ingress")
     namespace = props.get("Namespace", "gco-system")
-    global_region = props.get("GlobalRegion", "us-east-2")
+    registry_region = _get_registry_region(props, DEFAULT_REGISTRY_REGION)
+    assert registry_region is not None
     project_name = props.get("ProjectName", "gco")
 
     # Step 1: Remove all endpoints from GA endpoint group and wait for Global
-    # Accelerator to release its managed ENIs, so the public subnets those ENIs
+    # Accelerator to release its managed ENIs, so the ALB subnets those ENIs
     # occupy can be deleted cleanly during teardown (see issue #130).
     ga = boto3.client("globalaccelerator", region_name="us-west-2")
     deregister_alb_from_ga(ga, endpoint_group_arn)
@@ -673,7 +706,7 @@ def handle_delete(
     delete_ingress_and_wait_for_alb_deletion(cluster_name, region, namespace, ingress_name)
 
     # Step 3: Clean up ALB hostname from SSM
-    delete_alb_hostname_from_ssm(region, global_region, project_name)
+    delete_alb_hostname_from_ssm(region, registry_region, project_name)
 
     send_response(event, context, "SUCCESS", {}, physical_id)
 
@@ -684,15 +717,15 @@ def register_ga_endpoint(
     endpoint_group_arn: str,
     ingress_name: str = "gco-ingress",
     namespace: str = "gco-system",
-    global_region: str = "us-east-2",
+    registry_region: str = DEFAULT_REGISTRY_REGION,
     project_name: str = "gco",
 ) -> dict[str, str]:
     """Find the active platform ALB and register it with Global Accelerator.
 
     Shared core for both entrypoints (the Step Functions convergence task and
     the legacy CloudFormation custom resource). Polls for the active ALB,
-    registers it (idempotent), scrubs stale endpoints, enforces HTTP health
-    checks, and records the ALB hostname in SSM. Raises on timeout so the
+    registers it (idempotent), scrubs stale endpoints, enforces the HTTPS/443
+    health contract, and records the ALB hostname in SSM. Raises on timeout so the
     caller can react. Returns ``{"AlbArn", "AlbHostname"}``.
     """
     # Initialize clients
@@ -747,13 +780,11 @@ def register_ga_endpoint(
     # previous deployments). Only the platform ALB should be in GA.
     scrub_stale_ga_endpoints(ga, endpoint_group_arn, alb_arn)
 
-    # Ensure the endpoint group uses HTTP health checks (not TCP).
-    # This is a safety net — the CDK stack should configure this, but if
-    # the endpoint group was created with defaults, this fixes it.
-    ensure_http_health_check(ga, endpoint_group_arn)
+    # Keep older endpoint groups aligned with the HTTPS-only backend contract.
+    ensure_https_health_check(ga, endpoint_group_arn)
 
-    # Store ALB hostname in SSM for cross-region aggregation
-    store_alb_hostname_in_ssm(region, alb_hostname, global_region, project_name)
+    # Publish the ALB hostname for verified regional VPC-proxy resolution.
+    store_alb_hostname_in_ssm(region, alb_hostname, registry_region, project_name)
 
     return {"AlbArn": alb_arn, "AlbHostname": alb_hostname}
 
@@ -774,7 +805,8 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
         endpoint_group_arn=event["EndpointGroupArn"],
         ingress_name=event.get("IngressName", "gco-ingress"),
         namespace=event.get("Namespace", "gco-system"),
-        global_region=event.get("GlobalRegion", "us-east-2"),
+        registry_region=_get_registry_region(event, DEFAULT_REGISTRY_REGION)
+        or DEFAULT_REGISTRY_REGION,
         project_name=event.get("ProjectName", "gco"),
     )
 
@@ -789,7 +821,8 @@ def handle_create_update(
         endpoint_group_arn=props["EndpointGroupArn"],
         ingress_name=props.get("IngressName", "gco-ingress"),
         namespace=props.get("Namespace", "gco-system"),
-        global_region=props.get("GlobalRegion", "us-east-2"),
+        registry_region=_get_registry_region(props, DEFAULT_REGISTRY_REGION)
+        or DEFAULT_REGISTRY_REGION,
         project_name=props.get("ProjectName", "gco"),
     )
 
@@ -805,12 +838,12 @@ def on_delete_event(event: dict[str, Any], _context: Any = None) -> dict[str, An
     job is teardown ordering. It is a **no-op on Create/Update** — registration
     stays owned by the convergence state machine's final task — and on **Delete**
     it deregisters the region's ALB from the shared Global Accelerator endpoint
-    group and waits for GA to release its managed ENIs, BEFORE CloudFormation
-    deletes the VPC public subnets those ENIs sit in.
+    group, waits for GA to release its managed ENIs, and removes the region's
+    SSM endpoint-registry entry before the stack disappears.
 
     Without this hook the endpoint group keeps referencing the
     LB-controller-deleted ALB, Global Accelerator keeps
-    ``global_accelerator_managed`` ENIs pinned in the public subnets, subnet
+    ``global_accelerator_managed`` ENIs pinned in the ALB subnets, subnet
     deletion fails, and the stack is left in DELETE_FAILED (see issue #130).
 
     Unlike the raw CloudFormation custom-resource path (:func:`lambda_handler`),
@@ -827,16 +860,36 @@ def on_delete_event(event: dict[str, Any], _context: Any = None) -> dict[str, An
         return {"PhysicalResourceId": physical_id}
 
     endpoint_group_arn = props.get("EndpointGroupArn")
-    if not endpoint_group_arn:
+    if endpoint_group_arn:
+        logger.info(f"Deregistering region's ALB from Global Accelerator: {endpoint_group_arn}")
+        try:
+            ga = boto3.client("globalaccelerator", region_name="us-west-2")
+            deregister_alb_from_ga(ga, endpoint_group_arn)
+        except Exception as e:  # noqa: BLE001 - teardown guard must never wedge the stack delete
+            logger.error(
+                f"GA deregistration guard failed (continuing teardown): {e}", exc_info=True
+            )
+    else:
         logger.warning("No EndpointGroupArn in resource properties; skipping GA deregistration")
-        return {"PhysicalResourceId": physical_id}
 
-    logger.info(f"Deregistering region's ALB from Global Accelerator: {endpoint_group_arn}")
-    try:
-        ga = boto3.client("globalaccelerator", region_name="us-west-2")
-        deregister_alb_from_ga(ga, endpoint_group_arn)
-    except Exception as e:  # noqa: BLE001 - teardown guard must never wedge the stack delete
-        logger.error(f"GA deregistration guard failed (continuing teardown): {e}", exc_info=True)
+    # The endpoint registry is independent of the GA endpoint group. Always
+    # remove this region's hostname on Delete when the registry location was
+    # supplied, even if GA deregistration was skipped or failed.
+    region = props.get("Region")
+    registry_region = _get_registry_region(props)
+    project_name = props.get("ProjectName", "gco")
+    if not region:
+        logger.warning("No Region in resource properties; skipping SSM registry cleanup")
+    elif not registry_region:
+        logger.warning(
+            "No RegistryRegion (or legacy GlobalRegion) in resource properties; "
+            "skipping SSM registry cleanup"
+        )
+    else:
+        try:
+            delete_alb_hostname_from_ssm(str(region), registry_region, str(project_name))
+        except Exception as e:  # noqa: BLE001 - teardown guard must never wedge the stack delete
+            logger.error(f"SSM registry cleanup failed (continuing teardown): {e}", exc_info=True)
 
     return {"PhysicalResourceId": physical_id}
 

@@ -40,6 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from diagrams.code_diagrams._renderer import (  # noqa: E402
+    prune_orphaned_artifacts,
     render_all,
     write_readme,
 )
@@ -103,6 +104,7 @@ def main() -> None:
         return
 
     targets = _filter_targets(TARGETS, args.target)
+    full_catalog = args.target is None
 
     print("🧭 GCO Code Flowchart Generator")
     print("=" * 50)
@@ -118,9 +120,19 @@ def main() -> None:
     )
 
     if not args.skip_marker:
-        upsert_markers(results, project_root=project_root)
+        if full_catalog:
+            upsert_markers(results, project_root=project_root)
+        else:
+            print(
+                "\n🖋  Skipping source-marker refresh for a partial run; "
+                "a full run preserves every marker entry."
+            )
 
-    write_readme(results, output_dir=output_dir)
+    if full_catalog:
+        prune_orphaned_artifacts(targets=TARGETS, output_dir=output_dir)
+        write_readme(results, output_dir=output_dir)
+    else:
+        print("\n📝 Keeping the full-catalog README unchanged for a partial run.")
 
     print("\n" + "=" * 50)
     print("✅ Code flowchart generation complete!")
