@@ -88,7 +88,7 @@ jobs:
         # ruff==0.15.21 entry in pyproject.toml's [project.optional-dependencies]
         # lint group so the pre-commit hook, developer installs, and CI
         # stay in lockstep. Bump both together.
-        uses: astral-sh/ruff-action@v4.0.0
+        uses: astral-sh/ruff-action@v4.1.0
         with:
           version: "0.15.21"
           args: "format --check --diff"
@@ -106,7 +106,7 @@ jobs:
         # simplify (SIM), and isort-style import sorting (I). Exclusions
         # target build-staged Lambda package directories that contain
         # third-party wheels we don't own.
-        uses: astral-sh/ruff-action@v4.0.0
+        uses: astral-sh/ruff-action@v4.1.0
         with:
           version: "0.15.21"
           args: "check --exclude lambda/kubectl-applier-simple-build --exclude lambda/helm-installer-build"
