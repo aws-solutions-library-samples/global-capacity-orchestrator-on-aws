@@ -576,6 +576,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_ga_registration.py` | Tests for the Global Accelerator registration Lambda (lambda/ga-registration/handler.py). |
 | `test_health_check_coverage.py` | Consistency tests between ALB Ingress health-check paths and the auth middleware allowlist. |
 | `test_helm_orchestrator_handler.py` | Unit tests for the helm-orchestrator custom-resource provider handler. |
+| `test_helm_teardown_provider.py` | Delete-only Helm teardown provider contracts — Create/Update no-ops, deterministic and idempotent Step Functions execution, in-flight installer cancellation and drain, completion polling, and failed-uninstall propagation. |
 | `test_inference_gpu_autoscaling.py` | GPU-aware autoscaling routes through a KEDA ScaledObject. |
 | `test_inference_manager_extended.py` | Extended tests for cli/inference.InferenceManager. |
 | `test_inference_store.py` | Tests for gco/services/inference_store.InferenceEndpointStore. |
