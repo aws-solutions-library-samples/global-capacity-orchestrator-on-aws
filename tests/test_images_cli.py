@@ -342,11 +342,12 @@ def test_images_build_immutable_tag_rejection(manager: ImageManager, tmp_path: A
 # ---------------------------------------------------------------------------
 
 
-def test_region_falls_back_to_global_when_unset(mock_config: Any) -> None:
-    """Without an explicit region or AWS_DEFAULT_REGION, use config.regions[0]."""
+def test_region_falls_back_to_global_when_unset(mock_config: Any, monkeypatch: Any) -> None:
+    """Without an explicit region or AWS_DEFAULT_REGION, use the global region."""
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
     with patch("cli.images.get_config", return_value=mock_config):
         mgr = ImageManager(config=mock_config)
-    assert mgr.region == mock_config.regions[0]
+    assert mgr.region == mock_config.global_region
 
 
 def test_region_uses_aws_default_region(mock_config: Any, monkeypatch: Any) -> None:
