@@ -779,7 +779,10 @@ class TestRegionalStackSynthesis:
             for logical_id in _depends_on("HelmInstallCharts")
         )
         ga_id = next(
-            logical_id for logical_id in resources if logical_id.startswith("GaDeregistration")
+            logical_id
+            for logical_id, resource in resources.items()
+            if logical_id.startswith("GaDeregistration")
+            and resource["Type"] == "AWS::CloudFormation::CustomResource"
         )
         assert ga_id in _depends_on("HelmTeardown")
         assert "HelmInstallCharts" in _depends_on(ga_id)
