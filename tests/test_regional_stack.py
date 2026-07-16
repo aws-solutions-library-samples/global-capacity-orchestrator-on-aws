@@ -991,16 +991,31 @@ class TestRegionalStackSynthesis:
         assert manifest_statements
         assert shared_statements
 
-        jobs_table_arn = "arn:aws:dynamodb:us-east-2:123456789012:table/gco-test-jobs"
-        jobs_index_arn = f"{jobs_table_arn}/index/*"
-        jobs_resources = {jobs_table_arn, jobs_index_arn}
+        def _partitioned_dynamodb_arn(resource_suffix):
+            return {
+                "Fn::Join": [
+                    "",
+                    [
+                        "arn:",
+                        {"Ref": "AWS::Partition"},
+                        f":dynamodb:us-east-2:123456789012:{resource_suffix}",
+                    ],
+                ]
+            }
+
+        jobs_table_arn = _partitioned_dynamodb_arn("table/gco-test-jobs")
+        jobs_index_arn = _partitioned_dynamodb_arn("table/gco-test-jobs/index/*")
+        jobs_resources = [jobs_table_arn, jobs_index_arn]
+
+        def _references_jobs(resources):
+            return any(resource in jobs_resources for resource in resources)
 
         manifest_jobs_statements = []
         for statement in manifest_statements:
             resources = statement.get("Resource", [])
-            if isinstance(resources, str):
+            if not isinstance(resources, list):
                 resources = [resources]
-            if jobs_resources.intersection(resources):
+            if _references_jobs(resources):
                 manifest_jobs_statements.append(statement)
 
         assert len(manifest_jobs_statements) == 1
@@ -1009,7 +1024,7 @@ class TestRegionalStackSynthesis:
         if isinstance(actions, str):
             actions = [actions]
         resources = jobs_statement.get("Resource", [])
-        if isinstance(resources, str):
+        if not isinstance(resources, list):
             resources = [resources]
         assert set(actions) == {
             "dynamodb:GetItem",
@@ -1018,18 +1033,19 @@ class TestRegionalStackSynthesis:
             "dynamodb:Query",
             "dynamodb:Scan",
         }
-        assert set(resources) == jobs_resources
+        assert resources == jobs_resources
 
         for statement in shared_statements:
             actions = statement.get("Action", [])
             if isinstance(actions, str):
                 actions = [actions]
             resources = statement.get("Resource", [])
-            if isinstance(resources, str):
+            if not isinstance(resources, list):
                 resources = [resources]
-            assert jobs_resources.isdisjoint(resources)
+            references_jobs = _references_jobs(resources)
+            assert not references_jobs
             assert not (
-                jobs_resources.intersection(resources)
+                references_jobs
                 and {"dynamodb:PutItem", "dynamodb:UpdateItem"}.intersection(actions)
             )
 
