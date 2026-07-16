@@ -424,7 +424,7 @@ class TestK8sLiveResource:
             "resources.k8s.cli_runner.subprocess.run",
             side_effect=_subprocess.TimeoutExpired("kubectl", 30),
         ):
-            body = _read_resource("gco://k8s/default/pod/my-pod")
+            body = _read_resource("gco://k8s/us-east-1/default/pod/my-pod")
         payload = json.loads(body)
         assert "timed out" in payload["error"]
 
