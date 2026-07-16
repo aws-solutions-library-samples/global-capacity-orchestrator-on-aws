@@ -130,7 +130,7 @@ jobs:
         # start firing new rules. Configuration (rule set, globs, ignores) lives
         # in .github/config/.markdownlint-cli2.yaml; see CONTRIBUTING.md for
         # how to run the same check locally.
-        uses: DavidAnson/markdownlint-cli2-action@v23.2.0
+        uses: DavidAnson/markdownlint-cli2-action@v24.0.0
         with:
           config: ".github/config/.markdownlint-cli2.yaml"
           globs: "**/*.md"
