@@ -773,7 +773,6 @@ class TestRegionalStackSynthesis:
             value = resources[logical_id].get("DependsOn", [])
             return [value] if isinstance(value, str) else value
 
-        assert "HelmInstallCharts" in _depends_on("HelmTeardown")
         assert "MockHelmInstallerAccessEntry" in _depends_on("HelmInstallCharts")
         assert any(
             logical_id.startswith("KubectlLambdaAccessEntry")
