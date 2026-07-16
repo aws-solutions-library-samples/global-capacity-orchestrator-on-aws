@@ -13,7 +13,8 @@ These tests pin:
   triple, target, region).
 - CPU/memory targets ride along as native KEDA triggers on the same object.
 - A CPU/memory-only autoscaler stays on the native HPA path (no ScaledObject).
-- Teardown removes any ScaledObject left behind by the GPU path.
+- Teardown removes classic and Mooncake role ScaledObjects left behind by GPU
+  autoscaling paths.
 """
 
 from __future__ import annotations
@@ -199,7 +200,7 @@ def test_existing_scaled_object_is_patched():
 
 
 def test_delete_resources_removes_scaled_object():
-    """Teardown deletes any KEDA ScaledObject left by the GPU path."""
+    """Teardown deletes classic and role-scoped KEDA ScaledObjects."""
     monitor = _make_monitor()
     custom = MagicMock()
     with (
@@ -208,10 +209,13 @@ def test_delete_resources_removes_scaled_object():
     ):
         monitor._delete_resources("ep-gpu", "gco-inference")
 
-    custom.delete_namespaced_custom_object.assert_called_once()
-    kwargs = custom.delete_namespaced_custom_object.call_args.kwargs
-    assert kwargs["plural"] == "scaledobjects"
-    assert kwargs["name"] == "ep-gpu"
+    calls = custom.delete_namespaced_custom_object.call_args_list
+    assert [entry.kwargs["name"] for entry in calls] == [
+        "ep-gpu",
+        "ep-gpu-prefill",
+        "ep-gpu-decode",
+    ]
+    assert all(entry.kwargs["plural"] == "scaledobjects" for entry in calls)
 
 
 def test_delete_resources_tolerates_absent_scaled_object():
