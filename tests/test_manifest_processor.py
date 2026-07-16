@@ -1961,9 +1961,10 @@ class TestCreateAndUpdateResource:
     async def test_create_resource_success(self, processor_with_mocks):
         """Test successful resource creation."""
         # Mock the dynamic client
+        created_resource = MagicMock()
         mock_resource = MagicMock()
         mock_resource.namespaced = True
-        mock_resource.create = MagicMock()
+        mock_resource.create = MagicMock(return_value=created_resource)
         processor_with_mocks._dynamic_client = MagicMock()
         processor_with_mocks._dynamic_client.resources.get.return_value = mock_resource
 
@@ -1974,7 +1975,7 @@ class TestCreateAndUpdateResource:
         }
 
         result = await processor_with_mocks._create_resource(manifest)
-        assert result is True
+        assert result is created_resource
         mock_resource.create.assert_called_once()
 
     @pytest.mark.asyncio
@@ -2547,9 +2548,10 @@ class TestCreateResourceNonNamespaced:
     async def test_create_resource_non_namespaced(self, processor_with_mocks):
         """Test creating a non-namespaced resource (line 675)."""
         processor = processor_with_mocks
+        created_resource = MagicMock()
         mock_resource = MagicMock()
         mock_resource.namespaced = False
-        mock_resource.create = MagicMock()
+        mock_resource.create = MagicMock(return_value=created_resource)
         processor._dynamic_client = MagicMock()
         processor._dynamic_client.resources.get.return_value = mock_resource
 
@@ -2560,7 +2562,7 @@ class TestCreateResourceNonNamespaced:
         }
 
         result = await processor._create_resource(manifest)
-        assert result is True
+        assert result is created_resource
         mock_resource.create.assert_called_once_with(body=manifest)
 
 
