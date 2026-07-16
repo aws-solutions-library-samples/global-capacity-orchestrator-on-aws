@@ -199,7 +199,11 @@ class TestSubmitJobToQueueEndpoint:
                 response = client.post(
                     "/api/v1/queue/jobs",
                     json={
-                        "manifest": {"apiVersion": "batch/v1", "kind": "Job"},
+                        "manifest": {
+                            "apiVersion": "batch/v1",
+                            "kind": "Job",
+                            "metadata": {"name": "test-job"},
+                        },
                         "target_region": "us-east-1",
                         "labels": {"team": "ml", "env": "prod"},
                     },
@@ -242,7 +246,11 @@ class TestSubmitJobToQueueEndpoint:
                 response = client.post(
                     "/api/v1/queue/jobs",
                     json={
-                        "manifest": {"apiVersion": "batch/v1", "kind": "Job"},
+                        "manifest": {
+                            "apiVersion": "batch/v1",
+                            "kind": "Job",
+                            "metadata": {"name": "test-job"},
+                        },
                         "target_region": "us-east-1",
                     },
                     headers=_REQUEST_HEADERS,
@@ -284,7 +292,11 @@ class TestSubmitJobToQueueEndpoint:
                 response = client.post(
                     "/api/v1/queue/jobs",
                     json={
-                        "manifest": {"apiVersion": "batch/v1", "kind": "Job"},
+                        "manifest": {
+                            "apiVersion": "batch/v1",
+                            "kind": "Job",
+                            "metadata": {"name": "test-job"},
+                        },
                         "target_region": "us-east-1",
                     },
                     headers=_REQUEST_HEADERS,
