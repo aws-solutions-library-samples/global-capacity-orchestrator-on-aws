@@ -782,12 +782,11 @@ valid_job_manifest = {
 ## Coverage Requirements
 
 The global Python line + branch coverage floor is 90% across `gco/`, `cli/`,
-and `gco_mcp/` in `unit:pytest:core`; pull requests and releases still target at
-least 93% measured coverage. The dedicated streaming-Lambda workflow
-independently enforces at least 93% lines, functions, and branches with Node
-24's built-in V8 coverage. Current measured values come from CI artifacts;
-add tests to hold the 93% target rather than raising or lowering the global
-Python floor.
+and `gco_mcp/` in `unit:pytest:core`; pull requests and releases target ~92%
+measured coverage. The dedicated streaming-Lambda workflow independently
+enforces at least 93% lines, functions, and branches with Node 24's built-in
+V8 coverage. Current measured values come from CI artifacts; add tests to hold
+the ~92% Python target rather than raising or lowering the global floor.
 
 To check the Python report:
 

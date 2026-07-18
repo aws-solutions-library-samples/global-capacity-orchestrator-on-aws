@@ -17,7 +17,7 @@
 #   - unit:fresh-install           — pip install from scratch, verify imports
 #   - unit:lockfile:freshness      — requirements-lock.txt matches pyproject.toml
 #   - unit:mcp:install             — uv-installs gco-mcp from source, then launches the server
-#   - unit:pytest:core             — pytest (90% enforced floor; 93% target) + upload coverage artifact
+#   - unit:pytest:core             — pytest (90% enforced floor; ~92% Python target) + upload coverage artifact
 #   - unit:workload:imports        — K8s service import + circular-import detection
 #
 # The HTML coverage report is published to GitHub Pages by a separate

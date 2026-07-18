@@ -15,7 +15,7 @@ Run on every push to `main` and every pull request.
 
 | File | Badge | Description |
 |------|-------|-------------|
-| `unit-tests.yml` | Unit Tests | pytest with coverage (90% enforced floor; 93% target), BATS shell tests, CDK synth, config matrix, cdk-nag compliance, lockfile freshness, CLI smoke |
+| `unit-tests.yml` | Unit Tests | pytest with coverage (90% enforced floor; ~92% Python target), BATS shell tests, CDK synth, config matrix, cdk-nag compliance, lockfile freshness, CLI smoke |
 | `inference-streaming-proxy.yml` | — | Native Node.js 24 tests for the inference streaming Lambda with 93% line/function/branch gates |
 | `integration-tests.yml` | Integration Tests | Dockerfile builds, kind cluster E2E with Calico and Metrics Server (4 service deployments, inference-proxy HPA `ScalingActive`, RBAC enforcement, NetworkPolicy blocking, ResourceQuota, PDB validation), K8s manifest validation, Lambda import checks, MCP server tests |
 | `security.yml` | Security | bandit, pip-audit, npm audit across every owned graph, trivy (filesystem + container), trufflehog, gitleaks, semgrep, checkov, KICS, CodeQL (Python + JavaScript) |

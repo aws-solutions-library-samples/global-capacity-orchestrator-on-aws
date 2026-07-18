@@ -60,7 +60,7 @@ workflow runs these commands in CI.
 The package script enforces at least 93% line, function, and branch coverage
 with Node's built-in V8 coverage. This dedicated JavaScript gate is separate
 from the repository-wide Python coverage configuration, whose enforced floor
-remains 90% while the project targets at least 93% measured coverage.
+remains 90% while the project targets ~92% measured coverage.
 
 Do not weaken a threshold to accommodate new behavior. Add focused tests for
 new success, failure, timeout, cancellation, and cleanup paths instead.

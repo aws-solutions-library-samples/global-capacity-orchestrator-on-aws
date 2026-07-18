@@ -67,7 +67,7 @@ Each file maps to one row in the README badge table.
 
 | File | README row | What it covers |
 |------|------------|----------------|
-| `workflows/unit-tests.yml` | Unit Tests | pytest with coverage (90% enforced floor; 93% target), BATS, CLI smoke, CDK synth + config matrix, lockfile freshness, fresh install, MCP install + launch smoke, workload import checks |
+| `workflows/unit-tests.yml` | Unit Tests | pytest with coverage (90% enforced floor; ~92% Python target), BATS, CLI smoke, CDK synth + config matrix, lockfile freshness, fresh install, MCP install + launch smoke, workload import checks |
 | `workflows/inference-streaming-proxy.yml` | — | Native Node.js 24 tests for the production streaming Lambda, with 93% line/function/branch thresholds |
 | `workflows/integration-tests.yml` | Integration Tests | Per-Dockerfile build + module-import smoke, dev-container smoke, kind E2E with Calico and pinned Metrics Server (NetworkPolicy enforcement, RBAC verification, ResourceQuota/LimitRange, PDB validation, inference-proxy HPA `ScalingActive`, cross-namespace traffic blocking, all 4 service deployments), K8s manifest schema validation (kubeconform), Lambda import validation, cross-module pytest, MCP server pytest |
 | `workflows/security.yml` | Security | bandit, pip-audit, npm audit across every owned package graph, trivy (filesystem + per-image matrix), trufflehog, gitleaks, semgrep, checkov, KICS, CodeQL (Python + JavaScript) |
