@@ -709,12 +709,30 @@ class TestGetDeployRegion:
         "cli.config._load_cdk_json",
         return_value={"regional": ["us-east-1"]},
     )
-    def test_destroy_resolves_unconfigured_orphan_bridge_region(self, _mock_cdk):
+    def test_destroy_resolves_unconfigured_orphan_bridge_region(self, _mock_cdk, tmp_path):
         """Destroy still finds an orphan bridge after its Region leaves config."""
+        (tmp_path / "cdk.json").write_text(
+            json.dumps(
+                {
+                    "context": {
+                        "project_name": "gco",
+                        "deployment_regions": {
+                            "global": "us-east-2",
+                            "api_gateway": "us-east-1",
+                            "monitoring": "us-east-2",
+                            "regional": ["us-east-1"],
+                        },
+                    },
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         mgr = self._make_manager()
+        mgr.project_root = tmp_path
         with patch(
             "cli.stacks._known_cloudformation_regions",
-            return_value=frozenset({"us-east-1", "us-west-2"}),
+            return_value=frozenset({"us-east-1", "us-east-2", "us-west-2"}),
         ):
             assert mgr._get_deploy_region("gco-regional-api-us-west-2") is None
             assert mgr._get_destroy_region("gco-regional-api-us-west-2") == "us-west-2"

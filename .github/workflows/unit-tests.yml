@@ -130,8 +130,10 @@ jobs:
         # --dist=load (xdist's default) round-robins individual test items
         # across workers. --maxfail=1 matches the previous -x "stop at
         # first failure" behavior — `-x` itself isn't compatible with xdist.
+        # Concise output avoids thousands of per-test log writes; report.xml
+        # retains individual test names, timings, and failure details.
         run: |
-          pytest tests/ -v \
+          pytest tests/ -q \
             --ignore=tests/test_integration.py \
             --ignore=tests/test_nag_compliance.py \
             --ignore=tests/test_cdk_synthesis_matrix.py \
