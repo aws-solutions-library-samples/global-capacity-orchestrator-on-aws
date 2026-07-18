@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import secrets
 import shutil
@@ -66,6 +67,10 @@ def resolve_local_path(
 
     try:
         root = Path(configured_root).expanduser().resolve(strict=True)
+    except OSError as exc:
+        if exc.errno != errno.ELOOP:
+            raise
+        raise ValueError(f"{_LOCAL_ROOT_ENV} could not be resolved safely") from exc
     except RuntimeError as exc:
         raise ValueError(f"{_LOCAL_ROOT_ENV} could not be resolved safely") from exc
     root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
@@ -91,6 +96,10 @@ def resolve_local_path(
         resolved = lexical.resolve(strict=require_exists)
     except FileNotFoundError as exc:
         raise ValueError(f"{purpose} source does not exist: {local_path}") from exc
+    except OSError as exc:
+        if exc.errno != errno.ELOOP:
+            raise
+        raise ValueError(f"{purpose} path could not be resolved safely: {local_path}") from exc
     except RuntimeError as exc:
         raise ValueError(f"{purpose} path could not be resolved safely: {local_path}") from exc
     if not resolved.is_relative_to(root):

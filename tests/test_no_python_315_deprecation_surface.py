@@ -4,6 +4,11 @@ The Python 3.15 release schedule soft-deprecates a number of stdlib symbols and
 syntactic forms. This test walks the production tree, plus the project README, and
 fails loudly with file paths and line numbers if any of those forms are reintroduced.
 
+The companion version-drift test treats this filename as part of the contract: it
+must target the Python minor immediately after the floor in ``requires-python``.
+Raising the floor therefore fails CI until this module, its patterns, and its
+documentation advance to the following Python release.
+
 Patterns checked:
 
 * ``collections.abc.ByteString`` — removed alias.
@@ -23,6 +28,7 @@ The test passes silently when none are present.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -31,7 +37,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # left alone (so the spec/design tree, hidden caches, and the .git folder do not
 # trip the test).
 SCANNED_DIRS = (
-    "mcp",
+    "gco_mcp",
     "cli",
     "gco",
     "lambda",
@@ -164,6 +170,29 @@ def _scan_file(path: Path) -> list[tuple[int, str, str]]:
             if pattern.search(line) and not ignore_fn(path):  # type: ignore[operator]
                 hits.append((line_no, label, line.rstrip()))
     return hits
+
+
+def test_deprecation_surface_guard_tracks_next_python_minor() -> None:
+    """Require this guard to advance whenever the supported Python floor advances."""
+    metadata = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    requires_python = metadata.get("project", {}).get("requires-python")
+    assert isinstance(requires_python, str), "[project].requires-python must be a string"
+
+    minimum = re.match(r"^\s*>=\s*(\d+)\.(\d+)(?:\.\d+)?", requires_python)
+    assert minimum is not None, (
+        "The deprecation guard could not identify the Python floor from "
+        f"requires-python={requires_python!r}; keep an explicit leading >=<major>.<minor> floor"
+    )
+
+    major, minor = (int(part) for part in minimum.groups())
+    target_major, target_minor = major, minor + 1
+    expected_filename = f"test_no_python_{target_major}{target_minor:02d}_deprecation_surface.py"
+    assert SELF.name == expected_filename, (
+        f"{SELF.name} is stale for requires-python={requires_python!r}. The deprecation "
+        f"guard must target Python {target_major}.{target_minor}: rename this module to "
+        f"{expected_filename} and replace its scan patterns and documentation with "
+        f"Python {target_major}.{target_minor} deprecations."
+    )
 
 
 def test_no_python_315_deprecation_surface() -> None:
