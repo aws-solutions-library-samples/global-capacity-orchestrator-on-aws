@@ -11,11 +11,10 @@ This module checks the contract that holds for every RDMA spec: each role pod
 ends up tolerating the EFA taint, selecting ``efa=true`` and ``mooncake-efa=true``
 (the latter pinning it to the dedicated mooncake EFA pool that excludes the
 A100-40GB p4d family), requesting at least one EFA device, and keeping the GPU
-request and limit it started with. It also checks the complementary case — a
-transfer protocol explicitly set to something other than RDMA leaves the pod's
-tolerations, node selector, and resource asks exactly as they were — and the
-default case — a spec that omits the protocol (or the whole ``transfer`` block)
-defaults to RDMA and is placed on EFA like any other RDMA spec.
+request and limit it started with. It also checks the complementary case — the
+supported TCP fallback leaves the pod's tolerations, node selector, and resource
+asks exactly as they were — and the default case — a spec that omits the protocol (or the whole ``transfer``
+block) defaults to RDMA and is placed on EFA like any other RDMA spec.
 """
 
 from __future__ import annotations
@@ -177,16 +176,14 @@ def test_rdma_pod_lands_on_efa_fabric_and_keeps_gpu_asks(scenario: dict[str, Any
         }
 
 
-@given(
-    protocol=st.sampled_from(["tcp", "TCP", "rocev2", "", "ib"]),
-    container_count=st.integers(min_value=1, max_value=4),
-)
-def test_non_rdma_pod_gets_no_efa_scheduling(protocol: str, container_count: int) -> None:
-    """A non-RDMA transfer leaves the pod's scheduling and resources untouched.
+@given(container_count=st.integers(min_value=1, max_value=4))
+def test_tcp_pod_gets_no_efa_scheduling(container_count: int) -> None:
+    """The supported TCP fallback leaves scheduling and resources untouched.
 
-    When the transfer protocol is anything other than ``rdma``, the pod gains no
-    EFA toleration, no ``efa`` node selector, and no EFA device request; its
-    GPU asks are likewise unchanged.
+    When the transfer protocol is ``tcp``, the pod gains no EFA toleration, no
+    ``efa`` node selector, and no EFA device request; its GPU asks are likewise
+    unchanged. Unsupported protocol values are rejected by the spec validator
+    and are covered by ``test_mooncake_spec_validation.py``.
     """
     containers = [
         client.V1Container(
@@ -201,7 +198,7 @@ def test_non_rdma_pod_gets_no_efa_scheduling(protocol: str, container_count: int
     ]
     pod_spec = client.V1PodSpec(containers=containers)
 
-    apply_efa_scheduling({"transfer": {"protocol": protocol}}, pod_spec)
+    apply_efa_scheduling({"transfer": {"protocol": "tcp"}}, pod_spec)
 
     toleration_keys = {t.key for t in (pod_spec.tolerations or [])}
     assert EFA_RESOURCE_NAME not in toleration_keys
