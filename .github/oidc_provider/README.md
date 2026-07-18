@@ -34,25 +34,21 @@ This stack is **standalone** — it does not depend on or affect the main GCO in
 ## Prerequisites
 
 - Python 3.14+
-- Node.js 24 and npm 11.18.0 (use the repository `.nvmrc` and `packageManager` pin)
-- Locked AWS CDK CLI installed from the repository root with `npm ci --ignore-scripts --no-audit --no-fund`
+- AWS CDK CLI available as `cdk` on `PATH`
 - AWS credentials configured for the target account
-- CDK bootstrapped in the target region: `../../node_modules/.bin/cdk bootstrap aws://ACCOUNT_ID/REGION`
+- CDK bootstrapped in the target region: `cdk bootstrap aws://ACCOUNT_ID/REGION`
 
 ## Quick Start
 
 ```bash
-# From the repository root, install the locked CDK graph first
-npm ci --ignore-scripts --no-audit --no-fund
-
-# Then enter the standalone app
+# From the repository root
 cd .github/oidc_provider
 
-# Install Python dependencies
+# Install dependencies
 pip install -e "../../[cdk]"
 
-# Deploy with the repository-owned CDK binary
-../../node_modules/.bin/cdk deploy GCOGitHubOIDCStack
+# Deploy (uses your default AWS credentials and region)
+cdk deploy GCOGitHubOIDCStack
 
 # Note the role ARN from the stack output
 # Add it as a GitHub Actions secret: GCO_CI_ROLE_ARN
@@ -84,7 +80,7 @@ The default policy in `policy.json` grants minimal read-only permissions for the
 To add permissions (for example, to allow CI to deploy stacks or run integration tests against live infrastructure):
 
 1. Edit `policy.json` to add the IAM actions you need
-2. Redeploy from `.github/oidc_provider`: `../../node_modules/.bin/cdk deploy GCOGitHubOIDCStack` from an environment with AWS credentials for the target account
+2. Redeploy from `.github/oidc_provider`: `cdk deploy GCOGitHubOIDCStack` from an environment with AWS credentials for the target account
 
 Common additions:
 
@@ -109,7 +105,7 @@ To use with your fork, edit `cdk.json`:
 }
 ```
 
-Then redeploy from `.github/oidc_provider`: `../../node_modules/.bin/cdk deploy GCOGitHubOIDCStack`
+Then redeploy from `.github/oidc_provider`: `cdk deploy GCOGitHubOIDCStack`
 
 Setting `github_branch` to `"main"` restricts the role so only the main branch can assume it. `"*"` (the default) allows any branch or tag.
 
@@ -160,7 +156,7 @@ The tests verify:
 
 ```bash
 cd .github/oidc_provider
-../../node_modules/.bin/cdk destroy GCOGitHubOIDCStack
+cdk destroy GCOGitHubOIDCStack
 ```
 
 This removes the IAM role and policy. The OIDC provider is retained if other roles in the account depend on it.

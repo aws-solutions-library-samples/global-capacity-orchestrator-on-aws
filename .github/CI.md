@@ -30,33 +30,33 @@ For contributor-facing docs (how to run tests locally, release process, dependen
 ```text
 .github/
 ├── actions/
-│   └── build-lambda-package/       # Composite action: stage Lambda build dirs
+│   └── build-lambda-package/         # Composite action: stage Lambda build dirs
 ├── codeql/
-│   └── codeql-config.yml           # Paths + query-filters for Code Scanning
+│   └── codeql-config.yml             # Paths + query-filters for Code Scanning
 ├── ISSUE_TEMPLATE/
 │   ├── bug_report.md
-│   ├── config.yml                  # Blank-issue + contact links config
+│   ├── config.yml                    # Blank-issue + contact links config
 │   └── feature_request.md
 ├── kind/
-│   └── kind-calico.yaml            # Kind cluster config for integration:kind:cluster-e2e
+│   └── kind-calico.yaml              # Kind cluster config for integration:kind:cluster-e2e
 ├── scripts/
-│   └── dependency-scan.sh          # Monthly dependency-drift scanner
+│   └── dependency-scan.sh            # Monthly dependency-drift scanner
 ├── workflows/
-│   ├── unit-tests.yml              # Unit Tests workflow
+│   ├── unit-tests.yml                # Unit Tests workflow
 │   ├── inference-streaming-proxy.yml # Native Node.js streaming-proxy tests
-│   ├── integration-tests.yml       # Integration Tests workflow
-│   ├── security.yml                # Security workflow
-│   ├── lint.yml                    # Linting workflow
-│   ├── mooncake-image.yml          # Mooncake vLLM image contract test (push/PR)
-│   ├── release.yml                 # Manual workflow_dispatch release
-│   ├── deps-scan.yml               # Monthly dependency scan
-│   ├── cve-scan.yml                # Weekly CVE scan
-│   └── pages.yml                   # Publish coverage report to GitHub Pages (workflow_run)
+│   ├── integration-tests.yml         # Integration Tests workflow
+│   ├── security.yml                  # Security workflow
+│   ├── lint.yml                      # Linting workflow
+│   ├── mooncake-image.yml            # Mooncake vLLM image contract test (push/PR)
+│   ├── release.yml                   # Manual workflow_dispatch release
+│   ├── deps-scan.yml                 # Monthly dependency scan
+│   ├── cve-scan.yml                  # Weekly CVE scan
+│   └── pages.yml                     # Publish coverage report to GitHub Pages (workflow_run)
 ├── CODEOWNERS
 ├── dependabot.yml
 ├── pull_request_template.md
-├── release.yml                     # GitHub Release notes categorization
-└── CI.md                           # You are here (reference for everything in this folder)
+├── release.yml                       # GitHub Release notes categorization
+└── CI.md                             # You are here (reference for everything in this folder)
 ```
 
 ## Workflows

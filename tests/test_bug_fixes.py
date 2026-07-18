@@ -290,6 +290,7 @@ class TestQueryRegionUrlEncoding:
         mock_http.request.return_value = mock_response
 
         with (
+            patch.dict(handler.os.environ, {"AWS_URL_SUFFIX": "amazonaws.com"}),
             patch.object(handler, "http", mock_http),
             patch.object(handler, "_sigv4_headers", return_value={"Authorization": "test"}),
         ):

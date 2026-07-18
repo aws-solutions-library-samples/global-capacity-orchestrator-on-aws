@@ -8,7 +8,7 @@ while ``gco.config`` is still initializing.
 
 from __future__ import annotations
 
-from importlib import import_module
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -24,22 +24,47 @@ __all__ = [
     "GCORegionalStack",
 ]
 
-_LAZY_EXPORTS = {
-    "GCOApiGatewayGlobalStack": (".api_gateway_global_stack", "GCOApiGatewayGlobalStack"),
-    "GCOGlobalStack": (".global_stack", "GCOGlobalStack"),
-    "GCOMonitoringStack": (".monitoring_stack", "GCOMonitoringStack"),
-    "GCORegionalStack": (".regional_stack", "GCORegionalStack"),
+
+def _load_api_gateway_global_stack() -> Any:
+    from .api_gateway_global_stack import GCOApiGatewayGlobalStack  # noqa: PLC0415
+
+    return GCOApiGatewayGlobalStack
+
+
+def _load_global_stack() -> Any:
+    from .global_stack import GCOGlobalStack  # noqa: PLC0415
+
+    return GCOGlobalStack
+
+
+def _load_monitoring_stack() -> Any:
+    from .monitoring_stack import GCOMonitoringStack  # noqa: PLC0415
+
+    return GCOMonitoringStack
+
+
+def _load_regional_stack() -> Any:
+    from .regional_stack import GCORegionalStack  # noqa: PLC0415
+
+    return GCORegionalStack
+
+
+_LAZY_EXPORTS: dict[str, Callable[[], Any]] = {
+    "GCOApiGatewayGlobalStack": _load_api_gateway_global_stack,
+    "GCOGlobalStack": _load_global_stack,
+    "GCOMonitoringStack": _load_monitoring_stack,
+    "GCORegionalStack": _load_regional_stack,
 }
 
 
 def __getattr__(name: str) -> Any:
     """Load one public stack class on first access and cache the result."""
     try:
-        module_name, attribute_name = _LAZY_EXPORTS[name]
+        loader = _LAZY_EXPORTS[name]
     except KeyError as exc:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
 
-    value = getattr(import_module(module_name, __name__), attribute_name)
+    value = loader()
     globals()[name] = value
     return value
 

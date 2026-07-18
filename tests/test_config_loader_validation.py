@@ -3,7 +3,7 @@ Tests for gco/config/config_loader.py validation rules.
 
 Exercises the ConfigLoader validator across its defensive branches:
 the no-op path when no context is provided (validation skipped),
-missing required fields, empty regional region list, too many regions,
+missing required fields, empty regional region list, more than ten regions,
 and other field-level constraints. Uses real cdk.App instances with
 context= dicts so the CDK Node wiring is part of the test rather than
 mocked out, which complements the MockApp-based test_config_loader.py.
@@ -86,9 +86,9 @@ class TestConfigLoaderValidation:
         with pytest.raises(ConfigValidationError, match="At least one region must be specified"):
             ConfigLoader(app)
 
-    def test_config_loader_validates_too_many_regions(self):
-        """Test that ConfigLoader validates maximum regions."""
-        from gco.config.config_loader import ConfigLoader, ConfigValidationError
+    def test_config_loader_accepts_more_than_ten_regions(self):
+        """Test that ConfigLoader does not impose an artificial region-count cap."""
+        from gco.config.config_loader import ConfigLoader
 
         regions = [
             "us-east-1",
@@ -146,8 +146,9 @@ class TestConfigLoaderValidation:
             }
         )
 
-        with pytest.raises(ConfigValidationError, match="Maximum of 10 regions"):
-            ConfigLoader(app)
+        config = ConfigLoader(app)
+
+        assert config.get_regions() == regions
 
     def test_config_loader_validates_invalid_region(self):
         """Test that ConfigLoader validates invalid regions."""

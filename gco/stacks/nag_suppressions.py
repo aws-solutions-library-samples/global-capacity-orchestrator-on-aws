@@ -138,45 +138,44 @@ def acknowledge_nag_findings(
     acknowledgment on a stack covers all resources in that stack, and one on a
     role covers the role's generated policies.
     """
-    # cdk-nag renders the CloudFormation account/region pseudo-parameters in a
-    # finding's detail two different ways, and which one appears is decided
-    # per-ARN, not per-stack:
-    #   * an ARN built from an ``Aws.ACCOUNT_ID`` / ``Aws.REGION`` pseudo-param
-    #     always renders as the angle-bracket literal ``<AWS::AccountId>`` /
-    #     ``<AWS::Region>`` (CloudFormation resolves the pseudo-param at deploy,
-    #     never at synth), whereas
-    #   * an ARN hand-built from ``stack.account`` / ``stack.region`` renders as
-    #     the *concrete* value when the stack is environment-specific, and as
-    #     the pseudo-param literal when it is environment-agnostic.
-    # So for a concrete env we can't know from here which form cdk-nag will
-    # emit for any given finding. We therefore register the acknowledgment
-    # under BOTH the placeholder detail and its literal rendering; extra keys
-    # that match no finding are harmless, and whichever form cdk-nag emits then
-    # has a matching acknowledgment. A detail we ourselves built from a region/
-    # account *token* is first normalized to the placeholder form — a raw token
-    # can't be used as a metadata-map key (synth fails with
-    # ``KeyMustResolveToString``).
+    # cdk-nag renders the CloudFormation partition/account/region
+    # pseudo-parameters in a finding's detail two different ways, and which one
+    # appears is decided per ARN, not per stack:
+    #   * an ARN built from ``Aws.PARTITION`` / ``Aws.ACCOUNT_ID`` /
+    #     ``Aws.REGION`` may retain the angle-bracket pseudo-param literal,
+    #     whereas
+    #   * an ARN hand-built from ``stack.partition`` / ``stack.account`` /
+    #     ``stack.region`` renders concrete values when CDK can resolve them.
+    # So for a concrete env we can't know from here which form cdk-nag will emit
+    # for any given finding. Register the acknowledgment under both the
+    # placeholder detail and every resolvable literal rendering. Extra keys
+    # that match no finding are harmless; whichever exact form cdk-nag emits
+    # then has a matching acknowledgment. Any detail built from a raw token is
+    # normalized first because unresolved tokens cannot be metadata-map keys.
     stack = Stack.of(scope)
+    dimensions = (
+        (stack.partition, "<AWS::Partition>"),
+        (stack.account, "<AWS::AccountId>"),
+        (stack.region, "<AWS::Region>"),
+    )
 
     def _keys_for(rule_id: str, detail: str) -> list[str]:
-        if Token.is_unresolved(stack.region):
-            detail = detail.replace(stack.region, "<AWS::Region>")
-        if Token.is_unresolved(stack.account):
-            detail = detail.replace(stack.account, "<AWS::AccountId>")
+        for value, placeholder in dimensions:
+            if Token.is_unresolved(value):
+                detail = detail.replace(value, placeholder)
         if Token.is_unresolved(detail):
             raise ValueError(
                 "cdk-nag acknowledgment detail contains an unresolved token and "
                 f"cannot be used as a metadata key: {detail!r}. Use cdk-nag's "
                 "literal rendering (e.g. '<AWS::Region>', '<LogicalId.Arn>') instead."
             )
-        # Expand the placeholder detail into every form cdk-nag might emit: for
-        # each concrete env dimension, add a variant with the pseudo-param
-        # placeholder swapped for its literal value.
+        # Expand each placeholder into every concrete environment dimension
+        # CDK resolved, producing the exact partition/account/region combinations
+        # cdk-nag can render for the same policy resource.
         variants = {detail}
-        if not Token.is_unresolved(stack.account):
-            variants.update(v.replace("<AWS::AccountId>", stack.account) for v in list(variants))
-        if not Token.is_unresolved(stack.region):
-            variants.update(v.replace("<AWS::Region>", stack.region) for v in list(variants))
+        for value, placeholder in dimensions:
+            if not Token.is_unresolved(value):
+                variants.update(v.replace(placeholder, value) for v in list(variants))
         return [f"{rule_id}[{v}]" for v in variants]
 
     ack: dict[str, str] = {}

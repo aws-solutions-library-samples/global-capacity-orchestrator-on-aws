@@ -15,7 +15,7 @@
 #                                        — CodeQL security-and-quality pack on Python
 #   - security:gitleaks:secrets          — gitleaks on current files (no git history)
 #   - security:kics:iac                  — KICS on cdk.out (needs CDK synth first)
-#   - security:npm-audit:all-packages   — npm audit on every locked npm graph
+#   - security:npm-audit:all-packages    — npm audit on every locked npm graph
 #   - security:pip-audit:deps            — pip-audit on requirements-lock.txt
 #   - security:semgrep:sast              — semgrep scan --config auto
 #   - security:trivy:filesystem          — trivy fs on the source tree
