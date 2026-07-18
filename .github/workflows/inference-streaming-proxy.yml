@@ -1,0 +1,40 @@
+# =============================================================================
+# inference-streaming-proxy.yml — Native Node.js tests for Lambda streaming
+# =============================================================================
+
+name: Inference Streaming Proxy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit-node-inference-streaming-proxy:
+    name: "unit:node:inference-streaming-proxy"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: lambda/inference-streaming-proxy
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6.4.0
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+          cache-dependency-path: "lambda/inference-streaming-proxy/package-lock.json"
+      - name: Install and verify the declared npm version
+        run: bash ../../.github/scripts/use-pinned-npm.sh package.json
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Run native Node.js unit tests with a strict 93% V8 coverage floor
+        run: npm test

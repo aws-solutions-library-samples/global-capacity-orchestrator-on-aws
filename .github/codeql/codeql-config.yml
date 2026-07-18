@@ -1,13 +1,12 @@
 name: "GCO CodeQL config"
 
-# Read by GitHub's Default Setup for Code Scanning (auto-applied when this
-# file exists at .github/codeql/codeql-config.yml). Also usable from an
-# explicit codeql-action/init step via config-file: if we move to a
-# workflow-backed scan later.
+# Read by the Advanced Setup CodeQL jobs in ``workflows/security.yml`` via
+# ``config-file``. Keeping this configuration in git makes both Python and
+# JavaScript scan scope and query filters reviewable.
 
 # --- Paths to scan ---------------------------------------------------------
-# Scope the scan to the Python packages that carry security-sensitive
-# runtime code: ``gco/``, ``cli/``, ``gco_mcp/``, ``lambda/``, ``scripts/``.
+# Scope the scan to security-sensitive runtime code in Python and JavaScript:
+# ``gco/``, ``cli/``, ``gco_mcp/``, ``lambda/``, and ``scripts/``.
 # Anything else (tests, demos, CDK synthesis output, caches) is either
 # already excluded via ``paths-ignore`` below or falls outside these
 # directories.
@@ -38,6 +37,7 @@ paths-ignore:
   - .ruff_cache
   - lambda/kubectl-applier-simple-build
   - lambda/helm-installer-build
+  - lambda/inference-streaming-proxy-build
   # Tests don't ship to production. Skipping them removes the largest
   # source of noise — CodeQL's URL-sanitization heuristics fire on any
   # `assert "host.example" in output` pattern, which is a legitimate

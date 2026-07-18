@@ -7,10 +7,12 @@ For each ``(source_file, function)`` target in :data:`TARGETS`:
    flowchart.js DSL string.
 2. Emit an interactive HTML page (flowchart.js renders client-side).
 3. Render the same diagram to a PNG using a headless Chromium via
-   :mod:`playwright` (optional — skipped with a warning if Playwright
-   or its browsers aren't installed).
-4. Insert (idempotently) a ``# Flowchart:`` comment near the top of the
-   source file pointing at the generated HTML and PNG.
+   :mod:`playwright` (optional — when skipped or unavailable, any older PNG
+   for that target is removed so artifact timestamps cannot disagree).
+4. Stamp the HTML, PNG, generated catalogue, and source marker with one
+   invocation-wide UTC generation time.
+5. Insert (idempotently) a source comment near the top of the source file
+   pointing at the generated HTML and PNG.
 
 Outputs mirror the source tree under ``diagrams/code_diagrams/``:
 
@@ -49,6 +51,7 @@ from diagrams.code_diagrams._source_marker import (  # noqa: E402
     upsert_markers,
 )
 from diagrams.code_diagrams._targets import TARGETS, Target  # noqa: E402
+from diagrams.code_diagrams._timestamp import generation_timestamp_utc  # noqa: E402
 
 
 def main() -> None:
@@ -70,7 +73,10 @@ def main() -> None:
     parser.add_argument(
         "--skip-png",
         action="store_true",
-        help="Skip Playwright PNG rendering (still writes HTML).",
+        help=(
+            "Skip Playwright PNG rendering, remove selected targets' stale "
+            "PNGs, and still write HTML."
+        ),
     )
     parser.add_argument(
         "--skip-marker",
@@ -105,18 +111,21 @@ def main() -> None:
 
     targets = _filter_targets(TARGETS, args.target)
     full_catalog = args.target is None
+    generated_at = generation_timestamp_utc()
 
     print("🧭 GCO Code Flowchart Generator")
     print("=" * 50)
     print(f"   Project root : {project_root}")
     print(f"   Output dir   : {output_dir}")
     print(f"   Targets      : {len(targets)}")
+    print(f"   Generated at : {generated_at}")
 
     results = render_all(
         targets=targets,
         project_root=project_root,
         output_dir=output_dir,
         render_png=not args.skip_png,
+        generated_at=generated_at,
     )
 
     if not args.skip_marker:

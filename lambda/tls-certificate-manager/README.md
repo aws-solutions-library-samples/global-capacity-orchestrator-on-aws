@@ -20,6 +20,7 @@ Creates and rotates the deployment-local private certificate authority (CA) and 
 - [IAM Permissions](#iam-permissions)
 - [Packaging](#packaging)
 - [Failure Behavior](#failure-behavior)
+- [Recovery Runbook](#recovery-runbook)
 
 ## Responsibilities
 
@@ -33,7 +34,11 @@ The manager:
 6. Reimports renewed leaves into the existing ACM ARN so ALB certificate associations remain stable.
 7. Stages root rollover so clients receive the next public root before any leaf starts using it.
 8. Emits root and leaf expiry metrics for operational alarms.
-9. Removes imported certificates and public SSM parameters during ordered stack teardown.
+9. Persists regions removed by an Update until their certificates and public
+   ARN parameters are safely deleted, retrying while an ALB listener still
+   uses a leaf.
+10. Removes current and persisted-retired certificates plus public SSM
+    parameters during ordered stack teardown.
 
 ## Lifecycle
 
@@ -41,11 +46,11 @@ The manager:
 
 The CDK provider invokes `lambda_handler` with a CloudFormation `Create` or `Update` event. The handler validates every region, namespace, lifetime, and certificate identity before it mutates state. It then creates or loads the root, publishes the trust bundle, and ensures every regional ACM certificate exists and is current.
 
-The custom resource uses a stable physical ID. Updating lifecycle policy therefore reconciles the existing PKI rather than replacing it.
+The custom resource uses a stable physical ID. Updating lifecycle policy therefore reconciles the existing PKI rather than replacing it. When `Regions` removes a workload region, the manager records that retirement in the encrypted root state before cleanup. If ACM reports that an ALB listener still uses the leaf, the public ARN parameter remains intact and scheduled reconciliation retries after listener teardown.
 
 ### Scheduled Reconciliation
 
-EventBridge invokes the handler with `{"Action": "Rotate"}` on the configured schedule. Reconciliation renews leaves inside their rotate-before window, advances any staged root transition, republishes expiry metrics, and otherwise remains idempotent.
+EventBridge invokes the handler with `{"Action": "Rotate"}` on the configured schedule. Reconciliation renews leaves inside their rotate-before window, advances any staged root transition, retries persisted retired-region cleanup, republishes expiry metrics, and otherwise remains idempotent.
 
 ### Root Rollover
 
@@ -62,7 +67,7 @@ This prevents a leaf/root cutover from outrunning cached client trust. The overl
 
 ### Delete
 
-On a CloudFormation `Delete`, the manager deletes each regional imported ACM certificate, its SSM ARN parameter, and the public trust parameter. Regional stacks depend on the owning API stack, so their ALB listeners are removed before certificate cleanup. The root secret and KMS key follow the removal policies defined by the CDK stack rather than being deleted directly by this handler.
+On a CloudFormation `Delete`, the manager deletes certificates and SSM ARN parameters for both the current `Regions` property and every persisted retired region, then deletes the public trust parameter. Regional stacks depend on the owning API stack, so their ALB listeners are removed before certificate cleanup. An unexpected `ResourceInUseException` fails Delete rather than abandoning an ARN with no future scheduler. The root secret and KMS key follow the removal policies defined by the CDK stack rather than being deleted directly by this handler.
 
 ## Security Model
 
@@ -137,7 +142,7 @@ For a project named `gco`, public state uses these paths:
 
 | State | Location | Sensitive |
 |---|---|---:|
-| Root private key and root lifecycle state | Secrets Manager: `gco/backend-tls/root-ca` | Yes |
+| Current, pending, overlapping roots, and retired-region cleanup state | Secrets Manager: `gco/backend-tls/root-ca` | Yes |
 | Current, pending, and overlapping public roots | SSM: `/gco/backend-tls/root-ca.pem` | No |
 | Stable regional ACM ARN | SSM: `/gco/backend-tls/certificate-arn/<region>` | No |
 | Regional leaf certificate and private key | ACM in the workload region | ACM-managed |
@@ -148,10 +153,11 @@ The SSM trust bundle may contain multiple public roots during staged rollover. I
 
 The function publishes to the `GCO/BackendTLS` CloudWatch namespace:
 
+- `ReconciliationSuccess`, dimensioned by project. A missing heartbeat for two schedule intervals alarms even when EventBridge is disabled or no Lambda error metric is emitted.
 - `RootCertificateDaysToExpiry`, dimensioned by project.
 - `LeafCertificateDaysToExpiry`, dimensioned by project and region.
 
-The owning CDK stack also alarms on root/leaf expiry thresholds, manager errors, and dead-letter queue messages. Metric publication is best effort; certificate reconciliation still fails on any state, Secrets Manager, SSM, or ACM error.
+The owning CDK stack also alarms on a missing reconciliation heartbeat, root/leaf expiry thresholds, manager errors, and dead-letter queue messages. Metric publication is best effort; certificate reconciliation still fails on any state, Secrets Manager, SSM, or ACM error.
 
 ## IAM Permissions
 
@@ -177,4 +183,13 @@ The container entry point is `handler.lambda_handler`. A container image is requ
 
 ## Failure Behavior
 
-Configuration, malformed secret state, unsafe lifetime relationships, invalid ACM ARN ownership, and certificate issuance/import failures are fatal. CloudFormation or EventBridge retry behavior, the encrypted dead-letter queue, and CloudWatch alarms surface these failures. Expiry metric publication is the only best-effort operation because an observability outage must not interrupt an otherwise safe certificate rotation.
+Configuration, malformed secret state, unsafe lifetime relationships, invalid ACM ARN ownership, certificate-signature mismatch, and issuance/import failures are fatal. A pending root's activation delay starts only after SSM successfully publishes a trust bundle containing it, so an SSM outage cannot silently consume the proxy propagation window. A retired certificate that is still attached is the deliberate exception: its ARN parameter and encrypted retirement record remain until a scheduled retry can safely remove both. CloudFormation or EventBridge retry behavior, the encrypted dead-letter queue, heartbeat/expiry metrics, and CloudWatch alarms surface failures. Expiry and heartbeat metric publication is the only best-effort operation because an observability outage must not interrupt an otherwise safe certificate rotation.
+
+## Recovery Runbook
+
+For alarm diagnosis, metadata-only Secrets Manager version recovery, public
+trust and regional ACM/ALB validation, staged emergency generation bumps, and
+irrecoverable-root escalation, follow
+[Backend Certificate Rotation Fails](../../docs/RUNBOOKS.md#backend-certificate-rotation-fails),
+including its [Root-State Recovery](../../docs/RUNBOOKS.md#root-state-recovery)
+procedure. Never print or export private root material during diagnosis.

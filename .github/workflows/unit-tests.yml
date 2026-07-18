@@ -13,10 +13,11 @@
 #   - unit:cdk:project-name-scoping — #139: per-project_name name-collision + gco backward-compat synth checks
 #   - unit:cdk:synth               — cdk synth of the default config
 #   - unit:cli:smoke               — gco --help and all subcommand help pages
+#   - unit:cli:smoke:windows       — native Windows cli.stacks/app import + file-lock smoke
 #   - unit:fresh-install           — pip install from scratch, verify imports
 #   - unit:lockfile:freshness      — requirements-lock.txt matches pyproject.toml
 #   - unit:mcp:install             — uv-installs gco-mcp from source, then launches the server
-#   - unit:pytest:core             — pytest (coverage gate 90%) + upload coverage artifact
+#   - unit:pytest:core             — pytest (90% enforced floor; 93% target) + upload coverage artifact
 #   - unit:workload:imports        — K8s service import + circular-import detection
 #
 # The HTML coverage report is published to GitHub Pages by a separate
@@ -107,7 +108,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: actions/setup-node@v6.4.0
         with:
-          node-version: "24"
+          node-version-file: ".nvmrc"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
@@ -119,15 +120,12 @@ jobs:
       - uses: ./.github/actions/build-lambda-package
       - name: Run pytest with coverage
         # -n auto distributes tests across all available CPU cores via
-        # pytest-xdist. Every test is xdist-safe because
-        # tests/conftest.py::_neutralize_lambda_build patches
-        # StackManager._ensure_lambda_build and _rebuild_lambda_packages
-        # so tests can't rebuild the real lambda/kubectl-applier-simple-build
-        # tree mid-run — that rebuild is what CDK's Code.from_asset() races
-        # against when two workers synthesize stacks concurrently. The
-        # session-wide patch guards on `project_root` so the handful of
-        # tests that legitimately exercise these methods against a
-        # `tmp_path` keep working.
+        # pytest-xdist. The production asset publisher now uses per-asset
+        # interprocess locks, staging trees, full-tree completion manifests,
+        # and atomic rename publication. The session guard still patches
+        # StackManager._ensure_lambda_build for the real checkout so tests do
+        # not repeat pip/npm installs; tests using a tmp_path exercise the
+        # production publisher unchanged.
         #
         # --dist=load (xdist's default) round-robins individual test items
         # across workers. --maxfail=1 matches the previous -x "stop at
@@ -169,6 +167,38 @@ jobs:
       - name: Run BATS suite
         run: bats tests/BATS/
 
+  unit-recorder-macos-bash32:
+    name: "unit:recorder:macos-bash32"
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify recorder syntax and guards with macOS system Bash
+        run: |
+          set -euo pipefail
+          bash_version=$(/bin/bash -c 'printf "%s" "$BASH_VERSION"')
+          case "$bash_version" in
+            3.2.*) ;;
+            *) echo "Expected macOS Bash 3.2, found $bash_version" >&2; exit 1 ;;
+          esac
+          /bin/bash -n demo/lib_demo.sh demo/record_deploy.sh demo/record_destroy.sh
+          /bin/bash -eu <<'BASH32'
+          source demo/lib_demo.sh
+          GCO_EXPECTED_GIT_SHA=$(git rev-parse HEAD)
+          export GCO_EXPECTED_GIT_SHA
+          verify_recording_git_state "$PWD"
+          temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/gco-recorder.XXXXXX")
+          trap 'rm -rf "$temp_dir"' EXIT
+          cast_file="$temp_dir/test.cast"
+          access_key="AKIA""ABCDEFGHIJKLMNOP"
+          printf '{"version":2}\n[0.1,"o","account 123456789012 key %s"]\n' \
+            "$access_key" > "$cast_file"
+          sanitize_cast "$cast_file"
+          verify_cast_sanitized "$cast_file"
+          grep -q '000000000000' "$cast_file"
+          grep -q 'REDACTED_AWS_ACCESS_KEY_ID' "$cast_file"
+          BASH32
+
   unit-cli-smoke:
     name: "unit:cli:smoke"
     runs-on: ubuntu-latest
@@ -194,6 +224,39 @@ jobs:
           gco dag --help
           gco inference --help
 
+  unit-cli-smoke-windows:
+    name: "unit:cli:smoke:windows"
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install CLI with CDK dependencies
+        run: pip install -e ".[cdk]"
+      - name: Exercise native Windows imports and asset locks
+        shell: pwsh
+        run: |
+          @'
+          import tempfile
+          from pathlib import Path
+
+          import app
+          import cli.stacks as stacks
+
+          with tempfile.TemporaryDirectory() as temporary_directory:
+              build_dir = Path(temporary_directory) / "asset-build"
+              with stacks._lambda_asset_lock(build_dir, exclusive=False):
+                  pass
+              with stacks._lambda_asset_lock(build_dir, exclusive=True):
+                  pass
+          print("Windows CDK imports and asset locks OK")
+          '@ | python -
+          gco stacks --help
+
   unit-cdk-synth:
     name: "unit:cdk:synth"
     runs-on: ubuntu-latest
@@ -202,19 +265,25 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6.4.0
         with:
-          node-version: "24"
+          node-version-file: ".nvmrc"
+          cache: "npm"
+          cache-dependency-path: "package-lock.json"
+      - name: Install and verify the declared npm version
+        run: bash .github/scripts/use-pinned-npm.sh package.json
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
-      - name: Install CDK + dependencies
+      - name: Install locked CDK + Python dependencies
         run: |
+          npm ci --ignore-scripts --no-audit --no-fund
           pip install -e ".[cdk]"
-          npm install -g aws-cdk
       - uses: ./.github/actions/build-lambda-package
+      - name: Verify synth and diff repair the real inference streaming bundle
+        run: python .github/scripts/verify_inference_streaming_bundle_freshness.py
       - name: cdk synth
-        run: cdk synth --quiet
+        run: npm exec -- cdk synth --quiet
       - name: Upload cdk.out
         if: always()
         uses: ./.github/actions/upload-artifact-with-retry
@@ -237,7 +306,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: actions/setup-node@v6.4.0
         with:
-          node-version: "24"
+          node-version-file: ".nvmrc"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
@@ -290,7 +359,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: actions/setup-node@v6.4.0
         with:
-          node-version: "24"
+          node-version-file: ".nvmrc"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
@@ -368,7 +437,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: actions/setup-node@v6.4.0
         with:
-          node-version: "24"
+          node-version-file: ".nvmrc"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
@@ -476,7 +545,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6.4.0
         with:
-          node-version: "24"
+          node-version-file: ".nvmrc"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"

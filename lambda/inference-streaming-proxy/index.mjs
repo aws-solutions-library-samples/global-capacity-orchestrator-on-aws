@@ -1,6 +1,5 @@
 import { createHash, createHmac, randomBytes, X509Certificate } from "node:crypto";
 import * as https from "node:https";
-import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { checkServerIdentity } from "node:tls";
 import { performance } from "node:perf_hooks";
@@ -26,6 +25,10 @@ const HOP_BY_HOP_HEADERS = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
+// Streaming response metadata has a single-value `headers` object. Inference
+// backends are not allowed to set caller cookies, so drop Set-Cookie instead
+// of corrupting repeated values by comma-folding them.
+const BLOCKED_RESPONSE_HEADERS = new Set(["content-length", "set-cookie"]);
 const ALLOWED_REQUEST_HEADERS = new Set([
   "accept",
   "accept-encoding",
@@ -50,12 +53,14 @@ const INTERNAL_SIGNATURE_HEADERS = new Set([
 const ALLOWED_METHODS = new Set(["GET", "HEAD", "POST"]);
 const RETRYABLE_METHODS = new Set(["GET", "HEAD"]);
 const RETRYABLE_STATUS_CODES = new Set([429, 502, 503, 504]);
-const REGION_RE = /^[a-z]{2}(?:-[a-z]+)+-[0-9]+$/;
+const REGION_RE = /^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$/;
 const DNS_NAME_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
 const GLOBAL_IDLE_TIMEOUT_MS = 30_000;
 const REGIONAL_IDLE_TIMEOUT_MS = 300_000;
 const LAMBDA_MAX_FORWARD_MS = 899_000;
 const RESPONSE_HEADROOM_MS = 1_000;
+const DEFAULT_MAX_REQUEST_BODY_BYTES = 1_048_576;
+const MAX_CONFIGURABLE_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
 
 function boundedEnvFloat(name, defaultValue, minimum, maximum) {
   const raw = process.env[name];
@@ -78,6 +83,13 @@ function boundedEnvInt(name, defaultValue, minimum, maximum) {
     ? value
     : defaultValue;
 }
+
+const MAX_REQUEST_BODY_BYTES = boundedEnvInt(
+  "MAX_REQUEST_BODY_BYTES",
+  DEFAULT_MAX_REQUEST_BODY_BYTES,
+  1,
+  MAX_CONFIGURABLE_REQUEST_BODY_BYTES,
+);
 
 function monotonicSeconds() {
   return performance.now() / 1_000;
@@ -216,8 +228,7 @@ async function refreshSecret(now, ageAtAttempt) {
   }
 }
 
-async function getSecretToken() {
-  const now = monotonicSeconds();
+async function getSecretToken(now = monotonicSeconds()) {
   const age = now - secretLastSuccessfulRefresh;
   if (cachedSecret !== null && age < SECRET_CACHE_TTL_SECONDS) {
     return cachedSecret;
@@ -321,9 +332,8 @@ async function refreshTlsTransport(settings, now, ageAtAttempt) {
   }
 }
 
-async function getTlsTransport() {
+async function getTlsTransport(now = monotonicSeconds()) {
   const settings = tlsSettings();
-  const now = monotonicSeconds();
   const age = now - tlsLastSuccessfulRefresh;
   if (cachedTlsTransport !== null && age < settings.ttl) {
     return cachedTlsTransport;
@@ -354,13 +364,20 @@ function regionalEndpointCacheTtl() {
   return boundedEnvFloat("REGIONAL_ENDPOINT_CACHE_TTL_SECONDS", 60, 0, 300);
 }
 
+function awsUrlSuffix() {
+  const suffix = String(process.env.AWS_URL_SUFFIX || "").trim().toLowerCase();
+  if (!DNS_NAME_RE.test(suffix)) {
+    throw new Error("AWS URL suffix is not configured");
+  }
+  return suffix;
+}
+
 function validatedDnsName(value) {
   const endpoint = String(value ?? "").trim().replace(/\.+$/, "");
   const lower = endpoint.toLowerCase();
   if (
     !DNS_NAME_RE.test(endpoint) ||
-    (!lower.endsWith(".elb.amazonaws.com") &&
-      !lower.endsWith(".elb.amazonaws.com.cn"))
+    !lower.endsWith(`.elb.${awsUrlSuffix()}`)
   ) {
     throw new Error("Registered backend is invalid");
   }
@@ -440,7 +457,7 @@ async function validateRegionalEndpointOwnership(
   }
 }
 
-async function resolveRegionalEndpoint() {
+async function resolveRegionalEndpoint(now = monotonicSeconds()) {
   const registryRegion = String(process.env.REGISTRY_REGION || "").trim();
   const targetRegion = String(process.env.TARGET_REGION || "").trim();
   const projectName = String(process.env.PROJECT_NAME || "").trim();
@@ -461,7 +478,6 @@ async function resolveRegionalEndpoint() {
     expectedAccount,
   ]);
   const ttl = regionalEndpointCacheTtl();
-  const now = monotonicSeconds();
   const cached = regionalEndpointCache.get(cacheKey);
   if (ttl > 0 && cached && now - cached.timestamp < ttl) {
     return cached.endpoint;
@@ -479,7 +495,7 @@ async function resolveRegionalEndpoint() {
     projectName,
   );
   regionalEndpointCache.set(cacheKey, {
-    timestamp: monotonicSeconds(),
+    timestamp: now,
     endpoint,
   });
   return endpoint;
@@ -626,10 +642,18 @@ function eventPath(event) {
 }
 
 function eventHeaders(event) {
-  const headers = event?.headers;
-  return headers !== null && typeof headers === "object" && !Array.isArray(headers)
-    ? headers
-    : {};
+  const merged = {};
+  if (nonEmptyMapping(event?.headers)) {
+    Object.assign(merged, event.headers);
+  }
+  if (nonEmptyMapping(event?.multiValueHeaders)) {
+    // REST API v1 supplies repeated values here. Apply this map after the
+    // scalar map so it wins even when API Gateway populated both forms.
+    for (const [name, value] of Object.entries(event.multiValueHeaders)) {
+      merged[name] = Array.isArray(value) ? value : [value];
+    }
+  }
+  return merged;
 }
 
 function hasHeader(headers, expectedName) {
@@ -651,7 +675,16 @@ function sanitizeRequestHeaders(headers) {
     ) {
       continue;
     }
-    sanitized[normalized] = String(value);
+    const values = Array.isArray(value) ? value : [value];
+    const sanitizedValues = values
+      .filter((entry) => entry !== null && entry !== undefined)
+      .map(String);
+    if (sanitizedValues.length === 0) {
+      continue;
+    }
+    sanitized[normalized] = Array.isArray(value)
+      ? sanitizedValues
+      : sanitizedValues[0];
   }
   return sanitized;
 }
@@ -690,7 +723,9 @@ function outboundHeaders(headers) {
       (ALLOWED_REQUEST_HEADERS.has(normalized) ||
         INTERNAL_SIGNATURE_HEADERS.has(normalized))
     ) {
-      outbound[normalized] = String(value);
+      outbound[normalized] = Array.isArray(value)
+        ? value.map(String)
+        : String(value);
     }
   }
   return outbound;
@@ -702,7 +737,7 @@ function sanitizeResponseHeaders(headers) {
     const normalized = String(name).toLowerCase();
     if (
       HOP_BY_HOP_HEADERS.has(normalized) ||
-      normalized === "content-length" ||
+      BLOCKED_RESPONSE_HEADERS.has(normalized) ||
       value === undefined
     ) {
       continue;
@@ -778,6 +813,26 @@ function transportFailureKind(error) {
   return "unexpected";
 }
 
+function publicErrorForTransportFailure(kind, attemptsMade = 0) {
+  if (kind === "tls") {
+    return new PublicError(502, "Backend TLS verification failed");
+  }
+  if (kind === "unexpected") {
+    return new PublicError(500, "Internal server error");
+  }
+  if (kind === "connection") {
+    return new PublicError(503, "Service unavailable", {}, {
+      message: `Upstream failed after ${attemptsMade} attempt(s)`,
+    });
+  }
+  if (kind === "timeout") {
+    return new PublicError(504, "Gateway timeout", {}, {
+      message: `Upstream failed after ${attemptsMade} attempt(s)`,
+    });
+  }
+  return new PublicError(504, "Gateway timeout");
+}
+
 function openUpstream({
   target,
   method,
@@ -787,7 +842,7 @@ function openUpstream({
   idleTimeoutMs,
   remainingMs,
   signal,
-}) {
+}, requestFactory = https.request) {
   return new Promise((resolve, reject) => {
     let request;
     let response = null;
@@ -840,7 +895,7 @@ function openUpstream({
     signal.addEventListener("abort", onAbort, { once: true });
 
     try {
-      request = https.request(
+      request = requestFactory(
         {
           protocol: "https:",
           hostname: target.hostname,
@@ -943,6 +998,12 @@ async function streamFinalResponse(resource, responseStream, state, signal) {
   }
 }
 
+const FORWARD_OPERATIONS = Object.freeze({
+  openUpstream,
+  sleep,
+  streamFinalResponse,
+});
+
 async function forwardRequest({
   target,
   method,
@@ -954,7 +1015,7 @@ async function forwardRequest({
   responseStream,
   responseState,
   signal,
-}) {
+}, operations = FORWARD_OPERATIONS) {
   const maxAttempts = RETRYABLE_METHODS.has(method) ? MAX_RETRIES : 1;
   const deadline = monotonicMilliseconds() + Math.max(timeoutMs, 0);
   let lastFailureKind = null;
@@ -969,7 +1030,7 @@ async function forwardRequest({
 
     let resource;
     try {
-      resource = await openUpstream({
+      resource = await operations.openUpstream({
         target,
         method,
         headers,
@@ -984,11 +1045,8 @@ async function forwardRequest({
       if (kind === "downstream") {
         throw error;
       }
-      if (kind === "tls") {
-        throw new PublicError(502, "Backend TLS verification failed");
-      }
-      if (kind === "unexpected") {
-        throw new PublicError(500, "Internal server error");
+      if (kind === "tls" || kind === "unexpected") {
+        throw publicErrorForTransportFailure(kind, attemptsMade);
       }
       lastFailureKind = kind;
       console.warn(
@@ -1002,7 +1060,7 @@ async function forwardRequest({
       if (deadline - monotonicMilliseconds() <= backoffMs) {
         break;
       }
-      await sleep(backoffMs, signal);
+      await operations.sleep(backoffMs, signal);
       continue;
     }
 
@@ -1015,12 +1073,12 @@ async function forwardRequest({
         );
         resource.cleanup();
         resource.destroy();
-        await sleep(backoffMs, signal);
+        await operations.sleep(backoffMs, signal);
         continue;
       }
     }
 
-    await streamFinalResponse(
+    await operations.streamFinalResponse(
       resource,
       responseStream,
       responseState,
@@ -1029,17 +1087,7 @@ async function forwardRequest({
     return;
   }
 
-  if (lastFailureKind === "connection") {
-    throw new PublicError(503, "Service unavailable", {}, {
-      message: `Upstream failed after ${attemptsMade} attempt(s)`,
-    });
-  }
-  if (lastFailureKind === "timeout") {
-    throw new PublicError(504, "Gateway timeout", {}, {
-      message: `Upstream failed after ${attemptsMade} attempt(s)`,
-    });
-  }
-  throw new PublicError(504, "Gateway timeout");
+  throw publicErrorForTransportFailure(lastFailureKind, attemptsMade);
 }
 
 async function sendJsonError(
@@ -1061,7 +1109,7 @@ async function sendJsonError(
         ...headers,
       },
     });
-    await pipeline(Readable.from([body]), output);
+    output.end(body);
   } catch {
     // The caller may have disconnected before the bounded error could be sent.
   }
@@ -1075,7 +1123,50 @@ function routingMode() {
   return mode;
 }
 
-async function streamingHandler(event, responseStream, context) {
+function preflightRequest(event) {
+  if (event?.isBase64Encoded) {
+    throw new PublicError(415, "Base64-encoded request bodies are not supported");
+  }
+  const method = eventMethod(event);
+  const path = eventPath(event);
+  const query = requestQuery(event);
+  const incomingHeaders = eventHeaders(event);
+  const body = event?.body ?? "";
+  if (typeof body !== "string") {
+    throw new PublicError(400, "Invalid request body");
+  }
+  const bodyBuffer = Buffer.from(body, "utf8");
+  if (bodyBuffer.byteLength > MAX_REQUEST_BODY_BYTES) {
+    throw new PublicError(
+      413,
+      `Request body exceeds maximum size of ${MAX_REQUEST_BODY_BYTES} bytes`,
+    );
+  }
+  const mode = routingMode();
+
+  if (mode === "global" && hasHeader(incomingHeaders, "x-gco-target-region")) {
+    throw new PublicError(
+      400,
+      "X-GCO-Target-Region is not supported by the global endpoint; use the target region's regional API endpoint if authorized for direct access",
+    );
+  }
+
+  return { method, path, query, incomingHeaders, bodyBuffer, mode };
+}
+
+const PRODUCTION_DEPENDENCIES = Object.freeze({
+  getSecretToken,
+  resolveRegionalEndpoint,
+  getTlsTransport,
+  forwardRequest,
+});
+
+async function streamingHandler(
+  event,
+  responseStream,
+  context,
+  dependencies = PRODUCTION_DEPENDENCIES,
+) {
   const responseState = { started: false };
   const downstreamAbort = new AbortController();
   const onDownstreamClose = () => {
@@ -1090,30 +1181,12 @@ async function streamingHandler(event, responseStream, context) {
   responseStream.once("error", onDownstreamError);
 
   try {
-    if (event?.isBase64Encoded) {
-      throw new PublicError(415, "Base64-encoded request bodies are not supported");
-    }
-    const method = eventMethod(event);
-    const path = eventPath(event);
-    const query = requestQuery(event);
-    const incomingHeaders = eventHeaders(event);
-    const body = event?.body ?? "";
-    if (typeof body !== "string") {
-      throw new PublicError(400, "Invalid request body");
-    }
-    const bodyBuffer = Buffer.from(body, "utf8");
-    const mode = routingMode();
-
-    if (mode === "global" && hasHeader(incomingHeaders, "x-gco-target-region")) {
-      throw new PublicError(
-        400,
-        "X-GCO-Target-Region is not supported by the global endpoint; use the target region's regional API endpoint if authorized for direct access",
-      );
-    }
+    const { method, path, query, incomingHeaders, bodyBuffer, mode } =
+      preflightRequest(event);
 
     let signingKey;
     try {
-      signingKey = await getSecretToken();
+      signingKey = await dependencies.getSecretToken();
     } catch {
       throw new PublicError(
         503,
@@ -1129,7 +1202,7 @@ async function streamingHandler(event, responseStream, context) {
           throw new Error("Global endpoint is not configured");
         }
       } else {
-        endpoint = await resolveRegionalEndpoint();
+        endpoint = await dependencies.resolveRegionalEndpoint();
       }
     } catch {
       if (mode === "regional") {
@@ -1159,7 +1232,7 @@ async function streamingHandler(event, responseStream, context) {
 
     let transport;
     try {
-      transport = await getTlsTransport();
+      transport = await dependencies.getTlsTransport();
     } catch {
       throw new PublicError(503, "Backend trust is temporarily unavailable");
     }
@@ -1174,7 +1247,7 @@ async function streamingHandler(event, responseStream, context) {
       throw new PublicError(504, "Gateway timeout");
     }
 
-    await forwardRequest({
+    await dependencies.forwardRequest({
       target,
       method,
       headers: outboundHeaders(requestHeaders),
@@ -1211,5 +1284,80 @@ async function streamingHandler(event, responseStream, context) {
     responseStream.removeListener("error", onDownstreamError);
   }
 }
+
+function resetRuntimeStateForTest() {
+  secretsClients.clear();
+  ssmClients.clear();
+  elbClients.clear();
+  regionalEndpointCache.clear();
+  cachedSecret = null;
+  secretLastSuccessfulRefresh = 0;
+  secretLastRefreshAttempt = 0;
+  secretRefreshPromise = null;
+  cachedTlsTransport = null;
+  tlsLastSuccessfulRefresh = 0;
+  tlsLastRefreshAttempt = 0;
+  tlsRefreshPromise = null;
+}
+
+export const __test = Object.freeze({
+  MAX_REQUEST_BODY_BYTES,
+  PublicError,
+  UpstreamTimeoutError,
+  DownstreamAbortError,
+  boundedEnvFloat,
+  boundedEnvInt,
+  monotonicSeconds,
+  monotonicMilliseconds,
+  secretRegion,
+  getSecretsClient,
+  getSsmClient,
+  getElbClient,
+  refreshSecret,
+  getSecretToken,
+  tlsSettings,
+  validateTrustBundle,
+  newTlsTransport,
+  refreshTlsTransport,
+  getTlsTransport,
+  regionalEndpointCacheTtl,
+  awsUrlSuffix,
+  validatedDnsName,
+  validateRegionalEndpointOwnership,
+  resolveRegionalEndpoint,
+  parseEndpoint,
+  encodeRequestPath,
+  pythonString,
+  encodeQueryComponent,
+  nonEmptyMapping,
+  encodedQueryFromMapping,
+  eventMethod,
+  eventPath,
+  hasHeader,
+  isTlsError,
+  openUpstream,
+  sleep,
+  forwardRequest,
+  routingMode,
+  resetRuntimeStateForTest,
+  secretsClients,
+  ssmClients,
+  elbClients,
+  regionalEndpointCache,
+  preflightRequest,
+  requestQuery,
+  buildTarget,
+  eventHeaders,
+  sanitizeRequestHeaders,
+  outboundHeaders,
+  sanitizeResponseHeaders,
+  buildSignedHeaders,
+  requestBudgetMilliseconds,
+  transportFailureKind,
+  publicErrorForTransportFailure,
+  streamFinalResponse,
+  sendJsonError,
+  streamingHandler,
+});
 
 export const handler = awslambda.streamifyResponse(streamingHandler);

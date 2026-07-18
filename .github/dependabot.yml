@@ -1,8 +1,9 @@
-# Dependabot scope is GitHub Actions + Docker only.
-# Python dependencies are intentionally NOT tracked here — they are pinned
-# via `requirements-lock.txt` with `pip-compile` and reviewed intentionally.
-# The monthly `deps-scan` workflow + weekly `cve-scan` cover CVE-driven
-# Python bumps.
+# Dependabot scope is GitHub Actions, Docker, repository tooling, and the
+# deployable Node Lambda. Python dependencies are intentionally NOT tracked
+# here — they are pinned via `requirements-lock.txt` with `pip-compile` and
+# reviewed intentionally.
+# The monthly `deps-scan` workflow tracks language/runtime drift (including
+# Lambda Python and Node.js), while weekly CVE scanning covers locked graphs.
 
 version: 2
 updates:
@@ -20,6 +21,28 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
+
+  # Locked repository tooling (AWS CDK CLI, cdk-dia, markdownlint-cli2).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+
+  # Bundled AWS SDK clients for the inference response-streaming Lambda.
+  - package-ecosystem: "npm"
+    directory: "/lambda/inference-streaming-proxy"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
 
   # Service image base layers.
   - package-ecosystem: "docker"

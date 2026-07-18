@@ -500,14 +500,14 @@ def add_iam_suppressions(
         # service-account role builds this exact ARN deterministically (from
         # the secret name + API Gateway region + account) so it matches in
         # both single-region and cross-region topologies — see issue #125.
-        f"Resource::arn:aws:secretsmanager:{secret_region}:<AWS::AccountId>:secret:{api_gateway_auth_secret_name(project_name)}*",
+        f"Resource::arn:<AWS::Partition>:secretsmanager:{secret_region}:<AWS::AccountId>:secret:{api_gateway_auth_secret_name(project_name)}*",
     ]
 
     # Add EKS addon patterns for each configured region
     if regions:
         for region in regions:
             applies_to.append(
-                f"Resource::arn:aws:eks:{region}:<AWS::AccountId>:addon/<GCOEksCluster841A896A>/*"
+                f"Resource::arn:<AWS::Partition>:eks:{region}:<AWS::AccountId>:addon/<GCOEksCluster841A896A>/*"
             )
 
     # Add SSM parameter patterns for global region and all regional regions.
@@ -523,13 +523,13 @@ def add_iam_suppressions(
 
     for region in sorted(ssm_regions_set):
         applies_to.append(
-            f"Resource::arn:aws:ssm:{region}:<AWS::AccountId>:parameter/{project_name}/*"
+            f"Resource::arn:<AWS::Partition>:ssm:{region}:<AWS::AccountId>:parameter/{project_name}/*"
         )
         # Per-chart add-on status + replay input written by the helm installer
         # and orchestrator (gco stacks addons status/install). Scoped to the
         # project's addons subtree in each region.
         applies_to.append(
-            f"Resource::arn:aws:ssm:{region}:<AWS::AccountId>:parameter/{project_name}/addons/*"
+            f"Resource::arn:<AWS::Partition>:ssm:{region}:<AWS::AccountId>:parameter/{project_name}/addons/*"
         )
 
     # Add DynamoDB index wildcard patterns for global region
@@ -537,10 +537,10 @@ def add_iam_suppressions(
     if global_region:
         applies_to.extend(
             [
-                f"Resource::arn:aws:dynamodb:{global_region}:<AWS::AccountId>:table/{project_name}-job-templates/index/*",
-                f"Resource::arn:aws:dynamodb:{global_region}:<AWS::AccountId>:table/{project_name}-webhooks/index/*",
-                f"Resource::arn:aws:dynamodb:{global_region}:<AWS::AccountId>:table/{project_name}-jobs/index/*",
-                f"Resource::arn:aws:dynamodb:{global_region}:<AWS::AccountId>:table/{project_name}-inference-endpoints/index/*",
+                f"Resource::arn:<AWS::Partition>:dynamodb:{global_region}:<AWS::AccountId>:table/{project_name}-job-templates/index/*",
+                f"Resource::arn:<AWS::Partition>:dynamodb:{global_region}:<AWS::AccountId>:table/{project_name}-webhooks/index/*",
+                f"Resource::arn:<AWS::Partition>:dynamodb:{global_region}:<AWS::AccountId>:table/{project_name}-jobs/index/*",
+                f"Resource::arn:<AWS::Partition>:dynamodb:{global_region}:<AWS::AccountId>:table/{project_name}-inference-endpoints/index/*",
             ]
         )
 
@@ -550,13 +550,13 @@ def add_iam_suppressions(
     # single ``<project_name>-*`` prefix covers both.
     applies_to.extend(
         [
-            f"Resource::arn:aws:s3:::{project_name}-*",
-            f"Resource::arn:aws:s3:::{project_name}-*/*",
+            f"Resource::arn:<AWS::Partition>:s3:::{project_name}-*",
+            f"Resource::arn:<AWS::Partition>:s3:::{project_name}-*/*",
         ]
     )
 
     # KMS wildcard scoped to S3 via condition for model weights bucket decryption
-    applies_to.append("Resource::arn:aws:kms:*:<AWS::AccountId>:key/*")
+    applies_to.append("Resource::arn:<AWS::Partition>:kms:*:<AWS::AccountId>:key/*")
 
     acknowledge_nag_findings(
         stack,
@@ -1117,14 +1117,14 @@ def add_sagemaker_suppressions(
         # SageMaker execution role — SQS submit to any regional queue under
         # the project's ``<project>-jobs-*`` pattern. The SQS queue ARNs
         # are owned by the regional stacks and not directly importable.
-        f"Resource::arn:aws:sqs:*:<AWS::AccountId>:{project_name}-jobs-*",
+        f"Resource::arn:<AWS::Partition>:sqs:*:<AWS::AccountId>:{project_name}-jobs-*",
         # SageMaker execution role — ``ssm:GetParameter`` on the
         # Cluster_Shared_Bucket metadata parameters under
         # ``/gco/cluster-shared-bucket/*`` in the global region. The path
         # wildcard covers exactly three literal parameter names
         # (name / arn / region) defined by ``GCOGlobalStack``; the rest of
         # the ARN is fully scoped (global region + account).
-        f"Resource::arn:aws:ssm:{gbl_region}:<AWS::AccountId>:parameter/{project_name}/cluster-shared-bucket/*",
+        f"Resource::arn:<AWS::Partition>:ssm:{gbl_region}:<AWS::AccountId>:parameter/{project_name}/cluster-shared-bucket/*",
         # SageMaker execution role — execute-api on any REST API id
         # under ``/prod/*/api/v1/*`` and ``/prod/*/inference/*`` in the
         # api-gateway region. The concrete region value is templated in
@@ -1133,9 +1133,10 @@ def add_sagemaker_suppressions(
         # pinning ``GET``) so notebooks can submit jobs, update
         # templates, and manage inference endpoints in addition to
         # read-only GETs.
-        f"Resource::arn:aws:execute-api:{api_region}:<AWS::AccountId>:*/prod/*/api/v1/*",
-        f"Resource::arn:aws:execute-api:{api_region}:<AWS::AccountId>:*/prod/*/inference/*",
-        # KMS decrypt scoped by ``kms:ViaService=s3.<global-region>.amazonaws.com``
+        f"Resource::arn:<AWS::Partition>:execute-api:{api_region}:<AWS::AccountId>:*/prod/*/api/v1/*",
+        f"Resource::arn:<AWS::Partition>:execute-api:{api_region}:<AWS::AccountId>:*/prod/*/inference/*",
+        # KMS decrypt scoped by
+        # ``kms:ViaService=s3.<global-region>.<AWS::URLSuffix>``
         # condition — the resource ARN is unknown to this stack (cluster-
         # shared KMS key lives in the global region) so Resource::* is the
         # documented pattern, narrowed by the ViaService condition.
@@ -1159,14 +1160,14 @@ def add_sagemaker_suppressions(
         # ``kms:ViaService`` condition-scoped wildcard on the cluster-
         # shared bucket's KMS key — only matched when s3 is the invoking
         # service in the global region.
-        f"Condition::kms:ViaService:s3.{gbl_region}.amazonaws.com",
+        f"Condition::kms:ViaService:s3.{gbl_region}.<AWS::URLSuffix>",
         # Studio UI actions — the execution role is assumed by the Studio
         # runtime and needs domain/space/app/user-profile wildcards to
         # render the IDE and manage notebook apps.
-        f"Resource::arn:aws:sagemaker:{api_region}:<AWS::AccountId>:domain/*",
-        f"Resource::arn:aws:sagemaker:{api_region}:<AWS::AccountId>:user-profile/*/*",
-        f"Resource::arn:aws:sagemaker:{api_region}:<AWS::AccountId>:space/*/*",
-        f"Resource::arn:aws:sagemaker:{api_region}:<AWS::AccountId>:app/*/*/*/*",
+        f"Resource::arn:<AWS::Partition>:sagemaker:{api_region}:<AWS::AccountId>:domain/*",
+        f"Resource::arn:<AWS::Partition>:sagemaker:{api_region}:<AWS::AccountId>:user-profile/*/*",
+        f"Resource::arn:<AWS::Partition>:sagemaker:{api_region}:<AWS::AccountId>:space/*/*",
+        f"Resource::arn:<AWS::Partition>:sagemaker:{api_region}:<AWS::AccountId>:app/*/*/*/*",
         # EMR Serverless — Studio discovers and manages EMR apps via these
         # actions. Resource::* is required because EMR Serverless does not
         # support resource-level scoping on most actions.
@@ -1181,8 +1182,8 @@ def add_sagemaker_suppressions(
         # ``sagemaker-mlflow`` service prefix, so this statement stays
         # inline and scoped to the api-gateway region + account.
         "Action::sagemaker-mlflow:*",
-        f"Resource::arn:aws:sagemaker:{api_region}:<AWS::AccountId>:mlflow-tracking-server/*",
-        f"Resource::arn:aws:sagemaker:{api_region}:<AWS::AccountId>:mlflow-app/*",
+        f"Resource::arn:<AWS::Partition>:sagemaker:{api_region}:<AWS::AccountId>:mlflow-tracking-server/*",
+        f"Resource::arn:<AWS::Partition>:sagemaker:{api_region}:<AWS::AccountId>:mlflow-app/*",
         # ``sts:GetCallerIdentity`` does not support resource-level
         # scoping; the MLflow SigV4 plug-in calls it on every request.
         "Action::sts:GetCallerIdentity",
@@ -1202,7 +1203,7 @@ def add_sagemaker_suppressions(
                     "HTTP methods, so notebooks can submit jobs and "
                     "manage inference endpoints in addition to read-only "
                     "GETs), (3) KMS Decrypt/GenerateDataKey "
-                    "scoped by kms:ViaService=s3.<global-region>.amazonaws.com "
+                    "scoped by kms:ViaService=s3.<global-region>.<AWS::URLSuffix> "
                     "condition (the cluster-shared KMS key ARN is not known "
                     "to the analytics stack — it lives in the global region), "
                     "(4) S3 action wildcards (``s3:Abort*``, ``s3:DeleteObject*``, "
@@ -1599,13 +1600,21 @@ def add_presigned_url_lambda_suppressions(
                 ),
                 applies_to=[
                     "Resource::*",
-                    (f"Resource::arn:aws:sagemaker:{region}:<AWS::AccountId>:domain/*"),
-                    (f"Resource::arn:aws:sagemaker:{region}:<AWS::AccountId>:user-profile/*/*"),
+                    (
+                        f"Resource::arn:<AWS::Partition>:sagemaker:{region}:<AWS::AccountId>:domain/*"
+                    ),
+                    (
+                        f"Resource::arn:<AWS::Partition>:sagemaker:{region}:<AWS::AccountId>:user-profile/*/*"
+                    ),
                     # Generic shapes — catch tokenized-region variants
                     # (``<AWS::Region>``) produced when CDK synthesizes
                     # the policy without pinning the stack's env region.
-                    ("Resource::arn:aws:sagemaker:<AWS::Region>:<AWS::AccountId>:domain/*"),
-                    ("Resource::arn:aws:sagemaker:<AWS::Region>:<AWS::AccountId>:user-profile/*/*"),
+                    (
+                        "Resource::arn:<AWS::Partition>:sagemaker:<AWS::Region>:<AWS::AccountId>:domain/*"
+                    ),
+                    (
+                        "Resource::arn:<AWS::Partition>:sagemaker:<AWS::Region>:<AWS::AccountId>:user-profile/*/*"
+                    ),
                 ],
             ),
         ],

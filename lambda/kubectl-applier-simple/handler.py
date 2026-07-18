@@ -32,6 +32,7 @@ CloudFormation Properties:
 """
 
 import base64
+import copy
 import json
 import logging
 import os
@@ -47,6 +48,7 @@ from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.png``)
@@ -76,6 +78,24 @@ FAILED = "FAILED"
 # {{Hostname}}) in the observability dashboard ConfigMaps, which must survive
 # substitution untouched and be applied verbatim.
 _UNRESOLVED_PLACEHOLDER_RE = re.compile(r"\{\{[A-Z0-9_]+\}\}")
+_HPA_REPLICA_OWNERSHIP_ANNOTATION = "gco.aws/hpa-controls-replicas"
+
+
+def _deployment_patch_body(document: dict[str, Any]) -> dict[str, Any]:
+    """Copy a Deployment update without replicas when its HPA owns scale."""
+    patch_body = copy.deepcopy(document)
+    metadata = patch_body.get("metadata")
+    annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
+    if not isinstance(annotations, dict) or (
+        annotations.get(_HPA_REPLICA_OWNERSHIP_ANNOTATION) != "true"
+    ):
+        return patch_body
+
+    spec = patch_body.get("spec")
+    if isinstance(spec, dict):
+        spec.pop("replicas", None)
+    return patch_body
+
 
 # Exact resources owned by optional features. Keys include the apply phase so
 # disabling one feature cannot delete similarly named or unrelated resources.
@@ -548,6 +568,7 @@ def apply_manifests(
     configure_k8s_client(cluster_name, region)
     v1 = client.CoreV1Api()
     apps_v1 = client.AppsV1Api()
+    autoscaling_v2 = client.AutoscalingV2Api()
     rbac_v1 = client.RbacAuthorizationV1Api()
     networking_v1 = client.NetworkingV1Api()
     custom_api = client.CustomObjectsApi()
@@ -688,7 +709,11 @@ def apply_manifests(
                             apps_v1.create_namespaced_deployment(namespace, body=doc)
                         except ApiException as e:
                             if e.status == 409:
-                                apps_v1.patch_namespaced_deployment(name, namespace, body=doc)
+                                apps_v1.patch_namespaced_deployment(
+                                    name,
+                                    namespace,
+                                    body=_deployment_patch_body(doc),
+                                )
                             else:
                                 raise
 
@@ -710,6 +735,19 @@ def apply_manifests(
                         except ApiException as e:
                             if e.status == 409:
                                 batch_v1.patch_namespaced_cron_job(name, namespace, body=doc)
+                            else:
+                                raise
+
+                    elif kind == "HorizontalPodAutoscaler":
+                        try:
+                            autoscaling_v2.create_namespaced_horizontal_pod_autoscaler(
+                                namespace, body=doc
+                            )
+                        except ApiException as e:
+                            if e.status == 409:
+                                autoscaling_v2.patch_namespaced_horizontal_pod_autoscaler(
+                                    name, namespace, body=doc
+                                )
                             else:
                                 raise
 

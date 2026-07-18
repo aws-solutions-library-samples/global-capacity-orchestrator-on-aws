@@ -1,6 +1,6 @@
 # 0002. Cluster observability on EKS Auto Mode
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-14
 - **Deciders:** GCO maintainers
 - **Supersedes:** none

@@ -15,6 +15,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+from threading import Event, Thread
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -122,14 +123,36 @@ class TestContainerRuntimeDetection:
 class TestStackManager:
     """Tests for StackManager class."""
 
-    def test_stack_manager_init(self):
-        """Test StackManager initialization."""
+    def test_initialization_defers_cdk_and_asset_builds(self):
+        """CloudFormation-only commands construct a manager without local tooling."""
         from cli.stacks import StackManager
 
         config = MagicMock()
-        manager = StackManager(config)
+        with (
+            patch.object(StackManager, "_find_cdk") as find_cdk,
+            patch.object(StackManager, "_ensure_lambda_build") as ensure_build,
+        ):
+            manager = StackManager(config)
+
         assert manager.config == config
         assert manager.project_root is not None
+        assert manager._cdk_path is None
+        find_cdk.assert_not_called()
+        ensure_build.assert_not_called()
+
+    def test_shared_asset_preparation_uses_the_requested_project_root(self, tmp_path):
+        """Raw and in-process CDK callers can invoke the production builder."""
+        from cli.stacks import StackManager, prepare_cdk_assets
+
+        prepared_roots = []
+
+        def record_prepare(manager):
+            prepared_roots.append(manager.project_root)
+
+        with patch.object(StackManager, "_ensure_lambda_build", record_prepare):
+            prepare_cdk_assets(tmp_path)
+
+        assert prepared_roots == [tmp_path]
 
     def test_find_project_root_with_cdk_json(self):
         """Test finding project root when cdk.json exists."""
@@ -151,23 +174,201 @@ class TestStackManager:
 
         config = MagicMock()
 
-        with patch("subprocess.run") as mock_run:
+        with (
+            patch("pathlib.Path.is_file", return_value=False),
+            patch("subprocess.run") as mock_run,
+        ):
             mock_run.return_value = MagicMock(returncode=0, stdout="/usr/local/bin/cdk\n")
             manager = StackManager(config)
-            assert "cdk" in manager._cdk_path
+            assert manager._find_cdk() == "/usr/local/bin/cdk"
+            assert manager._cdk_path is None
 
-    def test_find_cdk_fallback_to_npx(self):
-        """Test fallback to npx cdk when cdk not in PATH."""
-        from cli.stacks import StackManager
+    def test_find_cdk_missing_install_is_actionable(self):
+        """A missing CDK CLI points to the dependency-locked root install."""
+        from cli.stacks import CdkToolchainError, StackManager
 
         config = MagicMock()
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.CalledProcessError(1, "which")
 
-            with patch("os.path.exists", return_value=False):
+            with (
+                patch("os.path.exists", return_value=False),
+                patch("pathlib.Path.is_file", return_value=False),
+                pytest.raises(CdkToolchainError, match="npm ci"),
+            ):
                 manager = StackManager(config)
-                assert manager._cdk_path == "npx cdk"
+                manager._find_cdk()
+
+
+class TestCdkAssetConsumerLocking:
+    """Concurrent publishers cannot expose missing or mixed CDK asset trees."""
+
+    @staticmethod
+    def _write_fresh_helm_asset(stacks_module, root: Path, content: str) -> tuple[Path, Path]:
+        source_dir = root / "lambda" / "helm-installer"
+        build_dir = root / "lambda" / "helm-installer-build"
+        source_dir.mkdir(parents=True)
+        build_dir.mkdir(parents=True)
+        (source_dir / "handler.py").write_text(content, encoding="utf-8")
+        (build_dir / "handler.py").write_text(content, encoding="utf-8")
+        source_digest = stacks_module._asset_tree_digest(source_dir, source_inputs=None)
+        assert source_digest is not None
+        stacks_module._write_build_manifest(build_dir, source_digest)
+        assert stacks_module._asset_build_is_fresh_unlocked(
+            source_dir,
+            build_dir,
+            source_inputs=None,
+        )
+        return source_dir, build_dir
+
+    @staticmethod
+    def _stage_helm_asset(
+        stacks_module,
+        source_dir: Path,
+        build_dir: Path,
+        content: str,
+        *,
+        update_source: bool,
+    ) -> Path:
+        if update_source:
+            (source_dir / "handler.py").write_text(content, encoding="utf-8")
+        staging_dir = build_dir.with_name(f".{build_dir.name}.staging-test")
+        staging_dir.mkdir()
+        (staging_dir / "handler.py").write_text(content, encoding="utf-8")
+        source_digest = stacks_module._asset_tree_digest(source_dir, source_inputs=None)
+        assert source_digest is not None
+        stacks_module._write_build_manifest(staging_dir, source_digest)
+        return staging_dir
+
+    def test_consumer_waits_through_publish_rename_gap(self, tmp_path):
+        """A consumer never observes the absent final path between both renames."""
+        import cli.stacks as stacks_module
+
+        source_dir, build_dir = self._write_fresh_helm_asset(
+            stacks_module,
+            tmp_path,
+            "old-version",
+        )
+        staging_dir = self._stage_helm_asset(
+            stacks_module,
+            source_dir,
+            build_dir,
+            "new-version",
+            update_source=True,
+        )
+        publisher_in_gap = Event()
+        resume_publisher = Event()
+        consumer_entered = Event()
+        failures: list[BaseException] = []
+        observed: list[str] = []
+        original_replace = os.replace
+
+        def pausing_replace(source, target):
+            original_replace(source, target)
+            target_path = Path(target)
+            if Path(source) == build_dir and target_path.name.startswith(
+                f".{build_dir.name}.backup-"
+            ):
+                publisher_in_gap.set()
+                if not resume_publisher.wait(5):
+                    raise TimeoutError("publisher was not released")
+
+        def publish() -> None:
+            try:
+                with (
+                    patch.object(stacks_module.os, "replace", side_effect=pausing_replace),
+                    stacks_module._lambda_asset_lock(build_dir, exclusive=True),
+                ):
+                    stacks_module._publish_staged_asset(staging_dir, build_dir)
+            except Exception as exc:  # pragma: no cover - surfaced by assertion below
+                failures.append(exc)
+
+        def consume() -> None:
+            try:
+                with stacks_module.cdk_asset_consumer(tmp_path):
+                    observed.append((build_dir / "handler.py").read_text(encoding="utf-8"))
+                    assert stacks_module._asset_build_is_fresh_unlocked(
+                        source_dir,
+                        build_dir,
+                        source_inputs=None,
+                    )
+                    consumer_entered.set()
+            except BaseException as exc:  # pragma: no cover - surfaced by assertion below
+                failures.append(exc)
+
+        publisher = Thread(target=publish)
+        publisher.start()
+        assert publisher_in_gap.wait(5)
+        consumer = Thread(target=consume)
+        consumer.start()
+        assert not consumer_entered.wait(0.2)
+
+        resume_publisher.set()
+        publisher.join(5)
+        consumer.join(5)
+        assert not publisher.is_alive()
+        assert not consumer.is_alive()
+        assert failures == []
+        assert observed == ["new-version"]
+
+    def test_shared_consumer_blocks_publisher_until_tree_read_finishes(self, tmp_path):
+        """A publisher cannot reach its first rename while CDK owns the tree."""
+        import cli.stacks as stacks_module
+
+        source_dir, build_dir = self._write_fresh_helm_asset(
+            stacks_module,
+            tmp_path,
+            "old-version",
+        )
+        consumer_entered = Event()
+        release_consumer = Event()
+        publisher_acquired = Event()
+        failures: list[BaseException] = []
+        observed: list[str] = []
+
+        def consume() -> None:
+            try:
+                with stacks_module.cdk_asset_consumer(tmp_path):
+                    consumer_entered.set()
+                    observed.append((build_dir / "handler.py").read_text(encoding="utf-8"))
+                    if not release_consumer.wait(5):
+                        raise TimeoutError("consumer was not released")
+                    observed.append((build_dir / "handler.py").read_text(encoding="utf-8"))
+            except BaseException as exc:  # pragma: no cover - surfaced by assertion below
+                failures.append(exc)
+
+        def publish() -> None:
+            try:
+                with stacks_module._lambda_asset_lock(build_dir, exclusive=True):
+                    publisher_acquired.set()
+                    staging_dir = self._stage_helm_asset(
+                        stacks_module,
+                        source_dir,
+                        build_dir,
+                        "new-version",
+                        update_source=False,
+                    )
+                    stacks_module._publish_staged_asset(staging_dir, build_dir)
+            except BaseException as exc:  # pragma: no cover - surfaced by assertion below
+                failures.append(exc)
+
+        consumer = Thread(target=consume)
+        consumer.start()
+        assert consumer_entered.wait(5)
+        publisher = Thread(target=publish)
+        publisher.start()
+        assert not publisher_acquired.wait(0.2)
+        assert observed == ["old-version"]
+
+        release_consumer.set()
+        consumer.join(5)
+        publisher.join(5)
+        assert not consumer.is_alive()
+        assert not publisher.is_alive()
+        assert failures == []
+        assert observed == ["old-version", "old-version"]
+        assert (build_dir / "handler.py").read_text(encoding="utf-8") == "new-version"
 
 
 class TestStackInfo:
@@ -478,7 +679,10 @@ class TestStackManagerOperations:
         config = MagicMock()
         manager = StackManager(config)
 
-        with patch("subprocess.run") as mock_run:
+        with (
+            patch.object(manager, "_ensure_lambda_build") as mock_prepare,
+            patch("subprocess.run") as mock_run,
+        ):
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
             manager._run_cdk(["list"], capture_output=True)
@@ -488,6 +692,41 @@ class TestStackManagerOperations:
             assert "env" in call_kwargs
             assert "PYTHONPATH" in call_kwargs["env"]
             assert call_kwargs["env"]["PYTHONPATH"]  # Should be non-empty
+            mock_prepare.assert_called_once_with()
+
+    def test_run_cdk_treats_a_path_with_spaces_as_one_executable(self):
+        """CDK executable paths are argv entries, not shell command strings."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        manager._cdk_path = "/Applications/CDK Tools/bin/cdk"
+        with (
+            patch.object(manager, "_ensure_lambda_build"),
+            patch("subprocess.run", return_value=MagicMock(returncode=0)) as mock_run,
+        ):
+            manager._run_cdk(["list"], capture_output=True)
+
+        assert mock_run.call_args.args[0] == [
+            "/Applications/CDK Tools/bin/cdk",
+            "list",
+        ]
+
+    @pytest.mark.parametrize(
+        "command",
+        (["list"], ["synth"], ["diff"], ["deploy"], ["destroy"]),
+    )
+    def test_run_cdk_prepares_assets_for_app_commands(self, command):
+        """Every CDK subcommand that evaluates app.py prepares ignored assets."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        with (
+            patch.object(manager, "_ensure_lambda_build") as mock_prepare,
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            manager._run_cdk(command, capture_output=True)
+
+        mock_prepare.assert_called_once_with()
 
     def test_list_stacks(self):
         """Test listing CDK stacks."""
@@ -719,8 +958,8 @@ class TestStackDeploymentOrder:
 
         assert destroy_order == list(reversed(deploy_order))
 
-    def test_get_stack_destroy_order_regional_first(self):
-        """Test that regional stacks are destroyed before global stacks."""
+    def test_get_stack_destroy_order_uses_orchestrated_phases(self):
+        """Preview order is monitoring, regional work, then global dependencies."""
         from cli.stacks import get_stack_destroy_order
 
         stacks = [
@@ -733,13 +972,13 @@ class TestStackDeploymentOrder:
 
         result = get_stack_destroy_order(stacks)
 
-        # Regional stacks should come first (reverse alphabetical)
-        assert result[0] == "gco-us-west-2"
-        assert result[1] == "gco-us-east-1"
-        # Global stacks should come after (reverse priority)
-        assert result[2] == "gco-monitoring"
-        assert result[3] == "gco-api-gateway"
-        assert result[4] == "gco-global"
+        assert result == [
+            "gco-monitoring",
+            "gco-us-west-2",
+            "gco-us-east-1",
+            "gco-api-gateway",
+            "gco-global",
+        ]
 
     def test_deployment_order_non_gco_project(self):
         """#139: ordering is by suffix, so a non-``gco`` project orders
@@ -762,8 +1001,15 @@ class TestStackDeploymentOrder:
             "acme-us-east-1",
             "acme-us-west-2",
         ]
-        # Destroy is the exact reverse.
-        assert get_stack_destroy_order(stacks) == list(reversed(deploy_order))
+        # Destroy uses the execution phases, not a naive reverse: monitoring
+        # must release its regional dependencies before base stacks are removed.
+        assert get_stack_destroy_order(stacks, project_name="acme") == [
+            "acme-monitoring",
+            "acme-us-west-2",
+            "acme-us-east-1",
+            "acme-api-gateway",
+            "acme-global",
+        ]
 
 
 class TestStackManagerOrchestrated:
@@ -790,6 +1036,73 @@ class TestStackManagerOrchestrated:
             assert successful == ["gco-global", "gco-us-east-1"]
             assert failed == []
             assert mock_deploy.call_count == 2
+
+    def test_deploy_orchestrated_orders_regional_bridges_after_base_stacks(self):
+        """Sequential deploy never crosses the base-to-bridge dependency."""
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        stacks = [
+            "gco-regional-api-us-west-2",
+            "gco-monitoring",
+            "gco-us-east-1",
+            "gco-global",
+            "gco-regional-api-us-east-1",
+            "gco-us-west-2",
+        ]
+        with (
+            patch("cli.stacks._detect_container_runtime", return_value="docker"),
+            patch.object(StackManager, "list_stacks", return_value=stacks),
+            patch.object(StackManager, "deploy", return_value=True) as mock_deploy,
+        ):
+            manager = StackManager(config)
+            success, _, failed = manager.deploy_orchestrated(require_approval=False)
+
+        assert success is True
+        assert failed == []
+        assert [call.kwargs["stack_name"] for call in mock_deploy.call_args_list] == [
+            "gco-global",
+            "gco-us-east-1",
+            "gco-us-west-2",
+            "gco-regional-api-us-east-1",
+            "gco-regional-api-us-west-2",
+            "gco-monitoring",
+        ]
+
+    def test_destroy_orchestrated_orders_regional_bridges_before_base_stacks(self):
+        """Sequential destroy releases bridge VPC imports before base teardown."""
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        stacks = [
+            "gco-global",
+            "gco-us-east-1",
+            "gco-regional-api-us-east-1",
+            "gco-monitoring",
+        ]
+        thread = MagicMock()
+        with (
+            patch.object(StackManager, "list_stacks", return_value=stacks),
+            patch.object(StackManager, "_image_registry_destroy_preflight", return_value=True),
+            patch.object(StackManager, "cleanup_orphaned_bastions"),
+            patch.object(StackManager, "_cleanup_backup_vault"),
+            patch.object(StackManager, "_start_eks_sg_watchdog", return_value=thread),
+            patch.object(StackManager, "_cleanup_eks_security_groups"),
+            patch.object(StackManager, "destroy", return_value=True) as mock_destroy,
+        ):
+            manager = StackManager(config)
+            success, _, failed = manager.destroy_orchestrated(force=True)
+
+        assert success is True
+        assert failed == []
+        assert [call.kwargs["stack_name"] for call in mock_destroy.call_args_list] == [
+            "gco-monitoring",
+            "gco-regional-api-us-east-1",
+            "gco-us-east-1",
+            "gco-global",
+        ]
 
     def test_deploy_orchestrated_stops_on_failure(self):
         """Test that orchestrated deployment stops on first failure."""
@@ -866,6 +1179,7 @@ class TestStackManagerOrchestrated:
         from cli.stacks import StackManager
 
         config = MagicMock()
+        config.project_name = "gco"
 
         with (
             patch("cli.stacks._detect_container_runtime", return_value="docker"),
@@ -877,6 +1191,7 @@ class TestStackManagerOrchestrated:
                 "gco-global",
                 "gco-api-gateway",
                 "gco-us-east-1",
+                "gco-regional-api-us-east-1",
                 "gco-monitoring",
             ]
             mock_deploy.return_value = True
@@ -894,9 +1209,10 @@ class TestStackManagerOrchestrated:
         # Phase 1 globals: no --exclusively (they're the top of the dep tree).
         assert exclusively_by_stack.get("gco-global") is False
         assert exclusively_by_stack.get("gco-api-gateway") is False
-        # Phase 2 regional: uses --exclusively.
+        # Phase 2 regional and phase 3 regional API bridge: --exclusively.
         assert exclusively_by_stack.get("gco-us-east-1") is True
-        # Phase 3 monitoring: uses --exclusively.
+        assert exclusively_by_stack.get("gco-regional-api-us-east-1") is True
+        # Phase 4 monitoring: uses --exclusively.
         assert exclusively_by_stack.get("gco-monitoring") is True
 
     def test_deploy_passes_exclusively_flag_to_cdk(self):
@@ -913,7 +1229,7 @@ class TestStackManagerOrchestrated:
         with (
             patch("cli.stacks._detect_container_runtime", return_value="docker"),
             patch.object(StackManager, "ensure_bootstrapped", return_value=True),
-            patch.object(StackManager, "_rebuild_lambda_packages"),
+            patch.object(StackManager, "_ensure_lambda_build"),
             patch.object(StackManager, "_sync_lambda_sources"),
             patch.object(StackManager, "_check_and_fix_stuck_stack"),
             patch.object(StackManager, "_get_stack_status", return_value="CREATE_COMPLETE"),
@@ -1119,6 +1435,103 @@ class TestParallelDeployment:
             assert "gco-us-east-1" in successful
             assert "gco-us-west-2" in successful
             assert "gco-eu-west-1" in successful
+
+    def test_deploy_parallel_scopes_bridge_phase_to_exact_project_name(self):
+        """A project containing ``regional-api`` keeps bases out of the bridge phase."""
+        from cli.stacks import StackManager
+
+        project = "foo-regional-api-bar"
+        config = MagicMock()
+        config.project_name = project
+        stacks = [
+            f"{project}-global",
+            f"{project}-us-east-1",
+            f"{project}-us-west-2",
+            f"{project}-regional-api-us-east-1",
+            f"{project}-regional-api-us-west-2",
+        ]
+        batches: list[list[str]] = []
+
+        def deploy_batch(*, stacks, **kwargs):
+            del kwargs
+            batches.append(list(stacks))
+            return list(stacks), []
+
+        with (
+            patch("cli.stacks._detect_container_runtime", return_value="docker"),
+            patch.object(StackManager, "list_stacks", return_value=stacks),
+            patch.object(StackManager, "deploy", return_value=True),
+            patch.object(StackManager, "_deploy_stacks_parallel", side_effect=deploy_batch),
+        ):
+            manager = StackManager(config)
+            success, successful, failed = manager.deploy_orchestrated(
+                require_approval=False,
+                parallel=True,
+                max_workers=2,
+            )
+
+        assert success is True
+        assert failed == []
+        assert batches == [
+            [f"{project}-us-east-1", f"{project}-us-west-2"],
+            [
+                f"{project}-regional-api-us-east-1",
+                f"{project}-regional-api-us-west-2",
+            ],
+        ]
+        assert sorted(successful) == sorted(stacks)
+        assert len(successful) == len(set(successful))
+
+    def test_destroy_parallel_scopes_bridge_phase_to_exact_project_name(self):
+        """Destroy separates exact bridge IDs before their matching base stacks."""
+        from cli.stacks import StackManager
+
+        project = "foo-regional-api-bar"
+        config = MagicMock()
+        config.project_name = project
+        stacks = [
+            f"{project}-global",
+            f"{project}-us-east-1",
+            f"{project}-us-west-2",
+            f"{project}-regional-api-us-east-1",
+            f"{project}-regional-api-us-west-2",
+        ]
+        batches: list[list[str]] = []
+
+        def destroy_batch(*, stacks, **kwargs):
+            del kwargs
+            batches.append(list(stacks))
+            return list(stacks), []
+
+        thread = MagicMock()
+        with (
+            patch.object(StackManager, "list_stacks", return_value=stacks),
+            patch.object(StackManager, "_image_registry_destroy_preflight", return_value=True),
+            patch.object(StackManager, "cleanup_orphaned_bastions"),
+            patch.object(StackManager, "_cleanup_backup_vault"),
+            patch.object(StackManager, "_start_eks_sg_watchdog", return_value=thread),
+            patch.object(StackManager, "_cleanup_eks_security_groups"),
+            patch.object(StackManager, "destroy", return_value=True),
+            patch.object(StackManager, "_destroy_stacks_parallel", side_effect=destroy_batch),
+        ):
+            manager = StackManager(config)
+            success, successful, failed = manager.destroy_orchestrated(
+                force=True,
+                parallel=True,
+                max_workers=2,
+            )
+
+        assert success is True
+        assert failed == []
+        assert batches == [
+            [
+                f"{project}-regional-api-us-west-2",
+                f"{project}-regional-api-us-east-1",
+            ],
+            [f"{project}-us-west-2", f"{project}-us-east-1"],
+        ]
+        assert sorted(successful) == sorted(stacks)
+        assert len(successful) == len(set(successful))
 
     def test_deploy_orchestrated_parallel_with_failure(self):
         """Test parallel deployment handles failures correctly."""
@@ -1479,69 +1892,61 @@ class TestStackDeploymentOrderExtended:
 
 
 class TestStackManagerSyncLambdaSources:
-    """Tests for _sync_lambda_sources method."""
+    """Tests for atomic synchronization of canonical shared source copies."""
 
     def test_sync_lambda_sources_success(self, tmp_path):
-        """Test successful lambda source sync."""
+        """Shared proxy and TLS files replace each checked-in target."""
         from cli.stacks import StackManager
 
-        # Create source directory structure
-        source_dir = tmp_path / "lambda" / "kubectl-applier-simple"
-        source_dir.mkdir(parents=True)
-        (source_dir / "handler.py").write_text("# handler code")
-        manifests_dir = source_dir / "manifests"
-        manifests_dir.mkdir()
-        (manifests_dir / "01-test.yaml").write_text("kind: Test")
+        lambda_dir = tmp_path / "lambda"
+        proxy_source = lambda_dir / "proxy-shared" / "proxy_utils.py"
+        tls_source = lambda_dir / "tls-shared" / "backend_tls.py"
+        proxy_source.parent.mkdir(parents=True)
+        tls_source.parent.mkdir(parents=True)
+        proxy_source.write_text("# canonical proxy")
+        tls_source.write_text("# canonical tls")
+        targets = [
+            lambda_dir / "api-gateway-proxy" / "proxy_utils.py",
+            lambda_dir / "regional-api-proxy" / "proxy_utils.py",
+            lambda_dir / "proxy-shared" / "backend_tls.py",
+            lambda_dir / "api-gateway-proxy" / "backend_tls.py",
+            lambda_dir / "regional-api-proxy" / "backend_tls.py",
+        ]
+        for target in targets:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("# stale")
 
-        # Create build directory structure
-        build_dir = tmp_path / "lambda" / "kubectl-applier-simple-build"
-        build_dir.mkdir(parents=True)
-        (build_dir / "handler.py").write_text("# old handler")
-        build_manifests_dir = build_dir / "manifests"
-        build_manifests_dir.mkdir()
-
-        config = MagicMock()
-        manager = StackManager(config, project_root=tmp_path)
+        manager = StackManager(MagicMock(), project_root=tmp_path)
         manager._sync_lambda_sources()
 
-        # Verify files were synced
-        assert (build_dir / "handler.py").read_text() == "# handler code"
-        assert (build_manifests_dir / "01-test.yaml").read_text() == "kind: Test"
+        for target in targets[:2]:
+            assert target.read_text() == "# canonical proxy"
+        for target in targets[2:]:
+            assert target.read_text() == "# canonical tls"
+        assert not list(lambda_dir.rglob("*.tmp-*"))
 
     def test_sync_lambda_sources_no_source_dir(self, tmp_path):
-        """Test sync when source directory doesn't exist."""
+        """Missing optional shared sources are a no-op."""
         from cli.stacks import StackManager
 
-        config = MagicMock()
-        manager = StackManager(config, project_root=tmp_path)
-        # Should not raise error
+        manager = StackManager(MagicMock(), project_root=tmp_path)
         manager._sync_lambda_sources()
 
-    def test_sync_lambda_sources_no_build_dir(self, tmp_path):
-        """Test sync when build directory doesn't exist — triggers auto-build."""
+    def test_sync_lambda_sources_never_mutates_generated_asset(self, tmp_path):
+        """Generated finals are changed only by the locked asset publisher."""
         from cli.stacks import StackManager
 
-        # Create source directory with handler and requirements
         source_dir = tmp_path / "lambda" / "kubectl-applier-simple"
-        source_dir.mkdir(parents=True)
-        (source_dir / "handler.py").write_text("# handler code")
-        (source_dir / "requirements.txt").write_text("pyyaml\n")
-        manifests_dir = source_dir / "manifests"
-        manifests_dir.mkdir()
-        (manifests_dir / "test.yaml").write_text("kind: Test")
-
-        config = MagicMock()
-        manager = StackManager(config, project_root=tmp_path)
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            manager._sync_lambda_sources()
-
-        # Build dir should now exist with handler and manifests
         build_dir = tmp_path / "lambda" / "kubectl-applier-simple-build"
-        assert build_dir.exists()
-        assert (build_dir / "handler.py").exists()
-        assert (build_dir / "manifests" / "test.yaml").exists()
+        source_dir.mkdir(parents=True)
+        build_dir.mkdir(parents=True)
+        (source_dir / "handler.py").write_text("# canonical")
+        (build_dir / "handler.py").write_text("# existing final")
+
+        manager = StackManager(MagicMock(), project_root=tmp_path)
+        manager._sync_lambda_sources()
+
+        assert (build_dir / "handler.py").read_text() == "# existing final"
 
 
 class TestCheckAndFixStuckStack:
@@ -3365,6 +3770,27 @@ class TestAutoMirrorOnDeploy:
         ):
             # Deduplicated, order-stable.
             assert mgr._mirror_target_regions(None, True) == ["us-east-1", "eu-west-1"]
+
+    def test_regional_api_bridge_does_not_mirror_images(self):
+        """Regional API bridges contain no Helm image consumers."""
+        mgr = self._manager()
+        assert mgr._mirror_target_regions("gco-regional-api-us-east-1", False) == []
+
+    def test_bridge_with_marker_in_project_name_does_not_mirror_images(self):
+        """Exact project scoping handles project names containing regional-api."""
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "foo-regional-api-bar"
+        mgr = StackManager(config)
+        assert (
+            mgr._mirror_target_regions(
+                "foo-regional-api-bar-regional-api-us-east-1",
+                False,
+            )
+            == []
+        )
+        assert mgr._mirror_target_regions("foo-regional-api-bar-us-east-1", False) == ["us-east-1"]
 
     def test_non_gco_project_regional_stack_mirrors_its_region(self):
         """#139 regression: a non-``gco`` project's regional stack must still

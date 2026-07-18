@@ -194,6 +194,7 @@ def _format_block(
     statement).
     """
     lines = ["", f"# <{SENTINEL}> BEGIN - auto-inserted, do not edit"]
+    lines.append(f"# Generated at (UTC): {results[0].generated_at}")
     lines.append("# Flowchart(s) generated from this file:")
     for result in results:
         html_rel = result.html_path.relative_to(project_root)

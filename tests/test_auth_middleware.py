@@ -15,6 +15,7 @@ import hmac
 import os
 import secrets
 import time
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -340,20 +341,24 @@ class TestGetSecretToken:
             ),
             patch("gco.services.auth_middleware.get_secrets_client", return_value=mock_secrets),
         ):
-            # First call
             result1 = get_valid_tokens()
-            # Second call should use cache
+            first_refresh_calls = mock_secrets.get_secret_value.call_count
+            # Second call should use cache without querying any secret stage.
             result2 = get_valid_tokens()
 
             assert result1 == result2
-            # Should only call Secrets Manager once (for AWSCURRENT, AWSPENDING may fail)
-            assert mock_secrets.get_secret_value.call_count <= 2
+            assert first_refresh_calls == 3
+            assert mock_secrets.get_secret_value.call_count == first_refresh_calls
+            assert [
+                call.kwargs["VersionStage"] for call in mock_secrets.get_secret_value.call_args_list
+            ] == ["AWSCURRENT", "AWSPENDING", "AWSPREVIOUS"]
 
     def test_clear_token_cache(self):
         """Test clear_token_cache resets the cache."""
         import gco.services.auth_middleware as auth_module
 
         auth_module._cached_tokens = {"old-key"}
+        auth_module._token_expirations = {"old-key": time.time() + 60}
         auth_module._cache_timestamp = 999999.0
         auth_module._last_successful_refresh = 999999.0
         auth_module._last_refresh_attempt = 999999.0
@@ -362,6 +367,7 @@ class TestGetSecretToken:
         clear_token_cache()
 
         assert auth_module._cached_tokens == set()
+        assert auth_module._token_expirations == {}
         assert auth_module._cache_timestamp == 0.0
         assert auth_module._last_successful_refresh == 0.0
         assert auth_module._last_refresh_attempt == 0.0
@@ -557,6 +563,133 @@ class TestAuthMiddlewareErrorHandlingExtended:
             import gco.services.auth_middleware as auth_module
 
             assert "current-token" in auth_module._cached_tokens
+
+    def test_refresh_cache_retains_previous_key_after_rotation(self):
+        """A refreshed verifier accepts a warm signer's key during fixed overlap."""
+        import gco.services.auth_middleware as auth_module
+        from gco.services.auth_middleware import _refresh_cache
+
+        mock_secrets = MagicMock()
+        rotation_completed = 1_700_000_000.0
+        mock_secrets.describe_secret.return_value = {
+            "LastRotatedDate": datetime.fromtimestamp(rotation_completed, UTC)
+        }
+
+        def mock_get_secret(SecretId, VersionStage):
+            del SecretId
+            tokens = {
+                "AWSCURRENT": "new-current-token",
+                "AWSPREVIOUS": "former-current-token",
+            }
+            if VersionStage in tokens:
+                return {"SecretString": f'{{"token": "{tokens[VersionStage]}"}}'}
+            raise mock_secrets.exceptions.ResourceNotFoundException()
+
+        mock_secrets.get_secret_value.side_effect = mock_get_secret
+        mock_secrets.exceptions.ResourceNotFoundException = type(
+            "ResourceNotFoundException", (Exception,), {}
+        )
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"AUTH_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:123:secret:test"},
+            ),
+            patch("gco.services.auth_middleware.get_secrets_client", return_value=mock_secrets),
+            patch(
+                "gco.services.auth_middleware.time.time",
+                return_value=rotation_completed + 1,
+            ),
+        ):
+            assert _refresh_cache() is True
+
+        assert auth_module._cached_tokens == {
+            "new-current-token",
+            "former-current-token",
+        }
+        assert auth_module._token_expirations == {
+            "former-current-token": rotation_completed + auth_module.CACHE_MAX_STALE_SECONDS
+        }
+        mock_secrets.describe_secret.assert_called_once_with(
+            SecretId="arn:aws:secretsmanager:us-east-1:123:secret:test"
+        )
+        requested_stages = [
+            call.kwargs["VersionStage"] for call in mock_secrets.get_secret_value.call_args_list
+        ]
+        assert requested_stages == ["AWSCURRENT", "AWSPENDING", "AWSPREVIOUS"]
+
+    def test_previous_key_expires_despite_successful_refreshes(self):
+        """Repeated refreshes cannot renew AWSPREVIOUS beyond rotation overlap."""
+        import gco.services.auth_middleware as auth_module
+        from gco.services.auth_middleware import _refresh_cache
+
+        mock_secrets = MagicMock()
+        rotation_completed = 1_700_000_000.0
+        mock_secrets.describe_secret.return_value = {
+            "LastRotatedDate": datetime.fromtimestamp(rotation_completed, UTC)
+        }
+
+        def mock_get_secret(SecretId, VersionStage):
+            del SecretId
+            if VersionStage == "AWSCURRENT":
+                return {"SecretString": '{"token": "new-current-token"}'}
+            if VersionStage == "AWSPREVIOUS":
+                return {"SecretString": '{"token": "former-current-token"}'}
+            raise mock_secrets.exceptions.ResourceNotFoundException()
+
+        mock_secrets.get_secret_value.side_effect = mock_get_secret
+        mock_secrets.exceptions.ResourceNotFoundException = type(
+            "ResourceNotFoundException", (Exception,), {}
+        )
+        secret_arn = "arn:aws:secretsmanager:us-east-1:123:secret:test"
+        deadline = rotation_completed + auth_module.CACHE_MAX_STALE_SECONDS
+
+        with (
+            patch.dict("os.environ", {"AUTH_SECRET_ARN": secret_arn}),
+            patch("gco.services.auth_middleware.get_secrets_client", return_value=mock_secrets),
+            patch("gco.services.auth_middleware.time.time", return_value=deadline - 1),
+        ):
+            assert _refresh_cache() is True
+            assert _refresh_cache() is True
+            assert get_valid_tokens() == {"new-current-token", "former-current-token"}
+
+        assert auth_module._token_expirations["former-current-token"] == deadline
+
+        with patch("gco.services.auth_middleware.time.time", return_value=deadline + 1):
+            assert get_valid_tokens() == {"new-current-token"}
+
+    def test_previous_key_requires_rotation_completion_metadata(self):
+        """Missing LastRotatedDate fails closed for AWSPREVIOUS only."""
+        import gco.services.auth_middleware as auth_module
+        from gco.services.auth_middleware import _refresh_cache
+
+        mock_secrets = MagicMock()
+        mock_secrets.describe_secret.return_value = {}
+
+        def mock_get_secret(SecretId, VersionStage):
+            del SecretId
+            if VersionStage == "AWSCURRENT":
+                return {"SecretString": '{"token": "current-token"}'}
+            if VersionStage == "AWSPREVIOUS":
+                return {"SecretString": '{"token": "previous-token"}'}
+            raise mock_secrets.exceptions.ResourceNotFoundException()
+
+        mock_secrets.get_secret_value.side_effect = mock_get_secret
+        mock_secrets.exceptions.ResourceNotFoundException = type(
+            "ResourceNotFoundException", (Exception,), {}
+        )
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"AUTH_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:123:secret:test"},
+            ),
+            patch("gco.services.auth_middleware.get_secrets_client", return_value=mock_secrets),
+        ):
+            assert _refresh_cache() is True
+
+        assert auth_module._cached_tokens == {"current-token"}
+        assert auth_module._token_expirations == {}
 
     def test_refresh_cache_outer_exception(self):
         """Test _refresh_cache handles outer exception gracefully."""

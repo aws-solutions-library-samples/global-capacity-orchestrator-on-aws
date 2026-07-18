@@ -42,7 +42,7 @@ this runbook.
 | ~30 days before a suppression `exp:` date | Renew or drop the CVE suppression | `deps-scan` **Suppression Expiries** row |
 | When the scan flags a newer same-family model | Bump the Bedrock default model pin | `deps-scan` **Bedrock default model** row |
 | Weekly | Check the `cve-scan` result and act on new findings | Monday `cve-scan` run |
-| Every PR | Keep coverage ≥ 90% and label the PR so release notes categorize | Opening a pull request |
+| Every PR | Keep coverage ≥ 93% and label the PR so release notes categorize | Opening a pull request |
 | Every release | Bump the version and confirm the generated GitHub Release notes | Cutting a version |
 | On alarm | Follow the matching runbook in `docs/RUNBOOKS.md` | CloudWatch alarm via the SNS alert topic |
 
@@ -241,28 +241,36 @@ each carry an `exp:YYYY-MM-DD` marker and a justification. The rules:
 ## Routine dependency bumps
 
 The monthly [`deps-scan`](../.github/CI.md#dependency-scan-script) issue lists
-every surface that has drifted (Python packages, Docker images, Helm charts,
-EKS add-ons, CI tooling, and more), grouped with an urgency hint and per-row
-links to the upstream changelog. To act on it:
+every surface that has drifted (Python packages, npm graphs, Docker images,
+Helm charts, EKS add-ons, CI tooling, and more), grouped with an urgency hint
+and per-row links to the upstream changelog. To act on it:
 
 1. Follow the report's **Ref** links to review changelogs for breaking changes.
-2. Update the version in `pyproject.toml`, the manifest, `charts.yaml`, or the
-   pinned `*_VERSION` env/ARG value.
-3. Regenerate `requirements-lock.txt` if Python dependencies changed.
+2. Update the exact version in `pyproject.toml`, the relevant `package.json`, a
+   manifest, `charts.yaml`, or the pinned `*_VERSION` env/ARG value.
+3. Regenerate the lock that belongs to the changed graph:
+   - Python: regenerate `requirements-lock.txt` with the supported container
+     workflow documented below.
+   - Root npm tooling: run
+     `npm install --save-dev --save-exact --ignore-scripts --no-audit --no-fund <package>@<version>`.
+   - Streaming Lambda: run
+     `npm --prefix lambda/inference-streaming-proxy install --save-exact --ignore-scripts --no-audit --no-fund <package>@<version>`.
 4. Reconcile any **Version Consistency** rows so every copy of a pin agrees.
-5. Run the test suite locally, then open a PR.
+5. Run the affected checks and open a PR; CI independently audits both npm
+   graphs and rejects lock, runtime, or dependency-management drift.
 
 Python dependencies are intentionally not tracked by Dependabot — they are
 pinned through `requirements-lock.txt` with `pip-compile` and reviewed
-deliberately. GitHub Actions and Docker base images *are* tracked by Dependabot;
-see [Dependabot](../.github/CI.md#dependabot) for the split.
+deliberately. GitHub Actions, Docker base images, and both repository-owned npm
+graphs *are* tracked by Dependabot; see
+[Dependabot](../.github/CI.md#dependabot) for the split.
 
 ## Refreshing the Bedrock default model
 
 GCO's two optional, advisory Bedrock features — Mission sampling (`gco mission
 ...`) and the capacity advisor (`gco capacity ai-recommend` / `predict` and the
-`ai_recommend` MCP tool) — default to **Amazon Nova Pro**
-(`us.amazon.nova-pro-v1:0`). That id is pinned as a Python constant in two
+`ai_recommend` MCP tool) — default to **Amazon Nova Premier**
+(`us.amazon.nova-premier-v1:0`). That id is pinned as a Python constant in two
 places, kept byte-identical by a CI test:
 
 | File | Constant | Guard |
@@ -275,7 +283,7 @@ Because it is a Python constant — not a `pyproject.toml` entry, a Dockerfile
 [`deps-scan`](../.github/CI.md#dependency-scan-script) closes that gap: its
 **Bedrock default model** check reads `DEFAULT_BEDROCK_MODEL_ID`, lists the
 system-defined inference profiles in `us-east-1`, and flags a newer release **in
-the same model family** — a future Nova Pro generation, never a jump to a
+the same model family** — a future Nova Premier generation, never a jump to a
 different tier or provider (that is a choice, not drift). The check needs AWS
 credentials via OIDC; without them the scan skips it with a noted reason, so a
 credential-less run is not a false "up to date".
@@ -292,7 +300,7 @@ deliberately):
 3. Run the Mission and capacity suites, then open a PR.
 
 Picking a *different* model — for regulatory, data-residency, model-governance,
-or cost reasons — rather than tracking Nova Pro releases is an operator choice,
+or cost reasons — rather than tracking Nova Premier releases is an operator choice,
 not routine maintenance; the override paths (per-call flag,
 `GCO_MISSION_BEDROCK_MODEL_ID`, or changing the default) live in
 [Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). Both
@@ -335,8 +343,16 @@ resolved lockfile, so a clean checkout installs the same graph CI ran.
 - Direct Python deps and their extras (`cdk`, `diagrams`, `inference-monitor`,
   `mcp`, `lint`, `typecheck`, `test`, `security`, `dev`) — exact `==` pins in
   `pyproject.toml`.
-- The full transitive closure — `requirements-lock.txt`, generated by
+- The full Python transitive closure — `requirements-lock.txt`, generated by
   `pip-compile`.
+- Repository development tooling — exact `devDependencies` in the root
+  `package.json` with the full graph in the adjacent `package-lock.json`.
+- The deployable response-streaming Lambda — exact `dependencies` in
+  `lambda/inference-streaming-proxy/package.json` with a separate adjacent
+  lockfile, so development tools cannot enter the production asset.
+- Both npm manifests pin `engines.node` and `packageManager`; the monthly scan
+  keeps those values aligned with `.nvmrc`, `Dockerfile.dev`, and
+  `LAMBDA_NODEJS_RUNTIME` in `gco/stacks/constants.py`.
 - Versions that live outside `pyproject.toml` — workflow `*_VERSION` env pins,
   Dockerfile `ARG`s, `lambda/helm-installer/charts.yaml`,
   `gco/stacks/constants.py`, and the Python-constant image/model pins (the
@@ -345,15 +361,34 @@ resolved lockfile, so a clean checkout installs the same graph CI ran.
   [Refreshing the Bedrock default model](#refreshing-the-bedrock-default-model)).
   These are tracked by the monthly scan rather than Dependabot.
 
-No open ranges. If a local `pip install` needs a range to resolve, the venv is
-dirty — fix the environment, don't loosen the pin.
+No open ranges. Every direct Python and npm dependency uses an exact version,
+and each graph commits its resolved lock. If a local install needs a range to
+resolve, the environment is dirty — fix the environment, don't loosen the pin.
 
 ### Updating a dependency
 
-1. Change the pin (`pyproject.toml`, a manifest, `charts.yaml`, or a
-   `*_VERSION`), reviewing the upstream changelog for breaking changes.
-2. Regenerate the lockfile through the container — the only supported path, so
-   the result matches CI's Linux resolution:
+1. Change the exact pin (`pyproject.toml`, the appropriate `package.json`, a
+   manifest, `charts.yaml`, or a `*_VERSION`), reviewing the upstream changelog
+   for breaking changes.
+2. For an npm dependency, update only its owning graph and adjacent lockfile:
+
+   ```bash
+   # Install and verify npm from the exact packageManager pin first.
+   bash .github/scripts/use-pinned-npm.sh package.json
+
+   # Root development tooling
+   npm install --save-dev --save-exact --ignore-scripts --no-audit --no-fund \
+     <package>@<version>
+
+   # Production streaming-Lambda dependencies
+   npm --prefix lambda/inference-streaming-proxy install \
+     --save-exact --ignore-scripts --no-audit --no-fund <package>@<version>
+   ```
+
+   Never copy root tooling into the Lambda graph. Commit both the changed
+   manifest and its `package-lock.json`.
+3. For a Python dependency, regenerate the lockfile through the container — the
+   only supported path, so the result matches CI's Linux resolution:
 
    ```bash
    docker build -f Dockerfile.dev -t gco-dev .
@@ -364,9 +399,8 @@ dirty — fix the environment, don't loosen the pin.
    '
    ```
 
-3. Run the suite locally, then open a PR. The lockfile-freshness check in
-   `unit-tests.yml` fails if `requirements-lock.txt` drifts from
-   `pyproject.toml`.
+4. Run the affected checks, then open a PR. CI rejects stale Python or npm
+   lockfiles, unmanaged npm graphs, and inconsistent Node/npm/CDK pins.
 
 See [Regenerating the Lockfile](../CONTRIBUTING.md#regenerating-the-lockfile)
 for the full rationale, and [Routine dependency bumps](#routine-dependency-bumps)
@@ -376,26 +410,34 @@ for acting on a monthly drift report.
 
 | Layer | What runs | Cadence |
 |-------|-----------|---------|
-| `security.yml` | bandit, pip-audit, Trivy (filesystem + per-image), semgrep, checkov, KICS, trufflehog, gitleaks, CodeQL | Every push + PR |
+| `security.yml` | bandit, pip-audit, npm audit (every owned graph), Trivy (filesystem + per-image), semgrep, checkov, KICS, trufflehog, gitleaks, CodeQL (Python + JavaScript) | Every push + PR |
 | `cve-scan.yml` | Trivy re-run against fresh CVE databases | Weekly (Mon 09:00 UTC) |
 | `deps-scan.yml` | Version drift across every pinned surface | Monthly |
 
 When a scanner flags a CVE with no upstream fix yet, suppress it with an
 expiring entry — see [Renewing CVE suppressions](#renewing-cve-suppressions).
 
-**Automated updates.** Dependabot is scoped to **GitHub Actions and Docker
-only** (`.github/dependabot.yml`); Python stays on the deliberate `pip-compile`
-path above. See [Dependabot](../.github/CI.md#dependabot) for the rationale.
+**Automated updates.** Dependabot is scoped to **GitHub Actions, Docker, and
+both repository-owned npm graphs** (`.github/dependabot.yml`); Python stays on
+the deliberate `pip-compile` path above. The security workflow runs
+`npm audit` independently in every discovered graph, and Advanced Setup CodeQL
+analyzes both Python and JavaScript. See
+[Dependabot](../.github/CI.md#dependabot) for the rationale.
 
 ## Testing and CI hygiene
 
 ### Coverage expectation
 
-Line + branch coverage must stay **≥ 90%** (`fail_under = 90` in
-`pyproject.toml` `[tool.coverage.report]`), enforced by the `unit:pytest:core`
-job with `--cov-fail-under=90` over `gco`, `cli`, and `gco_mcp`. The HTML report
-is published to GitHub Pages after each `main` run by `pages.yml`. Ship new code
-with tests that hold the line rather than lowering the threshold.
+Python line + branch coverage has an enforced floor of **90%** (`fail_under = 90`
+in `pyproject.toml` `[tool.coverage.report]`), applied by `unit:pytest:core`
+with `--cov-fail-under=90` over `gco`, `cli`, and `gco_mcp`. The project still
+targets **≥ 93% measured coverage** for pull requests and releases; review the
+CI artifact against that target without raising the global failure floor. The
+dedicated `unit:node:inference-streaming-proxy` job separately requires at
+least 93% lines, functions, and branches from Node.js 24's built-in V8
+coverage. The Python HTML report is published to GitHub Pages after each
+`main` run by `pages.yml`. Ship new code with tests that hold the 93% target
+rather than lowering the 90% floor.
 
 ### Test layout
 
@@ -408,6 +450,10 @@ with tests that hold the line rather than lowering the threshold.
   `GCO_HELM_CHART_VALIDATION=1` (needs `helm` + network).
 - `tests/BATS/` — Bash tests for the shell scripts (`dependency-scan.sh`, the
   demo recorders, cluster-access setup), run by the `unit:bats:*` jobs.
+- `tests/inference-streaming-proxy/` — native `node:test` coverage for the
+  production response-streaming Lambda. Its isolated Node.js 24 workflow runs
+  `npm ci` in the Lambda's dependency graph before enforcing 93%
+  line/function/branch coverage.
 - Many tests are **guard tests** that pin an invariant so a partial change
   fails loudly — version-skew guards, manifest-shape guards, the docs index,
   the pip-audit-ignore validator. A guard failure means "you changed two things
@@ -602,7 +648,13 @@ surfaces version drift as a single rolling issue.
 `diagrams/infra_diagrams/` (per-stack CDK views) and `diagrams/code_diagrams/`
 (per-function flowcharts) regenerate via their `generate.py` scripts. Refresh
 them when architecture or a charted handler changes so the visual docs don't
-rot.
+rot. One code-diagram generation uses one UTC timestamp across HTML metadata
+and visible content, PNG pixels, the generated README, and every source marker.
+Normal runs intentionally record their wall-clock invocation time and can
+produce metadata-only changes even when source code is unchanged. Set a fixed
+integer `SOURCE_DATE_EPOCH` when byte-reproducible output is required. Never
+hand-edit an individual artifact's timestamp — regenerate the complete target
+catalogue.
 
 ## Onboarding for maintainers
 

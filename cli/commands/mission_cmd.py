@@ -86,7 +86,7 @@ def _strip_private_criteria(session: Mapping[str, Any]) -> dict[str, Any]:
     """
     from mission.validation import strip_private_fields  # noqa: PLC0415
 
-    return strip_private_fields(session)
+    return cast("dict[str, Any]", strip_private_fields(session))
 
 
 def _strip_iteration(iteration: Any) -> Any:

@@ -12,6 +12,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from ._image_uri import aws_partition, aws_url_suffix
 from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
 from .kubectl_helpers import update_kubeconfig
@@ -121,7 +122,7 @@ class FileSystemClient:
                 file_system_id=file_system_id,
                 file_system_type="efs",
                 region=region,
-                dns_name=f"{file_system_id}.efs.{region}.amazonaws.com",
+                dns_name=f"{file_system_id}.efs.{region}.{aws_url_suffix(region)}",
                 mount_target_ip=mount_target_ip,
                 size_bytes=fs.get("SizeInBytes", {}).get("Value"),
                 status=fs["LifeCycleState"],
@@ -203,6 +204,7 @@ class FileSystemClient:
             DataSync task ARN
         """
         datasync = self._session.client("datasync", region_name=region)
+        partition = aws_partition(region)
 
         # Determine file system type
         fs_info = None
@@ -217,7 +219,7 @@ class FileSystemClient:
         # Create source location
         if fs_info.file_system_type == "efs":
             source_location = datasync.create_location_efs(
-                EfsFilesystemArn=f"arn:aws:elasticfilesystem:{region}:{self._get_account_id()}:file-system/{file_system_id}",
+                EfsFilesystemArn=f"arn:{partition}:elasticfilesystem:{region}:{self._get_account_id()}:file-system/{file_system_id}",
                 Subdirectory=source_path,
                 Ec2Config={
                     "SubnetArn": self._get_subnet_arn(region),
@@ -227,7 +229,7 @@ class FileSystemClient:
             source_arn = source_location["LocationArn"]
         else:
             source_location = datasync.create_location_fsx_lustre(
-                FsxFilesystemArn=f"arn:aws:fsx:{region}:{self._get_account_id()}:file-system/{file_system_id}",
+                FsxFilesystemArn=f"arn:{partition}:fsx:{region}:{self._get_account_id()}:file-system/{file_system_id}",
                 Subdirectory=source_path,
                 SecurityGroupArns=[self._get_security_group_arn(region)],
             )
@@ -235,7 +237,7 @@ class FileSystemClient:
 
         # Create destination location (S3)
         dest_location = datasync.create_location_s3(
-            S3BucketArn=f"arn:aws:s3:::{destination_bucket}",
+            S3BucketArn=f"arn:{partition}:s3:::{destination_bucket}",
             Subdirectory=destination_prefix,
             S3Config={"BucketAccessRoleArn": self._get_datasync_role_arn(region)},
         )

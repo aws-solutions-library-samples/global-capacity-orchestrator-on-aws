@@ -96,21 +96,23 @@ def run_config(name: str, overrides: dict[str, object]) -> list[dict[str, Any]]:
     # the hood — keep the import side-effects inside the call so
     # ``python3 scripts/dump_nag_findings.py --help`` (or future arg
     # parsing) doesn't pay the CDK-init cost.
+    from cli.stacks import cdk_asset_consumer
     from gco.stacks.regional_stack import GCORegionalStack
 
-    app = _build_app(context_overrides=overrides)
-    with (
-        patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
-        patch.object(GCORegionalStack, "_create_helm_installer_lambda", _mock_helm_installer),
-    ):
-        mock_image = MagicMock()
-        mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
-        mock_docker.return_value = mock_image
-        _build_all_stacks(app)
-        # ``app.synth()`` is what runs the validation plugins and writes
-        # validation-report.json — must happen inside the ``with`` block
-        # so the Docker/helm mocks are still active during synthesis.
-        app.synth()
+    with cdk_asset_consumer(REPO_ROOT):
+        app = _build_app(context_overrides=overrides)
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(GCORegionalStack, "_create_helm_installer_lambda", _mock_helm_installer),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            _build_all_stacks(app)
+            # ``app.synth()`` is what runs the validation plugins and writes
+            # validation-report.json — must happen inside the ``with`` block
+            # so the Docker/helm mocks are still active during synthesis.
+            app.synth()
     return _collect_nag_violations(app)
 
 

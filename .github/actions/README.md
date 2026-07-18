@@ -15,23 +15,34 @@ Reusable GitHub Actions composite actions shared across multiple CI workflows. I
 
 ### `build-lambda-package`
 
-Stages the Lambda build directories that CDK synth, pytest, and KICS scans all expect:
+Stages all three generated Lambda assets through the build-only
+`prepare_cdk_assets()` entry point. CDK synthesis callers use
+`cdk_asset_consumer()` to retain shared locks through app construction and
+synthesis. Each asset uses an interprocess lock, a unique staging tree, a
+source/full-build completion manifest, and rollback-safe rename publication:
 
-- `lambda/kubectl-applier-simple-build/` — copies handler + manifests, installs `kubernetes`, `pyyaml`, `urllib3`
-- `lambda/helm-installer-build/` — copies the helm-installer source
+- `lambda/kubectl-applier-simple-build/` — exact Python requirements, handler, and manifests
+- `lambda/inference-streaming-proxy-build/` — Node.js 24 handler and production AWS SDK clients from the committed lockfile, with lifecycle scripts disabled
+- `lambda/helm-installer-build/` — complete deployable helm-installer Docker context
 
 **Used by:** `unit:cdk:synth`, `unit:cdk:config-matrix`, `unit:cdk:nag-compliance`, `unit:pytest:core`, `security:kics:iac`
 
-**Prerequisite:** The calling job must set up Python (via `actions/setup-python`) before invoking this action.
+**Prerequisite:** The calling job must set up Python (via
+`actions/setup-python`), install this project's Python package, and set up
+Node.js from `.nvmrc` (via `actions/setup-node`) before invoking this action.
 
 **Usage:**
 
 ```yaml
 steps:
   - uses: actions/checkout@v6
+  - uses: actions/setup-node@v6.4.0
+    with:
+      node-version-file: ".nvmrc"
   - uses: actions/setup-python@v6
     with:
       python-version: "3.14"
+  - run: pip install -e ".[cdk]"
   - uses: ./.github/actions/build-lambda-package
 ```
 

@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Cognito SRP authentication (gco analytics studio login)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,20 +206,20 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1043=>operation: 'Authenticate a Cognito user via the ADMIN_USER_PASSWORD_AUTH flow.\n\n    Uses ``admin_initiate_auth`` which sends the password over TLS\n    directly (no client-side SRP math). This requires the user pool\n    client to have ``ALLOW_ADMIN_USER_PASSWORD_AUTH`` enabled and the\n    caller to have ``cognito-idp:AdminInitiateAuth`` permission.\n\n    Returns a dict with ``IdToken``, ``AccessToken``, and\n    ``RefreshToken`` on success. Raises ``botocore.exceptions.ClientError``\n    for Cognito-side failures (``NotAuthorizedException``,\n    ``UserNotFoundException``, etc.).\n    '
-op1045=>operation: import boto3
-op1047=>operation: cognito = boto3.client('cognito-idp', region_name=region)
-op1049=>operation: response = cognito.admin_initiate_auth(UserPoolId=pool_id, ClientId=client_id, AuthFlow='ADMIN_USER_PASSWORD_AUTH', AuthParameters={'USERNAME': username, 'PASSWORD': password})
-op1051=>operation: tokens = response.get('AuthenticationResult') or {}
-io1056=>inputoutput: output: {'IdToken': str(tokens.get('IdToken', '')), 'AccessToken': str(tokens.get('AccessToken', '')), 'RefreshToken': str(tokens.get('RefreshToken', ''))}
-e1054=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op1047=>operation: 'Authenticate a Cognito user via the ADMIN_USER_PASSWORD_AUTH flow.\n\n    Uses ``admin_initiate_auth`` which sends the password over TLS\n    directly (no client-side SRP math). This requires the user pool\n    client to have ``ALLOW_ADMIN_USER_PASSWORD_AUTH`` enabled and the\n    caller to have ``cognito-idp:AdminInitiateAuth`` permission.\n\n    Returns a dict with ``IdToken``, ``AccessToken``, and\n    ``RefreshToken`` on success. Raises ``botocore.exceptions.ClientError``\n    for Cognito-side failures (``NotAuthorizedException``,\n    ``UserNotFoundException``, etc.).\n    '
+op1049=>operation: import boto3
+op1051=>operation: cognito = boto3.client('cognito-idp', region_name=region)
+op1053=>operation: response = cognito.admin_initiate_auth(UserPoolId=pool_id, ClientId=client_id, AuthFlow='ADMIN_USER_PASSWORD_AUTH', AuthParameters={'USERNAME': username, 'PASSWORD': password})
+op1055=>operation: tokens = response.get('AuthenticationResult') or {}
+io1060=>inputoutput: output: {'IdToken': str(tokens.get('IdToken', '')), 'AccessToken': str(tokens.get('AccessToken', '')), 'RefreshToken': str(tokens.get('RefreshToken', ''))}
+e1058=>end: end function return
 
-op1043->op1045
-op1045->op1047
 op1047->op1049
 op1049->op1051
-op1051->io1056
-io1056->e1054
+op1051->op1053
+op1053->op1055
+op1055->io1060
+io1060->e1058
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -228,6 +229,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

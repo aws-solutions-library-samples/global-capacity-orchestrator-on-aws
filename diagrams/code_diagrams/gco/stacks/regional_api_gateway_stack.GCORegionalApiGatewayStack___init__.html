@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Regional API Gateway stack constructor (private access)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,28 +206,34 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub2122=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op2124=>operation: self.config = config
-op2126=>operation: self.deployment_region = region
-op2128=>operation: self.vpc = vpc
-op2130=>operation: self.alb_dns_name = alb_dns_name
-op2132=>operation: self.auth_secret_arn = auth_secret_arn
-op2134=>operation: self.aggregator_role_arn = aggregator_role_arn
-op2136=>operation: self.proxy_lambda = self._create_vpc_proxy_lambda()
-op2138=>operation: self.api = self._create_api_gateway()
-sub2140=>subroutine: self._create_outputs()
-sub2142=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub2333=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op2335=>operation: self.config = config
+op2337=>operation: self.deployment_region = region
+op2339=>operation: self.vpc = vpc
+op2341=>operation: self.alb_dns_name = alb_dns_name
+op2343=>operation: supports_global_accelerator = getattr(config, 'supports_global_accelerator', None)
+op2345=>operation: self.global_accelerator_enabled = bool(supports_global_accelerator()) if callable(supports_global_accelerator) else True
+op2347=>operation: self.auth_secret_arn = auth_secret_arn
+op2349=>operation: self.aggregator_role_arn = aggregator_role_arn
+op2351=>operation: self.proxy_lambda = self._create_vpc_proxy_lambda()
+op2353=>operation: self.inference_proxy_lambda = self._create_inference_proxy_lambda()
+op2355=>operation: self.api = self._create_api_gateway()
+sub2357=>subroutine: self._create_outputs()
+sub2359=>subroutine: self._apply_nag_suppressions()
 
-sub2122->op2124
-op2124->op2126
-op2126->op2128
-op2128->op2130
-op2130->op2132
-op2132->op2134
-op2134->op2136
-op2136->op2138
-op2138->sub2140
-sub2140->sub2142
+sub2333->op2335
+op2335->op2337
+op2337->op2339
+op2339->op2341
+op2341->op2343
+op2343->op2345
+op2345->op2347
+op2347->op2349
+op2349->op2351
+op2351->op2353
+op2353->op2355
+op2355->sub2357
+sub2357->sub2359
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -236,6 +243,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

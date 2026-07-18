@@ -32,6 +32,13 @@ import boto3
 from aws_cdk import App
 
 from gco.models import ClusterConfig, ResourceThresholds
+from gco.stacks.constants import (
+    DEFAULT_MAX_REQUEST_BODY_BYTES,
+    known_cloudformation_regions,
+    validated_deployment_partition,
+    validated_regional_deployment_regions,
+    validated_request_body_limit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,23 +54,10 @@ class ConfigLoader:
     Loads and validates configuration from CDK context (cdk.json)
     """
 
-    # Valid AWS regions (subset of commonly used regions)
-    VALID_REGIONS = {
-        "us-east-1",
-        "us-east-2",
-        "us-west-1",
-        "us-west-2",
-        "eu-west-1",
-        "eu-west-2",
-        "eu-west-3",
-        "eu-central-1",
-        "ap-southeast-1",
-        "ap-southeast-2",
-        "ap-northeast-1",
-        "ap-northeast-2",
-        "ca-central-1",
-        "sa-east-1",
-    }
+    # Keep the public class attribute for compatibility. Endpoint metadata
+    # covers every CloudFormation Region known to the installed AWS SDK; this
+    # is not a project-specific allowlist.
+    VALID_REGIONS = known_cloudformation_regions()
 
     def __init__(self, app: App):
         self.app = app
@@ -92,9 +86,9 @@ class ConfigLoader:
 
         # Check for deployment_regions
         deployment_regions = self.app.node.try_get_context("deployment_regions")
-        if not deployment_regions:
+        if not isinstance(deployment_regions, dict) or not deployment_regions:
             raise ConfigValidationError(
-                "Required configuration field 'deployment_regions' is missing"
+                "Required configuration field 'deployment_regions' must be a non-empty object"
             )
 
         # Validate regions
@@ -162,24 +156,30 @@ class ConfigLoader:
             )
 
     def _validate_regions(self) -> None:
-        """Validate region configuration"""
-        regions = self.get_regions()
-
-        if not regions:
-            raise ConfigValidationError("At least one region must be specified")
-
-        if len(regions) > 10:
-            raise ConfigValidationError("Maximum of 10 regions supported")
-
-        for region in regions:
-            if region not in self.VALID_REGIONS:
-                raise ConfigValidationError(
-                    f"Invalid region '{region}'. Valid regions: {sorted(self.VALID_REGIONS)}"
+        """Validate region configuration against the shared app/CLI contract."""
+        deployment_regions = self.get_deployment_regions()
+        try:
+            for field in ("global", "api_gateway", "monitoring"):
+                region = deployment_regions[field]
+                if not isinstance(region, str) or region not in self.VALID_REGIONS:
+                    raise ValueError(
+                        f"Invalid {field} region {region!r}; expected an AWS region with a "
+                        "CloudFormation endpoint known to the installed SDK"
+                    )
+            regional = validated_regional_deployment_regions(
+                deployment_regions["regional"],
+                known_regions=self.VALID_REGIONS,
+            )
+            validated_deployment_partition(
+                (
+                    deployment_regions["global"],
+                    deployment_regions["api_gateway"],
+                    deployment_regions["monitoring"],
+                    *regional,
                 )
-
-        # Check for duplicates
-        if len(regions) != len(set(regions)):
-            raise ConfigValidationError("Duplicate regions found in configuration")
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise ConfigValidationError(str(exc)) from exc
 
     def _validate_resource_thresholds(self) -> None:
         """Validate resource threshold configuration"""
@@ -346,6 +346,13 @@ class ConfigLoader:
         # Validate replicas
         if not isinstance(mp_config["replicas"], int) or mp_config["replicas"] <= 0:
             raise ConfigValidationError("manifest_processor replicas must be a positive integer")
+
+        try:
+            validated_request_body_limit(
+                mp_config.get("max_request_body_bytes", DEFAULT_MAX_REQUEST_BODY_BYTES)
+            )
+        except ValueError as exc:
+            raise ConfigValidationError(f"manifest_processor.{exc}") from exc
 
         # Validate the shared policy section separately so a misconfigured
         # policy block surfaces a clear error pointing at the right key.
@@ -663,8 +670,28 @@ class ConfigLoader:
             "regional": deployment_regions.get("regional", ["us-east-1"]),
         }
 
+    def get_deployment_partition(self) -> str:
+        """Return the one SDK partition shared by every configured Region."""
+        deployment_regions = self.get_deployment_regions()
+        regional = validated_regional_deployment_regions(
+            deployment_regions["regional"],
+            known_regions=self.VALID_REGIONS,
+        )
+        return validated_deployment_partition(
+            (
+                deployment_regions["global"],
+                deployment_regions["api_gateway"],
+                deployment_regions["monitoring"],
+                *regional,
+            )
+        )
+
+    def supports_global_accelerator(self) -> bool:
+        """Return whether this partition exposes the Global Accelerator topology."""
+        return self.get_deployment_partition() == "aws"
+
     def get_global_region(self) -> str:
-        """Get the region for global resources (Global Accelerator, SSM params)."""
+        """Get the region for global resources and shared SSM parameters."""
         region = self.get_deployment_regions()["global"]
         return str(region)
 
@@ -781,6 +808,7 @@ class ConfigLoader:
             "replicas": 3,
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
             "validation_enabled": True,
+            "max_request_body_bytes": DEFAULT_MAX_REQUEST_BODY_BYTES,
             "central_queue_worker_enabled": True,
             "central_queue_poll_interval_seconds": 10,
             "central_queue_batch_size": 5,
@@ -863,9 +891,11 @@ class ConfigLoader:
             - log_level: CloudWatch logging level (OFF, ERROR, INFO)
             - metrics_enabled: Enable CloudWatch metrics
             - tracing_enabled: Enable X-Ray tracing
-            - regional_api_enabled: Permit direct same-account callers to use
-              the always-deployed regional API bridges. Each bridge is required
-              for centralized aggregation regardless of this setting.
+            - regional_api_enabled: In the commercial ``aws`` partition,
+              permit direct same-account callers to use the always-deployed
+              regional API bridges. Other partitions force this access on
+              because the bridges are the supported workload ingress without
+              Global Accelerator. Centralized aggregation always uses them.
         """
         default_config = {
             "throttle_rate_limit": 1000,

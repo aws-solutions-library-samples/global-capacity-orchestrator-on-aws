@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Inference endpoint desired-state reconciliation</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,77 +206,77 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3429=>operation: 'Reconcile a single endpoint.'
-op3431=>operation: name = endpoint['endpoint_name']
-op3433=>operation: desired_state = endpoint.get('desired_state', 'deploying')
-op3435=>operation: target_regions = endpoint.get('target_regions', [])
-op3437=>operation: spec = endpoint.get('spec', {})
-op3439=>operation: ns = endpoint.get('namespace', self.namespace)
-cond3442=>condition: if self.region not in target_regions
-op3446=>operation: deployment_names = (name, f'{name}-prefill', f'{name}-decode', f'{name}-proxy')
-cond3449=>condition: if any((self._deployment_exists(d, ns) for d in deployment_names))
-sub3453=>subroutine: logger.info('Endpoint %s no longer targets %s, cleaning up', name, self.region)
-sub3455=>subroutine: self._delete_resources(name, ns, spec if isinstance(spec, dict) else None)
-sub3457=>subroutine: self.store.update_region_status(name, self.region, 'deleted')
-io3462=>inputoutput: output: {'action': 'cleanup', 'endpoint': name, 'reason': 'region_removed'}
-e3460=>end: end function return
-io3471=>inputoutput: output: None
-e3469=>end: end function return
-cond3478=>condition: if desired_state in ('deploying', 'running')
-cond3483=>condition: if not isinstance(spec, dict)
-op3487=>operation: error = 'endpoint spec must be a mapping'
-sub3508=>subroutine: logger.error('Rejecting invalid endpoint %s: %s', name, error)
-sub3510=>subroutine: self.store.update_region_status(name, self.region, 'failed', error=error)
-io3515=>inputoutput: output: {'action': 'reject', 'endpoint': name, 'reason': 'invalid_spec'}
-e3513=>end: end function return
-cond3492=>condition: if 'mooncake' in spec and 'canary' in spec
-op3496=>operation: error = "endpoint spec cannot combine 'mooncake' and 'canary' blocks"
-io3503=>inputoutput: output: await self._reconcile_running(name, ns, spec, endpoint)
-e3501=>end: end function return
-cond3522=>condition: if desired_state == 'stopped'
-io3529=>inputoutput: output: self._reconcile_stopped(name, ns)
-e3527=>end: end function return
-cond3536=>condition: if desired_state == 'deleted'
-io3543=>inputoutput: output: self._reconcile_deleted(name, ns, spec if isinstance(spec, dict) else None)
-e3541=>end: end function return
-io3552=>inputoutput: output: None
-e3550=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op3738=>operation: 'Reconcile a single endpoint.'
+op3740=>operation: name = endpoint['endpoint_name']
+op3742=>operation: desired_state = endpoint.get('desired_state', 'deploying')
+op3744=>operation: target_regions = endpoint.get('target_regions', [])
+op3746=>operation: spec = endpoint.get('spec', {})
+op3748=>operation: ns = endpoint.get('namespace', self.namespace)
+cond3751=>condition: if self.region not in target_regions
+op3755=>operation: deployment_names = (name, f'{name}-prefill', f'{name}-decode', f'{name}-proxy')
+cond3758=>condition: if any((self._deployment_exists(d, ns) for d in deployment_names))
+sub3762=>subroutine: logger.info('Endpoint %s no longer targets %s, cleaning up', name, self.region)
+sub3764=>subroutine: self._delete_resources(name, ns, spec if isinstance(spec, dict) else None)
+sub3766=>subroutine: self.store.update_region_status(name, self.region, 'deleted')
+io3771=>inputoutput: output: {'action': 'cleanup', 'endpoint': name, 'reason': 'region_removed'}
+e3769=>end: end function return
+io3780=>inputoutput: output: None
+e3778=>end: end function return
+cond3787=>condition: if desired_state in ('deploying', 'running')
+cond3792=>condition: if not isinstance(spec, dict)
+op3796=>operation: error = 'endpoint spec must be a mapping'
+sub3817=>subroutine: logger.error('Rejecting invalid endpoint %s: %s', name, error)
+sub3819=>subroutine: self.store.update_region_status(name, self.region, 'failed', error=error)
+io3824=>inputoutput: output: {'action': 'reject', 'endpoint': name, 'reason': 'invalid_spec'}
+e3822=>end: end function return
+cond3801=>condition: if 'mooncake' in spec and 'canary' in spec
+op3805=>operation: error = "endpoint spec cannot combine 'mooncake' and 'canary' blocks"
+io3812=>inputoutput: output: await self._reconcile_running(name, ns, spec, endpoint)
+e3810=>end: end function return
+cond3831=>condition: if desired_state == 'stopped'
+io3838=>inputoutput: output: self._reconcile_stopped(name, ns)
+e3836=>end: end function return
+cond3845=>condition: if desired_state == 'deleted'
+io3852=>inputoutput: output: self._reconcile_deleted(name, ns, spec if isinstance(spec, dict) else None)
+e3850=>end: end function return
+io3861=>inputoutput: output: None
+e3859=>end: end function return
 
-op3429->op3431
-op3431->op3433
-op3433->op3435
-op3435->op3437
-op3437->op3439
-op3439->cond3442
-cond3442(yes)->op3446
-op3446->cond3449
-cond3449(yes)->sub3453
-sub3453->sub3455
-sub3455->sub3457
-sub3457->io3462
-io3462->e3460
-cond3449(no)->io3471
-io3471->e3469
-cond3442(no)->cond3478
-cond3478(yes)->cond3483
-cond3483(yes)->op3487
-op3487->sub3508
-sub3508->sub3510
-sub3510->io3515
-io3515->e3513
-cond3483(no)->cond3492
-cond3492(yes)->op3496
-op3496->sub3508
-cond3492(no)->io3503
-io3503->e3501
-cond3478(no)->cond3522
-cond3522(yes)->io3529
-io3529->e3527
-cond3522(no)->cond3536
-cond3536(yes)->io3543
-io3543->e3541
-cond3536(no)->io3552
-io3552->e3550
+op3738->op3740
+op3740->op3742
+op3742->op3744
+op3744->op3746
+op3746->op3748
+op3748->cond3751
+cond3751(yes)->op3755
+op3755->cond3758
+cond3758(yes)->sub3762
+sub3762->sub3764
+sub3764->sub3766
+sub3766->io3771
+io3771->e3769
+cond3758(no)->io3780
+io3780->e3778
+cond3751(no)->cond3787
+cond3787(yes)->cond3792
+cond3792(yes)->op3796
+op3796->sub3817
+sub3817->sub3819
+sub3819->io3824
+io3824->e3822
+cond3792(no)->cond3801
+cond3801(yes)->op3805
+op3805->sub3817
+cond3801(no)->io3812
+io3812->e3810
+cond3787(no)->cond3831
+cond3831(yes)->io3838
+io3838->e3836
+cond3831(no)->cond3845
+cond3845(yes)->io3852
+io3852->e3850
+cond3845(no)->io3861
+io3861->e3859
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -285,6 +286,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

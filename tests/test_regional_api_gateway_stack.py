@@ -10,6 +10,7 @@ and the security group wiring is correct. No Docker or real AWS calls.
 """
 
 import importlib.util
+import json
 import os
 import sys
 from pathlib import Path
@@ -19,6 +20,9 @@ import aws_cdk as cdk
 import pytest
 from aws_cdk import assertions
 from aws_cdk import aws_ec2 as ec2
+from aws_cdk import aws_lambda as lambda_
+
+from gco.stacks.constants import LAMBDA_NODEJS_RUNTIME
 
 
 def _methods_for_child_resource(
@@ -80,6 +84,17 @@ def _integrations_for_child_resource(
     ]
 
 
+def _assert_streaming_lambda_integrations(integrations: list[dict]) -> None:
+    """Pin the Lambda response-streaming CloudFormation contract."""
+    assert len(integrations) == 3
+    for integration in integrations:
+        assert integration["Type"] == "AWS_PROXY"
+        assert integration["IntegrationHttpMethod"] == "POST"
+        assert integration["ResponseTransferMode"] == "STREAM"
+        assert integration["TimeoutInMillis"] == 900000
+        assert "response-streaming-invocations" in json.dumps(integration["Uri"])
+
+
 class TestRegionalApiGatewayStack:
     """Test cases for GCORegionalApiGatewayStack."""
 
@@ -106,6 +121,9 @@ class TestRegionalApiGatewayStack:
         config.get_backend_tls_config.return_value = {
             "trust_cache_ttl_seconds": 120,
             "trust_cache_max_stale_seconds": 900,
+        }
+        config.get_manifest_processor_config.return_value = {
+            "max_request_body_bytes": 2_097_152,
         }
         return config
 
@@ -153,6 +171,7 @@ class TestRegionalApiGatewayStack:
                     [
                         assertions.Match.object_like(
                             {
+                                "DataTraceEnabled": False,
                                 "LoggingLevel": "ERROR",
                                 "MetricsEnabled": False,
                                 "ThrottlingRateLimit": 37,
@@ -170,16 +189,75 @@ class TestRegionalApiGatewayStack:
             "POST",
         }
         inference_integrations = _integrations_for_child_resource(template, "inference", "{proxy+}")
-        assert len(inference_integrations) == 3
-        assert all(
-            integration["ResponseTransferMode"] == "STREAM"
-            and integration["TimeoutInMillis"] == 900000
-            for integration in inference_integrations
-        )
+        _assert_streaming_lambda_integrations(inference_integrations)
         control_integrations = _integrations_for_child_resource(template, "v1", "{proxy+}")
         assert control_integrations
         assert all("ResponseTransferMode" not in item for item in control_integrations)
         assert all(item["TimeoutInMillis"] == 29000 for item in control_integrations)
+
+    def test_aggregator_resource_policy_allows_only_runtime_contract(self, app, mock_config, vpc):
+        """The aggregator principal gets exactly its four regional operations."""
+        from gco.stacks.constants import AGGREGATOR_REGIONAL_API_ROUTES
+        from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
+
+        aggregator_role_arn = "arn:aws:iam::123456789012:role/gco-test-aggregator"
+        stack = GCORegionalApiGatewayStack(
+            app,
+            "TestRegionalApiPolicyStack",
+            config=mock_config,
+            region="us-east-1",
+            vpc=vpc,
+            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID
+            aggregator_role_arn=aggregator_role_arn,
+            env=cdk.Environment(region="us-east-1"),
+        )
+        template = assertions.Template.from_stack(stack)
+        rest_apis = template.find_resources("AWS::ApiGateway::RestApi")
+        assert len(rest_apis) == 1
+        statements = next(iter(rest_apis.values()))["Properties"]["Policy"]["Statement"]
+        broad_statement = next(
+            statement
+            for statement in statements
+            if (
+                statement.get("Principal") == "*"
+                or statement.get("Principal", {}).get("AWS") == "*"
+            )
+            and statement.get("Resource") == "execute-api:/*"
+        )
+        assert broad_statement["Condition"]["ArnNotEquals"] == {
+            "aws:PrincipalArn": aggregator_role_arn
+        }
+        assert "aws:PrincipalAccount" in broad_statement["Condition"]["StringEquals"]
+
+        # Evaluate the union of resource-policy Allows that apply to the
+        # aggregator. The broad same-account statement is intentionally
+        # inapplicable because its PrincipalArn condition excludes this role.
+        applicable_resources: set[str] = set()
+        for statement in statements:
+            if statement.get("Effect") != "Allow":
+                continue
+            principal = statement.get("Principal")
+            applies = isinstance(principal, dict) and principal.get("AWS") == aggregator_role_arn
+            if principal == "*" or (isinstance(principal, dict) and principal.get("AWS") == "*"):
+                excluded = (
+                    statement.get("Condition", {}).get("ArnNotEquals", {}).get("aws:PrincipalArn")
+                )
+                applies = excluded != aggregator_role_arn
+            if not applies:
+                continue
+            statement_resources = statement["Resource"]
+            if isinstance(statement_resources, str):
+                statement_resources = [statement_resources]
+            applicable_resources.update(statement_resources)
+
+        expected_resources = {
+            f"execute-api:/*/{method}/{path}" for method, path in AGGREGATOR_REGIONAL_API_ROUTES
+        }
+        assert applicable_resources == expected_resources
+        assert "execute-api:/*/*/api/v1/*" not in applicable_resources
+        assert "execute-api:/*/POST/api/v1/manifests" not in applicable_resources
+        assert "execute-api:/*/DELETE/api/v1/status" not in applicable_resources
+        assert all("/inference/" not in resource for resource in applicable_resources)
 
     def test_regional_api_gateway_has_lambda(self, app, mock_config, vpc):
         """Test that the regional API gateway has a VPC Lambda."""
@@ -213,13 +291,14 @@ class TestRegionalApiGatewayStack:
             "AWS::Lambda::Function",
             {
                 "FunctionName": "gco-regional-inference-proxy-us-east-1",
-                "Runtime": "nodejs22.x",
+                "Runtime": getattr(lambda_.Runtime, LAMBDA_NODEJS_RUNTIME).name,
                 "Handler": "index.handler",
                 "Timeout": 900,
                 "Environment": {
                     "Variables": assertions.Match.object_like(
                         {
                             "ROUTING_MODE": "regional",
+                            "MAX_REQUEST_BODY_BYTES": "2097152",
                             "TARGET_REGION": "us-east-1",
                             "REGISTRY_REGION": "us-east-2",
                         }
@@ -542,6 +621,7 @@ class TestRegionalApiProxyHandler:
                     {
                         "SECRET_ARN": "arn:aws:secretsmanager:us-east-1:123:secret:test",
                         "ALB_ENDPOINT": "internal-alb.elb.amazonaws.com",
+                        "AWS_URL_SUFFIX": "amazonaws.com",
                     },
                 ):
                     event = {
@@ -582,6 +662,7 @@ class TestRegionalApiProxyHandler:
                     {
                         "SECRET_ARN": "arn:aws:secretsmanager:us-east-1:123:secret:test",
                         "ALB_ENDPOINT": "internal-alb.elb.amazonaws.com",
+                        "AWS_URL_SUFFIX": "amazonaws.com",
                     },
                 ):
                     event = {
@@ -629,6 +710,7 @@ class TestRegionalApiProxyHandler:
                     {
                         "SECRET_ARN": "arn:aws:secretsmanager:us-east-1:123:secret:test",
                         "ALB_ENDPOINT": "internal-alb.elb.amazonaws.com",
+                        "AWS_URL_SUFFIX": "amazonaws.com",
                     },
                 ):
                     event = {
@@ -673,6 +755,7 @@ class TestRegionalApiProxyHandler:
                     {
                         "SECRET_ARN": "arn:aws:secretsmanager:us-east-1:123:secret:test",
                         "ALB_ENDPOINT": "internal-alb.elb.amazonaws.com",
+                        "AWS_URL_SUFFIX": "amazonaws.com",
                     },
                 ):
                     event = {

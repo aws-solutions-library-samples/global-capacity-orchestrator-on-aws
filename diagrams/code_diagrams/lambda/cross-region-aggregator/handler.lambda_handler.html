@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Cross-Region Aggregator Lambda</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,12 +206,12 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op409=>operation: '\n    Handle cross-region aggregation requests.\n\n    Routes:\n        GET /global/jobs - List jobs across all regions\n        GET /global/health - Health status across all regions\n        GET /global/status - Cluster status across all regions\n        DELETE /global/jobs - Bulk delete across all regions\n    '
-op411=>operation: http_method = event.get('httpMethod', 'GET')
-op413=>operation: path = event.get('path', '')
-op415=>operation: query_params = event.get('queryStringParameters') or {}
-op417=>operation: body = event.get('body')
-op420=>operation: if path == '/api/v1/global/jobs' and http_method == 'GET':
+        <div><textarea id="code" style="width: 100%;" rows="11">op411=>operation: '\n    Handle cross-region aggregation requests.\n\n    Routes:\n        GET /global/jobs - List jobs across all regions\n        GET /global/health - Health status across all regions\n        GET /global/status - Cluster status across all regions\n        DELETE /global/jobs - Bulk delete across all regions\n    '
+op413=>operation: http_method = event.get('httpMethod', 'GET')
+op415=>operation: path = event.get('path', '')
+op417=>operation: query_params = event.get('queryStringParameters') or {}
+op419=>operation: body = event.get('body')
+op422=>operation: if path == '/api/v1/global/jobs' and http_method == 'GET':
     result = aggregate_jobs(namespace=query_params.get('namespace'), status=query_params.get('status'), limit=int(query_params.get('limit', '50')))
 elif path == '/api/v1/global/jobs' and http_method == 'DELETE':
     body_data = json.loads(body) if body else {}
@@ -222,30 +223,30 @@ elif path == '/api/v1/global/status':
 else:
     return {'statusCode': 404, 'body': json.dumps({'error': 'Not found', 'path': path})}
 return {'statusCode': 200, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps(result)}
-cond419=>condition: exception raised?
-cond422=>condition: except RuntimeError
-sub426=>subroutine: _LOGGER.exception('Regional aggregation bridge discovery failed')
-io431=>inputoutput: output: {'statusCode': 503, 'body': json.dumps({'error': 'Regional aggregation is temporarily unavailable'})}
-e429=>end: end function return
-cond434=>condition: except Exception
-sub438=>subroutine: _LOGGER.exception('Unhandled regional aggregation request failure')
-io443=>inputoutput: output: {'statusCode': 500, 'body': json.dumps({'error': 'Internal server error'})}
-e441=>end: end function return
+cond421=>condition: exception raised?
+cond424=>condition: except RuntimeError
+sub428=>subroutine: _LOGGER.exception('Regional aggregation bridge discovery failed')
+io433=>inputoutput: output: {'statusCode': 503, 'body': json.dumps({'error': 'Regional aggregation is temporarily unavailable'})}
+e431=>end: end function return
+cond436=>condition: except Exception
+sub440=>subroutine: _LOGGER.exception('Unhandled regional aggregation request failure')
+io445=>inputoutput: output: {'statusCode': 500, 'body': json.dumps({'error': 'Internal server error'})}
+e443=>end: end function return
 
-op409->op411
 op411->op413
 op413->op415
 op415->op417
-op417->op420
-op420->cond419
-cond419(yes)->cond422
-cond422(yes)->sub426
-sub426->io431
-io431->e429
-cond422(no)->cond434
-cond434(yes)->sub438
-sub438->io443
-io443->e441
+op417->op419
+op419->op422
+op422->cond421
+cond421(yes)->cond424
+cond424(yes)->sub428
+sub428->io433
+io433->e431
+cond424(no)->cond436
+cond436(yes)->sub440
+sub440->io445
+io445->e443
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -255,6 +256,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

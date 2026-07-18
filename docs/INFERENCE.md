@@ -235,6 +235,21 @@ For each target region, the inference monitor creates:
 - **Optional autoscaler** — A native HPA for CPU/memory metrics or KEDA
   ScaledObject when GPU metrics are requested.
 
+This endpoint autoscaler is separate from the shared `inference-proxy` data
+plane. Each regional stack installs the managed EKS Metrics Server add-on that
+feeds resource metrics to the proxy's `autoscaling/v2` HPA. The proxy preserves
+a three-pod high-availability floor, scales to ten replicas at 70% CPU or 80%
+memory, and uses a 15-minute scale-down stabilization window. The Deployment's
+`replicas: 3` seeds only initial creation; kubectl-applier update patches omit
+that HPA-owned field so reconciliation cannot reset a live scale decision.
+
+Stream shutdown is protected end to end: the ALB target group drains for 900
+seconds, `preStop` removes a terminating pod from readiness before shutdown,
+Uvicorn gets a 900-second graceful-shutdown timeout, and Kubernetes allows 930
+seconds before forcing termination. The kind CI job installs pinned Metrics
+Server and requires the HPA to report `ScalingActive=True`, rather than merely
+checking that the API server admitted the object.
+
 The shared platform Ingress already owns `/inference/*`; no endpoint-specific
 Ingress, public Service, or ALB target group is created. On upgrades, the
 monitor deletes historical direct Ingresses if they still exist.
@@ -312,13 +327,44 @@ gco inference deploy my-llm \
 When `--mooncake-mode disaggregated` is set:
 
 - The inference monitor creates separate Deployments for each role (`{name}-prefill` and `{name}-decode`), fronted by a `{name}-proxy` Deployment and Service
-- A shared Mooncake transfer engine enables zero-copy KV cache transfer between roles via RDMA/TCP
+- A shared Mooncake transfer engine enables zero-copy KV cache transfer between roles. The default `rdma` intent is rendered to vLLM's EFA-specific point-to-point connector protocol and schedules the role pods on EFA; `--mooncake-protocol tcp` selects the non-EFA fallback
+- `--mooncake-device-name` optionally binds Mooncake to a specific provider-visible interface; omission leaves device selection to Mooncake/libfabric auto-detection
 - The `--image` flag is optional; when omitted, the upstream `vllm/vllm-openai` image (which bundles the Mooncake transfer engine) is used by default. The PD proxy defaults to that same image — override it with `--mooncake-proxy-image`
 - `--prefill-replicas` and `--decode-replicas` set the initial replica count for each role (both default to 1)
 - The shared authenticated `/inference/{name}/...` route forwards allowlisted
   serving requests to the proxy's ClusterIP Service. No endpoint-specific
   Ingress is created, and the proxy's `/instances/add` admin path is blocked by
   the platform inference proxy.
+
+#### EFA protocol and device overrides
+
+The default and `--mooncake-protocol rdma` both express GCO's portable RDMA
+intent. For role-to-role transfer, GCO writes
+`kv_connector_extra_config.mooncake_protocol: efa` into every vLLM
+`MooncakeConnector` and schedules those pods on `mooncake-efa-pool`. The mounted
+store configuration still uses `protocol: rdma`, which is a separate upstream
+Mooncake store setting; this distinction matters in `both` mode, where the
+point-to-point and store connectors run together.
+
+Use TCP when EFA is unavailable, or bind a known provider-visible device when
+auto-detection is insufficient:
+
+```bash
+# No EFA placement or EFA device request
+gco inference deploy my-llm \
+  --mooncake-mode disaggregated \
+  --mooncake-protocol tcp
+
+# EFA path with an explicit device (omit the device flag to auto-detect)
+gco inference deploy my-llm \
+  --mooncake-mode disaggregated \
+  --mooncake-protocol rdma \
+  --mooncake-device-name <DEVICE_NAME>
+```
+
+Both flags require `--mooncake-mode`. Device names vary by image and instance;
+use the name visible to Mooncake/libfabric inside the role pod rather than
+assuming a host interface name.
 
 #### Proxy admin key
 
@@ -439,9 +485,10 @@ Each role pod (prefill, decode, or the single store instance) reaches the KV cac
 
 No client-side wiring is needed to read the cache — workloads simply serve from the role pods, which the connectors back automatically. Clients invoke the endpoint exactly as any other GCO endpoint (see [Invoking Endpoints](#invoking-endpoints)): requests reach the nearest region through Global Accelerator and are routed to the PD proxy at `/inference/{name}/v1/...`.
 
-### GPU Placement for RDMA Role Pods
+### GPU Placement for EFA Role Pods
 
-RDMA KV transfer only runs on EFA-enabled GPU nodes, and not every EFA-capable instance is a good fit for serving. When the transfer protocol is `rdma` (the default), the monitor pins each role pod to a dedicated EFA nodepool, `mooncake-efa-pool` (`46-nodepool-mooncake-efa.yaml`), by adding both an `efa=true` and a `mooncake-efa=true` node selector plus the EFA toleration and a `vpc.amazonaws.com/efa` device request.
+The default RDMA intent is translated to vLLM's explicit EFA point-to-point
+protocol. Those role pods require EFA-enabled GPU nodes, and not every EFA-capable instance is a good fit for serving. When the transfer protocol is `rdma` (the default), the monitor pins each role pod to a dedicated EFA nodepool, `mooncake-efa-pool` (`46-nodepool-mooncake-efa.yaml`), by adding both an `efa=true` and a `mooncake-efa=true` node selector plus the EFA toleration and a `vpc.amazonaws.com/efa` device request.
 
 That pool is curated to instance families with at least 80GB of GPU memory and FP8-capable Hopper/Blackwell GPUs — `p5`/`p5e`/`p5en` (H100/H200) and `p6-b200`/`p6-b300`/`p6e-gb200` (B200/B300/GB200). It deliberately excludes `p4d` (8× A100 40GB, Ampere): a model plus its KV cache that fits comfortably on an 80GB+ GPU can run out of memory on a 40GB A100, and FP8 KV-cache and quantized configurations do not run on Ampere at all. The shared training EFA pool (`43-nodepool-efa.yaml`) keeps `p4d` for distributed training, where 40GB A100s are a legitimate, cheaper option; the `mooncake-efa=true` label is unique to the inference pool, so serving pods never land on `p4d`.
 
@@ -781,10 +828,10 @@ See `examples/valkey-cache-job.yaml` for a working Valkey caching example.
 
 ## Multi-Region Deployment
 
-By default, `gco inference deploy` targets all deployed regions. This is the recommended approach because Global Accelerator routes users to the nearest healthy region — if an endpoint only exists in some regions, users routed to a region without it will get a 404.
+By default, `gco inference deploy` targets all deployed Regions. This keeps endpoint availability consistent everywhere. In the commercial `aws` partition, Global Accelerator can route a global request to any healthy registered Region, so a Region where the endpoint is absent returns 404. In other partitions, callers choose an IAM-authenticated regional API directly and must choose a Region where the endpoint is deployed.
 
 ```bash
-# Deploy to all regions (recommended — ensures consistent global routing)
+# Deploy to all Regions (recommended — ensures consistent availability)
 gco inference deploy my-llm \
   -i vllm/vllm-openai:v0.24.0
 
@@ -794,7 +841,7 @@ gco inference deploy my-llm \
   -r us-east-1 -r eu-west-1
 ```
 
-> **Routing caveat:** If you deploy to a subset of regions, Global Accelerator may route users to a region where the endpoint doesn't exist. The CLI warns you about this. For production inference, deploy to all regions or ensure your users only connect from regions where the endpoint is available.
+> **Routing caveat:** In `aws`, Global Accelerator may route users to a Region where a subset deployment does not exist; the CLI warns about this. Outside `aws`, callers must select a deployed regional endpoint. For production inference, deploy to every configured Region or ensure clients use only Regions where the endpoint exists.
 
 ### Authenticated Global Routing
 
@@ -804,11 +851,14 @@ Use the API Gateway stack's `ApiEndpoint` output as the endpoint base URL:
 <ApiEndpoint>/inference/<endpoint-name>/
 ```
 
-API Gateway is the public entry point and requires AWS IAM (SigV4)
-authentication. After authentication, the global proxy sends a request-bound
-HMAC envelope through Global Accelerator, which selects the nearest healthy
-regional internal ALB. Global Accelerator and the ALB are routing layers behind
-the API; their addresses are not supported client entry points.
+In the commercial `aws` partition, API Gateway is the public workload entry
+point and requires AWS IAM (SigV4) authentication. After authentication, the
+global proxy sends a request-bound HMAC envelope through Global Accelerator,
+which selects a healthy regional internal ALB. Global Accelerator and the ALB
+are routing layers behind the API; their addresses are not supported client
+entry points. Outside `aws`, the global API exposes aggregate routes only;
+inference clients use the selected Region's IAM-authenticated
+`RegionalApiEndpoint` instead.
 
 ### Per-Region Status
 

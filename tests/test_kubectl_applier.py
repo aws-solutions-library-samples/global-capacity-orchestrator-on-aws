@@ -1247,3 +1247,266 @@ class TestHandleTask:
         phase, status = mock_status.call_args[0][0], mock_status.call_args[0][1]
         assert phase == "post-helm-manifests"
         assert status == "failed"
+
+
+class TestHorizontalPodAutoscalerApply:
+    """autoscaling/v2 HPAs are created and patched idempotently."""
+
+    @staticmethod
+    def _write_hpa(tmp_path):
+        document = {
+            "apiVersion": "autoscaling/v2",
+            "kind": "HorizontalPodAutoscaler",
+            "metadata": {
+                "name": "inference-proxy-hpa",
+                "namespace": "gco-system",
+            },
+            "spec": {
+                "scaleTargetRef": {
+                    "apiVersion": "apps/v1",
+                    "kind": "Deployment",
+                    "name": "inference-proxy",
+                },
+                "minReplicas": 3,
+                "maxReplicas": 10,
+            },
+        }
+        (tmp_path / "33-inference-proxy-hpa.yaml").write_text(yaml.safe_dump(document))
+        return document
+
+    @staticmethod
+    def _apply(handler_module, tmp_path, mock_client):
+        mock_client.CoreV1Api.return_value = MagicMock()
+        mock_client.RbacAuthorizationV1Api.return_value = MagicMock()
+        mock_client.NetworkingV1Api.return_value = MagicMock()
+        mock_client.CustomObjectsApi.return_value = MagicMock()
+        restart_result = {"restarted": [], "failed": []}
+        with (
+            patch.object(
+                handler_module,
+                "restart_deployments",
+                return_value=restart_result,
+            ),
+            patch.object(
+                handler_module,
+                "restart_daemonsets",
+                return_value=restart_result,
+            ),
+            patch.object(handler_module, "_verify_workload_credentials", return_value=[]),
+        ):
+            return handler_module.apply_manifests(
+                "test-cluster",
+                "us-east-1",
+                str(tmp_path),
+                {},
+            )
+
+    def test_deployment_update_omits_hpa_owned_replicas(self, handler_module, tmp_path):
+        """Create seeds three replicas; reconciliation leaves HPA scale untouched."""
+        from kubernetes.client.rest import ApiException
+
+        document = {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "name": "inference-proxy",
+                "namespace": "gco-system",
+                "annotations": {"gco.aws/hpa-controls-replicas": "true"},
+            },
+            "spec": {
+                "replicas": 3,
+                "selector": {"matchLabels": {"app": "inference-proxy"}},
+                "template": {
+                    "metadata": {"labels": {"app": "inference-proxy"}},
+                    "spec": {
+                        "containers": [
+                            {"name": "inference-proxy", "image": "example.invalid/proxy:test"}
+                        ]
+                    },
+                },
+            },
+        }
+        (tmp_path / "33-inference-proxy-deployment.yaml").write_text(yaml.safe_dump(document))
+
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch("handler.client") as mock_client,
+        ):
+            mock_apps = mock_client.AppsV1Api.return_value
+            mock_apps.create_namespaced_deployment.side_effect = ApiException(status=409)
+            result = self._apply(handler_module, tmp_path, mock_client)
+
+        assert result["AppliedCount"] == 1
+        assert result["FailedCount"] == 0
+        mock_apps.create_namespaced_deployment.assert_called_once_with(
+            "gco-system",
+            body=document,
+        )
+        patch_body = mock_apps.patch_namespaced_deployment.call_args.kwargs["body"]
+        assert "replicas" not in patch_body["spec"]
+        assert patch_body["spec"]["template"] == document["spec"]["template"]
+        assert document["spec"]["replicas"] == 3
+
+    def test_deployment_update_retains_replicas_without_hpa_ownership(self, handler_module):
+        """Ordinary Deployment updates continue to reconcile manifest replicas."""
+        document = {
+            "metadata": {"annotations": {"example.invalid/owner": "operator"}},
+            "spec": {"replicas": 4},
+        }
+
+        patch_body = handler_module._deployment_patch_body(document)
+
+        assert patch_body == document
+        assert patch_body is not document
+        assert patch_body["spec"] is not document["spec"]
+        assert patch_body["spec"]["replicas"] == 4
+
+    def test_hpa_applied_via_autoscaling_v2(self, handler_module, tmp_path):
+        """The HPA does not fall through to the unsupported-kind branch."""
+        document = self._write_hpa(tmp_path)
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch("handler.client") as mock_client,
+        ):
+            mock_autoscaling = MagicMock()
+            mock_client.AutoscalingV2Api.return_value = mock_autoscaling
+            result = self._apply(handler_module, tmp_path, mock_client)
+
+        assert result["AppliedCount"] == 1
+        assert result["FailedCount"] == 0
+        assert "HorizontalPodAutoscaler/inference-proxy-hpa" not in result["Skipped"]
+        mock_autoscaling.create_namespaced_horizontal_pod_autoscaler.assert_called_once_with(
+            "gco-system",
+            body=document,
+        )
+
+    def test_hpa_patched_on_conflict(self, handler_module, tmp_path):
+        """A 409 create response patches the existing HPA."""
+        from kubernetes.client.rest import ApiException
+
+        document = self._write_hpa(tmp_path)
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch("handler.client") as mock_client,
+        ):
+            mock_autoscaling = MagicMock()
+            mock_autoscaling.create_namespaced_horizontal_pod_autoscaler.side_effect = ApiException(
+                status=409
+            )
+            mock_client.AutoscalingV2Api.return_value = mock_autoscaling
+            result = self._apply(handler_module, tmp_path, mock_client)
+
+        assert result["AppliedCount"] == 1
+        assert result["FailedCount"] == 0
+        mock_autoscaling.patch_namespaced_horizontal_pod_autoscaler.assert_called_once_with(
+            "inference-proxy-hpa",
+            "gco-system",
+            body=document,
+        )
+
+
+class TestInferenceProxyAutoscalingManifest:
+    """Static contract for the shared streaming proxy's HPA and drain budget."""
+
+    def test_hpa_and_deployment_are_stream_safe(self):
+        manifest_path = (
+            Path(__file__).parent.parent
+            / "lambda"
+            / "kubectl-applier-simple"
+            / "manifests"
+            / "33-inference-proxy.yaml"
+        )
+        content = manifest_path.read_text().replace(
+            "{{INFERENCE_PROXY_IMAGE}}",
+            "example.invalid/inference-proxy:test",
+        )
+        documents = list(yaml.safe_load_all(content))
+        deployment = next(doc for doc in documents if doc["kind"] == "Deployment")
+        hpa = next(doc for doc in documents if doc["kind"] == "HorizontalPodAutoscaler")
+        pdb = next(doc for doc in documents if doc["kind"] == "PodDisruptionBudget")
+
+        assert deployment["spec"]["replicas"] == 3
+        assert deployment["metadata"]["annotations"] == {"gco.aws/hpa-controls-replicas": "true"}
+        assert hpa["apiVersion"] == "autoscaling/v2"
+        assert hpa["metadata"] == {
+            "name": "inference-proxy-hpa",
+            "namespace": "gco-system",
+            "labels": {
+                "app": "inference-proxy",
+                "component": "inference-data-plane",
+                "project": "gco",
+            },
+        }
+        assert hpa["spec"]["scaleTargetRef"] == {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "name": "inference-proxy",
+        }
+        assert hpa["spec"]["minReplicas"] == 3
+        assert hpa["spec"]["maxReplicas"] == 10
+        assert hpa["spec"]["metrics"] == [
+            {
+                "type": "Resource",
+                "resource": {
+                    "name": "cpu",
+                    "target": {"type": "Utilization", "averageUtilization": 70},
+                },
+            },
+            {
+                "type": "Resource",
+                "resource": {
+                    "name": "memory",
+                    "target": {"type": "Utilization", "averageUtilization": 80},
+                },
+            },
+        ]
+        assert hpa["spec"]["behavior"]["scaleDown"] == {
+            "stabilizationWindowSeconds": 900,
+            "selectPolicy": "Min",
+            "policies": [
+                {"type": "Percent", "value": 25, "periodSeconds": 60},
+                {"type": "Pods", "value": 1, "periodSeconds": 60},
+            ],
+        }
+        pod_spec = deployment["spec"]["template"]["spec"]
+        assert pod_spec["terminationGracePeriodSeconds"] == 930
+        env = {item["name"]: item.get("value") for item in pod_spec["containers"][0]["env"]}
+        assert env["GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS"] == "900"
+        assert pod_spec["containers"][0]["lifecycle"]["preStop"]["exec"]["command"] == [
+            "/bin/sh",
+            "-c",
+            "sleep 10",
+        ]
+        assert pdb["spec"]["minAvailable"] == 2
+        assert pdb["spec"]["selector"]["matchLabels"] == {"app": "inference-proxy"}
+
+    def test_ingress_deregistration_covers_stream_drain(self):
+        """ALB draining lasts at least as long as Uvicorn's maximum stream drain."""
+        ingress_path = (
+            Path(__file__).parent.parent
+            / "lambda"
+            / "kubectl-applier-simple"
+            / "manifests"
+            / "11-ingress.yaml"
+        )
+        ingress = yaml.safe_load(ingress_path.read_text())
+        annotations = ingress["metadata"]["annotations"]
+        assert annotations["alb.ingress.kubernetes.io/target-group-attributes"] == (
+            "deregistration_delay.timeout_seconds=900"
+        )
+
+    def test_uvicorn_runtime_honors_graceful_shutdown_budget(self):
+        """The container entrypoint forwards its configured drain window to Uvicorn."""
+        from gco.services import inference_api
+
+        assert inference_api.DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS == 900
+        with (
+            patch.dict(
+                "os.environ",
+                {"GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS": "901", "PORT": "8080"},
+            ),
+            patch("uvicorn.run") as mock_run,
+        ):
+            inference_api._run_server()
+
+        assert mock_run.call_args.kwargs["timeout_graceful_shutdown"] == 901

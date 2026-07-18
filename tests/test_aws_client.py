@@ -967,6 +967,111 @@ class TestGCOAWSClientMakeAuthenticatedRequest:
                 assert "regional.execute-api.us-west-2.amazonaws.com" in call_kwargs["url"]
                 assert "X-GCO-Target-Region" not in call_kwargs["headers"]
 
+    def test_regional_mode_defaults_omitted_region_to_configured_default(self):
+        """Supported unpinned calls use the default regional bridge."""
+        from cli.aws_client import GCOAWSClient
+        from cli.config import GCOConfig
+
+        config = GCOConfig(
+            default_region="eu-west-1",
+            use_regional_api=True,
+        )
+        with (
+            patch("boto3.Session") as mock_session,
+            patch("requests.request") as mock_request,
+            patch("cli.aws_client.SigV4Auth"),
+        ):
+            mock_session.return_value.get_credentials.return_value = MagicMock()
+            mock_response = MagicMock(status_code=200)
+            mock_request.return_value = mock_response
+
+            client = GCOAWSClient(config)
+            _cache_regional_endpoint(client, "eu-west-1")
+
+            response = client.make_authenticated_request("GET", "/api/v1/jobs")
+
+        assert response is mock_response
+        call_kwargs = mock_request.call_args.kwargs
+        assert "regional.execute-api.eu-west-1.amazonaws.com" in call_kwargs["url"]
+        assert "X-GCO-Target-Region" not in call_kwargs["headers"]
+
+    def test_regional_mode_default_region_missing_bridge_fails_closed(self):
+        """An omitted region never falls back to the global API."""
+        from cli.aws_client import GCOAWSClient
+        from cli.config import GCOConfig
+
+        config = GCOConfig(default_region="eu-west-1", use_regional_api=True)
+        with patch("boto3.Session"):
+            client = GCOAWSClient(config)
+            client.get_regional_api_endpoint = MagicMock(return_value=None)
+            client.get_api_endpoint = MagicMock()
+
+            with pytest.raises(
+                RuntimeError,
+                match="Regional API endpoint is not deployed in eu-west-1",
+            ):
+                client.make_authenticated_request("GET", "/api/v1/jobs")
+
+        client.get_regional_api_endpoint.assert_called_once_with("eu-west-1")
+        client.get_api_endpoint.assert_not_called()
+
+    @pytest.mark.parametrize("target_region", ["", "   "])
+    def test_regional_mode_rejects_blank_explicit_region(self, target_region):
+        """A blank explicit pin cannot escape strict mode through the global API."""
+        from cli.aws_client import GCOAWSClient
+        from cli.config import GCOConfig
+
+        config = GCOConfig(default_region="eu-west-1", use_regional_api=True)
+        with patch("boto3.Session"):
+            client = GCOAWSClient(config)
+            client.get_regional_api_endpoint = MagicMock()
+            client.get_api_endpoint = MagicMock()
+
+            with pytest.raises(ValueError, match="requires a non-empty.*AWS region"):
+                client.make_authenticated_request(
+                    "GET",
+                    "/api/v1/jobs",
+                    target_region=target_region,
+                )
+
+        client.get_regional_api_endpoint.assert_not_called()
+        client.get_api_endpoint.assert_not_called()
+
+    def test_regional_mode_rejects_blank_default_region(self):
+        """An omitted pin also fails closed when the configured default is blank."""
+        from cli.aws_client import GCOAWSClient
+        from cli.config import GCOConfig
+
+        config = GCOConfig(default_region="", use_regional_api=True)
+        with patch("boto3.Session"):
+            client = GCOAWSClient(config)
+            client.get_regional_api_endpoint = MagicMock()
+            client.get_api_endpoint = MagicMock()
+
+            with pytest.raises(ValueError, match="requires a non-empty.*AWS region"):
+                client.make_authenticated_request("GET", "/api/v1/jobs")
+
+        client.get_regional_api_endpoint.assert_not_called()
+        client.get_api_endpoint.assert_not_called()
+
+    def test_regional_mode_rejects_global_only_operation(self):
+        """Global aggregation helpers fail clearly in strict regional mode."""
+        from cli.aws_client import GCOAWSClient
+        from cli.config import GCOConfig
+
+        config = GCOConfig(default_region="eu-west-1", use_regional_api=True)
+        with patch("boto3.Session"):
+            client = GCOAWSClient(config)
+            client.get_regional_api_endpoint = MagicMock()
+
+            with pytest.raises(
+                ValueError,
+                match="Global API operations are unavailable in regional API mode",
+            ):
+                client.get_global_health()
+
+        client.get_regional_api_endpoint.assert_not_called()
+
 
 class TestGCOAWSClientGetJobs:
     """Tests for get_jobs method."""

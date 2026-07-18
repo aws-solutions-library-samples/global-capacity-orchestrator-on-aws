@@ -21,7 +21,7 @@
     "_comment_project_name": "Used as the resource-name prefix for every stack (e.g., '<project>-<region>') and as the SSM parameter path root for cross-region ALB hostname registration.",
     "project_name": "gco",
 
-    "_comment_deployment_regions": "Where each stack class deploys. 'global' hosts Global Accelerator, ECR, S3, and the cross-region SSM hostname registry. 'api_gateway' and 'monitoring' often co-locate with 'global' but can be split. 'regional' is the list of EKS clusters; one regional stack per entry.",
+    "_comment_deployment_regions": "Where each stack class deploys. 'global' hosts partition-wide ECR, S3, DynamoDB, and the cross-region SSM hostname registry; in the commercial 'aws' partition it also hosts Global Accelerator. 'api_gateway' and 'monitoring' often co-locate with 'global' but can be split. 'regional' is the unlimited list of EKS clusters; every configured Region must be SDK-known and all configured Regions must belong to one AWS partition.",
     "deployment_regions": {
       "global": "us-east-2",
       "api_gateway": "us-east-2",
@@ -50,7 +50,7 @@
 
     "_comment_networking": "Networking, security, and ingress",
 
-    "_comment_global_accelerator": "AWS Global Accelerator front door. health_check_grace_period: seconds before a new endpoint starts being probed. health_check_interval: seconds between probes. health_check_timeout: seconds to wait per probe. health_check_path: HTTP path probed on each regional ALB. client_affinity: 'NONE' (default, spreads connections across endpoints) or 'SOURCE_IP' (pins a client IP to the same endpoint). See https://docs.aws.amazon.com/global-accelerator/latest/dg/about-endpoint-groups-health-check-options.html and https://docs.aws.amazon.com/global-accelerator/latest/dg/about-listeners.html#about-listeners-client-affinity.",
+    "_comment_global_accelerator": "AWS Global Accelerator front door in the commercial 'aws' partition only. Other AWS partitions omit the accelerator, listener, endpoint groups, and registration resources and use the IAM-authenticated regional APIs directly. When applicable: health_check_grace_period is seconds before a new endpoint starts being probed; health_check_interval is seconds between probes; health_check_timeout is seconds to wait per probe; health_check_path is the HTTP path probed on each regional ALB; client_affinity is 'NONE' or 'SOURCE_IP'.",
     "global_accelerator": {
       "health_check_grace_period": 30,
       "health_check_interval": 30,
@@ -81,7 +81,7 @@
       "unhealthy_threshold": 2
     },
 
-    "_comment_api_gateway": "Edge-optimized global REST API behavior plus direct-caller policy for the always-deployed per-region aggregation bridges. throttle_rate_limit (req/s) and throttle_burst_limit (peak burst) are stage caps. log_level applies to access/execution logs. metrics_enabled and tracing_enabled toggle CloudWatch metrics and X-Ray tracing. regional_api_enabled admits other IAM-authorized principals from this account to each bridge; the exact aggregator role is always admitted and bridge deployment is unconditional. Each VPC Lambda resolves the current internal ALB from the trusted SSM registry and uses private-root TLS. See docs/CUSTOMIZATION.md (Regional API Gateway).",
+    "_comment_api_gateway": "Authenticated API behavior and direct-caller policy. In the commercial 'aws' partition the global REST API is edge-optimized and its control/inference proxies use Global Accelerator; regional_api_enabled optionally admits other IAM-authorized principals from this account to each regional bridge. In other partitions the global API is regional and aggregate-only, Global Accelerator proxy routes are omitted, and same-account regional bridge access is forced on as the supported workload ingress. The exact aggregator role is always admitted. throttle/logging/metrics/tracing settings apply in every partition.",
     "api_gateway": {
       "throttle_rate_limit": 1000,
       "throttle_burst_limit": 2000,
@@ -217,7 +217,7 @@
       }
     },
 
-    "_comment_volcano_image_mirror": "Optional credential-free fix for Volcano's docker.io-only images (volcanosh/vc-*), which on a cold cluster pull slowly / hit Docker Hub rate limits and can stall Volcano's helm install. When enabled, the regional stack redirects Volcano's basic.image_registry to <account>.dkr.ecr.<region>.amazonaws.com/<ecr_namespace> (which defaults to <project_name>/dockerhub and must start with <project_name>/ so it inherits the project's <project_name>/* node-pull access, replication, and trusted-registry allow-list), and 'gco stacks deploy' auto-mirrors the pinned images into that namespace before the regional Helm install (or run 'gco images mirror --region <region>' manually). The copy preserves the full multi-arch manifest list (docker buildx imagetools / Finch --all-platforms / skopeo). Unlike an ECR pull-through cache this needs no Docker Hub secret; it is a static mirror you refresh when the Volcano chart version changes. See docs/IMAGE_MIRROR.md.",
+    "_comment_volcano_image_mirror": "Optional credential-free fix for Volcano's docker.io-only images (volcanosh/vc-*), which on a cold cluster pull slowly / hit Docker Hub rate limits and can stall Volcano's helm install. When enabled, the regional stack redirects Volcano's basic.image_registry to <account>.dkr.ecr.<region>.<url-suffix>/<ecr_namespace> (which defaults to <project_name>/dockerhub and must start with <project_name>/ so it inherits the project's <project_name>/* node-pull access, replication, and trusted-registry allow-list), and 'gco stacks deploy' auto-mirrors the pinned images into that namespace before the regional Helm install (or run 'gco images mirror --region <region>' manually). The copy preserves the full multi-arch manifest list (docker buildx imagetools / Finch --all-platforms / skopeo). Unlike an ECR pull-through cache this needs no Docker Hub secret; it is a static mirror you refresh when the Volcano chart version changes. See docs/IMAGE_MIRROR.md.",
     "volcano_image_mirror": {
       "enabled": true
     },

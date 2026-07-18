@@ -22,6 +22,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 900
+
 app = FastAPI(
     title="GCO Inference Proxy API",
     description="Authenticated streaming reverse proxy for managed GCO inference endpoints",
@@ -79,12 +81,19 @@ def create_app() -> FastAPI:
     return app
 
 
-if __name__ == "__main__":
+def _run_server() -> None:
+    """Run Uvicorn with the same drain budget declared by the pod manifest."""
     import uvicorn
 
     host = os.getenv("HOST", "0.0.0.0")  # nosec B104 — container listener
     port = int(os.getenv("PORT", "8080"))
     log_level = os.getenv("LOG_LEVEL", "info").lower()
+    graceful_shutdown_seconds = int(
+        os.getenv(
+            "GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS",
+            str(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS),
+        )
+    )
     logger.info("Starting Inference Proxy API on %s:%d", host, port)
     uvicorn.run(
         "gco.services.inference_api:app",
@@ -92,4 +101,9 @@ if __name__ == "__main__":
         port=port,
         log_level=log_level,
         reload=False,
+        timeout_graceful_shutdown=graceful_shutdown_seconds,
     )
+
+
+if __name__ == "__main__":
+    _run_server()

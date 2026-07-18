@@ -8,7 +8,7 @@ These examples call GCO through an IAM-authenticated API Gateway endpoint. They 
 - [Prerequisites](#prerequisites)
 - [Discover an endpoint](#discover-an-endpoint)
   - [Global API (default)](#global-api-default)
-  - [Regional bridge and optional direct access](#regional-bridge-and-optional-direct-access)
+  - [Regional bridge and direct access](#regional-bridge-and-direct-access)
 - [Run the examples](#run-the-examples)
 - [Current request shapes](#current-request-shapes)
 - [Authentication failures](#authentication-failures)
@@ -63,7 +63,7 @@ aws cloudformation describe-stacks \
   --output text
 ```
 
-The global path is:
+In the commercial `aws` partition, the global workload path is:
 
 ```text
 Client → edge-optimized API Gateway (AWS-managed TLS + SigV4)
@@ -73,15 +73,18 @@ Client → edge-optimized API Gateway (AWS-managed TLS + SigV4)
 ```
 
 Global Accelerator chooses a healthy registered backend. The global proxy
-rejects `X-GCO-Target-Region`; callers that require an exact region must use an
-authorized regional API endpoint.
+rejects `X-GCO-Target-Region`; callers that require an exact Region must use an
+authorized regional API endpoint. Outside `aws`, the global API is regional and
+aggregate-only, so workload control and inference always use a regional bridge.
 
-### Regional bridge and optional direct access
+### Regional bridge and direct access
 
 Every workload region has a stack named `<project>-regional-api-<region>` with a
-`RegionalApiEndpoint` output because cross-region aggregation depends on it.
-`api_gateway.regional_api_enabled=true` additionally permits IAM-authorized
-same-account callers to invoke that endpoint directly:
+`RegionalApiEndpoint` output because cross-region aggregation depends on it. In
+`aws`, `api_gateway.regional_api_enabled=true` additionally permits
+IAM-authorized same-account callers to invoke that endpoint directly. Other
+partitions enable that policy automatically because this endpoint is the
+supported workload ingress without Global Accelerator:
 
 ```bash
 aws cloudformation describe-stacks \
@@ -100,10 +103,11 @@ Client → regional API Gateway (AWS-managed TLS + SigV4)
 ```
 
 Sign requests in the region that owns the selected API Gateway endpoint. The
-bridge always exists for aggregator fan-out, but direct invocation requires the
-resource-policy opt-in. The aggregator itself uses AWS-managed TLS and SigV4 to
-the bridge; it does not read ALB SSM state, the HMAC secret, or private-root
-trust.
+bridge always exists for aggregator fan-out. In `aws`, direct invocation
+requires the resource-policy opt-in; outside `aws`, the deployment enables that
+same-account policy automatically. The aggregator itself uses AWS-managed TLS
+and SigV4 to the bridge; it does not read ALB SSM state, the HMAC secret, or
+private-root trust.
 
 ## Run the examples
 

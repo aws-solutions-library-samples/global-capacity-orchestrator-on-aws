@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Container runtime detection (docker > finch > podman)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,24 +206,24 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3690=>operation: '\n    Detect available container runtime (cached).\n\n    Returns:\n        Runtime name (``"docker"``, ``"finch"``, or ``"podman"``) if a\n        runtime is found and running, ``None`` if nothing is available.\n\n    Note:\n        If the ``CDK_DOCKER`` environment variable is set, that value\n        is returned without checking if the runtime is available.\n    '
-op3692=>operation: global _container_runtime_cache
-cond3695=>condition: if _container_runtime_cache is not _UNCHECKED
-io3702=>inputoutput: output: _container_runtime_cache
-e3700=>end: end function return
-op3708=>operation: result = _detect_container_runtime_uncached()
-op3710=>operation: _container_runtime_cache = result
-io3715=>inputoutput: output: result
-e3713=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op3999=>operation: '\n    Detect available container runtime (cached).\n\n    Returns:\n        Runtime name (``"docker"``, ``"finch"``, or ``"podman"``) if a\n        runtime is found and running, ``None`` if nothing is available.\n\n    Note:\n        If the ``CDK_DOCKER`` environment variable is set, that value\n        is returned without checking if the runtime is available.\n    '
+op4001=>operation: global _container_runtime_cache
+cond4004=>condition: if _container_runtime_cache is not _UNCHECKED
+io4011=>inputoutput: output: _container_runtime_cache
+e4009=>end: end function return
+op4017=>operation: result = _detect_container_runtime_uncached()
+op4019=>operation: _container_runtime_cache = result
+io4024=>inputoutput: output: result
+e4022=>end: end function return
 
-op3690->op3692
-op3692->cond3695
-cond3695(yes)->io3702
-io3702->e3700
-cond3695(no)->op3708
-op3708->op3710
-op3710->io3715
-io3715->e3713
+op3999->op4001
+op4001->cond4004
+cond4004(yes)->io4011
+io4011->e4009
+cond4004(no)->op4017
+op4017->op4019
+op4019->io4024
+io4024->e4022
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -232,6 +233,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

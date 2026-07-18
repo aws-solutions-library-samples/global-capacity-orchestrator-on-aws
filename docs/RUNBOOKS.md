@@ -8,6 +8,7 @@ Step-by-step procedures for common operational scenarios. Each runbook includes 
 
 - [Region Goes Unhealthy](#region-goes-unhealthy)
 - [Secret Rotation Fails](#secret-rotation-fails)
+- [Backend Certificate Rotation Fails](#backend-certificate-rotation-fails)
 - [Global Accelerator Stops Routing to a Region](#global-accelerator-stops-routing-to-a-region)
 - [SQS Dead Letter Queue Filling Up](#sqs-dead-letter-queue-filling-up)
 - [Manifest Processor Rejecting Valid Jobs](#manifest-processor-rejecting-valid-jobs)
@@ -128,6 +129,242 @@ aws secretsmanager get-secret-value \
    ```
 
 **Prevention:** The monitoring stack includes a CloudWatch alarm for rotation failures. Ensure the SNS topic has subscribers.
+
+---
+
+## Backend Certificate Rotation Fails
+
+**Symptoms:** A `BackendTls*` alarm enters `ALARM`, the certificate-manager dead-letter queue receives a message, the reconciliation heartbeat is absent for two schedule intervals, or regional backend requests begin failing TLS verification.
+
+The normal path is fully automatic: the manager reconciles every 1–24 hours (12 by default), renews 30-day regional leaves 10 days before expiry, stages 10-year root replacements 180 days before expiry, confirms publication of the pending public root before starting the activation delay, and keeps the previous root trusted for 45 days. Customer action is needed only when the AWS reconciliation path remains unhealthy long enough to exhaust retries or trigger an alarm.
+
+**Diagnosis:**
+
+```bash
+PROJECT_NAME=${PROJECT_NAME:-gco}
+API_REGION=${API_REGION:-us-east-2}
+REGISTRY_REGION=${REGISTRY_REGION:-us-east-2}
+API_STACK="${PROJECT_NAME}-api-gateway"
+
+# Discover the manager, schedule, and terminal DLQ from CloudFormation.
+MANAGER_FUNCTION=$(aws cloudformation list-stack-resources \
+  --stack-name "$API_STACK" --region "$API_REGION" \
+  --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function' && contains(LogicalResourceId, 'BackendTlsCertificateManager')].PhysicalResourceId | [0]" \
+  --output text)
+ROTATION_RULE=$(aws cloudformation list-stack-resources \
+  --stack-name "$API_STACK" --region "$API_REGION" \
+  --query "StackResourceSummaries[?ResourceType=='AWS::Events::Rule' && contains(LogicalResourceId, 'BackendTlsRotationSchedule')].PhysicalResourceId | [0]" \
+  --output text)
+DLQ_URL=$(aws cloudformation list-stack-resources \
+  --stack-name "$API_STACK" --region "$API_REGION" \
+  --query "StackResourceSummaries[?ResourceType=='AWS::SQS::Queue' && contains(LogicalResourceId, 'BackendTlsRotationDlq')].PhysicalResourceId | [0]" \
+  --output text)
+MANAGER_LOG_GROUP=$(aws lambda get-function-configuration \
+  --function-name "$MANAGER_FUNCTION" --region "$API_REGION" \
+  --query 'LoggingConfig.LogGroup' --output text)
+
+aws events describe-rule --name "$ROTATION_RULE" --region "$API_REGION"
+aws logs tail "$MANAGER_LOG_GROUP" --since 24h --region "$API_REGION"
+aws sqs get-queue-attributes --queue-url "$DLQ_URL" \
+  --attribute-names ApproximateNumberOfMessages --region "$API_REGION"
+
+# Inspect public trust only; never print the root secret or private keys.
+aws ssm get-parameter --name "/${PROJECT_NAME}/backend-tls/root-ca.pem" \
+  --region "$REGISTRY_REGION" --query 'Parameter.LastModifiedDate'
+METRIC_START=$(python3 -c 'from datetime import UTC, datetime, timedelta; print((datetime.now(UTC) - timedelta(days=2)).isoformat())')
+METRIC_END=$(python3 -c 'from datetime import UTC, datetime; print(datetime.now(UTC).isoformat())')
+aws cloudwatch get-metric-data --region "$API_REGION" \
+  --metric-data-queries "[{\"Id\":\"heartbeat\",\"MetricStat\":{\"Metric\":{\"Namespace\":\"GCO/BackendTLS\",\"MetricName\":\"ReconciliationSuccess\",\"Dimensions\":[{\"Name\":\"Project\",\"Value\":\"${PROJECT_NAME}\"}]},\"Period\":43200,\"Stat\":\"Sum\"}}]" \
+  --start-time "$METRIC_START" \
+  --end-time "$METRIC_END"
+```
+
+**Resolution:**
+
+1. **If the schedule is disabled:** Re-enable it, then invoke one reconciliation. Determine why it was disabled before clearing the alarm.
+
+   ```bash
+   aws events enable-rule --name "$ROTATION_RULE" --region "$API_REGION"
+   aws lambda invoke --function-name "$MANAGER_FUNCTION" \
+     --cli-binary-format raw-in-base64-out --payload '{"Action":"Rotate"}' \
+     --region "$API_REGION" /tmp/backend-tls-reconcile.json
+   jq . /tmp/backend-tls-reconcile.json
+   ```
+
+2. **If reconciliation fails:** Fix the logged KMS, Secrets Manager, SSM, ACM, quota, or IAM error and invoke the same `Rotate` action again. The operation is idempotent: existing regional ACM ARNs are reimported in place, and an unregistered first import is compensated automatically.
+
+3. **If a root is pending:** Do not edit the encrypted root state or force promotion. The activation clock starts only after SSM confirms that proxies can fetch the pending public root. Restore SSM access and let the manager complete the configured propagation delay.
+
+4. **If an expiry alarm remains active after a successful invocation:** Confirm each configured region's ARN under `/${PROJECT_NAME}/backend-tls/certificate-arn/<region>` and inspect it with `aws acm describe-certificate --certificate-arn <ARN> --region <REGION>`. Escalate before manually importing or deleting certificates; ad hoc replacement changes the stable ARN consumed by the ALB listener.
+
+5. **After recovery:** Delete terminal DLQ messages only after the heartbeat and expiry metrics are healthy. Warm proxy processes refresh public trust within the configured cache TTL (five minutes by default), so routine recovery does not require restarts.
+
+### Root-State Recovery
+
+The root secret contains the only durable signing key. Treat recovery as a
+security incident: freeze PKI configuration changes, preserve CloudTrail and
+Lambda logs, and never print or download `SecretString` into a terminal, ticket,
+or log. The commands below inspect only secret metadata and public material.
+
+1. **Restore a secret scheduled for deletion.** A normal stack must keep
+   `${PROJECT_NAME}/backend-tls/root-ca` available. `restore-secret` is
+   idempotent only while Secrets Manager still retains the secret:
+
+   ```bash
+   ROOT_SECRET_ID="${PROJECT_NAME}/backend-tls/root-ca"
+   DELETED_DATE=$(aws secretsmanager describe-secret \
+     --secret-id "$ROOT_SECRET_ID" --region "$API_REGION" \
+     --query 'DeletedDate' --output text)
+   if [ "$DELETED_DATE" != "None" ]; then
+     aws secretsmanager restore-secret \
+       --secret-id "$ROOT_SECRET_ID" --region "$API_REGION"
+   fi
+   ```
+
+2. **Move `AWSCURRENT` to a known-good version.** List version IDs, stages, and
+   dates only. Select the version associated with the last healthy
+   reconciliation—often the newest `AWSPREVIOUS`—and have a second operator
+   verify the ID before changing stages:
+
+   ```bash
+   aws secretsmanager list-secret-version-ids \
+     --secret-id "$ROOT_SECRET_ID" --include-deprecated \
+     --region "$API_REGION" \
+     --query 'Versions[].{VersionId:VersionId,Stages:VersionStages,Created:CreatedDate}'
+
+   KNOWN_GOOD_VERSION_ID=${KNOWN_GOOD_VERSION_ID:?Set the independently verified version ID}
+   CURRENT_VERSION_ID=$(aws secretsmanager list-secret-version-ids \
+     --secret-id "$ROOT_SECRET_ID" --region "$API_REGION" \
+     --query 'Versions[?contains(VersionStages, `AWSCURRENT`)].VersionId | [0]' \
+     --output text)
+   if [ -z "$CURRENT_VERSION_ID" ] || [ "$CURRENT_VERSION_ID" = "None" ]; then
+     aws secretsmanager update-secret-version-stage \
+       --secret-id "$ROOT_SECRET_ID" --version-stage AWSCURRENT \
+       --move-to-version-id "$KNOWN_GOOD_VERSION_ID" \
+       --region "$API_REGION"
+   elif [ "$CURRENT_VERSION_ID" != "$KNOWN_GOOD_VERSION_ID" ]; then
+     aws secretsmanager update-secret-version-stage \
+       --secret-id "$ROOT_SECRET_ID" --version-stage AWSCURRENT \
+       --move-to-version-id "$KNOWN_GOOD_VERSION_ID" \
+       --remove-from-version-id "$CURRENT_VERSION_ID" \
+       --region "$API_REGION"
+   fi
+   ```
+
+   Invoke one reconciliation; the manager validates the restored
+   key/certificate pair and fails without replacing regional leaves if the
+   version is malformed:
+
+   ```bash
+   aws lambda invoke --function-name "$MANAGER_FUNCTION" \
+     --cli-binary-format raw-in-base64-out --payload '{"Action":"Rotate"}' \
+     --region "$API_REGION" /tmp/backend-tls-reconcile.json
+   jq . /tmp/backend-tls-reconcile.json
+   ```
+
+3. **Validate public trust and every regional association.** Set `REGIONS` to
+   the exact space-separated workload-region list from `cdk.json`. The first
+   loop works from CloudShell; the final TLS handshake also requires network
+   reachability to each internal ALB (for example, a VPC-connected shell):
+
+   ```bash
+   REGIONS=${REGIONS:?Set the exact space-separated workload regions}
+   BACKEND_TLS_SERVER_NAME="backend.${PROJECT_NAME}.gco.internal"
+   TRUST_BUNDLE=$(mktemp)
+   trap 'rm -f "$TRUST_BUNDLE"' EXIT
+   aws ssm get-parameter --name "/${PROJECT_NAME}/backend-tls/root-ca.pem" \
+     --region "$REGISTRY_REGION" --query 'Parameter.Value' --output text \
+     >"$TRUST_BUNDLE"
+   if grep -q 'PRIVATE KEY' "$TRUST_BUNDLE"; then
+     echo "ERROR: public trust parameter contains private material" >&2
+     exit 1
+   fi
+   openssl crl2pkcs7 -nocrl -certfile "$TRUST_BUNDLE" \
+     | openssl pkcs7 -print_certs -noout
+
+   for REGION in $REGIONS; do
+     CERT_ARN=$(aws ssm get-parameter \
+       --name "/${PROJECT_NAME}/backend-tls/certificate-arn/${REGION}" \
+       --region "$REGISTRY_REGION" --query 'Parameter.Value' --output text)
+     aws acm describe-certificate --certificate-arn "$CERT_ARN" \
+       --region "$REGION" \
+       --query 'Certificate.{Status:Status,NotAfter:NotAfter,Domain:DomainName,InUseBy:InUseBy}'
+     LOAD_BALANCERS=$(aws acm describe-certificate --certificate-arn "$CERT_ARN" \
+       --region "$REGION" --query 'Certificate.InUseBy[]' --output text)
+     if [ -z "$LOAD_BALANCERS" ] || [ "$LOAD_BALANCERS" = "None" ]; then
+       echo "ERROR: $REGION certificate is not attached to a load balancer" >&2
+       exit 1
+     fi
+     CERTIFICATE_ATTACHED=false
+     VERIFIED_LOAD_BALANCER_ARN=""
+     for LOAD_BALANCER_ARN in $LOAD_BALANCERS; do
+       LISTENER_ARNS=$(aws elbv2 describe-listeners \
+         --load-balancer-arn "$LOAD_BALANCER_ARN" --region "$REGION" \
+         --query 'Listeners[].ListenerArn' --output text)
+       for LISTENER_ARN in $LISTENER_ARNS; do
+         ATTACHED=$(aws elbv2 describe-listener-certificates \
+           --listener-arn "$LISTENER_ARN" --region "$REGION" \
+           --query "Certificates[?CertificateArn=='${CERT_ARN}'].CertificateArn | [0]" \
+           --output text)
+         if [ "$ATTACHED" = "$CERT_ARN" ]; then
+           CERTIFICATE_ATTACHED=true
+           VERIFIED_LOAD_BALANCER_ARN=$LOAD_BALANCER_ARN
+           break
+         fi
+       done
+       [ "$CERTIFICATE_ATTACHED" = "true" ] && break
+     done
+     if [ "$CERTIFICATE_ATTACHED" != "true" ]; then
+       echo "ERROR: $REGION certificate is absent from every load-balancer listener" >&2
+       exit 1
+     fi
+
+     ALB_HOSTNAME=$(aws ssm get-parameter \
+       --name "/${PROJECT_NAME}/alb-hostname-${REGION}" \
+       --region "$REGISTRY_REGION" --query 'Parameter.Value' --output text)
+     VERIFIED_ALB_HOSTNAME=$(aws elbv2 describe-load-balancers \
+       --load-balancer-arns "$VERIFIED_LOAD_BALANCER_ARN" \
+       --region "$REGION" --query 'LoadBalancers[0].DNSName' --output text)
+     if [ -z "$VERIFIED_ALB_HOSTNAME" ] \
+       || [ "$VERIFIED_ALB_HOSTNAME" = "None" ] \
+       || [ "$ALB_HOSTNAME" != "$VERIFIED_ALB_HOSTNAME" ]; then
+       echo "ERROR: $REGION SSM hostname does not identify the certificate-bearing ALB" >&2
+       exit 1
+     fi
+     openssl s_client -connect "${VERIFIED_ALB_HOSTNAME}:443" \
+       -servername "$BACKEND_TLS_SERVER_NAME" \
+       -verify_hostname "$BACKEND_TLS_SERVER_NAME" \
+       -verify_return_error -CAfile "$TRUST_BUNDLE" \
+       </dev/null >/dev/null
+   done
+   ```
+
+4. **Perform an emergency root rollover through the normal staged path.** Once
+   a valid `AWSCURRENT` is restored, increment
+   `context.backend_tls.root_generation` by exactly one in `cdk.json`, review
+   that change, and deploy the API stack normally. Do not manufacture a root or
+   edit encrypted state manually. The manager publishes the pending public root,
+   starts the activation delay only after that publication succeeds, promotes
+   it after the configured delay, reimports leaves into stable ACM ARNs, and
+   retains the previous public root for the overlap window. Monitor all
+   `BackendTls*` alarms throughout the activation and overlap periods.
+
+5. **Escalate when the secret or every root-state version is irrecoverable.**
+   Private root material cannot be reconstructed from SSM or ACM. If
+   `describe-secret` returns `ResourceNotFoundException`, do not manually create
+   a same-named secret: CloudFormation would still reference the deleted
+   physical resource and the deployment would remain drifted. Keep the schedule
+   disabled, preserve the still-serving leaves, and engage the service
+   owner/security incident process before they expire. Recovery requires an
+   approved maintenance window and a controlled CloudFormation teardown/redeploy
+   of the API PKI and dependent regional listener associations; the redeployed
+   managed secret then starts from its generated `UNINITIALIZED` state. Do not
+   delete or overwrite a surviving root secret in place: doing so can switch
+   leaves before warm proxy trust caches contain the new root and create an
+   avoidable outage. Re-run the full validation above before restoring traffic
+   and the schedule.
+
+**Prevention:** Keep the certificate manager schedule enabled and route the API stack's `BackendTls*` CloudWatch alarms to an on-call destination. The alarms exist automatically, but notification subscriptions are deployment-specific; an unsubscribed alarm is visible in CloudWatch but cannot page anyone.
 
 ---
 

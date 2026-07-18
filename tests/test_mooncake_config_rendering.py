@@ -11,9 +11,10 @@ disaggregated endpoint talks to the KV fabric:
   into each pod, carrying the RDMA/TCP transport, the optional key-value store,
   and the optional asynchronous cold tier.
 
-These examples pin the exact connector chain for mode ``both``, the rejection of
-an unsupported ``(mode, role)`` pair, and the rendered config across the
-rdma/tcp transports and the store-on/store-off and cold-tier-on/off choices.
+These examples pin the exact connector chain for mode ``both``, the explicit
+EFA/TCP connector transport settings, rejection of an unsupported
+``(mode, role)`` pair, and the rendered config across the rdma/tcp transports
+and the store-on/store-off and cold-tier-on/off choices.
 """
 
 from __future__ import annotations
@@ -47,6 +48,10 @@ def test_both_mode_chains_transfer_then_store_sharing_kv_role() -> None:
         "MooncakeStoreConnector",
     ]
     assert connectors[0]["kv_role"] == "kv_producer"
+    assert connectors[0]["kv_connector_extra_config"] == {
+        "mooncake_protocol": "efa",
+        "device_name": "",
+    }
     assert connectors[1]["kv_role"] == "kv_producer"
 
 
@@ -58,6 +63,52 @@ def test_both_mode_decode_role_shares_consumer_role_across_chain() -> None:
     assert parsed["kv_role"] == "kv_consumer"
     assert connectors[0]["kv_role"] == "kv_consumer"
     assert connectors[1]["kv_role"] == "kv_consumer"
+
+
+def test_disaggregated_default_selects_efa_with_device_autodetection() -> None:
+    """An omitted transfer block explicitly selects EFA and auto-detection."""
+    parsed = json.loads(build_kv_transfer_config({"mode": "disaggregated"}, "prefill"))
+
+    assert parsed["kv_connector_extra_config"] == {
+        "mooncake_protocol": "efa",
+        "device_name": "",
+    }
+
+
+def test_disaggregated_rdma_intent_explicitly_selects_efa_and_device() -> None:
+    """GCO's RDMA intent maps to the EFA protocol at the vLLM boundary."""
+    parsed = json.loads(
+        build_kv_transfer_config(
+            {
+                "mode": "disaggregated",
+                "transfer": {"protocol": "rdma", "device_name": "eth0"},
+            },
+            "prefill",
+        )
+    )
+
+    assert parsed["kv_connector_extra_config"] == {
+        "mooncake_protocol": "efa",
+        "device_name": "eth0",
+    }
+
+
+def test_disaggregated_tcp_intent_uses_tcp_without_dropping_device() -> None:
+    """An explicit TCP fallback and its device are forwarded unchanged."""
+    parsed = json.loads(
+        build_kv_transfer_config(
+            {
+                "mode": "disaggregated",
+                "transfer": {"protocol": "tcp", "device_name": "eth1"},
+            },
+            "decode",
+        )
+    )
+
+    assert parsed["kv_connector_extra_config"] == {
+        "mooncake_protocol": "tcp",
+        "device_name": "eth1",
+    }
 
 
 @pytest.mark.parametrize(

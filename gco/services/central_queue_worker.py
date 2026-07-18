@@ -13,11 +13,12 @@ from typing import Any
 
 from kubernetes.client.rest import ApiException
 
-from gco.services.manifest_processor import ManifestProcessor
+from gco.services.manifest_processor import ManifestProcessor, RetryableQueuedJobApplyError
 from gco.services.structured_logging import sanitize_log_value
 from gco.services.template_store import JobStatus, JobStore
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``process_queued_jobs_once`` -> ``diagrams/code_diagrams/gco/services/central_queue_worker.process_queued_jobs_once.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/central_queue_worker.process_queued_jobs_once.png``)
@@ -238,7 +239,17 @@ async def process_queued_jobs_once(
                 )
             else:
                 processed.append({"job_id": job_id, "status": "fenced"})
-        except Exception as exc:  # noqa: BLE001 - isolate malformed/transient records
+        except RetryableQueuedJobApplyError as exc:
+            # The API may have accepted a deterministic create before the
+            # response was lost. Keep APPLYING fenced and let lease recovery
+            # return it to QUEUED, where the next attempt adopts by full queue ID.
+            error = _bounded_error(exc)
+            logger.warning(
+                "Deferring central queue job %s after an inconclusive Kubernetes result",
+                sanitize_log_value(job_id),
+            )
+            processed.append({"job_id": job_id, "status": "retryable", "error": error})
+        except Exception as exc:  # noqa: BLE001 - isolate malformed/permanent records
             error = _bounded_error(exc)
             logger.exception(
                 "Failed to process central queue job %s",

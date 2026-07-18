@@ -24,7 +24,10 @@ CloudFormation Custom Resource — runs on stack Create, Update, and Delete.
 1. Configures a Kubernetes client with EKS token authentication
 2. Reads all YAML files from the `manifests/` directory (sorted by filename)
 3. Replaces placeholders (e.g., image URIs) with values from CloudFormation properties
-4. Applies each resource with create-or-patch idempotency
+4. Applies each resource with create-or-patch idempotency. Deployment creates
+   retain their manifest `spec.replicas` seed; deployments carrying the
+   `gco.aws/hpa-controls-replicas: "true"` ownership annotation omit that field
+   from update patches so the HPA's scale-subresource decision is not reset.
 5. Restarts key deployments in `gco-system` to pick up new images
 
 ### Delete
@@ -33,7 +36,7 @@ Always returns SUCCESS to prevent stuck stacks. Optionally skips resource deleti
 
 ## Supported Resource Kinds
 
-Namespace, ServiceAccount, ClusterRole, ClusterRoleBinding, Role, RoleBinding, Deployment, DaemonSet, Service, ConfigMap, Secret, Ingress, IngressClass, IngressClassParams, StorageClass, PersistentVolume, PersistentVolumeClaim, PodDisruptionBudget, NetworkPolicy, NodePool, EC2NodeClass, APIService, DeviceClass, ScaledJob, ScaledObject.
+Namespace, ServiceAccount, ClusterRole, ClusterRoleBinding, Role, RoleBinding, Deployment, DaemonSet, HorizontalPodAutoscaler (`autoscaling/v2`), Service, ConfigMap, Secret, Ingress, IngressClass, IngressClassParams, StorageClass, PersistentVolume, PersistentVolumeClaim, PodDisruptionBudget, NetworkPolicy, NodePool, EC2NodeClass, APIService, DeviceClass, ScaledJob, ScaledObject.
 
 ## CloudFormation Properties
 

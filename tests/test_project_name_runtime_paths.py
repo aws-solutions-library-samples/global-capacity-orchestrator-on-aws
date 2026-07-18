@@ -126,6 +126,7 @@ class TestAggregatorDiscoveryStackName:
                 {
                     "PROJECT_NAME": project,
                     "TARGET_REGIONS": '["us-east-1"]',
+                    "AWS_URL_SUFFIX": "amazonaws.com",
                 },
             ),
             patch("boto3.client", return_value=mock_cloudformation) as mock_client,
@@ -158,7 +159,14 @@ class TestAggregatorDiscoveryStackName:
             ]
         }
         with (
-            patch.dict(os.environ, {"TARGET_REGIONS": '["us-west-2"]'}, clear=True),
+            patch.dict(
+                os.environ,
+                {
+                    "TARGET_REGIONS": '["us-west-2"]',
+                    "AWS_URL_SUFFIX": "amazonaws.com",
+                },
+                clear=True,
+            ),
             patch("boto3.client", return_value=mock_cloudformation),
         ):
             endpoints = handler.get_regional_endpoints()

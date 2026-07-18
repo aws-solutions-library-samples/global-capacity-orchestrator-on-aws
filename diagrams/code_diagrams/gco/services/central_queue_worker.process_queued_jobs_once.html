@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Central queue activation pass (migration, fenced claim, heartbeat, deterministic apply)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,23 +206,23 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2550=>operation: "Claim and apply one bounded batch for the processor's region."
-op2552=>operation: owner = owner_id or _worker_identity(processor.region)
-op2554=>operation: renewal_seconds = lease_renewal_seconds or max(5.0, min(float(store.claim_lease_seconds) / 3.0, 60.0))
-op2556=>operation: migration = await asyncio.to_thread(store.migrate_legacy_records_for_region, processor.region, max(limit * 20, 100))
-op2558=>operation: migrated = int(migration.get('migrated', 0))
-op2560=>operation: migration_failed = int(migration.get('failed', 0))
-cond2563=>operation: logger.warning('Central queue migration for %s: backfilled=%d safely_failed=%d complete=%s', processor.region, migrated, migration_failed, migration.get('complete', False)) if  migrated or migration_failed
-op2573=>operation: queued_jobs = await asyncio.to_thread(store.get_queued_jobs_for_region, processor.region, limit)
-op2575=>operation: processed: list[dict[str, Any]] = []
-cond2578=>condition: for queued_job in queued_jobs
-cond2583=>operation: break if  stop_event is not None and stop_event.is_set()
-op2593=>operation: job_id = str(queued_job.get('job_id', ''))
-cond2596=>condition: if not job_id
-sub2600=>subroutine: logger.error('Ignoring central queue record without a job_id')
-sub2602=>subroutine: continue
-op2607=>operation: claimed: dict[str, Any] | None = None
-op2610=>operation: claimed = await asyncio.to_thread(store.claim_job, job_id, processor.region, owner)
+        <div><textarea id="code" style="width: 100%;" rows="11">op2779=>operation: "Claim and apply one bounded batch for the processor's region."
+op2781=>operation: owner = owner_id or _worker_identity(processor.region)
+op2783=>operation: renewal_seconds = lease_renewal_seconds or max(5.0, min(float(store.claim_lease_seconds) / 3.0, 60.0))
+op2785=>operation: migration = await asyncio.to_thread(store.migrate_legacy_records_for_region, processor.region, max(limit * 20, 100))
+op2787=>operation: migrated = int(migration.get('migrated', 0))
+op2789=>operation: migration_failed = int(migration.get('failed', 0))
+cond2792=>operation: logger.warning('Central queue migration for %s: backfilled=%d safely_failed=%d complete=%s', processor.region, migrated, migration_failed, migration.get('complete', False)) if  migrated or migration_failed
+op2802=>operation: queued_jobs = await asyncio.to_thread(store.get_queued_jobs_for_region, processor.region, limit)
+op2804=>operation: processed: list[dict[str, Any]] = []
+cond2807=>condition: for queued_job in queued_jobs
+cond2812=>operation: break if  stop_event is not None and stop_event.is_set()
+op2822=>operation: job_id = str(queued_job.get('job_id', ''))
+cond2825=>condition: if not job_id
+sub2829=>subroutine: logger.error('Ignoring central queue record without a job_id')
+sub2831=>subroutine: continue
+op2836=>operation: claimed: dict[str, Any] | None = None
+op2839=>operation: claimed = await asyncio.to_thread(store.claim_job, job_id, processor.region, owner)
 if not claimed:
     continue
 claim_token = str(claimed.get('claim_token') or '')
@@ -251,63 +252,72 @@ if pending:
     processed.append({'job_id': job_id, 'status': 'applied', 'k8s_job_name': resource.name, 'k8s_job_uid': resource.uid})
 else:
     processed.append({'job_id': job_id, 'status': 'fenced'})
-cond2609=>condition: exception raised?
-cond2612=>condition: except Exception as exc
-op2616=>operation: error = _bounded_error(exc)
-sub2618=>subroutine: logger.exception('Failed to process central queue job %s', sanitize_log_value(job_id))
-op2620=>operation: claim = claimed
-op2622=>operation: token = claim.get('claim_token') if isinstance(claim, dict) else None
-op2624=>operation: generation = claim.get('claim_generation') if isinstance(claim, dict) else None
-cond2627=>condition: if token and generation
-op2634=>operation: failed = await asyncio.to_thread(store.transition_job, job_id, target_region=processor.region, expected_status=JobStatus.APPLYING, status=JobStatus.FAILED, message='Failed to apply deterministic Kubernetes Job', error=error, claimed_by=owner, claim_token=str(token), claim_generation=int(generation))
-cond2631=>condition: exception raised?
-cond2636=>condition: except Exception
-sub2640=>subroutine: logger.exception('Unable to persist failure for central queue job %s', sanitize_log_value(job_id))
-op2642=>operation: failed = None
-sub2647=>subroutine: processed.append({'job_id': job_id, 'status': 'failed' if failed else 'fenced', 'error': error})
-sub2651=>subroutine: processed.append({'job_id': job_id, 'status': 'fenced', 'error': error})
-io2662=>inputoutput: output: (len(queued_jobs), processed)
-e2660=>end: end function return
+cond2838=>condition: exception raised?
+cond2841=>condition: except RetryableQueuedJobApplyError as exc
+op2845=>operation: error = _bounded_error(exc)
+sub2847=>subroutine: logger.warning('Deferring central queue job %s after an inconclusive Kubernetes result', sanitize_log_value(job_id))
+sub2849=>subroutine: processed.append({'job_id': job_id, 'status': 'retryable', 'error': error})
+cond2851=>condition: except Exception as exc
+op2855=>operation: error = _bounded_error(exc)
+sub2857=>subroutine: logger.exception('Failed to process central queue job %s', sanitize_log_value(job_id))
+op2859=>operation: claim = claimed
+op2861=>operation: token = claim.get('claim_token') if isinstance(claim, dict) else None
+op2863=>operation: generation = claim.get('claim_generation') if isinstance(claim, dict) else None
+cond2866=>condition: if token and generation
+op2873=>operation: failed = await asyncio.to_thread(store.transition_job, job_id, target_region=processor.region, expected_status=JobStatus.APPLYING, status=JobStatus.FAILED, message='Failed to apply deterministic Kubernetes Job', error=error, claimed_by=owner, claim_token=str(token), claim_generation=int(generation))
+cond2870=>condition: exception raised?
+cond2875=>condition: except Exception
+sub2879=>subroutine: logger.exception('Unable to persist failure for central queue job %s', sanitize_log_value(job_id))
+op2881=>operation: failed = None
+sub2886=>subroutine: processed.append({'job_id': job_id, 'status': 'failed' if failed else 'fenced', 'error': error})
+sub2890=>subroutine: processed.append({'job_id': job_id, 'status': 'fenced', 'error': error})
+io2901=>inputoutput: output: (len(queued_jobs), processed)
+e2899=>end: end function return
 
-op2550->op2552
-op2552->op2554
-op2554->op2556
-op2556->op2558
-op2558->op2560
-op2560->cond2563
-cond2563->op2573
-op2573->op2575
-op2575->cond2578
-cond2578(yes)->cond2583
-cond2583->op2593
-op2593->cond2596
-cond2596(yes)->sub2600
-sub2600->sub2602
-cond2596(no)->op2607
-op2607->op2610
-op2610->cond2609
-cond2609(yes)->cond2612
-cond2612(yes)->op2616
-op2616->sub2618
-sub2618->op2620
-op2620->op2622
-op2622->op2624
-op2624->cond2627
-cond2627(yes)->op2634
-op2634->cond2631
-cond2631(yes)->cond2636
-cond2636(yes)->sub2640
-sub2640->op2642
-op2642->sub2647
-sub2647->cond2578
-cond2636(no)->sub2647
-cond2631(no)->sub2647
-cond2627(no)->sub2651
-sub2651->cond2578
-cond2612(no)->cond2578
-cond2609(no)->cond2578
-cond2578(no)->io2662
-io2662->e2660
+op2779->op2781
+op2781->op2783
+op2783->op2785
+op2785->op2787
+op2787->op2789
+op2789->cond2792
+cond2792->op2802
+op2802->op2804
+op2804->cond2807
+cond2807(yes)->cond2812
+cond2812->op2822
+op2822->cond2825
+cond2825(yes)->sub2829
+sub2829->sub2831
+cond2825(no)->op2836
+op2836->op2839
+op2839->cond2838
+cond2838(yes)->cond2841
+cond2841(yes)->op2845
+op2845->sub2847
+sub2847->sub2849
+sub2849->cond2807
+cond2841(no)->cond2851
+cond2851(yes)->op2855
+op2855->sub2857
+sub2857->op2859
+op2859->op2861
+op2861->op2863
+op2863->cond2866
+cond2866(yes)->op2873
+op2873->cond2870
+cond2870(yes)->cond2875
+cond2875(yes)->sub2879
+sub2879->op2881
+op2881->sub2886
+sub2886->cond2807
+cond2875(no)->sub2886
+cond2870(no)->sub2886
+cond2866(no)->sub2890
+sub2890->cond2807
+cond2851(no)->cond2807
+cond2838(no)->cond2807
+cond2807(no)->io2901
+io2901->e2899
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -317,6 +327,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

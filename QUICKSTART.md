@@ -46,9 +46,14 @@ You'll additionally need:
 # Python 3.14+ (3.14 used in CI)
 python3 --version
 
-# Node.js LTS (v24) and CDK CLI
+# Node.js 24 and npm 11.18.0 (see .nvmrc and package.json)
 node --version
-cdk --version    # npm install -g aws-cdk if missing
+npm --version
+
+# Install and verify the repository's exact npm pin, then the locked CDK CLI
+bash .github/scripts/use-pinned-npm.sh package.json
+npm ci --ignore-scripts --no-audit --no-fund
+npm exec -- cdk --version
 ```
 
 You should install GCO into a **fresh** virtual environment or via pipx. Mixing it into an existing Python environment will frequently fail dependency resolution because of the project's pinned versions.
@@ -383,12 +388,14 @@ GCO pins exact versions of many Python packages (CDK, AWS SDKs, FastAPI, mypy, R
 
 ### CDK CLI version mismatch
 
-If you see `Cloud assembly schema version mismatch`, your CDK CLI is too old. Install the latest version:
+If you see `Cloud assembly schema version mismatch`, reinstall the exact repository-owned CDK graph rather than downloading a global latest release:
 
 ```bash
-npm install -g aws-cdk@latest
-cdk --version
+npm ci --ignore-scripts --no-audit --no-fund
+npm exec -- cdk --version
 ```
+
+The CLI prefers `node_modules/.bin/cdk` from this lockfile. If the local graph is absent, `gco` can still use an already-installed CDK on `PATH`, but contributors and CI should use the locked copy.
 
 ### "Stack already exists"
 

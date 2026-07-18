@@ -17,6 +17,7 @@ AWS Lambda functions that power GCO's infrastructure layer. These are deployed a
 | `helm-installer/` | Installs Helm charts (KEDA, Volcano, KubeRay, Kueue) into EKS clusters during deployment. |
 | `helm-orchestrator/` | CloudFormation custom-resource provider (async `cr.Provider`) that starts and polls the Helm-install Step Functions state machine. Does no Helm/Kubernetes work itself — the per-chart tasks run in `helm-installer`. |
 | `image-lookup/` | CloudFormation custom resource that adopts-or-creates `gco/<name>` ECR repositories so retained repos from a prior deploy are rebound rather than failing the stack with `RepositoryAlreadyExistsException`. Honors `gco:retain=true` on Delete. |
+| `inference-streaming-proxy/` | Node.js 24 response-streaming proxy used by both global and regional `/inference/*` API Gateway integrations. Owns an isolated exact-pinned AWS SDK graph. |
 | `api-gateway-proxy/` | Proxies IAM-authenticated global requests through Global Accelerator to regional ALBs using request-bound HMAC plus strict deployment-local private-root TLS. |
 | `regional-api-proxy/` | VPC proxy behind every regional aggregation bridge; resolves/verifies its internal ALB and uses HMAC plus private-root TLS. Direct user invocation is optional. |
 | `cross-region-aggregator/` | Discovers deterministic regional API Gateway stacks and aggregates their SigV4-authenticated AWS-TLS responses; it never connects directly to ALBs. |
@@ -40,6 +41,14 @@ pip3 install kubernetes pyyaml urllib3 -t lambda/kubectl-applier-simple-build/
 
 The GCO CLI handles this automatically during `gco stacks deploy`.
 
+The inference streaming proxy has a separate production npm graph. CI and CDK staging install it from its committed lockfile with lifecycle scripts disabled:
+
+```bash
+npm ci --prefix lambda/inference-streaming-proxy --omit=dev --ignore-scripts --no-audit --no-fund
+```
+
+Do not install the root CDK/diagram/markdown packages into this directory; keeping the deployable graph isolated prevents development tooling from entering the Lambda asset.
+
 ## Architecture
 
 ```text
@@ -48,6 +57,10 @@ API Gateway → api-gateway-proxy (HMAC) → Global Accelerator (TCP/443 pass-th
                                       ↓
                          AuthenticationMiddleware
                          (validates exact request)
+
+API Gateway → inference-streaming-proxy (HMAC, Node.js 24 response stream)
+  → Global Accelerator or regional ALB (private-root TLS)
+  → inference-proxy Service → model endpoint Service → streamed response
 
 Global API → cross-region-aggregator → regional API (AWS TLS + SigV4)
   → regional-api-proxy (HMAC) → regional ALB (private-root TLS) → EKS pod

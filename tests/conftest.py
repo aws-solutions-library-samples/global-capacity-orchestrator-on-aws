@@ -5,9 +5,6 @@ This module provides common fixtures used across multiple test modules,
 including mock Kubernetes clients, sample manifests, and configuration objects.
 """
 
-import shutil
-import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -30,94 +27,38 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 @pytest.fixture(scope="session", autouse=True)
 def ensure_lambda_build_dirs():
-    """Ensure Lambda build directories exist before any CDK synthesis tests.
+    """Prepare every ignored Lambda asset before in-process CDK synthesis.
 
-    CDK's Code.from_asset() fingerprints these directories during synthesis.
-    If they're missing or stale, CDK tests fail with ENOENT errors.
-    This fixture runs once per test session and rebuilds if needed.
+    CI normally supplies source-current assets through the composite build
+    action. The shared production entry point is still invoked here so direct
+    pytest execution from a fresh checkout has the same precondition as raw
+    ``app.py`` and CLI-managed CDK execution.
     """
-    kubectl_build = PROJECT_ROOT / "lambda" / "kubectl-applier-simple-build"
-    helm_build = PROJECT_ROOT / "lambda" / "helm-installer-build"
+    from cli.stacks import cdk_asset_consumer
 
-    # Rebuild kubectl-applier-simple-build if handler.py is missing
-    if not (kubectl_build / "handler.py").exists():
-        kubectl_build.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(
-            PROJECT_ROOT / "lambda" / "kubectl-applier-simple" / "handler.py",
-            kubectl_build / "handler.py",
-        )
-        shutil.copytree(
-            PROJECT_ROOT / "lambda" / "kubectl-applier-simple" / "manifests",
-            kubectl_build / "manifests",
-            dirs_exist_ok=True,
-        )
-        subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - test fixture: static list [sys.executable,"-m","pip","install",...]; no user input
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "kubernetes",
-                "pyyaml",
-                "urllib3",
-                "-t",
-                str(kubectl_build),
-                "-q",
-            ],
-            check=True,
-        )
-
-    # Rebuild helm-installer-build if handler.py is missing
-    if not (helm_build / "handler.py").exists():
-        if helm_build.exists():
-            shutil.rmtree(helm_build)
-        shutil.copytree(
-            PROJECT_ROOT / "lambda" / "helm-installer",
-            helm_build,
-        )
-        # Remove __pycache__ from the copy
-        for pycache in helm_build.rglob("__pycache__"):
-            shutil.rmtree(pycache)
+    with cdk_asset_consumer(PROJECT_ROOT):
+        yield
 
 
 # ============================================================================
-# Session-scoped: neutralize StackManager's self-healing Lambda rebuild during tests
+# Session-scoped: neutralize StackManager Lambda rebuilds during tests
 # ============================================================================
 #
-# ``StackManager.__init__`` calls ``_ensure_lambda_build()`` (and its downstream
-# ``_build_kubectl_lambda``) as a self-healing step so any ``gco stacks
-# deploy`` succeeds even when a contributor's build tree is stale. That's the
-# right behavior at runtime, but it's destructive during tests:
-#
-#   1. ``_build_kubectl_lambda`` does ``_safe_rmtree(build_dir)`` on the *real*
-#      ``lambda/kubectl-applier-simple-build/`` whenever its guard (``yaml/``
-#      missing) trips.
-#   2. Under pytest-xdist, one worker's rebuild races with another worker's
-#      CDK ``Code.from_asset()`` mid-copy, producing the sporadic
-#      ``ENOENT: … lstat '…lambda/kubectl-applier-simple-build/botocore/data/…``
-#      failures we see on the 2-vCPU CI runner.
-#   3. Any test that mocks ``subprocess.run`` while constructing a
-#      ``StackManager`` can silently short-circuit the pip-install step and
-#      leave the build tree partially populated, which then trips the guard
-#      on the NEXT construction and cascades a rebuild.
-#   4. ``deploy()`` calls ``_rebuild_lambda_packages()`` which rm-trees and
-#      pip-installs into the real build dir even when ``_run_cdk`` is
-#      mocked — so every ``test_deploy_*`` hits the real filesystem too.
-#
-# Tests should never rebuild the *real* Lambda tree. The composite action
-# (``.github/actions/build-lambda-package``) populates it before pytest runs
-# in CI, and ``ensure_lambda_build_dirs`` above handles the local-dev case.
-# Patching ``_ensure_lambda_build`` and ``_rebuild_lambda_packages`` to skip
-# when ``project_root`` points at the real repo makes xdist safe; tests that
-# intentionally exercise these methods against a ``tmp_path`` keep working
-# because the guard lets them through.
+# ``StackManager.synth()`` / ``diff()`` and ``deploy()`` all call
+# ``_ensure_lambda_build()``. Production builders now use per-asset
+# interprocess locks, unique staging trees, completion manifests, and atomic
+# rename publication, so they never mutate a final build directory in place.
+# Tests still should not perform real pip/npm installs against the checkout:
+# the composite action prepares it before pytest in CI, and
+# ``ensure_lambda_build_dirs`` above handles the local-development case.
+# Patch only the real repository root; tests that intentionally exercise asset
+# preparation against ``tmp_path`` continue through the production code.
 @pytest.fixture(scope="session", autouse=True)
 def _neutralize_lambda_build(ensure_lambda_build_dirs):  # noqa: ARG001 — dep order only
     from cli import stacks as _stacks
 
     real_root = PROJECT_ROOT.resolve()
     orig_ensure = _stacks.StackManager._ensure_lambda_build
-    orig_rebuild = _stacks.StackManager._rebuild_lambda_packages
 
     def _guarded_ensure(self):
         try:
@@ -128,22 +69,11 @@ def _neutralize_lambda_build(ensure_lambda_build_dirs):  # noqa: ARG001 — dep 
             return
         return orig_ensure(self)
 
-    def _guarded_rebuild(self):
-        try:
-            same = Path(self.project_root).resolve() == real_root
-        except OSError:
-            same = False
-        if same:
-            return
-        return orig_rebuild(self)
-
     _stacks.StackManager._ensure_lambda_build = _guarded_ensure
-    _stacks.StackManager._rebuild_lambda_packages = _guarded_rebuild
     try:
         yield
     finally:
         _stacks.StackManager._ensure_lambda_build = orig_ensure
-        _stacks.StackManager._rebuild_lambda_packages = orig_rebuild
 
 
 # ============================================================================

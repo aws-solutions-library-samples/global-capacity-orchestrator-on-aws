@@ -24,12 +24,14 @@
 #     the latest tag from the upstream Git host (unauthenticated; one call
 #     per hook well below the 60 req/h limit)
 #   - CDK enum constants in gco/stacks/constants.py compared against the
-#     latest aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, AURORA_POSTGRES_VERSION)
+#     latest aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, LAMBDA_NODEJS_RUNTIME,
+#     AURORA_POSTGRES_VERSION)
 #   - Latest stable Python release from endoflife.date
 #   - CI tooling installed by hand across the workflows (Trivy, Helm, kubectl,
 #     kind + node image) — public endpoints, no AWS creds
-#   - Version consistency: pins that must move together (ruff across
-#     pyproject/pre-commit/lint.yml, python-version, duplicated *_VERSION env)
+#   - Version consistency: pins and package surfaces that must move together
+#     (ruff, Python + Node runtimes, npm + CDK CLI, every package.json's
+#     lockfile/Dependabot entry, and duplicated *_VERSION workflow env)
 #   - Base-image security epochs, suppression expiries, and lockfile freshness
 #     (all offline hygiene checks)
 #
@@ -66,6 +68,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6.4.0
+        with:
+          node-version-file: ".nvmrc"
+      - name: Install and verify the declared npm version
+        run: bash .github/scripts/use-pinned-npm.sh package.json
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
@@ -81,8 +88,8 @@ jobs:
           pip install awscli
       - name: Install latest aws-cdk-lib (for CDK enum drift check)
         # The CDK-enum section of dependency-scan.sh introspects
-        # ``aws_cdk.aws_lambda.Runtime`` and
-        # ``aws_cdk.aws_rds.AuroraPostgresEngineVersion`` to find the
+        # ``aws_cdk.aws_lambda.Runtime`` (Python and Node.js managed runtimes)
+        # and ``aws_cdk.aws_rds.AuroraPostgresEngineVersion`` to find the
         # newest enum members shipped by the library, then compares them
         # against the constants pinned in ``gco/stacks/constants.py``.
         # We install ``--upgrade`` (no version pin) on purpose so the

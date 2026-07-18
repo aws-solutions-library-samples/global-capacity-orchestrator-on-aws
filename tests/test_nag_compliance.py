@@ -68,8 +68,10 @@ def _build_app(
     same way every other regional-stack test mocks them, so no
     Docker daemon is required during pytest.
     """
+    project_root = Path(__file__).resolve().parent.parent
+
     # Load the baseline cdk.json context.
-    cdk_json_path = Path(__file__).resolve().parent.parent / "cdk.json"
+    cdk_json_path = project_root / "cdk.json"
     with cdk_json_path.open() as f:
         cdk_json = json.load(f)
     context: dict[str, Any] = dict(cdk_json.get("context", {}))
@@ -196,7 +198,7 @@ def _build_all_stacks(app: cdk.App, account: str | None = None) -> None:
     api_gateway_stack = GCOApiGatewayGlobalStack(
         app,
         f"{project_name}-api-gateway",
-        global_accelerator_dns=global_stack.accelerator.dns_name,
+        global_accelerator_dns=global_stack.get_accelerator_dns_name(),
         project_name=project_name,
         env=cdk.Environment(account=account, region=api_gateway_region),
     )
@@ -253,7 +255,8 @@ def _build_all_stacks(app: cdk.App, account: str | None = None) -> None:
             studio_domain_name=analytics_stack.studio_domain.domain_name or "",
             callback_url=(
                 f"https://{api_gateway_stack.api.rest_api_id}."
-                f"execute-api.{api_gateway_region}.amazonaws.com/prod/studio/callback"
+                f"execute-api.{api_gateway_region}."
+                f"{api_gateway_stack.url_suffix}/prod/studio/callback"
             ),
         )
         api_gateway_stack.set_analytics_config(analytics_api_config)
@@ -301,24 +304,27 @@ class TestCdkNagCompliance:
 
     @pytest.mark.parametrize("config_name,overrides", CONFIGS, ids=[c[0] for c in CONFIGS])
     def test_no_unsuppressed_findings(self, config_name: str, overrides: dict[str, Any]) -> None:
+        from cli.stacks import cdk_asset_consumer
         from gco.stacks.regional_stack import GCORegionalStack
 
-        app = _build_app(context_overrides=overrides)
+        project_root = Path(__file__).resolve().parent.parent
+        with cdk_asset_consumer(project_root):
+            app = _build_app(context_overrides=overrides)
 
-        with (
-            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
-            patch.object(
-                GCORegionalStack,
-                "_create_helm_installer_lambda",
-                _mock_helm_installer,
-            ),
-        ):
-            mock_image = MagicMock()
-            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
-            mock_docker.return_value = mock_image
+            with (
+                patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+                patch.object(
+                    GCORegionalStack,
+                    "_create_helm_installer_lambda",
+                    _mock_helm_installer,
+                ),
+            ):
+                mock_image = MagicMock()
+                mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+                mock_docker.return_value = mock_image
 
-            _build_all_stacks(app)
-            app.synth()
+                _build_all_stacks(app)
+                app.synth()
 
         findings = _collect_nag_violations(app)
         assert not findings, (
@@ -353,24 +359,27 @@ class TestCdkNagCompliance:
         ``acknowledge_nag_findings`` in ``gco/stacks/nag_suppressions.py``). The
         account rendering is config-independent, so the default config suffices.
         """
+        from cli.stacks import cdk_asset_consumer
         from gco.stacks.regional_stack import GCORegionalStack
 
-        app = _build_app()
+        project_root = Path(__file__).resolve().parent.parent
+        with cdk_asset_consumer(project_root):
+            app = _build_app()
 
-        with (
-            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
-            patch.object(
-                GCORegionalStack,
-                "_create_helm_installer_lambda",
-                _mock_helm_installer,
-            ),
-        ):
-            mock_image = MagicMock()
-            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
-            mock_docker.return_value = mock_image
+            with (
+                patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+                patch.object(
+                    GCORegionalStack,
+                    "_create_helm_installer_lambda",
+                    _mock_helm_installer,
+                ),
+            ):
+                mock_image = MagicMock()
+                mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+                mock_docker.return_value = mock_image
 
-            _build_all_stacks(app, account=self._CONCRETE_ACCOUNT)
-            app.synth()
+                _build_all_stacks(app, account=self._CONCRETE_ACCOUNT)
+                app.synth()
 
         findings = _collect_nag_violations(app)
         assert not findings, (

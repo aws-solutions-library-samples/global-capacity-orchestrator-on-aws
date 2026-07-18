@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Analytics stack SageMaker execution role (hyperpod/canvas branches)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,57 +206,57 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2224=>operation: 'Create ``SageMaker_Execution_Role`` and attach its (non-cluster-shared) grants.\n\n        Role name begins with ``AmazonSageMaker`` — SageMaker\n        requires this prefix for any role used by a Studio domain. Grants\n        attached here:\n\n        * RW on ``Studio_Only_Bucket`` + KMS on ``Analytics_KMS_Key``\n        * Read-only ``execute-api:Invoke`` on GCO API Gateway ``/api/v1/*`` GET routes\n        * ``sqs:SendMessage`` on regional job queues (wildcard ARN pattern)\n        * ``ssm:GetParameter`` on the ``Cluster_Shared_Bucket`` metadata\n          parameters in the global region — lets notebooks look up the\n          bucket name/arn/region at runtime without a per-user export step\n        * EFS mount actions on ``Studio_EFS`` (specific AP arn is added by\n          the presigned-URL Lambda at runtime; the role-level grant here is\n          scoped to the EFS ARN)\n        * HyperPod training-job actions when ``hyperpod.enabled=true``\n        * AWS-managed ``AmazonSageMakerCanvasFullAccess`` when\n          ``canvas.enabled=true`` (opt-in no-code ML app)\n        * AWS-managed ``AmazonSageMakerFullAccess`` — always attached\n          whenever analytics is enabled. Covers the full SageMaker\n          control-plane surface including MLflow Apps\n          (``CreateMlflowApp``/``ListMlflowApps``/``DescribeMlflowApp``),\n          MLflow Tracking Servers, Model Registry, Studio space/app\n          lifecycle, and adjacent services (S3, ECR, CloudWatch Logs,\n          etc.) that SageMaker needs to launch training jobs, create\n          apps, and render the Studio IDE. We pair the managed policy\n          with an inline ``sagemaker-mlflow:*`` statement (next block)\n          because the managed policy does not cover the\n          ``sagemaker-mlflow`` data-plane namespace the MLflow SDK\n          talks to. MLflow does not have its own sub-toggle — the\n          managed policy replaces our previous enumerated\n          ``sagemaker:*MlflowTrackingServer*`` inline grant.\n\n        The ``Cluster_Shared_Bucket`` grant lives in its own helper\n        (:meth:`_grant_sagemaker_role_on_cluster_shared_bucket`) because the\n        bucket ARN is resolved via a cross-region SSM read.\n        '
-op2226=>operation: self.sagemaker_execution_role = iam.Role(self, 'SagemakerExecutionRole', role_name=f'{SAGEMAKER_ROLE_NAME_PREFIX}-{self.project_name}-analytics-exec-{self.region}', assumed_by=iam.ServicePrincipal('sagemaker.amazonaws.com'), description='SageMaker_Execution_Role - assumed by notebooks in the Studio domain. Grants RW on Studio_Only_Bucket and (via a separate cross-region policy) Cluster_Shared_Bucket, plus read-only GCO API access, SQS job submission, and cross-region ssm:GetParameter on the Cluster_Shared_Bucket metadata parameters.')
-sub2228=>subroutine: self.studio_only_bucket.grant_read_write(self.sagemaker_execution_role)
-sub2230=>subroutine: self.kms_key.grant_encrypt_decrypt(self.sagemaker_execution_role)
-sub2232=>subroutine: self.kms_key.grant(self.sagemaker_execution_role, 'kms:CreateGrant', 'kms:DescribeKey')
-op2234=>operation: api_gw_region = self.config.get_api_gateway_region()
-sub2236=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['execute-api:Invoke'], resources=[f'arn:aws:execute-api:{api_gw_region}:{self.account}:*/prod/*/api/v1/*', f'arn:aws:execute-api:{api_gw_region}:{self.account}:*/prod/*/inference/*']))
-op2238=>operation: project_name = self.config.get_project_name()
-sub2240=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['sqs:SendMessage'], resources=[f'arn:aws:sqs:*:{self.account}:{project_name}-jobs-*']))
-op2242=>operation: global_region = self.config.get_global_region()
-sub2244=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['ssm:GetParameter', 'ssm:GetParameters'], resources=[f'arn:aws:ssm:{global_region}:{self.account}:parameter{cluster_shared_ssm_parameter_prefix(self.project_name)}/*']))
-sub2246=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['elasticfilesystem:ClientMount', 'elasticfilesystem:ClientWrite', 'elasticfilesystem:ClientRootAccess'], resources=[self.studio_efs.file_system_arn]))
-sub2248=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['elasticfilesystem:DescribeMountTargets', 'elasticfilesystem:DescribeFileSystems'], resources=['*']))
-sub2250=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['sagemaker:DescribeDomain', 'sagemaker:DescribeUserProfile', 'sagemaker:CreatePresignedDomainUrl', 'sagemaker:ListSpaces', 'sagemaker:ListApps', 'sagemaker:DescribeApp', 'sagemaker:DescribeSpace', 'sagemaker:CreateApp', 'sagemaker:DeleteApp', 'sagemaker:CreateSpace', 'sagemaker:DeleteSpace', 'sagemaker:UpdateSpace', 'sagemaker:ListTags', 'sagemaker:AddTags'], resources=[f'arn:aws:sagemaker:{self.region}:{self.account}:domain/*', f'arn:aws:sagemaker:{self.region}:{self.account}:user-profile/*/*', f'arn:aws:sagemaker:{self.region}:{self.account}:space/*/*', f'arn:aws:sagemaker:{self.region}:{self.account}:app/*/*/*/*']))
-sub2252=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['emr-serverless:ListApplications', 'emr-serverless:GetApplication', 'emr-serverless:CreateApplication', 'emr-serverless:StartApplication', 'emr-serverless:StopApplication', 'emr-serverless:StartJobRun', 'emr-serverless:GetJobRun', 'emr-serverless:ListJobRuns', 'emr-serverless:CancelJobRun', 'emr-serverless:GetDashboardForJobRun', 'emr-serverless:AccessLivyEndpoints'], resources=['*']))
-op2254=>operation: from gco.stacks.nag_suppressions import suppress_managed_policy_opt_in
-sub2256=>subroutine: self.sagemaker_execution_role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name('AmazonSageMakerFullAccess'))
-sub2258=>subroutine: suppress_managed_policy_opt_in(self.sagemaker_execution_role, managed_policy_name='AmazonSageMakerFullAccess', reason='AmazonSageMakerFullAccess is attached to SageMaker_Execution_Role when analytics_environment.enabled=true. The managed policy covers MLflow Apps, MLflow Tracking Servers, SageMaker Model Registry, Studio space/app lifecycle, training-job submission, and the cross-service helpers (S3, ECR, CloudWatch Logs) SageMaker needs to render the IDE and run jobs. Enumerating this surface inline drifts out of date within weeks — tracking the AWS-managed policy is the supported path. The inline ``sagemaker-mlflow:*`` statement that follows covers the data-plane namespace the managed policy does not include. Users who want a locked-down alternative can disable the analytics environment.')
-sub2260=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['sagemaker-mlflow:*'], resources=[f'arn:aws:sagemaker:{api_gw_region}:{self.account}:mlflow-tracking-server/*', f'arn:aws:sagemaker:{api_gw_region}:{self.account}:mlflow-app/*']))
-sub2262=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['sts:GetCallerIdentity'], resources=['*']))
-cond2265=>operation: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['sagemaker:CreateTrainingJob', 'sagemaker:DescribeTrainingJob', 'sagemaker:StopTrainingJob', 'sagemaker:ClusterInstance', 'sagemaker:ClusterInstanceGroup', 'sagemaker:DescribeClusterNode', 'sagemaker:ListClusterNodes'], resources=['*'])) if  self.hyperpod_enabled
-cond2276=>condition: if self.canvas_enabled
-sub2280=>subroutine: self.sagemaker_execution_role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name('AmazonSageMakerCanvasFullAccess'))
-sub2282=>subroutine: suppress_managed_policy_opt_in(self.sagemaker_execution_role, managed_policy_name='AmazonSageMakerCanvasFullAccess', reason="AmazonSageMakerCanvasFullAccess is attached to SageMaker_Execution_Role when analytics_environment.canvas.enabled=true. Canvas is an opt-in sub-toggle (off by default) and its managed policy is preferred over an enumerated least-privilege policy because Canvas's cross-service permission surface (Bedrock, Forecast, Rekognition, Athena, S3 dataset writes, etc.) evolves with every Canvas release — tracking the managed policy keeps Canvas functional as AWS ships new features. Users who want a locked-down alternative can keep the toggle off.")
-sub2287=>subroutine: self.studio_efs.add_to_resource_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, principals=[iam.AnyPrincipal()], actions=['elasticfilesystem:ClientMount', 'elasticfilesystem:ClientWrite', 'elasticfilesystem:ClientRootAccess', 'elasticfilesystem:DescribeMountTargets', 'elasticfilesystem:DescribeFileSystems', 'elasticfilesystem:DeleteAccessPoint', 'elasticfilesystem:DeleteMountTarget', 'elasticfilesystem:DeleteFileSystem', 'elasticfilesystem:DeleteFileSystemPolicy']))
+        <div><textarea id="code" style="width: 100%;" rows="11">op2441=>operation: 'Create ``SageMaker_Execution_Role`` and attach its (non-cluster-shared) grants.\n\n        Role name begins with ``AmazonSageMaker`` — SageMaker\n        requires this prefix for any role used by a Studio domain. Grants\n        attached here:\n\n        * RW on ``Studio_Only_Bucket`` + KMS on ``Analytics_KMS_Key``\n        * Read-only ``execute-api:Invoke`` on GCO API Gateway ``/api/v1/*`` GET routes\n        * ``sqs:SendMessage`` on regional job queues (wildcard ARN pattern)\n        * ``ssm:GetParameter`` on the ``Cluster_Shared_Bucket`` metadata\n          parameters in the global region — lets notebooks look up the\n          bucket name/arn/region at runtime without a per-user export step\n        * EFS mount actions on ``Studio_EFS`` (specific AP arn is added by\n          the presigned-URL Lambda at runtime; the role-level grant here is\n          scoped to the EFS ARN)\n        * HyperPod training-job actions when ``hyperpod.enabled=true``\n        * AWS-managed ``AmazonSageMakerCanvasFullAccess`` when\n          ``canvas.enabled=true`` (opt-in no-code ML app)\n        * AWS-managed ``AmazonSageMakerFullAccess`` — always attached\n          whenever analytics is enabled. Covers the full SageMaker\n          control-plane surface including MLflow Apps\n          (``CreateMlflowApp``/``ListMlflowApps``/``DescribeMlflowApp``),\n          MLflow Tracking Servers, Model Registry, Studio space/app\n          lifecycle, and adjacent services (S3, ECR, CloudWatch Logs,\n          etc.) that SageMaker needs to launch training jobs, create\n          apps, and render the Studio IDE. We pair the managed policy\n          with an inline ``sagemaker-mlflow:*`` statement (next block)\n          because the managed policy does not cover the\n          ``sagemaker-mlflow`` data-plane namespace the MLflow SDK\n          talks to. MLflow does not have its own sub-toggle — the\n          managed policy replaces our previous enumerated\n          ``sagemaker:*MlflowTrackingServer*`` inline grant.\n\n        The ``Cluster_Shared_Bucket`` grant lives in its own helper\n        (:meth:`_grant_sagemaker_role_on_cluster_shared_bucket`) because the\n        bucket ARN is resolved via a cross-region SSM read.\n        '
+op2443=>operation: self.sagemaker_execution_role = iam.Role(self, 'SagemakerExecutionRole', role_name=f'{SAGEMAKER_ROLE_NAME_PREFIX}-{self.project_name}-analytics-exec-{self.region}', assumed_by=iam.ServicePrincipal('sagemaker.amazonaws.com'), description='SageMaker_Execution_Role - assumed by notebooks in the Studio domain. Grants RW on Studio_Only_Bucket and (via a separate cross-region policy) Cluster_Shared_Bucket, plus read-only GCO API access, SQS job submission, and cross-region ssm:GetParameter on the Cluster_Shared_Bucket metadata parameters.')
+sub2445=>subroutine: self.studio_only_bucket.grant_read_write(self.sagemaker_execution_role)
+sub2447=>subroutine: self.kms_key.grant_encrypt_decrypt(self.sagemaker_execution_role)
+sub2449=>subroutine: self.kms_key.grant(self.sagemaker_execution_role, 'kms:CreateGrant', 'kms:DescribeKey')
+op2451=>operation: api_gw_region = self.config.get_api_gateway_region()
+sub2453=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['execute-api:Invoke'], resources=[f'arn:{self.partition}:execute-api:{api_gw_region}:{self.account}:*/prod/*/api/v1/*', f'arn:{self.partition}:execute-api:{api_gw_region}:{self.account}:*/prod/*/inference/*']))
+op2455=>operation: project_name = self.config.get_project_name()
+sub2457=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['sqs:SendMessage'], resources=[f'arn:{self.partition}:sqs:*:{self.account}:{project_name}-jobs-*']))
+op2459=>operation: global_region = self.config.get_global_region()
+sub2461=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['ssm:GetParameter', 'ssm:GetParameters'], resources=[f'arn:{self.partition}:ssm:{global_region}:{self.account}:parameter{cluster_shared_ssm_parameter_prefix(self.project_name)}/*']))
+sub2463=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['elasticfilesystem:ClientMount', 'elasticfilesystem:ClientWrite', 'elasticfilesystem:ClientRootAccess'], resources=[self.studio_efs.file_system_arn]))
+sub2465=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['elasticfilesystem:DescribeMountTargets', 'elasticfilesystem:DescribeFileSystems'], resources=['*']))
+sub2467=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['sagemaker:DescribeDomain', 'sagemaker:DescribeUserProfile', 'sagemaker:CreatePresignedDomainUrl', 'sagemaker:ListSpaces', 'sagemaker:ListApps', 'sagemaker:DescribeApp', 'sagemaker:DescribeSpace', 'sagemaker:CreateApp', 'sagemaker:DeleteApp', 'sagemaker:CreateSpace', 'sagemaker:DeleteSpace', 'sagemaker:UpdateSpace', 'sagemaker:ListTags', 'sagemaker:AddTags'], resources=[f'arn:{self.partition}:sagemaker:{self.region}:{self.account}:domain/*', f'arn:{self.partition}:sagemaker:{self.region}:{self.account}:user-profile/*/*', f'arn:{self.partition}:sagemaker:{self.region}:{self.account}:space/*/*', f'arn:{self.partition}:sagemaker:{self.region}:{self.account}:app/*/*/*/*']))
+sub2469=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['emr-serverless:ListApplications', 'emr-serverless:GetApplication', 'emr-serverless:CreateApplication', 'emr-serverless:StartApplication', 'emr-serverless:StopApplication', 'emr-serverless:StartJobRun', 'emr-serverless:GetJobRun', 'emr-serverless:ListJobRuns', 'emr-serverless:CancelJobRun', 'emr-serverless:GetDashboardForJobRun', 'emr-serverless:AccessLivyEndpoints'], resources=['*']))
+op2471=>operation: from gco.stacks.nag_suppressions import suppress_managed_policy_opt_in
+sub2473=>subroutine: self.sagemaker_execution_role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name('AmazonSageMakerFullAccess'))
+sub2475=>subroutine: suppress_managed_policy_opt_in(self.sagemaker_execution_role, managed_policy_name='AmazonSageMakerFullAccess', reason='AmazonSageMakerFullAccess is attached to SageMaker_Execution_Role when analytics_environment.enabled=true. The managed policy covers MLflow Apps, MLflow Tracking Servers, SageMaker Model Registry, Studio space/app lifecycle, training-job submission, and the cross-service helpers (S3, ECR, CloudWatch Logs) SageMaker needs to render the IDE and run jobs. Enumerating this surface inline drifts out of date within weeks — tracking the AWS-managed policy is the supported path. The inline ``sagemaker-mlflow:*`` statement that follows covers the data-plane namespace the managed policy does not include. Users who want a locked-down alternative can disable the analytics environment.')
+sub2477=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['sagemaker-mlflow:*'], resources=[f'arn:{self.partition}:sagemaker:{api_gw_region}:{self.account}:mlflow-tracking-server/*', f'arn:{self.partition}:sagemaker:{api_gw_region}:{self.account}:mlflow-app/*']))
+sub2479=>subroutine: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['sts:GetCallerIdentity'], resources=['*']))
+cond2482=>operation: self.sagemaker_execution_role.add_to_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['sagemaker:CreateTrainingJob', 'sagemaker:DescribeTrainingJob', 'sagemaker:StopTrainingJob', 'sagemaker:ClusterInstance', 'sagemaker:ClusterInstanceGroup', 'sagemaker:DescribeClusterNode', 'sagemaker:ListClusterNodes'], resources=['*'])) if  self.hyperpod_enabled
+cond2493=>condition: if self.canvas_enabled
+sub2497=>subroutine: self.sagemaker_execution_role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name('AmazonSageMakerCanvasFullAccess'))
+sub2499=>subroutine: suppress_managed_policy_opt_in(self.sagemaker_execution_role, managed_policy_name='AmazonSageMakerCanvasFullAccess', reason="AmazonSageMakerCanvasFullAccess is attached to SageMaker_Execution_Role when analytics_environment.canvas.enabled=true. Canvas is an opt-in sub-toggle (off by default) and its managed policy is preferred over an enumerated least-privilege policy because Canvas's cross-service permission surface (Bedrock, Forecast, Rekognition, Athena, S3 dataset writes, etc.) evolves with every Canvas release — tracking the managed policy keeps Canvas functional as AWS ships new features. Users who want a locked-down alternative can keep the toggle off.")
+sub2504=>subroutine: self.studio_efs.add_to_resource_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, principals=[iam.AnyPrincipal()], actions=['elasticfilesystem:ClientMount', 'elasticfilesystem:ClientWrite', 'elasticfilesystem:ClientRootAccess', 'elasticfilesystem:DescribeMountTargets', 'elasticfilesystem:DescribeFileSystems', 'elasticfilesystem:DeleteAccessPoint', 'elasticfilesystem:DeleteMountTarget', 'elasticfilesystem:DeleteFileSystem', 'elasticfilesystem:DeleteFileSystemPolicy']))
 
-op2224->op2226
-op2226->sub2228
-sub2228->sub2230
-sub2230->sub2232
-sub2232->op2234
-op2234->sub2236
-sub2236->op2238
-op2238->sub2240
-sub2240->op2242
-op2242->sub2244
-sub2244->sub2246
-sub2246->sub2248
-sub2248->sub2250
-sub2250->sub2252
-sub2252->op2254
-op2254->sub2256
-sub2256->sub2258
-sub2258->sub2260
-sub2260->sub2262
-sub2262->cond2265
-cond2265->cond2276
-cond2276(yes)->sub2280
-sub2280->sub2282
-sub2282->sub2287
-cond2276(no)->sub2287
+op2441->op2443
+op2443->sub2445
+sub2445->sub2447
+sub2447->sub2449
+sub2449->op2451
+op2451->sub2453
+sub2453->op2455
+op2455->sub2457
+sub2457->op2459
+op2459->sub2461
+sub2461->sub2463
+sub2463->sub2465
+sub2465->sub2467
+sub2467->sub2469
+sub2469->op2471
+op2471->sub2473
+sub2473->sub2475
+sub2475->sub2477
+sub2477->sub2479
+sub2479->cond2482
+cond2482->cond2493
+cond2493(yes)->sub2497
+sub2497->sub2499
+sub2499->sub2504
+cond2493(no)->sub2504
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -265,6 +266,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

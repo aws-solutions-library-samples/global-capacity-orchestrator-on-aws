@@ -10,7 +10,7 @@
   - [Kubernetes Layer](#4-kubernetes-layer)
   - [Lambda Layer](#5-lambda-layer)
 - [Data Flow](#data-flow)
-  - [Manifest Submission](#manifest-submission)
+  - [Manifest Submission](#manifest-submission-aws-partition-global-path)
   - [Authentication Flow](#authentication-flow)
   - [Node Provisioning](#node-provisioning-eks-auto-mode)
 - [Security Architecture](#security-architecture)
@@ -40,7 +40,7 @@ GCO (Global Capacity Orchestrator on AWS) is a multi-region Kubernetes platform 
 
 ### 1. Global Layer
 
-**AWS Global Accelerator**
+**AWS Global Accelerator** (commercial `aws` partition only)
 
 - Private acceleration plane behind the IAM-authenticated global API
 - Registers each region's internal platform ALB as an endpoint
@@ -48,6 +48,10 @@ GCO (Global Capacity Orchestrator on AWS) is a multi-region Kubernetes platform 
 - Automatic health-based regional routing and failover
 - DDoS protection via AWS Shield
 - Carries proxy-signed HTTPS requests over the AWS network to the ALB TLS listener
+
+Other AWS partitions omit the accelerator, listener, endpoint groups, and
+registration resources. Their global stack retains shared state and registries,
+while workload traffic uses the IAM-authenticated regional API bridges.
 
 ### 2. Regional Layer
 
@@ -83,7 +87,7 @@ Each region contains:
 - One internal application ALB per region, selected through the platform IngressClass
 - HTTPS/443 listener with a short-lived regional ACM leaf issued by the deployment-local private root
 - Leaf identity is `backend.<project>.gco.internal`; backend clients send and verify it through explicit SNI while connecting to dynamic accelerator or ALB DNS names
-- Registered with Global Accelerator and recorded in the global-region SSM registry
+- Registered with Global Accelerator when the deployment partition is `aws`, and recorded in the global-region SSM registry in every partition
 - Routes `/api/v1/*` and `/inference/*` through authenticated platform services
 - Ownership is verified by account, region, load-balancer type/scheme, EKS cluster tags, and platform-Ingress tags before a regional proxy forwards traffic
 - Terminates private-root TLS; the final ALB-to-Kubernetes-pod target-group hop remains HTTP
@@ -93,9 +97,10 @@ Each region contains:
 - Created in every workload region because the centralized aggregator cannot join arbitrary regional VPCs
 - Regional REST API uses AWS-managed TLS and IAM authentication (SigV4)
 - Its resource policy always admits the exact aggregator role
-- `api_gateway.regional_api_enabled=true` additionally admits IAM-authorized principals from the deployment account for direct region-pinned access; it does not control bridge deployment
+- In the commercial `aws` partition, `api_gateway.regional_api_enabled=true` additionally admits IAM-authorized principals from the deployment account for direct region-pinned access
+- In other partitions, same-account direct access is enabled automatically because this bridge is the supported workload ingress when Global Accelerator is absent
 - The buffered Python VPC Lambda resolves and verifies the internal ALB from `/<project>/alb-hostname-<region>` for `/api/v1/*`
-- A separate Node.js 22 VPC Lambda applies the same HMAC, private-root TLS, and ALB-ownership controls while streaming `/inference/*` responses
+- A separate Node.js 24 VPC Lambda applies the same HMAC, private-root TLS, and ALB-ownership controls while streaming `/inference/*` responses
 - Neither path requires a VPC Link or Network Load Balancer
 
 **Amazon EFS (Elastic File System)**
@@ -120,11 +125,10 @@ Each region contains:
 
 **Global API Gateway** (gco-api-gateway stack)
 
-- Single authenticated entry point for all regions
+- Single authenticated aggregation entry point in every partition
 - IAM authentication (SigV4) required for all requests
-- Buffered Python Lambda proxy handles `/api/v1/*`
-- Dedicated Node.js 22 Lambda streams `/inference/*` responses through the 15-minute REST API streaming integration
-- Both proxy paths sign the exact backend request with a short-lived HMAC envelope and forward through Global Accelerator
+- In the commercial `aws` partition, an edge-optimized API adds buffered `/api/v1/*` and streaming `/inference/*` proxy paths through Global Accelerator
+- In other partitions, a regional API exposes only `/api/v1/global/*` aggregation routes; callers use each workload region's IAM API for control-plane and inference traffic
 
 **Lambda Proxy**
 
@@ -133,7 +137,8 @@ Each region contains:
 - Allowlists supported end-to-end headers
 - Signs the version, timestamp, nonce, method, exact path/query, and body digest
 - Never transmits the reusable signing key
-- Uses strict private-root TLS through Global Accelerator with explicit SNI/hostname assertion
+- Uses strict private-root TLS through Global Accelerator with explicit SNI/hostname assertion when the deployment partition is `aws`
+- Is not created outside `aws`; regional VPC proxies provide the equivalent HMAC and private-root TLS hop
 - Retries only safe read-only methods
 
 **Cross-Region Aggregator**
@@ -224,7 +229,7 @@ Each region contains:
 
 ## Data Flow
 
-### Manifest Submission
+### Manifest Submission (`aws` partition global path)
 
 ```text
 User → API Gateway (IAM Auth, AWS-managed TLS) → Lambda Proxy
@@ -233,7 +238,7 @@ User → API Gateway (IAM Auth, AWS-managed TLS) → Lambda Proxy
   → Kubernetes API → Workload Scheduled → Node Provisioned
 ```
 
-### Inference Invocation
+### Inference Invocation (`aws` partition global path)
 
 ```text
 User → API Gateway (IAM Auth, AWS-managed TLS) → Streaming Inference Lambda
@@ -242,13 +247,18 @@ User → API Gateway (IAM Auth, AWS-managed TLS) → Streaming Inference Lambda
   → Endpoint ClusterIP Service → Model Pod → streamed response
 ```
 
+Outside the commercial `aws` partition, control-plane and inference requests use
+the selected regional API Gateway directly; its VPC Lambda performs the same
+HMAC-signed, private-root-TLS hop to the internal ALB.
+
 ### Authentication Flow
 
 ```text
 User Request (SigV4 signed) → API Gateway (AWS-managed TLS + IAM Auth)
   → Lambda Proxy retrieves the HMAC signing key and public root bundle
   → Lambda signs the exact backend request with a short-lived envelope
-  → Private-root TLS traverses Global Accelerator unchanged to the ALB
+  → Private-root TLS traverses Global Accelerator unchanged to the ALB (`aws` partition)
+  → or the regional API's VPC Lambda connects directly to the ALB (other partitions)
   → Backend middleware validates freshness, integrity, body digest, and nonce replay
   → Manifest Processor handles `/api/v1/*`; Inference Proxy handles `/inference/*`
 ```
@@ -317,7 +327,7 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 - **At Rest**: EBS volumes and EFS encrypted with AWS KMS
 - **Client and AWS API Transit**: AWS-managed TLS protects API Gateway and AWS service API connections; aggregator-to-regional-API calls also require SigV4
-- **Private Backend Transit**: Global proxy → Global Accelerator → ALB and regional VPC proxy → ALB use deployment-local private-root TLS with explicit `backend.<project>.gco.internal` SNI and hostname verification; Global Accelerator is Layer 4 and does not terminate TLS
+- **Private Backend Transit**: In `aws`, global proxy → Global Accelerator → ALB uses deployment-local private-root TLS; in every partition, regional VPC proxy → ALB uses the same trust and explicit `backend.<project>.gco.internal` SNI/hostname verification. Global Accelerator is Layer 4 and does not terminate TLS.
 - **Post-Termination Hop**: ALB target groups use HTTP to Kubernetes pods after the authenticated TLS listener terminates the connection
 - **Private-Key Boundary**: Only the certificate-manager role can read the customer-managed-KMS-encrypted root secret; backend clients read public SSM trust only
 - **Request Authentication**: HMAC adds integrity, freshness, and replay defense, not encryption
@@ -352,7 +362,8 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 ### Regional Scaling
 
 - Add configured regional stacks independently after the global control-plane stacks exist
-- Global Accelerator registration and the global-region SSM registry connect each regional backend to the shared API path
+- In `aws`, Global Accelerator registration plus the global-region SSM registry connect each regional backend to the shared API path
+- In other partitions, the SSM registry and regional IAM APIs connect clients and the aggregator without Global Accelerator
 - A regional compute failure does not require another regional cluster to remain healthy
 
 ## High Availability
@@ -380,8 +391,8 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 ### Global HA
 
 - **Multi-Region**: Deploy to 2+ regions
-- **Global Accelerator**: Automatic failover
-- **Health-Based Routing**: Routes away from unhealthy regions
+- **Commercial `aws` partition**: Global Accelerator provides health-based routing and failover
+- **Other partitions**: The aggregate API can query every required regional bridge, but direct regional callers select a region explicitly; no accelerator-based automatic failover is claimed
 
 ## Cost Optimization
 
@@ -430,9 +441,9 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 **Regional Failure:**
 
-1. Global Accelerator routes new backend requests to another healthy registered region
+1. In `aws`, Global Accelerator routes new backend requests to another healthy registered region; elsewhere callers select another healthy regional API endpoint
 2. Operators investigate and restore the failed regional stack
-3. Actual recovery time depends on health-check convergence, workload state, and replacement capacity; no fixed sub-minute RTO is guaranteed
+3. Actual recovery time depends on health-check convergence or client failover, workload state, and replacement capacity; no fixed sub-minute RTO is guaranteed
 
 **Cluster Failure:**
 
@@ -527,9 +538,9 @@ regions actually configured and the lowest applicable limit at each layer.
 The stock global API stage is configured for 1,000 requests/second with a
 2,000-request burst (both configurable in `cdk.json`). That is one shared API
 Gateway stage limit; it is **not multiplied by the number of backend regions**.
-The WAF per-source-IP rate rule, Lambda concurrency, Global Accelerator health,
-ALB target capacity, manifest-processor replicas, and Kubernetes API throughput
-can impose lower limits.
+The WAF per-source-IP rate rule, Lambda concurrency, accelerator health (in
+`aws`), regional API capacity, ALB target capacity, manifest-processor replicas,
+and Kubernetes API throughput can impose lower limits.
 
 ### Compute Path
 

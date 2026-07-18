@@ -234,6 +234,53 @@ class TestSplitDeployDefaults:
 
 
 class TestDeployFlagThreading:
+    def test_protocol_and_device_flags_reach_the_manager(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.deploy.return_value = {
+            "endpoint_name": "pd",
+            "target_regions": ["us-east-1"],
+            "ingress_path": "/inference/pd",
+        }
+        mock_aws = MagicMock()
+        mock_aws.discover_regional_stacks.return_value = {"us-east-1": {}}
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_aws),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "inference",
+                    "deploy",
+                    "pd",
+                    "--mooncake-mode",
+                    "disaggregated",
+                    "-r",
+                    "us-east-1",
+                    "--mooncake-protocol",
+                    "tcp",
+                    "--mooncake-device-name",
+                    "eth1",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert mock_mgr.deploy.call_args.kwargs["mooncake_transfer"] == {
+            "protocol": "tcp",
+            "device_name": "eth1",
+        }
+
+    @pytest.mark.parametrize(
+        "flag_args",
+        (["--mooncake-protocol", "rdma"], ["--mooncake-device-name", "eth0"]),
+    )
+    def test_transfer_flags_require_mooncake_mode(self, runner, flag_args):
+        mock_mgr = MagicMock()
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(cli, ["inference", "deploy", "pd", *flag_args])
+        assert result.exit_code != 0
+        assert "require --mooncake-mode" in result.output
+        mock_mgr.deploy.assert_not_called()
+
     def test_cold_tier_and_proxy_flags_reach_the_manager(self, runner):
         mock_mgr = MagicMock()
         mock_mgr.deploy.return_value = {

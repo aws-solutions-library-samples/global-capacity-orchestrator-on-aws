@@ -44,6 +44,7 @@ from gco.services.inference_store import InferenceEndpointStore
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``InferenceMonitor._reconcile_endpoint`` -> ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint.png``)
@@ -408,6 +409,30 @@ class RegionalScopeResolution:
     error: str | None = None
 
 
+def _resolved_mooncake_transfer(mooncake: dict[str, Any]) -> tuple[str, str]:
+    """Resolve the persisted transfer intent and optional network device.
+
+    GCO's spec deliberately uses ``rdma`` as the portable high-performance
+    intent because the mounted Mooncake store configuration accepts
+    ``rdma|tcp``. On AWS, role pods with that intent are placed on EFA nodes,
+    so :func:`build_kv_transfer_config` translates it to vLLM's explicit
+    ``mooncake_protocol=efa`` at the point-to-point connector boundary.
+    """
+    transfer = mooncake.get("transfer", {})
+    if not isinstance(transfer, dict):
+        raise ValueError("mooncake.transfer must be a mapping")
+
+    protocol = transfer.get("protocol", "rdma")
+    if protocol not in {"rdma", "tcp"}:
+        raise ValueError(
+            f"mooncake.transfer.protocol must be one of {{rdma, tcp}}, got {protocol!r}"
+        )
+    device_name = transfer.get("device_name", "")
+    if not isinstance(device_name, str):
+        raise ValueError(f"mooncake.transfer.device_name must be a string, got {device_name!r}")
+    return protocol, device_name
+
+
 def build_kv_transfer_config(mooncake: dict[str, Any], role: str) -> str:
     """Return the JSON string for vLLM's ``--kv-transfer-config``.
 
@@ -420,23 +445,28 @@ def build_kv_transfer_config(mooncake: dict[str, Any], role: str) -> str:
       (index 0) followed by a ``MooncakeStoreConnector`` (index 1), both
       sharing the role's ``kv_role``.
 
+    Every point-to-point ``MooncakeConnector`` receives explicit
+    ``kv_connector_extra_config``. GCO's default/high-performance ``rdma``
+    intent maps to Mooncake's AWS-specific ``efa`` protocol because the same
+    pod is pinned to the EFA node pool; ``tcp`` remains an explicit fallback.
+    ``device_name`` is forwarded verbatim, with an empty string requesting
+    Mooncake/libfabric auto-detection.
+
     The emitted ``kv_role`` is ``kv_producer`` for prefill, ``kv_consumer``
     for decode, and ``kv_both`` for a single store instance.
 
-    No RDMA endpoints are embedded here; transport configuration is supplied
-    separately via the file mounted at ``MOONCAKE_CONFIG_PATH``.
-
     Args:
         mooncake: The ``spec["mooncake"]`` block; its ``mode`` selects the
-            connector shape.
+            connector shape and its optional ``transfer`` block selects the
+            protocol/device.
         role: One of ``"prefill"``, ``"decode"``, or ``"single"``.
 
     Returns:
         A JSON object string parseable by vLLM.
 
     Raises:
-        ValueError: If the ``(mode, role)`` combination is not supported. No
-            configuration is emitted in that case.
+        ValueError: If the ``(mode, role)`` combination or transfer settings
+            are unsupported. No configuration is emitted in that case.
     """
     mode = mooncake.get("mode")
     supported_roles = _WORKER_ROLES_BY_MODE.get(mode) if isinstance(mode, str) else None
@@ -445,11 +475,20 @@ def build_kv_transfer_config(mooncake: dict[str, Any], role: str) -> str:
 
     kv_role = _KV_ROLE_BY_WORKER_ROLE[role]
 
-    if mode == "disaggregated":
-        return json.dumps({"kv_connector": "MooncakeConnector", "kv_role": kv_role})
-
     if mode == "store":
         return json.dumps({"kv_connector": "MooncakeStoreConnector", "kv_role": kv_role})
+
+    protocol, device_name = _resolved_mooncake_transfer(mooncake)
+    connector = {
+        "kv_connector": "MooncakeConnector",
+        "kv_role": kv_role,
+        "kv_connector_extra_config": {
+            "mooncake_protocol": "efa" if protocol == "rdma" else "tcp",
+            "device_name": device_name,
+        },
+    }
+    if mode == "disaggregated":
+        return json.dumps(connector)
 
     # mode == "both": MultiConnector chains transfer then store.
     return json.dumps(
@@ -458,7 +497,7 @@ def build_kv_transfer_config(mooncake: dict[str, Any], role: str) -> str:
             "kv_role": kv_role,
             "kv_connector_extra_config": {
                 "connectors": [
-                    {"kv_connector": "MooncakeConnector", "kv_role": kv_role},
+                    connector,
                     {"kv_connector": "MooncakeStoreConnector", "kv_role": kv_role},
                 ]
             },
@@ -539,12 +578,12 @@ def render_mooncake_config(
           which requires ``cold_tier_enabled`` to be the boolean ``True``; any
           other value (absent, null, truthy non-bool) leaves the cold tier off.
     """
-    transfer = mooncake.get("transfer", {})
+    protocol, device_name = _resolved_mooncake_transfer(mooncake)
     store = mooncake.get("store", {})
     cfg: dict[str, Any] = {
         "metadata_server": region_services["metadata_server"],
-        "protocol": transfer.get("protocol", "rdma"),
-        "device_name": transfer.get("device_name", ""),
+        "protocol": protocol,
+        "device_name": device_name,
     }
     if store.get("enabled"):
         cfg["master_server_address"] = region_services["master_server_address"]
@@ -603,8 +642,8 @@ def apply_efa_scheduling(mooncake: dict[str, Any], pod_spec: client.V1PodSpec) -
             applies.
         pod_spec: The pod specification to mutate in place.
     """
-    transfer = mooncake.get("transfer", {})
-    if transfer.get("protocol", "rdma") != "rdma":
+    protocol, _device_name = _resolved_mooncake_transfer(mooncake)
+    if protocol != "rdma":
         return
 
     # Tolerate the EFA taint without disturbing existing tolerations.

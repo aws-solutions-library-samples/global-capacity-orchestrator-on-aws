@@ -167,7 +167,7 @@ def _build_all_stacks(app: cdk.App) -> None:
     api_gateway_stack = GCOApiGatewayGlobalStack(
         app,
         f"{project_name}-api-gateway",
-        global_accelerator_dns=global_stack.accelerator.dns_name,
+        global_accelerator_dns=global_stack.get_accelerator_dns_name(),
         project_name=project_name,
         env=cdk.Environment(region=api_gateway_region),
     )
@@ -220,7 +220,8 @@ def _build_all_stacks(app: cdk.App) -> None:
             studio_domain_name=analytics_stack.studio_domain.domain_name or "",
             callback_url=(
                 f"https://{api_gateway_stack.api.rest_api_id}."
-                f"execute-api.{api_gateway_region}.amazonaws.com/prod/studio/callback"
+                f"execute-api.{api_gateway_region}."
+                f"{api_gateway_stack.url_suffix}/prod/studio/callback"
             ),
         )
         api_gateway_stack.set_analytics_config(analytics_api_config)

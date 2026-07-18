@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>gco inference canary — weighted canary rollout</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,42 +206,42 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1826=>operation: 'Start a canary deployment for an existing classic endpoint.\n\n        Creates a canary variant with the new image receiving ``weight``%\n        of traffic. Mooncake endpoints are excluded because their split-role\n        topology cannot be represented by the classic canary Deployment.\n\n        Args:\n            endpoint_name: Existing endpoint to canary\n            image: New container image for the canary\n            weight: Percentage of traffic to route to canary (1-99)\n            replicas: Positive number of canary replicas\n\n        Returns:\n            Updated endpoint record, or None if endpoint not found\n        '
-cond1829=>operation: raise ValueError('Canary image must be a non-empty string') if  not isinstance(image, str) or not image.strip()
-cond1840=>operation: raise ValueError('Canary weight must be an integer between 1 and 99') if  not _is_plain_int(weight) or not 1 <= weight <= 99
-cond1851=>operation: raise ValueError('Canary replicas must be a positive integer') if  not _is_plain_int(replicas) or replicas < 1
-op1861=>operation: store = self._get_store()
-op1863=>operation: endpoint = store.get_endpoint(endpoint_name)
-cond1866=>condition: if not endpoint
-io1873=>inputoutput: output: None
-e1871=>end: end function return
-cond1880=>operation: raise ValueError(f"Cannot canary an endpoint in '{endpoint.get('desired_state')}' state. Endpoint must be running or deploying.") if  endpoint.get('desired_state') not in ('running', 'deploying')
-op1890=>operation: raw_spec = endpoint.get('spec')
-cond1893=>operation: raise ValueError(f"Endpoint '{endpoint_name}' has an invalid spec") if  not isinstance(raw_spec, dict)
-cond1904=>operation: raise ValueError('Canary deployments are not supported for Mooncake endpoints') if  'mooncake' in raw_spec
-op1914=>operation: spec = deepcopy(raw_spec)
-op1916=>operation: spec['canary'] = {'image': image.strip(), 'weight': weight, 'replicas': replicas}
-op1918=>operation: result: dict[str, Any] | None = store.update_spec(endpoint_name, spec)
-io1923=>inputoutput: output: result
-e1921=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op2002=>operation: 'Start a canary deployment for an existing classic endpoint.\n\n        Creates a canary variant with the new image receiving ``weight``%\n        of traffic. Mooncake endpoints are excluded because their split-role\n        topology cannot be represented by the classic canary Deployment.\n\n        Args:\n            endpoint_name: Existing endpoint to canary\n            image: New container image for the canary\n            weight: Percentage of traffic to route to canary (1-99)\n            replicas: Positive number of canary replicas\n\n        Returns:\n            Updated endpoint record, or None if endpoint not found\n        '
+cond2005=>operation: raise ValueError('Canary image must be a non-empty string') if  not isinstance(image, str) or not image.strip()
+cond2016=>operation: raise ValueError('Canary weight must be an integer between 1 and 99') if  not _is_plain_int(weight) or not 1 <= weight <= 99
+cond2027=>operation: raise ValueError('Canary replicas must be a positive integer') if  not _is_plain_int(replicas) or replicas < 1
+op2037=>operation: store = self._get_store()
+op2039=>operation: endpoint = store.get_endpoint(endpoint_name)
+cond2042=>condition: if not endpoint
+io2049=>inputoutput: output: None
+e2047=>end: end function return
+cond2056=>operation: raise ValueError(f"Cannot canary an endpoint in '{endpoint.get('desired_state')}' state. Endpoint must be running or deploying.") if  endpoint.get('desired_state') not in ('running', 'deploying')
+op2066=>operation: raw_spec = endpoint.get('spec')
+cond2069=>operation: raise ValueError(f"Endpoint '{endpoint_name}' has an invalid spec") if  not isinstance(raw_spec, dict)
+cond2080=>operation: raise ValueError('Canary deployments are not supported for Mooncake endpoints') if  'mooncake' in raw_spec
+op2090=>operation: spec = deepcopy(raw_spec)
+op2092=>operation: spec['canary'] = {'image': image.strip(), 'weight': weight, 'replicas': replicas}
+op2094=>operation: result: dict[str, Any] | None = store.update_spec(endpoint_name, spec)
+io2099=>inputoutput: output: result
+e2097=>end: end function return
 
-op1826->cond1829
-cond1829->cond1840
-cond1840->cond1851
-cond1851->op1861
-op1861->op1863
-op1863->cond1866
-cond1866(yes)->io1873
-io1873->e1871
-cond1866(no)->cond1880
-cond1880->op1890
-op1890->cond1893
-cond1893->cond1904
-cond1904->op1914
-op1914->op1916
-op1916->op1918
-op1918->io1923
-io1923->e1921
+op2002->cond2005
+cond2005->cond2016
+cond2016->cond2027
+cond2027->op2037
+op2037->op2039
+op2039->cond2042
+cond2042(yes)->io2049
+io2049->e2047
+cond2042(no)->cond2056
+cond2056->op2066
+op2066->cond2069
+cond2069->cond2080
+cond2080->op2090
+op2090->op2092
+op2092->op2094
+op2094->io2099
+io2099->e2097
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -250,6 +251,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

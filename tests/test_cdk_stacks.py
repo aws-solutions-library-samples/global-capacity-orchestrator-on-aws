@@ -9,9 +9,14 @@ dependencies. Good as a smoke test that construct wiring still compiles
 after refactors without needing a real AWS environment.
 """
 
+import json
+
 import aws_cdk as cdk
 import pytest
 from aws_cdk import assertions
+from aws_cdk import aws_lambda as lambda_
+
+from gco.stacks.constants import LAMBDA_NODEJS_RUNTIME
 
 
 def _methods_for_child_resource(
@@ -71,6 +76,17 @@ def _integrations_for_child_resource(
         for resource in template.find_resources("AWS::ApiGateway::Method").values()
         if resource.get("Properties", {}).get("ResourceId") == {"Ref": child_ids[0]}
     ]
+
+
+def _assert_streaming_lambda_integrations(integrations: list[dict]) -> None:
+    """Pin the Lambda response-streaming CloudFormation contract."""
+    assert len(integrations) == 3
+    for integration in integrations:
+        assert integration["Type"] == "AWS_PROXY"
+        assert integration["IntegrationHttpMethod"] == "POST"
+        assert integration["ResponseTransferMode"] == "STREAM"
+        assert integration["TimeoutInMillis"] == 900000
+        assert "response-streaming-invocations" in json.dumps(integration["Uri"])
 
 
 # Mock the ConfigLoader to avoid needing actual cdk.json context
@@ -338,6 +354,7 @@ class TestApiGatewayStackSynth:
                 "tracing_enabled": False,
             },
             registry_region="eu-west-1",
+            max_request_body_bytes=2_097_152,
         )
 
         template = assertions.Template.from_stack(stack)
@@ -348,6 +365,7 @@ class TestApiGatewayStackSynth:
                     [
                         assertions.Match.object_like(
                             {
+                                "DataTraceEnabled": False,
                                 "LoggingLevel": "ERROR",
                                 "MetricsEnabled": False,
                                 "ThrottlingRateLimit": 37,
@@ -375,6 +393,29 @@ class TestApiGatewayStackSynth:
                 "Environment": {
                     "Variables": assertions.Match.object_like({"REGISTRY_REGION": "eu-west-1"})
                 }
+            },
+        )
+        inference_functions = [
+            resource
+            for logical_id, resource in template.find_resources("AWS::Lambda::Function").items()
+            if logical_id.startswith("InferenceStreamingProxyFunction")
+        ]
+        assert len(inference_functions) == 1
+        assert (
+            inference_functions[0]["Properties"]["Environment"]["Variables"][
+                "MAX_REQUEST_BODY_BYTES"
+            ]
+            == "2097152"
+        )
+
+        template.has_resource_properties(
+            "AWS::CloudWatch::Alarm",
+            {
+                "MetricName": "ReconciliationSuccess",
+                "ComparisonOperator": "LessThanThreshold",
+                "Threshold": 1,
+                "EvaluationPeriods": 1,
+                "TreatMissingData": "breaching",
             },
         )
 
@@ -413,6 +454,161 @@ class TestApiGatewayStackSynth:
                 },
             },
         )
+
+    def test_backend_tls_manager_can_delete_only_account_certificates(self):
+        """Compensation can delete only ACM certificates owned by this account."""
+        from gco.stacks.api_gateway_global_stack import GCOApiGatewayGlobalStack
+
+        app = cdk.App()
+        stack = GCOApiGatewayGlobalStack(
+            app,
+            "test-api-gateway-tls-manager-policy",
+            global_accelerator_dns="test-accelerator.awsglobalaccelerator.com",
+        )
+
+        template = assertions.Template.from_stack(stack)
+        manager_role_ids = [
+            logical_id
+            for logical_id in template.find_resources("AWS::IAM::Role")
+            if logical_id.startswith("BackendTlsManagerRole")
+        ]
+        assert len(manager_role_ids) == 1
+
+        statements = []
+        for policy in template.find_resources("AWS::IAM::Policy").values():
+            if {"Ref": manager_role_ids[0]} not in policy["Properties"].get("Roles", []):
+                continue
+            statements.extend(policy["Properties"]["PolicyDocument"]["Statement"])
+
+        delete_statements = []
+        for statement in statements:
+            actions = statement.get("Action", [])
+            if isinstance(actions, str):
+                actions = [actions]
+            if "acm:DeleteCertificate" in actions:
+                delete_statements.append((statement, set(actions)))
+
+        assert len(delete_statements) == 1
+        statement, actions = delete_statements[0]
+        assert statement["Effect"] == "Allow"
+        assert actions == {
+            "acm:DeleteCertificate",
+            "acm:DescribeCertificate",
+            "acm:GetCertificate",
+            "acm:ListTagsForCertificate",
+        }
+        resources = statement["Resource"]
+        if not isinstance(resources, list):
+            resources = [resources]
+        assert resources == [
+            {
+                "Fn::Join": [
+                    "",
+                    [
+                        "arn:",
+                        {"Ref": "AWS::Partition"},
+                        ":acm:*:",
+                        {"Ref": "AWS::AccountId"},
+                        ":certificate/*",
+                    ],
+                ]
+            }
+        ]
+
+        list_statements = []
+        for candidate in statements:
+            candidate_actions = candidate.get("Action", [])
+            if isinstance(candidate_actions, str):
+                candidate_actions = [candidate_actions]
+            if "acm:ListCertificates" in candidate_actions:
+                list_statements.append((candidate, set(candidate_actions)))
+        assert len(list_statements) == 1
+        list_statement, list_actions = list_statements[0]
+        assert list_statement["Effect"] == "Allow"
+        assert list_actions == {
+            "acm:AddTagsToCertificate",
+            "acm:ImportCertificate",
+            "acm:ListCertificates",
+        }
+        assert list_statement["Resource"] == "*"
+
+        ssm_statements = []
+        for candidate in statements:
+            candidate_actions = candidate.get("Action", [])
+            if isinstance(candidate_actions, str):
+                candidate_actions = [candidate_actions]
+            if "ssm:GetParametersByPath" in candidate_actions:
+                ssm_statements.append((candidate, set(candidate_actions)))
+        assert len(ssm_statements) == 1
+        ssm_statement, ssm_actions = ssm_statements[0]
+        assert ssm_statement["Effect"] == "Allow"
+        assert ssm_actions == {
+            "ssm:DeleteParameter",
+            "ssm:GetParameter",
+            "ssm:GetParametersByPath",
+            "ssm:PutParameter",
+        }
+        assert "parameter/gco/backend-tls/*" in json.dumps(ssm_statement["Resource"])
+
+    def test_aggregator_role_can_invoke_only_runtime_contract(self):
+        """Identity policy matches the four routes in each configured region."""
+        from gco.stacks.api_gateway_global_stack import GCOApiGatewayGlobalStack
+        from gco.stacks.constants import AGGREGATOR_REGIONAL_API_ROUTES
+
+        app = cdk.App()
+        regions = ["us-east-1", "us-west-2"]
+        stack = GCOApiGatewayGlobalStack(
+            app,
+            "test-api-gateway-aggregator-policy",
+            global_accelerator_dns="test-accelerator.awsglobalaccelerator.com",
+            certificate_regions=regions,
+            env=cdk.Environment(account="123456789012", region="us-east-2"),
+        )
+        template = assertions.Template.from_stack(stack)
+        aggregator_role_ids = [
+            logical_id
+            for logical_id, role in template.find_resources("AWS::IAM::Role").items()
+            if role.get("Properties", {}).get("RoleName") == "gco-cross-region-aggregator"
+        ]
+        assert len(aggregator_role_ids) == 1
+
+        invoke_resources: list[object] = []
+        for policy in template.find_resources("AWS::IAM::Policy").values():
+            if {"Ref": aggregator_role_ids[0]} not in policy["Properties"].get("Roles", []):
+                continue
+            for statement in policy["Properties"]["PolicyDocument"]["Statement"]:
+                actions = statement.get("Action", [])
+                if isinstance(actions, str):
+                    actions = [actions]
+                if "execute-api:Invoke" not in actions:
+                    continue
+                resources = statement.get("Resource", [])
+                if isinstance(resources, list):
+                    invoke_resources.extend(resources)
+                else:
+                    invoke_resources.append(resources)
+
+        def render_partition_token(value: object) -> str:
+            if isinstance(value, str):
+                return value
+            if value == {"Ref": "AWS::Partition"}:
+                return "aws"
+            if isinstance(value, dict) and set(value) == {"Fn::Join"}:
+                separator, parts = value["Fn::Join"]
+                assert isinstance(separator, str)
+                assert isinstance(parts, list)
+                return separator.join(render_partition_token(part) for part in parts)
+            raise AssertionError(f"Unexpected execute-api resource token: {value!r}")
+
+        normalized_resources = [render_partition_token(resource) for resource in invoke_resources]
+        assert set(normalized_resources) == {
+            f"arn:aws:execute-api:{region}:123456789012:*/*/{method}/{path}"
+            for region in regions
+            for method, path in AGGREGATOR_REGIONAL_API_ROUTES
+        }
+        assert not any(resource.endswith("/api/v1/*") for resource in normalized_resources)
+        assert not any("/POST/api/v1/manifests" in resource for resource in normalized_resources)
+        assert not any("/inference/" in resource for resource in normalized_resources)
 
     def test_api_gateway_has_lambda(self):
         """Test that ApiGatewayStack creates Lambda proxy function(s)."""
@@ -467,16 +663,11 @@ class TestApiGatewayStackSynth:
             "POST",
         }
         inference_integrations = _integrations_for_child_resource(template, "inference", "{proxy+}")
-        assert len(inference_integrations) == 3
-        assert all(
-            integration["ResponseTransferMode"] == "STREAM"
-            and integration["TimeoutInMillis"] == 900000
-            for integration in inference_integrations
-        )
+        _assert_streaming_lambda_integrations(inference_integrations)
         template.has_resource_properties(
             "AWS::Lambda::Function",
             {
-                "Runtime": "nodejs22.x",
+                "Runtime": getattr(lambda_.Runtime, LAMBDA_NODEJS_RUNTIME).name,
                 "Handler": "index.handler",
                 "Timeout": 900,
                 "Environment": {

@@ -458,8 +458,11 @@ class TestJobStore:
         assert result["claim_generation"] == 3
         assert result["claim_token"] == "claim-token"
         values = mock_dynamodb.update_item.call_args.kwargs["ExpressionAttributeValues"]
+        expression = mock_dynamodb.update_item.call_args.kwargs["UpdateExpression"]
         assert values[":target_region"] == "us-east-1"
         assert values[":claimed_by"] == "worker-1"
+        assert values[":work_sort"] == values[":lease_expires_at"]
+        assert "work_sort = :work_sort" in expression
 
     def test_claim_job_already_claimed(self, job_store, mock_dynamodb):
         """A conditional race loss returns None without stealing the claim."""
@@ -560,7 +563,13 @@ class TestJobStore:
         assert result["k8s_job_uid"] == "abc-123-def"
         expression = mock_dynamodb.update_item.call_args.kwargs["UpdateExpression"]
         assert "k8s_job_namespace = :k8s_job_namespace" in expression
-        assert "REMOVE claimed_by, claim_token, lease_expires_at" in expression
+        remove_fields = set(expression.split(" REMOVE ", 1)[1].split(", "))
+        assert remove_fields == {
+            "error_message",
+            "claimed_by",
+            "claim_token",
+            "lease_expires_at",
+        }
 
     def test_transition_job_failed(self, job_store, mock_dynamodb):
         """A failed transition records a terminal timestamp and bounded error field."""
@@ -706,7 +715,14 @@ class TestJobStore:
         result = job_store.get_queued_jobs_for_region("us-east-1")
 
         assert len(result) == 2
-        # Should be sorted by priority descending
+        queries = [call.kwargs for call in mock_dynamodb.query.call_args_list]
+        assert [query["IndexName"] for query in queries] == [
+            "region-status-work-index",
+        ]
+        assert all(
+            query["KeyConditionExpression"] == "region_status = :region_status" for query in queries
+        )
+        # Results from the work index are sorted by priority.
         assert result[0]["priority"] == 10
         assert result[1]["priority"] == 1
 
@@ -841,10 +857,17 @@ class TestJobStore:
 
         assert result == {"evaluated": 3, "migrated": 1, "failed": 2, "complete": True}
         assert mock_dynamodb.update_item.call_count == 3
+        migrated_call = mock_dynamodb.update_item.call_args_list[0]
+        migrated_condition = migrated_call.kwargs["ConditionExpression"]
+        assert "region_status <> :region_status" in migrated_condition
+        assert "work_sort <> :work_sort" in migrated_condition
         for call in mock_dynamodb.update_item.call_args_list:
             condition = call.kwargs["ConditionExpression"]
-            assert "attribute_not_exists(region_status)" in condition
             assert "#status = :expected" in condition
+            assert "target_region = :target_region" in condition
+            snapshot_fields = set(call.kwargs["ExpressionAttributeNames"].values())
+            assert {"priority", "submitted_at", "updated_at"}.issubset(snapshot_fields)
+            assert ":work_sort" in call.kwargs["ExpressionAttributeValues"]
         failed_calls = mock_dynamodb.update_item.call_args_list[1:]
         assert all(":failed" in call.kwargs["ExpressionAttributeValues"] for call in failed_calls)
         assert all(
@@ -852,6 +875,197 @@ class TestJobStore:
             in call.kwargs["ExpressionAttributeValues"][":history"]
             for call in failed_calls
         )
+
+    def test_completed_migration_restarts_to_catch_a_late_legacy_writer(
+        self, job_store, mock_dynamodb
+    ):
+        """A full sweep resets so a later base-version write is backfilled."""
+        empty_page = {"Items": [], "ScannedCount": 0}
+        mock_dynamodb.query.return_value = empty_page
+
+        first_sweep = job_store.migrate_legacy_records_for_region("us-east-1")
+
+        assert first_sweep["complete"] is True
+        assert mock_dynamodb.query.call_count == 5
+
+        mock_dynamodb.query.reset_mock()
+        mock_dynamodb.query.side_effect = [
+            {
+                "Items": [
+                    {
+                        "job_id": "late-legacy",
+                        "job_name": "late-legacy",
+                        "target_region": "us-east-1",
+                        "namespace": "gco-jobs",
+                        "status": "queued",
+                        "priority": 50,
+                        "manifest": "{}",
+                        "submitted_at": "2024-01-01T00:00:00Z",
+                        "updated_at": "2024-01-01T00:00:00Z",
+                        "status_history": "[]",
+                    }
+                ],
+                "ScannedCount": 1,
+            },
+            empty_page,
+            empty_page,
+            empty_page,
+            empty_page,
+        ]
+
+        second_sweep = job_store.migrate_legacy_records_for_region("us-east-1")
+
+        assert second_sweep == {
+            "evaluated": 1,
+            "migrated": 1,
+            "failed": 0,
+            "complete": True,
+        }
+        mock_dynamodb.update_item.assert_called_once()
+        assert [call.kwargs["IndexName"] for call in mock_dynamodb.query.call_args_list] == [
+            "region-status-index",
+            "region-status-index",
+            "region-status-index",
+            "region-status-index",
+            "region-status-index",
+        ]
+
+    def test_migration_repairs_stale_claim_keys_with_lease_snapshot_fencing(
+        self, job_store, mock_dynamodb
+    ):
+        """Present-but-stale derived keys are repaired without racing a renewal."""
+        item = {
+            "job_id": "claimed-stale",
+            "status": "claimed",
+            "target_region": "us-east-1",
+            "priority": 75,
+            "submitted_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:01Z",
+            "claimed_by": "worker-a",
+            "claim_token": "token-a",
+            "claim_generation": 3,
+            "lease_expires_at": "2026-01-01T00:05:00Z",
+            "region_status": "us-east-1#queued",
+            "priority_sort": "stale-priority",
+            "work_sort": "2026-01-01T00:00:02Z",
+        }
+        mock_dynamodb.update_item.return_value = {}
+
+        assert job_store._migrate_legacy_record(item, "us-east-1", "claimed") == "migrated"
+
+        update = mock_dynamodb.update_item.call_args.kwargs
+        values = update["ExpressionAttributeValues"]
+        assert values[":region_status"] == "us-east-1#claimed"
+        assert values[":work_sort"] == item["lease_expires_at"]
+        snapshot_fields = set(update["ExpressionAttributeNames"].values())
+        assert {
+            "claimed_by",
+            "claim_token",
+            "claim_generation",
+            "lease_expires_at",
+            "updated_at",
+        }.issubset(snapshot_fields)
+        lease_name_token = next(
+            token
+            for token, field_name in update["ExpressionAttributeNames"].items()
+            if field_name == "lease_expires_at"
+        )
+        assert f"{lease_name_token} = " in update["ConditionExpression"]
+
+    def test_migration_fairly_services_active_statuses_behind_queued_backlog(
+        self, job_store, mock_dynamodb
+    ):
+        """A queued page cannot consume the whole migration evaluation budget."""
+        submitted_at = "2026-01-01T00:00:00Z"
+        current_items = []
+        for job_id in ("queued-1", "queued-2"):
+            priority_sort = f"050#{submitted_at}#{job_id}"
+            current_items.append(
+                {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "target_region": "us-east-1",
+                    "priority": 50,
+                    "submitted_at": submitted_at,
+                    "region_status": "us-east-1#queued",
+                    "priority_sort": priority_sort,
+                    "work_sort": priority_sort,
+                }
+            )
+        mock_dynamodb.query.side_effect = [
+            {
+                "Items": current_items,
+                "ScannedCount": 2,
+                "LastEvaluatedKey": {"job_id": "queued-2"},
+            },
+            {"Items": [], "ScannedCount": 0},
+            {"Items": [], "ScannedCount": 0},
+            {"Items": [], "ScannedCount": 0},
+            {"Items": [], "ScannedCount": 0},
+        ]
+
+        result = job_store.migrate_legacy_records_for_region("us-east-1", evaluation_limit=10)
+
+        assert result == {"evaluated": 2, "migrated": 0, "failed": 0, "complete": False}
+        queried_statuses = [
+            call.kwargs["ExpressionAttributeValues"][":status"]
+            for call in mock_dynamodb.query.call_args_list
+        ]
+        assert queried_statuses == ["queued", "claimed", "applying", "pending", "running"]
+        assert all(
+            "FilterExpression" not in call.kwargs for call in mock_dynamodb.query.call_args_list
+        )
+        mock_dynamodb.update_item.assert_not_called()
+
+    def test_lease_recovery_uses_the_status_work_index(self, job_store, mock_dynamodb):
+        """Expired claims are ordered by work_sort within transient partitions."""
+        mock_dynamodb.query.return_value = {"Items": []}
+
+        assert job_store.requeue_expired_jobs("us-east-1", limit=5) == 0
+
+        assert mock_dynamodb.query.call_count == 2
+        queries = [call.kwargs for call in mock_dynamodb.query.call_args_list]
+        assert [query["IndexName"] for query in queries] == [
+            "region-status-work-index",
+            "region-status-work-index",
+        ]
+        for query in queries:
+            assert "work_sort <= :upper_bound" in query["KeyConditionExpression"]
+
+    def test_expired_claims_use_the_single_work_index(self, job_store, mock_dynamodb):
+        """The unified work index returns expired claims in lease order."""
+        mock_dynamodb.query.return_value = {
+            "Items": [
+                {
+                    "job_id": "work-latest",
+                    "lease_expires_at": "2026-01-01T00:00:03Z",
+                },
+                {
+                    "job_id": "work-earliest",
+                    "lease_expires_at": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "job_id": "work-middle",
+                    "lease_expires_at": "2026-01-01T00:00:02Z",
+                },
+            ]
+        }
+
+        claims = job_store._query_expired_claims(
+            "us-east-1",
+            "claimed",
+            "2099-01-01T00:00:00Z",
+            10,
+        )
+
+        assert [claim["job_id"] for claim in claims] == [
+            "work-earliest",
+            "work-middle",
+            "work-latest",
+        ]
+        query = mock_dynamodb.query.call_args.kwargs
+        assert query["IndexName"] == "region-status-work-index"
+        assert "work_sort <= :upper_bound" in query["KeyConditionExpression"]
 
     def test_cancel_job_success(self, job_store, mock_dynamodb):
         """Only a still-queued record can be cancelled with an atomic history CAS."""

@@ -39,7 +39,7 @@ instead of the upstream — typically a Helm ``image_registry``/``image`` overri
 in ``gco/stacks/regional_stack.py`` (see ``_helm_chart_value_overrides`` /
 ``_configure_volcano_image_mirror`` for the Volcano example) or a manifest image
 reference. The mirror copies ``<registry>/<repo>:<tag>`` to
-``<account>.dkr.ecr.<region>.amazonaws.com/<ecr_namespace>/<repo>:<tag>``, so the
+``<account>.dkr.ecr.<region>.<url-suffix>/<ecr_namespace>/<repo>:<tag>``, so the
 consumer must point at ``<…>/<ecr_namespace>/<repo>``.
 
 WHY mirror rather than pull-through cache: ECR pull-through cache for Docker Hub
@@ -70,7 +70,10 @@ from typing import Any
 import boto3
 import yaml
 
+from ._image_uri import ecr_registry_host
+
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``read_mirror_config`` -> ``diagrams/code_diagrams/cli/_image_mirror.read_mirror_config.html``
 #     (PNG: ``diagrams/code_diagrams/cli/_image_mirror.read_mirror_config.png``)
@@ -212,7 +215,7 @@ def plan_from_sources(
 ) -> list[MirrorItem]:
     """Compute the copy plan: one :class:`MirrorItem` per source ref.
 
-    ``registry_host`` is ``<account>.dkr.ecr.<region>.amazonaws.com`` and
+    ``registry_host`` is ``<account>.dkr.ecr.<region>.<url-suffix>`` and
     ``ecr_namespace`` is the destination prefix (e.g. ``gco/dockerhub``). The
     destination preserves the upstream repo path so it lines up with whatever
     ``image_registry``/``image`` override the consumer points at
@@ -262,7 +265,8 @@ def _account_id() -> str:
 
 
 def _registry_host(account_id: str, region: str) -> str:
-    return f"{account_id}.dkr.ecr.{region}.amazonaws.com"
+    """Return the ECR host using botocore's partition URL suffix metadata."""
+    return ecr_registry_host(account_id, region)
 
 
 def detect_runtime() -> str:
@@ -457,7 +461,7 @@ def plan_mirror(
     ``source_refs`` defaults to :func:`collect_source_refs`; ``ecr_namespace``
     defaults to :func:`cdk_default_namespace`. Returns ``{region, registry,
     ecr_namespace, images: [{source_ref, dest_repo, dest_ref, tag}, ...]}`` where
-    ``registry`` is ``<account>.dkr.ecr.<region>.amazonaws.com/<ecr_namespace>``.
+    ``registry`` is ``<account>.dkr.ecr.<region>.<url-suffix>/<ecr_namespace>``.
     """
     ecr_namespace = (ecr_namespace or cdk_default_namespace()).strip("/")
     if source_refs is None:

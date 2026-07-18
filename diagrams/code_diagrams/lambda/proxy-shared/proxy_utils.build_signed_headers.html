@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Proxy request-bound HMAC envelope construction</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,22 +206,22 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2425=>operation: 'Build short-lived request authentication without transmitting the signing key.'
-op2427=>operation: timestamp = str(int(time.time()))
-op2429=>operation: nonce = secrets.token_hex(16)
-op2431=>operation: content_hash = hashlib.sha256((body or '').encode('utf-8')).hexdigest()
-op2433=>operation: canonical = '\n'.join(['v1', timestamp, nonce, http_method.upper(), _request_target(target_url), content_hash])
-op2435=>operation: signature = hmac.new(signing_key.encode('utf-8'), canonical.encode('utf-8'), hashlib.sha256).hexdigest()
-io2440=>inputoutput: output: {'x-gco-signature-version': 'v1', 'x-gco-signature': signature, 'x-gco-timestamp': timestamp, 'x-gco-nonce': nonce, 'x-gco-content-sha256': content_hash}
-e2438=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op2654=>operation: 'Build short-lived request authentication without transmitting the signing key.'
+op2656=>operation: timestamp = str(int(time.time()))
+op2658=>operation: nonce = secrets.token_hex(16)
+op2660=>operation: content_hash = hashlib.sha256((body or '').encode('utf-8')).hexdigest()
+op2662=>operation: canonical = '\n'.join(['v1', timestamp, nonce, http_method.upper(), _request_target(target_url), content_hash])
+op2664=>operation: signature = hmac.new(signing_key.encode('utf-8'), canonical.encode('utf-8'), hashlib.sha256).hexdigest()
+io2669=>inputoutput: output: {'x-gco-signature-version': 'v1', 'x-gco-signature': signature, 'x-gco-timestamp': timestamp, 'x-gco-nonce': nonce, 'x-gco-content-sha256': content_hash}
+e2667=>end: end function return
 
-op2425->op2427
-op2427->op2429
-op2429->op2431
-op2431->op2433
-op2433->op2435
-op2435->io2440
-io2440->e2438
+op2654->op2656
+op2656->op2658
+op2658->op2660
+op2660->op2662
+op2662->op2664
+op2664->io2669
+io2669->e2667
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -230,6 +231,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

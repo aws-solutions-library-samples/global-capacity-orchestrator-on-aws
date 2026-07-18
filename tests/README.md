@@ -79,6 +79,7 @@ Tests are organized by the component they test:
 | MCP Server | `test_mcp_server.py`, `test_mcp_audit.py`, `test_mcp_resources_new.py`, `test_mcp_integration.py` | MCP tools, resources, audit logging, protocol tests |
 | Mission | `test_mission_*.py` | Mission goal-directed iteration loop — engine, state, validators, sampling, sandbox, audit, CLI, scaffolder, MCP gating, and end-to-end sessions |
 | Infrastructure | `test_oidc_stack.py`, `test_feature_toggles.py` | OIDC provider stack, feature toggle helpers (Valkey, Aurora, FSx) |
+| Node Lambda | `inference-streaming-proxy/*.test.mjs` | Native Node.js 24 unit tests for response streaming, routing, signing, TLS, retries, cache behavior, and disconnect handling; separate CI workflow |
 
 ## Test Files by Category
 
@@ -775,12 +776,25 @@ valid_job_manifest = {
 
 ## Coverage Requirements
 
-The project enforces a minimum of 90% test coverage across `gco/`, `cli/`, and `gco_mcp/`. Current coverage is ~92%.
+The global Python line + branch coverage floor is 90% across `gco/`, `cli/`,
+and `gco_mcp/` in `unit:pytest:core`; pull requests and releases still target at
+least 93% measured coverage. The dedicated streaming-Lambda workflow
+independently enforces at least 93% lines, functions, and branches with Node
+24's built-in V8 coverage. Current measured values come from CI artifacts;
+add tests to hold the 93% target rather than raising or lowering the global
+Python floor.
 
-To check coverage:
+To check the Python report:
 
 ```bash
 python -m pytest --cov=gco --cov=cli --cov=gco_mcp --cov-report=term-missing
+```
+
+The streaming-Lambda graph uses:
+
+```bash
+npm ci --prefix lambda/inference-streaming-proxy --ignore-scripts --no-audit --no-fund
+npm --prefix lambda/inference-streaming-proxy test
 ```
 
 To generate an HTML coverage report:

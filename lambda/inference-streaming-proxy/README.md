@@ -1,6 +1,6 @@
 # Inference Streaming Proxy
 
-Dependency-free Node.js 22 Lambda response-streaming proxy for the authenticated `/inference/...` surface. Set `ROUTING_MODE=global` to use Global Accelerator or `ROUTING_MODE=regional` to discover and verify the regional internal ALB.
+Node.js 24 Lambda response-streaming proxy for the authenticated `/inference/...` surface. Set `ROUTING_MODE=global` to use Global Accelerator or `ROUTING_MODE=regional` to discover and verify the regional internal ALB. The deployable package owns a separate exact-pinned npm graph containing only the three AWS SDK clients it imports.
 
 ## Environment
 
@@ -16,6 +16,8 @@ Dependency-free Node.js 22 Lambda response-streaming proxy for the authenticated
 | `TARGET_REGION` | Regional | Workload region whose ALB is resolved and verified. |
 | `PROJECT_NAME` | Regional | Prefix used by the registry path and expected EKS cluster tag. |
 | `AWS_ACCOUNT_ID` | Regional | Account that must own the resolved internal application ALB. |
+| `AWS_URL_SUFFIX` | Regional | CDK-provided DNS suffix for the active AWS partition; regional ALB validation requires the exact ELB suffix. |
+| `MAX_REQUEST_BODY_BYTES` | Both | UTF-8 request-body cap enforced before authentication, discovery, or TLS work; bounded to 1–10 MiB (default `1048576`). |
 | `REGIONAL_ENDPOINT_CACHE_TTL_SECONDS` | Regional | Verified route TTL, bounded to 0–300 seconds (default `60`; `0` disables reads from cache). |
 | `PROXY_MAX_RETRIES` | Both | Attempts for `GET`/`HEAD`, bounded to 1–5 (default `3`). |
 | `PROXY_RETRY_BACKOFF_BASE` | Both | Exponential-backoff base seconds, bounded to 0–5 (default `0.3`). |
@@ -24,9 +26,26 @@ Dependency-free Node.js 22 Lambda response-streaming proxy for the authenticated
 
 The execution role needs `secretsmanager:GetSecretValue` and trust-parameter `ssm:GetParameter`. Regional mode also needs registry-parameter `ssm:GetParameter`, `elasticloadbalancing:DescribeLoadBalancers`, and `elasticloadbalancing:DescribeTags`.
 
+## Dependencies and CI
+
+`package.json` and `package-lock.json` are the deployment graph and pin Node 24, npm 11.18.0, and each direct AWS SDK client exactly. The root tooling graph is intentionally separate so CDK, diagram, and markdown tooling cannot enter the Lambda bundle. Install this graph with lifecycle scripts disabled:
+
+```bash
+npm ci --prefix lambda/inference-streaming-proxy --ignore-scripts --no-audit --no-fund
+```
+
+The native `node:test` suite lives in `tests/inference-streaming-proxy/`; the
+package's `npm test` script invokes it while keeping dependency resolution
+anchored to this production graph. The dedicated `Inference Streaming Proxy`
+workflow runs it on Node 24 and enforces at least 93% lines, functions, and
+branches. `security:npm-audit:all-packages`, JavaScript CodeQL, Semgrep, Trivy,
+Dependabot, and the monthly dependency-consistency scan cover this graph. The
+shared Lambda packaging action stages production dependencies with
+`npm ci --omit=dev --ignore-scripts`; it never resolves packages on demand.
+
 ## Behavior
 
-The handler accepts only `GET`, `HEAD`, and `POST` under `/inference/...` and rejects base64 request bodies. It forwards only the existing request-header allowlist, strips hop-by-hop response headers, and signs the exact outbound method, encoded path/query (including duplicate query values), UTF-8 body digest, timestamp, and nonce with the Python-compatible `v1` HMAC envelope.
+The handler accepts only `GET`, `HEAD`, and `POST` under `/inference/...`, rejects base64 request bodies, and applies `MAX_REQUEST_BODY_BYTES` to the UTF-8 byte length for every supported method before any AWS, routing, or TLS dependency runs. It forwards only the existing request-header allowlist, strips hop-by-hop response headers, and drops upstream `Set-Cookie` rather than corrupting repeated cookie values in Lambda's single-value streaming metadata. It signs the exact outbound method, encoded path/query (including duplicate query values), UTF-8 body digest, timestamp, and nonce with the Python-compatible `v1` HMAC envelope.
 
 Both modes require HTTPS/443 with a public root bundle loaded from SSM, TLS 1.2 or newer, and explicit `BACKEND_TLS_SERVER_NAME` SNI/hostname verification. Regional mode accepts only the SSM-registered ELB DNS name after ELB confirms the exact account/region, internal application type, GCO cluster tag, and platform Ingress tag. Secret and trust refresh failures may use only bounded stale cache entries; failed or expired route verification is never accepted.
 

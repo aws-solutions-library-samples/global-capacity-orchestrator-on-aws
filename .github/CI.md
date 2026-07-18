@@ -43,6 +43,7 @@ For contributor-facing docs (how to run tests locally, release process, dependen
 │   └── dependency-scan.sh          # Monthly dependency-drift scanner
 ├── workflows/
 │   ├── unit-tests.yml              # Unit Tests workflow
+│   ├── inference-streaming-proxy.yml # Native Node.js streaming-proxy tests
 │   ├── integration-tests.yml       # Integration Tests workflow
 │   ├── security.yml                # Security workflow
 │   ├── lint.yml                    # Linting workflow
@@ -66,9 +67,10 @@ Each file maps to one row in the README badge table.
 
 | File | README row | What it covers |
 |------|------------|----------------|
-| `workflows/unit-tests.yml` | Unit Tests | pytest with coverage (fail under 90%), BATS, CLI smoke, CDK synth + config matrix, lockfile freshness, fresh install, MCP install + launch smoke, workload import checks |
-| `workflows/integration-tests.yml` | Integration Tests | Per-Dockerfile build + module-import smoke, dev-container smoke, kind E2E with Calico (NetworkPolicy enforcement, RBAC verification, ResourceQuota/LimitRange, PDB validation, cross-namespace traffic blocking, all 3 service deployments), K8s manifest schema validation (kubeconform), Lambda import validation, cross-module pytest, MCP server pytest |
-| `workflows/security.yml` | Security | bandit, pip-audit, trivy (filesystem + per-image matrix), trufflehog, gitleaks, semgrep, checkov, KICS, CodeQL (Python) |
+| `workflows/unit-tests.yml` | Unit Tests | pytest with coverage (90% enforced floor; 93% target), BATS, CLI smoke, CDK synth + config matrix, lockfile freshness, fresh install, MCP install + launch smoke, workload import checks |
+| `workflows/inference-streaming-proxy.yml` | — | Native Node.js 24 tests for the production streaming Lambda, with 93% line/function/branch thresholds |
+| `workflows/integration-tests.yml` | Integration Tests | Per-Dockerfile build + module-import smoke, dev-container smoke, kind E2E with Calico and pinned Metrics Server (NetworkPolicy enforcement, RBAC verification, ResourceQuota/LimitRange, PDB validation, inference-proxy HPA `ScalingActive`, cross-namespace traffic blocking, all 4 service deployments), K8s manifest schema validation (kubeconform), Lambda import validation, cross-module pytest, MCP server pytest |
+| `workflows/security.yml` | Security | bandit, pip-audit, npm audit across every owned package graph, trivy (filesystem + per-image matrix), trufflehog, gitleaks, semgrep, checkov, KICS, CodeQL (Python + JavaScript) |
 | `workflows/lint.yml` | Linting | actionlint, hadolint, markdownlint, mypy (strict / stacks / lambda), ruff (format + check, imports included), shellcheck, yamllint |
 
 ### Satellites
@@ -103,15 +105,15 @@ All CI workflows share the same safety defaults:
 
 Shared logic used by multiple jobs. Invoked with `uses: ./.github/actions/<name>`.
 
-- **`actions/build-lambda-package`** — stages `lambda/kubectl-applier-simple-build/` and `lambda/helm-installer-build/` that CDK synth, pytest, and KICS scans all expect. Used by `unit:cdk:synth`, `unit:cdk:config-matrix`, `unit:cdk:nag-compliance`, `unit:pytest:core`, and `security:kics:iac`.
+- **`actions/build-lambda-package`** — stages `lambda/kubectl-applier-simple-build/`, `lambda/helm-installer-build/`, and the production-only `lambda/inference-streaming-proxy-build/` graph that CDK synth, pytest, and KICS scans expect. Callers must configure Python 3.14 and Node.js from `.nvmrc`; the action installs and verifies the exact npm version from the Lambda `packageManager` pin before its locked install. Used by `unit:cdk:synth`, `unit:cdk:config-matrix`, `unit:cdk:nag-compliance`, `unit:pytest:core`, and `security:kics:iac`.
 
 ## CodeQL config
 
-[`codeql/codeql-config.yml`](codeql/codeql-config.yml) is read by the Advanced Setup CodeQL job (`security:codeql:python-code-analysis`) in [`workflows/security.yml`](workflows/security.yml), via the `config-file:` input on `github/codeql-action/init@v3`. It does three things:
+[`codeql/codeql-config.yml`](codeql/codeql-config.yml) is read by the Advanced Setup Python and JavaScript CodeQL jobs in [`workflows/security.yml`](workflows/security.yml), via the `config-file:` input on `github/codeql-action/init@v4`. It does three things:
 
-- **Scopes the scan** to hand-authored Python runtime code (`gco/`, `cli/`, `gco_mcp/`, `lambda/`, `scripts/`). Generated output (`cdk.out/`, `lambda/*-build/`), virtualenvs, caches, tests, and the demo folder are excluded. `app.py` (the CDK app entry point) is not in scope — it's composition-only glue with no runtime/security surface.
+- **Scopes the scan** to hand-authored Python and JavaScript runtime code (`gco/`, `cli/`, `gco_mcp/`, `lambda/`, `scripts/`). Generated output (`cdk.out/`, `lambda/*-build/`), virtualenvs, caches, tests, and the demo folder are excluded. The deployable `lambda/inference-streaming-proxy/index.mjs` remains in scope while its tests and staged build copy are excluded.
 - **Pins the query pack** to `security-and-quality` so the additional maintainability queries still surface alongside the default security suite.
-- **Filters three rules** that have been reviewed and classified as false positives against this codebase: `py/clear-text-logging-sensitive-data` (we log operational identifiers like ARNs and registry hostnames, not credential values), `py/incomplete-url-substring-sanitization` (only ever hit by test-file assertions, not access-control code paths), and `py/weak-sensitive-data-hashing` (SRP protocol digest in `cli/analytics_user_mgmt.py`, not a password storage hash — RFC 5054 mandates SHA-256 for the protocol primitive). Each exclusion carries an inline comment in the config naming the exact call sites and the reason — audit them when the codebase shape changes.
+- **Filters two rules** that have been reviewed and classified as false positives against this codebase: `py/clear-text-logging-sensitive-data` (we log operational identifiers like ARNs and registry hostnames, not credential values) and `py/incomplete-url-substring-sanitization` (only ever hit by test-file assertions, not access-control code paths). Each exclusion carries an inline comment in the config naming the exact call sites and the reason — audit them when the codebase shape changes.
 
 The scan runs as an Advanced Setup workflow rather than Default Setup so the filters and paths are pinned in git instead of hidden in repo Settings. To swap back to Default Setup: comment out the `security-codeql-python-code-analysis` job in `workflows/security.yml` and re-enable Default Setup in repo Settings → Code security → CodeQL. The config file has no effect under Default Setup.
 
@@ -143,17 +145,19 @@ If a stale run ever shows a `img.shields.io/github/actions/workflow/status/...` 
 
 ## Dependabot
 
-[`dependabot.yml`](dependabot.yml) covers **GitHub Actions and Docker only**, not Python.
+[`dependabot.yml`](dependabot.yml) covers **GitHub Actions, Docker, and both repository-owned npm graphs**, not Python.
 
 Rationale: Python deps are pinned through `requirements-lock.txt` with `pip-compile` and reviewed intentionally; Dependabot would fight that workflow. CVE-driven Python bumps are caught by the weekly `cve-scan` workflow (Trivy) and the monthly `deps-scan` workflow.
 
 Ecosystems tracked:
 
 - GitHub Actions (`uses:` versions across all workflows)
+- npm root tooling (`/`) and the deployable streaming Lambda (`/lambda/inference-streaming-proxy`)
 - Docker (`dockerfiles/`, `lambda/helm-installer/`, `Dockerfile.dev` at repo root)
 
 ## Helper scripts
 
+- **`scripts/use-pinned-npm.sh`** — installs (when necessary) and verifies the exact npm release declared by a supplied `package.json` `packageManager` field. Every CI path that invokes npm calls this helper first; the Lambda packaging composite also enforces it internally.
 - **`scripts/dependency-scan.sh`** — backs the `deps-scan` workflow. See [below](#dependency-scan-script) for the full reference.
 - **`scripts/check_pip_audit_ignore.py`** — backs the `security:pip-audit:deps` job. See [below](#pip-audit-ignore-validator) for the full reference.
 
@@ -166,6 +170,7 @@ Ecosystems tracked:
 | Surface | Source | Notes |
 |---------|--------|-------|
 | Python packages | `pip list --outdated` against the editable install of the current repo, filtered to packages we pin *directly* in `pyproject.toml` | Transitive-only drift is excluded because those versions are controlled by upstream pins (`jsii`, `aws-cdk-lib`, `botocore`, `fastmcp`, …) and bumping them ourselves either no-ops or breaks the resolver. The filter is driven by `extract_direct_python_deps` in `lib_dependency_scan.sh`. |
+| Node/npm package management | Every repository-owned `package.json`, its adjacent lockfile, and `.github/dependabot.yml` | Requires exact direct pins, `packageManager`, a committed lockfile, and a matching Dependabot npm directory. Also checks Node/npm/CDK consistency against `.nvmrc`, `Dockerfile.dev`, and `gco/stacks/constants.py`. |
 | Docker image tags | `image: …:<tag>` references in `.github/workflows/*.yml`, `lambda/kubectl-applier-simple/manifests/`, `examples/`, and `lambda/helm-installer/charts.yaml`, plus the Mooncake default image pinned as `_DISAGGREGATED_DEFAULT_IMAGE` in `cli/images.py` (via `extract_mooncake_default_image`) | Queries the original registry (Docker Hub, Quay, GHCR, GCR, ECR Public, registry.k8s.io) via `skopeo`; only semver tags. The Mooncake image is a Python constant — not a Dockerfile `FROM` or a manifest — so Dependabot doesn't see it; surfacing its drift here is the cue to validate and bump the pin (the `mooncake-image` workflow re-runs the image contract tests against the new tag). |
 | Helm charts | `lambda/helm-installer/charts.yaml` | Uses `helm show chart` for OCI charts and `helm search repo` for traditional repos |
 | EKS add-ons | `addon_name`/`addon_version` pairs extracted from `gco/stacks/constants.py` | Requires AWS credentials (via OIDC). The script pre-flights `sts get-caller-identity`; without valid creds the add-on section is explicitly **skipped** and the report notes why — everything else still runs |
@@ -175,9 +180,9 @@ Ecosystems tracked:
 | Bedrock default model | `DEFAULT_BEDROCK_MODEL_ID` from `gco_mcp/mission/sampling.py` (mirrored by `cli/capacity/advisor.py`) | Requires AWS credentials (via OIDC). Lists system-defined inference profiles (`bedrock list-inference-profiles`, pinned to us-east-1) and reports drift when a newer release exists in the *same model family*. The id is a Python constant, so Dependabot never sees it |
 | Dockerfile.dev pins | `ARG` pins in `Dockerfile.dev` (Node LTS major, npm, CDK CLI, kubectl, AWS CLI v2, Docker CLI, Buildx) | Public endpoints, no AWS creds. Each ARG resolves against its own upstream (`nodejs/Release`, the npm/CDK registries, `dl.k8s.io`, `aws/aws-cli` tags, `moby/moby`, `docker/buildx`) |
 | Pre-commit hooks | `repo:` / `rev:` blocks in `.pre-commit-config.yaml` | Calls `GET /repos/{owner}/{repo}/tags` on GitHub for each hook and reports drift when our pinned `rev:` is older than the highest semver-shaped tag. Unauthenticated; SHA pins and non-GitHub repos are skipped silently |
-| CDK enum constants | `LAMBDA_PYTHON_RUNTIME` and `AURORA_POSTGRES_VERSION` from `gco/stacks/constants.py` | Introspects the installed `aws-cdk-lib` (the `deps-scan` workflow installs the latest) for `aws_lambda.Runtime.PYTHON_X_Y` and `aws_rds.AuroraPostgresEngineVersion.VER_X_Y` and reports drift when our pinned enum is older than the highest member exposed by the library. Skipped with a note when `aws-cdk-lib` isn't importable |
+| CDK enum constants | `LAMBDA_PYTHON_RUNTIME`, `LAMBDA_NODEJS_RUNTIME`, and `AURORA_POSTGRES_VERSION` from `gco/stacks/constants.py` | Introspects the installed `aws-cdk-lib` (the `deps-scan` workflow installs the latest) for `aws_lambda.Runtime.PYTHON_X_Y`, `aws_lambda.Runtime.NODEJS_<major>_X`, and `aws_rds.AuroraPostgresEngineVersion.VER_X_Y`, then reports drift when a pinned enum is older than the highest matching member exposed by the library. Skipped with a note when `aws-cdk-lib` isn't importable |
 | Python release | `LAMBDA_PYTHON_RUNTIME` (the major Python version we standardise on across Lambdas) | Queries `https://endoflife.date/api/python.json` for the highest currently-supported stable cycle and reports drift compared to the `LAMBDA_PYTHON_RUNTIME` constant. Public endpoint, no AWS creds |
-| CI tooling | `TRIVY_VERSION` (`cve-scan.yml` / `security.yml`), `HELM_VERSION` and `KUBECTL_VERSION` (`deps-scan.yml`), `KUBECONFORM_VERSION` (`integration-tests.yml`), and the kind binary + node image (`integration-tests.yml`) | Public endpoints, no AWS creds. Compares each hand-installed CI tool against its upstream (GitHub Releases for Trivy/Helm/kind/kubeconform, `dl.k8s.io` for kubectl, registry tags within the pinned minor for the kind node image). These are plain env / `with:` pins Dependabot doesn't watch — a stale Trivy silently weakens the CVE scan, a stale kubeconform validates against outdated Kubernetes schemas |
+| CI tooling | `TRIVY_VERSION` (`cve-scan.yml` / `security.yml`), `HELM_VERSION` and `KUBECTL_VERSION` (`deps-scan.yml`), `KUBECONFORM_VERSION` and `METRICS_SERVER_VERSION` (`integration-tests.yml`), and the kind binary + node image (`integration-tests.yml`) | Public endpoints, no AWS creds. Compares each hand-installed CI tool against its upstream (GitHub Releases for Trivy/Helm/kind/kubeconform/Metrics Server, `dl.k8s.io` for kubectl, registry tags within the pinned minor for the kind node image). These are plain env / `with:` pins Dependabot doesn't watch — stale validation and autoscaling tools can silently weaken CI coverage |
 | Version consistency | ruff (pyproject / pre-commit / `lint.yml`), `python-version` across workflows vs the project runtime, and each `*_VERSION` env pin across workflow files | No network. Reports when copies of a pin that must move together disagree |
 | Base-image security epochs | `APT_SECURITY_EPOCH` / `DNF_SECURITY_EPOCH` ARGs in `Dockerfile.dev`, `dockerfiles/*`, and `lambda/helm-installer/Dockerfile` | No network. Flags an epoch older than `SECURITY_EPOCH_STALE_DAYS` (default 45) so a stale cache-bust date masking new OS patches gets bumped |
 | Suppression expiries | `exp:` markers in `.github/config/.trivyignore` and `.pip-audit-ignore` | No network. Surfaces entries expiring within `SUPPRESSION_EXPIRY_WARN_DAYS` (default 30) so they're renewed before the CI validator hard-fails a build on the expiry date |
@@ -406,7 +411,11 @@ Most jobs map to a single command you can run locally. Quick reference:
 ruff format --check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 yamllint -c .github/config/.yamllint.yml --strict .
-npx markdownlint-cli2 --config .github/config/.markdownlint-cli2.yaml
+bash .github/scripts/use-pinned-npm.sh package.json
+npm ci --ignore-scripts --no-audit --no-fund
+npm run lint:markdown
+npm ci --prefix lambda/inference-streaming-proxy --ignore-scripts --no-audit --no-fund
+npm --prefix lambda/inference-streaming-proxy test
 
 # Type check (matches lint:mypy:strict and lint:mypy:stacks)
 mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'

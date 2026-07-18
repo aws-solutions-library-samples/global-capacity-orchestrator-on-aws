@@ -43,8 +43,8 @@ A mirror sidesteps both. There is no credential to store, and the mirrored image
 The mirror has three moving parts: the **source set**, the **copy**, and the **consumer override**.
 
 1. **Source set.** [`cli/_image_mirror.py`](../cli/_image_mirror.py) builds the list of upstream images to mirror in `collect_source_refs()`. Volcano's entries are derived from [`lambda/helm-installer/charts.yaml`](../lambda/helm-installer/charts.yaml) — the per-component `*_image_name` fields under `volcano.values.basic` plus the pinned `image_tag_version` — so the mirrored tag is always exactly what Helm requests and never drifts from the deployed chart.
-2. **Copy.** For each source ref `<registry>/<repo>:<tag>`, the mirror ensures an ECR repository `<ecr_namespace>/<repo>` exists and copies the image into `<account>.dkr.ecr.<region>.amazonaws.com/<ecr_namespace>/<repo>:<tag>`, preserving the full multi-arch manifest list. Copies are idempotent — a tag already present in ECR is skipped.
-3. **Consumer override.** When the mirror is enabled, the regional stack ([`gco/stacks/regional_stack.py`](../gco/stacks/regional_stack.py)) injects a single Volcano Helm value override — `basic.image_registry` → `<account>.dkr.ecr.<region>.amazonaws.com/<ecr_namespace>` — into the `HelmInstallCharts` custom resource. Every Volcano image (controller, scheduler, admission webhook, and the pre-install admission-init hook) renders from `basic.image_registry`, so all of them resolve from the mirror.
+2. **Copy.** For each source ref `<registry>/<repo>:<tag>`, the mirror ensures an ECR repository `<ecr_namespace>/<repo>` exists and copies the image into `<account>.dkr.ecr.<region>.<url-suffix>/<ecr_namespace>/<repo>:<tag>`, preserving the full multi-arch manifest list. Copies are idempotent — a tag already present in ECR is skipped.
+3. **Consumer override.** When the mirror is enabled, the regional stack ([`gco/stacks/regional_stack.py`](../gco/stacks/regional_stack.py)) injects a single Volcano Helm value override — `basic.image_registry` → `<account>.dkr.ecr.<region>.<url-suffix>/<ecr_namespace>` — into the `HelmInstallCharts` custom resource. Every Volcano image (controller, scheduler, admission webhook, and the pre-install admission-init hook) renders from `basic.image_registry`, so all of them resolve from the mirror.
 
 The override creates **no** CloudFormation resources of its own — it is just a value passed to the existing Helm install path. The ECR repositories are created by the copy step, not by CDK.
 
@@ -52,7 +52,7 @@ The override creates **no** CloudFormation resources of its own — it is just a
 charts.yaml (volcanosh/vc-*:v1.15.0)
         │  collect_source_refs()
         ▼
-docker.io/volcanosh/vc-scheduler:v1.15.0   ── copy (all arches) ──▶  <acct>.dkr.ecr.<region>.amazonaws.com/gco/dockerhub/volcanosh/vc-scheduler:v1.15.0
+docker.io/volcanosh/vc-scheduler:v1.15.0   ── copy (all arches) ──▶  <acct>.dkr.ecr.<region>.<url-suffix>/gco/dockerhub/volcanosh/vc-scheduler:v1.15.0
         ▲                                                                         ▲
         │                                                  Volcano basic.image_registry override points here
         └── upstream (one-time, anonymous)                 so the cluster pulls from ECR, not docker.io

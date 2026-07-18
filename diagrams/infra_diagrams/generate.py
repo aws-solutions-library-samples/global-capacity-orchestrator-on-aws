@@ -24,8 +24,8 @@ How it works
 does not run ``cdk synth`` itself. So this script synthesizes each diagram's
 stack set in-process to a temporary ``cdk.out`` (with the Docker image asset
 and helm-installer Lambda mocked, exactly like the unit tests, so no Docker
-daemon or live AWS access is required) and then invokes
-``npx cdk-dia --tree <cdk.out>/tree.json --target <name>.png``.
+daemon or live AWS access is required) and then invokes the locked ``cdk-dia``
+binary from the root npm graph against ``<cdk.out>/tree.json``.
 
 Per-stack diagrams synthesize just the target stack (passing placeholder
 strings for cross-stack inputs). ``regional-api`` also instantiates the
@@ -50,8 +50,8 @@ Usage:
 Prerequisites:
     * Graphviz ``dot`` on PATH (``brew install graphviz`` / ``apt-get install
       graphviz``).
-    * Node.js + npx (``cdk-dia`` is fetched on demand, pinned to
-      ``CDK_DIA_VERSION``).
+    * Node.js + npm. Run the root ``npm ci`` command first so ``cdk-dia``
+      executes from the committed lockfile rather than an on-demand graph.
 """
 
 from __future__ import annotations
@@ -71,22 +71,34 @@ from unittest.mock import MagicMock, patch
 # up. The ``sys.path.insert`` lets the script be invoked standalone
 # (``python diagrams/infra_diagrams/generate.py``) without a prior
 # ``pip install -e .``.
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+_PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
+sys.path.insert(0, str(_PROJECT_ROOT))
 
-import aws_cdk as cdk
+import aws_cdk as cdk  # noqa: E402
 
-from gco.config.config_loader import ConfigLoader
-from gco.stacks.analytics_stack import GCOAnalyticsStack
-from gco.stacks.api_gateway_global_stack import AnalyticsApiConfig, GCOApiGatewayGlobalStack
-from gco.stacks.global_stack import GCOGlobalStack
-from gco.stacks.monitoring_stack import GCOMonitoringStack
-from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
-from gco.stacks.regional_stack import GCORegionalStack
+from cli.stacks import cdk_asset_consumer  # noqa: E402
+from gco.config.config_loader import ConfigLoader  # noqa: E402
+from gco.stacks.analytics_stack import GCOAnalyticsStack  # noqa: E402
+from gco.stacks.api_gateway_global_stack import (  # noqa: E402
+    AnalyticsApiConfig,
+    GCOApiGatewayGlobalStack,
+)
+from gco.stacks.global_stack import GCOGlobalStack  # noqa: E402
+from gco.stacks.monitoring_stack import GCOMonitoringStack  # noqa: E402
+from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack  # noqa: E402
+from gco.stacks.regional_stack import GCORegionalStack  # noqa: E402
 
-# Pinned cdk-dia version fetched via ``npx`` (repo has no root package.json;
-# Node CLIs are invoked through npx, matching how ``cli/stacks.py`` shells out
-# to ``npx cdk``).
-CDK_DIA_VERSION = "0.12.3"
+
+def _locked_node_tool(package_name: str) -> Path:
+    """Return a root node_modules binary or fail with install guidance."""
+    binary = _PROJECT_ROOT / "node_modules" / ".bin" / package_name
+    if not binary.is_file():
+        raise RuntimeError(
+            f"{package_name} is not installed from package-lock.json; run "
+            "'npm ci --ignore-scripts --no-audit --no-fund' at the project root"
+        )
+    return binary
+
 
 # A builder instantiates the stacks for one diagram and returns the stack ids
 # to pass to ``cdk-dia --include`` (or ``None`` to diagram every stack in the
@@ -126,11 +138,9 @@ def _mocked_regional_assets() -> Iterator[None]:
 def _run_cdk_dia(
     tree_path: Path, target: Path, *, include: list[str] | None, collapse: bool
 ) -> None:
-    """Invoke ``npx cdk-dia`` against a synthesized ``tree.json``."""
+    """Invoke the locked ``cdk-dia`` against a synthesized ``tree.json``."""
     cmd = [
-        "npx",
-        "--yes",
-        f"cdk-dia@{CDK_DIA_VERSION}",
+        str(_locked_node_tool("cdk-dia")),
         "--tree",
         str(tree_path),
         "--target",
@@ -161,11 +171,12 @@ def _generate(
     output_dir = Path(__file__).parent
     with tempfile.TemporaryDirectory() as tmp:
         assembly_dir = Path(tmp) / "cdk.out"
-        app = cdk.App(outdir=str(assembly_dir), context=context)
-        config = ConfigLoader(app)
-        with _mocked_regional_assets():
-            include = build(app, config)
-            app.synth()
+        with cdk_asset_consumer(_PROJECT_ROOT):
+            app = cdk.App(outdir=str(assembly_dir), context=context)
+            config = ConfigLoader(app)
+            with _mocked_regional_assets():
+                include = build(app, config)
+                app.synth()
         _run_cdk_dia(
             assembly_dir / "tree.json",
             output_dir / f"{name}.png",
@@ -251,7 +262,7 @@ def _build_regional_api(app: cdk.App, config: ConfigLoader) -> list[str]:
         auth_secret_arn=f"arn:aws:secretsmanager:{region}:123456789012:secret:placeholder",
         aggregator_role_arn=("arn:aws:iam::123456789012:role/gco-diagram-cross-region-aggregator"),
         env=cdk.Environment(region=region),
-        description=(f"Regional aggregation bridge for {region} with optional direct access"),
+        description=f"Regional aggregation and workload bridge for {region}",
     )
     return [f"{project}-regional-api-{region}"]
 
@@ -271,7 +282,7 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
     api_gateway_stack = GCOApiGatewayGlobalStack(
         app,
         f"{project}-api-gateway",
-        global_accelerator_dns=global_stack.accelerator.dns_name,
+        global_accelerator_dns=global_stack.get_accelerator_dns_name(),
         project_name=project,
         api_gateway_config=config.get_api_gateway_config(),
         registry_region=config.get_global_region(),

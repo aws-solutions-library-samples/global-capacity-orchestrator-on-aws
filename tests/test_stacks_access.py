@@ -4,7 +4,7 @@ cli/commands/stacks_cmd.py.
 
 Covers region resolution (defaulting to the first entry of
 cdk.json::context.regional and falling back to `-r`), cluster name
-defaulting to `gco-{region}`, and the EKS access-entry creation path:
+defaulting to `<project_name>-{region}`, and the EKS access-entry creation path:
 translating `sts:assumed-role` ARNs to IAM role ARNs, invoking
 `aws eks update-kubeconfig` and `create-access-entry` via patched
 subprocess.run, and swallowing the "already exists" error on rerun
@@ -72,7 +72,7 @@ class TestStacksAccessCommand:
             assert any("my-cluster" in c for c in calls)
 
     def test_default_cluster_name_from_region(self, runner):
-        """Without -c, cluster name should be gco-{region}."""
+        """Without -c, cluster name should use the configured project and region."""
         with patch("subprocess.run") as mock_run, patch("time.sleep"):
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="NAME STATUS\nnode1 Ready\n", stderr=""
@@ -116,6 +116,48 @@ class TestStacksAccessCommand:
             # Should have called create-access-entry with the role ARN
             calls = [str(c) for c in mock_run.call_args_list]
             assert any("arn:aws:iam::" in c for c in calls)
+
+    @pytest.mark.parametrize(
+        ("region", "partition"),
+        (("cn-north-1", "aws-cn"), ("us-gov-west-1", "aws-us-gov")),
+    )
+    def test_access_arns_follow_target_partition(self, runner, region, partition):
+        """Assumed-role and managed access-policy ARNs use Region metadata."""
+        import json
+
+        captured: list[list[str]] = []
+
+        def side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list):
+                captured.append(list(cmd))
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            response = MagicMock(returncode=0, stderr="", stdout="")
+            if "describe-cluster" in cmd_str:
+                response.stdout = json.dumps({"public": True, "private": True, "publicCidrs": []})
+            elif "get-caller-identity" in cmd_str and "Arn" in cmd_str:
+                response.stdout = (
+                    f"arn:{partition}:sts::123456789012:assumed-role/PartitionRole/session\n"
+                )
+            elif "get-caller-identity" in cmd_str and "Account" in cmd_str:
+                response.stdout = "123456789012\n"
+            elif "kubectl" in cmd_str:
+                response.stdout = "NAME STATUS\nnode1 Ready\n"
+            return response
+
+        with patch("subprocess.run", side_effect=side_effect), patch("time.sleep"):
+            result = runner.invoke(stacks, ["access", "-r", region])
+
+        assert result.exit_code == 0, result.output
+        create_call = next(cmd for cmd in captured if "create-access-entry" in cmd)
+        assert (
+            create_call[create_call.index("--principal-arn") + 1]
+            == f"arn:{partition}:iam::123456789012:role/PartitionRole"
+        )
+        associate_call = next(cmd for cmd in captured if "associate-access-policy" in cmd)
+        assert associate_call[associate_call.index("--policy-arn") + 1] == (
+            f"arn:{partition}:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+        )
 
     def test_handles_existing_access_entry(self, runner):
         """Should handle 'already exists' gracefully."""

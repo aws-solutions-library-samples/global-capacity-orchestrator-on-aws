@@ -10,6 +10,7 @@ Environment variables:
     TARGET_REGION: Region served by this regional API.
     PROJECT_NAME: Deployment prefix used by the SSM path and EKS cluster name.
     AWS_ACCOUNT_ID: Account that must own the resolved ALB.
+    AWS_URL_SUFFIX: CDK-resolved DNS suffix for the deployment partition.
     ALB_ENDPOINT: Optional literal ALB DNS name for compatibility/isolated use.
     REGIONAL_ENDPOINT_CACHE_TTL_SECONDS: Registry cache TTL, bounded to 0-300
         seconds (default: 60; 0 disables caching).
@@ -41,6 +42,7 @@ from proxy_utils import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/regional-api-proxy/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/regional-api-proxy/handler.lambda_handler.png``)
@@ -51,7 +53,7 @@ from proxy_utils import (
 _LOGGER = logging.getLogger(__name__)
 _MAX_FORWARD_REQUEST_SECONDS = 28.0
 _LAMBDA_RESPONSE_HEADROOM_SECONDS = 1.0
-_REGION_RE = re.compile(r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$")
+_REGION_RE = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
 _DNS_NAME_RE = re.compile(
     r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
@@ -70,12 +72,19 @@ def _regional_endpoint_cache_ttl() -> float:
     return value if 0 <= value <= 300 else 60.0
 
 
+def _aws_url_suffix() -> str:
+    """Return the CDK-resolved DNS suffix for this deployment partition."""
+    suffix = os.getenv("AWS_URL_SUFFIX", "").strip().lower()
+    if _DNS_NAME_RE.fullmatch(suffix) is None:
+        raise RuntimeError("The AWS URL suffix is not configured")
+    return suffix
+
+
 def _validated_dns_name(value: Any, *, region: str) -> str:
     """Normalize an ELB DNS name and reject non-ELB hostnames."""
     endpoint = str(value or "").strip().rstrip(".")
-    if _DNS_NAME_RE.fullmatch(endpoint) is None or not endpoint.lower().endswith(
-        (".elb.amazonaws.com", ".elb.amazonaws.com.cn")
-    ):
+    expected_suffix = f".elb.{_aws_url_suffix()}"
+    if _DNS_NAME_RE.fullmatch(endpoint) is None or not endpoint.lower().endswith(expected_suffix):
         raise RuntimeError(f"The registered backend for {region} is invalid")
     return endpoint
 

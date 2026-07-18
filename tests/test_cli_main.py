@@ -2456,6 +2456,38 @@ class TestStacksDestroyAllOrchestrated:
             assert result.exit_code == 0
             assert "Parallel mode" in result.output
 
+    def test_destroy_preview_passes_custom_project_to_phase_order(self):
+        """The confirmation order uses the configured project bridge prefix."""
+        from click.testing import CliRunner
+
+        from cli.config import GCOConfig
+        from cli.main import cli
+
+        runner = CliRunner()
+        config = GCOConfig(project_name="acme")
+        stacks = [
+            "acme-global",
+            "acme-us-east-1",
+            "acme-regional-api-us-east-1",
+            "acme-monitoring",
+        ]
+
+        with (
+            patch("cli.main.get_config", return_value=config),
+            patch("cli.stacks.get_stack_manager") as mock_manager,
+            patch("cli.stacks.get_stack_destroy_order") as mock_order,
+        ):
+            mock_sm = MagicMock()
+            mock_sm.list_stacks.return_value = stacks
+            mock_sm.destroy_orchestrated.return_value = (True, stacks, [])
+            mock_manager.return_value = mock_sm
+            mock_order.return_value = list(reversed(stacks))
+
+            result = runner.invoke(cli, ["stacks", "destroy-all", "-y"])
+
+        assert result.exit_code == 0
+        mock_order.assert_called_once_with(stacks, project_name="acme")
+
     def test_destroy_all_error(self):
         """Test destroy-all with exception."""
         from click.testing import CliRunner

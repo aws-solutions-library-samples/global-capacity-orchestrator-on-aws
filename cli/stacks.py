@@ -11,7 +11,7 @@ This module handles:
     - CDK bootstrap across all target regions (idempotent)
     - Lambda source synchronization (copies handler code + dependencies before synth)
     - CDK stack deployment with proper dependency ordering:
-        1. Global stack (Global Accelerator, DynamoDB)
+        1. Global stack (partition-wide state, plus Global Accelerator in `aws`)
         2. API Gateway stack (auth secret, Lambda proxy)
         3. Regional stacks in parallel (EKS, VPC, ALB per region)
         4. Monitoring stack (CloudWatch dashboards, alarms)
@@ -34,24 +34,40 @@ Environment Variables:
 
 from __future__ import annotations
 
+import errno
+import hashlib
 import importlib.util
+import json
 import logging
 import os
 import shutil
 import site
+import stat
 import subprocess
 import sys
-from collections.abc import Callable
+import tempfile
+import time
+import uuid
+from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
-from threading import Event, Lock, Thread
-from typing import TYPE_CHECKING, Any
+from threading import Event, Lock, Thread, local
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from botocore.exceptions import ClientError
 
+from gco.stacks.constants import (
+    known_cloudformation_regions,
+    validated_deployment_partition,
+    validated_regional_deployment_regions,
+)
+
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -74,6 +90,392 @@ logger = logging.getLogger(__name__)
 # cannot synthesize or deploy. ``StackManager._ensure_cdk_toolchain`` checks
 # for these before invoking ``cdk`` so a missing toolchain is actionable.
 _CDK_TOOLCHAIN_MODULES = ("aws_cdk", "cdk_nag")
+_INFERENCE_STREAMING_PACKAGE_FILES = ("index.mjs", "package.json", "package-lock.json")
+_KUBECTL_PACKAGE_INPUTS = ("handler.py", "requirements.txt", "manifests")
+_LAMBDA_BUILD_MANIFEST = ".gco-build-manifest.json"
+_LAMBDA_BUILD_MANIFEST_VERSION = 1
+_LAMBDA_SOURCE_IGNORED_DIRECTORIES = frozenset({"__pycache__", ".mypy_cache", ".pytest_cache"})
+_LAMBDA_SOURCE_IGNORED_FILES = frozenset({".DS_Store"})
+_LAMBDA_SOURCE_COPY_IGNORE_PATTERNS = (
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".DS_Store",
+    "*.pyc",
+    "*.pyo",
+)
+_ASSET_LOCK_RETRY_SECONDS = 0.05
+_CDK_ASSET_CONSUMER_MAX_ATTEMPTS = 3
+
+
+@dataclass(frozen=True)
+class _CdkAssetSpec:
+    """One canonical generated asset consumed by the CDK application."""
+
+    name: str
+    source_directory: str
+    build_directory: str
+    source_inputs: tuple[str, ...] | None
+
+    def paths(self, project_root: Path) -> tuple[Path, Path]:
+        lambda_dir = project_root / "lambda"
+        return lambda_dir / self.source_directory, lambda_dir / self.build_directory
+
+
+_KUBECTL_CDK_ASSET = _CdkAssetSpec(
+    name="kubectl-applier-simple",
+    source_directory="kubectl-applier-simple",
+    build_directory="kubectl-applier-simple-build",
+    source_inputs=_KUBECTL_PACKAGE_INPUTS,
+)
+_HELM_CDK_ASSET = _CdkAssetSpec(
+    name="helm-installer",
+    source_directory="helm-installer",
+    build_directory="helm-installer-build",
+    source_inputs=None,
+)
+_INFERENCE_STREAMING_CDK_ASSET = _CdkAssetSpec(
+    name="inference-streaming-proxy",
+    source_directory="inference-streaming-proxy",
+    build_directory="inference-streaming-proxy-build",
+    source_inputs=_INFERENCE_STREAMING_PACKAGE_FILES,
+)
+_CDK_ASSET_SPECS = (
+    _KUBECTL_CDK_ASSET,
+    _HELM_CDK_ASSET,
+    _INFERENCE_STREAMING_CDK_ASSET,
+)
+
+
+class _AssetThreadState(local):
+    """Per-thread nesting state; each OS lock still spans the full process."""
+
+    def __init__(self) -> None:
+        self.held: dict[str, tuple[bool, int]] = {}
+        self.active_consumers: dict[str, int] = {}
+
+
+_asset_thread_state = _AssetThreadState()
+
+
+def _asset_tree_paths(root: Path, source_inputs: tuple[str, ...] | None) -> Iterator[Path]:
+    """Yield deterministic source or build-tree entries below ``root``."""
+    selected: set[Path] = set()
+    if source_inputs is None:
+        selected.update(root.rglob("*"))
+    else:
+        for relative_name in source_inputs:
+            path = root / relative_name
+            if not path.exists() and not path.is_symlink():
+                raise FileNotFoundError(path)
+            selected.add(path)
+            if path.is_dir() and not path.is_symlink():
+                selected.update(path.rglob("*"))
+    yield from sorted(selected, key=lambda path: path.relative_to(root).as_posix())
+
+
+def _asset_tree_digest(
+    root: Path,
+    *,
+    source_inputs: tuple[str, ...] | None = None,
+) -> str | None:
+    """Hash every deployable entry in a source selection or complete build tree.
+
+    The completion manifest and local cache files are excluded. Regular-file
+    content, paths, modes, directory entries, and symlink targets are included
+    so removing any installed transitive dependency invalidates the build.
+    """
+    if not root.is_dir():
+        return None
+    digest = hashlib.sha256()
+    try:
+        for path in _asset_tree_paths(root, source_inputs):
+            relative = path.relative_to(root)
+            if any(part in _LAMBDA_SOURCE_IGNORED_DIRECTORIES for part in relative.parts):
+                continue
+            if (
+                path.name in _LAMBDA_SOURCE_IGNORED_FILES
+                or path.name == _LAMBDA_BUILD_MANIFEST
+                or path.suffix in {".pyc", ".pyo"}
+            ):
+                continue
+
+            metadata = path.lstat()
+            relative_bytes = relative.as_posix().encode("utf-8")
+            digest.update(len(relative_bytes).to_bytes(8, "big"))
+            digest.update(relative_bytes)
+            digest.update(stat.S_IMODE(metadata.st_mode).to_bytes(4, "big"))
+
+            if path.is_symlink():
+                target = os.readlink(path).encode("utf-8")
+                digest.update(b"L")
+                digest.update(len(target).to_bytes(8, "big"))
+                digest.update(target)
+            elif path.is_dir():
+                digest.update(b"D")
+            elif path.is_file():
+                file_digest = hashlib.sha256()
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        file_digest.update(chunk)
+                digest.update(b"F")
+                digest.update(file_digest.digest())
+            else:
+                return None
+    except OSError, UnicodeError:
+        return None
+    return digest.hexdigest()
+
+
+def _read_build_manifest(build_dir: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads((build_dir / _LAMBDA_BUILD_MANIFEST).read_text(encoding="utf-8"))
+    except OSError, UnicodeError, json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _write_build_manifest(build_dir: Path, source_digest: str) -> None:
+    """Write the completion marker only after the staged build is complete."""
+    build_digest = _asset_tree_digest(build_dir)
+    if build_digest is None:
+        raise RuntimeError(f"Unable to hash completed Lambda asset {build_dir.name}")
+    manifest = {
+        "schema_version": _LAMBDA_BUILD_MANIFEST_VERSION,
+        "source_digest": source_digest,
+        "build_digest": build_digest,
+    }
+    manifest_path = build_dir / _LAMBDA_BUILD_MANIFEST
+    with manifest_path.open("x", encoding="utf-8") as handle:
+        json.dump(manifest, handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _asset_build_is_fresh_unlocked(
+    source_dir: Path,
+    build_dir: Path,
+    *,
+    source_inputs: tuple[str, ...] | None,
+) -> bool:
+    manifest = _read_build_manifest(build_dir)
+    if manifest is None or manifest.get("schema_version") != _LAMBDA_BUILD_MANIFEST_VERSION:
+        return False
+    source_digest = _asset_tree_digest(source_dir, source_inputs=source_inputs)
+    build_digest = _asset_tree_digest(build_dir)
+    return (
+        source_digest is not None
+        and build_digest is not None
+        and manifest.get("source_digest") == source_digest
+        and manifest.get("build_digest") == build_digest
+    )
+
+
+def _thread_asset_locks() -> dict[str, tuple[bool, int]]:
+    """Return locks held by the current thread for safe nested consumers."""
+    return _asset_thread_state.held
+
+
+def _ensure_windows_lock_byte(lock_file: BinaryIO) -> None:
+    """Ensure msvcrt has a real byte range to lock."""
+    lock_file.seek(0, os.SEEK_END)
+    if lock_file.tell() == 0:
+        lock_file.write(b"\0")
+        lock_file.flush()
+    lock_file.seek(0)
+
+
+def _windows_lock_is_contended(exc: OSError) -> bool:
+    return exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK} or getattr(
+        exc,
+        "winerror",
+        None,
+    ) in {32, 33, 36}
+
+
+def _acquire_asset_file_lock(
+    lock_file: BinaryIO,
+    *,
+    exclusive: bool,
+) -> None:
+    """Acquire a platform-native interprocess lock."""
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt_api: Any = msvcrt
+        _ensure_windows_lock_byte(lock_file)
+        while True:
+            lock_file.seek(0)
+            try:
+                # msvcrt exposes only exclusive byte-range locks. Serializing
+                # Windows readers and writers preserves correctness while POSIX
+                # keeps true shared-reader concurrency through flock below.
+                msvcrt_api.locking(lock_file.fileno(), msvcrt_api.LK_NBLCK, 1)
+                return
+            except OSError as exc:
+                if not _windows_lock_is_contended(exc):
+                    raise
+                time.sleep(_ASSET_LOCK_RETRY_SECONDS)
+
+    import fcntl
+
+    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    fcntl.flock(lock_file.fileno(), operation)
+
+
+def _release_asset_file_lock(lock_file: BinaryIO) -> None:
+    """Release the matching platform-native interprocess lock."""
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt_api: Any = msvcrt
+        lock_file.seek(0)
+        msvcrt_api.locking(lock_file.fileno(), msvcrt_api.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _lambda_asset_lock(build_dir: Path, *, exclusive: bool) -> Iterator[None]:
+    """Serialize publishers and keep freshness reads off rename windows."""
+    build_dir.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = build_dir.with_name(f".{build_dir.name}.lock")
+    lock_key = os.path.normcase(os.path.abspath(lock_path))
+    held = _thread_asset_locks()
+    existing = held.get(lock_key)
+    if existing is not None:
+        held_exclusive, depth = existing
+        if exclusive and not held_exclusive:
+            raise RuntimeError(f"Cannot upgrade shared asset lock to exclusive: {lock_path}")
+        held[lock_key] = (held_exclusive, depth + 1)
+        try:
+            yield
+        finally:
+            held[lock_key] = (held_exclusive, depth)
+        return
+
+    with lock_path.open("a+b") as lock_file:
+        _acquire_asset_file_lock(lock_file, exclusive=exclusive)
+        held[lock_key] = (exclusive, 1)
+        try:
+            yield
+        finally:
+            held.pop(lock_key, None)
+            _release_asset_file_lock(lock_file)
+
+
+def _asset_build_is_fresh(
+    source_dir: Path,
+    build_dir: Path,
+    *,
+    source_inputs: tuple[str, ...] | None,
+) -> bool:
+    with _lambda_asset_lock(build_dir, exclusive=False):
+        return _asset_build_is_fresh_unlocked(
+            source_dir,
+            build_dir,
+            source_inputs=source_inputs,
+        )
+
+
+def _remove_asset_tree(path: Path) -> None:
+    if path.exists() or path.is_symlink():
+        _safe_rmtree(path)
+
+
+def _recover_interrupted_asset_publish(build_dir: Path) -> None:
+    """Restore a prior final tree and discard abandoned staging directories."""
+    staging_dirs = list(build_dir.parent.glob(f".{build_dir.name}.staging-*"))
+    backup_dirs = list(build_dir.parent.glob(f".{build_dir.name}.backup-*"))
+
+    if not build_dir.exists() and backup_dirs:
+        try:
+            newest_backup = max(backup_dirs, key=lambda path: path.stat().st_mtime_ns)
+        except OSError:
+            newest_backup = backup_dirs[0]
+        os.replace(newest_backup, build_dir)
+
+    for path in [*staging_dirs, *backup_dirs]:
+        _remove_asset_tree(path)
+
+
+def _publish_staged_asset(staging_dir: Path, build_dir: Path) -> None:
+    """Publish one complete staged tree with rollback to the previous final."""
+    backup_dir = build_dir.with_name(f".{build_dir.name}.backup-{uuid.uuid4().hex}")
+    had_previous = build_dir.exists()
+    if had_previous:
+        os.replace(build_dir, backup_dir)
+    try:
+        os.replace(staging_dir, build_dir)
+    except Exception:
+        if had_previous and backup_dir.exists() and not build_dir.exists():
+            os.replace(backup_dir, build_dir)
+        raise
+    if backup_dir.exists():
+        _remove_asset_tree(backup_dir)
+
+
+def _prepare_lambda_asset(
+    source_dir: Path,
+    build_dir: Path,
+    *,
+    source_inputs: tuple[str, ...] | None,
+    display_name: str,
+    builder: Callable[[Path], None],
+) -> bool:
+    """Build and atomically publish an asset when its completion proof is stale."""
+    with _lambda_asset_lock(build_dir, exclusive=True):
+        _recover_interrupted_asset_publish(build_dir)
+        source_digest = _asset_tree_digest(source_dir, source_inputs=source_inputs)
+        if source_digest is None:
+            raise RuntimeError(f"{display_name} source inputs are incomplete or unreadable")
+        if _asset_build_is_fresh_unlocked(
+            source_dir,
+            build_dir,
+            source_inputs=source_inputs,
+        ):
+            return False
+
+        print(f"  Building {display_name}...")
+        staging_dir = Path(
+            tempfile.mkdtemp(prefix=f".{build_dir.name}.staging-", dir=build_dir.parent)
+        )
+        try:
+            builder(staging_dir)
+            if _asset_tree_digest(source_dir, source_inputs=source_inputs) != source_digest:
+                raise RuntimeError(f"{display_name} sources changed while packaging")
+            _write_build_manifest(staging_dir, source_digest)
+            if not _asset_build_is_fresh_unlocked(
+                source_dir,
+                staging_dir,
+                source_inputs=source_inputs,
+            ):
+                raise RuntimeError(f"{display_name} completion manifest verification failed")
+            _publish_staged_asset(staging_dir, build_dir)
+        finally:
+            _remove_asset_tree(staging_dir)
+        print(f"  {display_name} built successfully")
+        return True
+
+
+def _atomic_copy_file(source: Path, target: Path) -> None:
+    """Replace one checked-in Lambda source copy without exposing partial bytes."""
+    temporary = target.with_name(f".{target.name}.tmp-{uuid.uuid4().hex}")
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@lru_cache(maxsize=1)
+def _known_cloudformation_regions() -> frozenset[str]:
+    """Return every AWS SDK-known Region that exposes CloudFormation."""
+    return known_cloudformation_regions()
 
 
 class CdkToolchainError(RuntimeError):
@@ -123,9 +525,14 @@ def _safe_rmtree(path: Path) -> None:
     """
     resolved = path.resolve()
 
-    # Safety: refuse to remove anything that isn't clearly a build artifact
-    # inside the project.  The path must contain "lambda" and end with "-build".
-    if "lambda" not in resolved.parts or not resolved.name.endswith("-build"):
+    # Safety: refuse to remove anything that isn't clearly a final, staging,
+    # or rollback Lambda build artifact inside the project tree.
+    artifact_name = resolved.name
+    is_final = artifact_name.endswith("-build")
+    is_ephemeral = artifact_name.startswith(".") and (
+        ".staging-" in artifact_name or ".backup-" in artifact_name
+    )
+    if "lambda" not in resolved.parts or not (is_final or is_ephemeral):
         raise ValueError(f"Refusing to remove unexpected path: {resolved}")
 
     try:
@@ -167,16 +574,96 @@ def _detect_container_runtime() -> str | None:
     return _container_runtime_cache
 
 
+def prepare_cdk_assets(project_root: str | Path) -> None:
+    """Prepare every ignored Lambda asset consumed by the CDK application.
+
+    This is the shared entry point for build-only callers. CDK consumers must
+    use :func:`cdk_asset_consumer` so the resulting paths remain immutable
+    until app construction and synthesis finish.
+    """
+    manager = StackManager.__new__(StackManager)
+    manager.project_root = Path(project_root)
+    manager._ensure_lambda_build()
+
+
+def _thread_asset_consumers() -> dict[str, int]:
+    return _asset_thread_state.active_consumers
+
+
+@contextmanager
+def cdk_asset_consumer(project_root: str | Path) -> Iterator[None]:
+    """Hold source-current generated assets stable through CDK synthesis.
+
+    Preparation runs before any shared locks are acquired. The complete set of
+    canonical paths is then locked in deterministic order and every completion
+    manifest is revalidated while publishers are excluded. A stale observation
+    releases all locks and retries preparation; repeated source churn fails
+    closed instead of exposing CDK to a missing or mixed-version tree.
+    """
+    root = Path(project_root)
+    root_key = os.path.normcase(os.path.abspath(root))
+    active = _thread_asset_consumers()
+    if root_key in active:
+        active[root_key] += 1
+        try:
+            yield
+        finally:
+            active[root_key] -= 1
+        return
+
+    stale_assets: list[str] = []
+    for _attempt in range(_CDK_ASSET_CONSUMER_MAX_ATTEMPTS):
+        prepare_cdk_assets(root)
+        resolved_assets = []
+        for spec in _CDK_ASSET_SPECS:
+            source_dir, build_dir = spec.paths(root)
+            # Include a source-backed path even during the publisher's
+            # final-to-backup rename gap, when the canonical build is absent.
+            if source_dir.exists() or build_dir.exists():
+                resolved_assets.append((spec, source_dir, build_dir))
+
+        with ExitStack() as locks:
+            for _spec, _source_dir, build_dir in sorted(
+                resolved_assets,
+                key=lambda item: str(item[2]),
+            ):
+                locks.enter_context(_lambda_asset_lock(build_dir, exclusive=False))
+
+            stale_assets = [
+                spec.name
+                for spec, source_dir, build_dir in resolved_assets
+                if not _asset_build_is_fresh_unlocked(
+                    source_dir,
+                    build_dir,
+                    source_inputs=spec.source_inputs,
+                )
+            ]
+            if stale_assets:
+                continue
+
+            active[root_key] = 1
+            try:
+                yield
+            finally:
+                active.pop(root_key, None)
+            return
+
+    names = ", ".join(stale_assets) or "unknown assets"
+    raise RuntimeError(
+        "Generated CDK assets changed repeatedly while acquiring consumer locks: "
+        f"{names}. Stop concurrent source edits and retry."
+    )
+
+
 class StackManager:
     """Manages CDK stack operations."""
 
     def __init__(self, config: GCOConfig, project_root: Path | None = None):
         self.config = config
         self.project_root = project_root or self._find_project_root()
-        self._cdk_path = self._find_cdk()
-
-        # Ensure Lambda build directory exists before any CDK synth
-        self._ensure_lambda_build()
+        # Resolve CDK only when a CDK-backed operation runs. CloudFormation-only
+        # status/output commands must not require a local Node/CDK installation.
+        self._cdk_path: str | None = None
 
     def _find_project_root(self) -> Path:
         """Find the project root by looking for cdk.json."""
@@ -187,47 +674,76 @@ class StackManager:
         return current
 
     def _find_cdk(self) -> str:
-        """Find CDK executable."""
-        # Check if cdk is in PATH
+        """Find the dependency-locked CDK executable when available."""
+        # Prefer the repository's locked tool when ``npm ci`` has populated it.
+        local_cdk = self.project_root / "node_modules" / ".bin" / "cdk"
+        if local_cdk.is_file():
+            return str(local_cdk)
+
+        # Fall back to PATH for installed distributions that do not include
+        # the repository's root npm graph.
         try:
             result = subprocess.run(["which", "cdk"], capture_output=True, text=True, check=True)
             return result.stdout.strip()
         except subprocess.CalledProcessError:
             pass
 
-        # Check common locations
+        # Check common global-install locations.
         for path in ["/usr/local/bin/cdk", "~/.npm-global/bin/cdk"]:
             expanded = os.path.expanduser(path)
             if os.path.exists(expanded):
                 return expanded
 
-        # Fall back to npx
-        return "npx cdk"
+        raise CdkToolchainError(
+            "AWS CDK CLI is not installed. Run "
+            "'npm ci --ignore-scripts --no-audit --no-fund' at the project root "
+            "to install the dependency-locked CLI."
+        )
+
+    @staticmethod
+    def _kubectl_build_is_fresh(source_dir: Path, build_dir: Path) -> bool:
+        """Return whether the kubectl build has a valid full-tree completion proof."""
+        return _asset_build_is_fresh(
+            source_dir,
+            build_dir,
+            source_inputs=_KUBECTL_CDK_ASSET.source_inputs,
+        )
+
+    @staticmethod
+    def _helm_build_is_fresh(source_dir: Path, build_dir: Path) -> bool:
+        """Return whether the Helm build has a valid full-tree completion proof."""
+        return _asset_build_is_fresh(
+            source_dir,
+            build_dir,
+            source_inputs=_HELM_CDK_ASSET.source_inputs,
+        )
+
+    @staticmethod
+    def _inference_streaming_build_is_fresh(source_dir: Path, build_dir: Path) -> bool:
+        """Return whether the Node build has a valid full-tree completion proof."""
+        return _asset_build_is_fresh(
+            source_dir,
+            build_dir,
+            source_inputs=_INFERENCE_STREAMING_CDK_ASSET.source_inputs,
+        )
 
     def _ensure_lambda_build(self) -> None:
-        """Ensure the Lambda build directories exist for CDK synthesis.
+        """Atomically prepare every generated Lambda asset when source-stale.
 
-        Called from __init__ so the directory is ready before any CDK synth
-        (even ``cdk list`` needs it because ``app.py`` references the asset).
-
-        This does a lightweight check — only builds if the directory is
-        missing or incomplete. It does NOT do a full rebuild (no rmtree).
-        The full rebuild happens in ``_rebuild_lambda_packages()``, which
-        is called by ``deploy()`` before the actual CDK deploy.
+        Every builder takes its per-asset interprocess lock, repairs an
+        interrupted publish, and rechecks freshness before doing installation
+        work. Concurrent app evaluations therefore either reuse one complete
+        final tree or publish another complete tree; they never share a
+        directory while pip/npm/copy operations are mutating it.
         """
-        kubectl_source = self.project_root / "lambda" / "kubectl-applier-simple"
-        kubectl_build = self.project_root / "lambda" / "kubectl-applier-simple-build"
-        helm_source = self.project_root / "lambda" / "helm-installer"
-        helm_build = self.project_root / "lambda" / "helm-installer-build"
-
-        # Only build if the directory is missing or deps aren't installed
-        if kubectl_source.exists() and (
-            not kubectl_build.exists() or not (kubectl_build / "yaml").exists()
+        for spec, builder in (
+            (_KUBECTL_CDK_ASSET, self._build_kubectl_lambda),
+            (_HELM_CDK_ASSET, self._build_helm_installer_lambda),
+            (_INFERENCE_STREAMING_CDK_ASSET, self._build_inference_streaming_proxy_lambda),
         ):
-            self._build_kubectl_lambda()
-
-        if helm_source.exists() and not helm_build.exists():
-            self._build_helm_installer_lambda()
+            source_dir, _build_dir = spec.paths(self.project_root)
+            if source_dir.exists():
+                builder()
 
     def _check_and_fix_stuck_stack(self, stack_name: str) -> None:
         """Check if a stack is in a stuck state and auto-recover.
@@ -339,23 +855,16 @@ class StackManager:
             # Best effort — don't fail the deploy further
 
     def _sync_lambda_sources(self) -> None:
-        """
-        Sync latest handler code and manifests into the build directory.
+        """Atomically synchronize canonical shared files before asset ensures.
 
-        Called at the start of ``deploy()`` to ensure CDK picks up the
-        latest source changes. Only copies files — does NOT rebuild pip
-        deps or rmtree. Runs once per StackManager instance.
+        Checked-in copies keep raw CDK evaluation deterministic. Deploy updates
+        those copies before generated assets are checked, and never mutates a
+        generated final build tree in place.
         """
         if getattr(self, "_lambda_sources_synced", False):
             return
-        self._lambda_sources_synced = True
 
         lambda_dir = self.project_root / "lambda"
-
-        # Keep shared proxy and TLS transport sources synchronized with every
-        # deployable Lambda asset. Checked-in copies make direct ``cdk synth``
-        # deterministic; this deploy-time sync prevents stale copies after a
-        # canonical source edit.
         shared_source_targets = {
             lambda_dir / "proxy-shared" / "proxy_utils.py": [
                 lambda_dir / "api-gateway-proxy" / "proxy_utils.py",
@@ -372,136 +881,172 @@ class StackManager:
                 continue
             for target in targets:
                 if target.parent.exists():
-                    shutil.copy2(shared_source, target)
-
-        source_dir = lambda_dir / "kubectl-applier-simple"
-        build_dir = lambda_dir / "kubectl-applier-simple-build"
-
-        if not source_dir.exists() or not build_dir.exists():
-            return
-
-        # Sync handler.py
-        source_handler = source_dir / "handler.py"
-        build_handler = build_dir / "handler.py"
-        if source_handler.exists():
-            shutil.copy2(source_handler, build_handler)
-
-        # Sync manifests directory
-        source_manifests = source_dir / "manifests"
-        build_manifests = build_dir / "manifests"
-        if source_manifests.exists():
-            build_manifests.mkdir(parents=True, exist_ok=True)
-            for manifest_file in source_manifests.glob("*.yaml"):
-                shutil.copy2(manifest_file, build_manifests / manifest_file.name)
+                    _atomic_copy_file(shared_source, target)
+        self._lambda_sources_synced = True
 
     def _rebuild_lambda_packages(self) -> None:
-        """Full rebuild of Lambda packages for deploy.
-
-        Nukes the build directories and recreates them from scratch with
-        fresh pip deps, handler code, and manifests. Called once at the
-        start of a deploy to ensure CDK picks up all changes.
-
-        Runs once per StackManager instance.
-        """
+        """Compatibility wrapper for a source-current atomic asset ensure."""
         if getattr(self, "_lambda_packages_rebuilt", False):
             return
+        self._ensure_lambda_build()
         self._lambda_packages_rebuilt = True
-        self._build_lambda_packages()
 
     def _build_lambda_packages(self) -> None:
-        """Build Lambda packages for kubectl-applier and helm-installer.
-
-        Creates build directories with fresh copies of handler code, manifests,
-        charts config, and pip dependencies. This ensures CDK always picks up
-        the latest content regardless of Docker/asset caching.
-        """
+        """Source-check and atomically publish all generated Lambda packages."""
         self._build_kubectl_lambda()
         self._build_helm_installer_lambda()
+        self._build_inference_streaming_proxy_lambda()
 
     def _build_kubectl_lambda(self) -> None:
         """Build the kubectl-applier-simple Lambda package."""
-        source_dir = self.project_root / "lambda" / "kubectl-applier-simple"
-        build_dir = self.project_root / "lambda" / "kubectl-applier-simple-build"
+        source_dir, build_dir = _KUBECTL_CDK_ASSET.paths(self.project_root)
         requirements = source_dir / "requirements.txt"
-
-        if not source_dir.exists() or not requirements.exists():
+        if not source_dir.is_dir() or not requirements.is_file():
             return
 
-        print("  Building kubectl-applier-simple Lambda package...")
+        def build(staging_dir: Path) -> None:
+            shutil.copy2(source_dir / "handler.py", staging_dir / "handler.py")
+            shutil.copy2(requirements, staging_dir / "requirements.txt")
+            shutil.copytree(source_dir / "manifests", staging_dir / "manifests")
+            result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - static pip arguments and project-owned paths
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "-r",
+                    str(requirements),
+                    "-t",
+                    str(staging_dir),
+                    "--upgrade",
+                    "--platform",
+                    "manylinux2014_x86_64",
+                    "--only-binary=:all:",
+                    "--quiet",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "kubectl Lambda dependency installation failed: " + result.stderr[:200]
+                )
 
-        # Clean stale build directory to avoid broken symlinks from previous
-        # pip installs (botocore/data/ is a common source of dangling symlinks
-        # that cause CDK's asset fingerprinting to fail with ENOENT).
-        if build_dir.exists():
-            _safe_rmtree(build_dir)
-
-        # Create build directory
-        build_dir.mkdir(parents=True, exist_ok=True)
-
-        # Copy handler and manifests (always overwrite to prevent stale content)
-        shutil.copy2(source_dir / "handler.py", build_dir / "handler.py")
-        build_manifests = build_dir / "manifests"
-        if (source_dir / "manifests").exists():
-            if build_manifests.exists():
-                shutil.rmtree(build_manifests)
-            shutil.copytree(source_dir / "manifests", build_manifests, dirs_exist_ok=True)
-
-        # Install pip dependencies for Lambda runtime
-        import sys
-
-        result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - static list: sys.executable + pip args + Path objects, no user input
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "-r",
-                str(requirements),
-                "-t",
-                str(build_dir),
-                "--upgrade",
-                "--platform",
-                "manylinux2014_x86_64",
-                "--only-binary=:all:",
-                "--quiet",
-            ],
-            capture_output=True,
-            text=True,
+        _prepare_lambda_asset(
+            source_dir,
+            build_dir,
+            source_inputs=_KUBECTL_CDK_ASSET.source_inputs,
+            display_name="kubectl-applier-simple Lambda package",
+            builder=build,
         )
-        if result.returncode != 0:
-            print(f"  Warning: pip install failed: {result.stderr[:200]}")
-        else:
-            print("  Lambda package built successfully")
 
     def _build_helm_installer_lambda(self) -> None:
-        """Build the helm-installer Lambda Docker context.
-
-        Copies all source files into a clean build directory so CDK always
-        detects changes to charts.yaml, handler.py, Dockerfile, etc.
-        """
-        source_dir = self.project_root / "lambda" / "helm-installer"
-        build_dir = self.project_root / "lambda" / "helm-installer-build"
-
-        if not source_dir.exists():
+        """Build the complete helm-installer Lambda Docker context."""
+        source_dir, build_dir = _HELM_CDK_ASSET.paths(self.project_root)
+        if not source_dir.is_dir():
             return
 
-        print("  Building helm-installer Lambda package...")
+        def build(staging_dir: Path) -> None:
+            shutil.copytree(
+                source_dir,
+                staging_dir,
+                ignore=shutil.ignore_patterns(*_LAMBDA_SOURCE_COPY_IGNORE_PATTERNS),
+                dirs_exist_ok=True,
+            )
 
-        # Clean and recreate build directory
-        if build_dir.exists():
-            _safe_rmtree(build_dir)
-        build_dir.mkdir(parents=True, exist_ok=True)
+        _prepare_lambda_asset(
+            source_dir,
+            build_dir,
+            source_inputs=_HELM_CDK_ASSET.source_inputs,
+            display_name="helm-installer Lambda package",
+            builder=build,
+        )
 
-        # Copy all source files into the build directory
-        for item in source_dir.iterdir():
-            if item.name == "__pycache__":
-                continue
-            if item.is_file():
-                shutil.copy2(item, build_dir / item.name)
-            elif item.is_dir():
-                shutil.copytree(item, build_dir / item.name, dirs_exist_ok=True)
+    def _build_inference_streaming_proxy_lambda(self) -> None:
+        """Build the Node.js streaming Lambda with its pinned AWS SDK clients."""
+        source_dir, build_dir = _INFERENCE_STREAMING_CDK_ASSET.paths(self.project_root)
+        if not source_dir.is_dir():
+            return
 
-        print("  Helm installer package built successfully")
+        package_files = _INFERENCE_STREAMING_CDK_ASSET.source_inputs
+        assert package_files is not None
+        missing = [name for name in package_files if not (source_dir / name).is_file()]
+        if missing:
+            raise RuntimeError(
+                "Inference streaming Lambda package is incomplete; missing: " + ", ".join(missing)
+            )
+        try:
+            package_manager = str(
+                json.loads((source_dir / "package.json").read_text(encoding="utf-8")).get(
+                    "packageManager", ""
+                )
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Unable to read the inference streaming Lambda npm pin") from exc
+        required_npm = package_manager.removeprefix("npm@")
+        version_parts = required_npm.split(".")
+        if (
+            not package_manager.startswith("npm@")
+            or len(version_parts) != 3
+            or any(not part.isdigit() for part in version_parts)
+        ):
+            raise RuntimeError(
+                "Inference streaming Lambda packageManager must pin an exact npm version"
+            )
+
+        def build(staging_dir: Path) -> None:
+            npm = shutil.which("npm")
+            if npm is None:
+                raise RuntimeError(
+                    f"npm {required_npm} is required to package the inference streaming Lambda; "
+                    "install the Node.js version pinned in .nvmrc"
+                )
+            try:
+                version_result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - resolved executable and project-owned cwd
+                    [npm, "--version"],
+                    cwd=source_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RuntimeError("Unable to verify the npm packaging version") from exc
+            actual_npm = version_result.stdout.strip()
+            if version_result.returncode != 0 or actual_npm != required_npm:
+                found = actual_npm or "unavailable"
+                raise RuntimeError(
+                    f"npm {required_npm} is required to package the inference streaming Lambda; "
+                    f"found {found}. Run: npm install --global npm@{required_npm}"
+                )
+
+            for name in package_files:
+                shutil.copy2(source_dir / name, staging_dir / name)
+            result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - resolved npm path, static arguments, and project-owned cwd
+                [
+                    npm,
+                    "ci",
+                    "--omit=dev",
+                    "--ignore-scripts",
+                    "--no-audit",
+                    "--no-fund",
+                ],
+                cwd=staging_dir,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "Failed to install pinned inference streaming Lambda dependencies: "
+                    + result.stderr[:500]
+                )
+
+        _prepare_lambda_asset(
+            source_dir,
+            build_dir,
+            source_inputs=package_files,
+            display_name="inference-streaming-proxy Lambda package",
+            builder=build,
+        )
 
     def _get_python_path(self) -> str:
         """
@@ -589,6 +1134,12 @@ class StackManager:
         # a cryptic ImportError.
         self._ensure_cdk_toolchain()
 
+        # These commands all evaluate app.py, including list and destroy. The
+        # stack graph references ignored generated Lambda assets, so prepare
+        # them centrally rather than relying on individual command wrappers.
+        if command and command[0] in {"deploy", "destroy", "diff", "list", "synth"}:
+            self._ensure_lambda_build()
+
         full_env = os.environ.copy()
 
         # Inject PYTHONPATH so CDK's python3 subprocess can find aws_cdk
@@ -598,7 +1149,11 @@ class StackManager:
         if env:
             full_env.update(env)
 
-        cdk_cmd = self._cdk_path.split() + command
+        cdk_path = self._cdk_path
+        if cdk_path is None:
+            cdk_path = self._find_cdk()
+            self._cdk_path = cdk_path
+        cdk_cmd = [cdk_path, *command]
 
         try:
             if capture_output:
@@ -636,7 +1191,8 @@ class StackManager:
         return [s.strip() for s in result.stdout.strip().split("\n") if s.strip()]
 
     def synth(self, stack_name: str | None = None, quiet: bool = True) -> str:
-        """Synthesize CloudFormation templates."""
+        """Synthesize CloudFormation templates from source-current assets."""
+        self._ensure_lambda_build()
         cmd = ["synth"]
         if stack_name:
             cmd.append(stack_name)
@@ -649,7 +1205,8 @@ class StackManager:
         return str(result.stdout)
 
     def diff(self, stack_name: str | None = None) -> str:
-        """Show diff between deployed and local stacks."""
+        """Show diff between deployed and source-current local stacks."""
+        self._ensure_lambda_build()
         cmd = ["diff", "--no-color"]
         if stack_name:
             cmd.append(stack_name)
@@ -689,10 +1246,12 @@ class StackManager:
                 to re-run each time, adding minutes per phase for no
                 actual change.
         """
-        # Full rebuild of Lambda packages on first deploy call (once per session),
-        # then sync latest source on subsequent calls
-        self._rebuild_lambda_packages()
+        # Synchronize canonical checked-in copies first, then source-check and
+        # atomically publish only stale generated assets. A deploy must never
+        # destructively rebuild a fresh tree while another CDK process may be
+        # fingerprinting it.
         self._sync_lambda_sources()
+        self._ensure_lambda_build()
 
         # Check for stuck stacks and auto-recover
         if stack_name:
@@ -915,6 +1474,21 @@ class StackManager:
             and not self._image_registry_destroy_preflight(force=force)
         ):
             return False
+
+        # A regional API bridge disappears from the CDK app when its Region is
+        # removed from configuration. Only this exact project-scoped shape with
+        # an SDK-known CloudFormation Region may bypass CDK; configured bridges,
+        # arbitrary suffixes, and every other stack keep the normal CDK path.
+        if stack_name and not all_stacks:
+            orphan_region = self._get_orphan_regional_api_region(stack_name)
+            if orphan_region is not None:
+                if not self._stack_exists_in_cloudformation(stack_name):
+                    return True
+                print(
+                    f"  {stack_name} is absent from the configured CDK app; "
+                    f"deleting it directly in {orphan_region}..."
+                )
+                return self._cloudformation_delete_stack(stack_name)
 
         # If destroying a specific stack that exists in CloudFormation but
         # might not be in the CDK app, temporarily enable its toggle.
@@ -1281,13 +1855,132 @@ class StackManager:
         except Exception:
             return False
 
+    def _validated_regional_api_region(self, stack_name: str) -> str | None:
+        """Return an exact project bridge's SDK-known CloudFormation Region."""
+        bridge_prefix = f"{self.config.project_name}-regional-api-"
+        if not stack_name.startswith(bridge_prefix):
+            return None
+
+        region = stack_name[len(bridge_prefix) :]
+        if not region:
+            return None
+        try:
+            return region if region in _known_cloudformation_regions() else None
+        except Exception:
+            logger.debug(
+                "Could not validate regional API bridge Region for %s",
+                stack_name,
+                exc_info=True,
+            )
+            return None
+
+    def _configured_regional_api_regions(
+        self,
+    ) -> tuple[frozenset[str], str] | None:
+        """Read valid root regions and their partition for orphan deletion.
+
+        Returning ``None`` means the configuration could not prove anything:
+        missing, unreadable, malformed, wrong-project, incomplete, empty, and
+        duplicate Region configurations all fail closed under the same contract
+        used by :class:`ConfigLoader`.
+        """
+        path = self.project_root / "cdk.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return None
+            context = data.get("context")
+            if not isinstance(context, dict):
+                return None
+            configured_project = context.get("project_name")
+            if (
+                not isinstance(configured_project, str)
+                or not configured_project
+                or configured_project != self.config.project_name
+            ):
+                return None
+            deployment_regions = context.get("deployment_regions")
+            if not isinstance(deployment_regions, dict):
+                return None
+
+            known_regions = _known_cloudformation_regions()
+            for key in ("global", "api_gateway", "monitoring"):
+                region = deployment_regions.get(key)
+                if not isinstance(region, str) or region not in known_regions:
+                    return None
+
+            try:
+                regional = validated_regional_deployment_regions(
+                    deployment_regions.get("regional"),
+                    known_regions=known_regions,
+                )
+                deployment_partition = validated_deployment_partition(
+                    (
+                        deployment_regions["global"],
+                        deployment_regions["api_gateway"],
+                        deployment_regions["monitoring"],
+                        *regional,
+                    )
+                )
+            except RuntimeError, ValueError:
+                return None
+            return frozenset(regional), deployment_partition
+        except OSError, UnicodeError, json.JSONDecodeError, TypeError:
+            logger.debug(
+                "Could not read authoritative regional configuration from %s",
+                path,
+                exc_info=True,
+            )
+            return None
+
+    def _get_orphan_regional_api_region(self, stack_name: str) -> str | None:
+        """Return a bridge Region only when valid root config proves it absent.
+
+        This result authorizes bypassing CDK and deleting a stack directly via
+        CloudFormation. Merely failing a normal configuration lookup can never
+        be interpreted as proof that the stack is orphaned.
+        """
+        region = self._validated_regional_api_region(stack_name)
+        if region is None:
+            return None
+        configured = self._configured_regional_api_regions()
+        if configured is None:
+            return None
+        configured_regions, deployment_partition = configured
+        if region in configured_regions:
+            return None
+        try:
+            candidate_partition = validated_deployment_partition((region,))
+        except RuntimeError, ValueError:
+            return None
+        if candidate_partition != deployment_partition:
+            return None
+        return region
+
     def _get_destroy_region(self, stack_name: str) -> str:
-        """Determine the region for a stack based on its name."""
+        """Determine a configured or cryptographically bounded destroy Region.
+
+        Deploy resolution intentionally requires bridge Regions to remain in
+        ``cdk.json``. A removed bridge may still resolve through the orphan
+        path, but that path validates the exact project-scoped name, SDK-known
+        CloudFormation Region, authoritative root configuration, and matching
+        AWS partition. Reconciliation must reuse that same proof rather than
+        trusting a bridge-shaped suffix independently.
+        """
         try:
             region = self._get_deploy_region(stack_name)
-            return region or self.config.api_gateway_region
         except Exception:
-            return self.config.api_gateway_region
+            logger.debug(
+                "Configured deploy Region lookup failed for %s; checking orphan shape",
+                stack_name,
+                exc_info=True,
+            )
+        else:
+            if region:
+                return region
+
+        orphan_region = self._get_orphan_regional_api_region(stack_name)
+        return orphan_region or self.config.api_gateway_region
 
     def _ensure_analytics_enabled_for_destroy(self) -> bool:
         """Temporarily enable analytics so CDK includes the stack for destroy."""
@@ -1576,7 +2269,18 @@ class StackManager:
             region = cdk_regions.get("api_gateway") or self.config.api_gateway_region
             return region
 
-        # Regional stacks: {project}-{region}. The region is whatever
+        # Regional API bridges use ``<project>-regional-api-<region>``. Resolve
+        # this exact shape before generic regional stacks; otherwise the generic
+        # project-prefix branch returns the malformed ``regional-api-<region>``.
+        # Requiring a configured deployment region also prevents bridge-shaped
+        # typos from being treated as valid AWS regions.
+        bridge_prefix = f"{self.config.project_name}-regional-api-"
+        if stack_name.startswith(bridge_prefix):
+            region = stack_name[len(bridge_prefix) :]
+            configured_regions = {str(item) for item in (cdk_regions.get("regional") or [])}
+            return region if region in configured_regions else None
+
+        # Base regional stacks: {project}-{region}. The region is whatever
         # follows the project prefix (regions contain hyphens, so we strip
         # the known prefix rather than guess a split point).
         prefix = f"{self.config.project_name}-"
@@ -1610,6 +2314,14 @@ class StackManager:
 
             regional = _load_cdk_json().get("regional") or []
             return list(dict.fromkeys(str(r) for r in regional))
+
+        # Bridge stacks contain no regional Helm consumers and must not trigger
+        # image mirroring. Match the exact project-scoped prefix so a project
+        # name containing ``regional-api`` remains unambiguous.
+        bridge_prefix = f"{self.config.project_name}-regional-api-"
+        if stack_name and stack_name.startswith(bridge_prefix):
+            return []
+
         if stack_name and stack_name.startswith(prefix) and stack_name not in named:
             region = self._get_deploy_region(stack_name)
             return [region] if region else []
@@ -1704,8 +2416,9 @@ class StackManager:
         """
         Deploy all stacks in the correct order.
 
-        Deploys global stacks first, then regional stacks (optionally in parallel),
-        then the monitoring stack (which depends on regional stacks).
+        Deploys global stacks first, then base regional stacks, regional API
+        bridges, and finally monitoring. Parallelism never crosses a dependency
+        level.
 
         Args:
             require_approval: Whether to require approval for changes
@@ -1722,17 +2435,35 @@ class StackManager:
             Tuple of (overall_success, successful_stacks, failed_stacks)
         """
         stacks = self.list_stacks()
-        ordered_stacks = get_stack_deployment_order(stacks)
+        stack_names = set(stacks)
+        project_name = self.config.project_name
+        ordered_stacks = get_stack_deployment_order(stacks, project_name=project_name)
 
-        # Separate stacks into three groups by suffix so ordering is
-        # independent of project_name (#139) — a non-``gco`` deployment
-        # (``acme-global`` …) orders identically:
+        # Separate stacks into four dependency levels by suffix/marker so
+        # ordering is independent of project_name (#139):
         # 1. Pre-regional global stacks (<project>-global, <project>-api-gateway)
-        # 2. Regional stacks (<project>-<region>, can be parallelized)
-        # 3. Post-regional stacks (<project>-monitoring - depends on regional)
+        # 2. Base regional stacks (<project>-<region>, parallel-safe)
+        # 3. Regional API bridges (<project>-regional-api-<region>, depend on base)
+        # 4. Monitoring (depends on regional stacks)
         pre_regional_stacks = [s for s in ordered_stacks if s.endswith(("-global", "-api-gateway"))]
+        regional_api_stacks = [
+            s
+            for s in ordered_stacks
+            if _is_regional_api_bridge_stack(
+                s,
+                project_name=project_name,
+                stack_names=stack_names,
+            )
+        ]
         regional_stacks = [
-            s for s in ordered_stacks if not s.endswith(("-global", "-api-gateway", "-monitoring"))
+            s
+            for s in ordered_stacks
+            if not s.endswith(("-global", "-api-gateway", "-monitoring"))
+            and not _is_regional_api_bridge_stack(
+                s,
+                project_name=project_name,
+                stack_names=stack_names,
+            )
         ]
         post_regional_stacks = [s for s in ordered_stacks if s.endswith("-monitoring")]
 
@@ -1820,7 +2551,49 @@ class StackManager:
                     if not success:
                         return False, successful, failed
 
-        # Phase 3: Deploy post-regional stacks (monitoring) sequentially.
+        # Phase 3: Deploy regional API bridges only after every base regional
+        # stack is complete. Bridges within this level remain parallel-safe.
+        if regional_api_stacks:
+            if parallel and len(regional_api_stacks) > 1:
+                successful_api, failed_api = self._deploy_stacks_parallel(
+                    stacks=regional_api_stacks,
+                    require_approval=require_approval,
+                    outputs_file=outputs_file,
+                    parameters=parameters,
+                    tags=tags,
+                    progress=progress,
+                    on_stack_start=on_stack_start,
+                    on_stack_complete=on_stack_complete,
+                    max_workers=max_workers,
+                )
+                successful.extend(successful_api)
+                failed.extend(failed_api)
+                if failed_api:
+                    return False, successful, failed
+            else:
+                for stack_name in regional_api_stacks:
+                    if on_stack_start:
+                        on_stack_start(stack_name)
+
+                    success = self.deploy(
+                        stack_name=stack_name,
+                        require_approval=require_approval,
+                        outputs_file=outputs_file,
+                        parameters=parameters,
+                        tags=tags,
+                        progress=progress,
+                        exclusively=True,
+                    )
+                    if success:
+                        successful.append(stack_name)
+                    else:
+                        failed.append(stack_name)
+                    if on_stack_complete:
+                        on_stack_complete(stack_name, success)
+                    if not success:
+                        return False, successful, failed
+
+        # Phase 4: Deploy post-regional stacks (monitoring) sequentially.
         # Same rationale as Phase 2: every upstream stack is already
         # deployed, so --exclusively prevents a redundant pass over
         # global/api-gateway/regional.
@@ -1929,8 +2702,8 @@ class StackManager:
         """
         Destroy all stacks in the correct order.
 
-        Destroys monitoring stack first, then regional stacks (optionally in parallel),
-        then global stacks.
+        Destroys monitoring first, then regional API bridges, base regional
+        stacks, and global stacks. Parallelism never crosses a dependency level.
 
         Args:
             force: Skip confirmation prompts
@@ -1943,6 +2716,7 @@ class StackManager:
             Tuple of (overall_success, successful_stacks, failed_stacks)
         """
         stacks = self.list_stacks()
+        project_name = self.config.project_name
 
         # Image-registry pre-destroy guard — fires before ANY teardown so
         # operators don't end up with monitoring + regional + api-gateway
@@ -1964,21 +2738,15 @@ class StackManager:
         # can be deleted cleanly by CloudFormation.
         self._cleanup_backup_vault()
 
-        # Separate stacks into three groups (reverse of deploy order) by
-        # suffix so a non-``gco`` deployment orders correctly (#139).
-        post_regional_stacks = [s for s in stacks if s.endswith("-monitoring")]
-        regional_stacks = [
-            s for s in stacks if not s.endswith(("-global", "-api-gateway", "-monitoring"))
-        ]
-        pre_regional_stacks = [s for s in stacks if s.endswith(("-global", "-api-gateway"))]
-
-        # Sort regional stacks alphabetically (reversed for destroy)
-        regional_stacks.sort(reverse=True)
-        # Sort pre-regional stacks in reverse priority order: api-gateway
-        # (1) before global (2), independent of project_name.
-        pre_regional_stacks.sort(
-            key=lambda x: 1 if x.endswith("-api-gateway") else (2 if x.endswith("-global") else 0)
-        )
+        # Use the same project-aware phase classifier as the CLI preview.
+        # Keeping one source of truth prevents the confirmation list from
+        # promising an order that the real teardown does not follow.
+        (
+            post_regional_stacks,
+            regional_api_stacks,
+            regional_stacks,
+            pre_regional_stacks,
+        ) = _get_stack_destroy_phases(stacks, project_name=project_name)
 
         successful: list[str] = []
         failed: list[str] = []
@@ -2001,7 +2769,34 @@ class StackManager:
             if on_stack_complete:
                 on_stack_complete(stack_name, success)
 
-        # Phase 2: Destroy regional stacks (parallel or sequential)
+        # Phase 2: Destroy regional API bridges before their base stacks so
+        # CloudFormation imports from the regional VPC are released first.
+        if regional_api_stacks:
+            if parallel and len(regional_api_stacks) > 1:
+                successful_api, failed_api = self._destroy_stacks_parallel(
+                    stacks=regional_api_stacks,
+                    force=force,
+                    on_stack_start=on_stack_start,
+                    on_stack_complete=on_stack_complete,
+                    max_workers=max_workers,
+                )
+                successful.extend(successful_api)
+                failed.extend(failed_api)
+            else:
+                for stack_name in regional_api_stacks:
+                    if on_stack_start:
+                        on_stack_start(stack_name)
+                    success = self.destroy(stack_name=stack_name, force=force)
+                    if success:
+                        successful.append(stack_name)
+                    else:
+                        failed.append(stack_name)
+                    if on_stack_complete:
+                        on_stack_complete(stack_name, success)
+            if any(stack in failed for stack in regional_api_stacks):
+                return False, successful, failed
+
+        # Phase 3: Destroy base regional stacks (parallel or sequential)
         # Each regional destroy has a background watchdog that proactively
         # deletes EKS-managed security groups + orphaned ENIs as soon as
         # they appear. Without this, CloudFormation's VPC delete step sits
@@ -2056,7 +2851,7 @@ class StackManager:
             watchdog_threads[stack_name].join(timeout=5)
             self._cleanup_eks_security_groups(stack_name)
 
-        # Phase 3: Destroy pre-regional global stacks last
+        # Phase 4: Destroy pre-regional global stacks last
         for stack_name in pre_regional_stacks:
             if on_stack_start:
                 on_stack_start(stack_name)
@@ -2665,7 +3460,85 @@ def get_stack_manager(config: GCOConfig) -> StackManager:
     return StackManager(config)
 
 
-def get_stack_deployment_order(stacks: list[str]) -> list[str]:
+def _is_regional_api_bridge_stack(
+    stack: str,
+    *,
+    project_name: str,
+    stack_names: Collection[str],
+) -> bool:
+    """Return whether ``stack`` is a configured per-Region API bridge.
+
+    A bare ``"-regional-api-"`` substring is ambiguous because it is valid
+    inside ``project_name``. Match the exact project-scoped bridge prefix and
+    require the corresponding configured ``<project>-<region>`` base stack.
+    """
+    bridge_prefix = f"{project_name}-regional-api-"
+    if not stack.startswith(bridge_prefix):
+        return False
+    region = stack.removeprefix(bridge_prefix)
+    return bool(region) and f"{project_name}-{region}" in stack_names
+
+
+def _get_stack_destroy_phases(
+    stacks: list[str],
+    *,
+    project_name: str,
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Classify and order the exact phases used by orchestrated destroy.
+
+    Returns monitoring, regional API bridge, base regional, and pre-regional
+    global phases. The public preview helper and the execution path both flatten
+    this result, so custom project names and bridge dependencies cannot drift.
+    """
+    stack_names = set(stacks)
+    monitoring_stacks = sorted(
+        (stack for stack in stacks if stack.endswith("-monitoring")),
+        reverse=True,
+    )
+    regional_api_stacks = sorted(
+        (
+            stack
+            for stack in stacks
+            if _is_regional_api_bridge_stack(
+                stack,
+                project_name=project_name,
+                stack_names=stack_names,
+            )
+        ),
+        reverse=True,
+    )
+    regional_stacks = sorted(
+        (
+            stack
+            for stack in stacks
+            if not stack.endswith(("-global", "-api-gateway", "-monitoring"))
+            and not _is_regional_api_bridge_stack(
+                stack,
+                project_name=project_name,
+                stack_names=stack_names,
+            )
+        ),
+        reverse=True,
+    )
+    pre_regional_stacks = sorted(
+        (stack for stack in stacks if stack.endswith(("-global", "-api-gateway"))),
+        key=lambda stack: (
+            1 if stack.endswith("-api-gateway") else (2 if stack.endswith("-global") else 0)
+        ),
+    )
+    return (
+        monitoring_stacks,
+        regional_api_stacks,
+        regional_stacks,
+        pre_regional_stacks,
+    )
+
+
+def get_stack_deployment_order(
+    stacks: list[str],
+    *,
+    project_name: str = "gco",
+) -> list[str]:
     """
     Get the correct deployment order for stacks.
 
@@ -2679,8 +3552,10 @@ def get_stack_deployment_order(stacks: list[str]) -> list[str]:
     orders identically. Regional stacks are ``<project>-<region>`` and match
     no named suffix, so they fall through to the regional bucket.
     """
+    stack_names = set(stacks)
     global_stacks = []
     regional_stacks = []
+    regional_api_stacks = []
 
     # Named (non-regional) stack priority by suffix (lower = deploy first).
     suffix_priority = {
@@ -2700,24 +3575,32 @@ def get_stack_deployment_order(stacks: list[str]) -> list[str]:
         priority = _named_priority(stack)
         if priority is not None:
             global_stacks.append((priority, stack))
+        elif _is_regional_api_bridge_stack(
+            stack,
+            project_name=project_name,
+            stack_names=stack_names,
+        ):
+            regional_api_stacks.append(stack)
         else:
             regional_stacks.append(stack)
 
-    # Sort global stacks by priority, regional stacks alphabetically
+    # Keep bridge dependencies after every base regional stack. The
+    # orchestrated lifecycle further separates monitoring into its own phase.
     global_stacks.sort(key=lambda x: x[0])
     regional_stacks.sort()
+    regional_api_stacks.sort()
 
-    return [s[1] for s in global_stacks] + regional_stacks
+    return [s[1] for s in global_stacks] + regional_stacks + regional_api_stacks
 
 
-def get_stack_destroy_order(stacks: list[str]) -> list[str]:
-    """
-    Get the correct destroy order for stacks.
-
-    Order: regional stacks first, then global stacks (reverse of deploy).
-    """
-    deployment_order = get_stack_deployment_order(stacks)
-    return list(reversed(deployment_order))
+def get_stack_destroy_order(
+    stacks: list[str],
+    *,
+    project_name: str = "gco",
+) -> list[str]:
+    """Return the exact project-aware order used by orchestrated destroy."""
+    phases = _get_stack_destroy_phases(stacks, project_name=project_name)
+    return [stack for phase in phases for stack in phase]
 
 
 # =============================================================================

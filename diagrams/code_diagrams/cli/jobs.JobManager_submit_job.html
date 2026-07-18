@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>gco jobs submit — direct kubectl apply path</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,35 +206,35 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op822=>operation: "\n        Submit a job to GCO.\n\n        Args:\n            manifests: Path to manifest file/directory or list of manifest dicts\n            namespace: Fallback namespace for manifests that don't declare\n                their own. When set, each manifest's ``metadata.namespace`` is\n                filled in only if missing — existing values are preserved so\n                users who've declared a target namespace in the manifest can\n                rely on it reaching the server untouched. Server-side\n                validation enforces the allowlist.\n            target_region: Force job to specific region\n            dry_run: Validate without applying\n            labels: Additional labels to add to manifests\n\n        Returns:\n            Submission result dictionary\n        "
-op824=>operation: manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
-op826=>operation: effective_namespace = namespace or self.config.default_namespace
-cond829=>condition: for manifest in manifest_list
-cond834=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
-sub844=>subroutine: manifest['metadata'].setdefault('namespace', effective_namespace)
-cond849=>condition: if labels
-cond854=>condition: for manifest in manifest_list
-cond859=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
-cond870=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
-sub880=>subroutine: manifest['metadata']['labels'].update(labels)
-io890=>inputoutput: output: self._aws_client.submit_manifests(manifests=manifest_list, namespace=effective_namespace, target_region=target_region, dry_run=dry_run)
-e888=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op826=>operation: "\n        Submit a job to GCO.\n\n        Args:\n            manifests: Path to manifest file/directory or list of manifest dicts\n            namespace: Fallback namespace for manifests that don't declare\n                their own. When set, each manifest's ``metadata.namespace`` is\n                filled in only if missing — existing values are preserved so\n                users who've declared a target namespace in the manifest can\n                rely on it reaching the server untouched. Server-side\n                validation enforces the allowlist.\n            target_region: Force job to specific region\n            dry_run: Validate without applying\n            labels: Additional labels to add to manifests\n\n        Returns:\n            Submission result dictionary\n        "
+op828=>operation: manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
+op830=>operation: effective_namespace = namespace or self.config.default_namespace
+cond833=>condition: for manifest in manifest_list
+cond838=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
+sub848=>subroutine: manifest['metadata'].setdefault('namespace', effective_namespace)
+cond853=>condition: if labels
+cond858=>condition: for manifest in manifest_list
+cond863=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
+cond874=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
+sub884=>subroutine: manifest['metadata']['labels'].update(labels)
+io894=>inputoutput: output: self._aws_client.submit_manifests(manifests=manifest_list, namespace=effective_namespace, target_region=target_region, dry_run=dry_run)
+e892=>end: end function return
 
-op822->op824
-op824->op826
-op826->cond829
-cond829(yes)->cond834
-cond834->sub844
-sub844(left)->cond829
-cond829(no)->cond849
-cond849(yes)->cond854
-cond854(yes)->cond859
-cond859->cond870
-cond870->sub880
-sub880(left)->cond854
-cond854(no)->io890
-io890->e888
-cond849(no)->io890
+op826->op828
+op828->op830
+op830->cond833
+cond833(yes)->cond838
+cond838->sub848
+sub848(left)->cond833
+cond833(no)->cond853
+cond853(yes)->cond858
+cond858(yes)->cond863
+cond863->cond874
+cond874->sub884
+sub884(left)->cond858
+cond858(no)->io894
+io894->e892
+cond853(no)->io894
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -243,6 +244,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

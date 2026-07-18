@@ -4,7 +4,7 @@
 
 <p><b><i>One API. Every Accelerator. Any Region.</i></b></p>
 
-<p>Multi-region accelerated-compute orchestration for AWS — NVIDIA GPUs, AWS Trainium, AWS Inferentia, and CPU (amd64 + arm64 / Graviton) — with capacity-aware placement workflows, spot fallback, and multi-region autoscaling inference endpoints with automatic failover and latency-aware routing, all from a single REST API and CLI.</p>
+<p>Multi-region accelerated-compute orchestration for AWS — NVIDIA GPUs, AWS Trainium, AWS Inferentia, and CPU (amd64 + arm64 / Graviton) — with capacity-aware placement workflows, spot fallback, and autoscaling inference endpoints. Commercial <code>aws</code> deployments add automatic failover and latency-aware routing through one workload API; other partitions use IAM-authenticated regional workload APIs, all through the same CLI.</p>
 
 <!-- BEGIN BADGE TABLE -->
 <p>
@@ -45,11 +45,11 @@
 
 </div>
 
-**What it does.** Spins up [EKS Auto Mode](docs/CONCEPTS.md#eks-auto-mode) clusters across AWS regions, wired together with [Global Accelerator](docs/CONCEPTS.md#global-routing) for latency-aware anycast routing and automatic failover. Submit Kubernetes manifests through a REST API or CLI; capacity tools and auto-region queue/CLI workflows can select a target region, EKS Auto Mode provisions matching nodes, and shared storage can persist workload outputs. The global API routes by network health and proximity—it does not inspect live GPU inventory.
+**What it does.** Spins up [EKS Auto Mode](docs/CONCEPTS.md#eks-auto-mode) clusters across any number of SDK-known CloudFormation Regions in one AWS partition. In commercial `aws`, [Global Accelerator](docs/CONCEPTS.md#global-routing) provides latency-aware anycast routing and automatic failover behind the global workload API; other partitions use IAM-authenticated regional workload APIs while retaining the aggregate global API. Capacity tools and auto-region queue/CLI workflows can select a target Region, EKS Auto Mode provisions matching nodes, and shared storage can persist workload outputs. Network routing never substitutes for live GPU-capacity placement.
 
 **Who it's for.** Teams running accelerated workloads — LLM training and inference, batch ML, HPC, and general CPU jobs — that need multi-region redundancy, capacity discovery, and IAM-based access without per-cluster kubeconfig distribution. GCO includes the EKS Auto Mode `system` and `general-purpose` NodePools plus project-managed GPU x86, GPU ARM, inference, EFA, Mooncake EFA, Neuron, and CPU NodePools.
 
-**Why it's different.** Capacity-aware placement tools and auto-region workflows, health-based global failover, full-stack observability (CloudWatch dashboards, alarms, SNS), and a CDK app validated across 20+ config matrix combinations in CI.
+**Why it's different.** Capacity-aware placement tools and auto-region workflows, partition-aware authenticated routing, full-stack observability (CloudWatch dashboards, alarms, SNS), and a CDK app validated across 20+ config matrix combinations in CI.
 
 ---
 
@@ -144,11 +144,11 @@ Running GPU workloads at scale is hard. You need to find regions with available 
 |-----------|---------------------|--------------|
 | GPU availability | Manually check each region | Capacity tools and auto-region workflows compare configured regions |
 | Node provisioning | Pre-provision or wait for scaling | EKS Auto Mode provisions on-demand |
-| Multi-region ops | Manage clusters separately | Single API, automatic routing |
+| Multi-region ops | Manage clusters separately | One platform across unlimited SDK-known Regions in one partition |
 | Authentication | Configure per-cluster access | IAM-based, uses existing AWS credentials |
 | Job outputs | Lost when pods terminate | Persisted to EFS/FSx storage |
-| Inference serving | Deploy and manage per-region | Deploy once, serve globally |
-| Failover | Manual intervention required | Automatic via Global Accelerator |
+| Inference serving | Deploy and manage per-region | Deploy once across selected Regions |
+| Failover | Manual intervention required | Automatic via Global Accelerator in `aws`; explicit regional selection elsewhere |
 
 **When to use GCO:**
 
@@ -237,13 +237,15 @@ These curated views complement the generated CDK diagram with the multi-region p
 
 ### Multi-Region Reference Architecture workflow
 
+The generated reference architecture shows the commercial `aws` workload path. Other partitions retain the global aggregate API but route workload control and inference through each Region's IAM-authenticated bridge.
+
 1. **DevOps / Platform engineers** own the deployment. They configure the platform through `cdk.json` and drive everything from the `gco` CLI.
 2. The **AWS CDK app** synthesises and deploys the GCO stacks with a single `gco stacks deploy-all`, provisioning the global control plane and one regional stack per target region.
 3. **Users** submit jobs and inference requests through the `gco` CLI, which signs every call with **AWS SigV4** credentials.
-4. **Amazon API Gateway** (edge-optimized) is the global entry point. It enforces **IAM (SigV4) authentication** on every request before anything reaches the backend.
-5. Route-specific **AWS Lambda proxies** sign the exact backend request with a short-lived HMAC envelope derived from a rotating **AWS Secrets Manager** key. The reusable key is never transmitted; `/api/v1/*` stays buffered while the dedicated `/inference/*` Lambda streams responses.
-6. **AWS Global Accelerator** routes each request over the AWS backbone via anycast IPs to the nearest healthy region, providing automatic cross-region failover.
-7. A regional internal **AWS Application Load Balancer** terminates the deployment-local private-root TLS connection forwarded through Global Accelerator, then sends HTTP to the shared platform Ingress targets.
+4. In commercial `aws`, **Amazon API Gateway** is edge-optimized and is the global workload and aggregate entry point. In other partitions it is regional and aggregate-only. Every exposed method enforces **IAM (SigV4) authentication** before integration.
+5. In `aws`, route-specific **AWS Lambda proxies** sign workload requests with a short-lived HMAC envelope derived from a rotating **AWS Secrets Manager** key; `/api/v1/*` stays buffered while `/inference/*` streams. Other partitions omit these global workload proxies and use equivalent VPC proxies behind the regional APIs.
+6. In `aws`, **AWS Global Accelerator** routes workload requests over the AWS backbone to a healthy registered Region. Other partitions create no accelerator resources.
+7. A regional internal **AWS Application Load Balancer** terminates deployment-local private-root TLS from either Global Accelerator (`aws`) or the regional VPC proxy, then sends HTTP to shared platform Ingress targets.
 8. Each region runs an **Amazon EKS Auto Mode cluster** with built-in `system` and `general-purpose` NodePools plus project-managed GPU, inference, EFA, Mooncake EFA, Neuron, and CPU NodePools. Platform services include the Health Monitor, Manifest Processor, Queue Processor, Inference Monitor, and dedicated Inference Proxy.
 
 Below is the per-region workflow for a single regional stack.
@@ -255,7 +257,7 @@ Below is the per-region workflow for a single regional stack.
 3. **NodePools** provision capacity on demand: built-in `system` and `general-purpose`, plus `gpu-x86-pool`, `gpu-arm-pool`, `gpu-inference-pool`, `gpu-efa-pool`, `mooncake-efa-pool`, `neuron-pool`, and `cpu-general-pool`.
 4. **Workloads and platform services** run across namespaces: `gco-system` (Health Monitor, Manifest Processor, Queue Processor, Inference Monitor, Inference Proxy) and `gco-jobs` / `gco-inference` (training and batch jobs, inference endpoints, and job DAG pipelines).
 5. **Storage and data services** back workloads: Amazon EFS, optional FSx for Lustre, optional Valkey, optional Aurora pgvector, and Amazon S3 for KMS-encrypted model weights.
-6. An always-deployed **Regional API Gateway bridge** gives the aggregator a SigV4-authenticated path to the VPC Lambda and internal ALB; `regional_api_enabled` controls only optional direct same-account callers.
+6. An always-deployed **Regional API Gateway bridge** gives the aggregator a SigV4-authenticated path to the VPC Lambda and internal ALB. Direct same-account access is optional through `regional_api_enabled` in `aws` and enabled automatically as the required workload ingress elsewhere.
 7. **Regional AWS services** complete the stack: Amazon SQS for job ingestion, DynamoDB-backed state where applicable, and Amazon CloudWatch metrics and logs.
 
 <details>
@@ -267,7 +269,7 @@ Regenerate the full architecture and every per-stack view with `python diagrams/
 
 Flowcharts of Lambda handlers, CLI commands, stack constructors, and MCP control paths live under [`diagrams/code_diagrams/`](diagrams/code_diagrams/README.md).
 
-> The regional stack can be deployed to any AWS region. Add or remove regions by editing the `deployment_regions.regional` array in `cdk.json`.
+> A regional stack can be deployed to any CloudFormation Region known to the installed AWS SDK. Add or remove Regions in `deployment_regions.regional`; all configured Regions must belong to one AWS partition, and GCO imposes no count limit.
 
 ### Security Model
 
@@ -281,15 +283,20 @@ Six complementary controls protect backend requests:
 6. **IRSA / EKS Pod Identity** — pods receive scoped AWS permissions without static workload credentials.
 
 ```text
-Request flow: User → API Gateway (AWS TLS + SigV4) → Lambda (HMAC)
+Commercial `aws` request flow:
+User → API Gateway (AWS TLS + SigV4) → Lambda (HMAC)
   → Global Accelerator (TCP/443 pass-through) → internal ALB (private-root TLS)
   → AuthenticationMiddleware (HTTP after ALB termination)
+
+Other partitions:
+User → Regional API Gateway (AWS TLS + SigV4) → VPC Lambda (HMAC)
+  → internal ALB (private-root TLS) → AuthenticationMiddleware
 ```
 
-Every region's API bridge is required for aggregator fan-out. Optional [direct
-regional access](docs/CUSTOMIZATION.md#regional-api-gateway-aggregation-bridge-and-direct-regional-access)
-provides an IAM-authorized, region-pinned VPC-Lambda path to the same internal
-ALB.
+Every Region's API bridge is required for aggregator fan-out. [Direct regional
+access](docs/CUSTOMIZATION.md#regional-api-gateway-aggregation-bridge-and-direct-regional-access)
+is optional for same-account callers in `aws` and enabled automatically as the
+supported workload ingress in other partitions.
 
 See [Architecture Details](docs/ARCHITECTURE.md) for the full deep dive.
 
@@ -502,8 +509,8 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 **Host install path (advanced):**
 
 - AWS CLI configured with appropriate credentials
-- Python 3.14+ and Node.js LTS (v24)
-- AWS CDK CLI (`npm install -g aws-cdk`)
+- Python 3.14+ and Node.js 24 (use `.nvmrc`)
+- npm 11.18.0 and the repository's locked tooling graph: run `npm ci --ignore-scripts --no-audit --no-fund` at the repository root; `gco` prefers its local `node_modules/.bin/cdk` over a global CLI
 - Docker or Finch (for building container images)
 - A **clean** Python virtual environment or pipx — GCO pins exact versions of many packages, so installing it into an existing environment will commonly fail with dependency-resolver errors. If you hit `ResolutionImpossible`, switch to the dev container instead of debugging your local env.
 
@@ -624,6 +631,8 @@ GCO implements defense-in-depth across five layers (see [Security Model](#securi
 
 - Container images scanned with Trivy on every push (CVE detection)
 - Python dependencies audited with pip-audit (GHSA/CVE detection)
+- Both repository-owned npm graphs are exact-pinned with committed lockfiles, audited on every PR, and updated by Dependabot
+- Production JavaScript is scanned by CodeQL and Semgrep; the inference-streaming Lambda has a separate Node.js 24 test workflow with 93% line/function/branch gates
 - Dependency versions pinned with exact hashes in `requirements-lock.txt`
 - Dependabot and CodeQL enabled for automated vulnerability alerts
 - SBOM generation via Trivy for all container images

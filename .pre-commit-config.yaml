@@ -32,6 +32,6 @@ repos:
     hooks:
       # Configuration (rule set, globs, ignores) lives in
       # .github/config/.markdownlint-cli2.yaml. See CONTRIBUTING.md for
-      # how to run the same check locally via `npx markdownlint-cli2`.
+      # how to install the locked root graph and run `npm run lint:markdown`.
       - id: markdownlint-cli2
         args: ["--config", ".github/config/.markdownlint-cli2.yaml"]

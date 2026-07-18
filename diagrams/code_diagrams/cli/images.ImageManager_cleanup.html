@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>gco images cleanup — bulk tag delete with filter branches</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,20 +206,20 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3859=>operation: 'Delete every untagged image across one or all project repos.'
-cond3862=>operation: raise ValueError('cleanup() requires either a name or all=True') if  not name and (not all)
-op3872=>operation: repos: list[str]
-cond3875=>condition: if name
-op3879=>operation: validated = self._validate_name(name)
-op3881=>operation: repos = [f'{self._repo_prefix}/{validated}']
-op3888=>operation: ecr = self._ecr_client()
-op3890=>operation: repos_touched = 0
-op3892=>operation: tags_deleted = 0
-op3894=>operation: bytes_freed = 0
-cond3897=>condition: for repo_name in repos
-op3901=>operation: untagged_ids: list[dict[str, str]] = []
-op3903=>operation: untagged_size = 0
-op3906=>operation: paginator = ecr.get_paginator('describe_images')
+        <div><textarea id="code" style="width: 100%;" rows="11">op4168=>operation: 'Delete every untagged image across one or all project repos.'
+cond4171=>operation: raise ValueError('cleanup() requires either a name or all=True') if  not name and (not all)
+op4181=>operation: repos: list[str]
+cond4184=>condition: if name
+op4188=>operation: validated = self._validate_name(name)
+op4190=>operation: repos = [f'{self._repo_prefix}/{validated}']
+op4197=>operation: ecr = self._ecr_client()
+op4199=>operation: repos_touched = 0
+op4201=>operation: tags_deleted = 0
+op4203=>operation: bytes_freed = 0
+cond4206=>condition: for repo_name in repos
+op4210=>operation: untagged_ids: list[dict[str, str]] = []
+op4212=>operation: untagged_size = 0
+op4215=>operation: paginator = ecr.get_paginator('describe_images')
 for page in paginator.paginate(repositoryName=repo_name, filter={'tagStatus': 'UNTAGGED'}):
     for detail in page.get('imageDetails', []):
         digest = detail.get('imageDigest')
@@ -228,52 +229,52 @@ for page in paginator.paginate(repositoryName=repo_name, filter={'tagStatus': 'U
         size = detail.get('imageSizeInBytes') or 0
         if isinstance(size, int):
             untagged_size += size
-cond3905=>condition: exception raised?
-cond3908=>condition: except ClientError as e
-sub3912=>subroutine: logger.debug('describe_images for cleanup of %s failed: %s', repo_name, e)
-sub3914=>subroutine: continue
-cond3920=>operation: continue if  not untagged_ids
-op3930=>operation: repos_touched += 1
-cond3933=>condition: for chunk_start in range(0, len(untagged_ids), 100)
-op3937=>operation: chunk = untagged_ids[chunk_start:chunk_start + 100]
-op3939=>operation: resp = ecr.batch_delete_image(repositoryName=repo_name, imageIds=chunk)
-op3941=>operation: tags_deleted += len(resp.get('imageIds', []))
-op3945=>operation: bytes_freed += untagged_size
-io3952=>inputoutput: output: {'repos_touched': repos_touched, 'tags_deleted': tags_deleted, 'bytes_freed': bytes_freed}
-e3950=>end: end function return
-op3885=>operation: repos = [r['name'] for r in self.list_repos()]
+cond4214=>condition: exception raised?
+cond4217=>condition: except ClientError as e
+sub4221=>subroutine: logger.debug('describe_images for cleanup of %s failed: %s', repo_name, e)
+sub4223=>subroutine: continue
+cond4229=>operation: continue if  not untagged_ids
+op4239=>operation: repos_touched += 1
+cond4242=>condition: for chunk_start in range(0, len(untagged_ids), 100)
+op4246=>operation: chunk = untagged_ids[chunk_start:chunk_start + 100]
+op4248=>operation: resp = ecr.batch_delete_image(repositoryName=repo_name, imageIds=chunk)
+op4250=>operation: tags_deleted += len(resp.get('imageIds', []))
+op4254=>operation: bytes_freed += untagged_size
+io4261=>inputoutput: output: {'repos_touched': repos_touched, 'tags_deleted': tags_deleted, 'bytes_freed': bytes_freed}
+e4259=>end: end function return
+op4194=>operation: repos = [r['name'] for r in self.list_repos()]
 
-op3859->cond3862
-cond3862->op3872
-op3872->cond3875
-cond3875(yes)->op3879
-op3879->op3881
-op3881->op3888
-op3888->op3890
-op3890->op3892
-op3892->op3894
-op3894->cond3897
-cond3897(yes)->op3901
-op3901->op3903
-op3903->op3906
-op3906->cond3905
-cond3905(yes)->cond3908
-cond3908(yes)->sub3912
-sub3912->sub3914
-cond3908(no)->cond3920
-cond3920->op3930
-op3930->cond3933
-cond3933(yes)->op3937
-op3937->op3939
-op3939->op3941
-op3941(left)->cond3933
-cond3933(no)->op3945
-op3945(left)->cond3897
-cond3905(no)->cond3920
-cond3897(no)->io3952
-io3952->e3950
-cond3875(no)->op3885
-op3885->op3888
+op4168->cond4171
+cond4171->op4181
+op4181->cond4184
+cond4184(yes)->op4188
+op4188->op4190
+op4190->op4197
+op4197->op4199
+op4199->op4201
+op4201->op4203
+op4203->cond4206
+cond4206(yes)->op4210
+op4210->op4212
+op4212->op4215
+op4215->cond4214
+cond4214(yes)->cond4217
+cond4217(yes)->sub4221
+sub4221->sub4223
+cond4217(no)->cond4229
+cond4229->op4239
+op4239->cond4242
+cond4242(yes)->op4246
+op4246->op4248
+op4248->op4250
+op4250(left)->cond4242
+cond4242(no)->op4254
+op4254(left)->cond4206
+cond4214(no)->cond4229
+cond4206(no)->io4261
+io4261->e4259
+cond4184(no)->op4194
+op4194->op4197
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -283,6 +284,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

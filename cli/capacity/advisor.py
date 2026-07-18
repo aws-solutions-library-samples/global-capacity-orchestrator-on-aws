@@ -58,14 +58,14 @@ class BedrockCapacityAdvisor:
     before making production decisions.
     """
 
-    # Default model to use if none specified. Amazon Nova Pro is a
+    # Default model to use if none specified. Amazon Nova Premier is a
     # first-party Amazon model — access is enabled by default in
     # commercial Regions with no Anthropic First-Time-Use (FTU) form —
     # so the advisor works out of the box. Mirrors
     # gco_mcp/mission/sampling.py::DEFAULT_BEDROCK_MODEL_ID. Override per
     # call with --model (CLI) or model_id (constructor); see
     # docs/CUSTOMIZATION.md ("Bedrock Model Selection").
-    DEFAULT_MODEL = "us.amazon.nova-pro-v1:0"
+    DEFAULT_MODEL = "us.amazon.nova-premier-v1:0"
 
     def __init__(self, config: GCOConfig | None = None, model_id: str | None = None):
         self.config = config or get_config()

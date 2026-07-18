@@ -20,7 +20,7 @@
 #   - integration:docker:queue-processor     — build + startup-banner check
 #   - integration:helm:charts-valid          — every charts.yaml (chart,version) resolves + renders with helm
 #   - integration:k8s:manifest-schema        — kubeconform schema validation + YAML/required-kinds/DAG checks
-#   - integration:kind:cluster-e2e           — kind + Calico + services + RBAC + NetworkPolicy + ResourceQuota
+#   - integration:kind:cluster-e2e           — kind + Calico + Metrics Server + HPA + services + policy/RBAC
 #   - integration:lambda:imports             — import each Lambda handler
 #   - integration:mcp:server                 — pytest tests/test_mcp_integration.py
 #   - integration:pytest:cross-module        — pytest tests/test_integration.py
@@ -646,7 +646,11 @@ jobs:
   integration-kind-cluster-e2e:
     name: "integration:kind:cluster-e2e"
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
+    env:
+      # kind does not provide the EKS managed add-on used in production. Pin
+      # upstream Metrics Server so the HPA can prove ScalingActive in CI.
+      METRICS_SERVER_VERSION: "v0.9.0"
     steps:
       - uses: actions/checkout@v7
       - name: Create kind cluster (no default CNI)
@@ -716,6 +720,18 @@ jobs:
           echo "===== Diagnostics: recent kube-system events ====="
           kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -50 || true
           exit 1
+      - name: Install Metrics Server for HPA reconciliation
+        # Production uses the EKS managed metrics-server add-on. kind needs the
+        # upstream component plus insecure kubelet TLS because its node serving
+        # certificate is not signed for the container's InternalIP.
+        run: |
+          set -euo pipefail
+          kubectl apply -f \
+            "https://github.com/kubernetes-sigs/metrics-server/releases/download/${METRICS_SERVER_VERSION}/components.yaml"
+          kubectl -n kube-system patch deployment metrics-server --type=json \
+            --patch='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+          kubectl -n kube-system rollout status deployment/metrics-server --timeout=3m
+          kubectl wait --for=condition=Available apiservice/v1beta1.metrics.k8s.io --timeout=2m
       - name: Set up Buildx (enables shared GHA layer cache)
         uses: docker/setup-buildx-action@v4.2.0
       - name: Build health-monitor image
@@ -802,12 +818,14 @@ jobs:
               *32-inference-monitor*)  image="inference-monitor:ci"; key="INFERENCE_MONITOR_IMAGE" ;;
               *33-inference-proxy*)    image="inference-proxy:ci"; key="INFERENCE_PROXY_IMAGE" ;;
             esac
-            # Stub out every remaining {{PLACEHOLDER}} with a safe literal
-            # so the apiserver accepts the manifest (empty strings are fine
-            # — the pods won't reach Ready, but the object validates).
+            # Stub out every remaining {{PLACEHOLDER}} with a safe literal.
+            # These tags were loaded into kind rather than pushed to a registry,
+            # so the CI-only render must not retain production's Always policy.
             sed -e "s|{{${key}}}|${image}|g" \
                 -e "s|{{DEPLOYMENT_TIMESTAMP}}|$(date +%s)|g" \
+                -e 's|{{INFERENCE_PROXY_MAX_REQUEST_BODY_BYTES}}|1048576|g' \
                 -e "s|{{[A-Z_]*}}|ci-stub|g" \
+                -e 's|imagePullPolicy: Always|imagePullPolicy: IfNotPresent|g' \
                 "$manifest" \
               | kubectl apply -f -
           done
@@ -819,6 +837,12 @@ jobs:
           kubectl -n gco-system get deploy manifest-processor
           kubectl -n gco-system get deploy inference-monitor
           kubectl -n gco-system get deploy inference-proxy
+          # The shared streaming proxy scales independently while retaining its
+          # three-pod HA floor. Exact readback guards against partial file apply.
+          kubectl -n gco-system get hpa inference-proxy-hpa
+          test "$(kubectl -n gco-system get hpa inference-proxy-hpa -o jsonpath='{.spec.minReplicas}')" = "3"
+          test "$(kubectl -n gco-system get hpa inference-proxy-hpa -o jsonpath='{.spec.maxReplicas}')" = "10"
+          test "$(kubectl -n gco-system get hpa inference-proxy-hpa -o jsonpath='{.spec.scaleTargetRef.name}')" = "inference-proxy"
           # At least one pod got scheduled for each — confirms the apiserver
           # admitted the PodSpec and the scheduler found the nodes.
           for _ in $(seq 1 30); do
@@ -839,6 +863,27 @@ jobs:
           echo "Pods never appeared within 60s"
           kubectl -n gco-system get pods -o wide
           kubectl -n gco-system describe deploy health-monitor manifest-processor inference-monitor inference-proxy
+          exit 1
+      - name: Verify inference proxy HPA is actively computing replicas
+        # Admission/readback alone does not prove autoscaling works. Wait for
+        # Metrics Server samples and require the controller's ScalingActive
+        # condition for the real autoscaling/v2 resource.
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 90); do
+            active="$(kubectl -n gco-system get hpa inference-proxy-hpa \
+              -o jsonpath='{.status.conditions[?(@.type=="ScalingActive")].status}')"
+            if [ "$active" = "True" ]; then
+              kubectl -n gco-system get hpa inference-proxy-hpa
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::inference-proxy-hpa never reported ScalingActive=True"
+          kubectl -n gco-system describe hpa inference-proxy-hpa || true
+          kubectl top nodes || true
+          kubectl -n gco-system top pods -l app=inference-proxy || true
+          kubectl -n kube-system logs deployment/metrics-server --tail=100 || true
           exit 1
       - name: Verify NetworkPolicies validated
         # Calico's admission webhooks would reject malformed policies, so

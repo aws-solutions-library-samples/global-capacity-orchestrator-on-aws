@@ -26,7 +26,7 @@ from urllib.parse import urlparse
 # SSM managed-node ids: EC2 (i-...) and hybrid/managed (mi-...), 8 or 17 hex.
 _INSTANCE_RE = re.compile(r"^(i|mi)-[0-9a-f]{8}([0-9a-f]{9})?$")
 _HOST_RE = re.compile(r"^[a-zA-Z0-9.\-]{1,255}$")
-_REGION_RE = re.compile(r"^[a-z]{2,3}-[a-z]+-\d+$")
+_REGION_RE = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
 
 # AWS SSM document that forwards a local port to an arbitrary remote host
 # reachable from the managed node (here, the private EKS API endpoint).

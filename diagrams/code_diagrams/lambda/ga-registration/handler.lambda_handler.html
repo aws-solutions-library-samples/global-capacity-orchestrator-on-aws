@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Global Accelerator Endpoint Registration Lambda</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,43 +206,43 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op549=>operation: "Lambda handler for GA registration.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the convergence pipeline's final step): the event\n      carries an ``Action`` key and is dispatched to :func:`handle_task`.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the result is POSTed back to CloudFormation.\n    "
-cond552=>condition: if event.get('Action')
-sub556=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
-io561=>inputoutput: output: handle_task(event)
-e559=>end: end function return
-sub567=>subroutine: logger.info(f'Event: {json.dumps(event)}')
-op569=>operation: request_type = event['RequestType']
-op571=>operation: props = event['ResourceProperties']
-op573=>operation: physical_id = event.get('PhysicalResourceId', f"ga-reg-{props['ClusterName']}")
-cond579=>condition: if request_type == 'Delete'
-sub583=>subroutine: handle_delete(event, context, props, physical_id)
-cond575=>condition: exception raised?
-cond590=>condition: except Exception as e
-sub594=>subroutine: logger.error(f'Error: {e}', exc_info=True)
-cond597=>condition: if request_type == 'Delete'
-sub601=>subroutine: send_response(event, context, 'SUCCESS', {}, physical_id)
-sub605=>subroutine: send_response(event, context, 'FAILED', {}, physical_id, str(e))
-sub587=>subroutine: handle_create_update(event, context, props, physical_id)
+        <div><textarea id="code" style="width: 100%;" rows="11">op551=>operation: "Lambda handler for GA registration.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the convergence pipeline's final step): the event\n      carries an ``Action`` key and is dispatched to :func:`handle_task`.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the result is POSTed back to CloudFormation.\n    "
+cond554=>condition: if event.get('Action')
+sub558=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
+io563=>inputoutput: output: handle_task(event)
+e561=>end: end function return
+sub569=>subroutine: logger.info(f'Event: {json.dumps(event)}')
+op571=>operation: request_type = event['RequestType']
+op573=>operation: props = event['ResourceProperties']
+op575=>operation: physical_id = event.get('PhysicalResourceId', f"ga-reg-{props['ClusterName']}")
+cond581=>condition: if request_type == 'Delete'
+sub585=>subroutine: handle_delete(event, context, props, physical_id)
+cond577=>condition: exception raised?
+cond592=>condition: except Exception as e
+sub596=>subroutine: logger.error(f'Error: {e}', exc_info=True)
+cond599=>condition: if request_type == 'Delete'
+sub603=>subroutine: send_response(event, context, 'SUCCESS', {}, physical_id)
+sub607=>subroutine: send_response(event, context, 'FAILED', {}, physical_id, str(e))
+sub589=>subroutine: handle_create_update(event, context, props, physical_id)
 
-op549->cond552
-cond552(yes)->sub556
-sub556->io561
-io561->e559
-cond552(no)->sub567
-sub567->op569
-op569->op571
+op551->cond554
+cond554(yes)->sub558
+sub558->io563
+io563->e561
+cond554(no)->sub569
+sub569->op571
 op571->op573
-op573->cond579
-cond579(yes)->sub583
-sub583->cond575
-cond575(yes)->cond590
-cond590(yes)->sub594
-sub594->cond597
-cond597(yes)->sub601
-cond597(no)->sub605
-cond579(no)->sub587
-sub587->cond575
+op573->op575
+op575->cond581
+cond581(yes)->sub585
+sub585->cond577
+cond577(yes)->cond592
+cond592(yes)->sub596
+sub596->cond599
+cond599(yes)->sub603
+cond599(no)->sub607
+cond581(no)->sub589
+sub589->cond577
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -251,6 +252,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Mission verdict cascade (budget caps, completion, cadence-skip, heuristic)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,73 +206,73 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4667=>operation: 'Return the deterministic Verdict for the in-progress iteration.\n\n    The cascade order is fixed (see module docstring). The first matching\n    branch wins: a session that has both run out of iterations and has\n    every Criterion met returns ``("terminate", "max_iterations")``, not\n    ``("complete", "criteria_met")`` — budget caps are evaluated before\n    completion so the operator can tell the loop ended because it ran\n    out of budget rather than because the goal was reached on the\n    closing iteration.\n    Note: When the prior Execute_Phase ran a scripted Strategy and the\n    sandbox cap fired, ``_execute_script`` writes\n    ``iteration["sandbox_terminated_reason"]`` and the cascade returns\n    that reason verbatim before anything else is consulted. The\n    sandbox limit is a true budget cap — the script ran out of wall\n    clock during execution — so it routes to a ``terminate`` verdict\n    on the same path as the ``BudgetControls``-driven caps below.\n    '
-op4669=>operation: sandbox_reason = iteration.get('sandbox_terminated_reason')
-cond4672=>condition: if sandbox_reason is not None
-io4679=>inputoutput: output: ('terminate', sandbox_reason)
-e4677=>end: end function return
-op4685=>operation: max_iter = session['budget']['max_iterations']
-cond4688=>condition: if max_iter != -1 and len(session['iterations']) + 1 >= max_iter
-io4695=>inputoutput: output: ('terminate', 'max_iterations')
-e4693=>end: end function return
-cond4702=>condition: if _wall_clock_exceeded(session, now)
-io4709=>inputoutput: output: ('terminate', 'max_wall_clock')
-e4707=>end: end function return
-cond4716=>condition: if session['no_progress_counter'] >= session['stagnation_threshold']
-cond4721=>condition: if not session.get('use_sampling')
-io4728=>inputoutput: output: ('terminate', 'no_progress')
-e4726=>end: end function return
-op4734=>operation: _stagnation_pending = True
-cond4742=>condition: if _completion_satisfied(session, iteration)
-io4749=>inputoutput: output: ('complete', 'criteria_met')
-e4747=>end: end function return
-cond4756=>condition: if not should_evaluate_now(session, len(session['iterations']), now)
-io4763=>inputoutput: output: ('continue', 'cadence_skip')
-e4761=>end: end function return
-op4769=>operation: unproductive, _heuristic_reason = _strategy_unproductive(session, iteration)
-cond4772=>condition: if unproductive
-io4779=>inputoutput: output: ('adjust', 'heuristic_unproductive')
-e4777=>end: end function return
-cond4786=>condition: if _stagnation_pending
-io4793=>inputoutput: output: ('terminate', 'no_progress')
-e4791=>end: end function return
-io4802=>inputoutput: output: ('continue', 'in_progress')
-e4800=>end: end function return
-op4738=>operation: _stagnation_pending = False
+        <div><textarea id="code" style="width: 100%;" rows="11">op4976=>operation: 'Return the deterministic Verdict for the in-progress iteration.\n\n    The cascade order is fixed (see module docstring). The first matching\n    branch wins: a session that has both run out of iterations and has\n    every Criterion met returns ``("terminate", "max_iterations")``, not\n    ``("complete", "criteria_met")`` — budget caps are evaluated before\n    completion so the operator can tell the loop ended because it ran\n    out of budget rather than because the goal was reached on the\n    closing iteration.\n    Note: When the prior Execute_Phase ran a scripted Strategy and the\n    sandbox cap fired, ``_execute_script`` writes\n    ``iteration["sandbox_terminated_reason"]`` and the cascade returns\n    that reason verbatim before anything else is consulted. The\n    sandbox limit is a true budget cap — the script ran out of wall\n    clock during execution — so it routes to a ``terminate`` verdict\n    on the same path as the ``BudgetControls``-driven caps below.\n    '
+op4978=>operation: sandbox_reason = iteration.get('sandbox_terminated_reason')
+cond4981=>condition: if sandbox_reason is not None
+io4988=>inputoutput: output: ('terminate', sandbox_reason)
+e4986=>end: end function return
+op4994=>operation: max_iter = session['budget']['max_iterations']
+cond4997=>condition: if max_iter != -1 and len(session['iterations']) + 1 >= max_iter
+io5004=>inputoutput: output: ('terminate', 'max_iterations')
+e5002=>end: end function return
+cond5011=>condition: if _wall_clock_exceeded(session, now)
+io5018=>inputoutput: output: ('terminate', 'max_wall_clock')
+e5016=>end: end function return
+cond5025=>condition: if session['no_progress_counter'] >= session['stagnation_threshold']
+cond5030=>condition: if not session.get('use_sampling')
+io5037=>inputoutput: output: ('terminate', 'no_progress')
+e5035=>end: end function return
+op5043=>operation: _stagnation_pending = True
+cond5051=>condition: if _completion_satisfied(session, iteration)
+io5058=>inputoutput: output: ('complete', 'criteria_met')
+e5056=>end: end function return
+cond5065=>condition: if not should_evaluate_now(session, len(session['iterations']), now)
+io5072=>inputoutput: output: ('continue', 'cadence_skip')
+e5070=>end: end function return
+op5078=>operation: unproductive, _heuristic_reason = _strategy_unproductive(session, iteration)
+cond5081=>condition: if unproductive
+io5088=>inputoutput: output: ('adjust', 'heuristic_unproductive')
+e5086=>end: end function return
+cond5095=>condition: if _stagnation_pending
+io5102=>inputoutput: output: ('terminate', 'no_progress')
+e5100=>end: end function return
+io5111=>inputoutput: output: ('continue', 'in_progress')
+e5109=>end: end function return
+op5047=>operation: _stagnation_pending = False
 
-op4667->op4669
-op4669->cond4672
-cond4672(yes)->io4679
-io4679->e4677
-cond4672(no)->op4685
-op4685->cond4688
-cond4688(yes)->io4695
-io4695->e4693
-cond4688(no)->cond4702
-cond4702(yes)->io4709
-io4709->e4707
-cond4702(no)->cond4716
-cond4716(yes)->cond4721
-cond4721(yes)->io4728
-io4728->e4726
-cond4721(no)->op4734
-op4734->cond4742
-cond4742(yes)->io4749
-io4749->e4747
-cond4742(no)->cond4756
-cond4756(yes)->io4763
-io4763->e4761
-cond4756(no)->op4769
-op4769->cond4772
-cond4772(yes)->io4779
-io4779->e4777
-cond4772(no)->cond4786
-cond4786(yes)->io4793
-io4793->e4791
-cond4786(no)->io4802
-io4802->e4800
-cond4716(no)->op4738
-op4738->cond4742
+op4976->op4978
+op4978->cond4981
+cond4981(yes)->io4988
+io4988->e4986
+cond4981(no)->op4994
+op4994->cond4997
+cond4997(yes)->io5004
+io5004->e5002
+cond4997(no)->cond5011
+cond5011(yes)->io5018
+io5018->e5016
+cond5011(no)->cond5025
+cond5025(yes)->cond5030
+cond5030(yes)->io5037
+io5037->e5035
+cond5030(no)->op5043
+op5043->cond5051
+cond5051(yes)->io5058
+io5058->e5056
+cond5051(no)->cond5065
+cond5065(yes)->io5072
+io5072->e5070
+cond5065(no)->op5078
+op5078->cond5081
+cond5081(yes)->io5088
+io5088->e5086
+cond5081(no)->cond5095
+cond5095(yes)->io5102
+io5102->e5100
+cond5095(no)->io5111
+io5111->e5109
+cond5025(no)->op5047
+op5047->cond5051
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -281,6 +282,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

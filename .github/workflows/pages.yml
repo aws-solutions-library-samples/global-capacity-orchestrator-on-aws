@@ -81,9 +81,9 @@ jobs:
         # shields.io endpoint schema so the README badge can link to a static
         # JSON on Pages without calling a third-party service.
         #
-        # Color threshold matches the --cov-fail-under gate (90%) in
-        # unit-tests.yml: a run below that would have failed and been skipped
-        # by the `if` above, so the badge only has two meaningful states.
+        # Bright green marks the 93% project target, intentionally stricter
+        # than the 90% --cov-fail-under floor in unit-tests.yml. A passing
+        # 90–92.9% run still publishes its report with a red target badge.
         #
         # The write is done entirely in Python (heredoc + json.dump) rather
         # than piped through shell — interpolating an f-string result into
@@ -95,7 +95,7 @@ jobs:
           import json
           with open("coverage-data/coverage.json") as f:
               pct = json.load(f)["totals"]["percent_covered"]
-          color = "brightgreen" if pct >= 90 else "red"
+          color = "brightgreen" if pct >= 93 else "red"
           badge = {
               "schemaVersion": 1,
               "label": "coverage",

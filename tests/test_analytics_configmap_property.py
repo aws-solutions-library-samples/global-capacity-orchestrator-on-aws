@@ -19,7 +19,7 @@ biconditional holds:
      ``ReadClusterSharedBucketArn.Parameter.Value``; and
   2. A KMS ``Decrypt`` / ``GenerateDataKey`` statement with a
      ``kms:ViaService`` condition scoping the grant to the
-     ``s3.<global-region>.amazonaws.com`` service.
+     ``s3.<global-region>.<AWS::URLSuffix>`` service.
 
 The ``gco-cluster-shared-bucket`` ConfigMap itself is covered by
 :mod:`tests.test_analytics_cluster_shared_configmap_property` — it's
@@ -154,12 +154,12 @@ def _statement_has_kms_via_s3_grant(
     statement: dict[str, Any],
 ) -> bool:
     """True if ``statement`` is a ``kms:Decrypt`` + ``kms:GenerateDataKey``
-    grant with a ``kms:ViaService`` condition keyed on the
-    ``s3.<region>.amazonaws.com`` principal.
+    grant with a ``kms:ViaService`` condition keyed on a partition-aware
+    ``s3.<region>.<AWS::URLSuffix>`` endpoint.
 
-    The condition's region component is not pinned — any concrete region
-    the implementation sets is accepted so the test doesn't depend on the
-    baseline ``cdk.json``'s ``deployment_regions.global`` value.
+    The condition's region component is not pinned. CloudFormation token
+    objects are accepted only when they contain ``AWS::URLSuffix``; concrete
+    strings remain accepted for direct predicate unit tests.
     """
     actions = set(_as_list(statement.get("Action")))
     if not _REQUIRED_KMS_ACTIONS.issubset(actions):
@@ -171,9 +171,12 @@ def _statement_has_kms_via_s3_grant(
     if not isinstance(string_equals, dict):
         return False
     via = string_equals.get("kms:ViaService")
-    if not isinstance(via, str):
+    if isinstance(via, str):
+        return via.startswith("s3.") and "." in via.removeprefix("s3.")
+    if not isinstance(via, (dict, list)):
         return False
-    return via.startswith("s3.") and via.endswith(".amazonaws.com")
+    rendered = _flat_repr(via)
+    return "s3." in rendered and "AWS::URLSuffix" in rendered
 
 
 def _has_cluster_shared_grant(statements: list[dict[str, Any]]) -> bool:
@@ -301,6 +304,25 @@ class TestPredicatesTotality:
     """Every predicate must be total: arbitrary malformed statements
     can't raise. Only totality is asserted; the classification result
     is not."""
+
+    def test_kms_via_s3_grant_predicate_accepts_url_suffix_token(self) -> None:
+        statement = {
+            "Action": ["kms:Decrypt", "kms:GenerateDataKey"],
+            "Condition": {
+                "StringEquals": {
+                    "kms:ViaService": {
+                        "Fn::Join": [
+                            "",
+                            [
+                                "s3.us-east-2.",
+                                {"Ref": "AWS::URLSuffix"},
+                            ],
+                        ]
+                    }
+                }
+            },
+        }
+        assert _statement_has_kms_via_s3_grant(statement)
 
     @settings(max_examples=25, deadline=None)
     @given(

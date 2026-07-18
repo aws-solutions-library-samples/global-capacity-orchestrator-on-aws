@@ -19,7 +19,7 @@ Usage:
     python scripts/capture_scaffold_fixtures.py
 
     # Capture a single model.
-    python scripts/capture_scaffold_fixtures.py --model us.amazon.nova-pro-v1:0
+    python scripts/capture_scaffold_fixtures.py --model us.amazon.nova-premier-v1:0
 
     # Use a different region.
     python scripts/capture_scaffold_fixtures.py --region us-west-2
@@ -117,7 +117,7 @@ _DEFAULT_MODELS: tuple[str, ...] = (
     "us.anthropic.claude-opus-4-5-20251101-v1:0",
     "us.anthropic.claude-3-5-haiku-20241022-v1:0",
     "us.anthropic.claude-3-haiku-20240307-v1:0",
-    # Amazon Nova family — first-party, no FTU form; nova-pro is the GCO
+    # Amazon Nova family — first-party, no FTU form; nova-premier is the GCO
     # default (DEFAULT_BEDROCK_MODEL_ID). Every visible CRIS profile.
     "us.amazon.nova-premier-v1:0",
     "us.amazon.nova-pro-v1:0",

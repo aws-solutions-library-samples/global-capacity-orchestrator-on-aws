@@ -55,6 +55,11 @@ class TestAcceptedBlocks:
             {"mode": "store", "store": {"enabled": True, "cold_tier_enabled": True}}
         )
 
+    def test_transfer_protocol_and_device_pass(self):
+        block = _valid_disaggregated()
+        block["transfer"] = {"protocol": "tcp", "device_name": "eth1"}
+        validate_mooncake_spec(block)
+
     def test_autoscaling_on_split_mode_passes(self):
         validate_mooncake_spec(
             {
@@ -83,6 +88,12 @@ class TestShapeRejections:
         with pytest.raises(ValueError, match="mooncake.store must be a mapping"):
             validate_mooncake_spec(block)
 
+    def test_non_mapping_transfer_is_rejected(self):
+        block = _valid_disaggregated()
+        block["transfer"] = "nope"
+        with pytest.raises(ValueError, match="mooncake.transfer must be a mapping"):
+            validate_mooncake_spec(block)
+
     def test_non_mapping_autoscaling_is_rejected(self):
         block = _valid_disaggregated()
         block["autoscaling"] = "nope"
@@ -93,6 +104,27 @@ class TestShapeRejections:
         block = _valid_disaggregated()
         block["autoscaling"] = {"enabled": True, "prefill": "nope"}
         with pytest.raises(ValueError, match="mooncake.autoscaling.prefill must be a mapping"):
+            validate_mooncake_spec(block)
+
+
+# ---------------------------------------------------------------------------
+# Transfer protocol/device rejection
+# ---------------------------------------------------------------------------
+
+
+class TestTransferRejections:
+    @pytest.mark.parametrize("bad_protocol", ["efa", "ib", "rocev2", "", None, 1])
+    def test_unsupported_protocol_is_rejected(self, bad_protocol):
+        block = _valid_disaggregated()
+        block["transfer"] = {"protocol": bad_protocol}
+        with pytest.raises(ValueError, match="mooncake.transfer.protocol must be one of"):
+            validate_mooncake_spec(block)
+
+    @pytest.mark.parametrize("bad_device", [None, 1, True, ["eth0"]])
+    def test_non_string_device_is_rejected(self, bad_device):
+        block = _valid_disaggregated()
+        block["transfer"] = {"device_name": bad_device}
+        with pytest.raises(ValueError, match="mooncake.transfer.device_name must be a string"):
             validate_mooncake_spec(block)
 
 
@@ -351,6 +383,17 @@ class TestDeployValidateBeforeWrite:
                     "enabled": True,
                     "prefill": {"min_replicas": 0},
                 },
+            )
+        store.create_endpoint.assert_not_called()
+
+    def test_bad_transfer_is_rejected_and_nothing_is_written(self, manager_with_spy_store):
+        mgr, store = manager_with_spy_store
+        with pytest.raises(ValueError, match="mooncake.transfer.protocol"):
+            mgr.deploy(
+                "ep",
+                target_regions=["us-east-1"],
+                mooncake_mode="disaggregated",
+                mooncake_transfer={"protocol": "efa"},
             )
         store.create_endpoint.assert_not_called()
 

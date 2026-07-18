@@ -13,7 +13,7 @@ MCP resource definitions and live-state adapters. Static modules use `@mcp.resou
 
 | File | Scheme or role | Description |
 |------|----------------|-------------|
-| `_eks.py` | shared helper | Builds account-qualified, partition-aware EKS contexts for region-pinned live reads. |
+| `_eks.py` | shared helper | Builds configured-project, account-qualified, partition-aware EKS contexts for region-pinned live reads. |
 | `ci.py` | `ci://` | GitHub Actions workflows, composite actions, scripts, templates, and policy files. |
 | `clients.py` | `clients://` | API client examples for Python, curl, and the AWS CLI. |
 | `cluster.py` | `gco://cluster/` | Live regional NodePool and pending-pod topology. |
@@ -51,7 +51,12 @@ The live catalog is available from `mcp://gco/resources/index`. Important entry 
 
 Each resource has a URI, a read-only handler, and a description. Static resources are concrete URIs; parameterized resources are templates. FastMCP's Resources As Tools transform also exposes `list_resources` and `read_resource`, so tool-only clients can reach the same catalog.
 
-Handlers that read project files use allowlists and resolved-path checks. Kubernetes handlers require an explicit region and an account-qualified EKS context. Resource responses are read-only, but live handlers can still call AWS, the GCO CLI, or `kubectl`, so their descriptions identify the backing system.
+Handlers that read project files use allowlists and resolved-path checks. Kubernetes
+handlers require an explicit region and an account-qualified EKS context whose
+cluster prefix comes from the merged CLI ``project_name`` configuration, including
+``GCO_PROJECT_NAME`` overrides. Resource responses are read-only, but live handlers
+can still call AWS, the GCO CLI, or ``kubectl``, so their descriptions identify the
+backing system.
 
 ## Adding a New Resource Group
 

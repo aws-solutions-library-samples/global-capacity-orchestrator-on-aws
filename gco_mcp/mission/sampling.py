@@ -51,6 +51,7 @@ from .types import Criterion, CriterionResult, IterationRecord, Observation, Str
 from .validation import MissionValidationError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``maybe_sample_strategy_revision`` -> ``diagrams/code_diagrams/gco_mcp/mission/sampling.maybe_sample_strategy_revision.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/sampling.maybe_sample_strategy_revision.png``)
@@ -196,14 +197,14 @@ def _summarise_environment_context(env: Mapping[str, Any]) -> dict[str, Any]:
 #: Default Bedrock model identifier. Mirrors
 #: ``cli.capacity.advisor.BedrockCapacityAdvisor.DEFAULT_MODEL`` so an
 #: operator gets the same model for Mission sampling and the capacity
-#: advisor. Amazon Nova Pro is a first-party Amazon model: access is
+#: advisor. Amazon Nova Premier is a first-party Amazon model: access is
 #: enabled by default in commercial Regions and, unlike the Anthropic
 #: models, it needs no First-Time-Use (FTU) form, so the advisory path
 #: works out of the box on a fresh account. Operators with regulatory
 #: or model-governance requirements can override per call via the
 #: ``GCO_MISSION_BEDROCK_MODEL_ID`` env var or the ``--bedrock-model-id``
 #: CLI flag — see docs/CUSTOMIZATION.md ("Bedrock Model Selection").
-DEFAULT_BEDROCK_MODEL_ID: str = "us.amazon.nova-pro-v1:0"
+DEFAULT_BEDROCK_MODEL_ID: str = "us.amazon.nova-premier-v1:0"
 
 #: Default Bedrock region. The capacity advisor pins ``us-east-1`` for
 #: the same reason: cross-region inference profiles routinely surface

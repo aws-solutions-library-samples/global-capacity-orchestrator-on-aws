@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/v1/queue", tags=["Job Queue"])
 logger = logging.getLogger(__name__)
 
-_AWS_REGION_PATTERN = re.compile(r"^[a-z]{2}(?:-gov)?-[a-z]+-\d+$")
+_AWS_REGION_PATTERN = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
 _DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 _IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._~:/+=-]{1,128}$")
 _IDEMPOTENCY_NAMESPACE = uuid.UUID("88284d12-1e04-47d5-8871-607a9e4dac09")

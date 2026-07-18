@@ -161,7 +161,7 @@ def submit_job_direct(
 
         aws eks associate-access-policy --cluster-name gco-REGION \\
             --principal-arn YOUR_ARN \\
-            --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \\
+            --policy-arn arn:<partition>:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \\
             --access-scope type=cluster
 
     Examples:

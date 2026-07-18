@@ -75,19 +75,22 @@ These options are available for all commands:
 ### Regional API Mode
 
 Every workload region has a regional API bridge because the centralized
-aggregator uses it to reach that region's private VPC. By default, the bridge's
-resource policy admits only the aggregator role. Setting
-`api_gateway.regional_api_enabled=true` additionally permits IAM-authorized
-principals from the deployment account to invoke it directly.
+aggregator uses it to reach that region's private VPC. In the commercial `aws`
+partition, the bridge's resource policy admits only the aggregator role by
+default, and `api_gateway.regional_api_enabled=true` additionally permits
+IAM-authorized principals from the deployment account. In other partitions,
+same-account direct access is enabled automatically because Global Accelerator
+and its global proxy routes are omitted.
 
 When a command supplies an exact target region, the CLI automatically resolves
 and signs against that region's API Gateway; it never forwards a routing header
 to the global endpoint. When `--regional-api` is enabled (or
 `GCO_REGIONAL_API=true` is set), the CLI requires a selected region for every API
-call and never uses the global API Gateway → Global Accelerator path. Enable the
-policy opt-in in `cdk.json` and redeploy before using either form of direct
-regional access. The global endpoint rejects `X-GCO-Target-Region` rather than
-silently pretending a region pin succeeded.
+call and never uses the global API Gateway → Global Accelerator path. In `aws`,
+enable the policy opt-in in `cdk.json` and redeploy before using either form of
+direct regional access. Outside `aws`, the deployment enables that same-account
+policy automatically. The global endpoint rejects `X-GCO-Target-Region` rather
+than silently pretending a region pin succeeded.
 
 Both API Gateway hops use AWS-managed TLS and SigV4. The regional VPC Lambda
 then uses HMAC plus deployment-local private-root TLS to the internal ALB.
@@ -1060,7 +1063,7 @@ gco stacks access [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--cluster` | `-c` | Cluster name (default: gco-{region}) |
+| `--cluster` | `-c` | Cluster name (default: `<project_name>-<region>`) |
 | `--region` | `-r` | AWS region (default: first deployment region) |
 
 **Examples:**
@@ -2051,6 +2054,8 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | `--mooncake-mode` | | Mooncake serving mode: `disaggregated` (prefill/decode split), `store` (shared KV-cache), or `both` |
 | `--prefill-replicas` | | Number of prefill replicas (default: 1). Used with `--mooncake-mode disaggregated\|both` |
 | `--decode-replicas` | | Number of decode replicas (default: 1). Used with `--mooncake-mode disaggregated\|both` |
+| `--mooncake-protocol` | | Transfer intent: `rdma` (default, rendered to vLLM's EFA connector protocol and scheduled on EFA) or `tcp` (non-EFA fallback). Requires `--mooncake-mode` |
+| `--mooncake-device-name` | | Optional provider-visible network device forwarded to Mooncake. Omit for auto-detection. Requires `--mooncake-mode` |
 | `--mooncake-autoscale` | | Per-role autoscaling as `ROLE:MIN:MAX[:METRIC:TARGET...]`. Repeatable. E.g. `prefill:1:8:gpu:70` |
 | `--mooncake-cold-tier` | | Enable the async per-region S3 cold tier for the shared KV-cache store. Requires `--mooncake-mode store\|both`. Pre-warm with `gco inference populate-kv` |
 | `--mooncake-proxy-image` | | Container image for the prefill-decode proxy (disaggregated/both). Defaults to the endpoint image |
@@ -4284,7 +4289,7 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_ENABLE_MISSION` | Gate the `gco mission` subcommand group (`true`/`false`). With the flag unset, every subcommand exits 2 with a hint. |
 | `GCO_ENABLE_ALL_TOOLS` | Umbrella flag that satisfies every per-tool gate including `GCO_ENABLE_MISSION`. |
 | `GCO_MISSION_STATE_BACKEND` | Persistence backend for sessions (`filesystem` or `dynamodb`). Unrecognised values fall back to filesystem with a one-line warning. |
-| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the default Bedrock model id (Amazon Nova Pro, `us.amazon.nova-pro-v1:0`) used by the CLI sampling backend. See [Customization → Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). |
+| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the default Bedrock model id (Amazon Nova Premier, `us.amazon.nova-premier-v1:0`) used by the CLI sampling backend. See [Customization → Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). |
 | `GCO_MISSION_BEDROCK_REGION` | Override the default Bedrock region (`us-east-1`). |
 
 ## Examples

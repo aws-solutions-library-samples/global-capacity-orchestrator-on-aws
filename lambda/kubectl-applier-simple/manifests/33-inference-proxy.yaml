@@ -1,11 +1,15 @@
 # Inference Proxy — authenticates and streams managed model traffic.
-# Deployment + PodDisruptionBudget + Service consolidated in one file.
+# Deployment + HorizontalPodAutoscaler + PodDisruptionBudget + Service.
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: inference-proxy
   namespace: gco-system
+  annotations:
+    # The applier keeps replicas on create but omits it from update patches so
+    # the HorizontalPodAutoscaler's scale-subresource value remains authoritative.
+    gco.aws/hpa-controls-replicas: "true"
   labels:
     app: inference-proxy
     component: inference-data-plane
@@ -31,7 +35,9 @@ spec:
     spec:
       serviceAccountName: gco-inference-proxy-sa
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 60
+      # API Gateway response streams can run for 15 minutes. Allow Uvicorn to
+      # drain an in-flight stream after this pod stops receiving new traffic.
+      terminationGracePeriodSeconds: 930
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -98,6 +104,8 @@ spec:
               value: gco-inference
             - name: MAX_REQUEST_BODY_BYTES
               value: "{{INFERENCE_PROXY_MAX_REQUEST_BODY_BYTES}}"
+            - name: GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+              value: "900"
           resources:
             requests:
               cpu: 250m
@@ -147,6 +155,60 @@ spec:
                   audience: sts.amazonaws.com
                   expirationSeconds: 86400
                   path: token
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: inference-proxy-hpa
+  namespace: gco-system
+  labels:
+    app: inference-proxy
+    component: inference-data-plane
+    project: gco
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: inference-proxy
+  # Preserve the existing three-pod HA baseline and scale burst capacity.
+  minReplicas: 3
+  maxReplicas: 10
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+    # Streaming requests may live for 15 minutes. Avoid rapid scale-down churn;
+    # pod termination independently drains accepted streams for the same window.
+    scaleDown:
+      stabilizationWindowSeconds: 900
+      selectPolicy: Min
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

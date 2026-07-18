@@ -1290,6 +1290,14 @@ SHIM
     [[ "$output" =~ ^v[0-9] ]]
 }
 
+@test "extract_workflow_env_pin: reads the METRICS_SERVER_VERSION pin from integration-tests.yml" {
+    # kind installs this pinned component so CI can require the inference HPA's
+    # ScalingActive condition instead of checking admission alone.
+    run extract_workflow_env_pin METRICS_SERVER_VERSION
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
 @test "extract_workflow_env_pin: empty for an unset var" {
     run extract_workflow_env_pin NONEXISTENT_VERSION_XYZ
     [ "$status" -eq 0 ]

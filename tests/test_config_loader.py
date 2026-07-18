@@ -11,9 +11,13 @@ informative message. Companion suite to test_config_loader_validation.py
 which drills into the validation rules themselves.
 """
 
+import subprocess
+import sys
+
 import pytest
 
 from gco.config.config_loader import ConfigLoader, ConfigValidationError
+from gco.stacks.constants import cloudformation_region_partitions
 
 
 class MockNode:
@@ -98,8 +102,15 @@ class TestConfigLoaderValidation:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match="Required configuration field 'deployment_regions' is missing",
+            match="Required configuration field 'deployment_regions' must be a non-empty object",
         ):
+            ConfigLoader(app)
+
+    def test_malformed_deployment_regions_object(self, valid_context):
+        """Non-object Region configuration fails with an actionable error."""
+        valid_context["deployment_regions"] = ["us-east-1"]
+        app = MockApp(valid_context)
+        with pytest.raises(ConfigValidationError, match="must be a non-empty object"):
             ConfigLoader(app)
 
     def test_empty_context_skips_validation(self):
@@ -111,20 +122,47 @@ class TestConfigLoaderValidation:
         assert config.get_regions() == ["us-east-1"]
 
 
+def test_config_and_public_stack_exports_import_in_a_clean_interpreter() -> None:
+    """Cold import order must not recreate the ConfigLoader/stack cycle."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from gco.config import ConfigLoader; from gco.stacks import GCOGlobalStack",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 class TestRegionValidation:
     """Tests for region validation."""
 
     def test_valid_regions(self, valid_context):
-        """Test valid regions pass validation."""
+        """SDK-known regions outside the former project subset pass validation."""
+        valid_context["deployment_regions"]["regional"] = ["ap-south-1"]
         app = MockApp(valid_context)
         config = ConfigLoader(app)
-        assert config.get_regions() == ["us-east-1", "us-west-2"]
+        assert config.get_regions() == ["ap-south-1"]
 
     def test_invalid_region(self, valid_context):
         """Test invalid region raises error."""
         valid_context["deployment_regions"]["regional"] = ["us-east-1", "invalid-region"]
         app = MockApp(valid_context)
         with pytest.raises(ConfigValidationError, match="Invalid region 'invalid-region'"):
+            ConfigLoader(app)
+
+    @pytest.mark.parametrize("field", ["global", "api_gateway", "monitoring"])
+    def test_invalid_stack_region(self, valid_context, field):
+        """Every scalar stack Region must be SDK-known for CloudFormation."""
+        valid_context["deployment_regions"][field] = "invalid-region"
+        app = MockApp(valid_context)
+        with pytest.raises(
+            ConfigValidationError,
+            match=rf"Invalid {field} region 'invalid-region'",
+        ):
             ConfigLoader(app)
 
     def test_duplicate_regions(self, valid_context):
@@ -134,24 +172,44 @@ class TestRegionValidation:
         with pytest.raises(ConfigValidationError, match="Duplicate regions"):
             ConfigLoader(app)
 
-    def test_too_many_regions(self, valid_context):
-        """Test more than 10 regions raises error."""
-        valid_context["deployment_regions"]["regional"] = [
-            "us-east-1",
-            "us-east-2",
-            "us-west-1",
-            "us-west-2",
-            "eu-west-1",
-            "eu-west-2",
-            "eu-west-3",
-            "eu-central-1",
-            "ap-southeast-1",
-            "ap-southeast-2",
-            "ap-northeast-1",
-        ]
+    def test_mixed_aws_partitions(self, valid_context):
+        """A deployment cannot span accounts or credentials partitions."""
+        valid_context["deployment_regions"]["regional"] = ["us-east-1", "cn-north-1"]
         app = MockApp(valid_context)
-        with pytest.raises(ConfigValidationError, match="Maximum of 10 regions"):
+        with pytest.raises(ConfigValidationError, match="single AWS partition"):
             ConfigLoader(app)
+
+    def test_single_noncommercial_partition_is_valid_without_global_accelerator(
+        self, valid_context
+    ):
+        """A coherent SDK partition stays deployable through regional IAM APIs."""
+        region, partition = next(
+            (region, partition)
+            for region, partition in cloudformation_region_partitions().items()
+            if partition != "aws"
+        )
+        valid_context["deployment_regions"] = {
+            "global": region,
+            "api_gateway": region,
+            "monitoring": region,
+            "regional": [region],
+        }
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_deployment_partition() == partition
+        assert config.supports_global_accelerator() is False
+
+    def test_more_than_ten_regions(self, valid_context):
+        """The deployment contract has no project-specific Region-count cap."""
+        regions = sorted(
+            region
+            for region, partition in cloudformation_region_partitions().items()
+            if partition == "aws"
+        )[:11]
+        assert len(regions) == 11
+        valid_context["deployment_regions"]["regional"] = regions
+        app = MockApp(valid_context)
+        config = ConfigLoader(app)
+        assert config.get_regions() == regions
 
 
 class TestResourceThresholdsValidation:
@@ -652,6 +710,17 @@ class TestConfigValidationEdgeCases:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError, match="manifest_processor replicas must be a positive integer"
+        ):
+            ConfigLoader(app)
+
+    @pytest.mark.parametrize("value", (0, True, 10 * 1024 * 1024 + 1))
+    def test_invalid_manifest_processor_request_body_limit(self, valid_context, value):
+        """Request limits must remain positive integers within API Gateway's cap."""
+        valid_context["manifest_processor"]["max_request_body_bytes"] = value
+        app = MockApp(valid_context)
+        with pytest.raises(
+            ConfigValidationError,
+            match="manifest_processor.max_request_body_bytes must be an integer",
         ):
             ConfigLoader(app)
 

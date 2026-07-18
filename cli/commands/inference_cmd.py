@@ -108,6 +108,20 @@ def inference(config: Any) -> None:
     help="Decode instance count (Y in an XpYd topology) for split modes.",
 )
 @click.option(
+    "--mooncake-protocol",
+    type=click.Choice(["rdma", "tcp"]),
+    default=None,
+    help="Mooncake transfer intent. 'rdma' (the default) schedules role pods "
+    "on EFA and configures vLLM's connector protocol as 'efa'; 'tcp' is the "
+    "non-EFA fallback. Requires --mooncake-mode.",
+)
+@click.option(
+    "--mooncake-device-name",
+    default=None,
+    help="Network device passed to Mooncake (for example efa_0 or eth0). "
+    "Omit or pass an empty value for auto-detection. Requires --mooncake-mode.",
+)
+@click.option(
     "--mooncake-autoscale",
     multiple=True,
     help="Per-role Mooncake autoscaling as ROLE:MIN:MAX[:METRIC:TARGET ...], "
@@ -165,6 +179,8 @@ def inference_deploy(
     mooncake_mode: Any,
     prefill_replicas: Any,
     decode_replicas: Any,
+    mooncake_protocol: Any,
+    mooncake_device_name: Any,
     mooncake_autoscale: Any,
     mooncake_cold_tier: Any,
     mooncake_proxy_image: Any,
@@ -224,6 +240,23 @@ def inference_deploy(
             "max_replicas": max_replicas or 10,
             "metrics": metrics,
         }
+
+    # Transfer overrides are meaningful only when a Mooncake block is being
+    # authored. With no override, the monitor resolves the default RDMA intent
+    # to vLLM's explicit EFA connector protocol and auto-detects the device.
+    if (mooncake_protocol is not None or mooncake_device_name is not None) and not mooncake_mode:
+        formatter.print_error(
+            "--mooncake-protocol and --mooncake-device-name require --mooncake-mode."
+        )
+        sys.exit(1)
+
+    mooncake_transfer_config: dict[str, Any] | None = None
+    if mooncake_protocol is not None or mooncake_device_name is not None:
+        mooncake_transfer_config = {}
+        if mooncake_protocol is not None:
+            mooncake_transfer_config["protocol"] = mooncake_protocol
+        if mooncake_device_name is not None:
+            mooncake_transfer_config["device_name"] = mooncake_device_name
 
     # Build per-role Mooncake autoscaling config (spec.mooncake.autoscaling).
     # This is distinct from the legacy single-Deployment autoscaling above:
@@ -333,6 +366,7 @@ def inference_deploy(
             prefill_replicas=prefill_replicas,
             decode_replicas=decode_replicas,
             mooncake_store=mooncake_store_config,
+            mooncake_transfer=mooncake_transfer_config,
             mooncake_proxy=mooncake_proxy_config,
             mooncake_autoscaling=mooncake_autoscaling_config,
         )

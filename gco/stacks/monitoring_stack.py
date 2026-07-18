@@ -58,6 +58,7 @@ from constructs import Construct
 from gco.config.config_loader import ConfigLoader
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``GCOMonitoringStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.png``)
@@ -190,6 +191,8 @@ class GCOMonitoringStack(Stack):
         CloudWatch uses the Accelerator ID (UUID), not the name.
         """
         widgets: list[cloudwatch.IWidget] = []
+        if self.global_stack.accelerator_id is None:
+            return widgets
 
         # Get the accelerator ID from the global stack (CloudWatch uses ID, not name)
         accelerator_id = self.global_stack.accelerator_id
@@ -366,13 +369,14 @@ class GCOMonitoringStack(Stack):
 
         # Add API Gateway Lambda functions if available
         if self.api_gateway_stack:
-            lambda_functions.append(
-                (
-                    self.api_gateway_stack.proxy_lambda.function_name,
-                    "API Gateway Proxy",
-                    api_gw_region,
+            if self.api_gateway_stack.proxy_lambda is not None:
+                lambda_functions.append(
+                    (
+                        self.api_gateway_stack.proxy_lambda.function_name,
+                        "API Gateway Proxy",
+                        api_gw_region,
+                    )
                 )
-            )
             lambda_functions.append(
                 (
                     self.api_gateway_stack.rotation_lambda.function_name,
@@ -1808,13 +1812,13 @@ class GCOMonitoringStack(Stack):
         api_latency_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
 
     def _create_lambda_alarms(self) -> None:
-        """Create Lambda function alarms"""
-        # Get Lambda function names from api_gateway_stack if available
-        if self.api_gateway_stack:
-            proxy_function_name = self.api_gateway_stack.proxy_lambda.function_name
-            rotation_function_name = self.api_gateway_stack.rotation_lambda.function_name
+        """Create Lambda function alarms."""
+        if self.api_gateway_stack is None:
+            return
 
-            # API Gateway Proxy Lambda errors
+        proxy_lambda = self.api_gateway_stack.proxy_lambda
+        if proxy_lambda is not None:
+            proxy_function_name = proxy_lambda.function_name
             proxy_errors_alarm = cloudwatch.Alarm(
                 self,
                 "ProxyLambdaErrorsAlarm",
@@ -1834,7 +1838,6 @@ class GCOMonitoringStack(Stack):
             )
             proxy_errors_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
 
-            # Proxy Lambda throttles
             proxy_throttles_alarm = cloudwatch.Alarm(
                 self,
                 "ProxyLambdaThrottlesAlarm",
@@ -1854,25 +1857,26 @@ class GCOMonitoringStack(Stack):
             )
             proxy_throttles_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
 
-            # Secret rotation Lambda errors
-            rotation_errors_alarm = cloudwatch.Alarm(
-                self,
-                "RotationLambdaErrorsAlarm",
-                alarm_description="Secret rotation Lambda has errors",
-                metric=cloudwatch.Metric(
-                    namespace="AWS/Lambda",
-                    metric_name="Errors",
-                    dimensions_map={"FunctionName": rotation_function_name},
-                    statistic="Sum",
-                    period=Duration.hours(1),
-                ),
-                threshold=1,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-                evaluation_periods=1,
-                datapoints_to_alarm=1,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            rotation_errors_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
+        rotation_errors_alarm = cloudwatch.Alarm(
+            self,
+            "RotationLambdaErrorsAlarm",
+            alarm_description="Secret rotation Lambda has errors",
+            metric=cloudwatch.Metric(
+                namespace="AWS/Lambda",
+                metric_name="Errors",
+                dimensions_map={
+                    "FunctionName": self.api_gateway_stack.rotation_lambda.function_name
+                },
+                statistic="Sum",
+                period=Duration.hours(1),
+            ),
+            threshold=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            evaluation_periods=1,
+            datapoints_to_alarm=1,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        rotation_errors_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
 
     def _create_sqs_alarms(self) -> None:
         """Create SQS queue alarms"""
@@ -2131,7 +2135,7 @@ class GCOMonitoringStack(Stack):
                 composite_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
 
         # API Gateway + Lambda composite alarm (only if api_gateway_stack is available)
-        if self.api_gateway_stack:
+        if self.api_gateway_stack and self.api_gateway_stack.proxy_lambda is not None:
             api_name = self.api_gateway_stack.api.rest_api_name
             proxy_function_name = self.api_gateway_stack.proxy_lambda.function_name
 

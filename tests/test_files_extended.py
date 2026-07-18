@@ -124,6 +124,70 @@ class TestFileSystemClientFSxErrors:
 class TestFileSystemClientDataSync:
     """Tests for DataSync operations."""
 
+    @pytest.mark.parametrize(
+        ("region", "partition"),
+        (("cn-north-1", "aws-cn"), ("us-gov-west-1", "aws-us-gov")),
+    )
+    def test_datasync_arns_use_target_partition(self, region, partition):
+        """EFS and S3 DataSync ARNs follow China and GovCloud metadata."""
+        from cli.files import FileSystemClient, FileSystemInfo
+
+        with (
+            patch("cli.files.get_config", return_value=MagicMock()),
+            patch("cli.files.get_aws_client", return_value=MagicMock()),
+        ):
+            client = FileSystemClient()
+
+        file_system_id = "fs-efs123"
+        file_system = FileSystemInfo(
+            file_system_id=file_system_id,
+            file_system_type="efs",
+            region=region,
+            dns_name="unused",
+        )
+        datasync = MagicMock()
+        datasync.create_location_efs.return_value = {"LocationArn": "source"}
+        datasync.create_location_s3.return_value = {"LocationArn": "destination"}
+        datasync.create_task.return_value = {"TaskArn": "task"}
+        client._session = MagicMock()
+        client._session.client.return_value = datasync
+
+        with (
+            patch.object(client, "get_file_systems", return_value=[file_system]),
+            patch.object(client, "_get_account_id", return_value="123456789012"),
+            patch.object(
+                client,
+                "_get_subnet_arn",
+                return_value=f"arn:{partition}:ec2:{region}:123456789012:subnet/subnet-1",
+            ),
+            patch.object(
+                client,
+                "_get_security_group_arn",
+                return_value=(f"arn:{partition}:ec2:{region}:123456789012:security-group/sg-1"),
+            ),
+            patch.object(
+                client,
+                "_get_datasync_role_arn",
+                return_value=f"arn:{partition}:iam::123456789012:role/datasync",
+            ),
+        ):
+            assert (
+                client.create_datasync_download_task(
+                    file_system_id=file_system_id,
+                    region=region,
+                    source_path="/data",
+                    destination_bucket="gco-downloads",
+                )
+                == "task"
+            )
+
+        assert datasync.create_location_efs.call_args.kwargs["EfsFilesystemArn"] == (
+            f"arn:{partition}:elasticfilesystem:{region}:123456789012:file-system/{file_system_id}"
+        )
+        assert datasync.create_location_s3.call_args.kwargs["S3BucketArn"] == (
+            f"arn:{partition}:s3:::gco-downloads"
+        )
+
     def test_create_datasync_download_task_efs(self):
         """Test creating DataSync task for EFS."""
         from cli.files import FileSystemClient, FileSystemInfo
@@ -341,6 +405,36 @@ class TestFileSystemClientHelperMethods:
 
 class TestFileSystemClientEFSMountTargets:
     """Tests for EFS mount target handling."""
+
+    def test_get_efs_info_uses_partition_url_suffix(self):
+        """China EFS DNS names use botocore's partition URL suffix."""
+        from cli.files import FileSystemClient
+
+        with (
+            patch("cli.files.get_config", return_value=MagicMock()),
+            patch("cli.files.get_aws_client", return_value=MagicMock()),
+        ):
+            client = FileSystemClient()
+
+        efs = MagicMock()
+        efs.describe_file_systems.return_value = {
+            "FileSystems": [
+                {
+                    "FileSystemId": "fs-12345",
+                    "LifeCycleState": "available",
+                    "SizeInBytes": {"Value": 1024},
+                }
+            ]
+        }
+        efs.describe_mount_targets.return_value = {"MountTargets": []}
+        efs.describe_tags.return_value = {"Tags": []}
+        client._session = MagicMock()
+        client._session.client.return_value = efs
+
+        result = client._get_efs_info("fs-12345", "cn-north-1")
+
+        assert result is not None
+        assert result.dns_name == "fs-12345.efs.cn-north-1.amazonaws.com.cn"
 
     def test_get_efs_info_no_mount_targets(self):
         """Test getting EFS info when no mount targets exist."""

@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Analytics stack constructor (KMS, VPC, EFS, Studio, EMR, Cognito)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,50 +206,50 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub2178=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op2180=>operation: self.config = config
-op2182=>operation: self.project_name = config.get_project_name()
-op2184=>operation: self.api_gateway_secret_arn = api_gateway_secret_arn
-op2186=>operation: cfg = config.get_analytics_config()
-op2188=>operation: self.hyperpod_enabled: bool = bool(cfg['hyperpod']['enabled'])
-op2190=>operation: self.canvas_enabled: bool = bool(cfg['canvas']['enabled'])
-op2192=>operation: self.efs_removal: RemovalPolicy = _parse_removal(cfg['efs']['removal_policy'])
-op2194=>operation: self.cognito_removal: RemovalPolicy = _parse_removal(cfg['cognito']['removal_policy'])
-op2196=>operation: self._cognito_domain_prefix_override: str | None = cfg['cognito'].get('domain_prefix')
-sub2198=>subroutine: self._create_kms_key()
-sub2200=>subroutine: self._create_vpc_and_endpoints()
-sub2202=>subroutine: self._create_access_logs_bucket()
-sub2204=>subroutine: self._create_studio_only_bucket()
-sub2206=>subroutine: self._create_studio_efs()
-sub2208=>subroutine: self._create_execution_role_and_grants()
-sub2210=>subroutine: self._grant_sagemaker_role_on_cluster_shared_bucket()
-sub2212=>subroutine: self._create_studio_domain()
-sub2214=>subroutine: self._create_emr_app()
-sub2216=>subroutine: self._create_cognito_pool()
-sub2218=>subroutine: self._create_presigned_url_lambda()
-sub2220=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub2395=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op2397=>operation: self.config = config
+op2399=>operation: self.project_name = config.get_project_name()
+op2401=>operation: self.api_gateway_secret_arn = api_gateway_secret_arn
+op2403=>operation: cfg = config.get_analytics_config()
+op2405=>operation: self.hyperpod_enabled: bool = bool(cfg['hyperpod']['enabled'])
+op2407=>operation: self.canvas_enabled: bool = bool(cfg['canvas']['enabled'])
+op2409=>operation: self.efs_removal: RemovalPolicy = _parse_removal(cfg['efs']['removal_policy'])
+op2411=>operation: self.cognito_removal: RemovalPolicy = _parse_removal(cfg['cognito']['removal_policy'])
+op2413=>operation: self._cognito_domain_prefix_override: str | None = cfg['cognito'].get('domain_prefix')
+sub2415=>subroutine: self._create_kms_key()
+sub2417=>subroutine: self._create_vpc_and_endpoints()
+sub2419=>subroutine: self._create_access_logs_bucket()
+sub2421=>subroutine: self._create_studio_only_bucket()
+sub2423=>subroutine: self._create_studio_efs()
+sub2425=>subroutine: self._create_execution_role_and_grants()
+sub2427=>subroutine: self._grant_sagemaker_role_on_cluster_shared_bucket()
+sub2429=>subroutine: self._create_studio_domain()
+sub2431=>subroutine: self._create_emr_app()
+sub2433=>subroutine: self._create_cognito_pool()
+sub2435=>subroutine: self._create_presigned_url_lambda()
+sub2437=>subroutine: self._apply_nag_suppressions()
 
-sub2178->op2180
-op2180->op2182
-op2182->op2184
-op2184->op2186
-op2186->op2188
-op2188->op2190
-op2190->op2192
-op2192->op2194
-op2194->op2196
-op2196->sub2198
-sub2198->sub2200
-sub2200->sub2202
-sub2202->sub2204
-sub2204->sub2206
-sub2206->sub2208
-sub2208->sub2210
-sub2210->sub2212
-sub2212->sub2214
-sub2214->sub2216
-sub2216->sub2218
-sub2218->sub2220
+sub2395->op2397
+op2397->op2399
+op2399->op2401
+op2401->op2403
+op2403->op2405
+op2405->op2407
+op2407->op2409
+op2409->op2411
+op2411->op2413
+op2413->sub2415
+sub2415->sub2417
+sub2417->sub2419
+sub2419->sub2421
+sub2421->sub2423
+sub2423->sub2425
+sub2425->sub2427
+sub2427->sub2429
+sub2429->sub2431
+sub2431->sub2433
+sub2433->sub2435
+sub2435->sub2437
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -258,6 +259,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

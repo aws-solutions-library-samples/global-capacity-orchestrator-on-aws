@@ -11,6 +11,7 @@ field so only deployment_regions is exercised.
 import pytest
 
 from gco.config.config_loader import ConfigLoader, ConfigValidationError
+from gco.stacks.constants import cloudformation_region_partitions
 
 
 class MockNode:
@@ -82,7 +83,7 @@ class TestDeploymentRegionsRequired:
         app = MockApp(base_context)
         with pytest.raises(
             ConfigValidationError,
-            match="Required configuration field 'deployment_regions' is missing",
+            match="Required configuration field 'deployment_regions' must be a non-empty object",
         ):
             ConfigLoader(app)
 
@@ -164,17 +165,19 @@ class TestDeploymentRegionsGetters:
 class TestDeploymentRegionsValidation:
     """Tests for deployment_regions validation."""
 
-    def test_invalid_global_region(self, base_context):
-        """Test that invalid global region is allowed (not validated separately)."""
-        # Note: Global region is not validated against VALID_REGIONS
-        # Only regional list is validated
+    @pytest.mark.parametrize("field", ["global", "api_gateway", "monitoring"])
+    def test_invalid_scalar_region_raises_error(self, base_context, field):
+        """Every stack-placement Region uses the SDK CloudFormation contract."""
         base_context["deployment_regions"] = {
-            "global": "invalid-region",
+            field: "invalid-region",
             "regional": ["us-east-1"],
         }
         app = MockApp(base_context)
-        config = ConfigLoader(app)
-        assert config.get_global_region() == "invalid-region"
+        with pytest.raises(
+            ConfigValidationError,
+            match=rf"Invalid {field} region 'invalid-region'",
+        ):
+            ConfigLoader(app)
 
     def test_invalid_regional_region_raises_error(self, base_context):
         """Test that invalid regional region raises error."""
@@ -194,26 +197,41 @@ class TestDeploymentRegionsValidation:
         with pytest.raises(ConfigValidationError, match="Duplicate regions"):
             ConfigLoader(app)
 
-    def test_too_many_regional_regions_raises_error(self, base_context):
-        """Test that more than 10 regional regions raises error."""
+    def test_more_than_ten_regional_regions_are_supported(self, base_context):
+        """SDK-known regional deployments are not subject to a count ceiling."""
+        regions = sorted(
+            region
+            for region, partition in cloudformation_region_partitions().items()
+            if partition == "aws"
+        )[:11]
+        assert len(regions) == 11
+        base_context["deployment_regions"] = {"regional": regions}
+        app = MockApp(base_context)
+        config = ConfigLoader(app)
+        assert config.get_regions() == regions
+
+    def test_mixed_scalar_and_regional_partitions_raise_error(self, base_context):
+        """Scalar and workload Regions must share one AWS partition."""
         base_context["deployment_regions"] = {
-            "regional": [
-                "us-east-1",
-                "us-east-2",
-                "us-west-1",
-                "us-west-2",
-                "eu-west-1",
-                "eu-west-2",
-                "eu-west-3",
-                "eu-central-1",
-                "ap-southeast-1",
-                "ap-southeast-2",
-                "ap-northeast-1",
-            ],
+            "global": "cn-north-1",
+            "api_gateway": "us-east-1",
+            "monitoring": "us-west-2",
+            "regional": ["us-east-2"],
         }
         app = MockApp(base_context)
-        with pytest.raises(ConfigValidationError, match="Maximum of 10 regions"):
+        with pytest.raises(ConfigValidationError, match="single AWS partition"):
             ConfigLoader(app)
+
+    def test_partition_accessor_reports_commercial_partition(self, base_context):
+        base_context["deployment_regions"] = {
+            "global": "us-east-2",
+            "api_gateway": "us-east-1",
+            "monitoring": "us-west-2",
+            "regional": ["eu-west-1"],
+        }
+        config = ConfigLoader(MockApp(base_context))
+        assert config.get_deployment_partition() == "aws"
+        assert config.supports_global_accelerator() is True
 
     def test_empty_regional_list_raises_error(self, base_context):
         """Test that empty regional list raises error."""

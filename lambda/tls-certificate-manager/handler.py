@@ -27,11 +27,13 @@ from typing import Any
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/tls-certificate-manager/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/tls-certificate-manager/handler.lambda_handler.png``)
@@ -43,7 +45,17 @@ LOGGER = logging.getLogger(__name__)
 LOGGER.setLevel(logging.INFO)
 
 _SCHEMA_VERSION = 1
-_REGION_RE = re.compile(r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$")
+_REGION_RE = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
+_MANAGED_BY_TAG_VALUE = "gco-backend-tls-manager"
+_CERTIFICATE_STATUSES = (
+    "PENDING_VALIDATION",
+    "ISSUED",
+    "INACTIVE",
+    "EXPIRED",
+    "VALIDATION_TIMED_OUT",
+    "REVOKED",
+    "FAILED",
+)
 _DNS_RE = re.compile(
     r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
@@ -199,7 +211,7 @@ def _parse_iso(value: Any, field: str) -> datetime:
 
 def _certificate_not_after(certificate: x509.Certificate) -> datetime:
     value = getattr(certificate, "not_valid_after_utc", None)
-    if value is not None:
+    if isinstance(value, datetime):
         return value
     return certificate.not_valid_after.replace(tzinfo=UTC)
 
@@ -331,6 +343,9 @@ def _load_root_state() -> dict[str, Any] | None:
     if pending is not None:
         _validate_root_record(pending, "pending")
         _parse_iso(pending.get("activate_after"), "pending.activate_after")
+        published_at = pending.get("trust_bundle_published_at")
+        if published_at is not None:
+            _parse_iso(published_at, "pending.trust_bundle_published_at")
     previous = state.get("previous", [])
     if not isinstance(previous, list):
         raise ValueError("Invalid root state: previous must be a list")
@@ -339,6 +354,16 @@ def _load_root_state() -> dict[str, Any] | None:
             raise ValueError(f"Invalid root state: previous[{index}]")
         x509.load_pem_x509_certificate(item["certificate_pem"].encode("ascii"))
         _parse_iso(item.get("retire_after"), f"previous[{index}].retire_after")
+    retired_regions = state.get("retired_regions", [])
+    if (
+        not isinstance(retired_regions, list)
+        or any(
+            not isinstance(region, str) or _REGION_RE.fullmatch(region) is None
+            for region in retired_regions
+        )
+        or len(retired_regions) != len(set(retired_regions))
+    ):
+        raise ValueError("Invalid root state: retired_regions")
     return state
 
 
@@ -376,7 +401,13 @@ def _ensure_root(config: ManagerConfig) -> tuple[dict[str, Any], bool]:
             "current": _generate_root(config, config.root_generation),
             "pending": None,
             "previous": [],
+            "retired_regions": [],
         }
+        changed = True
+    elif "retired_regions" not in state:
+        # Additive migration for root state written before regional retirement
+        # tracking existed. The schema remains compatible with old secrets.
+        state["retired_regions"] = []
         changed = True
 
     _, current_certificate = _validate_root_record(state["current"], "current")
@@ -405,6 +436,7 @@ def _ensure_root(config: ManagerConfig) -> tuple[dict[str, Any], bool]:
     pending = state.get("pending")
     if (
         pending is not None
+        and pending.get("trust_bundle_published_at") is not None
         and _parse_iso(pending["activate_after"], "pending.activate_after") <= now
     ):
         previous = list(state.get("previous", []))
@@ -418,6 +450,7 @@ def _ensure_root(config: ManagerConfig) -> tuple[dict[str, Any], bool]:
         )
         promoted = dict(pending)
         promoted.pop("activate_after", None)
+        promoted.pop("trust_bundle_published_at", None)
         state["current"] = promoted
         state["pending"] = None
         state["previous"] = previous
@@ -437,6 +470,25 @@ def _ensure_root(config: ManagerConfig) -> tuple[dict[str, Any], bool]:
     if changed:
         _save_root_state(state)
     _publish_trust_bundle(config, state)
+
+    # Activation delay starts only after SSM accepted a bundle containing the
+    # pending root. A prolonged SSM outage therefore cannot consume the safety
+    # window and promote a root that warm proxy caches never had a chance to
+    # observe. Missing markers on legacy pending records are repaired safely.
+    pending = state.get("pending")
+    if pending is not None and pending.get("trust_bundle_published_at") is None:
+        published_at = _now()
+        pending["trust_bundle_published_at"] = _iso(published_at)
+        pending["activate_after"] = _iso(
+            published_at + timedelta(hours=config.root_activation_delay_hours)
+        )
+        _save_root_state(state)
+        changed = True
+        LOGGER.info(
+            "Confirmed trust publication for pending root generation %d; activation begins %s",
+            pending["generation"],
+            pending["activate_after"],
+        )
     return state, changed
 
 
@@ -504,10 +556,220 @@ def _generate_leaf(
     return certificate_pem, private_key_pem, leaf_expiry
 
 
-def _registered_certificate(
+def _validated_certificate_arn(region: str, value: Any) -> str:
+    """Validate one project-registry value before it authorizes mutation."""
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid ACM certificate ARN stored for {region}")
+    certificate_arn = value.strip()
+    expected_prefix = (
+        f"arn:{os.environ.get('AWS_PARTITION', 'aws')}:acm:{region}:"
+        f"{os.environ.get('AWS_ACCOUNT_ID', '')}:certificate/"
+    )
+    certificate_id = certificate_arn.removeprefix(expected_prefix)
+    if (
+        not certificate_arn.startswith(expected_prefix)
+        or re.fullmatch(r"[A-Za-z0-9-]+", certificate_id) is None
+    ):
+        raise ValueError(f"Invalid ACM certificate ARN stored for {region}")
+    return certificate_arn
+
+
+def _write_certificate_registry(
+    config: ManagerConfig,
+    region: str,
+    certificate_arn: str,
+) -> None:
+    """Persist the canonical regional certificate association in SSM."""
+    boto3.client("ssm", region_name=config.registry_region).put_parameter(
+        Name=config.certificate_parameter_name(region),
+        Value=certificate_arn,
+        Type="String",
+        Overwrite=True,
+        Description=f"Regional ACM certificate ARN for GCO backend TLS in {region}",
+    )
+
+
+def _certificate_tags(acm_client: Any, certificate_arn: str) -> dict[str, str]:
+    """Return a strict tag map for one ACM certificate."""
+    response = acm_client.list_tags_for_certificate(CertificateArn=certificate_arn)
+    raw_tags = response.get("Tags", [])
+    if not isinstance(raw_tags, list):
+        raise ValueError("ACM returned malformed certificate tags")
+
+    tags: dict[str, str] = {}
+    for raw_tag in raw_tags:
+        if not isinstance(raw_tag, dict):
+            raise ValueError("ACM returned a malformed certificate tag")
+        key = raw_tag.get("Key")
+        value = raw_tag.get("Value")
+        if not isinstance(key, str) or not isinstance(value, str) or key in tags:
+            raise ValueError("ACM returned a malformed certificate tag")
+        tags[key] = value
+    return tags
+
+
+def _certificate_ownership_status(config: ManagerConfig, tags: dict[str, str]) -> str:
+    """Classify ownership tags as ``owned``, ``legacy``, or ``conflicting``."""
+    expected = {
+        "Project": config.project_name,
+        "ManagedBy": _MANAGED_BY_TAG_VALUE,
+    }
+    if any(key in tags and tags[key] != value for key, value in expected.items()):
+        return "conflicting"
+    if all(tags.get(key) == value for key, value in expected.items()):
+        return "owned"
+    return "legacy"
+
+
+def _require_certificate_ownership(
+    config: ManagerConfig,
+    region: str,
+    certificate_arn: str,
+    acm_client: Any,
+) -> None:
+    """Fail closed unless an ACM certificate has both GCO ownership tags."""
+    status = _certificate_ownership_status(
+        config,
+        _certificate_tags(acm_client, certificate_arn),
+    )
+    if status != "owned":
+        raise PermissionError(
+            f"Registered ACM certificate for {region} has {status} ownership tags"
+        )
+
+
+def _managed_root_certificates(state: dict[str, Any]) -> tuple[x509.Certificate, ...]:
+    """Load every current, pending, and previous root authorized by state."""
+    roots: list[x509.Certificate] = []
+    _, current = _validate_root_record(state.get("current"), "current")
+    roots.append(current)
+
+    pending = state.get("pending")
+    if pending is not None:
+        _, pending_certificate = _validate_root_record(pending, "pending")
+        roots.append(pending_certificate)
+
+    for index, previous in enumerate(state.get("previous", [])):
+        if not isinstance(previous, dict) or not isinstance(previous.get("certificate_pem"), str):
+            raise ValueError(f"Invalid root state: previous[{index}]")
+        try:
+            roots.append(
+                x509.load_pem_x509_certificate(previous["certificate_pem"].encode("ascii"))
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid root state: previous[{index}] certificate") from exc
+    return tuple(roots)
+
+
+def _certificate_has_server_name(
+    certificate: x509.Certificate,
+    server_name: str,
+) -> bool:
+    try:
+        names = certificate.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName
+        ).value.get_values_for_type(x509.DNSName)
+    except x509.ExtensionNotFound:
+        return False
+    expected = server_name.casefold()
+    return any(name.casefold() == expected for name in names)
+
+
+def _certificate_signed_by_root(
+    certificate: x509.Certificate,
+    root_certificate: x509.Certificate,
+) -> bool:
+    if certificate.issuer != root_certificate.subject:
+        return False
+    root_public_key = root_certificate.public_key()
+    signature_algorithm = certificate.signature_hash_algorithm
+    if not isinstance(root_public_key, ec.EllipticCurvePublicKey) or signature_algorithm is None:
+        return False
+    try:
+        root_public_key.verify(
+            certificate.signature,
+            certificate.tbs_certificate_bytes,
+            ec.ECDSA(signature_algorithm),
+        )
+    except InvalidSignature, UnsupportedAlgorithm, TypeError, ValueError:
+        return False
+    return True
+
+
+def _recover_unregistered_certificate(
     config: ManagerConfig,
     region: str,
 ) -> tuple[str | None, x509.Certificate | None]:
+    """Adopt the unique tagged ACM leaf left by a failed SSM registration.
+
+    SSM remains the canonical registry. Tagged ACM inventory is the durable
+    recovery channel for the narrow case where both that write and the
+    compensating delete fail. Ambiguous inventory fails closed rather than
+    importing another certificate.
+    """
+    acm_client = boto3.client("acm", region_name=region)
+    managed: list[tuple[str, x509.Certificate]] = []
+    paginator = acm_client.get_paginator("list_certificates")
+    for page in paginator.paginate(
+        CertificateStatuses=list(_CERTIFICATE_STATUSES),
+        Includes={"keyTypes": ["EC_prime256v1"]},
+    ):
+        for summary in page.get("CertificateSummaryList", []):
+            if summary.get("Type") not in (None, "IMPORTED"):
+                continue
+            certificate_arn = _validated_certificate_arn(
+                region,
+                summary.get("CertificateArn"),
+            )
+            tags = _certificate_tags(acm_client, certificate_arn)
+            if _certificate_ownership_status(config, tags) != "owned":
+                continue
+            detail = acm_client.describe_certificate(CertificateArn=certificate_arn)
+            if detail.get("Certificate", {}).get("Type") != "IMPORTED":
+                raise RuntimeError(
+                    f"Managed ACM certificate inventory for {region} contains a non-imported leaf"
+                )
+            certificate_response = acm_client.get_certificate(CertificateArn=certificate_arn)
+            certificate_pem = certificate_response.get("Certificate")
+            if not isinstance(certificate_pem, str):
+                raise ValueError(f"ACM did not return a managed imported certificate for {region}")
+            managed.append(
+                (
+                    certificate_arn,
+                    x509.load_pem_x509_certificate(certificate_pem.encode("ascii")),
+                )
+            )
+
+    if len(managed) > 1:
+        raise RuntimeError(
+            f"Multiple unregistered managed ACM certificates were found for {region}"
+        )
+    if not managed:
+        return None, None
+
+    certificate_arn, certificate = managed[0]
+    _write_certificate_registry(config, region, certificate_arn)
+    LOGGER.warning(
+        "Recovered the tagged backend leaf certificate registry association in %s",
+        region,
+    )
+    return certificate_arn, certificate
+
+
+def _registered_certificate(
+    config: ManagerConfig,
+    region: str,
+    *,
+    migration_roots: tuple[x509.Certificate, ...] | None = None,
+) -> tuple[str | None, x509.Certificate | None]:
+    """Load a registered leaf, optionally adopting a proven legacy leaf.
+
+    Strict callers, including every cleanup path, omit ``migration_roots`` and
+    therefore reject missing or conflicting ownership tags. Reconciliation may
+    pass the roots from its authenticated secret state; only then can an
+    untagged legacy imported leaf be tagged after its SAN and signature prove
+    that it belongs to this deployment.
+    """
     parameter_name = config.certificate_parameter_name(region)
     ssm_client = boto3.client("ssm", region_name=config.registry_region)
     try:
@@ -516,25 +778,58 @@ def _registered_certificate(
         if exc.response.get("Error", {}).get("Code") == "ParameterNotFound":
             return None, None
         raise
-    certificate_arn = str(response.get("Parameter", {}).get("Value", "")).strip()
-    expected_prefix = (
-        f"arn:{os.environ.get('AWS_PARTITION', 'aws')}:acm:{region}:"
-        f"{os.environ.get('AWS_ACCOUNT_ID', '')}:certificate/"
+    certificate_arn = _validated_certificate_arn(
+        region,
+        response.get("Parameter", {}).get("Value"),
     )
-    if not certificate_arn.startswith(expected_prefix):
-        raise ValueError(f"Invalid ACM certificate ARN stored for {region}")
 
     acm_client = boto3.client("acm", region_name=region)
-    try:
-        response = acm_client.get_certificate(CertificateArn=certificate_arn)
-    except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
-            return None, None
-        raise
+    ownership = _certificate_ownership_status(
+        config,
+        _certificate_tags(acm_client, certificate_arn),
+    )
+    if ownership == "conflicting":
+        raise PermissionError(
+            f"Registered ACM certificate for {region} has conflicting ownership tags"
+        )
+    if ownership == "legacy" and migration_roots is None:
+        raise PermissionError(f"Registered ACM certificate for {region} is missing ownership tags")
+
+    if ownership == "legacy":
+        detail = acm_client.describe_certificate(CertificateArn=certificate_arn)
+        certificate_detail = detail.get("Certificate")
+        if not isinstance(certificate_detail, dict) or certificate_detail.get("Type") != "IMPORTED":
+            raise PermissionError(
+                f"Legacy ACM certificate for {region} is not an imported certificate"
+            )
+
+    response = acm_client.get_certificate(CertificateArn=certificate_arn)
     certificate_pem = response.get("Certificate")
     if not isinstance(certificate_pem, str):
         raise ValueError(f"ACM did not return the imported certificate for {region}")
-    return certificate_arn, x509.load_pem_x509_certificate(certificate_pem.encode("ascii"))
+    certificate = x509.load_pem_x509_certificate(certificate_pem.encode("ascii"))
+
+    if ownership == "legacy":
+        assert migration_roots is not None
+        if not _certificate_has_server_name(certificate, config.server_name) or not any(
+            _certificate_signed_by_root(certificate, root) for root in migration_roots
+        ):
+            raise PermissionError(
+                f"Legacy ACM certificate for {region} is not a managed backend leaf"
+            )
+        acm_client.add_tags_to_certificate(
+            CertificateArn=certificate_arn,
+            Tags=[
+                {"Key": "Project", "Value": config.project_name},
+                {"Key": "ManagedBy", "Value": _MANAGED_BY_TAG_VALUE},
+            ],
+        )
+        LOGGER.warning(
+            "Migrated cryptographically verified legacy backend leaf ownership in %s",
+            region,
+        )
+
+    return certificate_arn, certificate
 
 
 def _leaf_needs_rotation(
@@ -548,15 +843,10 @@ def _leaf_needs_rotation(
         days=config.leaf_rotate_before_days
     ):
         return True
-    if certificate.issuer != root_certificate.subject:
-        return True
-    try:
-        names = certificate.extensions.get_extension_for_class(
-            x509.SubjectAlternativeName
-        ).value.get_values_for_type(x509.DNSName)
-    except x509.ExtensionNotFound:
-        return True
-    return config.server_name not in names
+    return not _certificate_signed_by_root(
+        certificate,
+        root_certificate,
+    ) or not _certificate_has_server_name(certificate, config.server_name)
 
 
 def _ensure_certificate(
@@ -565,9 +855,19 @@ def _ensure_certificate(
     region: str,
 ) -> tuple[str, datetime, bool]:
     _, root_certificate = _validate_root_record(state["current"], "current")
-    certificate_arn, existing_certificate = _registered_certificate(config, region)
+    certificate_arn, existing_certificate = _registered_certificate(
+        config,
+        region,
+        migration_roots=_managed_root_certificates(state),
+    )
+    if certificate_arn is None:
+        certificate_arn, existing_certificate = _recover_unregistered_certificate(
+            config,
+            region,
+        )
     if not _leaf_needs_rotation(config, existing_certificate, root_certificate):
         assert certificate_arn is not None
+        assert existing_certificate is not None
         return certificate_arn, _certificate_not_after(existing_certificate), False
 
     certificate_pem, private_key_pem, leaf_expiry = _generate_leaf(config, state["current"])
@@ -581,17 +881,26 @@ def _ensure_certificate(
     else:
         import_args["Tags"] = [
             {"Key": "Project", "Value": config.project_name},
-            {"Key": "ManagedBy", "Value": "gco-backend-tls-manager"},
+            {"Key": "ManagedBy", "Value": _MANAGED_BY_TAG_VALUE},
         ]
     response = acm_client.import_certificate(**import_args)
     imported_arn = str(response["CertificateArn"])
-    boto3.client("ssm", region_name=config.registry_region).put_parameter(
-        Name=config.certificate_parameter_name(region),
-        Value=imported_arn,
-        Type="String",
-        Overwrite=True,
-        Description=f"Regional ACM certificate ARN for GCO backend TLS in {region}",
-    )
+    try:
+        _write_certificate_registry(config, region, imported_arn)
+    except Exception:  # noqa: BLE001 - compensate every failed registry write
+        # A first import has no stable ARN until the registry write succeeds.
+        # Delete only that newly-created certificate so a retry cannot leak an
+        # undiscoverable managed certificate or create another orphan. A
+        # reimport of an existing ARN must never be deleted on registry failure.
+        if certificate_arn is None:
+            try:
+                acm_client.delete_certificate(CertificateArn=imported_arn)
+            except Exception:  # noqa: BLE001 - retain the original SSM failure
+                LOGGER.exception(
+                    "Could not remove unregistered backend leaf certificate in %s",
+                    region,
+                )
+        raise
     LOGGER.info(
         "%s backend leaf certificate in %s; ACM ARN association remains stable",
         "Reimported" if certificate_arn else "Imported",
@@ -608,11 +917,17 @@ def _publish_expiry_metrics(
     now = _now()
     metric_data = [
         {
+            "MetricName": "ReconciliationSuccess",
+            "Dimensions": [{"Name": "Project", "Value": config.project_name}],
+            "Value": 1.0,
+            "Unit": "Count",
+        },
+        {
             "MetricName": "RootCertificateDaysToExpiry",
             "Dimensions": [{"Name": "Project", "Value": config.project_name}],
             "Value": max(0.0, (root_expiry - now).total_seconds() / 86400),
             "Unit": "Count",
-        }
+        },
     ]
     metric_data.extend(
         {
@@ -635,7 +950,10 @@ def _publish_expiry_metrics(
         LOGGER.warning("Could not publish backend TLS expiry metrics: %s", exc)
 
 
-def _reconcile(config: ManagerConfig) -> dict[str, Any]:
+def _reconcile(
+    config: ManagerConfig,
+    newly_retired: tuple[str, ...] = (),
+) -> dict[str, Any]:
     state, root_changed = _ensure_root(config)
     expiries: dict[str, datetime] = {}
     rotated_regions: list[str] = []
@@ -644,13 +962,50 @@ def _reconcile(config: ManagerConfig) -> dict[str, Any]:
         expiries[region] = expiry
         if rotated:
             rotated_regions.append(region)
+
+    cleaned_retired, pending_retired = _retry_retired_region_cleanup(
+        config,
+        state,
+        newly_retired,
+    )
     _, root_certificate = _validate_root_record(state["current"], "current")
     _publish_expiry_metrics(config, expiries, _certificate_not_after(root_certificate))
     return {
         "RootChanged": root_changed,
         "RotatedRegions": rotated_regions,
         "ManagedRegionCount": len(config.regions),
+        "CleanedRetiredRegions": cleaned_retired,
+        "PendingRetiredRegions": pending_retired,
     }
+
+
+def _event_regions(properties: Any, field: str) -> tuple[str, ...]:
+    """Return a strict custom-resource region list without silent coercion."""
+    if not isinstance(properties, dict):
+        raise ValueError(f"{field} must be an object")
+    raw_regions = properties.get("Regions")
+    if not isinstance(raw_regions, list) or not raw_regions:
+        raise ValueError(f"{field}.Regions must be a non-empty list")
+    regions: list[str] = []
+    for value in raw_regions:
+        if not isinstance(value, str):
+            raise ValueError(f"{field}.Regions contains an invalid region")
+        region = value.strip()
+        if _REGION_RE.fullmatch(region) is None:
+            raise ValueError(f"{field}.Regions contains an invalid region")
+        if region in regions:
+            raise ValueError(f"{field}.Regions contains a duplicate region")
+        regions.append(region)
+    return tuple(regions)
+
+
+def _retired_regions_from_update(
+    event: dict[str, Any],
+    config: ManagerConfig,
+) -> tuple[str, ...]:
+    old_regions = _event_regions(event.get("OldResourceProperties"), "OldResourceProperties")
+    current_regions = set(config.regions)
+    return tuple(region for region in old_regions if region not in current_regions)
 
 
 def _delete_parameter(client: Any, name: str) -> None:
@@ -661,21 +1016,157 @@ def _delete_parameter(client: Any, name: str) -> None:
             raise
 
 
-def _cleanup(config: ManagerConfig) -> None:
-    ssm_client = boto3.client("ssm", region_name=config.registry_region)
-    for region in config.regions:
-        certificate_arn, _ = _registered_certificate(config, region)
-        if certificate_arn is not None:
-            try:
-                boto3.client("acm", region_name=region).delete_certificate(
-                    CertificateArn=certificate_arn
+def _certificate_registry_regions(config: ManagerConfig) -> frozenset[str]:
+    """Discover and validate every managed regional certificate parameter.
+
+    Inventory and ownership validation finish before cleanup mutates anything.
+    Names must be exact direct children of the project prefix, values must be
+    account/partition/Region-scoped ACM ARNs, and every referenced certificate
+    must already carry both expected ownership tags. Cleanup never performs
+    legacy tag migration.
+    """
+    client = boto3.client("ssm", region_name=config.registry_region)
+    certificates: dict[str, str] = {}
+    seen_tokens: set[str] = set()
+    next_token: str | None = None
+
+    while True:
+        request: dict[str, Any] = {
+            "Path": config.certificate_parameter_prefix,
+            "Recursive": True,
+            "WithDecryption": False,
+        }
+        if next_token is not None:
+            request["NextToken"] = next_token
+        response = client.get_parameters_by_path(**request)
+        parameters = response.get("Parameters")
+        if not isinstance(parameters, list):
+            raise ValueError("Certificate registry inventory returned malformed parameters")
+
+        for parameter in parameters:
+            if not isinstance(parameter, dict):
+                raise ValueError("Certificate registry inventory contains a malformed entry")
+            name = parameter.get("Name")
+            if not isinstance(name, str) or not name.startswith(
+                config.certificate_parameter_prefix
+            ):
+                raise ValueError("Certificate registry parameter is outside the project prefix")
+            region = name.removeprefix(config.certificate_parameter_prefix)
+            if _REGION_RE.fullmatch(region) is None or name != config.certificate_parameter_name(
+                region
+            ):
+                raise ValueError(f"Malformed certificate registry parameter name: {name!r}")
+            if region in certificates:
+                raise ValueError(f"Duplicate certificate registry parameter for {region}")
+            certificates[region] = _validated_certificate_arn(
+                region,
+                parameter.get("Value"),
+            )
+
+        token = response.get("NextToken")
+        if token is None:
+            break
+        if not isinstance(token, str) or not token or token in seen_tokens:
+            raise ValueError("Certificate registry inventory returned an invalid pagination token")
+        seen_tokens.add(token)
+        next_token = token
+
+    for region, certificate_arn in certificates.items():
+        _require_certificate_ownership(
+            config,
+            region,
+            certificate_arn,
+            boto3.client("acm", region_name=region),
+        )
+    return frozenset(certificates)
+
+
+def _delete_regional_certificate(
+    config: ManagerConfig,
+    region: str,
+    *,
+    defer_in_use: bool,
+) -> bool:
+    """Delete one managed certificate and its ARN parameter when safe.
+
+    ACM refuses deletion while an ALB listener still uses the certificate. An
+    Update or scheduled reconciliation preserves the parameter and returns
+    ``False`` so durable retired-region state can retry later. Delete events
+    fail instead: once the custom resource disappears no scheduler remains to
+    finish cleanup.
+    """
+    certificate_arn, _ = _registered_certificate(config, region)
+    if certificate_arn is None:
+        # A failed first import can leave a tagged ACM certificate without its
+        # canonical SSM association when both registration and compensation
+        # fail. Recover that association before deletion so CloudFormation
+        # cleanup cannot strand the durable orphan that reconciliation knows
+        # how to adopt.
+        certificate_arn, _ = _recover_unregistered_certificate(config, region)
+    if certificate_arn is not None:
+        try:
+            boto3.client("acm", region_name=region).delete_certificate(
+                CertificateArn=certificate_arn
+            )
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code")
+            if code == "ResourceInUseException" and defer_in_use:
+                LOGGER.info(
+                    "Backend certificate in retired region %s is still attached; "
+                    "retaining its ARN for scheduled cleanup",
+                    region,
                 )
-            except ClientError as exc:
-                if exc.response.get("Error", {}).get("Code") != "ResourceNotFoundException":
-                    raise
-        _delete_parameter(ssm_client, config.certificate_parameter_name(region))
+                return False
+            if code != "ResourceNotFoundException":
+                raise
+    _delete_parameter(
+        boto3.client("ssm", region_name=config.registry_region),
+        config.certificate_parameter_name(region),
+    )
+    return True
+
+
+def _retry_retired_region_cleanup(
+    config: ManagerConfig,
+    state: dict[str, Any],
+    newly_retired: tuple[str, ...],
+) -> tuple[list[str], list[str]]:
+    """Persist, retry, and remove retired regions only after complete cleanup."""
+    active_regions = set(config.regions)
+    pending = sorted((set(state.get("retired_regions", [])) | set(newly_retired)) - active_regions)
+    if pending != state.get("retired_regions", []):
+        state["retired_regions"] = pending
+        _save_root_state(state)
+
+    remaining: list[str] = []
+    cleaned: list[str] = []
+    for region in pending:
+        if _delete_regional_certificate(config, region, defer_in_use=True):
+            cleaned.append(region)
+        else:
+            remaining.append(region)
+    if remaining != pending:
+        state["retired_regions"] = remaining
+        _save_root_state(state)
+    return cleaned, remaining
+
+
+def _cleanup(config: ManagerConfig) -> None:
+    state = _load_root_state()
+    registry_regions = _certificate_registry_regions(config)
+    regions = set(config.regions) | set(registry_regions)
+    if state is not None:
+        regions.update(state.get("retired_regions", []))
+
+    for region in sorted(regions):
+        _delete_regional_certificate(config, region, defer_in_use=False)
+
+    ssm_client = boto3.client("ssm", region_name=config.registry_region)
     _delete_parameter(ssm_client, config.root_ca_parameter_name)
-    LOGGER.info("Removed regional ACM certificates and public backend TLS parameters")
+    if state is not None and state.get("retired_regions"):
+        state["retired_regions"] = []
+        _save_root_state(state)
+    LOGGER.info("Removed current and retired ACM certificates and public backend TLS parameters")
 
 
 def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
@@ -695,7 +1186,8 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     if request_type not in {"Create", "Update"}:
         raise ValueError(f"Unsupported certificate manager event: {request_type!r}")
 
-    result = _reconcile(config)
+    newly_retired = _retired_regions_from_update(event, config) if request_type == "Update" else ()
+    result = _reconcile(config, newly_retired)
     return {
         "PhysicalResourceId": physical_id,
         "Data": result,

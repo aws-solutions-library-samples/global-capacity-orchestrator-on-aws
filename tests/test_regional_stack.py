@@ -273,6 +273,26 @@ class TestGlobalStackSynthesis:
         template = assertions.Template.from_stack(stack)
         template.resource_count_is("AWS::GlobalAccelerator::Accelerator", 1)
 
+    def test_noncommercial_partition_omits_global_accelerator(self):
+        """Partitions without GA retain shared resources without invalid GA types."""
+        from gco.stacks.global_stack import GCOGlobalStack
+
+        class NonCommercialConfig(MockConfigLoader):
+            def supports_global_accelerator(self):
+                return False
+
+        app = cdk.App()
+        stack = GCOGlobalStack(
+            app,
+            "test-synth-without-accelerator",
+            config=NonCommercialConfig(app),
+        )
+        template = assertions.Template.from_stack(stack)
+        template.resource_count_is("AWS::GlobalAccelerator::Accelerator", 0)
+        template.resource_count_is("AWS::GlobalAccelerator::Listener", 0)
+        template.resource_count_is("AWS::GlobalAccelerator::EndpointGroup", 0)
+        assert stack.get_accelerator_dns_name() is None
+
     def test_global_stack_creates_listener(self):
         """Test that GlobalStack creates a listener."""
         from gco.stacks.global_stack import GCOGlobalStack
@@ -607,8 +627,8 @@ class TestRegionalStackSynthesis:
             service_token=("arn:aws:lambda:us-east-1:123456789012:function:mock-teardown"),
         )
 
-    def test_regional_stack_creates_vpc(self):
-        """Test that RegionalStack creates a VPC."""
+    def test_regional_stack_creates_vpc_and_metrics_server_addon(self):
+        """Regional stacks create their VPC and the HPA metrics provider."""
 
         from gco.stacks.regional_stack import GCORegionalStack
 
@@ -639,6 +659,10 @@ class TestRegionalStackSynthesis:
 
             template = assertions.Template.from_stack(stack)
             template.resource_count_is("AWS::EC2::VPC", 1)
+            template.has_resource_properties(
+                "AWS::EKS::Addon",
+                {"AddonName": "metrics-server"},
+            )
 
     def test_regional_stack_ga_deregistration_teardown_guard(self):
         """Issue #130: a delete-time custom resource must deregister the ALB
@@ -1952,8 +1976,8 @@ class TestGlobalStackDynamoDBTables:
             },
         )
 
-    def test_jobs_table_has_priority_and_lease_indexes(self):
-        """Worker claims and lease recovery use their exact ordered queue GSIs."""
+    def test_jobs_table_stages_one_new_worker_index(self):
+        """The unified work GSI is the only index added to deployed tables."""
         from gco.stacks.global_stack import GCOGlobalStack
 
         app = cdk.App()
@@ -1972,16 +1996,33 @@ class TestGlobalStackDynamoDBTables:
             for index in jobs_tables[0]["Properties"]["GlobalSecondaryIndexes"]
         }
 
-        assert indexes["region-status-priority-index"]["KeySchema"] == [
-            {"AttributeName": "region_status", "KeyType": "HASH"},
-            {"AttributeName": "priority_sort", "KeyType": "RANGE"},
-        ]
-        assert indexes["region-status-priority-index"]["Projection"] == {"ProjectionType": "ALL"}
-        assert indexes["region-status-lease-index"]["KeySchema"] == [
-            {"AttributeName": "region_status", "KeyType": "HASH"},
-            {"AttributeName": "lease_expires_at", "KeyType": "RANGE"},
-        ]
-        assert indexes["region-status-lease-index"]["Projection"] == {"ProjectionType": "ALL"}
+        expected_indexes = {
+            "region-status-index",
+            "region-status-priority-index",
+            "region-status-lease-index",
+            "region-status-work-index",
+            "namespace-index",
+            "status-index",
+        }
+        assert set(indexes) == expected_indexes
+
+        expected_key_schemas = {
+            "region-status-priority-index": [
+                {"AttributeName": "region_status", "KeyType": "HASH"},
+                {"AttributeName": "priority_sort", "KeyType": "RANGE"},
+            ],
+            "region-status-lease-index": [
+                {"AttributeName": "region_status", "KeyType": "HASH"},
+                {"AttributeName": "lease_expires_at", "KeyType": "RANGE"},
+            ],
+            "region-status-work-index": [
+                {"AttributeName": "region_status", "KeyType": "HASH"},
+                {"AttributeName": "work_sort", "KeyType": "RANGE"},
+            ],
+        }
+        for index_name, key_schema in expected_key_schemas.items():
+            assert indexes[index_name]["KeySchema"] == key_schema
+            assert indexes[index_name]["Projection"] == {"ProjectionType": "ALL"}
 
     def test_global_stack_creates_backup_plan(self):
         """Test that GlobalStack creates AWS Backup plan for DynamoDB tables."""
@@ -2577,12 +2618,13 @@ class TestClusterSharedBucketRegionalIntegration:
                     found_s3_rw_on_cluster_shared = True
 
                 # KMS grant — Decrypt + GenerateDataKey, scoped via kms:ViaService
-                # to s3.<region>.amazonaws.com. The region is a token
-                # (ReadClusterSharedBucketRegion AwsCustomResource).
+                # to s3.<region>.<AWS::URLSuffix>. Both values are tokens:
+                # the cross-region reader and the partition DNS pseudo-parameter.
                 if (
                     "kms:Decrypt" in actions
                     and "kms:GenerateDataKey" in actions
                     and "ReadClusterSharedBucketRegion" in str(statement)
+                    and "AWS::URLSuffix" in str(statement)
                 ):
                     found_kms_scoped_to_cluster_shared = True
 
@@ -2783,6 +2825,12 @@ class TestRegionalStackVolcanoImageMirror:
         mirror.update(overrides)
         return cdk.App(context={"volcano_image_mirror": mirror})
 
+    @staticmethod
+    def _expected_mirror_registry(stack, namespace):
+        return stack.resolve(
+            f"{stack.account}.dkr.ecr.{stack.deployment_region}.{stack.url_suffix}/{namespace}"
+        )
+
     def test_disabled_by_default_no_override_no_cache_resources(self):
         """No context -> no registry override, and (regression) no PTC resources."""
         stack = self._build(cdk.App())
@@ -2798,9 +2846,8 @@ class TestRegionalStackVolcanoImageMirror:
 
     def test_enabled_sets_mirror_registry(self):
         stack = self._build(self._enabled_app())
-        assert (
-            stack.volcano_mirror_registry
-            == "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco-test/dockerhub"
+        assert stack.resolve(stack.volcano_mirror_registry) == self._expected_mirror_registry(
+            stack, "gco-test/dockerhub"
         )
         # Still creates no pull-through cache / registry policy resources.
         template = assertions.Template.from_stack(stack)
@@ -2809,7 +2856,8 @@ class TestRegionalStackVolcanoImageMirror:
 
     def test_enabled_redirects_volcano_image_registry(self):
         """The HelmInstallCharts custom resource carries the Volcano override."""
-        template = assertions.Template.from_stack(self._build(self._enabled_app()))
+        stack = self._build(self._enabled_app())
+        template = assertions.Template.from_stack(stack)
         template.has_resource_properties(
             "AWS::CloudFormation::CustomResource",
             {
@@ -2817,8 +2865,8 @@ class TestRegionalStackVolcanoImageMirror:
                     "volcano": {
                         "values": {
                             "basic": {
-                                "image_registry": (
-                                    "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco-test/dockerhub"
+                                "image_registry": self._expected_mirror_registry(
+                                    stack, "gco-test/dockerhub"
                                 )
                             }
                         }
@@ -2829,8 +2877,8 @@ class TestRegionalStackVolcanoImageMirror:
 
     def test_custom_namespace_is_honored(self):
         stack = self._build(self._enabled_app(ecr_namespace="gco-test/mirror"))
-        assert stack.volcano_mirror_registry == (
-            "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco-test/mirror"
+        assert stack.resolve(stack.volcano_mirror_registry) == self._expected_mirror_registry(
+            stack, "gco-test/mirror"
         )
 
     def test_namespace_outside_project_prefix_raises(self):

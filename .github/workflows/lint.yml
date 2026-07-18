@@ -125,15 +125,19 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - name: Run markdownlint-cli2
-        # Pin to a specific action version so a new major rev doesn't quietly
-        # start firing new rules. Configuration (rule set, globs, ignores) lives
-        # in .github/config/.markdownlint-cli2.yaml; see CONTRIBUTING.md for
-        # how to run the same check locally.
-        uses: DavidAnson/markdownlint-cli2-action@v24.0.0
+      - uses: actions/setup-node@v6.4.0
         with:
-          config: ".github/config/.markdownlint-cli2.yaml"
-          globs: "**/*.md"
+          node-version-file: ".nvmrc"
+          cache: "npm"
+          cache-dependency-path: "package-lock.json"
+      - name: Install and verify the declared npm version
+        run: bash .github/scripts/use-pinned-npm.sh package.json
+      - name: Install locked repository Node tooling
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run markdownlint-cli2
+        # The exact CLI and transitive graph come from package-lock.json so
+        # local runs and CI execute the same dependency set.
+        run: npm run lint:markdown
 
   lint-hadolint-dockerfile:
     name: "lint:hadolint:dockerfile"
@@ -281,7 +285,8 @@ jobs:
                    lambda/cross-region-aggregator lambda/drift-detection \
                    lambda/ga-registration lambda/helm-installer \
                    lambda/kubectl-applier-simple lambda/proxy-shared \
-                   lambda/regional-api-proxy lambda/secret-rotation; do
+                   lambda/regional-api-proxy lambda/secret-rotation \
+                   lambda/tls-certificate-manager; do
             echo "=== typecheck: $d ==="
             if ! mypy "$d"; then
               FAILED=1

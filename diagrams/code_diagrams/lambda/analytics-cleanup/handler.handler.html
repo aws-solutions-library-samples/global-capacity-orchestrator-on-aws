@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Analytics Cleanup Lambda (stack-delete drain)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,73 +206,73 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op123=>operation: 'CloudFormation custom resource handler.'
-op125=>operation: request_type = event.get('RequestType', '')
-op127=>operation: physical_id = event.get('PhysicalResourceId', 'analytics-cleanup')
-cond130=>condition: if request_type != 'Delete'
-sub134=>subroutine: logger.info('RequestType=%s, nothing to do', request_type)
-io139=>inputoutput: output: {'Status': 'SUCCESS', 'PhysicalResourceId': physical_id}
-e137=>end: end function return
-op145=>operation: region = os.environ['REGION']
-op147=>operation: domain_id = os.environ['DOMAIN_ID']
-op149=>operation: efs_id = os.environ.get('EFS_ID', '')
-op151=>operation: vpc_id = os.environ.get('VPC_ID', '')
-op153=>operation: errors: list[str] = []
-op155=>operation: critical_errors: list[str] = []
-op157=>operation: app_errors = _delete_apps(region, domain_id)
-sub159=>subroutine: errors.extend(app_errors)
-sub161=>subroutine: critical_errors.extend(app_errors)
-op163=>operation: space_errors = _delete_spaces(region, domain_id)
-sub165=>subroutine: errors.extend(space_errors)
-sub167=>subroutine: critical_errors.extend(space_errors)
-op169=>operation: profile_errors = _delete_user_profiles(region, domain_id)
-sub171=>subroutine: errors.extend(profile_errors)
-sub173=>subroutine: critical_errors.extend(profile_errors)
-cond176=>operation: _delete_efs_resource_policy(region, efs_id) if  efs_id
-op186=>operation: sm_efs_id = _get_sagemaker_home_efs_id(region, domain_id)
-cond189=>operation: _delete_efs_resource_policy(region, sm_efs_id) if  sm_efs_id
-sub199=>subroutine: errors.extend(_delete_sagemaker_managed_efs(region, domain_id))
-cond202=>operation: errors.extend(_delete_sagemaker_security_groups(region, domain_id, vpc_id)) if  vpc_id
-cond213=>condition: if errors
-sub217=>subroutine: logger.warning('Cleanup completed with %d errors: %s', len(errors), errors)
-cond225=>operation: raise RuntimeError(f'Analytics cleanup failed to fully drain the SageMaker domain ({len(critical_errors)} error(s)). See CloudWatch Logs for details: {critical_errors}') if  critical_errors
-io238=>inputoutput: output: {'Status': 'SUCCESS', 'PhysicalResourceId': physical_id}
-e236=>end: end function return
-sub221=>subroutine: logger.info('Cleanup completed successfully')
+        <div><textarea id="code" style="width: 100%;" rows="11">op125=>operation: 'CloudFormation custom resource handler.'
+op127=>operation: request_type = event.get('RequestType', '')
+op129=>operation: physical_id = event.get('PhysicalResourceId', 'analytics-cleanup')
+cond132=>condition: if request_type != 'Delete'
+sub136=>subroutine: logger.info('RequestType=%s, nothing to do', request_type)
+io141=>inputoutput: output: {'Status': 'SUCCESS', 'PhysicalResourceId': physical_id}
+e139=>end: end function return
+op147=>operation: region = os.environ['REGION']
+op149=>operation: domain_id = os.environ['DOMAIN_ID']
+op151=>operation: efs_id = os.environ.get('EFS_ID', '')
+op153=>operation: vpc_id = os.environ.get('VPC_ID', '')
+op155=>operation: errors: list[str] = []
+op157=>operation: critical_errors: list[str] = []
+op159=>operation: app_errors = _delete_apps(region, domain_id)
+sub161=>subroutine: errors.extend(app_errors)
+sub163=>subroutine: critical_errors.extend(app_errors)
+op165=>operation: space_errors = _delete_spaces(region, domain_id)
+sub167=>subroutine: errors.extend(space_errors)
+sub169=>subroutine: critical_errors.extend(space_errors)
+op171=>operation: profile_errors = _delete_user_profiles(region, domain_id)
+sub173=>subroutine: errors.extend(profile_errors)
+sub175=>subroutine: critical_errors.extend(profile_errors)
+cond178=>operation: _delete_efs_resource_policy(region, efs_id) if  efs_id
+op188=>operation: sm_efs_id = _get_sagemaker_home_efs_id(region, domain_id)
+cond191=>operation: _delete_efs_resource_policy(region, sm_efs_id) if  sm_efs_id
+sub201=>subroutine: errors.extend(_delete_sagemaker_managed_efs(region, domain_id))
+cond204=>operation: errors.extend(_delete_sagemaker_security_groups(region, domain_id, vpc_id)) if  vpc_id
+cond215=>condition: if errors
+sub219=>subroutine: logger.warning('Cleanup completed with %d errors: %s', len(errors), errors)
+cond227=>operation: raise RuntimeError(f'Analytics cleanup failed to fully drain the SageMaker domain ({len(critical_errors)} error(s)). See CloudWatch Logs for details: {critical_errors}') if  critical_errors
+io240=>inputoutput: output: {'Status': 'SUCCESS', 'PhysicalResourceId': physical_id}
+e238=>end: end function return
+sub223=>subroutine: logger.info('Cleanup completed successfully')
 
-op123->op125
 op125->op127
-op127->cond130
-cond130(yes)->sub134
-sub134->io139
-io139->e137
-cond130(no)->op145
-op145->op147
+op127->op129
+op129->cond132
+cond132(yes)->sub136
+sub136->io141
+io141->e139
+cond132(no)->op147
 op147->op149
 op149->op151
 op151->op153
 op153->op155
 op155->op157
-op157->sub159
-sub159->sub161
-sub161->op163
-op163->sub165
-sub165->sub167
-sub167->op169
-op169->sub171
-sub171->sub173
-sub173->cond176
-cond176->op186
-op186->cond189
-cond189->sub199
-sub199->cond202
-cond202->cond213
-cond213(yes)->sub217
-sub217->cond225
-cond225->io238
-io238->e236
-cond213(no)->sub221
-sub221->cond225
+op157->op159
+op159->sub161
+sub161->sub163
+sub163->op165
+op165->sub167
+sub167->sub169
+sub169->op171
+op171->sub173
+sub173->sub175
+sub175->cond178
+cond178->op188
+op188->cond191
+cond191->sub201
+sub201->cond204
+cond204->cond215
+cond215(yes)->sub219
+sub219->cond227
+cond227->io240
+io240->e238
+cond215(no)->sub223
+sub223->cond227
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -281,6 +282,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

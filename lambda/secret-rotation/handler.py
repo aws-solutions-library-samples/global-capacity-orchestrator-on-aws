@@ -23,6 +23,7 @@ from typing import Any
 import boto3
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/secret-rotation/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/secret-rotation/handler.lambda_handler.png``)

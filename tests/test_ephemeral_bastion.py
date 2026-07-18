@@ -109,6 +109,42 @@ class TestBuilders:
         assert add[:3] == ["aws", "iam", "add-role-to-instance-profile"]
         assert eb.BASTION_ROLE_NAME in add and eb.BASTION_PROFILE_NAME in add
 
+    @pytest.mark.parametrize(
+        ("region", "expected_policy_arn", "expected_principal"),
+        [
+            (
+                "cn-north-1",
+                "arn:aws-cn:iam::aws:policy/AmazonSSMManagedInstanceCore",
+                "ec2.amazonaws.com.cn",
+            ),
+            (
+                "us-gov-west-1",
+                "arn:aws-us-gov:iam::aws:policy/AmazonSSMManagedInstanceCore",
+                "ec2.amazonaws.com",
+            ),
+        ],
+    )
+    def test_iam_commands_follow_target_partition(
+        self,
+        region: str,
+        expected_policy_arn: str,
+        expected_principal: str,
+    ) -> None:
+        create_role = eb.build_create_role_command(region=region)
+        attach_policy = eb.build_attach_role_policy_command(region=region)
+        create_profile = eb.build_create_instance_profile_command(region=region)
+        add_role = eb.build_add_role_to_profile_command(region=region)
+        teardown = eb.build_iam_teardown_commands(region=region)
+
+        for command in [create_role, attach_policy, create_profile, add_role, *teardown]:
+            assert command[command.index("--region") + 1] == region
+
+        trust = json.loads(create_role[create_role.index("--assume-role-policy-document") + 1])
+        assert trust["Statement"][0]["Principal"]["Service"] == expected_principal
+        assert attach_policy[attach_policy.index("--policy-arn") + 1] == expected_policy_arn
+        detach_policy = next(command for command in teardown if command[2] == "detach-role-policy")
+        assert detach_policy[detach_policy.index("--policy-arn") + 1] == expected_policy_arn
+
     def test_run_instances_command_carries_all_safeguards(self) -> None:
         cmd = eb.build_run_instances_command(
             ami_id="ami-0123456789abcdef0",
@@ -583,7 +619,9 @@ class TestProjectScopedNaming:
         )
         seen: dict[str, object] = {}
         monkeypatch.setattr(
-            eb, "ensure_bastion_iam", lambda project: seen.__setitem__("iam", project)
+            eb,
+            "ensure_bastion_iam",
+            lambda project, region: seen.__setitem__("iam", (project, region)),
         )
         monkeypatch.setattr(
             eb,
@@ -593,5 +631,5 @@ class TestProjectScopedNaming:
         monkeypatch.setattr(eb, "wait_until_ssm_online", lambda *a, **k: None)
         out = eb.create_ephemeral_bastion("acme-us-east-1", "us-east-1", project_name="acme")
         assert out == "i-0123456789abcdef0"
-        assert seen["iam"] == "acme"
+        assert seen["iam"] == ("acme", "us-east-1")
         assert seen["launch"] == "acme"

@@ -26,7 +26,7 @@
 
 ## What You're About to See
 
-Global Capacity Orchestrator (GCO) is a production-ready platform that lets you submit GPU workloads across any number of AWS regions through a single API. It uses EKS Auto Mode, Global Accelerator, and API Gateway to eliminate the operational complexity of multi-region GPU orchestration.
+Global Capacity Orchestrator (GCO) is a production-ready platform that submits GPU workloads across any number of SDK-known AWS Regions in one partition. This commercial `aws` demo uses EKS Auto Mode, Global Accelerator, and API Gateway; other partitions omit Global Accelerator and use IAM-authenticated regional API bridges for workload traffic.
 
 This document walks through the live demo so you can follow along or replicate it in your own account afterward.
 
@@ -73,7 +73,7 @@ cat cdk.json | python3 -m json.tool
 Key things to notice:
 
 - `deployment_regions.regional` — list of regions where EKS clusters are deployed
-- `deployment_regions.global` — where Global Accelerator lives
+- `deployment_regions.global` — where partition-wide state lives (and Global Accelerator in commercial `aws`)
 - `eks_cluster.endpoint_access: PRIVATE` — clusters are private by default
 - `job_validation_policy.trusted_registries` — only approved container registries are allowed
 - `fsx_lustre.enabled` — toggle for high-performance storage
@@ -265,7 +265,7 @@ gco inference deploy vllm-demo \
   --extra-args '--model' --extra-args 'facebook/opt-125m'
 ```
 
-Omitting `-r` deploys to all regions so Global Accelerator routing works. The inference_monitor in each region picks up the DynamoDB record and creates the Kubernetes Deployment and internal ClusterIP Service. The existing shared Ingress routes `/inference/*` through the dedicated authenticated inference proxy before it reaches that Service; no endpoint-specific Ingress is created.
+Omitting `-r` deploys to every configured Region, keeping endpoint availability consistent. In this commercial `aws` demo that also makes Global Accelerator routing safe. The inference_monitor in each Region picks up the DynamoDB record and creates the Kubernetes Deployment and internal ClusterIP Service. The existing shared Ingress routes `/inference/*` through the dedicated authenticated inference proxy before it reaches that Service; no endpoint-specific Ingress is created.
 
 **Check status and invoke:**
 
@@ -412,6 +412,8 @@ gco inference deploy my-model \
 
 ## Architecture Overview
 
+The recorded demo uses the commercial `aws` topology:
+
 ```text
 User ──► API Gateway (IAM/SigV4 Auth)
               │
@@ -433,7 +435,7 @@ User ──► API Gateway (IAM/SigV4 Auth)
   └────────────────┘  └────────────────┘  └────────────────┘
 ```
 
-Each region runs an independent EKS Auto Mode cluster with GPU nodepools, shared storage, health monitoring, SQS job queues with automatic processing, inference endpoint reconciliation, and manifest processing. Adding a region is a one-line config change and a redeploy.
+Other AWS partitions omit Global Accelerator; users call the selected Region's IAM-authenticated regional API Gateway, whose VPC Lambda reaches the same internal ALB. Each Region runs an independent EKS Auto Mode cluster with GPU nodepools, shared storage, health monitoring, SQS job queues with automatic processing, inference endpoint reconciliation, and manifest processing. Adding an SDK-known Region in the deployment's partition is a one-line config change and a redeploy.
 
 ---
 
@@ -442,7 +444,7 @@ Each region runs an independent EKS Auto Mode cluster with GPU nodepools, shared
 - **Authentication:** IAM-native (SigV4) — uses your existing AWS credentials, no kubeconfig management
 - **Compute:** EKS Auto Mode provisions GPU nodes on-demand (g4dn, g5, g5g, p4d, p5) and scales to zero when idle
 - **Storage:** EFS for general outputs, FSx for Lustre for high-throughput ML training (optional), Valkey Serverless for caching (optional)
-- **Networking:** Global Accelerator provides a single endpoint with automatic failover between regions
+- **Networking:** In commercial `aws`, Global Accelerator provides a single workload endpoint with automatic failover; other partitions use IAM-authenticated regional workload endpoints
 - **Job Submission:** Four paths — SQS queue with auto-processing (recommended), API Gateway, direct kubectl, or DynamoDB global queue
 - **Queue Processing:** KEDA ScaledJob automatically consumes SQS messages and applies manifests to the cluster — no manual intervention
 - **Inference Serving:** DynamoDB-backed desired state with continuous reconciliation, canary deployments, autoscaling, and model weight sync from S3

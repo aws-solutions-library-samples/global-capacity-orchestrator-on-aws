@@ -30,10 +30,13 @@ def _reset_endpoints_cache():
     """Reset endpoint state and stub SigV4 signing for transport-focused tests."""
     handler._cached_endpoints = None
     handler._endpoints_cache_time = time.monotonic()
-    with patch.object(
-        handler,
-        "_sigv4_headers",
-        return_value={"Authorization": "AWS4-HMAC-SHA256 test-signature"},
+    with (
+        patch.dict("os.environ", {"AWS_URL_SUFFIX": "amazonaws.com"}),
+        patch.object(
+            handler,
+            "_sigv4_headers",
+            return_value={"Authorization": "AWS4-HMAC-SHA256 test-signature"},
+        ),
     ):
         yield
 

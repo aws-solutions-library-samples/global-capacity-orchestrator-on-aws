@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Image-lookup-or-create custom resource Lambda</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,32 +206,32 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4499=>operation: 'Lookup-or-create custom resource handler for ECR repositories.\n\n    Dispatches on ``event["RequestType"]`` and returns the standard\n    CloudFormation custom resource response shape. The CDK Provider\n    framework wraps this dict into the protocol-required envelope.\n    '
-op4501=>operation: request_type = event.get('RequestType', '')
-op4503=>operation: properties = event.get('ResourceProperties', {}) or {}
-op4505=>operation: physical_id = event.get('PhysicalResourceId', '')
-sub4507=>subroutine: logger.info('Image-Lookup CR event: %s for %s', request_type, properties.get('RepositoryName'))
-op4509=>operation: ecr = _ecr_client()
-cond4512=>condition: if request_type in ('Create', 'Update')
-io4519=>inputoutput: output: _handle_create_or_update(ecr, properties)
-e4517=>end: end function return
-cond4526=>condition: if request_type == 'Delete'
-io4533=>inputoutput: output: _handle_delete(ecr, properties, physical_id)
-e4531=>end: end function return
-sub4539=>subroutine: raise ValueError(f'Unsupported RequestType: {request_type!r}')
+        <div><textarea id="code" style="width: 100%;" rows="11">op4808=>operation: 'Lookup-or-create custom resource handler for ECR repositories.\n\n    Dispatches on ``event["RequestType"]`` and returns the standard\n    CloudFormation custom resource response shape. The CDK Provider\n    framework wraps this dict into the protocol-required envelope.\n    '
+op4810=>operation: request_type = event.get('RequestType', '')
+op4812=>operation: properties = event.get('ResourceProperties', {}) or {}
+op4814=>operation: physical_id = event.get('PhysicalResourceId', '')
+sub4816=>subroutine: logger.info('Image-Lookup CR event: %s for %s', request_type, properties.get('RepositoryName'))
+op4818=>operation: ecr = _ecr_client()
+cond4821=>condition: if request_type in ('Create', 'Update')
+io4828=>inputoutput: output: _handle_create_or_update(ecr, properties)
+e4826=>end: end function return
+cond4835=>condition: if request_type == 'Delete'
+io4842=>inputoutput: output: _handle_delete(ecr, properties, physical_id)
+e4840=>end: end function return
+sub4848=>subroutine: raise ValueError(f'Unsupported RequestType: {request_type!r}')
 
-op4499->op4501
-op4501->op4503
-op4503->op4505
-op4505->sub4507
-sub4507->op4509
-op4509->cond4512
-cond4512(yes)->io4519
-io4519->e4517
-cond4512(no)->cond4526
-cond4526(yes)->io4533
-io4533->e4531
-cond4526(no)->sub4539
+op4808->op4810
+op4810->op4812
+op4812->op4814
+op4814->sub4816
+sub4816->op4818
+op4818->cond4821
+cond4821(yes)->io4828
+io4828->e4826
+cond4821(no)->cond4835
+cond4835(yes)->io4842
+io4842->e4840
+cond4835(no)->sub4848
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -240,6 +241,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

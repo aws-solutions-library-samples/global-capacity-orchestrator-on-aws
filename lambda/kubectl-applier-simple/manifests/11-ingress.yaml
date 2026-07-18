@@ -19,6 +19,10 @@ metadata:
     # the regional API Gateway streaming path (5 minutes). The global edge path
     # still enforces its own shorter 30-second idle timeout.
     alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=300
+    # EKS Auto Mode supports target-group behavior on individual Ingresses.
+    # Keep deregistering pods in draining state for the full 15-minute maximum
+    # inference stream before Kubernetes' 930-second termination grace expires.
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=900
     alb.ingress.kubernetes.io/healthcheck-path: /healthz
     alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
     alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"

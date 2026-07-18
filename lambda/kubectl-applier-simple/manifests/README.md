@@ -83,7 +83,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | File | Contents |
 |------|----------|
 | `10-ingressclass.yaml` | `IngressClassParams` (ALB group) + `IngressClass` |
-| `11-ingress.yaml` | `gco-ingress` routing control traffic to manifest-processor and `/inference` traffic to inference-proxy |
+| `11-ingress.yaml` | `gco-ingress` routing control traffic to manifest-processor and `/inference` traffic to inference-proxy, with a 900-second target deregistration drain |
 
 ### Storage (20–29)
 
@@ -103,7 +103,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `30-health-monitor.yaml` | `Deployment` + `PodDisruptionBudget` + `Service` |
 | `31-manifest-processor.yaml` | `Deployment` + `PodDisruptionBudget` + `Service` |
 | `32-inference-monitor.yaml` | `Deployment` + `PodDisruptionBudget` |
-| `33-inference-proxy.yaml` | Dedicated inference `Deployment` + `PodDisruptionBudget` + `Service` |
+| `33-inference-proxy.yaml` | Dedicated inference `Deployment` (three replicas on create; HPA owns updates) + CPU/memory `HorizontalPodAutoscaler` + two-pod `PodDisruptionBudget` + 15-minute stream-drain lifecycle + `Service` |
 
 ### NodePools (40–49)
 

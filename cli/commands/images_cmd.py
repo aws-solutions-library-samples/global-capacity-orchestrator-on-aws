@@ -294,8 +294,8 @@ def images_mirror(
     namespace = (ecr_namespace or mirror.cdk_default_namespace()).strip("/")
     try:
         if dry_run:
-            # Placeholder host so the plan prints without any AWS calls.
-            registry_host = f"<account>.dkr.ecr.{region}.amazonaws.com"
+            # Partition metadata is local, so this remains free of AWS API calls.
+            registry_host = mirror._registry_host("<account>", region)
             plan = mirror.plan_from_sources(mirror.collect_source_refs(), registry_host, namespace)
             formatter.print_info(
                 f"[dry-run] would mirror {len(plan)} image(s) into namespace {namespace!r}:"

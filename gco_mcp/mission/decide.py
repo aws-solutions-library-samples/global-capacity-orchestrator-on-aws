@@ -79,6 +79,7 @@ from .checkpoints import should_evaluate_now
 from .types import IterationRecord, SessionState, VerdictLabel, VerdictReason
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``decide_verdict`` -> ``diagrams/code_diagrams/gco_mcp/mission/decide.decide_verdict.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/decide.decide_verdict.png``)

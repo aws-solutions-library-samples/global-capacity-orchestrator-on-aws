@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Backend TLS Certificate Manager Lambda</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,38 +206,40 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op761=>operation: 'Handle scheduled reconciliation and CDK provider lifecycle events.'
-op763=>operation: config = ManagerConfig.from_event(event)
-cond766=>condition: if event.get('Action') == 'Rotate'
-sub770=>subroutine: LOGGER.info('Running scheduled backend TLS reconciliation')
-io775=>inputoutput: output: _reconcile(config)
-e773=>end: end function return
-op781=>operation: request_type = event.get('RequestType')
-op783=>operation: physical_id = event.get('PhysicalResourceId') or f'{config.project_name}-backend-tls-certificates'
-cond786=>condition: if request_type == 'Delete'
-sub790=>subroutine: _cleanup(config)
-io795=>inputoutput: output: {'PhysicalResourceId': physical_id}
-e793=>end: end function return
-cond802=>operation: raise ValueError(f'Unsupported certificate manager event: {request_type!r}') if  request_type not in {'Create', 'Update'}
-op812=>operation: result = _reconcile(config)
-io817=>inputoutput: output: {'PhysicalResourceId': physical_id, 'Data': result}
-e815=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op763=>operation: 'Handle scheduled reconciliation and CDK provider lifecycle events.'
+op765=>operation: config = ManagerConfig.from_event(event)
+cond768=>condition: if event.get('Action') == 'Rotate'
+sub772=>subroutine: LOGGER.info('Running scheduled backend TLS reconciliation')
+io777=>inputoutput: output: _reconcile(config)
+e775=>end: end function return
+op783=>operation: request_type = event.get('RequestType')
+op785=>operation: physical_id = event.get('PhysicalResourceId') or f'{config.project_name}-backend-tls-certificates'
+cond788=>condition: if request_type == 'Delete'
+sub792=>subroutine: _cleanup(config)
+io797=>inputoutput: output: {'PhysicalResourceId': physical_id}
+e795=>end: end function return
+cond804=>operation: raise ValueError(f'Unsupported certificate manager event: {request_type!r}') if  request_type not in {'Create', 'Update'}
+op814=>operation: newly_retired = _retired_regions_from_update(event, config) if request_type == 'Update' else ()
+op816=>operation: result = _reconcile(config, newly_retired)
+io821=>inputoutput: output: {'PhysicalResourceId': physical_id, 'Data': result}
+e819=>end: end function return
 
-op761->op763
-op763->cond766
-cond766(yes)->sub770
-sub770->io775
-io775->e773
-cond766(no)->op781
-op781->op783
-op783->cond786
-cond786(yes)->sub790
-sub790->io795
-io795->e793
-cond786(no)->cond802
-cond802->op812
-op812->io817
-io817->e815
+op763->op765
+op765->cond768
+cond768(yes)->sub772
+sub772->io777
+io777->e775
+cond768(no)->op783
+op783->op785
+op785->cond788
+cond788(yes)->sub792
+sub792->io797
+io797->e795
+cond788(no)->cond804
+cond804->op814
+op814->op816
+op816->io821
+io821->e819
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -246,6 +249,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

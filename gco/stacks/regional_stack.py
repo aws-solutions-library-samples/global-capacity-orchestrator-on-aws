@@ -22,8 +22,8 @@ Resources Created:
     Load Balancing:
         - Internal ALB (created by Ingress via EKS Auto Mode)
         - Always-deployed regional API bridge reaches the ALB through a VPC Lambda;
-          direct caller access is optional
-        - Global Accelerator endpoint registration (via ga-registration Lambda)
+          direct caller access is optional in ``aws`` and required elsewhere
+        - Global Accelerator endpoint registration in commercial ``aws`` only
 
     Storage:
         - EFS with dynamic provisioning (CSI driver, access points, encryption at rest + in transit)
@@ -34,9 +34,10 @@ Resources Created:
     Lambda Functions:
         - kubectl-applier: applies K8s manifests during deployment
         - helm-installer: installs Helm charts (KEDA, Volcano, KubeRay, etc.)
-        - ga-registration: registers ALB with Global Accelerator
+        - ga-registration: registers the ALB with Global Accelerator in ``aws``
         - regional-api-proxy: separate-stack VPC proxy used by the always-on
-          aggregation bridge and optional direct regional callers
+          aggregation bridge and by optional direct callers in ``aws`` or the
+          required regional workload ingress in other partitions
 
     Container Images:
         - ECR repositories + Docker image builds for health-monitor, manifest-processor,
@@ -53,7 +54,7 @@ Key Design Decisions:
     - Template variables in K8s manifests ({{PLACEHOLDER}}) are replaced at deploy time
 
 Dependencies:
-    - GCOGlobalStack (for Global Accelerator endpoint group ARN, DynamoDB table names, S3 bucket)
+    - GCOGlobalStack (partition-wide state and, in ``aws``, Global Accelerator endpoint groups)
     - GCOApiGatewayGlobalStack (for auth secret ARN)
 
 Modification Guide:
@@ -123,6 +124,7 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
@@ -205,11 +207,12 @@ def _augment_trusted_registries_with_project_ecr(
     account: str,
     regions: list[str],
     global_region: str,
+    url_suffix: str,
 ) -> list[str]:
     """Return the configured trusted registries plus the project's own ECR.
 
     The new ``gco images build`` flow pushes images to a per-account ECR
-    registry under ``<account>.dkr.ecr.<region>.amazonaws.com/gco/<name>``.
+    registry under ``<account>.dkr.ecr.<region>.<url-suffix>/gco/<name>``.
     Without this augmentation the queue/manifest validators would treat
     those URIs as untrusted and reject every job that uses one — which
     defeats the whole point of the image registry feature.
@@ -225,7 +228,7 @@ def _augment_trusted_registries_with_project_ecr(
     targets = list(dict.fromkeys([global_region, *regions]))
     if account:
         for region in targets:
-            host = f"{account}.dkr.ecr.{region}.amazonaws.com"
+            host = f"{account}.dkr.ecr.{region}.{url_suffix}"
             if host not in seen:
                 augmented.append(host)
                 seen.add(host)
@@ -344,6 +347,10 @@ class GCORegionalStack(Stack):
         self.deployment_region = region
         self.auth_secret_arn = auth_secret_arn
         self.alb_arn: str | None = None
+        supports_global_accelerator = getattr(config, "supports_global_accelerator", None)
+        self.global_accelerator_enabled = (
+            bool(supports_global_accelerator()) if callable(supports_global_accelerator) else True
+        )
 
         # Get cluster configuration for this region
         cluster_config = self.config.get_cluster_config(region)
@@ -446,8 +453,10 @@ class GCORegionalStack(Stack):
         # Create Aurora Serverless v2 + pgvector (if enabled) for vector DB
         self._create_aurora_pgvector()
 
-        # Create GA registration Lambda for registering Ingress-created ALB
-        self._create_ga_registration_lambda()
+        # Register the Ingress ALB only where Global Accelerator exists. Other
+        # partitions expose this cluster through the regional IAM API bridge.
+        if self.global_accelerator_enabled:
+            self._create_ga_registration_lambda()
 
         # Create Helm installer Lambda for KEDA and other Helm-based installations
         self._create_helm_installer_lambda()
@@ -650,7 +659,7 @@ class GCORegionalStack(Stack):
                 effect=iam.Effect.ALLOW,
                 actions=["eks:UpdateAddon", "eks:DescribeAddon"],
                 resources=[
-                    f"arn:aws:eks:{self.deployment_region}:{self.account}"
+                    f"arn:{self.partition}:eks:{self.deployment_region}:{self.account}"
                     f":addon/{self.cluster_config.cluster_name}/*"
                 ],
             )
@@ -665,7 +674,8 @@ class GCORegionalStack(Stack):
                 effect=iam.Effect.ALLOW,
                 actions=["ssm:GetParameter"],
                 resources=[
-                    f"arn:aws:ssm:{global_region}:{self.account}:parameter/{project_name}/*"
+                    f"arn:{self.partition}:ssm:{global_region}:{self.account}:"
+                    f"parameter/{project_name}/*"
                 ],
             )
         )
@@ -712,9 +722,9 @@ class GCORegionalStack(Stack):
                         "per-CR roles."
                     ),
                     "appliesTo": [
-                        f"Resource::arn:aws:eks:{self.deployment_region}"
+                        f"Resource::arn:<AWS::Partition>:eks:{self.deployment_region}"
                         f":<AWS::AccountId>:addon/{self.cluster_config.cluster_name}/*",
-                        f"Resource::arn:aws:ssm:{global_region}"
+                        f"Resource::arn:<AWS::Partition>:ssm:{global_region}"
                         f":<AWS::AccountId>:parameter/{project_name}/*",
                     ],
                 },
@@ -1815,8 +1825,8 @@ class GCORegionalStack(Stack):
                     "s3:ListBucket",
                 ],
                 resources=[
-                    f"arn:aws:s3:::{project_name}-*",
-                    f"arn:aws:s3:::{project_name}-*/*",
+                    f"arn:{self.partition}:s3:::{project_name}-*",
+                    f"arn:{self.partition}:s3:::{project_name}-*/*",
                 ],
             )
         )
@@ -1826,10 +1836,10 @@ class GCORegionalStack(Stack):
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 actions=["kms:Decrypt", "kms:GenerateDataKey"],
-                resources=[f"arn:aws:kms:*:{self.account}:key/*"],
+                resources=[f"arn:{self.partition}:kms:*:{self.account}:key/*"],
                 conditions={
                     "StringLike": {
-                        "kms:ViaService": "s3.*.amazonaws.com",
+                        "kms:ViaService": f"s3.*.{self.url_suffix}",
                     }
                 },
             )
@@ -2112,7 +2122,7 @@ class GCORegionalStack(Stack):
            shape uses the ``gco-cluster-shared-*`` prefix that IAM
            policies scope against.
         2. KMS ``Decrypt`` / ``GenerateDataKey`` scoped by the
-           ``kms:ViaService=s3.<shared.region>.amazonaws.com`` condition —
+           ``kms:ViaService=s3.<shared.region>.<AWS::URLSuffix>`` condition —
            ``resources=["*"]`` because the KMS key ARN is not known to this
            stack (it lives in the global region and is referenced indirectly
            through the S3 service). The condition is what actually restricts
@@ -2145,7 +2155,7 @@ class GCORegionalStack(Stack):
                 resources=["*"],
                 conditions={
                     "StringEquals": {
-                        "kms:ViaService": f"s3.{shared.region}.amazonaws.com",
+                        "kms:ViaService": f"s3.{shared.region}.{self.url_suffix}",
                     }
                 },
             )
@@ -2285,7 +2295,7 @@ class GCORegionalStack(Stack):
 
         # Primary general-purpose regional bucket. The name is derived from
         # ``project_name`` so the bucket and the IAM allow-list assertions
-        # (arn:aws:s3:::<project_name>-regional-shared-*) stay in lockstep and
+        # (arn:<partition>:s3:::<project_name>-regional-shared-*) stay in lockstep and
         # two deployments in the same account+region do not collide.
         # `bucket_key_enabled=True` mirrors the central-bucket pattern to
         # reduce per-object KMS request costs.
@@ -2560,7 +2570,7 @@ class GCORegionalStack(Stack):
             iam.PolicyStatement(
                 actions=["ssm:PutParameter"],
                 resources=[
-                    f"arn:aws:ssm:{self.deployment_region}:{self.account}:"
+                    f"arn:{self.partition}:ssm:{self.deployment_region}:{self.account}:"
                     f"parameter/{project_name}/addons/*"
                 ],
             )
@@ -2772,6 +2782,7 @@ class GCORegionalStack(Stack):
                     account=self.account,
                     regions=self.config.get_regions(),
                     global_region=self.config.get_global_region(),
+                    url_suffix=self.url_suffix,
                 )
             ),
             "{{MP_TRUSTED_DOCKERHUB_ORGS}}": ",".join(job_policy.get("trusted_dockerhub_orgs", [])),
@@ -2901,6 +2912,7 @@ class GCORegionalStack(Stack):
                     account=self.account,
                     regions=self.config.get_regions(),
                     global_region=self.config.get_global_region(),
+                    url_suffix=self.url_suffix,
                 )
             )
             image_replacements["{{QP_TRUSTED_DOCKERHUB_ORGS}}"] = ",".join(
@@ -2993,30 +3005,32 @@ class GCORegionalStack(Stack):
         # chart selection/overrides, the manifest ImageReplacements (for the base
         # and post-Helm kubectl passes), and the Global Accelerator
         # EndpointGroupArn (for the final GA-registration task).
+        convergence_properties: dict[str, Any] = {
+            "ClusterName": self.cluster.cluster_name,
+            "Region": self.deployment_region,
+            # Helm chart selection + per-chart value overrides (e.g. Volcano
+            # image_registry redirected to the ECR mirror when enabled).
+            "EnabledCharts": self._get_enabled_helm_charts(),
+            "Charts": self._helm_chart_value_overrides(),
+            "KedaOperatorRoleArn": self.keda_operator_role.role_arn,
+            # Template substitutions for the base + post-Helm kubectl passes.
+            "ImageReplacements": image_replacements,
+            # Project name lets the orchestrator persist the execution input
+            # to SSM so `gco stacks addons install` can replay the whole
+            # pipeline without reconstructing chart/manifest config.
+            "ProjectName": self.config.get_project_name(),
+            # Force re-invocation on every deployment (new charts.yaml,
+            # manifest, or image) so convergence re-runs end to end.
+            "DeploymentTimestamp": deployment_timestamp,
+        }
+        if self.global_accelerator_enabled:
+            convergence_properties["EndpointGroupArn"] = self.endpoint_group_arn
+
         converge_trigger = CustomResource(
             self,
             "HelmInstallCharts",
             service_token=self.helm_installer_provider.service_token,
-            properties={
-                "ClusterName": self.cluster.cluster_name,
-                "Region": self.deployment_region,
-                # Helm chart selection + per-chart value overrides (e.g. Volcano
-                # image_registry redirected to the ECR mirror when enabled).
-                "EnabledCharts": self._get_enabled_helm_charts(),
-                "Charts": self._helm_chart_value_overrides(),
-                "KedaOperatorRoleArn": self.keda_operator_role.role_arn,
-                # Template substitutions for the base + post-Helm kubectl passes.
-                "ImageReplacements": image_replacements,
-                # Endpoint group the final task registers the Ingress ALB with.
-                "EndpointGroupArn": self.endpoint_group_arn,
-                # Project name lets the orchestrator persist the execution input
-                # to SSM so `gco stacks addons install` can replay the whole
-                # pipeline without reconstructing chart/manifest config.
-                "ProjectName": self.config.get_project_name(),
-                # Force re-invocation on every deployment (new charts.yaml,
-                # manifest, or image) so convergence re-runs end to end.
-                "DeploymentTimestamp": deployment_timestamp,
-            },
+            properties=convergence_properties,
         )
 
         # The trigger (and therefore the whole convergence pipeline) must run
@@ -3133,7 +3147,8 @@ class GCORegionalStack(Stack):
                 effect=iam.Effect.ALLOW,
                 actions=["ssm:GetParameter", "ssm:PutParameter", "ssm:DeleteParameter"],
                 resources=[
-                    f"arn:aws:ssm:{self.config.get_global_region()}:{self.account}:parameter/{project_name}/*"
+                    f"arn:{self.partition}:ssm:{self.config.get_global_region()}:"
+                    f"{self.account}:parameter/{project_name}/*"
                 ],
             )
         )
@@ -3415,7 +3430,7 @@ class GCORegionalStack(Stack):
         CloudFormation resources.
 
         Sets ``self.volcano_mirror_registry`` to
-        ``<account>.dkr.ecr.<region>.amazonaws.com/<ecr_namespace>`` that
+        ``<account>.dkr.ecr.<region>.<url-suffix>/<ecr_namespace>`` that
         ``_helm_chart_value_overrides`` feeds into Volcano's
         ``basic.image_registry``; left ``None`` when disabled.
         """
@@ -3428,7 +3443,7 @@ class GCORegionalStack(Stack):
 
         ecr_namespace = cfg["ecr_namespace"]
         self.volcano_mirror_registry = (
-            f"{self.account}.dkr.ecr.{self.deployment_region}.amazonaws.com/{ecr_namespace}"
+            f"{self.account}.dkr.ecr.{self.deployment_region}.{self.url_suffix}/{ecr_namespace}"
         )
 
     def _helm_chart_value_overrides(self) -> dict[str, Any]:
@@ -3672,7 +3687,7 @@ class GCORegionalStack(Stack):
             iam.PolicyStatement(
                 actions=["ssm:PutParameter"],
                 resources=[
-                    f"arn:aws:ssm:{self.deployment_region}:{self.account}:"
+                    f"arn:{self.partition}:ssm:{self.deployment_region}:{self.account}:"
                     f"parameter/{project_name}/addons/*"
                 ],
             )
@@ -3807,7 +3822,8 @@ class GCORegionalStack(Stack):
         chart_tasks = [_chart_task(name) for name in chart_order]
 
         # The state machine owns the full convergence pipeline:
-        #   base kubectl apply -> Helm charts -> post-Helm kubectl apply -> GA.
+        #   base kubectl apply -> Helm charts -> post-Helm kubectl apply
+        #   -> optional Global Accelerator registration.
         # Failure policy:
         #   * base apply: retry, then NO catch -> a failed base pass (missing
         #     namespaces / RBAC / storage / nodepools) FAILS the execution;
@@ -3821,13 +3837,16 @@ class GCORegionalStack(Stack):
         done = sfn.Succeed(self, "HelmInstallComplete")
         base_apply = _kubectl_task("ApplyBaseManifests", post_helm=False)
         post_apply = _kubectl_task("ApplyPostHelmManifests", post_helm=True)
-        ga_task = _ga_task()
 
-        # post-Helm apply -> GA -> done, both catch-and-continue.
-        post_apply.add_catch(ga_task, errors=["States.ALL"], result_path="$.lastApplyError")
-        post_apply.next(ga_task)
-        ga_task.add_catch(done, errors=["States.ALL"], result_path="$.gaError")
-        ga_task.next(done)
+        if self.global_accelerator_enabled:
+            ga_task = _ga_task()
+            post_apply.add_catch(ga_task, errors=["States.ALL"], result_path="$.lastApplyError")
+            post_apply.next(ga_task)
+            ga_task.add_catch(done, errors=["States.ALL"], result_path="$.gaError")
+            ga_task.next(done)
+        else:
+            post_apply.add_catch(done, errors=["States.ALL"], result_path="$.lastApplyError")
+            post_apply.next(done)
 
         if chart_tasks:
             for i, task in enumerate(chart_tasks):
@@ -3890,7 +3909,7 @@ class GCORegionalStack(Stack):
             iam.PolicyStatement(
                 actions=["ssm:PutParameter"],
                 resources=[
-                    f"arn:aws:ssm:{self.deployment_region}:{self.account}:"
+                    f"arn:{self.partition}:ssm:{self.deployment_region}:{self.account}:"
                     f"parameter/{project_name}/addons/*"
                 ],
             )
@@ -4159,12 +4178,12 @@ class GCORegionalStack(Stack):
         self.helm_teardown_state_machine.grant_start_execution(teardown_on_event)
         self.helm_teardown_state_machine.grant_read(teardown_is_complete)
         install_execution_detail = (
-            "Resource::arn:aws:states:<AWS::Region>:<AWS::AccountId>:execution:"
+            "Resource::arn:<AWS::Partition>:states:<AWS::Region>:<AWS::AccountId>:execution:"
             '{"Fn::Select":[6,{"Fn::Split":[":",'
             '{"Ref":"HelmInstallStateMachine7DB71CDC"}]}]}:*'
         )
         teardown_execution_detail = (
-            "Resource::arn:aws:states:<AWS::Region>:<AWS::AccountId>:execution:"
+            "Resource::arn:<AWS::Partition>:states:<AWS::Region>:<AWS::AccountId>:execution:"
             '{"Fn::Select":[6,{"Fn::Split":[":",'
             '{"Ref":"HelmTeardownStateMachine1C15895F"}]}]}:*'
         )
@@ -5170,8 +5189,8 @@ class GCORegionalStack(Stack):
                 effect=iam.Effect.ALLOW,
                 actions=["s3:GetObject", "s3:ListBucket"],
                 resources=[
-                    f"arn:aws:s3:::{project_name}-*",
-                    f"arn:aws:s3:::{project_name}-*/*",
+                    f"arn:{self.partition}:s3:::{project_name}-*",
+                    f"arn:{self.partition}:s3:::{project_name}-*/*",
                 ],
             )
         )

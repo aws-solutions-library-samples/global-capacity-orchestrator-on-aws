@@ -17,6 +17,7 @@ Regional Endpoint Discovery:
 Environment Variables:
     PROJECT_NAME: Deployment prefix used in regional API stack names.
     TARGET_REGIONS: JSON list of required workload regions.
+    AWS_URL_SUFFIX: CDK-resolved DNS suffix for the deployment partition.
 
 API Routes:
     GET /api/v1/global/jobs - List jobs across all regions
@@ -40,6 +41,7 @@ from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/cross-region-aggregator/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/cross-region-aggregator/handler.lambda_handler.png``)
@@ -48,8 +50,13 @@ from botocore.awsrequest import AWSRequest
 
 
 _LOGGER = logging.getLogger(__name__)
-_REGION_RE = re.compile(r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$")
+_REGION_RE = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
 _API_ID_RE = re.compile(r"^[a-z0-9]+$")
+_DNS_SUFFIX_RE = re.compile(
+    r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+    re.IGNORECASE,
+)
 
 # Regional API Gateway uses the AWS public trust chain. Certificate validation
 # remains mandatory; the private-root pool is used only by each VPC proxy's
@@ -80,21 +87,26 @@ def _configured_regions() -> list[str]:
     return regions
 
 
+def _aws_url_suffix() -> str:
+    """Return the CDK-resolved DNS suffix for this deployment partition."""
+    suffix = os.environ.get("AWS_URL_SUFFIX", "").strip().lower()
+    if _DNS_SUFFIX_RE.fullmatch(suffix) is None:
+        raise RuntimeError("The AWS URL suffix is not configured")
+    return suffix
+
+
 def _normalize_regional_api_url(value: Any, region: str) -> str:
     """Validate one stack output as this region's execute-api ``prod`` URL."""
     parsed = urlsplit(str(value or "").strip())
-    host = parsed.hostname or ""
-    expected_suffixes = (
-        f".execute-api.{region}.amazonaws.com",
-        f".execute-api.{region}.amazonaws.com.cn",
-    )
+    host = (parsed.hostname or "").lower()
     api_id = host.split(".", 1)[0]
+    expected_host = f"{api_id}.execute-api.{region}.{_aws_url_suffix()}"
     if (
         parsed.scheme != "https"
         or parsed.username is not None
         or parsed.password is not None
         or parsed.port not in (None, 443)
-        or not any(host.endswith(suffix) for suffix in expected_suffixes)
+        or host != expected_host
         or _API_ID_RE.fullmatch(api_id) is None
         or parsed.path.rstrip("/") != "/prod"
         or parsed.query

@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>gco jobs submit-sqs — SQS-backed submission path</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,77 +206,77 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op895=>operation: "\n        Submit a job to a regional SQS queue for processing.\n\n        This is the recommended way to submit jobs as it:\n        - Decouples submission from processing\n        - Enables KEDA-based autoscaling\n        - Provides better fault tolerance\n\n        Args:\n            manifests: Path to manifest file/directory or list of manifest dicts\n            region: Target region for job submission (required)\n            namespace: Fallback namespace for manifests that don't declare\n                their own. When set, each manifest's ``metadata.namespace`` is\n                filled in only if missing — existing values are preserved so\n                users who've declared a target namespace in the manifest can\n                rely on it reaching the queue processor untouched. Server-side\n                validation enforces the allowlist.\n            labels: Additional labels to add to manifests\n            priority: Job priority (higher = more important)\n\n        Returns:\n            Submission result dictionary with message_id and queue info\n        "
-op897=>operation: import json
-op899=>operation: import uuid
-op901=>operation: import boto3
-op903=>operation: manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
-cond906=>condition: if namespace
-cond911=>condition: for manifest in manifest_list
-cond916=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
-sub926=>subroutine: manifest['metadata'].setdefault('namespace', namespace)
-cond934=>condition: if labels
-cond939=>condition: for manifest in manifest_list
-cond944=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
-cond955=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
-sub965=>subroutine: manifest['metadata']['labels'].update(labels)
-op972=>operation: stack = self._aws_client.get_regional_stack(region)
-cond975=>operation: raise ValueError(f'No GCO stack found in region {region}') if  not stack
-op985=>operation: cfn = boto3.client('cloudformation', region_name=region)
-op987=>operation: response = cfn.describe_stacks(StackName=stack.stack_name)
-op989=>operation: outputs = {o['OutputKey']: o['OutputValue'] for o in response['Stacks'][0].get('Outputs', [])}
-op991=>operation: queue_url = outputs.get('JobQueueUrl')
-cond994=>operation: raise ValueError(f'Job queue not found in stack {stack.stack_name}') if  not queue_url
-op1004=>operation: job_id = str(uuid.uuid4())[:8]
-op1006=>operation: envelope_namespace = namespace or _first_manifest_namespace(manifest_list) or 'gco-jobs'
-op1008=>operation: message_body = {'job_id': job_id, 'manifests': manifest_list, 'namespace': envelope_namespace, 'priority': priority, 'submitted_at': datetime.now(UTC).isoformat()}
-op1010=>operation: sqs = boto3.client('sqs', region_name=region)
-op1012=>operation: response = sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(message_body), MessageAttributes={'Priority': {'DataType': 'Number', 'StringValue': str(priority)}, 'JobId': {'DataType': 'String', 'StringValue': job_id}})
-op1014=>operation: job_name = None
-cond1017=>condition: for manifest in manifest_list
-cond1022=>condition: if manifest.get('kind') == 'Job'
-op1026=>operation: job_name = manifest.get('metadata', {}).get('name')
-sub1028=>subroutine: break
-io1038=>inputoutput: output: {'status': 'queued', 'method': 'sqs', 'message_id': response['MessageId'], 'job_id': job_id, 'job_name': job_name, 'queue_url': queue_url, 'region': region, 'namespace': envelope_namespace, 'priority': priority}
-e1036=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op899=>operation: "\n        Submit a job to a regional SQS queue for processing.\n\n        This is the recommended way to submit jobs as it:\n        - Decouples submission from processing\n        - Enables KEDA-based autoscaling\n        - Provides better fault tolerance\n\n        Args:\n            manifests: Path to manifest file/directory or list of manifest dicts\n            region: Target region for job submission (required)\n            namespace: Fallback namespace for manifests that don't declare\n                their own. When set, each manifest's ``metadata.namespace`` is\n                filled in only if missing — existing values are preserved so\n                users who've declared a target namespace in the manifest can\n                rely on it reaching the queue processor untouched. Server-side\n                validation enforces the allowlist.\n            labels: Additional labels to add to manifests\n            priority: Job priority (higher = more important)\n\n        Returns:\n            Submission result dictionary with message_id and queue info\n        "
+op901=>operation: import json
+op903=>operation: import uuid
+op905=>operation: import boto3
+op907=>operation: manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
+cond910=>condition: if namespace
+cond915=>condition: for manifest in manifest_list
+cond920=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
+sub930=>subroutine: manifest['metadata'].setdefault('namespace', namespace)
+cond938=>condition: if labels
+cond943=>condition: for manifest in manifest_list
+cond948=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
+cond959=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
+sub969=>subroutine: manifest['metadata']['labels'].update(labels)
+op976=>operation: stack = self._aws_client.get_regional_stack(region)
+cond979=>operation: raise ValueError(f'No GCO stack found in region {region}') if  not stack
+op989=>operation: cfn = boto3.client('cloudformation', region_name=region)
+op991=>operation: response = cfn.describe_stacks(StackName=stack.stack_name)
+op993=>operation: outputs = {o['OutputKey']: o['OutputValue'] for o in response['Stacks'][0].get('Outputs', [])}
+op995=>operation: queue_url = outputs.get('JobQueueUrl')
+cond998=>operation: raise ValueError(f'Job queue not found in stack {stack.stack_name}') if  not queue_url
+op1008=>operation: job_id = str(uuid.uuid4())[:8]
+op1010=>operation: envelope_namespace = namespace or _first_manifest_namespace(manifest_list) or 'gco-jobs'
+op1012=>operation: message_body = {'job_id': job_id, 'manifests': manifest_list, 'namespace': envelope_namespace, 'priority': priority, 'submitted_at': datetime.now(UTC).isoformat()}
+op1014=>operation: sqs = boto3.client('sqs', region_name=region)
+op1016=>operation: response = sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(message_body), MessageAttributes={'Priority': {'DataType': 'Number', 'StringValue': str(priority)}, 'JobId': {'DataType': 'String', 'StringValue': job_id}})
+op1018=>operation: job_name = None
+cond1021=>condition: for manifest in manifest_list
+cond1026=>condition: if manifest.get('kind') == 'Job'
+op1030=>operation: job_name = manifest.get('metadata', {}).get('name')
+sub1032=>subroutine: break
+io1042=>inputoutput: output: {'status': 'queued', 'method': 'sqs', 'message_id': response['MessageId'], 'job_id': job_id, 'job_name': job_name, 'queue_url': queue_url, 'region': region, 'namespace': envelope_namespace, 'priority': priority}
+e1040=>end: end function return
 
-op895->op897
-op897->op899
 op899->op901
 op901->op903
-op903->cond906
-cond906(yes)->cond911
-cond911(yes)->cond916
-cond916->sub926
-sub926(left)->cond911
-cond911(no)->cond934
-cond934(yes)->cond939
-cond939(yes)->cond944
-cond944->cond955
-cond955->sub965
-sub965(left)->cond939
-cond939(no)->op972
-op972->cond975
-cond975->op985
-op985->op987
-op987->op989
+op903->op905
+op905->op907
+op907->cond910
+cond910(yes)->cond915
+cond915(yes)->cond920
+cond920->sub930
+sub930(left)->cond915
+cond915(no)->cond938
+cond938(yes)->cond943
+cond943(yes)->cond948
+cond948->cond959
+cond959->sub969
+sub969(left)->cond943
+cond943(no)->op976
+op976->cond979
+cond979->op989
 op989->op991
-op991->cond994
-cond994->op1004
-op1004->op1006
-op1006->op1008
+op991->op993
+op993->op995
+op995->cond998
+cond998->op1008
 op1008->op1010
 op1010->op1012
 op1012->op1014
-op1014->cond1017
-cond1017(yes)->cond1022
-cond1022(yes)->op1026
-op1026->sub1028
-cond1022(no)->cond1017
-cond1017(no)->io1038
-io1038->e1036
-cond934(no)->op972
-cond906(no)->cond934
+op1014->op1016
+op1016->op1018
+op1018->cond1021
+cond1021(yes)->cond1026
+cond1026(yes)->op1030
+op1030->sub1032
+cond1026(no)->cond1021
+cond1021(no)->io1042
+io1042->e1040
+cond938(no)->op976
+cond910(no)->cond938
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -285,6 +286,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

@@ -28,6 +28,8 @@ class RenderedTarget:
     html_path: Path
     png_path: Path | None
     """``None`` if PNG rendering was skipped or failed."""
+    generated_at: str
+    """Invocation-wide ISO-8601 UTC generation timestamp."""
 
 
 def render_all(
@@ -36,6 +38,7 @@ def render_all(
     project_root: Path,
     output_dir: Path,
     render_png: bool,
+    generated_at: str,
 ) -> list[RenderedTarget]:
     """Render every target, returning where each output landed."""
     _require_pyflowchart()
@@ -48,6 +51,7 @@ def render_all(
                 project_root=project_root,
                 output_dir=output_dir,
                 renderer=renderer,
+                generated_at=generated_at,
             )
             results.append(result)
         return results
@@ -62,6 +66,7 @@ def _render_one(
     project_root: Path,
     output_dir: Path,
     renderer: _PlaywrightRenderer | None,
+    generated_at: str,
 ) -> RenderedTarget:
     """Render a single target and return its output paths."""
     from pyflowchart import Flowchart, output_html  # local import: optional dep
@@ -85,26 +90,76 @@ def _render_one(
     # pyflowchart's HTML template includes trailing spaces on some generated
     # lines. Normalize every artifact here so regeneration remains compatible
     # with ``git diff --check`` across pyflowchart releases.
-    html = html_path.read_text(encoding="utf-8")
+    html = _annotate_generated_html(
+        html_path.read_text(encoding="utf-8"),
+        generated_at=generated_at,
+    )
     html_path.write_text(
         "\n".join(line.rstrip() for line in html.splitlines()) + "\n",
         encoding="utf-8",
     )
     print(f"   ✓ HTML  {html_path.relative_to(project_root)}")
 
+    # Never retain a PNG generated under an older invocation timestamp. Delete
+    # it before either attempting a fresh render or returning HTML-only output;
+    # a failed/skip-PNG run must not leave a mixed-age artifact set behind.
+    if png_path.is_file():
+        png_path.unlink()
+        print(f"   🧹 PNG   removed stale {png_path.relative_to(project_root)}")
+
     if renderer is not None:
         ok = renderer.render(html_path=html_path, png_path=png_path)
         if ok:
             print(f"   ✓ PNG   {png_path.relative_to(project_root)}")
-            return RenderedTarget(target=target, html_path=html_path, png_path=png_path)
-        return RenderedTarget(target=target, html_path=html_path, png_path=None)
+            return RenderedTarget(
+                target=target,
+                html_path=html_path,
+                png_path=png_path,
+                generated_at=generated_at,
+            )
+        return RenderedTarget(
+            target=target,
+            html_path=html_path,
+            png_path=None,
+            generated_at=generated_at,
+        )
 
-    # ``--skip-png`` or Playwright unavailable. If a previously generated
-    # PNG is still on disk from an earlier run, keep pointing at it so
-    # the README and source-file markers stay useful. Otherwise omit the
-    # PNG reference.
-    existing_png = png_path if png_path.is_file() else None
-    return RenderedTarget(target=target, html_path=html_path, png_path=existing_png)
+    # ``--skip-png`` or Playwright unavailable. The stale artifact was removed
+    # above, so README/source markers accurately describe this as HTML-only.
+    return RenderedTarget(
+        target=target,
+        html_path=html_path,
+        png_path=None,
+        generated_at=generated_at,
+    )
+
+
+def _annotate_generated_html(html: str, *, generated_at: str) -> str:
+    """Add machine-readable and visible generation metadata to HTML.
+
+    The visible wrapper intentionally contains the flowchart canvas so the
+    Playwright screenshot includes the same timestamp as the interactive
+    artifact. The HTML comment keeps the value easy to inspect without
+    rendering JavaScript.
+    """
+    charset = '        <meta charset="utf-8">'
+    canvas = '        <div id="canvas"></div>'
+    if charset not in html or canvas not in html:
+        raise RuntimeError("pyflowchart HTML template no longer matches the annotator")
+
+    meta = f'        <meta name="gco-generated-at" content="{generated_at}">'
+    artifact = "\n".join(
+        [
+            f"        <!-- Generated at (UTC): {generated_at} -->",
+            '        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">',
+            '          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">',
+            f'            Generated at (UTC): <time datetime="{generated_at}">{generated_at}</time>',
+            "          </p>",
+            '          <div id="canvas"></div>',
+            "        </div>",
+        ],
+    )
+    return html.replace(charset, f"{charset}\n{meta}", 1).replace(canvas, artifact, 1)
 
 
 def _output_stem_for(target: Target, *, output_dir: Path) -> Path:
@@ -256,7 +311,7 @@ class _PlaywrightRenderer:
                     },
                 )
                 page.wait_for_timeout(100)
-            locator.screenshot(path=str(png_path))
+            page.locator("#generated-artifact").screenshot(path=str(png_path))
             return True
         except PwTimeout as exc:
             warnings.warn(

@@ -3,17 +3,17 @@
 GCO (Global Capacity Orchestrator on AWS) - Multi-Region EKS Auto Mode Platform for AI/ML Workloads
 
 This is the main CDK application entry point that orchestrates the deployment of:
-- Global Stack: AWS Global Accelerator for multi-region routing
+- Global Stack: partition-wide state plus AWS Global Accelerator in the commercial `aws` partition
 - API Gateway Stack: Centralized IAM-authenticated entry point
 - Regional Stacks: EKS clusters, internal ALBs, and services per region
-- Regional API Bridges: SigV4 entry points with VPC Lambdas for aggregation and optional direct access
+- Regional API Bridges: SigV4 entry points with VPC Lambdas for aggregation and direct access (optional in `aws`, required elsewhere)
 - Monitoring Stack: Cross-region CloudWatch dashboards and alarms
 - Optional Analytics Stack: SageMaker Studio and EMR Serverless
 
 Architecture:
-    User → API Gateway (IAM Auth) → Global Accelerator → Internal Regional ALB → EKS Services
+    Commercial `aws`: User → API Gateway (IAM Auth) → Global Accelerator → Internal Regional ALB → EKS Services
+    Other partitions: User → Regional API Gateway (IAM Auth) → VPC Lambda → Internal Regional ALB → EKS Services
     Aggregator → Regional API Gateway (SigV4) → VPC Lambda → Internal Regional ALB
-    User (optional direct access) ───────────────────────────┘
 
 Usage:
     cdk deploy --all                    # Deploy all stacks
@@ -22,11 +22,13 @@ Usage:
 """
 
 import os
+from pathlib import Path
 
 import aws_cdk as cdk
 import jsii
 from constructs import IConstruct
 
+from cli.stacks import cdk_asset_consumer
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.analytics_stack import GCOAnalyticsStack
 from gco.stacks.api_gateway_global_stack import AnalyticsApiConfig, GCOApiGatewayGlobalStack
@@ -37,6 +39,7 @@ from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
 from gco.stacks.regional_stack import GCORegionalStack
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``main`` -> ``diagrams/code_diagrams/app.main.html``
 #     (PNG: ``diagrams/code_diagrams/app.main.png``)
@@ -67,16 +70,17 @@ class LambdaTracingAspect:
             node.tracing_config = cdk.aws_lambda.CfnFunction.TracingConfigProperty(mode="Active")
 
 
+@cdk_asset_consumer(Path(__file__).resolve().parent)
 def main() -> None:
     """
     Main application entry point.
 
     Creates and configures all CDK stacks with proper dependencies:
-    1. Global stack (Global Accelerator) - must be created first
-    2. API Gateway stack - depends on Global Accelerator DNS
+    1. Global stack (shared state plus optional Global Accelerator) - must be created first
+    2. API Gateway stack - uses Global Accelerator DNS only when available
     3. Regional stacks - depend on both global stacks
     4. Regional API bridges - depend on their matching regional stack
-       (direct caller access remains an optional policy setting)
+       (direct caller access is optional in `aws` and required elsewhere)
     5. Monitoring stack - depends on all regional stacks
     6. Optional analytics stack - feeds Studio routes into the API Gateway stack
     """
@@ -116,6 +120,7 @@ def main() -> None:
     monitoring_region = deployment_regions["monitoring"]
     regional_regions = deployment_regions["regional"]
     api_gateway_config = config.get_api_gateway_config()
+    manifest_processor_config = config.get_manifest_processor_config()
 
     # Apply common tags to all stacks
     for key, value in tags.items():
@@ -132,26 +137,28 @@ def main() -> None:
     # is None and stacks stay agnostic exactly as before.
     account = os.environ.get("CDK_DEFAULT_ACCOUNT")
 
-    # Create global stack (Global Accelerator)
-    # Note: Global Accelerator is a global service but needs a "home" region for CloudFormation
+    # Create global resources. Global Accelerator itself is included only in
+    # the commercial ``aws`` partition; the shared data plane remains
+    # available everywhere through regional IAM-authenticated API bridges.
     global_stack = GCOGlobalStack(
         app,
         f"{project_name}-global",
         config=config,
         env=cdk.Environment(account=account, region=global_region),
-        description=f"{SOLUTION_DESCRIPTION_PREFIX} - Global resources including AWS Global Accelerator for GCO (Global Capacity Orchestrator on AWS)",
+        description=f"{SOLUTION_DESCRIPTION_PREFIX} - Shared global resources for GCO (Global Capacity Orchestrator on AWS)",
     )
 
     # Create global API Gateway stack (authenticated entry point)
     api_gateway_stack = GCOApiGatewayGlobalStack(
         app,
         f"{project_name}-api-gateway",
-        global_accelerator_dns=global_stack.accelerator.dns_name,
+        global_accelerator_dns=global_stack.get_accelerator_dns_name(),
         project_name=project_name,
         api_gateway_config=api_gateway_config,
         registry_region=global_region,
         certificate_regions=regional_regions,
         backend_tls_config=config.get_backend_tls_config(),
+        max_request_body_bytes=manifest_processor_config.get("max_request_body_bytes", 1_048_576),
         env=cdk.Environment(account=account, region=api_gateway_region),
         description="Global API Gateway with IAM authentication",
     )
@@ -177,9 +184,10 @@ def main() -> None:
 
         # Every region gets an IAM-authenticated API bridge so the centralized
         # aggregator can reach the private ALB through a VPC-attached Lambda.
-        # ``regional_api_enabled`` controls only whether other account
-        # principals may invoke the bridge directly; it never disables the
-        # aggregator's required path.
+        # In commercial ``aws``, ``regional_api_enabled`` controls whether
+        # other account principals may invoke the bridge directly. Other
+        # partitions enable that IAM-authenticated workload ingress
+        # automatically. Neither mode disables the aggregator's required path.
         regional_api_stack = GCORegionalApiGatewayStack(
             app,
             f"{project_name}-regional-api-{region}",
@@ -189,7 +197,7 @@ def main() -> None:
             auth_secret_arn=api_gateway_stack.secret.secret_arn,
             aggregator_role_arn=api_gateway_stack.aggregator_role.role_arn,
             env=cdk.Environment(account=account, region=region),
-            description=(f"Regional aggregation bridge for {region} with optional direct access"),
+            description=f"Regional aggregation and workload bridge for {region}",
         )
         regional_api_stack.add_dependency(regional_stack)
 
@@ -251,7 +259,8 @@ def main() -> None:
             studio_domain_name=analytics_stack.studio_domain.domain_name or "",
             callback_url=(
                 f"https://{api_gateway_stack.api.rest_api_id}."
-                f"execute-api.{api_gateway_region}.amazonaws.com/prod/studio/callback"
+                f"execute-api.{api_gateway_region}."
+                f"{api_gateway_stack.url_suffix}/prod/studio/callback"
             ),
         )
         api_gateway_stack.set_analytics_config(analytics_api_config)

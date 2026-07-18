@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from kubernetes.client.rest import ApiException
 
 from tests._auth import bypass_backend_auth
 
@@ -521,6 +522,89 @@ class TestPollJobsEdgeCases:
                 data = response.json()
                 assert len(data["results"]) == 1
                 assert data["results"][0]["status"] == "failed"
+
+    def test_poll_jobs_ambiguous_apply_remains_retryable(self, mock_manifest_processor):
+        """An inconclusive create keeps its lease instead of becoming terminal."""
+        from gco.services.manifest_processor import RetryableQueuedJobApplyError
+
+        mock_job_store = self._claimed_job_store()
+        mock_manifest_processor.apply_queued_job.side_effect = RetryableQueuedJobApplyError(
+            "Kubernetes Job create result was inconclusive"
+        )
+
+        with (
+            patch(
+                "gco.services.manifest_api.create_manifest_processor_from_env",
+                return_value=mock_manifest_processor,
+            ),
+            patch("gco.services.manifest_api.get_template_store", return_value=MagicMock()),
+            patch("gco.services.manifest_api.get_webhook_store", return_value=MagicMock()),
+            patch("gco.services.manifest_api.get_job_store", return_value=mock_job_store),
+        ):
+            import gco.services.manifest_api as api_module
+
+            api_module.manifest_processor = mock_manifest_processor
+            api_module.job_store = mock_job_store
+
+            from gco.services.manifest_api import app
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.post("/api/v1/queue/poll?limit=5", headers=_AUTH_HEADERS)
+
+        assert response.status_code == 200
+        assert response.json()["results"][0]["status"] == "retryable"
+        # The sole transition is CLAIMED -> APPLYING; no terminal write follows.
+        assert mock_job_store.transition_job.call_count == 1
+
+    def test_timeout_after_create_is_adopted_on_retry(self):
+        """A lost create response converges on the persisted deterministic Job."""
+        from gco.services.manifest_processor import (
+            ManifestProcessor,
+            RetryableQueuedJobApplyError,
+        )
+
+        processor = object.__new__(ManifestProcessor)
+        processor._k8s_timeout = 10
+        processor.batch_v1 = MagicMock()
+        processor.validate_manifest = MagicMock(return_value=(True, None))
+        processor._inject_security_defaults = MagicMock()
+
+        queue_job_id = "queue-job-123"
+        deterministic_name = processor.queued_job_name("training", queue_job_id)
+        persisted_job = MagicMock()
+        persisted_job.metadata.name = deterministic_name
+        persisted_job.metadata.namespace = "gco-jobs"
+        persisted_job.metadata.uid = "k8s-uid-after-timeout"
+        persisted_job.metadata.annotations = {"gco.io/queue-job-id": queue_job_id}
+        processor.batch_v1.read_namespaced_job.side_effect = [
+            ApiException(status=404),
+            persisted_job,
+        ]
+        processor.batch_v1.create_namespaced_job.side_effect = TimeoutError(
+            "response lost after create"
+        )
+        manifest = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {"name": "training"},
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [{"name": "main", "image": "example.invalid/test:1"}],
+                        "restartPolicy": "Never",
+                    }
+                }
+            },
+        }
+
+        with pytest.raises(RetryableQueuedJobApplyError, match="inconclusive"):
+            processor.apply_queued_job(manifest, "gco-jobs", queue_job_id)
+
+        adopted = processor.apply_queued_job(manifest, "gco-jobs", queue_job_id)
+        assert adopted.status == "unchanged"
+        assert adopted.name == deterministic_name
+        assert adopted.uid == "k8s-uid-after-timeout"
+        assert processor.batch_v1.create_namespaced_job.call_count == 1
 
     def test_poll_jobs_with_k8s_uid(self, mock_manifest_processor):
         """Test poll jobs when Kubernetes returns a UID."""

@@ -2,13 +2,15 @@
 Regional API Gateway bridge for authenticated access to private regional ALBs.
 
 Every deployment creates this regional bridge so the centralized aggregator has
-a reachable, IAM-authenticated path into each regional VPC. Direct user access
-remains optional: ``api_gateway.regional_api_enabled`` controls whether the API
-resource policy also admits other principals from the deployment account.
+a reachable, IAM-authenticated path into each regional VPC. In the commercial
+``aws`` partition, ``api_gateway.regional_api_enabled`` optionally admits other
+same-account principals. In every other AWS partition, Global Accelerator is
+omitted and this regional IAM path is enabled for same-account callers
+regardless of that setting.
 
 Architecture:
     Aggregator → Regional API Gateway → buffered VPC Lambda → Internal ALB → EKS pods
-    User (optional) ────────────────────┤
+    User (optional in ``aws``; required elsewhere) ────────┤
                                         └→ streaming VPC Lambda → inference proxy
 
 Security:
@@ -21,9 +23,11 @@ Security:
     - No public exposure of the ALB or EKS API
 
 Configuration:
-    Set ``api_gateway.regional_api_enabled`` to ``true`` only when callers also
-    need direct region-pinned access. Global aggregation does not require that
-    opt-in because its dedicated role is always allowed.
+    In the commercial ``aws`` partition, set
+    ``api_gateway.regional_api_enabled`` to ``true`` when callers need direct
+    region-pinned access. Outside that partition, the regional API is the
+    supported workload ingress and same-account access is forced on. Global
+    aggregation always uses its dedicated role in every partition.
 """
 
 from typing import Any
@@ -43,12 +47,17 @@ from constructs import Construct
 
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.constants import (
+    AGGREGATOR_REGIONAL_API_ROUTES,
+    DEFAULT_MAX_REQUEST_BODY_BYTES,
+    LAMBDA_NODEJS_RUNTIME,
     LAMBDA_PYTHON_RUNTIME,
     backend_tls_root_ca_parameter_name,
     backend_tls_server_name,
+    validated_request_body_limit,
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalApiGatewayStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_api_gateway_stack.GCORegionalApiGatewayStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_api_gateway_stack.GCORegionalApiGatewayStack___init__.png``)
@@ -60,8 +69,9 @@ class GCORegionalApiGatewayStack(Stack):
     """Regional aggregation bridge with optional direct caller access.
 
     The VPC Lambda gives the global aggregator a reachable path to one internal
-    regional ALB. Operators can separately opt in to direct region-pinned API
-    access for other IAM-authorized principals in the deployment account.
+    regional ALB. Direct region-pinned access for other IAM-authorized account
+    principals is optional in the commercial ``aws`` partition and mandatory
+    in partitions where Global Accelerator is unavailable.
 
     Attributes:
         api: Regional REST API with IAM authentication.
@@ -87,6 +97,10 @@ class GCORegionalApiGatewayStack(Stack):
         self.deployment_region = region
         self.vpc = vpc
         self.alb_dns_name = alb_dns_name
+        supports_global_accelerator = getattr(config, "supports_global_accelerator", None)
+        self.global_accelerator_enabled = (
+            bool(supports_global_accelerator()) if callable(supports_global_accelerator) else True
+        )
         self.auth_secret_arn = auth_secret_arn
         self.aggregator_role_arn = aggregator_role_arn
 
@@ -223,6 +237,7 @@ class GCORegionalApiGatewayStack(Stack):
             "TARGET_REGION": self.deployment_region,
             "PROJECT_NAME": project_name,
             "AWS_ACCOUNT_ID": self.account,
+            "AWS_URL_SUFFIX": self.url_suffix,
             "BACKEND_TLS_SERVER_NAME": backend_tls_server_name(project_name),
             "BACKEND_TLS_ROOT_CA_PARAMETER": root_ca_parameter_name,
             "BACKEND_TLS_ROOT_CA_REGION": registry_region,
@@ -260,6 +275,11 @@ class GCORegionalApiGatewayStack(Stack):
         """Create the VPC Lambda that streams inference responses from the ALB."""
         project_name = self.config.get_project_name()
         backend_tls_config = self.config.get_backend_tls_config()
+        max_request_body_bytes = validated_request_body_limit(
+            self.config.get_manifest_processor_config().get(
+                "max_request_body_bytes", DEFAULT_MAX_REQUEST_BODY_BYTES
+            )
+        )
         registry_region = self.config.get_global_region()
         root_ca_parameter_name = backend_tls_root_ca_parameter_name(project_name)
         registry_parameter_arn = (
@@ -336,9 +356,9 @@ class GCORegionalApiGatewayStack(Stack):
             self,
             "InferenceStreamingProxyFunction",
             function_name=(f"{project_name}-regional-inference-proxy-{self.deployment_region}"),
-            runtime=lambda_.Runtime.NODEJS_22_X,
+            runtime=getattr(lambda_.Runtime, LAMBDA_NODEJS_RUNTIME),
             handler="index.handler",
-            code=lambda_.Code.from_asset("lambda/inference-streaming-proxy"),
+            code=lambda_.Code.from_asset("lambda/inference-streaming-proxy-build"),
             timeout=Duration.minutes(15),
             memory_size=256,
             role=role,
@@ -347,11 +367,13 @@ class GCORegionalApiGatewayStack(Stack):
             security_groups=[self._proxy_lambda_security_group],
             environment={
                 "ROUTING_MODE": "regional",
+                "MAX_REQUEST_BODY_BYTES": str(max_request_body_bytes),
                 "SECRET_ARN": self.auth_secret_arn,
                 "REGISTRY_REGION": registry_region,
                 "TARGET_REGION": self.deployment_region,
                 "PROJECT_NAME": project_name,
                 "AWS_ACCOUNT_ID": self.account,
+                "AWS_URL_SUFFIX": self.url_suffix,
                 "BACKEND_TLS_SERVER_NAME": backend_tls_server_name(project_name),
                 "BACKEND_TLS_ROOT_CA_PARAMETER": root_ca_parameter_name,
                 "BACKEND_TLS_ROOT_CA_REGION": registry_region,
@@ -408,7 +430,9 @@ class GCORegionalApiGatewayStack(Stack):
                 throttling_rate_limit=api_config["throttle_rate_limit"],
                 throttling_burst_limit=api_config["throttle_burst_limit"],
                 logging_level=logging_levels[configured_log_level],
-                data_trace_enabled=True,
+                # Never put inference prompts/responses (or other API bodies)
+                # into execution logs. Standard access logs and metrics remain.
+                data_trace_enabled=False,
                 metrics_enabled=api_config["metrics_enabled"],
                 tracing_enabled=api_config["tracing_enabled"],
                 access_log_destination=apigateway.LogGroupLogDestination(api_log_group),
@@ -434,20 +458,31 @@ class GCORegionalApiGatewayStack(Stack):
                 effect=iam.Effect.ALLOW,
                 principals=[iam.ArnPrincipal(self.aggregator_role_arn)],
                 actions=["execute-api:Invoke"],
-                resources=["execute-api:/*"],
+                resources=[
+                    f"execute-api:/*/{method}/{path}"
+                    for method, path in AGGREGATOR_REGIONAL_API_ROUTES
+                ],
             )
         )
 
-        # Direct regional mode is an explicit opt-in. API methods still require
-        # SigV4 and callers still need identity-policy permission to invoke.
-        if self.config.get_api_gateway_config()["regional_api_enabled"]:
+        # Direct regional mode is an explicit opt-in in the commercial
+        # partition. It becomes the required supported ingress in partitions
+        # where Global Accelerator does not exist. Methods still require SigV4
+        # and callers still need identity-policy permission to invoke.
+        if (
+            self.config.get_api_gateway_config()["regional_api_enabled"]
+            or not self.global_accelerator_enabled
+        ):
             api.add_to_resource_policy(
                 iam.PolicyStatement(
                     effect=iam.Effect.ALLOW,
                     principals=[iam.AnyPrincipal()],
                     actions=["execute-api:Invoke"],
                     resources=["execute-api:/*"],
-                    conditions={"StringEquals": {"aws:PrincipalAccount": self.account}},
+                    conditions={
+                        "StringEquals": {"aws:PrincipalAccount": self.account},
+                        "ArnNotEquals": {"aws:PrincipalArn": self.aggregator_role_arn},
+                    },
                 )
             )
 

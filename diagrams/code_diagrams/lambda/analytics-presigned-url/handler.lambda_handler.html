@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Analytics Presigned-URL Lambda (SageMaker Studio login)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,8 +206,8 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op101=>operation: 'Exchange a Cognito-authorized event for a presigned Studio URL.\n\n    Returns:\n\n    * **HTTP 200** with ``{"url": "...", "expires_in": N}`` when the\n      user profile is ``InService`` and the presigned URL is ready.\n    * **HTTP 202** with ``{"status": "provisioning"}`` when the user\n      profile is still being created.  The CLI should retry after a\n      few seconds.\n    * **HTTP 4xx / 5xx** with ``{"error": "<token>"}`` on failure.\n\n    The Lambda never blocks waiting for profile provisioning.  The CLI\n    is responsible for polling until it receives HTTP 200.\n    '
-op104=>operation: claims = _parse_claims(event)
+        <div><textarea id="code" style="width: 100%;" rows="11">op103=>operation: 'Exchange a Cognito-authorized event for a presigned Studio URL.\n\n    Returns:\n\n    * **HTTP 200** with ``{"url": "...", "expires_in": N}`` when the\n      user profile is ``InService`` and the presigned URL is ready.\n    * **HTTP 202** with ``{"status": "provisioning"}`` when the user\n      profile is still being created.  The CLI should retry after a\n      few seconds.\n    * **HTTP 4xx / 5xx** with ``{"error": "<token>"}`` on failure.\n\n    The Lambda never blocks waiting for profile provisioning.  The CLI\n    is responsible for polling until it receives HTTP 200.\n    '
+op106=>operation: claims = _parse_claims(event)
 username = claims.get('cognito:username') or claims.get('username')
 if not isinstance(username, str) or not username:
     logger.warning('Request missing Cognito username claim')
@@ -222,18 +223,18 @@ _ensure_access_point(username, STUDIO_EFS_ID)
 response = sagemaker.create_presigned_domain_url(DomainId=domain_id, UserProfileName=username, SessionExpirationDurationInSeconds=SESSION_EXPIRES_SECONDS, ExpiresInSeconds=URL_EXPIRES_SECONDS)
 url = response.get('AuthorizedUrl', '')
 return _format_success(url, URL_EXPIRES_SECONDS)
-cond103=>condition: exception raised?
-cond106=>condition: except Exception as exc
-sub110=>subroutine: logger.error('Presigned URL generation failed: %s', exc, exc_info=True)
-io115=>inputoutput: output: _format_error(500, _ERR_GENERIC)
-e113=>end: end function return
+cond105=>condition: exception raised?
+cond108=>condition: except Exception as exc
+sub112=>subroutine: logger.error('Presigned URL generation failed: %s', exc, exc_info=True)
+io117=>inputoutput: output: _format_error(500, _ERR_GENERIC)
+e115=>end: end function return
 
-op101->op104
-op104->cond103
-cond103(yes)->cond106
-cond106(yes)->sub110
-sub110->io115
-io115->e113
+op103->op106
+op106->cond105
+cond105(yes)->cond108
+cond108(yes)->sub112
+sub112->io117
+io117->e115
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -243,6 +244,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

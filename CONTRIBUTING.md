@@ -159,7 +159,7 @@ If `pip install` fails with `ResolutionImpossible` or "the conflict is caused by
 
 ### Dependency Management
 
-GCO uses exact-pinned dependencies in `pyproject.toml` and a committed lockfile (`requirements-lock.txt`) for reproducible builds.
+GCO uses exact-pinned Python dependencies in `pyproject.toml` with a committed transitive lock (`requirements-lock.txt`). It also owns two isolated npm graphs, each with exact direct pins, a committed `package-lock.json`, an npm `packageManager` pin, Dependabot coverage, and CI audit enforcement.
 
 #### Dependency Groups
 
@@ -171,6 +171,22 @@ GCO uses exact-pinned dependencies in `pyproject.toml` and a committed lockfile 
 | MCP | `pip install -e ".[mcp]"` | FastMCP server |
 
 CDK dependencies are in a separate `[cdk]` extras group so operators who only use the CLI don't need to install the full CDK toolchain.
+
+#### Node.js Dependency Graphs
+
+| Graph | Purpose | Install command |
+|-------|---------|-----------------|
+| Repository root | Locked AWS CDK CLI, cdk-dia, and markdownlint tooling | `npm ci --ignore-scripts --no-audit --no-fund` |
+| `lambda/inference-streaming-proxy/` | Deployable AWS SDK clients; its package script runs the native tests in `tests/inference-streaming-proxy/` | `npm ci --prefix lambda/inference-streaming-proxy --ignore-scripts --no-audit --no-fund` |
+
+Before installing either graph, select Node from `.nvmrc` and install/verify the
+exact npm release declared by `packageManager`:
+
+```bash
+bash .github/scripts/use-pinned-npm.sh package.json
+```
+
+Keep these graphs separate: root development tools must never enter the deployable Lambda bundle. Direct versions must be exact, lockfiles must be committed, and every new repository-owned `package.json` must add a matching npm entry in `.github/dependabot.yml`. CI's `check_npm_package_management` guard fails on an unlocked, ranged, unpinned, or unmanaged graph. Node 24, npm 11.18.0, and the root CDK CLI pin are also checked against `.nvmrc`, `Dockerfile.dev`, `gco/stacks/constants.py`, and both manifests by the monthly dependency scan.
 
 #### Regenerating the Lockfile
 
@@ -409,7 +425,7 @@ For what to update alongside code changes, see the [Testing](#testing) and
 
 ### CI/CD Pipeline
 
-The project uses GitHub Actions for automated testing. Every push and pull request runs five primary workflows in parallel, plus three satellites on schedule or manual trigger.
+The project uses GitHub Actions for automated testing. Every push and pull request runs six primary workflows in parallel, plus three satellites on schedule or manual trigger.
 
 #### Primary workflows (run on every push + PR)
 
@@ -417,7 +433,8 @@ The project uses GitHub Actions for automated testing. Every push and pull reque
 |---------------|------------|---------|
 | `.github/workflows/unit-tests.yml` | Unit Tests | pytest with coverage, BATS, CLI smoke, CDK synth + config matrix, lockfile freshness, fresh install, workload import checks |
 | `.github/workflows/integration-tests.yml` | Integration Tests | Per-Dockerfile build + healthcheck, kind cluster E2E (with Calico for NetworkPolicy enforcement), K8s manifest schema, Lambda import validation, cross-module pytest, MCP server pytest |
-| `.github/workflows/security.yml` | Security | bandit, pip-audit, trivy (filesystem + per-image), trufflehog, gitleaks, semgrep, checkov, KICS |
+| `.github/workflows/security.yml` | Security | bandit, pip-audit, npm audit for every owned graph, trivy (filesystem + per-image), trufflehog, gitleaks, semgrep, checkov, KICS, and CodeQL for Python + JavaScript |
+| `.github/workflows/inference-streaming-proxy.yml` | — (no badge) | Native Node.js 24 tests for the streaming Lambda with 93% line/function/branch gates |
 | `.github/workflows/lint.yml` | Linting | actionlint, hadolint, markdownlint, mypy (strict/stacks/lambda), ruff (format + check, imports included), shellcheck, yamllint |
 | `.github/workflows/mooncake-image.yml` | — (no badge) | Mooncake vLLM image contract: runs the real upstream image GCO defaults to (`cli/images.py::_DISAGGREGATED_DEFAULT_IMAGE`) and asserts the PD proxy starts under `python3` + serves `/healthz`, the rendered store config is accepted by the image's loader, and the connector names GCO emits are registered — so an image-version bump is validated by CI |
 
@@ -454,9 +471,12 @@ ruff format --check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 yamllint -c .github/config/.yamllint.yml --strict .
 
-# Run markdownlint (requires Node; no Python install needed).
-# Config lives in .github/config/.markdownlint-cli2.yaml.
-npx markdownlint-cli2 --config .github/config/.markdownlint-cli2.yaml
+# Install locked tooling and the isolated production-Lambda graph.
+bash .github/scripts/use-pinned-npm.sh package.json
+npm ci --ignore-scripts --no-audit --no-fund
+npm run lint:markdown
+npm ci --prefix lambda/inference-streaming-proxy --ignore-scripts --no-audit --no-fund
+npm --prefix lambda/inference-streaming-proxy test
 
 # Run type checks (everything except stacks — fast, no CDK needed)
 mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
@@ -556,10 +576,14 @@ Record architecturally significant decisions — ones that are expensive to reve
   - `diagrams/code_diagrams/` — per-function control-flow charts
     (Lambda handlers, CLI entry points) rendered with pyflowchart +
     Playwright. Run `python diagrams/code_diagrams/generate.py` to
-    refresh; the script auto-inserts a `# Flowchart:` pointer
-    comment at the top of every source file it charts so readers
-    can navigate from code to diagram without guessing. Add new
-    targets by editing `diagrams/code_diagrams/_targets.py`.
+    refresh; the script auto-inserts a generated marker block at the
+    top of every source file it charts with both the flowchart path and
+    the invocation-wide UTC generation timestamp. The same timestamp
+    appears in HTML metadata/visible content, PNG pixels, and the
+    generated README. A normal run intentionally refreshes that wall-clock
+    metadata even when source is unchanged; set a fixed integer
+    `SOURCE_DATE_EPOCH` for byte-reproducible output. Add new targets by
+    editing `diagrams/code_diagrams/_targets.py`.
 - Keep it up-to-date with code changes
 
 ## Code Review Guidelines
@@ -639,13 +663,14 @@ After releasing, confirm the auto-generated GitHub Release notes read well (they
 
 Dependency drift is tracked through three layers:
 
-1. **Dependabot (weekly PRs)** — GitHub Actions and Docker only. See `.github/dependabot.yml`. Python packages are intentionally excluded because `requirements-lock.txt` is managed through `pip-compile` and bumped intentionally.
+1. **Dependabot (weekly PRs)** — GitHub Actions, Docker, the locked root npm tooling graph, and the deployable inference-streaming Lambda graph. See `.github/dependabot.yml`. Python packages are intentionally excluded because `requirements-lock.txt` is managed through `pip-compile` and bumped intentionally.
 2. **`deps-scan` workflow (monthly issue)** — runs on the 1st of each month at 09:00 UTC. Checks Python packages, Docker images, Helm charts, EKS add-on versions, Aurora PostgreSQL engine versions, and pre-commit hook revisions. If anything is out of date, it opens a GitHub issue labeled `dependencies, automated`. The scan logic lives in [`.github/scripts/dependency-scan.sh`](.github/scripts/dependency-scan.sh) — see [`.github/CI.md`](.github/CI.md#dependency-scan-script) for the full reference (surfaces checked, inputs, outputs, extension points, failure modes). Pinned versions are centralised in [`gco/stacks/constants.py`](gco/stacks/constants.py).
 3. **`cve-scan` workflow (weekly job)** — runs Mondays at 09:00 UTC. Re-runs Trivy against the latest CVE databases. A red run is the signal; the per-push `security.yml` workflow will catch the same issue on the next PR.
 
 #### What Gets Checked by `deps-scan`
 
-- **Python Packages**: all packages resolved from `pyproject.toml` are checked against PyPI for newer versions
+- **Python Packages**: direct dependencies resolved from `pyproject.toml` are checked against PyPI for newer versions; transitive-only drift is left to the direct package that owns it
+- **Node/npm**: Node 24, npm, the CDK CLI, exact package pins, lockfile presence, and Dependabot coverage across every repository-owned `package.json`
 - **Docker Images**: semver-tagged images referenced in `.github/workflows/*.yml`, K8s manifests, examples, and Helm chart values
 - **Helm Charts**: from `lambda/helm-installer/charts.yaml`
 - **EKS Add-ons**: extracted from `gco/stacks/regional_stack.py` (requires AWS credentials via OIDC; falls back gracefully otherwise)

@@ -16,6 +16,9 @@ from diagrams.code_diagrams._renderer import RenderedTarget
 _HEADER = """\
 # GCO Code Flowcharts
 
+<!-- Generated at (UTC): __GENERATED_AT__ -->
+*Generated at (UTC): `__GENERATED_AT__`.*
+
 This directory holds auto-generated control-flow diagrams for the
 Python source files listed below. Each target produces an interactive
 [flowchart.js](https://github.com/adrai/flowchart.js) HTML page and (if
@@ -41,8 +44,11 @@ python diagrams/code_diagrams/generate.py
 python diagrams/code_diagrams/generate.py \\
     --target lambda/analytics-presigned-url/handler.py:lambda_handler
 
-# HTML only (skip the Playwright PNG step)
+# HTML only (skip Playwright and remove older PNGs for selected targets)
 python diagrams/code_diagrams/generate.py --skip-png
+
+# Make every HTML + PNG artifact byte-reproducible by fixing its timestamp
+SOURCE_DATE_EPOCH=1784203200 python diagrams/code_diagrams/generate.py
 
 # Don't insert/refresh the ``# Flowchart:`` markers in source files
 python diagrams/code_diagrams/generate.py --skip-marker
@@ -66,8 +72,13 @@ pip install -e '.[diagrams]'
 playwright install chromium
 ```
 
-Without Playwright's browser, the generator still writes HTML and skips
-the PNG step with a warning.
+Without Playwright's browser, the generator still writes HTML and removes any
+older PNG for the selected targets so mixed generation times are impossible.
+Every full run records one UTC timestamp in the HTML, PNG, catalogue, and source
+marker. Without ``SOURCE_DATE_EPOCH``, a normal run intentionally records its
+wall-clock invocation time and can change committed metadata even when source
+code is unchanged. Set ``SOURCE_DATE_EPOCH`` to fixed integer Unix seconds when
+byte-reproducible output is required.
 
 ## Flowchart index
 
@@ -84,7 +95,11 @@ def render_readme(
 ) -> str:
     """Render the full README markdown body as a string."""
     sections = _group_by_toplevel(results)
-    lines = [_HEADER.rstrip()]
+    generated_at_values = {result.generated_at for result in results}
+    if len(generated_at_values) > 1:
+        raise ValueError("README results must share one generation timestamp")
+    generated_at = next(iter(generated_at_values), "unknown")
+    lines = [_HEADER.replace("__GENERATED_AT__", generated_at).rstrip()]
     for top, dir_groups in sections.items():
         lines.append("")
         lines.append(f"### `{top}/`")

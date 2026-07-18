@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Helm Installer Lambda (CFN custom resource)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,15 +206,15 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op613=>operation: 'Main Lambda handler.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the current install path): the event carries an\n      ``Action`` key and is dispatched to :func:`handle_task`, which operates on\n      a single chart and raises on failure.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the whole-chart-set loop below runs.\n    '
-cond616=>condition: if event.get('Action')
-sub620=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
-io625=>inputoutput: output: handle_task(event)
-e623=>end: end function return
-sub631=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
-op633=>operation: request_type = event['RequestType']
-op635=>operation: physical_id = event.get('PhysicalResourceId', f"helm-{event['LogicalResourceId']}")
-op638=>operation: props = event['ResourceProperties']
+        <div><textarea id="code" style="width: 100%;" rows="11">op615=>operation: 'Main Lambda handler.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the current install path): the event carries an\n      ``Action`` key and is dispatched to :func:`handle_task`, which operates on\n      a single chart and raises on failure.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the whole-chart-set loop below runs.\n    '
+cond618=>condition: if event.get('Action')
+sub622=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
+io627=>inputoutput: output: handle_task(event)
+e625=>end: end function return
+sub633=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
+op635=>operation: request_type = event['RequestType']
+op637=>operation: physical_id = event.get('PhysicalResourceId', f"helm-{event['LogicalResourceId']}")
+op640=>operation: props = event['ResourceProperties']
 cluster_name = props['ClusterName']
 region = props['Region']
 default_config = load_charts_config()
@@ -248,6 +249,8 @@ if request_type in ('Create', 'Update'):
             namespace = config.get('namespace', 'default')
             logger.info(f'Chart {chart_name} is disabled, checking if installed...')
             success, message = uninstall_chart(chart_name, namespace, kubeconfig)
+            if success:
+                message = f'uninstalled (disabled): {message}'
             results[chart_name] = message
             if not success:
                 uninstall_failed.append(chart_name)
@@ -299,23 +302,23 @@ if failed:
     send_response(event, context, FAILED, response_data, physical_id, f"Failed charts: {', '.join(failed)}")
 else:
     send_response(event, context, SUCCESS, response_data, physical_id)
-cond637=>condition: exception raised?
-cond640=>condition: except Exception as e
-sub644=>subroutine: logger.error(f'Error: {e}', exc_info=True)
-sub646=>subroutine: send_response(event, context, FAILED, {}, physical_id, str(e))
+cond639=>condition: exception raised?
+cond642=>condition: except Exception as e
+sub646=>subroutine: logger.error(f'Error: {e}', exc_info=True)
+sub648=>subroutine: send_response(event, context, FAILED, {}, physical_id, str(e))
 
-op613->cond616
-cond616(yes)->sub620
-sub620->io625
-io625->e623
-cond616(no)->sub631
-sub631->op633
-op633->op635
-op635->op638
-op638->cond637
-cond637(yes)->cond640
-cond640(yes)->sub644
-sub644->sub646
+op615->cond618
+cond618(yes)->sub622
+sub622->io627
+io627->e625
+cond618(no)->sub633
+sub633->op635
+op635->op637
+op637->op640
+op640->cond639
+cond639(yes)->cond642
+cond642(yes)->sub646
+sub646->sub648
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -325,6 +328,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

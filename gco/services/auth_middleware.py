@@ -46,6 +46,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``AuthenticationMiddleware.dispatch`` -> ``diagrams/code_diagrams/gco/services/auth_middleware.AuthenticationMiddleware_dispatch.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/auth_middleware.AuthenticationMiddleware_dispatch.png``)
@@ -57,6 +58,7 @@ logger = logging.getLogger(__name__)
 
 # Module-level cache for secret signing keys and replay nonces.
 _cached_tokens: set[str] = set()
+_token_expirations: dict[str, float] = {}
 _cache_timestamp = 0.0
 _last_successful_refresh = 0.0
 _last_refresh_attempt = 0.0
@@ -120,9 +122,30 @@ def _is_cache_valid() -> bool:
     )
 
 
+def _previous_token_valid_until(secrets_client: Any, secret_arn: str) -> float | None:
+    """Return the fixed AWSPREVIOUS deadline from rotation completion metadata.
+
+    ``LastRotatedDate`` is set when Secrets Manager finishes rotation. Deriving
+    the deadline from it prevents successful cache refreshes from renewing a
+    displaced key indefinitely. Missing or malformed metadata fails closed for
+    AWSPREVIOUS without making AWSCURRENT or AWSPENDING unavailable.
+    """
+    try:
+        metadata = secrets_client.describe_secret(SecretId=secret_arn)
+        last_rotated = metadata.get("LastRotatedDate")
+        timestamp = getattr(last_rotated, "timestamp", None)
+        if not callable(timestamp):
+            raise ValueError("LastRotatedDate is missing")
+        return float(timestamp()) + CACHE_MAX_STALE_SECONDS
+    except Exception:
+        logger.debug("AWSPREVIOUS rotation metadata is unavailable")
+        return None
+
+
 def _refresh_cache() -> bool:
-    """Refresh current/pending keys without extending stale-key lifetime on failure."""
-    global _cached_tokens, _cache_timestamp, _last_successful_refresh, _last_refresh_attempt
+    """Refresh current and overlap keys without extending stale lifetime on failure."""
+    global _cached_tokens, _token_expirations
+    global _cache_timestamp, _last_successful_refresh, _last_refresh_attempt
 
     secret_arn = os.environ.get("AUTH_SECRET_ARN")
     if not secret_arn:
@@ -141,25 +164,41 @@ def _refresh_cache() -> bool:
         if not isinstance(current, str) or not current:
             raise ValueError("AWSCURRENT token is missing")
         new_tokens = {current}
+        new_token_expirations: dict[str, float] = {}
 
-        try:
-            response = secrets_client.get_secret_value(
-                SecretId=secret_arn,
-                VersionStage="AWSPENDING",
-            )
-            pending_data = json.loads(response["SecretString"])
-            pending = pending_data.get("token")
-            if isinstance(pending, str) and pending:
-                new_tokens.add(pending)
-        except secrets_client.exceptions.ResourceNotFoundException:
-            pass
-        except Exception:
-            logger.debug("AWSPENDING token is unavailable")
+        # Signers cache AWSCURRENT independently for up to
+        # CACHE_MAX_STALE_SECONDS. During rotation, Secrets Manager moves the
+        # displaced current version to AWSPREVIOUS, so validators must retain
+        # both optional overlap stages while a warm signer can still use them.
+        # AWSPREVIOUS gets a fixed wall-clock deadline from LastRotatedDate;
+        # unlike the aggregate cache TTL, successful refreshes cannot renew it.
+        for version_stage in ("AWSPENDING", "AWSPREVIOUS"):
+            try:
+                response = secrets_client.get_secret_value(
+                    SecretId=secret_arn,
+                    VersionStage=version_stage,
+                )
+                overlap_data = json.loads(response["SecretString"])
+                overlap = overlap_data.get("token")
+                if not isinstance(overlap, str) or not overlap:
+                    continue
+                if version_stage == "AWSPREVIOUS" and overlap not in new_tokens:
+                    valid_until = _previous_token_valid_until(secrets_client, secret_arn)
+                    if valid_until is None or time.time() > valid_until:
+                        logger.info("AWSPREVIOUS signing key is outside its overlap window")
+                        continue
+                    new_token_expirations[overlap] = valid_until
+                new_tokens.add(overlap)
+            except secrets_client.exceptions.ResourceNotFoundException:
+                pass
+            except Exception:
+                logger.debug("%s signing key is unavailable", version_stage)
     except Exception:
         logger.exception("Failed to refresh authentication signing keys")
         return False
 
     _cached_tokens = new_tokens
+    _token_expirations = new_token_expirations
     _last_successful_refresh = now
     _cache_timestamp = now
     logger.info("Authentication signing-key cache refreshed")
@@ -173,7 +212,12 @@ def get_valid_tokens() -> set[str]:
         _refresh_cache()
     age = time.monotonic() - _last_successful_refresh
     if _cached_tokens and age <= CACHE_MAX_STALE_SECONDS:
-        return set(_cached_tokens)
+        wall_clock = time.time()
+        return {
+            token
+            for token in _cached_tokens
+            if token not in _token_expirations or wall_clock <= _token_expirations[token]
+        }
     return set()
 
 
@@ -189,8 +233,10 @@ def get_secret_token() -> str | None:
 
 def clear_token_cache() -> None:
     """Clear signing-key and replay caches, forcing a refresh."""
-    global _cached_tokens, _cache_timestamp, _last_successful_refresh, _last_refresh_attempt
+    global _cached_tokens, _token_expirations
+    global _cache_timestamp, _last_successful_refresh, _last_refresh_attempt
     _cached_tokens = set()
+    _token_expirations = {}
     _cache_timestamp = 0.0
     _last_successful_refresh = 0.0
     _last_refresh_attempt = 0.0

@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>gco inference deploy — multi-region endpoint deploy</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,74 +206,74 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1609=>operation: "\n        Deploy an inference endpoint to one or more regions.\n\n        The endpoint spec is written to DynamoDB. The inference_monitor\n        in each target region picks it up and creates the K8s resources.\n\n        Args:\n            endpoint_name: Unique name for the endpoint\n            image: Container image (e.g. vllm/vllm-openai:v0.24.0). Optional\n                when ``mooncake_mode`` is set: a disaggregated/store deploy\n                with no image falls back to the default upstream\n                Mooncake-enabled vLLM image. A plain deploy still requires an\n                image.\n            target_regions: Regions to deploy to (default: all deployed regions)\n            replicas: Number of replicas per region\n            gpu_count: GPUs per replica\n            gpu_type: GPU instance type hint for node selector\n            port: Container port\n            model_path: EFS path for model weights\n            health_check_path: Health check endpoint path\n            env: Environment variables\n            namespace: Kubernetes namespace\n            labels: Labels for the endpoint\n            rewrite_image: When True (the default), rewrite ECR URIs in\n                ``image`` to target each region's local replica. Non-ECR\n                refs (Docker Hub, GHCR, etc.) are left unchanged. When\n                False, the URI is written verbatim to every region's\n                spec — the operator is responsible for cross-region\n                pulls. Per-region rewrites are stored under a\n                ``region_overrides`` map on the spec keyed by region.\n            mooncake_mode: When set to one of ``disaggregated``, ``store``,\n                or ``both``, build and persist a ``spec.mooncake`` block for\n                disaggregated prefill/decode serving and/or a shared KV-cache\n                store. An unsupported value is rejected before anything is\n                persisted.\n            prefill_replicas: X in an XpYd topology — prefill instance count\n                for split (``disaggregated``/``both``) modes.\n            decode_replicas: Y in an XpYd topology — decode instance count for\n                split modes.\n            mooncake_store: Optional KV-store pool configuration merged into\n                ``spec.mooncake.store``. Byte-size fields are authored as\n                base-10 integer decimal strings so they round-trip through\n                DynamoDB.\n            mooncake_transfer: Optional RDMA/TCP transfer-engine configuration\n                merged into ``spec.mooncake.transfer``.\n            mooncake_proxy: Optional PD proxy configuration merged into\n                ``spec.mooncake.proxy``.\n            mooncake_autoscaling: Optional per-role autoscaling configuration\n                merged into ``spec.mooncake.autoscaling``.\n\n        Returns:\n            Created endpoint record\n        "
-op1611=>operation: mooncake_block: dict[str, Any] | None = None
-cond1614=>condition: if mooncake_mode is not None
-cond1619=>condition: if image is None
-op1623=>operation: from .images import default_disaggregated_image
-op1625=>operation: image = default_disaggregated_image(config=self.config)
-op1630=>operation: mooncake_block = self._build_mooncake_block(mode=mooncake_mode, prefill_replicas=prefill_replicas, decode_replicas=decode_replicas, store=mooncake_store, transfer=mooncake_transfer, proxy=mooncake_proxy, autoscaling=mooncake_autoscaling, default_proxy_image=image)
-cond1636=>operation: raise ValueError('an image is required (pass image, or set mooncake_mode to use the default upstream Mooncake-enabled vLLM image)') if  image is None
-cond1647=>condition: if not target_regions
-op1651=>operation: stacks = self._aws_client.discover_regional_stacks()
-op1653=>operation: target_regions = list(stacks.keys())
-cond1656=>operation: raise ValueError('No deployed regions found. Deploy infrastructure first.') if  not target_regions
-op1669=>operation: region_image_map: dict[str, str] = {}
-cond1672=>condition: if rewrite_image
-op1676=>operation: from ._image_uri import rewrite_image_uri_for_region
-cond1679=>operation: region_image_map[region] = rewrite_image_uri_for_region(image, region) while  region in target_regions
-op1691=>operation: spec = {'image': image, 'port': port, 'replicas': replicas, 'gpu_count': gpu_count, 'health_check_path': health_check_path}
-cond1694=>operation: spec['region_image_uris'] = region_image_map if  region_image_map and any((uri != image for uri in region_image_map.values()))
-cond1705=>operation: spec['gpu_type'] = gpu_type if  gpu_type
-cond1716=>operation: spec['model_path'] = model_path if  model_path
-cond1727=>operation: spec['model_source'] = model_source if  model_source
-cond1738=>operation: spec['env'] = env if  env
-cond1749=>operation: spec['autoscaling'] = autoscaling if  autoscaling
-cond1760=>operation: spec['capacity_type'] = capacity_type if  capacity_type
-cond1771=>operation: spec['args'] = extra_args if  extra_args
-cond1782=>operation: spec['accelerator'] = accelerator if  accelerator != 'nvidia'
-cond1793=>operation: spec['node_selector'] = node_selector if  node_selector
-cond1804=>operation: spec['mooncake'] = mooncake_block if  mooncake_block is not None
-op1814=>operation: store = self._get_store()
-op1816=>operation: result: dict[str, Any] = store.create_endpoint(endpoint_name=endpoint_name, spec=spec, target_regions=target_regions, namespace=namespace, labels=labels)
-io1821=>inputoutput: output: result
-e1819=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op1785=>operation: "\n        Deploy an inference endpoint to one or more regions.\n\n        The endpoint spec is written to DynamoDB. The inference_monitor\n        in each target region picks it up and creates the K8s resources.\n\n        Args:\n            endpoint_name: Unique name for the endpoint\n            image: Container image (e.g. vllm/vllm-openai:v0.24.0). Optional\n                when ``mooncake_mode`` is set: a disaggregated/store deploy\n                with no image falls back to the default upstream\n                Mooncake-enabled vLLM image. A plain deploy still requires an\n                image.\n            target_regions: Regions to deploy to (default: all deployed regions)\n            replicas: Number of replicas per region\n            gpu_count: GPUs per replica\n            gpu_type: GPU instance type hint for node selector\n            port: Container port\n            model_path: EFS path for model weights\n            health_check_path: Health check endpoint path\n            env: Environment variables\n            namespace: Kubernetes namespace\n            labels: Labels for the endpoint\n            rewrite_image: When True (the default), rewrite ECR URIs in\n                ``image`` to target each region's local replica. Non-ECR\n                refs (Docker Hub, GHCR, etc.) are left unchanged. When\n                False, the URI is written verbatim to every region's\n                spec — the operator is responsible for cross-region\n                pulls. Per-region rewrites are stored under a\n                ``region_overrides`` map on the spec keyed by region.\n            mooncake_mode: When set to one of ``disaggregated``, ``store``,\n                or ``both``, build and persist a ``spec.mooncake`` block for\n                disaggregated prefill/decode serving and/or a shared KV-cache\n                store. An unsupported value is rejected before anything is\n                persisted.\n            prefill_replicas: X in an XpYd topology — prefill instance count\n                for split (``disaggregated``/``both``) modes.\n            decode_replicas: Y in an XpYd topology — decode instance count for\n                split modes.\n            mooncake_store: Optional KV-store pool configuration merged into\n                ``spec.mooncake.store``. Byte-size fields are authored as\n                base-10 integer decimal strings so they round-trip through\n                DynamoDB.\n            mooncake_transfer: Optional Mooncake transfer intent and network\n                device. ``protocol`` accepts ``rdma`` (the default; scheduled\n                on EFA and rendered to vLLM as ``mooncake_protocol=efa``) or\n                ``tcp`` (no EFA placement). ``device_name`` is forwarded to\n                both the connector and mounted Mooncake configuration; an\n                empty string lets Mooncake auto-detect it.\n            mooncake_proxy: Optional PD proxy configuration merged into\n                ``spec.mooncake.proxy``.\n            mooncake_autoscaling: Optional per-role autoscaling configuration\n                merged into ``spec.mooncake.autoscaling``.\n\n        Returns:\n            Created endpoint record\n        "
+op1787=>operation: mooncake_block: dict[str, Any] | None = None
+cond1790=>condition: if mooncake_mode is not None
+cond1795=>condition: if image is None
+op1799=>operation: from .images import default_disaggregated_image
+op1801=>operation: image = default_disaggregated_image(config=self.config)
+op1806=>operation: mooncake_block = self._build_mooncake_block(mode=mooncake_mode, prefill_replicas=prefill_replicas, decode_replicas=decode_replicas, store=mooncake_store, transfer=mooncake_transfer, proxy=mooncake_proxy, autoscaling=mooncake_autoscaling, default_proxy_image=image)
+cond1812=>operation: raise ValueError('an image is required (pass image, or set mooncake_mode to use the default upstream Mooncake-enabled vLLM image)') if  image is None
+cond1823=>condition: if not target_regions
+op1827=>operation: stacks = self._aws_client.discover_regional_stacks()
+op1829=>operation: target_regions = list(stacks.keys())
+cond1832=>operation: raise ValueError('No deployed regions found. Deploy infrastructure first.') if  not target_regions
+op1845=>operation: region_image_map: dict[str, str] = {}
+cond1848=>condition: if rewrite_image
+op1852=>operation: from ._image_uri import rewrite_image_uri_for_region
+cond1855=>operation: region_image_map[region] = rewrite_image_uri_for_region(image, region) while  region in target_regions
+op1867=>operation: spec = {'image': image, 'port': port, 'replicas': replicas, 'gpu_count': gpu_count, 'health_check_path': health_check_path}
+cond1870=>operation: spec['region_image_uris'] = region_image_map if  region_image_map and any((uri != image for uri in region_image_map.values()))
+cond1881=>operation: spec['gpu_type'] = gpu_type if  gpu_type
+cond1892=>operation: spec['model_path'] = model_path if  model_path
+cond1903=>operation: spec['model_source'] = model_source if  model_source
+cond1914=>operation: spec['env'] = env if  env
+cond1925=>operation: spec['autoscaling'] = autoscaling if  autoscaling
+cond1936=>operation: spec['capacity_type'] = capacity_type if  capacity_type
+cond1947=>operation: spec['args'] = extra_args if  extra_args
+cond1958=>operation: spec['accelerator'] = accelerator if  accelerator != 'nvidia'
+cond1969=>operation: spec['node_selector'] = node_selector if  node_selector
+cond1980=>operation: spec['mooncake'] = mooncake_block if  mooncake_block is not None
+op1990=>operation: store = self._get_store()
+op1992=>operation: result: dict[str, Any] = store.create_endpoint(endpoint_name=endpoint_name, spec=spec, target_regions=target_regions, namespace=namespace, labels=labels)
+io1997=>inputoutput: output: result
+e1995=>end: end function return
 
-op1609->op1611
-op1611->cond1614
-cond1614(yes)->cond1619
-cond1619(yes)->op1623
-op1623->op1625
-op1625->op1630
-op1630->cond1636
-cond1636->cond1647
-cond1647(yes)->op1651
-op1651->op1653
-op1653->cond1656
-cond1656->op1669
-op1669->cond1672
-cond1672(yes)->op1676
-op1676->cond1679
-cond1679->op1691
-op1691->cond1694
-cond1694->cond1705
-cond1705->cond1716
-cond1716->cond1727
-cond1727->cond1738
-cond1738->cond1749
-cond1749->cond1760
-cond1760->cond1771
-cond1771->cond1782
-cond1782->cond1793
-cond1793->cond1804
-cond1804->op1814
-op1814->op1816
-op1816->io1821
-io1821->e1819
-cond1672(no)->op1691
-cond1647(no)->op1669
-cond1619(no)->op1630
-cond1614(no)->cond1636
+op1785->op1787
+op1787->cond1790
+cond1790(yes)->cond1795
+cond1795(yes)->op1799
+op1799->op1801
+op1801->op1806
+op1806->cond1812
+cond1812->cond1823
+cond1823(yes)->op1827
+op1827->op1829
+op1829->cond1832
+cond1832->op1845
+op1845->cond1848
+cond1848(yes)->op1852
+op1852->cond1855
+cond1855->op1867
+op1867->cond1870
+cond1870->cond1881
+cond1881->cond1892
+cond1892->cond1903
+cond1903->cond1914
+cond1914->cond1925
+cond1925->cond1936
+cond1936->cond1947
+cond1947->cond1958
+cond1958->cond1969
+cond1969->cond1980
+cond1980->op1990
+op1990->op1992
+op1992->io1997
+io1997->e1995
+cond1848(no)->op1867
+cond1823(no)->op1845
+cond1795(no)->op1806
+cond1790(no)->cond1812
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -282,6 +283,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

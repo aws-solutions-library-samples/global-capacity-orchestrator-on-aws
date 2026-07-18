@@ -55,6 +55,7 @@ from gco.models import (
 from gco.services.structured_logging import configure_structured_logging, sanitize_log_value
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``ManifestProcessor.apply_queued_job`` -> ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.png``)
@@ -92,6 +93,19 @@ DEFAULT_ALLOWED_KINDS = (
     "ConfigMap",
     "Pod",
 )
+
+
+class RetryableQueuedJobApplyError(RuntimeError):
+    """A deterministic queued Job apply can be retried or adopted safely."""
+
+
+def _is_retryable_kubernetes_api_error(error: ApiException) -> bool:
+    """Classify throttling, server, and transport-like Kubernetes API failures."""
+    try:
+        status = int(error.status or 0)
+    except TypeError, ValueError:
+        status = 0
+    return status == 0 or status in {408, 429} or status >= 500
 
 
 def validate_resource_kind(
@@ -1023,6 +1037,10 @@ class ManifestProcessor:
             message = "Existing deterministic Kubernetes Job adopted"
         except ApiException as error:
             if error.status != 404:
+                if _is_retryable_kubernetes_api_error(error):
+                    raise RetryableQueuedJobApplyError(
+                        "Kubernetes Job lookup was inconclusive; retry deterministic adoption"
+                    ) from error
                 raise
             try:
                 job = self.batch_v1.create_namespaced_job(
@@ -1033,15 +1051,43 @@ class ManifestProcessor:
                 operation = "created"
                 message = "Deterministic Kubernetes Job created"
             except ApiException as create_error:
-                if create_error.status != 409:
+                if create_error.status == 409:
+                    try:
+                        job = self.batch_v1.read_namespaced_job(
+                            name=deterministic_name,
+                            namespace=namespace,
+                            _request_timeout=self._k8s_timeout,
+                        )
+                    except ApiException as adoption_error:
+                        if adoption_error.status == 404 or _is_retryable_kubernetes_api_error(
+                            adoption_error
+                        ):
+                            raise RetryableQueuedJobApplyError(
+                                "Concurrent Kubernetes Job adoption was inconclusive"
+                            ) from adoption_error
+                        raise
+                    except Exception as adoption_error:
+                        raise RetryableQueuedJobApplyError(
+                            "Concurrent Kubernetes Job adoption was inconclusive"
+                        ) from adoption_error
+                    operation = "unchanged"
+                    message = "Concurrent deterministic Kubernetes Job adopted"
+                elif _is_retryable_kubernetes_api_error(create_error):
+                    raise RetryableQueuedJobApplyError(
+                        "Kubernetes Job create result was inconclusive; retry deterministic adoption"
+                    ) from create_error
+                else:
                     raise
-                job = self.batch_v1.read_namespaced_job(
-                    name=deterministic_name,
-                    namespace=namespace,
-                    _request_timeout=self._k8s_timeout,
-                )
-                operation = "unchanged"
-                message = "Concurrent deterministic Kubernetes Job adopted"
+            except Exception as create_error:
+                # A timeout or connection loss can occur after the API server
+                # persisted the Job. Never mark that ambiguous result terminal.
+                raise RetryableQueuedJobApplyError(
+                    "Kubernetes Job create result was inconclusive; retry deterministic adoption"
+                ) from create_error
+        except Exception as read_error:
+            raise RetryableQueuedJobApplyError(
+                "Kubernetes Job lookup was inconclusive; retry deterministic adoption"
+            ) from read_error
 
         actual_annotations = getattr(job.metadata, "annotations", None) or {}
         if actual_annotations.get("gco.io/queue-job-id") != queue_job_id:

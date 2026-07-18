@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>MCP long-task runner (drain, progress, cancel + SIGTERM/SIGKILL)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,88 +206,88 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4039=>operation: 'Run a long-lived command with bounded output and durable status.\n\n    Logical ``gco`` argv is resolved to the executable installed beside this\n    MCP environment and runs from the project root. Process wait and both pipe\n    drains are coordinated concurrently, so a drain error is surfaced promptly\n    instead of allowing an unread pipe to deadlock the child. Every exception\n    after spawn terminates/reaps the process and stamps terminal disk status.\n    '
-op4041=>operation: logical_argv = list(argv)
-op4043=>operation: hit = _argv_has_traversal(logical_argv)
-cond4046=>condition: if hit is not None
-op4050=>operation: index, value = hit
-io4055=>inputoutput: output: json.dumps({'error': 'path_traversal_detected', 'argv_index': index, 'value': value})
-e4053=>end: end function return
-op4061=>operation: protocol_task_id = _try_get_task_id(ctx)
-cond4064=>condition: if len(logical_argv) >= 3 and logical_argv[0] == 'gco'
-op4068=>operation: tool_name = f"{logical_argv[1]}_{logical_argv[2].replace('-', '_')}"
-op4085=>operation: task_id = protocol_task_id if is_valid_task_id(protocol_task_id) else make_task_id(tool_name)
-op4087=>operation: spawn_argv = list(logical_argv)
-cond4090=>operation: spawn_argv[0] = cli_runner._gco_executable() if  spawn_argv and spawn_argv[0] == 'gco'
-op4100=>operation: started = time.monotonic()
-op4102=>operation: status_writer = TaskStatusWriter(task_id=task_id, tool=tool_name, argv=logical_argv, pid=None, total_units=total_units)
-op4104=>operation: process: asyncio.subprocess.Process | None = None
-op4106=>operation: wait_task: asyncio.Task[int] | None = None
-op4108=>operation: drains: list[asyncio.Task[None]] = []
-op4110=>operation: coordination: asyncio.Future[list[Any]] | None = None
-op4112=>operation: heartbeat: asyncio.Task[None] | None = None
-op4114=>operation: stacks_completed = 0
-op4116=>operation: failed_lines: deque[str] = deque(maxlen=_FAILED_EVENT_LINES)
-op4118=>operation: stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
-op4120=>operation: last_activity = time.monotonic()
-op4122=>operation: last_stack: str | None = None
-op4124=>operation: completed_stacks: set[str] = set()
-op4126=>operation: return_code: int | None = None
-st4129=>start: start _drain
-io4131=>inputoutput: input: stream, label
-op4134=>operation: nonlocal stacks_completed, last_activity, last_stack
-cond4137=>operation: raise RuntimeError(f'{label} pipe was not created') if  stream is None
-cond4148=>condition: async for line in _bounded_stream_lines(stream)
-cond4153=>operation: continue if  not line
-op4163=>operation: last_activity = time.monotonic()
-sub4165=>subroutine: status_writer.record_line(line, stream=label)
-op4167=>operation: increment_progress = False
-op4169=>operation: stack_done = _CDK_STACK_DONE_RE.search(line)
-cond4172=>condition: if stack_done is not None
-op4176=>operation: name = stack_done.group(1)
-cond4179=>condition: if name not in completed_stacks
-sub4183=>subroutine: completed_stacks.add(name)
-op4185=>operation: stacks_completed += 1
-sub4187=>subroutine: status_writer.increment_stacks(name)
-op4189=>operation: increment_progress = True
-cond4198=>operation: failed_lines.append(_bounded_text(line, _DIAGNOSTIC_LINE_MAX_BYTES)) if  _CFN_FAILED_RE.search(line)
-op4208=>operation: stack_match = _CDK_STACK_LINE_RE.search(line)
-cond4211=>condition: if stack_match
-op4215=>operation: last_stack = stack_match.group(1)
-sub4217=>subroutine: status_writer.set_last_stack(last_stack)
-cond4223=>operation: stderr_tail.append(_bounded_text(line, _DIAGNOSTIC_LINE_MAX_BYTES)) if  label == 'stderr'
-op4233=>operation: await _best_effort_client_call(progress, 'set_message', line[:_CLIENT_MESSAGE_MAX_CHARS])
-cond4236=>operation: await _best_effort_client_call(progress, 'increment') if  increment_progress
-cond4247=>operation: await _best_effort_client_call(ctx, 'info', f'stderr: {line[:_CLIENT_MESSAGE_MAX_CHARS]}') if  label == 'stderr'
-e4259=>end: end _drain
-st4263=>start: start _heartbeat
-io4265=>inputoutput: input:
-cond4269=>condition: while True
-op4273=>operation: await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
-cond4276=>operation: continue if  time.monotonic() - last_activity < _HEARTBEAT_INTERVAL_SECONDS
-op4286=>operation: elapsed = int(time.monotonic() - started)
-op4288=>operation: stack_part = f' (last: {last_stack})' if last_stack else ''
-op4290=>operation: message = f'still running … {_format_duration(elapsed)} elapsed{stack_part}'
-op4292=>operation: await _best_effort_client_call(progress, 'set_message', message)
-op4294=>operation: await _best_effort_client_call(ctx, 'info', message)
-e4298=>end: end _heartbeat
-st4302=>start: start _clean_process_tasks
-io4304=>inputoutput: input:
-op4307=>operation: 'Terminate/reap the child and consume every auxiliary task result.'
-op4309=>operation: nonlocal wait_task
-cond4312=>condition: if process is None
-e4317=>end: end function return
-cond4324=>operation: wait_task = asyncio.create_task(process.wait()) if  wait_task is None or wait_task.cancelled()
-op4334=>operation: await _terminate_and_reap(process, wait_task)
-cond4337=>condition: for drain in drains
-cond4342=>operation: drain.cancel() if  not drain.done()
-cond4355=>operation: await asyncio.gather(*drains, return_exceptions=True) if  drains
-cond4366=>condition: if coordination is not None
-cond4371=>operation: coordination.cancel() if  not coordination.done()
-op4381=>operation: with contextlib.suppress(asyncio.CancelledError, Exception):
+        <div><textarea id="code" style="width: 100%;" rows="11">op4348=>operation: 'Run a long-lived command with bounded output and durable status.\n\n    Logical ``gco`` argv is resolved to the executable installed beside this\n    MCP environment and runs from the project root. Process wait and both pipe\n    drains are coordinated concurrently, so a drain error is surfaced promptly\n    instead of allowing an unread pipe to deadlock the child. Every exception\n    after spawn terminates/reaps the process and stamps terminal disk status.\n    '
+op4350=>operation: logical_argv = list(argv)
+op4352=>operation: hit = _argv_has_traversal(logical_argv)
+cond4355=>condition: if hit is not None
+op4359=>operation: index, value = hit
+io4364=>inputoutput: output: json.dumps({'error': 'path_traversal_detected', 'argv_index': index, 'value': value})
+e4362=>end: end function return
+op4370=>operation: protocol_task_id = _try_get_task_id(ctx)
+cond4373=>condition: if len(logical_argv) >= 3 and logical_argv[0] == 'gco'
+op4377=>operation: tool_name = f"{logical_argv[1]}_{logical_argv[2].replace('-', '_')}"
+op4394=>operation: task_id = protocol_task_id if isinstance(protocol_task_id, str) and is_valid_task_id(protocol_task_id) else make_task_id(tool_name)
+op4396=>operation: spawn_argv = list(logical_argv)
+cond4399=>operation: spawn_argv[0] = cli_runner._gco_executable() if  spawn_argv and spawn_argv[0] == 'gco'
+op4409=>operation: started = time.monotonic()
+op4411=>operation: status_writer = TaskStatusWriter(task_id=task_id, tool=tool_name, argv=logical_argv, pid=None, total_units=total_units)
+op4413=>operation: process: asyncio.subprocess.Process | None = None
+op4415=>operation: wait_task: asyncio.Task[int] | None = None
+op4417=>operation: drains: list[asyncio.Task[None]] = []
+op4419=>operation: coordination: asyncio.Future[list[Any]] | None = None
+op4421=>operation: heartbeat: asyncio.Task[None] | None = None
+op4423=>operation: stacks_completed = 0
+op4425=>operation: failed_lines: deque[str] = deque(maxlen=_FAILED_EVENT_LINES)
+op4427=>operation: stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
+op4429=>operation: last_activity = time.monotonic()
+op4431=>operation: last_stack: str | None = None
+op4433=>operation: completed_stacks: set[str] = set()
+op4435=>operation: return_code: int | None = None
+st4438=>start: start _drain
+io4440=>inputoutput: input: stream, label
+op4443=>operation: nonlocal stacks_completed, last_activity, last_stack
+cond4446=>operation: raise RuntimeError(f'{label} pipe was not created') if  stream is None
+cond4457=>condition: async for line in _bounded_stream_lines(stream)
+cond4462=>operation: continue if  not line
+op4472=>operation: last_activity = time.monotonic()
+sub4474=>subroutine: status_writer.record_line(line, stream=label)
+op4476=>operation: increment_progress = False
+op4478=>operation: stack_done = _CDK_STACK_DONE_RE.search(line)
+cond4481=>condition: if stack_done is not None
+op4485=>operation: name = stack_done.group(1)
+cond4488=>condition: if name not in completed_stacks
+sub4492=>subroutine: completed_stacks.add(name)
+op4494=>operation: stacks_completed += 1
+sub4496=>subroutine: status_writer.increment_stacks(name)
+op4498=>operation: increment_progress = True
+cond4507=>operation: failed_lines.append(_bounded_text(line, _DIAGNOSTIC_LINE_MAX_BYTES)) if  _CFN_FAILED_RE.search(line)
+op4517=>operation: stack_match = _CDK_STACK_LINE_RE.search(line)
+cond4520=>condition: if stack_match
+op4524=>operation: last_stack = stack_match.group(1)
+sub4526=>subroutine: status_writer.set_last_stack(last_stack)
+cond4532=>operation: stderr_tail.append(_bounded_text(line, _DIAGNOSTIC_LINE_MAX_BYTES)) if  label == 'stderr'
+op4542=>operation: await _best_effort_client_call(progress, 'set_message', line[:_CLIENT_MESSAGE_MAX_CHARS])
+cond4545=>operation: await _best_effort_client_call(progress, 'increment') if  increment_progress
+cond4556=>operation: await _best_effort_client_call(ctx, 'info', f'stderr: {line[:_CLIENT_MESSAGE_MAX_CHARS]}') if  label == 'stderr'
+e4568=>end: end _drain
+st4572=>start: start _heartbeat
+io4574=>inputoutput: input:
+cond4578=>condition: while True
+op4582=>operation: await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+cond4585=>operation: continue if  time.monotonic() - last_activity < _HEARTBEAT_INTERVAL_SECONDS
+op4595=>operation: elapsed = int(time.monotonic() - started)
+op4597=>operation: stack_part = f' (last: {last_stack})' if last_stack else ''
+op4599=>operation: message = f'still running … {_format_duration(elapsed)} elapsed{stack_part}'
+op4601=>operation: await _best_effort_client_call(progress, 'set_message', message)
+op4603=>operation: await _best_effort_client_call(ctx, 'info', message)
+e4607=>end: end _heartbeat
+st4611=>start: start _clean_process_tasks
+io4613=>inputoutput: input:
+op4616=>operation: 'Terminate/reap the child and consume every auxiliary task result.'
+op4618=>operation: nonlocal wait_task
+cond4621=>condition: if process is None
+e4626=>end: end function return
+cond4633=>operation: wait_task = asyncio.create_task(process.wait()) if  wait_task is None or wait_task.cancelled()
+op4643=>operation: await _terminate_and_reap(process, wait_task)
+cond4646=>condition: for drain in drains
+cond4651=>operation: drain.cancel() if  not drain.done()
+cond4664=>operation: await asyncio.gather(*drains, return_exceptions=True) if  drains
+cond4675=>condition: if coordination is not None
+cond4680=>operation: coordination.cancel() if  not coordination.done()
+op4690=>operation: with contextlib.suppress(asyncio.CancelledError, Exception):
     await coordination
-e4386=>end: end _clean_process_tasks
-op4390=>operation: if total_units is not None and total_units > 0:
+e4695=>end: end _clean_process_tasks
+op4699=>operation: if total_units is not None and total_units > 0:
     await _best_effort_client_call(progress, 'set_total', int(total_units))
 process = await asyncio.create_subprocess_exec(*spawn_argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(cli_runner.PROJECT_ROOT))
 status_writer.set_pid(process.pid)
@@ -296,159 +297,159 @@ heartbeat = asyncio.create_task(_heartbeat())
 coordination = asyncio.gather(wait_task, *drains)
 results = await asyncio.shield(coordination)
 return_code = int(results[0])
-cond4389=>condition: exception raised?
-cond4392=>condition: except asyncio.CancelledError
-op4396=>operation: with contextlib.suppress(Exception):
+cond4698=>condition: exception raised?
+cond4701=>condition: except asyncio.CancelledError
+op4705=>operation: with contextlib.suppress(Exception):
     await _clean_process_tasks()
-sub4398=>subroutine: status_writer.finish(state='cancelled', exit_code=process.returncode if process is not None else None, error=_PARTIAL_STATE_DISCLAIMER if is_stack_op else 'cancelled')
-cond4401=>operation: raise asyncio.CancelledError(_PARTIAL_STATE_DISCLAIMER) from None if  is_stack_op
-sub4411=>subroutine: raise
-cond4413=>condition: except Exception as exc
-op4417=>operation: with contextlib.suppress(Exception):
+sub4707=>subroutine: status_writer.finish(state='cancelled', exit_code=process.returncode if process is not None else None, error=_PARTIAL_STATE_DISCLAIMER if is_stack_op else 'cancelled')
+cond4710=>operation: raise asyncio.CancelledError(_PARTIAL_STATE_DISCLAIMER) from None if  is_stack_op
+sub4720=>subroutine: raise
+cond4722=>condition: except Exception as exc
+op4726=>operation: with contextlib.suppress(Exception):
     await _clean_process_tasks()
-sub4419=>subroutine: status_writer.finish(state='failed', exit_code=process.returncode if process is not None else None, error=_bounded_text(f'{type(exc).__name__}: {exc}', _DIAGNOSTIC_LINE_MAX_BYTES))
-sub4421=>subroutine: raise
-cond4428=>condition: if heartbeat is not None
-sub4432=>subroutine: heartbeat.cancel()
-op4434=>operation: with contextlib.suppress(asyncio.CancelledError, Exception):
+sub4728=>subroutine: status_writer.finish(state='failed', exit_code=process.returncode if process is not None else None, error=_bounded_text(f'{type(exc).__name__}: {exc}', _DIAGNOSTIC_LINE_MAX_BYTES))
+sub4730=>subroutine: raise
+cond4737=>condition: if heartbeat is not None
+sub4741=>subroutine: heartbeat.cancel()
+op4743=>operation: with contextlib.suppress(asyncio.CancelledError, Exception):
     await heartbeat
-op4439=>operation: duration = int(time.monotonic() - started)
-cond4442=>operation: return_code = process.returncode if process is not None else None if  return_code is None
-cond4453=>condition: if return_code is None
-sub4457=>subroutine: status_writer.finish(state='failed', error='subprocess return code unavailable')
-sub4459=>subroutine: raise RuntimeError('subprocess return code unavailable')
-cond4465=>condition: if return_code != 0
-op4469=>operation: payload: dict[str, Any] = {'error': f'exit_code={return_code}', 'exit_code': return_code, 'task_id': task_id, 'stacks_completed': stacks_completed, 'duration_seconds': duration, 'last_stack': last_stack, 'failed_events': list(failed_lines), 'stderr_tail': list(stderr_tail)}
-cond4472=>operation: payload['disclaimer'] = _PARTIAL_STATE_DISCLAIMER if  is_stack_op
-sub4482=>subroutine: status_writer.finish(state='failed', exit_code=return_code, error=f'exit_code={return_code}')
-sub4484=>subroutine: raise ToolError(json.dumps(payload))
-sub4489=>subroutine: status_writer.finish(state='succeeded', exit_code=return_code)
-io4494=>inputoutput: output: json.dumps({'status': 'ok', 'task_id': task_id, 'stacks_completed': stacks_completed, 'duration_seconds': duration, 'last_stack': last_stack})
-e4492=>end: end function return
-cond4073=>condition: if len(logical_argv) >= 2 and logical_argv[0] == 'gco'
-op4077=>operation: tool_name = logical_argv[1]
-op4081=>operation: tool_name = logical_argv[0] if logical_argv else 'task'
+op4748=>operation: duration = int(time.monotonic() - started)
+cond4751=>operation: return_code = process.returncode if process is not None else None if  return_code is None
+cond4762=>condition: if return_code is None
+sub4766=>subroutine: status_writer.finish(state='failed', error='subprocess return code unavailable')
+sub4768=>subroutine: raise RuntimeError('subprocess return code unavailable')
+cond4774=>condition: if return_code != 0
+op4778=>operation: payload: dict[str, Any] = {'error': f'exit_code={return_code}', 'exit_code': return_code, 'task_id': task_id, 'stacks_completed': stacks_completed, 'duration_seconds': duration, 'last_stack': last_stack, 'failed_events': list(failed_lines), 'stderr_tail': list(stderr_tail)}
+cond4781=>operation: payload['disclaimer'] = _PARTIAL_STATE_DISCLAIMER if  is_stack_op
+sub4791=>subroutine: status_writer.finish(state='failed', exit_code=return_code, error=f'exit_code={return_code}')
+sub4793=>subroutine: raise ToolError(json.dumps(payload))
+sub4798=>subroutine: status_writer.finish(state='succeeded', exit_code=return_code)
+io4803=>inputoutput: output: json.dumps({'status': 'ok', 'task_id': task_id, 'stacks_completed': stacks_completed, 'duration_seconds': duration, 'last_stack': last_stack})
+e4801=>end: end function return
+cond4382=>condition: if len(logical_argv) >= 2 and logical_argv[0] == 'gco'
+op4386=>operation: tool_name = logical_argv[1]
+op4390=>operation: tool_name = logical_argv[0] if logical_argv else 'task'
 
-op4039->op4041
-op4041->op4043
-op4043->cond4046
-cond4046(yes)->op4050
-op4050->io4055
-io4055->e4053
-cond4046(no)->op4061
-op4061->cond4064
-cond4064(yes)->op4068
-op4068->op4085
-op4085->op4087
-op4087->cond4090
-cond4090->op4100
-op4100->op4102
-op4102->op4104
-op4104->op4106
-op4106->op4108
-op4108->op4110
-op4110->op4112
-op4112->op4114
-op4114->op4116
-op4116->op4118
-op4118->op4120
-op4120->op4122
-op4122->op4124
-op4124->op4126
-op4126->st4129
-st4129->io4131
-io4131->op4134
-op4134->cond4137
-cond4137->cond4148
-cond4148(yes)->cond4153
-cond4153->op4163
-op4163->sub4165
-sub4165->op4167
-op4167->op4169
-op4169->cond4172
-cond4172(yes)->op4176
-op4176->cond4179
-cond4179(yes)->sub4183
-sub4183->op4185
-op4185->sub4187
-sub4187->op4189
-op4189->cond4198
-cond4198->op4208
-op4208->cond4211
-cond4211(yes)->op4215
-op4215->sub4217
-sub4217->cond4223
-cond4223->op4233
-op4233->cond4236
-cond4236->cond4247
-cond4247->cond4148
-cond4211(no)->cond4223
-cond4179(no)->cond4198
-cond4172(no)->cond4198
-cond4148(no)->e4259
-e4259->st4263
-st4263->io4265
-io4265->cond4269
-cond4269(yes)->op4273
-op4273->cond4276
-cond4276->op4286
-op4286->op4288
-op4288->op4290
-op4290->op4292
-op4292->op4294
-op4294(left)->cond4269
-cond4269(no)->e4298
-e4298->st4302
-st4302->io4304
-io4304->op4307
-op4307->op4309
-op4309->cond4312
-cond4312(yes)->e4317
-cond4312(no)->cond4324
-cond4324->op4334
-op4334->cond4337
-cond4337(yes)->cond4342
-cond4342->cond4337
-cond4337(no)->cond4355
-cond4355->cond4366
-cond4366(yes)->cond4371
-cond4371->op4381
-op4381->e4386
-e4386->op4390
-op4390->cond4389
-cond4389(yes)->cond4392
-cond4392(yes)->op4396
-op4396->sub4398
-sub4398->cond4401
-cond4401->sub4411
-cond4392(no)->cond4413
-cond4413(yes)->op4417
-op4417->sub4419
-sub4419->sub4421
-cond4413(no)->cond4428
-cond4428(yes)->sub4432
-sub4432->op4434
-op4434->op4439
-op4439->cond4442
-cond4442->cond4453
-cond4453(yes)->sub4457
-sub4457->sub4459
-cond4453(no)->cond4465
-cond4465(yes)->op4469
-op4469->cond4472
-cond4472->sub4482
-sub4482->sub4484
-cond4465(no)->sub4489
-sub4489->io4494
-io4494->e4492
-cond4428(no)->op4439
-cond4389(no)->cond4428
-cond4366(no)->e4386
-cond4064(no)->cond4073
-cond4073(yes)->op4077
-op4077->op4085
-cond4073(no)->op4081
-op4081->op4085
+op4348->op4350
+op4350->op4352
+op4352->cond4355
+cond4355(yes)->op4359
+op4359->io4364
+io4364->e4362
+cond4355(no)->op4370
+op4370->cond4373
+cond4373(yes)->op4377
+op4377->op4394
+op4394->op4396
+op4396->cond4399
+cond4399->op4409
+op4409->op4411
+op4411->op4413
+op4413->op4415
+op4415->op4417
+op4417->op4419
+op4419->op4421
+op4421->op4423
+op4423->op4425
+op4425->op4427
+op4427->op4429
+op4429->op4431
+op4431->op4433
+op4433->op4435
+op4435->st4438
+st4438->io4440
+io4440->op4443
+op4443->cond4446
+cond4446->cond4457
+cond4457(yes)->cond4462
+cond4462->op4472
+op4472->sub4474
+sub4474->op4476
+op4476->op4478
+op4478->cond4481
+cond4481(yes)->op4485
+op4485->cond4488
+cond4488(yes)->sub4492
+sub4492->op4494
+op4494->sub4496
+sub4496->op4498
+op4498->cond4507
+cond4507->op4517
+op4517->cond4520
+cond4520(yes)->op4524
+op4524->sub4526
+sub4526->cond4532
+cond4532->op4542
+op4542->cond4545
+cond4545->cond4556
+cond4556->cond4457
+cond4520(no)->cond4532
+cond4488(no)->cond4507
+cond4481(no)->cond4507
+cond4457(no)->e4568
+e4568->st4572
+st4572->io4574
+io4574->cond4578
+cond4578(yes)->op4582
+op4582->cond4585
+cond4585->op4595
+op4595->op4597
+op4597->op4599
+op4599->op4601
+op4601->op4603
+op4603(left)->cond4578
+cond4578(no)->e4607
+e4607->st4611
+st4611->io4613
+io4613->op4616
+op4616->op4618
+op4618->cond4621
+cond4621(yes)->e4626
+cond4621(no)->cond4633
+cond4633->op4643
+op4643->cond4646
+cond4646(yes)->cond4651
+cond4651->cond4646
+cond4646(no)->cond4664
+cond4664->cond4675
+cond4675(yes)->cond4680
+cond4680->op4690
+op4690->e4695
+e4695->op4699
+op4699->cond4698
+cond4698(yes)->cond4701
+cond4701(yes)->op4705
+op4705->sub4707
+sub4707->cond4710
+cond4710->sub4720
+cond4701(no)->cond4722
+cond4722(yes)->op4726
+op4726->sub4728
+sub4728->sub4730
+cond4722(no)->cond4737
+cond4737(yes)->sub4741
+sub4741->op4743
+op4743->op4748
+op4748->cond4751
+cond4751->cond4762
+cond4762(yes)->sub4766
+sub4766->sub4768
+cond4762(no)->cond4774
+cond4774(yes)->op4778
+op4778->cond4781
+cond4781->sub4791
+sub4791->sub4793
+cond4774(no)->sub4798
+sub4798->io4803
+io4803->e4801
+cond4737(no)->op4748
+cond4698(no)->cond4737
+cond4675(no)->e4695
+cond4373(no)->cond4382
+cond4382(yes)->op4386
+op4386->op4394
+cond4382(no)->op4390
+op4390->op4394
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -458,6 +459,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

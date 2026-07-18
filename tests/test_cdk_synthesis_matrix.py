@@ -33,6 +33,7 @@ findings. That test stays as-is. This file asserts only that
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -49,9 +50,9 @@ def _build_app(context_overrides: dict[str, Any]) -> cdk.App:
     and a config there exercise identical code paths.
     """
     import json
-    from pathlib import Path
 
-    cdk_json_path = Path(__file__).resolve().parent.parent / "cdk.json"
+    project_root = Path(__file__).resolve().parent.parent
+    cdk_json_path = project_root / "cdk.json"
     with cdk_json_path.open() as f:
         cdk_json = json.load(f)
     context: dict[str, Any] = dict(cdk_json.get("context", {}))
@@ -115,7 +116,7 @@ def _build_all_stacks(app: cdk.App) -> None:
     api_gateway_stack = GCOApiGatewayGlobalStack(
         app,
         f"{project_name}-api-gateway",
-        global_accelerator_dns=global_stack.accelerator.dns_name,
+        global_accelerator_dns=global_stack.get_accelerator_dns_name(),
         env=cdk.Environment(region=api_gateway_region),
     )
     api_gateway_stack.add_dependency(global_stack)
@@ -163,7 +164,8 @@ def _build_all_stacks(app: cdk.App) -> None:
             studio_domain_name=analytics_stack.studio_domain.domain_name or "",
             callback_url=(
                 f"https://{api_gateway_stack.api.rest_api_id}."
-                f"execute-api.{api_gateway_region}.amazonaws.com/prod/studio/callback"
+                f"execute-api.{api_gateway_region}."
+                f"{api_gateway_stack.url_suffix}/prod/studio/callback"
             ),
         )
         api_gateway_stack.set_analytics_config(analytics_api_config)
@@ -173,21 +175,24 @@ def _build_all_stacks(app: cdk.App) -> None:
 @pytest.mark.parametrize("config_name,overrides", CONFIGS, ids=[c[0] for c in CONFIGS])
 def test_synth_succeeds(config_name: str, overrides: dict[str, Any]) -> None:
     """Every config in the shared matrix must synthesize without raising."""
+    from cli.stacks import cdk_asset_consumer
     from gco.stacks.regional_stack import GCORegionalStack
 
-    app = _build_app(overrides)
+    project_root = Path(__file__).resolve().parent.parent
+    with cdk_asset_consumer(project_root):
+        app = _build_app(overrides)
 
-    with (
-        patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
-        patch.object(
-            GCORegionalStack,
-            "_create_helm_installer_lambda",
-            _mock_helm_installer,
-        ),
-    ):
-        mock_image = MagicMock()
-        mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
-        mock_docker.return_value = mock_image
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                _mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
 
-        _build_all_stacks(app)
-        app.synth()
+            _build_all_stacks(app)
+            app.synth()

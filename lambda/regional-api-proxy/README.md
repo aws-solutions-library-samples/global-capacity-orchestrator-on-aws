@@ -1,6 +1,6 @@
 # Regional API Proxy
 
-Proxies IAM-authenticated requests from each always-deployed regional API bridge to the regional internal ALB through a Lambda function in the workload VPC. The centralized aggregator always uses this path. Same-account callers may also use it as a direct, region-pinned alternative when `api_gateway.regional_api_enabled=true`.
+Proxies IAM-authenticated requests from each always-deployed regional API bridge to the regional internal ALB through a Lambda function in the workload VPC. The centralized aggregator always uses this path. In the commercial `aws` partition, same-account callers may opt in with `api_gateway.regional_api_enabled=true`; in other AWS partitions this is the required supported workload ingress and same-account direct access is enabled automatically because Global Accelerator is omitted.
 
 ## Table of Contents
 
@@ -14,7 +14,7 @@ Proxies IAM-authenticated requests from each always-deployed regional API bridge
 
 ## Trigger
 
-Regional API Gateway proxy integration. The stack exposes `/api/v1/{proxy+}` and `/inference/{proxy+}` routes and requires IAM authorization (SigV4) on each method.
+Regional API Gateway's buffered `/api/v1/{proxy+}` integration. The bridge also exposes `/inference/{proxy+}` through the separate Node.js response-streaming proxy. Every method requires IAM authorization (SigV4).
 
 ## How It Works
 
@@ -33,7 +33,7 @@ Only safe read-only methods (`GET`, `HEAD`, and `OPTIONS`) use bounded exponenti
 
 ## Backend Discovery and Verification
 
-Production wiring omits `ALB_ENDPOINT`. At request time the Lambda reads `/<project>/alb-hostname-<target-region>` from SSM in `REGISTRY_REGION`, validates that the value is an ELB DNS name, and verifies with Elastic Load Balancing APIs that it is:
+Production wiring omits `ALB_ENDPOINT`. At request time the Lambda reads `/<project>/alb-hostname-<target-region>` from SSM in `REGISTRY_REGION`, validates that the value is an ELB DNS name under the CDK-provided `AWS_URL_SUFFIX`, and verifies with Elastic Load Balancing APIs that it is:
 
 - an internal application load balancer;
 - owned by `AWS_ACCOUNT_ID` in `TARGET_REGION`;
@@ -53,6 +53,7 @@ Verified endpoints are cached for 60 seconds by default. `REGIONAL_ENDPOINT_CACH
 | `TARGET_REGION` | Registry mode | Workload Region served by this regional API |
 | `PROJECT_NAME` | Registry mode | Deployment prefix used in the SSM path, EKS cluster name, and ownership checks |
 | `AWS_ACCOUNT_ID` | Registry mode | AWS account that must own the resolved ALB |
+| `AWS_URL_SUFFIX` | Registry mode | CDK-provided DNS suffix for the active AWS partition; the ALB hostname must end in the exact regional ELB suffix |
 | `ALB_ENDPOINT` | No | Literal ELB DNS override for compatibility/isolated use; bypasses registry ownership checks |
 | `REGIONAL_ENDPOINT_CACHE_TTL_SECONDS` | No | Verified endpoint cache TTL, 0–300 seconds (default: 60; `0` disables caching) |
 | `PROXY_MAX_RETRIES` | No | Maximum attempts for safe read-only methods (default: 3) |

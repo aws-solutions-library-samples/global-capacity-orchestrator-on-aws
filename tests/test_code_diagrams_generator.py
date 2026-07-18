@@ -5,9 +5,9 @@ Scope:
 * **Targets module** — :func:`Target.slug` and :data:`TARGETS`
   well-formedness (every source file exists, every function name is a
   valid Python identifier or dotted path).
-* **Renderer path math** — :func:`_output_stem_for` mirrors the source
-  tree correctly, including the dotted-function edge case that
-  :meth:`Path.with_suffix` would mangle.
+* **Renderer path/timestamp behavior** — :func:`_output_stem_for` mirrors the
+  source tree correctly, reproducible timestamps propagate into generated
+  HTML/catalogue metadata, and HTML-only runs delete stale PNGs.
 * **Source marker** — :func:`upsert_markers` strips any existing
   marker block first (so placement-rule changes take effect on the
   next run without a separate cleanup pass), inserts the fresh block
@@ -67,15 +67,19 @@ renderer_mod = _load("_cd_renderer", _CD_DIR / "_renderer.py")
 source_marker_mod = _load("_cd_source_marker", _CD_DIR / "_source_marker.py")
 readme_mod = _load("_cd_readme", _CD_DIR / "_readme.py")
 
+timestamp_mod = _load("_cd_timestamp", _CD_DIR / "_timestamp.py")
+
 Target = targets_mod.Target
 TARGETS = targets_mod.TARGETS
 _output_stem_for = renderer_mod._output_stem_for
+_render_one = renderer_mod._render_one
 RenderedTarget = renderer_mod.RenderedTarget
 SENTINEL = source_marker_mod.SENTINEL
 upsert_markers = source_marker_mod.upsert_markers
 strip_markers_from = source_marker_mod.strip_markers_from
 strip_all_markers = source_marker_mod.strip_all_markers
 render_readme = readme_mod.render_readme
+generation_timestamp_utc = timestamp_mod.generation_timestamp_utc
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +162,70 @@ class TestOutputStemFor:
         assert html_path.name == "handler.lambda_handler.html"
 
 
+class TestGenerationTimestamp:
+    """One validated timestamp must propagate without mixed-age PNG output."""
+
+    def test_source_date_epoch_is_reproducible(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SOURCE_DATE_EPOCH", "1784203200")
+        assert generation_timestamp_utc() == "2026-07-16T12:00:00Z"
+
+    def test_invalid_source_date_epoch_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SOURCE_DATE_EPOCH", "not-an-integer")
+        with pytest.raises(ValueError, match="integer Unix timestamp"):
+            generation_timestamp_utc()
+
+    def test_html_only_render_removes_stale_png_and_stamps_html(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pyflowchart
+
+        source = tmp_path / "example.py"
+        source.write_text("def f():\n    return True\n", encoding="utf-8")
+        output_dir = tmp_path / "diagrams" / "code_diagrams"
+        target = Target(source="example.py", function="f")
+        stem = _output_stem_for(target, output_dir=output_dir)
+        stale_png = stem.parent / f"{stem.name}.png"
+        stale_png.parent.mkdir(parents=True)
+        stale_png.write_bytes(b"older-png")
+
+        class FakeFlowchart:
+            @classmethod
+            def from_code(cls, code: str, *, field: str, inner: bool) -> FakeFlowchart:
+                assert "def f" in code
+                assert field == "f"
+                assert inner is True
+                return cls()
+
+            def flowchart(self) -> str:
+                return "st=>start: Start"
+
+        def fake_output_html(path: str, _title: str, _dsl: str) -> None:
+            Path(path).write_text(
+                '<html>\n<head>\n        <meta charset="utf-8">\n</head>\n'
+                '<body>\n        <div id="canvas"></div>\n</body>\n</html>\n',
+                encoding="utf-8",
+            )
+
+        monkeypatch.setattr(pyflowchart, "Flowchart", FakeFlowchart)
+        monkeypatch.setattr(pyflowchart, "output_html", fake_output_html)
+        generated_at = "2026-07-16T12:00:00Z"
+
+        result = _render_one(
+            target=target,
+            project_root=tmp_path,
+            output_dir=output_dir,
+            renderer=None,
+            generated_at=generated_at,
+        )
+
+        assert result.png_path is None
+        assert not stale_png.exists()
+        html = result.html_path.read_text(encoding="utf-8")
+        assert f'<meta name="gco-generated-at" content="{generated_at}">' in html
+        assert f"<!-- Generated at (UTC): {generated_at} -->" in html
+        assert f'<time datetime="{generated_at}">{generated_at}</time>' in html
+
+
 # ---------------------------------------------------------------------------
 # Source marker idempotence
 # ---------------------------------------------------------------------------
@@ -183,6 +251,7 @@ def _make_rendered(
         target=Target(source=source, function=function),
         html_path=html,
         png_path=png,
+        generated_at="2026-07-16T12:00:00Z",
     )
 
 
@@ -210,6 +279,7 @@ class TestUpsertMarkers:
 
         updated = src_path.read_text(encoding="utf-8")
         assert SENTINEL in updated, "Expected marker sentinel to be inserted"
+        assert "# Generated at (UTC): 2026-07-16T12:00:00Z" in updated
         # Marker must sit *below* the docstring + imports and *above*
         # the first real statement (``def f``).
         docstring_end = updated.index('"""Handler docstring."""') + len('"""Handler docstring."""')
@@ -432,6 +502,8 @@ class TestRenderReadme:
             _make_rendered(tmp_path, "lambda/b/h.py", "f"),
         ]
         rendered = render_readme(results, output_dir=output_dir)
+        assert "<!-- Generated at (UTC): 2026-07-16T12:00:00Z -->" in rendered
+        assert "*Generated at (UTC): `2026-07-16T12:00:00Z`.*" in rendered
 
         # Top-level groups are alphabetized, which places ``cli/`` before
         # ``lambda/`` — deterministic ordering matters for stable diffs.

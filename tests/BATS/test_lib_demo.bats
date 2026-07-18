@@ -3,8 +3,10 @@
 # BATS tests for demo/lib_demo.sh
 # ─────────────────────────────────────────────────────────────────────────────
 # Covers the shared helpers used by the three record_*.sh scripts:
-#   - sanitize_cast        (AWS-account-ID redaction in .cast files)
+#   - sanitize_cast        (AWS-account/access-key redaction in .cast files)
+#   - verify_recording_git_state (exact-SHA and dirty-path provenance guard)
 #   - render_gif           (agg invocation with the shared font fallback)
+#   - publish_recording_artifacts (paired publication with rollback)
 #   - DEMO_FONT_FAMILY_*   (the default font chain for emoji coverage)
 #   - ARN helpers          (is_assumed_role / extract_role_name / build_role_arn)
 #
@@ -42,6 +44,27 @@ teardown() {
     shellcheck "$LIB"
 }
 
+@test "verify_recording_git_state rejects a non-allowlisted rename source" {
+    local repo="$TEST_TMPDIR/repo"
+    mkdir -p "$repo/demo"
+    git -C "$repo" init -q
+    printf 'tracked source\n' > "$repo/source.txt"
+    git -C "$repo" add source.txt
+    git -C "$repo" -c user.name=CI -c user.email=ci@example.invalid \
+        commit -q -m initial
+    local sha
+    sha=$(git -C "$repo" rev-parse HEAD)
+    git -C "$repo" mv source.txt demo/deploy.cast
+
+    GCO_EXPECTED_GIT_SHA="$sha"
+    export GCO_EXPECTED_GIT_SHA
+    run verify_recording_git_state "$repo" "demo/deploy.cast"
+    unset GCO_EXPECTED_GIT_SHA
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"source.txt"* ]]
+}
+
 # ── sanitize_cast ────────────────────────────────────────────────────────────
 
 @test "sanitize_cast replaces a single 12-digit account ID with zeros" {
@@ -51,7 +74,8 @@ teardown() {
     sanitize_cast "$cast"
 
     grep -q "000000000000" "$cast"
-    ! grep -q "123456789012" "$cast"
+    run grep -q "123456789012" "$cast"
+    [ "$status" -ne 0 ]
 }
 
 @test "sanitize_cast replaces every occurrence across many lines" {
@@ -66,11 +90,100 @@ teardown() {
     sanitize_cast "$cast"
 
     # Each of the three account IDs should be gone.
-    ! grep -q "111122223333" "$cast"
-    ! grep -q "444455556666" "$cast"
-    ! grep -q "999988887777" "$cast"
+    run grep -q "111122223333" "$cast"
+    [ "$status" -ne 0 ]
+    run grep -q "444455556666" "$cast"
+    [ "$status" -ne 0 ]
+    run grep -q "999988887777" "$cast"
+    [ "$status" -ne 0 ]
     # Four occurrences total (111122223333 appears twice) → four redactions.
     [ "$(grep -c '000000000000' "$cast")" -eq 4 ]
+}
+
+@test "sanitize_cast redacts identifiers split across output events" {
+    local cast="$TEST_TMPDIR/split.cast"
+    {
+        printf '{"version":2,"width":80,"height":24}\n'
+        printf '[0.1,"o","account 123456"]\n'
+        printf '[0.2,"o","789012 key AKIAABCDEFGH"]\n'
+        printf '[0.3,"o","IJKLMNOP done"]\n'
+    } > "$cast"
+
+    sanitize_cast "$cast"
+    verify_cast_sanitized "$cast"
+
+    python3 - "$cast" <<'PYEOF'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    documents = [json.loads(line) for line in stream]
+rendered = "".join(
+    document[2]
+    for document in documents
+    if isinstance(document, list) and len(document) >= 3 and document[1] == "o"
+)
+assert len(documents) == 4
+assert "000000000000" in rendered
+assert "REDACTED_AWS_ACCESS_KEY_ID" in rendered
+assert "123456789012" not in rendered
+assert "".join(("AKIA", "ABCDEFGHIJKLMNOP")) not in rendered
+PYEOF
+}
+
+@test "sanitize_cast redacts complete identifiers hidden by adjacent output" {
+    local cast="$TEST_TMPDIR/adjacent.cast"
+    local fake_access_key_id
+    fake_access_key_id="$(printf '%s%s' 'AKIA' 'ABCDEFGHIJKLMNOP')"
+    {
+        printf '{"version":2,"width":80,"height":24}\n'
+        printf '[0.1,"o","123456789012"]\n'
+        printf '[0.2,"o","999988887777"]\n'
+        printf '[0.3,"o","%s"]\n' "$fake_access_key_id"
+        printf '[0.4,"o","Z"]\n'
+    } > "$cast"
+
+    sanitize_cast "$cast"
+    verify_cast_sanitized "$cast"
+
+    run grep -q "123456789012" "$cast"
+    [ "$status" -ne 0 ]
+    run grep -q "999988887777" "$cast"
+    [ "$status" -ne 0 ]
+    run grep -q "$fake_access_key_id" "$cast"
+    [ "$status" -ne 0 ]
+}
+
+@test "verify_cast_sanitized rejects complete identifiers hidden by adjacent output" {
+    local cast="$TEST_TMPDIR/adjacent-unsanitized.cast"
+    local fake_access_key_id
+    fake_access_key_id="$(printf '%s%s' 'AKIA' 'ABCDEFGHIJKLMNOP')"
+    {
+        printf '{"version":2,"width":80,"height":24}\n'
+        printf '[0.1,"o","123456789012"]\n'
+        printf '[0.2,"o","999988887777"]\n'
+        printf '[0.3,"o","%s"]\n' "$fake_access_key_id"
+        printf '[0.4,"o","Z"]\n'
+    } > "$cast"
+
+    run verify_cast_sanitized "$cast"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"2 account-ID pattern(s), 1 access-key-ID pattern(s)"* ]]
+}
+
+@test "verify_cast_sanitized rejects an unsanitized split output identifier" {
+    local cast="$TEST_TMPDIR/split-unsanitized.cast"
+    {
+        printf '{"version":2,"width":80,"height":24}\n'
+        printf '[0.1,"o","account 123456"]\n'
+        printf '[0.2,"o","789012"]\n'
+    } > "$cast"
+
+    run verify_cast_sanitized "$cast"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"1 account-ID pattern(s)"* ]]
 }
 
 @test "sanitize_cast leaves short numbers (timestamps, counts) alone" {
@@ -85,20 +198,22 @@ teardown() {
     grep -q "42 stacks" "$cast"
     grep -q "1800 seconds" "$cast"
     grep -q "year 2026" "$cast"
-    ! grep -q "000000000000" "$cast"
+    run grep -q "000000000000" "$cast"
+    [ "$status" -ne 0 ]
 }
 
-@test "sanitize_cast redacts longer-than-12-digit runs too (hashes, IDs)" {
-    # A 13-digit run will have the first 12 redacted; that's fine — it only
-    # matters that no 12-consecutive-digit account number survives.
+@test "sanitize_cast leaves longer numeric identifiers alone" {
+    # AWS account IDs are exactly 12 standalone digits. A longer numeric run is
+    # not account-ID-shaped and must not be partially rewritten into a new ID.
     local cast="$TEST_TMPDIR/sample.cast"
     printf '[0.0, "o", "1234567890123 is a 13-digit id"]\n' > "$cast"
 
     sanitize_cast "$cast"
 
-    # The original 13-digit run must not remain verbatim.
-    ! grep -q "1234567890123 is" "$cast"
-    grep -q "000000000000" "$cast"
+    run grep -q "1234567890123 is" "$cast"
+    [ "$status" -eq 0 ]
+    run grep -q "000000000000" "$cast"
+    [ "$status" -ne 0 ]
 }
 
 @test "sanitize_cast edits in place (not to stdout)" {
@@ -148,7 +263,8 @@ teardown() {
 
     # Original ID remains intact.
     grep -q "123456789012" "$cast"
-    ! grep -q "000000000000" "$cast"
+    run grep -q "000000000000" "$cast"
+    [ "$status" -ne 0 ]
 }
 
 # ── render_gif ───────────────────────────────────────────────────────────────
@@ -437,4 +553,81 @@ sys.exit(0 if all(ch in text for ch in codepoints) else 1)
     run build_role_arn "GcoDeployer" "123456789012"
     [ "$status" -eq 0 ]
     [ "$output" = "arn:aws:iam::123456789012:role/GcoDeployer" ]
+}
+
+# ── Paired recording publication ────────────────────────────────────────────
+
+@test "publish_recording_artifacts replaces a prepared cast and GIF together" {
+    local stage="$TEST_TMPDIR/stage"
+    local final_dir="$TEST_TMPDIR/final"
+    mkdir -p "$stage" "$final_dir"
+    printf 'old cast\n' > "$final_dir/demo.cast"
+    printf 'old gif\n' > "$final_dir/demo.gif"
+    printf 'new cast\n' > "$stage/demo.cast"
+    printf 'new gif\n' > "$stage/demo.gif"
+
+    publish_recording_artifacts \
+        "$stage/demo.cast" "$stage/demo.gif" \
+        "$final_dir/demo.cast" "$final_dir/demo.gif"
+
+    [ "$(cat "$final_dir/demo.cast")" = "new cast" ]
+    [ "$(cat "$final_dir/demo.gif")" = "new gif" ]
+    [ "$RECORDING_PUBLICATION_COMPLETE" -eq 1 ]
+    [ "$RECORDING_PUBLICATION_IN_PROGRESS" -eq 0 ]
+}
+
+@test "publish_recording_artifacts restores both originals when GIF publication fails" {
+    local stage="$TEST_TMPDIR/stage"
+    local final_dir="$TEST_TMPDIR/final"
+    mkdir -p "$stage" "$final_dir"
+    printf 'old cast\n' > "$final_dir/demo.cast"
+    printf 'old gif\n' > "$final_dir/demo.gif"
+    printf 'new cast\n' > "$stage/demo.cast"
+    printf 'new gif\n' > "$stage/demo.gif"
+
+    FAILING_MV_SOURCE="$stage/demo.gif"
+    FAILING_MV_DESTINATION="$final_dir/demo.gif"
+    export FAILING_MV_SOURCE FAILING_MV_DESTINATION
+    mv() {
+        local source destination
+        if [ "${1:-}" = "-f" ]; then
+            source="$2"
+            destination="$3"
+        else
+            source="$1"
+            destination="$2"
+        fi
+        if [ "$source" = "$FAILING_MV_SOURCE" ] && \
+                [ "$destination" = "$FAILING_MV_DESTINATION" ]; then
+            return 73
+        fi
+        command mv "$@"
+    }
+    export -f mv
+
+    run publish_recording_artifacts \
+        "$stage/demo.cast" "$stage/demo.gif" \
+        "$final_dir/demo.cast" "$final_dir/demo.gif"
+
+    [ "$status" -eq 73 ]
+    [ "$(cat "$final_dir/demo.cast")" = "old cast" ]
+    [ "$(cat "$final_dir/demo.gif")" = "old gif" ]
+}
+
+@test "publish_recording_artifacts removes an old GIF transactionally in SKIP_GIF mode" {
+    local stage="$TEST_TMPDIR/stage"
+    local final_dir="$TEST_TMPDIR/final"
+    mkdir -p "$stage" "$final_dir"
+    printf 'old cast\n' > "$final_dir/demo.cast"
+    printf 'old gif\n' > "$final_dir/demo.gif"
+    printf 'new cast\n' > "$stage/demo.cast"
+
+    publish_recording_artifacts \
+        "$stage/demo.cast" "" \
+        "$final_dir/demo.cast" "$final_dir/demo.gif"
+
+    [ "$(cat "$final_dir/demo.cast")" = "new cast" ]
+    [ ! -e "$final_dir/demo.gif" ]
+    [ "$RECORDING_PUBLICATION_COMPLETE" -eq 1 ]
+    [ "$RECORDING_PUBLICATION_IN_PROGRESS" -eq 0 ]
 }

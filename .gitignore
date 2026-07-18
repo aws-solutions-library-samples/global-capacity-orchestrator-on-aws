@@ -86,6 +86,12 @@ DEPLOYMENT_PLAN.md
 GPU_NODEPOOL_IMPLEMENTATION.md
 lambda/kubectl-applier-simple-build/
 lambda/helm-installer-build/
+lambda/inference-streaming-proxy-build/
+lambda/.*-build.lock
+lambda/.*-build.staging-*
+lambda/.*-build.backup-*
+/node_modules/
+lambda/inference-streaming-proxy/node_modules/
 .hypothesis/
 
 # Local-only security documents (never commit)

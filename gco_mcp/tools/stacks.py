@@ -105,7 +105,7 @@ def setup_cluster_access(cluster: str | None = None, region: str | None = None) 
     and associates the cluster admin policy. Handles assumed roles automatically.
 
     Args:
-        cluster: Cluster name (default: gco-{region}).
+        cluster: Cluster name (default: <project_name>-{region}).
         region: AWS region (default: first deployment region from cdk.json).
     """
     args = ["stacks", "access"]

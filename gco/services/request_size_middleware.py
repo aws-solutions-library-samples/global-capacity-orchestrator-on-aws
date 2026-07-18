@@ -8,7 +8,6 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 DEFAULT_MAX_REQUEST_BODY_BYTES = 1_048_576
-_BODYLESS_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "DELETE"})
 
 
 class RequestSizeLimitMiddleware:
@@ -29,7 +28,7 @@ class RequestSizeLimitMiddleware:
         self.max_body_bytes = max_body_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope.get("method", "GET") in _BODYLESS_METHODS:
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 

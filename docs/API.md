@@ -46,7 +46,7 @@ This document describes the REST API for the GCO Manifest Processor service.
 ## Base URL
 
 The API is available at the API Gateway endpoint configured during deployment,
-where `<API_GATEWAY_ENDPOINT>` is the host from the `ApiGatewayUrl`
+where `<API_GATEWAY_ENDPOINT>` is the host from the `ApiEndpoint`
 CloudFormation output:
 
 ```http
@@ -66,10 +66,12 @@ replayed envelopes.
 **Important:** Clients provide only SigV4 authentication. Do not set any
 `X-GCO-Signature-*`, `X-GCO-Timestamp`, `X-GCO-Nonce`, or
 `X-GCO-Content-SHA256` headers; the proxy strips caller-supplied internal headers
-and creates its own envelope after IAM authentication. The global endpoint also
-rejects `X-GCO-Target-Region`; select an authorized regional API endpoint for
-explicit region pinning. The GCO CLI does this automatically whenever an API
-operation carries an exact transport target region.
+and creates its own envelope after IAM authentication. In the commercial `aws`
+partition, the global workload endpoint also rejects `X-GCO-Target-Region`;
+select an authorized regional API endpoint for explicit region pinning. The GCO
+CLI does this automatically whenever an API operation carries an exact transport
+target Region. Outside `aws`, workload control and inference use those regional
+IAM endpoints because the global API is aggregate-only.
 
 ## Transport Security
 
@@ -79,9 +81,11 @@ GCO has two explicit TLS trust domains:
    Aggregator fan-out additionally uses SigV4 with its execution-role
    credentials to each deterministic regional API bridge.
 2. Trusted proxy Lambdas use the deployment-local private root for the backend
-   ALB hop. The normal global path is proxy → Global Accelerator → ALB, while a
-   regional bridge uses VPC proxy → ALB. Global Accelerator forwards TCP/443 at
-   Layer 4 and does not terminate TLS.
+   ALB hop. In commercial `aws`, the global path is proxy → Global Accelerator
+   → ALB; a regional bridge uses VPC proxy → ALB in every partition. Global
+   Accelerator forwards TCP/443 at Layer 4 and does not terminate TLS. Outside
+   `aws`, accelerator-backed workload routes are omitted and callers use the
+   regional bridge path directly.
 
 Every regional ACM leaf represents `backend.<project>.gco.internal`. Backend
 clients connect to dynamic accelerator or ALB DNS names but explicitly send

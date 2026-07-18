@@ -269,10 +269,11 @@ def deploy_all_orchestrated(
 def destroy_all_orchestrated(config: Any, yes: Any, parallel: Any, max_workers: Any) -> None:
     """Destroy all stacks in the correct order.
 
-    Destroys in three phases:
-    1. Monitoring stack (gco-monitoring)
-    2. Regional stacks (gco-us-east-1, etc.) - can be parallelized
-    3. Global stacks (gco-api-gateway, gco-global)
+    Destroys in four dependency phases:
+    1. Monitoring stack (<project>-monitoring)
+    2. Regional API bridges (<project>-regional-api-<region>)
+    3. Base regional stacks (<project>-<region>) - can be parallelized
+    4. Global stacks (<project>-api-gateway, <project>-global)
 
     Automatically retries up to 3 times (with 30s waits) if any stacks fail,
     which handles transient issues like orphaned resources during teardown.
@@ -300,7 +301,10 @@ def destroy_all_orchestrated(config: Any, yes: Any, parallel: Any, max_workers: 
     try:
         manager = get_stack_manager(config)
         stacks = manager.list_stacks()
-        ordered = get_stack_destroy_order(stacks)
+        ordered = get_stack_destroy_order(
+            stacks,
+            project_name=config.project_name,
+        )
 
         if not yes:
             formatter.print_warning("This will destroy ALL GCO stacks:")
@@ -469,6 +473,7 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
     """
     import subprocess
 
+    from .._image_uri import aws_partition
     from ..config import _load_cdk_json
 
     formatter = get_output_formatter(config)
@@ -480,6 +485,8 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
             region = cdk_regions["regional"][0]
         else:
             region = config.default_region or "us-east-1"
+
+    partition = aws_partition(str(region))
 
     # Determine cluster name
     if not cluster:
@@ -594,7 +601,7 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
                     text=True,
                 )
                 account_id = account_result.stdout.strip()
-                principal_arn = f"arn:aws:iam::{account_id}:role/{role_name.group(1)}"
+                principal_arn = f"arn:{partition}:iam::{account_id}:role/{role_name.group(1)}"
                 formatter.print_info(f"Using role ARN: {principal_arn}")
 
         # Step 3: Create access entry
@@ -634,7 +641,7 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
                     "--principal-arn",
                     principal_arn,
                     "--policy-arn",
-                    "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy",
+                    f"arn:{partition}:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy",
                     "--access-scope",
                     "type=cluster",
                 ],

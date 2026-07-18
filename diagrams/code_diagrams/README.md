@@ -1,5 +1,8 @@
 # GCO Code Flowcharts
 
+<!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+*Generated at (UTC): `2026-07-18T01:03:40Z`.*
+
 This directory holds auto-generated control-flow diagrams for the
 Python source files listed below. Each target produces an interactive
 [flowchart.js](https://github.com/adrai/flowchart.js) HTML page and (if
@@ -25,8 +28,11 @@ python diagrams/code_diagrams/generate.py
 python diagrams/code_diagrams/generate.py \
     --target lambda/analytics-presigned-url/handler.py:lambda_handler
 
-# HTML only (skip the Playwright PNG step)
+# HTML only (skip Playwright and remove older PNGs for selected targets)
 python diagrams/code_diagrams/generate.py --skip-png
+
+# Make every HTML + PNG artifact byte-reproducible by fixing its timestamp
+SOURCE_DATE_EPOCH=1784203200 python diagrams/code_diagrams/generate.py
 
 # Don't insert/refresh the ``# Flowchart:`` markers in source files
 python diagrams/code_diagrams/generate.py --skip-marker
@@ -50,8 +56,13 @@ pip install -e '.[diagrams]'
 playwright install chromium
 ```
 
-Without Playwright's browser, the generator still writes HTML and skips
-the PNG step with a warning.
+Without Playwright's browser, the generator still writes HTML and removes any
+older PNG for the selected targets so mixed generation times are impossible.
+Every full run records one UTC timestamp in the HTML, PNG, catalogue, and source
+marker. Without ``SOURCE_DATE_EPOCH``, a normal run intentionally records its
+wall-clock invocation time and can change committed metadata even when source
+code is unchanged. Set ``SOURCE_DATE_EPOCH`` to fixed integer Unix seconds when
+byte-reproducible output is required.
 
 ## Flowchart index
 

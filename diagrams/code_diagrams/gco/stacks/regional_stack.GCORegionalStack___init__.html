@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Regional stack constructor (VPC, EKS, ALB, SQS, EFS)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,64 +206,68 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub2062=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op2064=>operation: self.config = config
-op2066=>operation: self.deployment_region = region
-op2068=>operation: self.auth_secret_arn = auth_secret_arn
-op2070=>operation: self.alb_arn: str | None = None
-op2072=>operation: cluster_config = self.config.get_cluster_config(region)
-op2074=>operation: self.cluster_config = cluster_config
-op2076=>operation: self.vpc = ec2.Vpc(self, 'GCOVpc', max_azs=99, nat_gateways=2, subnet_configuration=[ec2.SubnetConfiguration(name='PublicSubnet', subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24), ec2.SubnetConfiguration(name='PrivateSubnet', subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS, cidr_mask=24)])
-sub2078=>subroutine: self._create_vpc_flow_logs()
-sub2080=>subroutine: self._create_sqs_queue()
-sub2082=>subroutine: self._create_container_images()
-sub2084=>subroutine: self._create_aws_custom_resource_role()
-op2086=>operation: self.backend_tls_certificate_arn = self._resolve_backend_tls_certificate_arn()
-sub2088=>subroutine: self._create_eks_cluster(cluster_config)
-sub2090=>subroutine: self._configure_volcano_image_mirror()
-op2092=>operation: self.cluster_shared_identity = self._resolve_cluster_shared_bucket_from_ssm()
-sub2094=>subroutine: self._grant_cluster_shared_bucket_to_job_role(self.cluster_shared_identity)
-sub2096=>subroutine: self._create_regional_shared_bucket()
-sub2098=>subroutine: self._create_efs()
-sub2100=>subroutine: self._create_fsx_lustre()
-sub2102=>subroutine: self._create_valkey_cache()
-sub2104=>subroutine: self._create_aurora_pgvector()
-sub2106=>subroutine: self._create_ga_registration_lambda()
-sub2108=>subroutine: self._create_helm_installer_lambda()
-sub2110=>subroutine: self._apply_kubernetes_manifests()
-sub2112=>subroutine: self._create_drift_detection()
-sub2114=>subroutine: self._create_mcp_role()
-sub2116=>subroutine: self._create_outputs()
-sub2118=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub2260=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op2262=>operation: self.config = config
+op2264=>operation: self.deployment_region = region
+op2266=>operation: self.auth_secret_arn = auth_secret_arn
+op2268=>operation: self.alb_arn: str | None = None
+op2270=>operation: supports_global_accelerator = getattr(config, 'supports_global_accelerator', None)
+op2272=>operation: self.global_accelerator_enabled = bool(supports_global_accelerator()) if callable(supports_global_accelerator) else True
+op2274=>operation: cluster_config = self.config.get_cluster_config(region)
+op2276=>operation: self.cluster_config = cluster_config
+op2278=>operation: self.vpc = ec2.Vpc(self, 'GCOVpc', max_azs=99, nat_gateways=2, subnet_configuration=[ec2.SubnetConfiguration(name='PublicSubnet', subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24), ec2.SubnetConfiguration(name='PrivateSubnet', subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS, cidr_mask=24)])
+sub2280=>subroutine: self._create_vpc_flow_logs()
+sub2282=>subroutine: self._create_sqs_queue()
+sub2284=>subroutine: self._create_container_images()
+sub2286=>subroutine: self._create_aws_custom_resource_role()
+op2288=>operation: self.backend_tls_certificate_arn = self._resolve_backend_tls_certificate_arn()
+sub2290=>subroutine: self._create_eks_cluster(cluster_config)
+sub2292=>subroutine: self._configure_volcano_image_mirror()
+op2294=>operation: self.cluster_shared_identity = self._resolve_cluster_shared_bucket_from_ssm()
+sub2296=>subroutine: self._grant_cluster_shared_bucket_to_job_role(self.cluster_shared_identity)
+sub2298=>subroutine: self._create_regional_shared_bucket()
+sub2300=>subroutine: self._create_efs()
+sub2302=>subroutine: self._create_fsx_lustre()
+sub2304=>subroutine: self._create_valkey_cache()
+sub2306=>subroutine: self._create_aurora_pgvector()
+cond2309=>operation: self._create_ga_registration_lambda() if  self.global_accelerator_enabled
+sub2319=>subroutine: self._create_helm_installer_lambda()
+sub2321=>subroutine: self._apply_kubernetes_manifests()
+sub2323=>subroutine: self._create_drift_detection()
+sub2325=>subroutine: self._create_mcp_role()
+sub2327=>subroutine: self._create_outputs()
+sub2329=>subroutine: self._apply_nag_suppressions()
 
-sub2062->op2064
-op2064->op2066
-op2066->op2068
-op2068->op2070
-op2070->op2072
-op2072->op2074
-op2074->op2076
-op2076->sub2078
-sub2078->sub2080
-sub2080->sub2082
-sub2082->sub2084
-sub2084->op2086
-op2086->sub2088
-sub2088->sub2090
-sub2090->op2092
-op2092->sub2094
-sub2094->sub2096
-sub2096->sub2098
-sub2098->sub2100
-sub2100->sub2102
-sub2102->sub2104
-sub2104->sub2106
-sub2106->sub2108
-sub2108->sub2110
-sub2110->sub2112
-sub2112->sub2114
-sub2114->sub2116
-sub2116->sub2118
+sub2260->op2262
+op2262->op2264
+op2264->op2266
+op2266->op2268
+op2268->op2270
+op2270->op2272
+op2272->op2274
+op2274->op2276
+op2276->op2278
+op2278->sub2280
+sub2280->sub2282
+sub2282->sub2284
+sub2284->sub2286
+sub2286->op2288
+op2288->sub2290
+sub2290->sub2292
+sub2292->op2294
+op2294->sub2296
+sub2296->sub2298
+sub2298->sub2300
+sub2300->sub2302
+sub2302->sub2304
+sub2304->sub2306
+sub2306->cond2309
+cond2309->sub2319
+sub2319->sub2321
+sub2321->sub2323
+sub2323->sub2325
+sub2325->sub2327
+sub2327->sub2329
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -272,6 +277,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # EKS cluster names: 1-100 chars, alphanumeric and hyphens only.
 # AWS region names: e.g. us-east-1, ap-southeast-2, eu-central-1.
 _CLUSTER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]{0,99}$")
-_REGION_RE = re.compile(r"^[a-z]{2,3}-[a-z]+-\d+$")
+_REGION_RE = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
 
 
 def _validate_cluster_name(cluster_name: str) -> None:

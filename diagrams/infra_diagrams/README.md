@@ -41,9 +41,10 @@ Download from <https://graphviz.org/download/> and add to PATH.
 
 ### Node.js
 
-`cdk-dia` is a Node CLI, fetched on demand via `npx` (pinned to
-`CDK_DIA_VERSION` in `generate.py`), so Node.js must be installed. No global
-`npm install` is required — the same way this repo invokes `npx cdk`.
+Run ``npm ci --ignore-scripts --no-audit --no-fund`` at the repository root.
+The exact ``cdk-dia`` release and its transitive graph are pinned in
+``package.json`` / ``package-lock.json``; the generator executes that local
+binary. No global or on-demand npm install is used.
 
 ## Quick Start
 
@@ -138,8 +139,8 @@ The diagram generator requires:
 
 - The `[cdk]` extra (`pip install -e '.[cdk]'`) — CDK libraries used to
   synthesize the app in-process.
-- [cdk-dia](https://github.com/pistazie/cdk-dia) — fetched on demand via
-  `npx` (Node.js required).
+- [cdk-dia](https://github.com/pistazie/cdk-dia) — installed from the root
+  ``package.json`` / ``package-lock.json`` and executed locally.
 - Graphviz `dot` (see Prerequisites above).
 
 ## Customization
@@ -149,4 +150,4 @@ Edit `diagrams/infra_diagrams/generate.py` to customize:
 - Which stacks each diagram includes (via each builder's returned
   `--include` list)
 - Collapsed vs expanded views (cdk-dia's `--collapse` / `--no-collapse`)
-- The pinned cdk-dia version (`CDK_DIA_VERSION`)
+- The locked cdk-dia version in the root ``package.json``

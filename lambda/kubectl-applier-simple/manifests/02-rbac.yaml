@@ -293,11 +293,12 @@ rules:
   # and, when an endpoint names none, provisions a per-endpoint {name}-admin
   # Secret create-if-absent with a generated key. The key reaches the proxy only
   # by Secret reference and is never written to the spec, so the monitor needs
-  # get + create and nothing more (no update/delete: it never rotates or removes
-  # an existing key).
+  # get + create + delete and nothing more (no update/list/watch). Delete is
+  # required only for monitor-owned generated keys during endpoint teardown;
+  # user-named Secrets are never removed by the monitor.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "create"]
+    verbs: ["get", "create", "delete"]
 
   # Networking resources — Ingress for inference endpoints
   - apiGroups: ["networking.k8s.io"]

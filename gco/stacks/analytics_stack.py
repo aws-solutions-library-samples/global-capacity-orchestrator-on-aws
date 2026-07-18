@@ -57,6 +57,7 @@ from gco.stacks.constants import (
 from gco.stacks.nag_suppressions import apply_all_suppressions
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``GCOAnalyticsStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/analytics_stack.GCOAnalyticsStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/analytics_stack.GCOAnalyticsStack___init__.png``)
@@ -158,17 +159,17 @@ class GCOAnalyticsStack(Stack):
         # Grant encrypt/decrypt to service principals that need to operate
         # on analytics-owned resources encrypted by this key.
         service_principals = [
-            f"logs.{self.region}.amazonaws.com",
-            "sagemaker.amazonaws.com",
-            "s3.amazonaws.com",
-            "elasticfilesystem.amazonaws.com",
+            ("logs.amazonaws.com", self.region),
+            ("sagemaker.amazonaws.com", self.region),
+            ("s3.amazonaws.com", self.region),
+            ("elasticfilesystem.amazonaws.com", self.region),
         ]
-        for principal in service_principals:
+        for principal, region in service_principals:
             self.kms_key.add_to_resource_policy(
                 iam.PolicyStatement(
                     sid=f"Allow{principal.split('.')[0].capitalize()}Encrypt",
                     effect=iam.Effect.ALLOW,
-                    principals=[iam.ServicePrincipal(principal)],
+                    principals=[iam.ServicePrincipal(principal, region=region)],
                     actions=[
                         "kms:Encrypt",
                         "kms:Decrypt",
@@ -290,9 +291,9 @@ class GCOAnalyticsStack(Stack):
         """Create ``Studio_Only_Bucket`` for notebook-private scratch + outputs.
 
         Named ``<project_name>-analytics-studio-<account>-<region>`` so the
-        cdk-nag deny-list assertion (``arn:aws:s3:::<project_name>-analytics-studio-*``)
-        stays in lockstep and two deployments in one account+region do not
-        collide. KMS-encrypted with ``self.kms_key``; every access path goes
+        cdk-nag deny-list assertion
+        (``arn:<partition>:s3:::<project_name>-analytics-studio-*``) stays in
+        lockstep, and two deployments in one account+region do not collide. KMS-encrypted with ``self.kms_key``; every access path goes
         through the ``SageMaker_Execution_Role`` grant — no other principal
         is granted access.
         """
@@ -483,11 +484,13 @@ class GCOAnalyticsStack(Stack):
                     # /api/v1/.  /studio/* is explicitly excluded; Canvas
                     # users go through their own Cognito-authorized
                     # ``/studio/login`` route.
-                    f"arn:aws:execute-api:{api_gw_region}:{self.account}:*/prod/*/api/v1/*",
+                    f"arn:{self.partition}:execute-api:{api_gw_region}:{self.account}:"
+                    "*/prod/*/api/v1/*",
                     # ``/inference/*`` proxies through to regional ALBs
                     # for in-cluster model endpoints — notebooks need
                     # the full method surface here too.
-                    f"arn:aws:execute-api:{api_gw_region}:{self.account}:*/prod/*/inference/*",
+                    f"arn:{self.partition}:execute-api:{api_gw_region}:{self.account}:"
+                    "*/prod/*/inference/*",
                 ],
             )
         )
@@ -503,7 +506,7 @@ class GCOAnalyticsStack(Stack):
                 effect=iam.Effect.ALLOW,
                 actions=["sqs:SendMessage"],
                 resources=[
-                    f"arn:aws:sqs:*:{self.account}:{project_name}-jobs-*",
+                    f"arn:{self.partition}:sqs:*:{self.account}:{project_name}-jobs-*",
                 ],
             )
         )
@@ -523,7 +526,8 @@ class GCOAnalyticsStack(Stack):
                 effect=iam.Effect.ALLOW,
                 actions=["ssm:GetParameter", "ssm:GetParameters"],
                 resources=[
-                    f"arn:aws:ssm:{global_region}:{self.account}:parameter{cluster_shared_ssm_parameter_prefix(self.project_name)}/*",
+                    f"arn:{self.partition}:ssm:{global_region}:{self.account}:parameter"
+                    f"{cluster_shared_ssm_parameter_prefix(self.project_name)}/*",
                 ],
             )
         )
@@ -578,10 +582,10 @@ class GCOAnalyticsStack(Stack):
                     "sagemaker:AddTags",
                 ],
                 resources=[
-                    f"arn:aws:sagemaker:{self.region}:{self.account}:domain/*",
-                    f"arn:aws:sagemaker:{self.region}:{self.account}:user-profile/*/*",
-                    f"arn:aws:sagemaker:{self.region}:{self.account}:space/*/*",
-                    f"arn:aws:sagemaker:{self.region}:{self.account}:app/*/*/*/*",
+                    f"arn:{self.partition}:sagemaker:{self.region}:{self.account}:domain/*",
+                    f"arn:{self.partition}:sagemaker:{self.region}:{self.account}:user-profile/*/*",
+                    f"arn:{self.partition}:sagemaker:{self.region}:{self.account}:space/*/*",
+                    f"arn:{self.partition}:sagemaker:{self.region}:{self.account}:app/*/*/*/*",
                 ],
             )
         )
@@ -672,8 +676,9 @@ class GCOAnalyticsStack(Stack):
                 effect=iam.Effect.ALLOW,
                 actions=["sagemaker-mlflow:*"],
                 resources=[
-                    f"arn:aws:sagemaker:{api_gw_region}:{self.account}:mlflow-tracking-server/*",
-                    f"arn:aws:sagemaker:{api_gw_region}:{self.account}:mlflow-app/*",
+                    f"arn:{self.partition}:sagemaker:{api_gw_region}:{self.account}:"
+                    "mlflow-tracking-server/*",
+                    f"arn:{self.partition}:sagemaker:{api_gw_region}:{self.account}:mlflow-app/*",
                 ],
             )
         )
@@ -789,7 +794,7 @@ class GCOAnalyticsStack(Stack):
         1. S3: ``GetObject``/``PutObject``/``DeleteObject``/``ListBucket``/
            ``GetBucketLocation`` on ``<arn>`` + ``<arn>/*``.
         2. KMS: ``Decrypt``/``GenerateDataKey`` with a
-           ``kms:ViaService=s3.<global-region>.amazonaws.com`` condition.
+           ``kms:ViaService=s3.<global-region>.<AWS::URLSuffix>`` condition.
 
         This is a role-side policy — the bucket policy is owned
         exclusively by ``GCOGlobalStack``.
@@ -872,7 +877,7 @@ class GCOAnalyticsStack(Stack):
                     resources=["*"],
                     conditions={
                         "StringEquals": {
-                            "kms:ViaService": f"s3.{global_region}.amazonaws.com",
+                            "kms:ViaService": f"s3.{global_region}.{self.url_suffix}",
                         }
                     },
                 ),
@@ -1387,8 +1392,10 @@ class GCOAnalyticsStack(Stack):
         # user profile under any domain in this region+account". The
         # account is still pinned, so the blast radius is bounded to
         # this account's SageMaker Studio installation.
-        domain_arn_prefix = f"arn:aws:sagemaker:{self.region}:{self.account}:domain/*"
-        user_profile_arn_prefix = f"arn:aws:sagemaker:{self.region}:{self.account}:user-profile/*/*"
+        domain_arn_prefix = f"arn:{self.partition}:sagemaker:{self.region}:{self.account}:domain/*"
+        user_profile_arn_prefix = (
+            f"arn:{self.partition}:sagemaker:{self.region}:{self.account}:user-profile/*/*"
+        )
         self.presigned_url_lambda_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -1498,17 +1505,19 @@ class GCOAnalyticsStack(Stack):
                         "(DescribeDomain, CreatePresignedDomainUrl, "
                         "DescribeUserProfile, CreateUserProfile, "
                         "ListTags, AddTags) are scoped to the literal "
-                        "arn:aws:sagemaker:<region>:<account>:domain/* "
-                        "and arn:aws:sagemaker:<region>:<account>:"
+                        "arn:<partition>:sagemaker:<region>:<account>:domain/* "
+                        "and arn:<partition>:sagemaker:<region>:<account>:"
                         "user-profile/*/* ARN families, which is the "
                         "tightest we can achieve at synth time because "
                         "DomainId is only resolvable at invoke time."
                     ),
                     "appliesTo": [
                         "Resource::*",
-                        ("Resource::arn:aws:sagemaker:<AWS::Region>:<AWS::AccountId>:domain/*"),
                         (
-                            "Resource::arn:aws:sagemaker:<AWS::Region>:"
+                            "Resource::arn:<AWS::Partition>:sagemaker:<AWS::Region>:<AWS::AccountId>:domain/*"
+                        ),
+                        (
+                            "Resource::arn:<AWS::Partition>:sagemaker:<AWS::Region>:"
                             "<AWS::AccountId>:user-profile/*/*"
                         ),
                     ],

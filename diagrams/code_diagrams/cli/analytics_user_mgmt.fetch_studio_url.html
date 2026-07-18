@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Studio presigned-URL fetch (gco analytics studio login)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,62 +206,62 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1061=>operation: "GET ``{api_base}/studio/login`` with the Cognito ID token.\n\n    Returns ``(url, expires_in, correlation_id)`` on success. Raises\n    :class:`urllib.error.HTTPError` / :class:`urllib.error.URLError`\n    on transport or HTTP failure; raises ``ValueError`` on malformed\n    response bodies (unexpected JSON shape / missing ``url`` key), or\n    on non-``https://`` ``api_base`` values (guards urllib's\n    ``file://`` / ``ftp://`` scheme support).\n    "
-op1063=>operation: import email.message
-op1065=>operation: import json as _json
-op1067=>operation: import urllib.error
-op1069=>operation: import urllib.parse
-op1071=>operation: import urllib.request
-op1073=>operation: parsed = urllib.parse.urlparse(api_base)
-cond1076=>operation: raise ValueError(f'api_base must use https:// scheme (got {parsed.scheme!r}). This guard rejects file:// / ftp:// schemes that urllib would otherwise follow.') if  parsed.scheme != 'https'
-cond1087=>operation: raise ValueError(f'api_base is missing a hostname: {api_base!r}') if  not parsed.netloc
-op1097=>operation: login_url = api_base.rstrip('/') + '/studio/login'
-op1099=>operation: request = urllib.request.Request(login_url, headers={'Authorization': id_token, 'Accept': 'application/json'}, method='GET')
-op1101=>operation: with urllib.request.urlopen(request, timeout=30) as response:
+        <div><textarea id="code" style="width: 100%;" rows="11">op1065=>operation: "GET ``{api_base}/studio/login`` with the Cognito ID token.\n\n    Returns ``(url, expires_in, correlation_id)`` on success. Raises\n    :class:`urllib.error.HTTPError` / :class:`urllib.error.URLError`\n    on transport or HTTP failure; raises ``ValueError`` on malformed\n    response bodies (unexpected JSON shape / missing ``url`` key), or\n    on non-``https://`` ``api_base`` values (guards urllib's\n    ``file://`` / ``ftp://`` scheme support).\n    "
+op1067=>operation: import email.message
+op1069=>operation: import json as _json
+op1071=>operation: import urllib.error
+op1073=>operation: import urllib.parse
+op1075=>operation: import urllib.request
+op1077=>operation: parsed = urllib.parse.urlparse(api_base)
+cond1080=>operation: raise ValueError(f'api_base must use https:// scheme (got {parsed.scheme!r}). This guard rejects file:// / ftp:// schemes that urllib would otherwise follow.') if  parsed.scheme != 'https'
+cond1091=>operation: raise ValueError(f'api_base is missing a hostname: {api_base!r}') if  not parsed.netloc
+op1101=>operation: login_url = api_base.rstrip('/') + '/studio/login'
+op1103=>operation: request = urllib.request.Request(login_url, headers={'Authorization': id_token, 'Accept': 'application/json'}, method='GET')
+op1105=>operation: with urllib.request.urlopen(request, timeout=30) as response:
     status = int(response.status)
     body = response.read().decode('utf-8')
     correlation_id = response.headers.get('x-amzn-RequestId') or 'N/A'
-cond1104=>condition: if status == 202
-io1111=>inputoutput: output: ('', 0, correlation_id)
-e1109=>end: end function return
-cond1118=>condition: if status != 200
-op1122=>operation: headers_msg: email.message.Message = email.message.Message()
-op1124=>operation: headers_msg['x-amzn-RequestId'] = correlation_id
-sub1126=>subroutine: raise urllib.error.HTTPError(login_url, status, f'Studio login returned HTTP {status}', headers_msg, None)
-op1132=>operation: payload = _json.loads(body)
+cond1108=>condition: if status == 202
+io1115=>inputoutput: output: ('', 0, correlation_id)
+e1113=>end: end function return
+cond1122=>condition: if status != 200
+op1126=>operation: headers_msg: email.message.Message = email.message.Message()
+op1128=>operation: headers_msg['x-amzn-RequestId'] = correlation_id
+sub1130=>subroutine: raise urllib.error.HTTPError(login_url, status, f'Studio login returned HTTP {status}', headers_msg, None)
+op1136=>operation: payload = _json.loads(body)
 url = str(payload['url'])
 expires_in = int(payload.get('expires_in', 0))
-cond1131=>condition: exception raised?
-cond1134=>condition: except (ValueError, KeyError) as exc
-sub1138=>subroutine: raise ValueError(f'malformed /studio/login response: {exc!r}') from exc
-io1146=>inputoutput: output: (url, expires_in, correlation_id)
-e1144=>end: end function return
+cond1135=>condition: exception raised?
+cond1138=>condition: except (ValueError, KeyError) as exc
+sub1142=>subroutine: raise ValueError(f'malformed /studio/login response: {exc!r}') from exc
+io1150=>inputoutput: output: (url, expires_in, correlation_id)
+e1148=>end: end function return
 
-op1061->op1063
-op1063->op1065
 op1065->op1067
 op1067->op1069
 op1069->op1071
 op1071->op1073
-op1073->cond1076
-cond1076->cond1087
-cond1087->op1097
-op1097->op1099
-op1099->op1101
-op1101->cond1104
-cond1104(yes)->io1111
-io1111->e1109
-cond1104(no)->cond1118
-cond1118(yes)->op1122
-op1122->op1124
-op1124->sub1126
-cond1118(no)->op1132
-op1132->cond1131
-cond1131(yes)->cond1134
-cond1134(yes)->sub1138
-cond1134(no)->io1146
-io1146->e1144
-cond1131(no)->io1146
+op1073->op1075
+op1075->op1077
+op1077->cond1080
+cond1080->cond1091
+cond1091->op1101
+op1101->op1103
+op1103->op1105
+op1105->cond1108
+cond1108(yes)->io1115
+io1115->e1113
+cond1108(no)->cond1122
+cond1122(yes)->op1126
+op1126->op1128
+op1128->sub1130
+cond1122(no)->op1136
+op1136->cond1135
+cond1135(yes)->cond1138
+cond1138(yes)->sub1142
+cond1138(no)->io1150
+io1150->e1148
+cond1135(no)->io1150
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -270,6 +271,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

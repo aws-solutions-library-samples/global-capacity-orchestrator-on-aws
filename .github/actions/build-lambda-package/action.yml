@@ -1,33 +1,31 @@
 name: "Build Lambda package"
 description: >
-  Builds the `lambda/kubectl-applier-simple-build` and `lambda/helm-installer-build`
-  directories that CDK synth, pytest, and KICS scans expect. Ports the
-  `.build-lambda-package` YAML anchor from the retired GitLab pipeline into a
-  composite action so jobs reference this single source of truth via
-  `uses: ./.github/actions/build-lambda-package` instead of duplicating the
-  copy/install logic.
+  Builds the `lambda/kubectl-applier-simple-build`, `lambda/helm-installer-build`,
+  and `lambda/inference-streaming-proxy-build` directories that CDK synth,
+  pytest, and KICS scans expect. Ports the `.build-lambda-package` YAML anchor
+  from the retired GitLab pipeline into a composite action so jobs reference
+  this single source of truth via `uses: ./.github/actions/build-lambda-package`
+  instead of duplicating the copy/install logic.
 
-  Runs `pip install kubernetes pyyaml urllib3 -t lambda/kubectl-applier-simple-build/`
-  which requires a working Python environment — the caller must set up Python
-  (typically with `actions/setup-python`) before invoking this action.
+  Python and Node.js package installation require working runtimes. Callers
+  must configure Python 3.14, install this project's Python dependencies, and
+  configure the Node major pinned in `.nvmrc` first. The action installs and
+  verifies the exact npm release declared by the Lambda's `packageManager`
+  field before invoking the production `prepare_cdk_assets()` entry point.
 
 runs:
   using: "composite"
   steps:
-    - name: Build kubectl-applier-simple-build
+    - name: Install and verify the Lambda's declared npm version
       shell: bash
       run: |
         set -euo pipefail
-        rm -rf lambda/kubectl-applier-simple-build
-        mkdir -p lambda/kubectl-applier-simple-build
-        cp lambda/kubectl-applier-simple/handler.py lambda/kubectl-applier-simple-build/
-        cp -r lambda/kubectl-applier-simple/manifests lambda/kubectl-applier-simple-build/
-        pip install --quiet kubernetes pyyaml urllib3 -t lambda/kubectl-applier-simple-build/
+        bash "${{ github.action_path }}/../../scripts/use-pinned-npm.sh" \
+          "${GITHUB_WORKSPACE}/lambda/inference-streaming-proxy/package.json"
 
-    - name: Build helm-installer-build
+    - name: Prepare source-current Lambda assets atomically
       shell: bash
       run: |
         set -euo pipefail
-        rm -rf lambda/helm-installer-build
-        cp -r lambda/helm-installer lambda/helm-installer-build
-        rm -rf lambda/helm-installer-build/__pycache__
+        python -c \
+          'from pathlib import Path; from cli.stacks import prepare_cdk_assets; prepare_cdk_assets(Path.cwd())'

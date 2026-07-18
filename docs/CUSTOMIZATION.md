@@ -66,24 +66,24 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
 
 ## Deployment Regions
 
-GCO deploys multiple stacks to different AWS regions. All regions are configurable via `cdk.json`.
+GCO deploys multiple stacks to configurable AWS Regions. Every configured Region must expose CloudFormation in the installed AWS SDK, and all Regions in one deployment must belong to the same AWS partition. There is no project-specific Region allowlist or count limit.
 
 ### Understanding Stack Regions
 
 | Stack | Default Region | Purpose |
 |-------|---------------|---------|
-| `gco-global` | us-east-2 | Global Accelerator, global state, and SSM parameters for cross-region coordination |
-| `gco-api-gateway` | us-east-2 | Edge-optimized API Gateway with IAM authentication |
-| `gco-regional-api-{region}` | workload region | Optional direct regional API Gateway and VPC Lambda |
+| `gco-global` | us-east-2 | Partition-wide state and SSM coordination; Global Accelerator in commercial `aws` only |
+| `gco-api-gateway` | us-east-2 | Edge-optimized workload + aggregate API in `aws`; regional aggregate-only API elsewhere |
+| `gco-regional-api-{region}` | workload Region | Aggregator bridge; optional direct access in `aws`, required workload ingress elsewhere |
 | `gco-monitoring` | us-east-2 | Cross-region CloudWatch dashboards and alarms |
 | `gco-analytics` | API Gateway region | Optional SageMaker Studio and EMR Serverless environment |
 | `gco-{region}` | (configurable) | Regional EKS clusters, internal ALBs, and workload infrastructure |
 
 **Why separate regions?**
 
-- Global infrastructure (API Gateway, Global Accelerator) is kept separate from workload regions
+- Partition-wide API and state resources are kept separate from workload Regions
 - Prevents resource conflicts and simplifies management
-- Edge-optimized API Gateway uses CloudFront, so the "home" region has minimal latency impact
+- In commercial `aws`, Global Accelerator and the edge-optimized API provide the global workload path; other partitions use regional IAM-authenticated workload APIs
 - Allows workload regions to be added/removed without affecting global infrastructure
 
 ### Configuring Deployment Regions
@@ -111,7 +111,7 @@ Edit `cdk.json` to customize where each stack type deploys:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `global` | string | `us-east-2` | Region for Global Accelerator and SSM parameters |
+| `global` | string | `us-east-2` | Region for partition-wide state and SSM parameters; also homes Global Accelerator in `aws` |
 | `api_gateway` | string | `us-east-2` | Region for API Gateway stack |
 | `monitoring` | string | `us-east-2` | Region for Monitoring stack |
 | `regional` | array | `["us-east-1"]` | Regions for EKS cluster deployment |
@@ -226,7 +226,7 @@ Changing `project_name` re-scopes all of the following (shown for
 | WAF WebACL + log groups | `acme-api-gateway-waf`, `/aws/apigateway/acme-global`, `aws-waf-logs-acme-api-gateway` |
 | CloudFormation exports | `acme-global-api-endpoint`, `acme-auth-secret-arn`, `acme-waf-webacl-arn`, … |
 | ECR image namespace | repos under `acme/*` (e.g. `acme/dockerhub/…`), ECR replication filter `acme/`, `gco images` / mirror namespace |
-| Global Accelerator | `acme-accelerator` (defaults to `<project>-accelerator` when `global_accelerator.name` is unset in `cdk.json`) |
+| Global Accelerator (`aws` only) | `acme-accelerator` (defaults to `<project>-accelerator` when `global_accelerator.name` is unset in `cdk.json`) |
 | API Gateway names | REST API `acme-global-api`, Studio Cognito authorizer `acme-studio-cognito-authorizer`, request validator `acme-studio-request-validator` |
 | Valkey cache (opt-in) | ElastiCache serverless cache `acme-<region>` |
 | Analytics (opt-in) | Studio bucket `acme-analytics-studio-*`, SageMaker role `AmazonSageMaker-acme-analytics-exec-<region>`, Studio domain `acme-studio-<region>`, EMR app `acme-spark-<region>`, Cognito domain `acme-studio-<account>` |
@@ -302,9 +302,9 @@ If you prefer to bootstrap manually first:
 gco stacks bootstrap -r ap-southeast-1
 ```
 
-### 3. Verify Global Accelerator
+### 3. Verify Regional Routing
 
-The new region is automatically added to Global Accelerator endpoints.
+In the commercial `aws` partition, the new Region is automatically added to Global Accelerator and can be verified with:
 
 ```bash
 aws globalaccelerator list-endpoint-groups \
@@ -313,6 +313,8 @@ aws globalaccelerator list-endpoint-groups \
     --query 'Stacks[0].Outputs[?OutputKey==`GlobalAcceleratorListenerArn`].OutputValue' \
     --output text)
 ```
+
+In every other partition, no accelerator resources or outputs are created. Verify the new `<project>-regional-api-<region>` stack and its `RegionalApiEndpoint` output instead; that IAM-authenticated bridge is the supported workload ingress.
 
 ## EKS Cluster Configuration
 
@@ -1052,7 +1054,7 @@ A few add-on charts pull their images directly from Docker Hub (`docker.io`) —
 
 > **Why a mirror and not an ECR pull-through cache?** ECR pull-through cache for Docker Hub *requires* a stored Docker Hub credential (anonymous Docker Hub PTC isn't supported), and on EKS Auto Mode the pull-only, service-managed node role complicates cache-miss imports. Mirroring sidesteps both: no credential, and the images are plain `gco/*` ECR repos the nodes can already pull.
 
-When enabled, the regional stack injects one Volcano value override — `basic.image_registry` → `<account>.dkr.ecr.<region>.amazonaws.com/<ecr_namespace>` — so every Volcano image (controller, scheduler, admission webhook, and the pre-install admission-init hook, which all render from `basic.image_registry`) resolves from ECR. It creates **no** CloudFormation resources; the mirror is populated by `gco stacks deploy` (automatically, see below) or the `gco images mirror` CLI.
+When enabled, the regional stack injects one Volcano value override — `basic.image_registry` → `<account>.dkr.ecr.<region>.<url-suffix>/<ecr_namespace>` — so every Volcano image (controller, scheduler, admission webhook, and the pre-install admission-init hook, which all render from `basic.image_registry`) resolves from ECR. It creates **no** CloudFormation resources; the mirror is populated by `gco stacks deploy` (automatically, see below) or the `gco images mirror` CLI.
 
 **1. Default `cdk.json` config** (on by default; the default `ecr_namespace` of `gco/dockerhub` is fine). To disable, set `enabled` to `false`:
 
@@ -1475,9 +1477,9 @@ GCO uses an Amazon Bedrock model for two optional, **advisory** features:
 - **Mission sampling** — the goal-directed Mission engine can ask a model for strategy-revision rationales and final-report lessons (`gco mission ...`).
 - **Capacity advisor** — `gco capacity ai-recommend` and `gco capacity predict` send capacity data to a model for a placement/timing recommendation, and the `ai_recommend` MCP tool does the same.
 
-Both default to **Amazon Nova Pro** (`us.amazon.nova-pro-v1:0`). Nova Pro is the default because:
+Both default to **Amazon Nova Premier** (`us.amazon.nova-premier-v1:0`). Nova Premier is the default because:
 
-- It is a system-defined cross-Region inference profile that is **enabled by default** in commercial AWS Regions with the standard AWS Marketplace permissions.
+- `us.amazon.nova-premier-v1:0` is Amazon's system-defined US geographic cross-Region inference profile for Nova Premier.
 - As a first-party Amazon model it does **not** require the one-time **First-Time-Use (FTU)** form that Anthropic asks each account (or organization) to submit before first invocation — so the advisory paths work on a fresh account with no extra onboarding step.
 
 > These Bedrock features are advisory and degrade gracefully. When no model is reachable (no credentials, model not enabled, or access denied) the Mission engine falls back to its deterministic templates and the capacity advisor surfaces a clear error. Core orchestration never depends on Bedrock.
@@ -1523,7 +1525,7 @@ Resolution order: per-call flag (`--model` / `--bedrock-model-id` / MCP `model=`
 
 ### Staying current
 
-The monthly **deps-scan** workflow compares the pinned default against the newest system-defined inference profile in the *same model family* (for example, a newer Amazon Nova Pro release) and opens a GitHub issue when a newer one is available, so the default never silently falls behind. It uses read-only Bedrock list permissions on the CI OIDC role; see [CI documentation](../.github/CI.md#dependency-scan-script) and `.github/scripts/dependency-scan.sh`.
+The monthly **deps-scan** workflow compares the pinned default against the newest system-defined inference profile in the *same model family* (for example, a newer Amazon Nova Premier release) and opens a GitHub issue when a newer one is available, so the default never silently falls behind. It uses read-only Bedrock list permissions on the CI OIDC role; see [CI documentation](../.github/CI.md#dependency-scan-script) and `.github/scripts/dependency-scan.sh`.
 
 ## CDK-nag Compliance
 
@@ -1686,6 +1688,48 @@ When enabled, this provides:
   configs. Mooncake role pods select its `mooncake-efa=true` label automatically,
   so they never land on `p4d`. See [docs/INFERENCE.md](INFERENCE.md).
 
+### Mooncake Protocol and Device Selection
+
+Mooncake has two related transport settings that use different vocabularies:
+
+- The endpoint spec and mounted `mooncake.json` use `protocol: rdma|tcp`, as
+  required by the Mooncake store configuration.
+- vLLM's point-to-point `MooncakeConnector` separately reads
+  `kv_connector_extra_config.mooncake_protocol`. On AWS, GCO translates the
+  default `rdma` intent to `mooncake_protocol: efa` and pins the pod to the
+  dedicated EFA nodepool. This avoids silently using vLLM's generic `rdma`
+  default on an EFA deployment.
+
+| CLI selection | Point-to-point connector | Pod placement |
+|---------------|---------------------------|---------------|
+| Omitted (default) or `--mooncake-protocol rdma` | `mooncake_protocol: efa` | Dedicated `mooncake-efa-pool`; requests an EFA device |
+| `--mooncake-protocol tcp` | `mooncake_protocol: tcp` | No EFA selector, toleration, or device request |
+
+Use `--mooncake-device-name` only when the Mooncake/libfabric runtime must bind
+to a specific provider-visible interface. GCO forwards the value to both the
+vLLM connector and `mooncake.json`; when omitted (or explicitly empty),
+Mooncake auto-detects the device. Device names are image and instance dependent,
+so do not assume that a host interface name is valid inside the pod.
+
+```bash
+gco inference deploy my-llm \
+  --mooncake-mode disaggregated \
+  --mooncake-protocol rdma \
+  --mooncake-device-name <DEVICE_NAME>
+
+# Portable fallback when EFA is unavailable
+gco inference deploy my-llm \
+  --mooncake-mode disaggregated \
+  --mooncake-protocol tcp
+```
+
+Both override flags require `--mooncake-mode`. The default EFA path also
+requires `helm.aws_efa_device_plugin.enabled = true`; select TCP if the target
+cluster intentionally has no EFA device plugin. See vLLM's
+[MooncakeConnector API](https://docs.vllm.ai/en/stable/api/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/mooncake_connector/)
+and [Mooncake store configuration](https://docs.vllm.ai/en/stable/features/mooncake_store_connector_usage/)
+for the two upstream configuration surfaces.
+
 ### Using EFA in Jobs
 
 Request EFA devices in your pod spec:
@@ -1807,13 +1851,17 @@ See `examples/trainium-job.yaml` and `examples/inferentia-job.yaml` for complete
 
 A regional API bridge is always deployed in every workload region. The
 centralized aggregator is not VPC-attached and uses these reachable API Gateway
-endpoints to fan out to each region. `api_gateway.regional_api_enabled` controls
-only whether other IAM-authorized principals in the deployment account may
-invoke a bridge directly; it never disables the aggregator path.
+endpoints to fan out to each region. In the commercial `aws` partition,
+`api_gateway.regional_api_enabled` controls whether other IAM-authorized
+principals in the deployment account may invoke a bridge directly. In every
+other AWS partition, Global Accelerator is omitted and same-account direct
+regional access is enabled automatically as the supported workload ingress.
 
-### Enable Direct Regional Access
+### Enable Direct Regional Access in the `aws` Partition
 
-Edit `cdk.json` to admit direct same-account callers to every regional bridge:
+Edit `cdk.json` to admit direct same-account callers to every regional bridge.
+Outside `aws`, no opt-in is needed and this setting cannot disable the required
+regional ingress:
 
 ```json
 {
@@ -1868,6 +1916,7 @@ gco jobs list --region us-east-1
 
 - A caller needs an explicitly region-pinned request path
 - An operation should bypass Global Accelerator health/latency routing
+- The deployment is outside the commercial `aws` partition, where regional APIs are the required workload ingress
 - An organizational control requires use of the regional API endpoint
 
 ### Security Considerations

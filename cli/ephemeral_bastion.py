@@ -38,6 +38,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from ._image_uri import aws_partition, aws_url_suffix
+
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
@@ -54,9 +56,29 @@ _ROLE_NAME_SUFFIX = "-ephemeral-bastion-role"
 _PROFILE_NAME_SUFFIX = "-ephemeral-bastion-profile"
 _INSTANCE_NAME_SUFFIX = "-ephemeral-ssm-bastion"
 
-# AmazonSSMManagedInstanceCore is an AWS-managed policy — a fixed global ARN, not
-# a resource GCO names — so it is intentionally not project-scoped.
-SSM_MANAGED_POLICY_ARN = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+
+# AmazonSSMManagedInstanceCore is AWS-managed and therefore not project-scoped,
+# but its ARN partition must follow the deployment Region.
+def ssm_managed_policy_arn(region: str) -> str:
+    return f"arn:{aws_partition(region)}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+
+
+def bastion_trust_policy(region: str) -> dict[str, object]:
+    """Return an EC2 trust policy using the partition's service DNS suffix."""
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"Service": f"ec2.{aws_url_suffix(region)}"},
+                "Action": "sts:AssumeRole",
+            }
+        ],
+    }
+
+
+# Back-compatible commercial defaults for callers that imported the constants.
+SSM_MANAGED_POLICY_ARN = ssm_managed_policy_arn("us-east-1")
 
 BASTION_INSTANCE_TYPE = "t3.micro"
 
@@ -81,23 +103,14 @@ DEFAULT_TTL_MINUTES = 120
 _PROFILE_PROPAGATION_RETRIES = 6
 _PROFILE_PROPAGATION_WAIT_SECONDS = 5.0
 
-# EC2 trust policy: only the EC2 service may assume the bastion role.
-BASTION_TRUST_POLICY: dict[str, object] = {
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Effect": "Allow",
-            "Principal": {"Service": "ec2.amazonaws.com"},
-            "Action": "sts:AssumeRole",
-        }
-    ],
-}
+# EC2 trust policy default; builders derive the principal from their target Region.
+BASTION_TRUST_POLICY: dict[str, object] = bastion_trust_policy("us-east-1")
 
 # --------------------------------------------------------------------------
 # Validators — every AWS-supplied id is re-validated before it enters an argv.
 # --------------------------------------------------------------------------
 
-_REGION_RE = re.compile(r"^[a-z]{2,3}-[a-z]+-\d+$")
+_REGION_RE = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
 _CLUSTER_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]{0,99}$")
 _INSTANCE_RE = re.compile(r"^i-[0-9a-f]{8}([0-9a-f]{9})?$")
 _VPC_RE = re.compile(r"^vpc-[0-9a-f]{8}([0-9a-f]{9})?$")
@@ -243,17 +256,23 @@ def build_describe_private_cluster_subnet_command(subnet_ids: list[str], region:
     ]
 
 
-def build_create_role_command(role_name: str = BASTION_ROLE_NAME) -> list[str]:
-    """``aws iam create-role`` argv with the EC2 trust policy."""
+def build_create_role_command(
+    role_name: str = BASTION_ROLE_NAME,
+    region: str = "us-east-1",
+) -> list[str]:
+    """``aws iam create-role`` argv with the partition-correct EC2 trust."""
     _validate(role_name, _CLUSTER_RE, "role name")
+    _validate(region, _REGION_RE, "region")
     return [
         "aws",
         "iam",
         "create-role",
+        "--region",
+        region,
         "--role-name",
         role_name,
         "--assume-role-policy-document",
-        json.dumps(BASTION_TRUST_POLICY),
+        json.dumps(bastion_trust_policy(region)),
         "--description",
         "GCO ephemeral SSM bastion (cluster-observability); safe to delete.",
         "--tags",
@@ -262,42 +281,59 @@ def build_create_role_command(role_name: str = BASTION_ROLE_NAME) -> list[str]:
     ]
 
 
-def build_attach_role_policy_command(role_name: str = BASTION_ROLE_NAME) -> list[str]:
-    """``aws iam attach-role-policy`` argv attaching AmazonSSMManagedInstanceCore."""
+def build_attach_role_policy_command(
+    role_name: str = BASTION_ROLE_NAME,
+    region: str = "us-east-1",
+) -> list[str]:
+    """``aws iam attach-role-policy`` argv attaching the partition policy."""
     _validate(role_name, _CLUSTER_RE, "role name")
+    _validate(region, _REGION_RE, "region")
     return [
         "aws",
         "iam",
         "attach-role-policy",
+        "--region",
+        region,
         "--role-name",
         role_name,
         "--policy-arn",
-        SSM_MANAGED_POLICY_ARN,
+        ssm_managed_policy_arn(region),
     ]
 
 
-def build_create_instance_profile_command(profile_name: str = BASTION_PROFILE_NAME) -> list[str]:
+def build_create_instance_profile_command(
+    profile_name: str = BASTION_PROFILE_NAME,
+    region: str = "us-east-1",
+) -> list[str]:
     """``aws iam create-instance-profile`` argv."""
     _validate(profile_name, _CLUSTER_RE, "instance-profile name")
+    _validate(region, _REGION_RE, "region")
     return [
         "aws",
         "iam",
         "create-instance-profile",
+        "--region",
+        region,
         "--instance-profile-name",
         profile_name,
     ]
 
 
 def build_add_role_to_profile_command(
-    role_name: str = BASTION_ROLE_NAME, profile_name: str = BASTION_PROFILE_NAME
+    role_name: str = BASTION_ROLE_NAME,
+    profile_name: str = BASTION_PROFILE_NAME,
+    region: str = "us-east-1",
 ) -> list[str]:
     """``aws iam add-role-to-instance-profile`` argv."""
     _validate(role_name, _CLUSTER_RE, "role name")
     _validate(profile_name, _CLUSTER_RE, "instance-profile name")
+    _validate(region, _REGION_RE, "region")
     return [
         "aws",
         "iam",
         "add-role-to-instance-profile",
+        "--region",
+        region,
         "--instance-profile-name",
         profile_name,
         "--role-name",
@@ -426,32 +462,46 @@ def build_terminate_instances_command(instance_id: str, region: str) -> list[str
 
 
 def build_iam_teardown_commands(
-    role_name: str = BASTION_ROLE_NAME, profile_name: str = BASTION_PROFILE_NAME
+    role_name: str = BASTION_ROLE_NAME,
+    profile_name: str = BASTION_PROFILE_NAME,
+    region: str = "us-east-1",
 ) -> list[list[str]]:
-    """Return the ordered IAM teardown argvs (profile disassociated before delete)."""
+    """Return ordered, partition-aware IAM teardown argvs."""
     _validate(role_name, _CLUSTER_RE, "role name")
     _validate(profile_name, _CLUSTER_RE, "instance-profile name")
+    _validate(region, _REGION_RE, "region")
+    policy_arn = ssm_managed_policy_arn(region)
+    region_args = ["--region", region]
     return [
         [
             "aws",
             "iam",
             "remove-role-from-instance-profile",
+            *region_args,
             "--instance-profile-name",
             profile_name,
             "--role-name",
             role_name,
         ],
-        ["aws", "iam", "delete-instance-profile", "--instance-profile-name", profile_name],
+        [
+            "aws",
+            "iam",
+            "delete-instance-profile",
+            *region_args,
+            "--instance-profile-name",
+            profile_name,
+        ],
         [
             "aws",
             "iam",
             "detach-role-policy",
+            *region_args,
             "--role-name",
             role_name,
             "--policy-arn",
-            SSM_MANAGED_POLICY_ARN,
+            policy_arn,
         ],
-        ["aws", "iam", "delete-role", "--role-name", role_name],
+        ["aws", "iam", "delete-role", *region_args, "--role-name", role_name],
     ]
 
 
@@ -551,14 +601,20 @@ def resolve_bastion_network(cluster: str, region: str) -> BastionNetwork:
     )
 
 
-def ensure_bastion_iam(project_name: str = DEFAULT_PROJECT_NAME) -> None:
-    """Idempotently create the bastion role + instance profile and wire them up."""
+def ensure_bastion_iam(
+    project_name: str = DEFAULT_PROJECT_NAME,
+    region: str = "us-east-1",
+) -> None:
+    """Idempotently create the bastion role + profile in one partition."""
     role_name = bastion_role_name(project_name)
     profile_name = bastion_profile_name(project_name)
-    _run_aws(build_create_role_command(role_name), allow_exists=True)
-    _run_aws(build_attach_role_policy_command(role_name), allow_exists=True)
-    _run_aws(build_create_instance_profile_command(profile_name), allow_exists=True)
-    _run_aws(build_add_role_to_profile_command(role_name, profile_name), allow_exists=True)
+    _run_aws(build_create_role_command(role_name, region), allow_exists=True)
+    _run_aws(build_attach_role_policy_command(role_name, region), allow_exists=True)
+    _run_aws(build_create_instance_profile_command(profile_name, region), allow_exists=True)
+    _run_aws(
+        build_add_role_to_profile_command(role_name, profile_name, region),
+        allow_exists=True,
+    )
 
 
 def launch_bastion(
@@ -648,7 +704,7 @@ def create_ephemeral_bastion(
 
     ami_id = resolve_bastion_ami(region)
     network = resolve_bastion_network(cluster, region)
-    ensure_bastion_iam(project_name)
+    ensure_bastion_iam(project_name, region)
     instance_id = launch_bastion(
         network=network, ami_id=ami_id, region=region, ttl_minutes=ttl, project_name=project_name
     )
@@ -694,7 +750,9 @@ def destroy_ephemeral_bastion(
     if not delete_iam:
         return
     teardown = build_iam_teardown_commands(
-        bastion_role_name(project_name), bastion_profile_name(project_name)
+        bastion_role_name(project_name),
+        bastion_profile_name(project_name),
+        region,
     )
     for step in teardown:
         try:

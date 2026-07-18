@@ -9,10 +9,13 @@
 # Jobs (alphabetical by display name):
 #   - security:bandit:sast               — bandit on gco/, cli/
 #   - security:checkov:iac               — checkov against the whole repo
+#   - security:codeql:javascript-code-analysis
+#                                        — CodeQL security-and-quality pack on JavaScript
 #   - security:codeql:python-code-analysis
 #                                        — CodeQL security-and-quality pack on Python
 #   - security:gitleaks:secrets          — gitleaks on current files (no git history)
 #   - security:kics:iac                  — KICS on cdk.out (needs CDK synth first)
+#   - security:npm-audit:all-packages   — npm audit on every locked npm graph
 #   - security:pip-audit:deps            — pip-audit on requirements-lock.txt
 #   - security:semgrep:sast              — semgrep scan --config auto
 #   - security:trivy:filesystem          — trivy fs on the source tree
@@ -21,8 +24,10 @@
 #                                          + Dockerfile.dev)
 #   - security:trufflehog:secrets        — trufflehog filesystem scan
 #
-# All scans are strict: if a scan finds issues the job fails. Fix the code,
-# don't silence the tool — policy inherited from the retired GitLab pipeline.
+# Scanner command failures fail their jobs. CodeQL analysis uploads SARIF to
+# GitHub Code Scanning; finding-based merge enforcement belongs to repository
+# rules/branch protection rather than the analyze action's process exit code.
+# Fix findings at their source instead of weakening scanner configuration.
 #
 # =============================================================================
 
@@ -126,6 +131,62 @@ jobs:
         with:
           name: pip-audit-report
           path: pip-audit-report.json
+          retention-days: 30
+
+  security-npm-audit:
+    name: "security:npm-audit:all-packages"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6.4.0
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+          cache-dependency-path: |
+            package-lock.json
+            lambda/inference-streaming-proxy/package-lock.json
+      - name: Install and verify the declared npm version
+        run: bash .github/scripts/use-pinned-npm.sh package.json
+      - name: Verify every npm graph is locked and Dependabot-managed
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=.github/scripts/lib_dependency_scan.sh
+          source .github/scripts/lib_dependency_scan.sh
+          problems="$(check_npm_package_management . .github/dependabot.yml)"
+          if [ -n "$problems" ]; then
+            printf '%s\n' "$problems" >&2
+            exit 1
+          fi
+      - name: Install and audit every locked npm graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=.github/scripts/lib_dependency_scan.sh
+          source .github/scripts/lib_dependency_scan.sh
+          mkdir -p npm-audit-reports
+          audit_status=0
+          while IFS= read -r package_dir; do
+            [ -n "$package_dir" ] || continue
+            report_name="${package_dir#./}"
+            [ "$report_name" = "." ] && report_name="root"
+            report_name="${report_name//\//-}"
+            echo "=== Auditing ${package_dir} ==="
+            npm ci --prefix "$package_dir" --ignore-scripts --no-audit --no-fund
+            if ! npm audit --prefix "$package_dir" --audit-level=high \
+              --json > "npm-audit-reports/${report_name}.json"; then
+              audit_status=1
+            fi
+            npm audit --prefix "$package_dir" --audit-level=high || true
+          done < <(list_npm_package_dirs .)
+          exit "$audit_status"
+      - name: Upload npm audit reports
+        if: always()
+        uses: ./.github/actions/upload-artifact-with-retry
+        with:
+          name: npm-audit-reports
+          path: npm-audit-reports/
           retention-days: 30
 
   security-trivy-filesystem:
@@ -350,19 +411,23 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6.4.0
         with:
-          node-version: "24"
+          node-version-file: ".nvmrc"
+          cache: "npm"
+          cache-dependency-path: "package-lock.json"
+      - name: Install and verify the declared npm version
+        run: bash .github/scripts/use-pinned-npm.sh package.json
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
-      - name: Install CDK + deps and synthesize
+      - name: Install locked CDK + Python dependencies and synthesize
         run: |
+          npm ci --ignore-scripts --no-audit --no-fund
           pip install -e ".[cdk]"
-          npm install -g aws-cdk
       - uses: ./.github/actions/build-lambda-package
       - name: cdk synth
-        run: cdk synth --quiet
+        run: npm exec -- cdk synth --quiet
       - name: Run KICS
         run: |
           docker run --rm -v "$PWD":/repo -w /repo \
@@ -425,3 +490,27 @@ jobs:
         uses: github/codeql-action/analyze@v4.37.0
         with:
           category: "/language:${{ matrix.language }}"
+
+  security-codeql-javascript-code-analysis:
+    name: "security:codeql:javascript-code-analysis"
+    # The streaming Lambda is production JavaScript and needs CodeQL in
+    # addition to the repository-wide Semgrep scan. JavaScript extraction is
+    # buildless, so the committed source is analyzed without npm lifecycle
+    # scripts or synthesized assets.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4.37.0
+        with:
+          languages: javascript-typescript
+          config-file: ./.github/codeql/codeql-config.yml
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4.37.0
+        with:
+          category: "/language:javascript-typescript"

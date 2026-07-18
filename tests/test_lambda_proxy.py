@@ -354,6 +354,7 @@ def regional_proxy_module():
             "os.environ",
             {
                 "ALB_ENDPOINT": "internal-alb.us-east-1.elb.amazonaws.com",
+                "AWS_URL_SUFFIX": "amazonaws.com",
                 "SECRET_ARN": "arn:aws:secretsmanager:us-east-1:123:secret:test",
                 "SECRET_CACHE_TTL_SECONDS": "300",
                 "PROXY_MAX_RETRIES": "3",

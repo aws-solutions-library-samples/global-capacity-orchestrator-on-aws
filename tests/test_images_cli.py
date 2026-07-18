@@ -25,6 +25,7 @@ from botocore.exceptions import ClientError
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from cli._image_uri import aws_partition, aws_url_suffix, ecr_registry_host
 from cli.images import (
     _NAME_RE,
     _TAG_RE,
@@ -124,6 +125,28 @@ def test_rewrite_image_uri_swaps_region_for_ecr(
     src_uri = f"{account}.dkr.ecr.{src_region}.amazonaws.com/{repo}:{tag}"
     expected = f"{account}.dkr.ecr.{dst_region}.amazonaws.com/{repo}:{tag}"
     assert _rewrite_image_uri_for_region(src_uri, dst_region) == expected
+
+
+def test_ecr_helpers_use_partition_metadata() -> None:
+    """Registry hosts and ARNs must follow the target region's partition."""
+    assert aws_partition("cn-north-1") == "aws-cn"
+    assert aws_url_suffix("cn-north-1") == "amazonaws.com.cn"
+    assert (
+        ecr_registry_host("123456789012", "eusc-de-east-1")
+        == "123456789012.dkr.ecr.eusc-de-east-1.amazonaws.eu"
+    )
+
+
+def test_rewrite_image_uri_uses_target_partition_suffix() -> None:
+    src = "123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn/gco/model:v1"
+    assert _rewrite_image_uri_for_region(src, "cn-northwest-1") == (
+        "123456789012.dkr.ecr.cn-northwest-1.amazonaws.com.cn/gco/model:v1"
+    )
+
+
+def test_rewrite_image_uri_rejects_ecr_lookalike_suffix() -> None:
+    uri = "123456789012.dkr.ecr.us-east-1.registry.example.com/gco/model:v1"
+    assert _rewrite_image_uri_for_region(uri, "us-west-2") == uri
 
 
 @given(

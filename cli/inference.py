@@ -16,6 +16,7 @@ from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``InferenceManager.deploy`` -> ``diagrams/code_diagrams/cli/inference.InferenceManager_deploy.html``
 #     (PNG: ``diagrams/code_diagrams/cli/inference.InferenceManager_deploy.png``)
@@ -53,8 +54,9 @@ logger = logging.getLogger(__name__)
 #: KV-store instance; ``both`` composes the two.
 MOONCAKE_MODES: frozenset[str] = frozenset({"disaggregated", "store", "both"})
 
-#: KV transfer / store transports. ``rdma`` runs over the EFA nodepool; ``tcp``
-#: is the non-RDMA fallback.
+#: KV transfer / store intents. ``rdma`` is the default high-performance
+#: intent: GCO schedules the pod on EFA and renders vLLM's point-to-point
+#: ``mooncake_protocol`` as ``efa``. ``tcp`` is the non-EFA fallback.
 MOONCAKE_TRANSFER_PROTOCOLS: frozenset[str] = frozenset({"rdma", "tcp"})
 
 #: KV-store offload tiers for spilling cache beyond GPU memory.
@@ -266,6 +268,9 @@ def validate_mooncake_spec(mooncake: dict[str, Any]) -> None:
 
     * ``mode`` must be one of the supported serving modes
       (:data:`MOONCAKE_MODES`).
+    * ``transfer`` must be a mapping when present; ``protocol`` must be one of
+      :data:`MOONCAKE_TRANSFER_PROTOCOLS` and ``device_name`` must be a string
+      (the empty string requests automatic interface detection).
     * Store byte-size fields must author as in-range base-10 integers.
     * ``disaggregated``/``both`` modes require integer ``topology.prefill`` and
       ``topology.decode`` in
@@ -287,6 +292,20 @@ def validate_mooncake_spec(mooncake: dict[str, Any]) -> None:
     store = mooncake.get("store")
     if store is not None and not isinstance(store, dict):
         raise ValueError("mooncake.store must be a mapping")
+
+    transfer = mooncake.get("transfer")
+    if transfer is not None and not isinstance(transfer, dict):
+        raise ValueError("mooncake.transfer must be a mapping")
+    if isinstance(transfer, dict):
+        protocol = transfer.get("protocol", "rdma")
+        if protocol not in MOONCAKE_TRANSFER_PROTOCOLS:
+            allowed = ", ".join(sorted(MOONCAKE_TRANSFER_PROTOCOLS))
+            raise ValueError(
+                f"mooncake.transfer.protocol must be one of {{{allowed}}}, got {protocol!r}"
+            )
+        device_name = transfer.get("device_name", "")
+        if not isinstance(device_name, str):
+            raise ValueError(f"mooncake.transfer.device_name must be a string, got {device_name!r}")
 
     # Byte-size fields must author cleanly; surface the offending field name.
     if isinstance(store, dict):
@@ -518,8 +537,12 @@ class InferenceManager:
                 ``spec.mooncake.store``. Byte-size fields are authored as
                 base-10 integer decimal strings so they round-trip through
                 DynamoDB.
-            mooncake_transfer: Optional RDMA/TCP transfer-engine configuration
-                merged into ``spec.mooncake.transfer``.
+            mooncake_transfer: Optional Mooncake transfer intent and network
+                device. ``protocol`` accepts ``rdma`` (the default; scheduled
+                on EFA and rendered to vLLM as ``mooncake_protocol=efa``) or
+                ``tcp`` (no EFA placement). ``device_name`` is forwarded to
+                both the connector and mounted Mooncake configuration; an
+                empty string lets Mooncake auto-detect it.
             mooncake_proxy: Optional PD proxy configuration merged into
                 ``spec.mooncake.proxy``.
             mooncake_autoscaling: Optional per-role autoscaling configuration

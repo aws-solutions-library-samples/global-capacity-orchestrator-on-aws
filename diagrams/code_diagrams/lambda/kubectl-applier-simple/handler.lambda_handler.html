@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Kubectl Applier Lambda (CFN custom resource)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,16 +206,16 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op653=>operation: 'Main Lambda handler.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the convergence pipeline): the event carries an\n      ``Action`` key and is dispatched to :func:`handle_task`, which applies the\n      manifests and raises on any failure.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the result is POSTed back to CloudFormation.\n    '
-cond656=>condition: if event.get('Action')
-sub660=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
-io665=>inputoutput: output: handle_task(event)
-e663=>end: end function return
-sub671=>subroutine: print(f"[HANDLER] Received event type: {event.get('RequestType')}")
-sub673=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
-op675=>operation: request_type = event['RequestType']
-op677=>operation: physical_resource_id = event.get('PhysicalResourceId', f"kubectl-{event['LogicalResourceId']}")
-op680=>operation: properties = event['ResourceProperties']
+        <div><textarea id="code" style="width: 100%;" rows="11">op655=>operation: 'Main Lambda handler.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the convergence pipeline): the event carries an\n      ``Action`` key and is dispatched to :func:`handle_task`, which applies the\n      manifests and raises on any failure.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the result is POSTed back to CloudFormation.\n    '
+cond658=>condition: if event.get('Action')
+sub662=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
+io667=>inputoutput: output: handle_task(event)
+e665=>end: end function return
+sub673=>subroutine: print(f"[HANDLER] Received event type: {event.get('RequestType')}")
+sub675=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
+op677=>operation: request_type = event['RequestType']
+op679=>operation: physical_resource_id = event.get('PhysicalResourceId', f"kubectl-{event['LogicalResourceId']}")
+op682=>operation: properties = event['ResourceProperties']
 cluster_name = properties['ClusterName']
 region = properties['Region']
 if request_type == 'Create' or request_type == 'Update':
@@ -229,28 +230,28 @@ elif request_type == 'Delete':
         logger.info('Skipping deletion (SkipDeletionOnStackDelete=true)')
     response_data = {'Status': 'Deleted'}
     send_response(event, context, SUCCESS, response_data, physical_resource_id)
-cond679=>condition: exception raised?
-cond682=>condition: except Exception as e
-sub686=>subroutine: logger.error(f'Error: {e}', exc_info=True)
-cond689=>condition: if request_type == 'Delete'
-sub693=>subroutine: send_response(event, context, SUCCESS, {'Status': 'Forced success on delete'}, physical_resource_id)
-sub697=>subroutine: send_response(event, context, FAILED, {}, physical_resource_id, str(e))
+cond681=>condition: exception raised?
+cond684=>condition: except Exception as e
+sub688=>subroutine: logger.error(f'Error: {e}', exc_info=True)
+cond691=>condition: if request_type == 'Delete'
+sub695=>subroutine: send_response(event, context, SUCCESS, {'Status': 'Forced success on delete'}, physical_resource_id)
+sub699=>subroutine: send_response(event, context, FAILED, {}, physical_resource_id, str(e))
 
-op653->cond656
-cond656(yes)->sub660
-sub660->io665
-io665->e663
-cond656(no)->sub671
-sub671->sub673
-sub673->op675
-op675->op677
-op677->op680
-op680->cond679
-cond679(yes)->cond682
-cond682(yes)->sub686
-sub686->cond689
-cond689(yes)->sub693
-cond689(no)->sub697
+op655->cond658
+cond658(yes)->sub662
+sub662->io667
+io667->e665
+cond658(no)->sub673
+sub673->sub675
+sub675->op677
+op677->op679
+op679->op682
+op682->cond681
+cond681(yes)->cond684
+cond684(yes)->sub688
+sub688->cond691
+cond691(yes)->sub695
+cond691(no)->sub699
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -260,6 +261,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

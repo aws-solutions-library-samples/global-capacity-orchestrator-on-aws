@@ -31,10 +31,13 @@ def _reset_endpoints_cache():
     """Reset endpoint state and stub SigV4 signing for transport-focused tests."""
     handler._cached_endpoints = None
     handler._endpoints_cache_time = time.monotonic()
-    with patch.object(
-        handler,
-        "_sigv4_headers",
-        return_value={"Authorization": "AWS4-HMAC-SHA256 test-signature"},
+    with (
+        patch.dict("os.environ", {"AWS_URL_SUFFIX": "amazonaws.com"}),
+        patch.object(
+            handler,
+            "_sigv4_headers",
+            return_value={"Authorization": "AWS4-HMAC-SHA256 test-signature"},
+        ),
     ):
         yield
 
@@ -120,6 +123,18 @@ class TestGetRegionalEndpoints:
             pytest.raises(RuntimeError, match="regional API bridges are unavailable"),
         ):
             handler.get_regional_endpoints()
+
+    def test_partition_specific_url_suffixes_and_eusc_region_are_supported(self):
+        cases = (
+            ("amazonaws.com.cn", "cn-north-1"),
+            ("c2s.ic.gov", "us-iso-east-1"),
+            ("cloud.adc-e.uk", "us-isof-south-1"),
+            ("amazonaws.eu", "eusc-de-east-1"),
+        )
+        for suffix, region in cases:
+            endpoint = f"https://abc123.execute-api.{region}.{suffix}/prod"
+            with patch.dict("os.environ", {"AWS_URL_SUFFIX": suffix}):
+                assert handler._normalize_regional_api_url(endpoint, region) == endpoint
 
     def test_get_regional_endpoints_cached(self):
         handler._cached_endpoints = {

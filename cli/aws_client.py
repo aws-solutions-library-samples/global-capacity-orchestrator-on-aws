@@ -359,8 +359,9 @@ class GCOAWSClient:
         Requests with ``target_region`` always use that region's API Gateway so
         exact region pinning is enforced without sending routing headers through
         the global endpoint. Unpinned requests use the global API unless regional
-        mode is enabled, in which case a target region is required. Missing
-        regional endpoints fail closed instead of silently using the global API.
+        mode is enabled, in which case they use ``config.default_region``. Global
+        aggregation paths are unavailable in regional mode. Missing regional
+        endpoints fail closed instead of silently using the global API.
 
         Args:
             method: HTTP method (GET, POST, etc.)
@@ -374,20 +375,45 @@ class GCOAWSClient:
         Returns:
             requests.Response object
         """
-        # Exact region pinning always uses the regional API. The global proxy is
-        # intentionally not VPC-attached and rejects X-GCO-Target-Region, so it
-        # cannot honor a pin without pretending success or weakening isolation.
-        if target_region:
-            endpoint = self.get_regional_api_endpoint(target_region)
-            if endpoint is None:
-                raise RuntimeError(
-                    f"Regional API endpoint is not deployed in {target_region}; "
-                    "exact region routing requires the regional API bridge"
+        # Global aggregation endpoints exist only on the global API. Regional
+        # mode must reject them clearly rather than send a global path to a
+        # regional bridge and surface an opaque 404.
+        if self._use_regional_api and (
+            path == "/api/v1/global" or path.startswith("/api/v1/global/")
+        ):
+            raise ValueError("Global API operations are unavailable in regional API mode")
+
+        # Strict regional mode has no global fallback. Resolve an omitted
+        # optional ``--region`` to the configured default, then require a real
+        # non-blank Region before attempting endpoint discovery. Keep this as a
+        # separate branch so ``get_api_endpoint`` is unreachable in strict mode.
+        if self._use_regional_api:
+            effective_region = (
+                target_region if target_region is not None else self.config.default_region
+            )
+            if not isinstance(effective_region, str) or not effective_region.strip():
+                raise ValueError(
+                    "Regional API mode requires a non-empty target or default AWS region"
                 )
-        elif self._use_regional_api:
-            raise ValueError("Regional API mode requires a target region")
+            target_region = effective_region.strip()
+            endpoint = self.get_regional_api_endpoint(target_region)
+        elif target_region:
+            # Exact region pinning always uses the regional API. The global
+            # proxy is intentionally not VPC-attached and rejects
+            # X-GCO-Target-Region, so it cannot honor a pin without pretending
+            # success or weakening isolation.
+            endpoint = self.get_regional_api_endpoint(target_region)
         else:
             endpoint = self.get_api_endpoint()
+
+        if endpoint is None:
+            # Only regional discovery returns None; the global endpoint helper
+            # either returns an endpoint or raises its own actionable error.
+            assert target_region is not None
+            raise RuntimeError(
+                f"Regional API endpoint is not deployed in {target_region}; "
+                "exact region routing requires the regional API bridge"
+            )
 
         url = f"{endpoint.url}{path}"
 

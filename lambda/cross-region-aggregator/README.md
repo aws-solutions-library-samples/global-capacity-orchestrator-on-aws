@@ -32,7 +32,7 @@ The global API Gateway invokes this Lambda for `/api/v1/global/*` routes.
 
 1. Reads the required workload regions from `TARGET_REGIONS`.
 2. Describes the deterministic `<project>-regional-api-<region>` CloudFormation stack in each region.
-3. Extracts and strictly validates the `RegionalApiEndpoint` output as that region's AWS `execute-api` HTTPS `/prod` URL.
+3. Extracts and strictly validates the `RegionalApiEndpoint` output as that region's AWS `execute-api` HTTPS `/prod` URL under `AWS_URL_SUFFIX`.
 4. Uses the Lambda execution-role credentials to SigV4-sign each request for `execute-api` in the target region.
 5. Queries regions in parallel with a bounded endpoint-discovery cache.
 6. Merges and sorts successful results while returning bounded per-region errors.
@@ -65,13 +65,14 @@ An API Gateway proxy response containing merged data, region summaries, and reda
 |---|---:|---|
 | `PROJECT_NAME` | No | Prefix used in deterministic regional stack names; defaults to `gco` |
 | `TARGET_REGIONS` | Yes | JSON array of required workload regions |
+| `AWS_URL_SUFFIX` | Yes | CDK-provided DNS suffix for the active AWS partition; endpoint validation requires `execute-api.<region>.<suffix>` |
 
 ## IAM Permissions
 
 The execution role receives only:
 
 - `cloudformation:DescribeStacks` on the exact project-scoped regional API stack ARN in each configured region;
-- `execute-api:Invoke` in the deployment account, constrained to the `/api/v1/*` route tree; and
+- `execute-api:Invoke` in the deployment account, constrained to exactly `GET /api/v1/jobs`, `GET /api/v1/health`, `GET /api/v1/status`, and `DELETE /api/v1/jobs`; and
 - standard Lambda logging and X-Ray permissions.
 
 ## Failure Behavior

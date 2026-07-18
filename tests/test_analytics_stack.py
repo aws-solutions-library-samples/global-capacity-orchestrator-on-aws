@@ -27,6 +27,7 @@ the heavy regional stack's helm-installer asset.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any, cast
 
@@ -59,12 +60,14 @@ class _AnalyticsMockConfig:
         cognito_removal: str = "destroy",
         hyperpod_enabled: bool = False,
         canvas_enabled: bool = False,
+        region: str = "us-east-2",
     ) -> None:
         self._enabled = enabled
         self._efs_removal = efs_removal
         self._cognito_removal = cognito_removal
         self._hyperpod_enabled = hyperpod_enabled
         self._canvas_enabled = canvas_enabled
+        self._region = region
 
     def get_project_name(self) -> str:
         return "gco-test"
@@ -79,7 +82,7 @@ class _AnalyticsMockConfig:
         this to build the ``AwsCustomResource`` that reads
         ``/gco/cluster-shared-bucket/arn`` from the global region.
         """
-        return "us-east-2"
+        return self._region
 
     def get_api_gateway_region(self) -> str:
         """Return a fixed api-gateway region for IAM resource scoping.
@@ -87,7 +90,7 @@ class _AnalyticsMockConfig:
         Section 8's ``_create_execution_role_and_grants`` uses this to
         scope the ``execute-api:Invoke`` statement on the SageMaker role.
         """
-        return "us-east-2"
+        return self._region
 
     def get_analytics_config(self) -> dict[str, Any]:
         return {
@@ -120,7 +123,7 @@ def _synth_analytics(
         app,
         construct_id,
         config=cast(ConfigLoader, config),
-        env=cdk.Environment(account="123456789012", region="us-east-2"),
+        env=cdk.Environment(account="123456789012", region=config.get_api_gateway_region()),
     )
     return assertions.Template.from_stack(stack)
 
@@ -827,11 +830,10 @@ class TestSageMakerExecutionRole:
             if not isinstance(resources, list):
                 resources = [resources]
             for res in resources:
-                if not isinstance(res, str):
-                    continue
-                if "/prod/*/api/v1/*" in res:
+                rendered = res if isinstance(res, str) else json.dumps(res, sort_keys=True)
+                if "/prod/*/api/v1/*" in rendered:
                     api_v1_ok = True
-                if "/prod/*/inference/*" in res:
+                if "/prod/*/inference/*" in rendered:
                     inference_ok = True
 
         assert api_v1_ok, (
@@ -858,11 +860,11 @@ class TestSageMakerExecutionRole:
             if not isinstance(resources, list):
                 resources = [resources]
             for res in resources:
-                if isinstance(res, str):
-                    assert "/prod/GET/" not in res, (
-                        "execute-api grant must not pin the HTTP method "
-                        f"to GET — got {res!r}; blocks POST submissions"
-                    )
+                rendered = res if isinstance(res, str) else json.dumps(res, sort_keys=True)
+                assert "/prod/GET/" not in rendered, (
+                    "execute-api grant must not pin the HTTP method "
+                    f"to GET — got {res!r}; blocks POST submissions"
+                )
 
     def test_role_has_sqs_sendmessage_on_jobs_queue_pattern(self) -> None:
         """``sqs:SendMessage`` on the regional job-queue naming
@@ -883,11 +885,8 @@ class TestSageMakerExecutionRole:
             if not isinstance(resources, list):
                 resources = [resources]
             for res in resources:
-                # Mock config sets project name = "gco-test", so the
-                # resolved pattern is ``arn:aws:sqs:*:<account>:gco-test-jobs-*``.
-                # The general shape is ``gco-*-jobs-*`` by design — assert
-                # the core of the pattern without pinning to the mock project.
-                if isinstance(res, str) and res.endswith("-jobs-*") and ":sqs:" in res:
+                rendered = res if isinstance(res, str) else json.dumps(res, sort_keys=True)
+                if "-jobs-*" in rendered and ":sqs:" in rendered:
                     matches.append(stmt)
                     break
 
@@ -928,10 +927,10 @@ class TestSageMakerExecutionRole:
                 resources = [resources]
             for res in resources:
                 # Expected shape:
-                #   arn:aws:ssm:<global-region>:<account>:parameter/gco/cluster-shared-bucket/*
-                if isinstance(res, str) and (
-                    ":ssm:" in res and f"parameter{cluster_shared_prefix}/*" in res
-                ):
+                #   arn:<partition>:ssm:<global-region>:<account>:
+                #   parameter/gco/cluster-shared-bucket/*
+                rendered = res if isinstance(res, str) else json.dumps(res, sort_keys=True)
+                if ":ssm:" in rendered and f"parameter{cluster_shared_prefix}/*" in rendered:
                     matches.append(stmt)
                     break
 
@@ -940,6 +939,26 @@ class TestSageMakerExecutionRole:
             f"parameter{cluster_shared_prefix}/* in the "
             f"global region; attached statements={statements!r}"
         )
+
+    @pytest.mark.parametrize("region", ("cn-north-1", "us-gov-west-1"))
+    def test_noncommercial_policies_retain_partition_and_url_suffix_tokens(
+        self,
+        region: str,
+    ) -> None:
+        """China and GovCloud synths keep both CloudFormation pseudo-parameters."""
+        template = _synth_analytics(
+            construct_id=f"test-analytics-{region}",
+            config=_AnalyticsMockConfig(region=region),
+        )
+        role_lid, _ = self._find_sagemaker_role(template)
+        rendered = json.dumps(
+            self._collect_role_statements(template, role_lid),
+            sort_keys=True,
+        )
+
+        assert "AWS::Partition" in rendered
+        assert "AWS::URLSuffix" in rendered
+        assert "arn:aws:sagemaker" not in rendered
 
 
 # ---------------------------------------------------------------------------

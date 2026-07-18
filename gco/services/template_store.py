@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
@@ -40,6 +41,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``JobStore.claim_job`` -> ``diagrams/code_diagrams/gco/services/template_store.JobStore_claim_job.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/template_store.JobStore_claim_job.png``)
@@ -57,8 +59,10 @@ _MAX_CLAIM_LEASE_SECONDS = 60 * 60
 _MAX_LIST_EVALUATED_ITEMS = 20_000
 _MAX_LEGACY_MIGRATION_EVALUATED_ITEMS = 1_000
 _LEGACY_REGION_STATUS_INDEX = "region-status-index"
-_REGION_STATUS_PRIORITY_INDEX = "region-status-priority-index"
-_REGION_STATUS_LEASE_INDEX = "region-status-lease-index"
+# One worker-facing GSI serves queue priority and lease recovery. Existing
+# deployments gain only this index in the compatibility release because
+# DynamoDB permits one GSI create/delete per table update.
+_REGION_STATUS_WORK_INDEX = "region-status-work-index"
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 
 
@@ -467,7 +471,8 @@ class JobStore:
         )
         self._table = self._dynamodb.Table(self.table_name)
         self._legacy_migration_cursors: dict[tuple[str, str], dict[str, Any]] = {}
-        self._legacy_migration_complete: set[tuple[str, str]] = set()
+        self._legacy_migration_completed_in_sweep: set[tuple[str, str]] = set()
+        self._legacy_migration_next_status: dict[str, int] = {}
 
     @staticmethod
     def _is_conditional_failure(error: ClientError) -> bool:
@@ -582,19 +587,55 @@ class JobStore:
             priority = 0
         return min(max(priority, 0), 100)
 
+    @staticmethod
+    def _migration_snapshot_conditions(
+        item: dict[str, Any],
+        fields: Collection[str],
+        names: dict[str, str],
+        values: dict[str, Any],
+    ) -> list[str]:
+        """Build optimistic-lock predicates for fields used by migration."""
+        conditions: list[str] = []
+        for index, field_name in enumerate(fields):
+            name_token = f"#snapshot_{index}"
+            names[name_token] = field_name
+            if field_name in item:
+                value_token = f":snapshot_{index}"
+                values[value_token] = item[field_name]
+                conditions.append(f"{name_token} = {value_token}")
+            else:
+                conditions.append(f"attribute_not_exists({name_token})")
+        return conditions
+
     def _migrate_legacy_record(self, item: dict[str, Any], region: str, status: str) -> str:
-        """Backfill one pre-index record or fail it when safe adoption is impossible."""
+        """Repair one old-writer record or fail it when adoption is unsafe.
+
+        The worker reads through the legacy target-region/status index during a
+        rolling upgrade, so every derived worker key may be missing *or stale*.
+        Updates carry optimistic predicates for every source field used to
+        derive those keys. A concurrent status transition, lease renewal, or
+        identity repair therefore wins instead of being overwritten by this
+        migration's older snapshot.
+        """
         job_id = item.get("job_id")
         if not isinstance(job_id, str) or not job_id:
             logger.error("Ignoring legacy queue record without a job_id")
             return "skipped"
 
         priority = self._legacy_priority(item)
-        submitted_at = str(item.get("submitted_at") or item.get("updated_at") or _utc_now_iso())
+        submitted_at = str(item.get("submitted_at") or item.get("updated_at") or "")
         priority_sort = self._priority_sort_key(priority, submitted_at, job_id)
+        snapshot_fields = ["priority", "submitted_at", "updated_at"]
 
         unsafe_reason: str | None = None
         if status in {JobStatus.CLAIMED.value, JobStatus.APPLYING.value}:
+            lease_fields = (
+                "claimed_by",
+                "claim_token",
+                "claim_generation",
+                "lease_expires_at",
+            )
+            snapshot_fields.extend(lease_fields)
             try:
                 generation = int(item.get("claim_generation", 0))
             except TypeError, ValueError:
@@ -609,33 +650,64 @@ class JobStore:
                     "Pre-upgrade transient queue record lacks complete lease fencing and "
                     "cannot be safely replayed"
                 )
-        elif status in {JobStatus.PENDING.value, JobStatus.RUNNING.value} and not all(
-            item.get(field) for field in ("k8s_job_name", "k8s_job_namespace", "k8s_job_uid")
+        elif status in {JobStatus.PENDING.value, JobStatus.RUNNING.value}:
+            identity_fields = ("k8s_job_name", "k8s_job_namespace", "k8s_job_uid")
+            snapshot_fields.extend(identity_fields)
+            if not all(item.get(field) for field in identity_fields):
+                unsafe_reason = (
+                    "Pre-upgrade active queue record lacks deterministic Kubernetes identity and "
+                    "cannot be safely adopted"
+                )
+
+        if unsafe_reason is None and status in {
+            JobStatus.CLAIMED.value,
+            JobStatus.APPLYING.value,
+        }:
+            work_sort = str(item["lease_expires_at"])
+        else:
+            work_sort = priority_sort
+        expected_region_status = self._region_status(region, status)
+
+        if unsafe_reason is None and (
+            item.get("region_status") == expected_region_status
+            and item.get("priority_sort") == priority_sort
+            and item.get("work_sort") == work_sort
         ):
-            unsafe_reason = (
-                "Pre-upgrade active queue record lacks deterministic Kubernetes identity and "
-                "cannot be safely adopted"
-            )
+            return "skipped"
 
         values: dict[str, Any] = {
             ":expected": status,
             ":target_region": region,
             ":priority_sort": priority_sort,
+            ":work_sort": work_sort,
         }
-        condition = (
-            "attribute_exists(job_id) AND target_region = :target_region AND "
-            "#status = :expected AND "
-            "(attribute_not_exists(region_status) OR attribute_not_exists(priority_sort))"
-        )
+        names = {"#status": "status"}
+        conditions = [
+            "attribute_exists(job_id)",
+            "target_region = :target_region",
+            "#status = :expected",
+            *self._migration_snapshot_conditions(item, snapshot_fields, names, values),
+        ]
         if unsafe_reason is None:
-            update_expression = "SET region_status = :region_status, priority_sort = :priority_sort"
-            values[":region_status"] = self._region_status(region, status)
+            values[":region_status"] = expected_region_status
+            conditions.append(
+                "(attribute_not_exists(region_status) OR "
+                "attribute_not_exists(priority_sort) OR "
+                "attribute_not_exists(work_sort) OR "
+                "region_status <> :region_status OR "
+                "priority_sort <> :priority_sort OR work_sort <> :work_sort)"
+            )
+            update_expression = (
+                "SET region_status = :region_status, priority_sort = :priority_sort, "
+                "work_sort = :work_sort"
+            )
             outcome = "migrated"
         else:
             now = _utc_now_iso()
             update_expression = (
                 "SET #status = :failed, region_status = :region_status, "
-                "priority_sort = :priority_sort, updated_at = :now, completed_at = :now, "
+                "priority_sort = :priority_sort, work_sort = :work_sort, "
+                "updated_at = :now, completed_at = :now, "
                 "error_message = :error, status_history = :history "
                 "REMOVE claimed_by, claim_token, lease_expires_at"
             )
@@ -660,8 +732,8 @@ class JobStore:
             self._table.update_item(
                 Key={"job_id": job_id},
                 UpdateExpression=update_expression,
-                ConditionExpression=condition,
-                ExpressionAttributeNames={"#status": "status"},
+                ConditionExpression=" AND ".join(conditions),
+                ExpressionAttributeNames=names,
                 ExpressionAttributeValues=values,
             )
             return outcome
@@ -675,7 +747,15 @@ class JobStore:
         region: str,
         evaluation_limit: int = _MAX_LEGACY_MIGRATION_EVALUATED_ITEMS,
     ) -> dict[str, int | bool]:
-        """Incrementally backfill records created before the worker-facing GSIs."""
+        """Incrementally repair records written by pre-work-index workers.
+
+        Every bounded invocation reserves a fair share for each unfinished
+        status partition instead of allowing a large queued backlog to starve
+        lease recovery and active-job reconciliation. The starting partition
+        rotates when a budget is smaller than the number of statuses. Completed
+        sweeps reset so a mixed-version worker's later write is repaired on a
+        subsequent pass.
+        """
         budget = min(max(int(evaluation_limit), 1), 10_000)
         statuses = (
             JobStatus.QUEUED.value,
@@ -684,6 +764,8 @@ class JobStore:
             JobStatus.PENDING.value,
             JobStatus.RUNNING.value,
         )
+        sweep_keys = {(region, status) for status in statuses}
+        completed_in_sweep = self._legacy_migration_completed_in_sweep
         stats: dict[str, int | bool] = {
             "evaluated": 0,
             "migrated": 0,
@@ -691,33 +773,55 @@ class JobStore:
             "complete": False,
         }
 
-        for status in statuses:
+        start = self._legacy_migration_next_status.get(region, 0) % len(statuses)
+        ordered_statuses = statuses[start:] + statuses[:start]
+        attempted: list[str] = []
+        for position, status in enumerate(ordered_statuses):
+            if int(stats["evaluated"]) >= budget:
+                break
             migration_key = (region, status)
-            if migration_key in self._legacy_migration_complete:
+            if migration_key in completed_in_sweep:
                 continue
-            while int(stats["evaluated"]) < budget:
-                remaining = budget - int(stats["evaluated"])
+
+            unfinished = sum(
+                (region, candidate) not in completed_in_sweep
+                for candidate in ordered_statuses[position:]
+            )
+            status_budget = max(
+                1,
+                (budget - int(stats["evaluated"]) + unfinished - 1) // unfinished,
+            )
+            status_evaluated = 0
+            attempted.append(status)
+            while int(stats["evaluated"]) < budget and status_evaluated < status_budget:
+                remaining = min(
+                    budget - int(stats["evaluated"]),
+                    status_budget - status_evaluated,
+                    100,
+                )
                 kwargs: dict[str, Any] = {
                     "IndexName": _LEGACY_REGION_STATUS_INDEX,
                     "KeyConditionExpression": (
                         "target_region = :target_region AND #status = :status"
-                    ),
-                    "FilterExpression": (
-                        "attribute_not_exists(region_status) OR attribute_not_exists(priority_sort)"
                     ),
                     "ExpressionAttributeNames": {"#status": "status"},
                     "ExpressionAttributeValues": {
                         ":target_region": region,
                         ":status": status,
                     },
-                    "Limit": min(remaining, 100),
+                    "Limit": remaining,
                 }
                 cursor = self._legacy_migration_cursors.get(migration_key)
                 if cursor:
                     kwargs["ExclusiveStartKey"] = cursor
                 response = self._table.query(**kwargs)
-                stats["evaluated"] = int(stats["evaluated"]) + int(response.get("ScannedCount", 0))
-                for item in response.get("Items", []):
+                items = response.get("Items", [])
+                scanned = int(response.get("ScannedCount", 0))
+                if scanned <= 0 and items:
+                    scanned = len(items)
+                stats["evaluated"] = int(stats["evaluated"]) + scanned
+                status_evaluated += scanned
+                for item in items:
                     if not isinstance(item, dict):
                         continue
                     outcome = self._migrate_legacy_record(item, region, status)
@@ -726,35 +830,49 @@ class JobStore:
 
                 next_cursor = response.get("LastEvaluatedKey")
                 if not isinstance(next_cursor, dict) or not next_cursor:
-                    self._legacy_migration_complete.add(migration_key)
+                    completed_in_sweep.add(migration_key)
                     self._legacy_migration_cursors.pop(migration_key, None)
                     break
                 self._legacy_migration_cursors[migration_key] = next_cursor
+                if scanned <= 0:
+                    break
 
-            if int(stats["evaluated"]) >= budget:
-                break
+        if attempted:
+            self._legacy_migration_next_status[region] = (statuses.index(attempted[-1]) + 1) % len(
+                statuses
+            )
 
-        stats["complete"] = all(
-            (region, status) in self._legacy_migration_complete for status in statuses
-        )
+        sweep_complete = sweep_keys.issubset(completed_in_sweep)
+        if sweep_complete:
+            completed_in_sweep.difference_update(sweep_keys)
+            self._legacy_migration_next_status.pop(region, None)
+        stats["complete"] = sweep_complete
         return stats
 
-    def _query_region_status(
+    def _query_worker_index(
         self,
+        *,
+        index_name: str,
         region: str,
         status: str,
         limit: int,
+        range_attribute: str | None = None,
+        upper_bound: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Read one region/status partition with correct DynamoDB pagination."""
+        """Read one worker index partition with correct DynamoDB pagination."""
         items: list[dict[str, Any]] = []
         exclusive_start_key: dict[str, Any] | None = None
         while len(items) < limit:
+            key_condition = "region_status = :region_status"
+            values = {":region_status": self._region_status(region, status)}
+            if range_attribute is not None:
+                assert upper_bound is not None
+                key_condition += f" AND {range_attribute} <= :upper_bound"
+                values[":upper_bound"] = upper_bound
             kwargs: dict[str, Any] = {
-                "IndexName": _REGION_STATUS_PRIORITY_INDEX,
-                "KeyConditionExpression": "region_status = :region_status",
-                "ExpressionAttributeValues": {
-                    ":region_status": self._region_status(region, status)
-                },
+                "IndexName": index_name,
+                "KeyConditionExpression": key_condition,
+                "ExpressionAttributeValues": values,
                 "Limit": limit - len(items),
                 "ScanIndexForward": True,
             }
@@ -766,6 +884,41 @@ class JobStore:
             if not exclusive_start_key:
                 break
         return items[:limit]
+
+    def _query_region_status(
+        self,
+        region: str,
+        status: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Read the unified worker index in priority order."""
+        pages = (
+            self._query_worker_index(
+                index_name=_REGION_STATUS_WORK_INDEX,
+                region=region,
+                status=status,
+                limit=limit,
+            ),
+        )
+        items_by_job_id: dict[str, dict[str, Any]] = {}
+        for page in pages:
+            for item in page:
+                job_id = item.get("job_id")
+                if isinstance(job_id, str) and job_id:
+                    items_by_job_id.setdefault(job_id, item)
+
+        def priority_order(item: dict[str, Any]) -> tuple[str, str]:
+            job_id = str(item.get("job_id") or "")
+            priority_sort = item.get("priority_sort")
+            if not isinstance(priority_sort, str) or not priority_sort:
+                priority_sort = self._priority_sort_key(
+                    self._legacy_priority(item),
+                    str(item.get("submitted_at") or item.get("updated_at") or ""),
+                    job_id,
+                )
+            return priority_sort, job_id
+
+        return sorted(items_by_job_id.values(), key=priority_order)[:limit]
 
     def _query_expired_claims(
         self,
@@ -774,30 +927,37 @@ class JobStore:
         expires_at_or_before: str,
         limit: int,
     ) -> list[dict[str, Any]]:
-        """Return the oldest expired leases without unexpired-record starvation."""
-        items: list[dict[str, Any]] = []
-        exclusive_start_key: dict[str, Any] | None = None
-        while len(items) < limit:
-            kwargs: dict[str, Any] = {
-                "IndexName": _REGION_STATUS_LEASE_INDEX,
-                "KeyConditionExpression": (
-                    "region_status = :region_status AND lease_expires_at <= :expires_at"
-                ),
-                "ExpressionAttributeValues": {
-                    ":region_status": self._region_status(region, status),
-                    ":expires_at": expires_at_or_before,
-                },
-                "Limit": limit - len(items),
-                "ScanIndexForward": True,
-            }
-            if exclusive_start_key:
-                kwargs["ExclusiveStartKey"] = exclusive_start_key
-            response = self._table.query(**kwargs)
-            items.extend(item for item in response.get("Items", []) if isinstance(item, dict))
-            exclusive_start_key = response.get("LastEvaluatedKey")
-            if not exclusive_start_key:
-                break
-        return items[:limit]
+        """Read expired claims from the unified worker index."""
+        pages = (
+            self._query_worker_index(
+                index_name=_REGION_STATUS_WORK_INDEX,
+                region=region,
+                status=status,
+                limit=limit,
+                range_attribute="work_sort",
+                upper_bound=expires_at_or_before,
+            ),
+        )
+        items_by_job_id: dict[str, dict[str, Any]] = {}
+        for page in pages:
+            for item in page:
+                job_id = item.get("job_id")
+                if not isinstance(job_id, str) or not job_id:
+                    continue
+                existing = items_by_job_id.get(job_id)
+                if existing is None or str(item.get("lease_expires_at") or "") > str(
+                    existing.get("lease_expires_at") or ""
+                ):
+                    # Keep the newest value if a malformed/mock page repeats a
+                    # job. Real GSI query pages contain one projection per key.
+                    items_by_job_id[job_id] = item
+        return sorted(
+            items_by_job_id.values(),
+            key=lambda item: (
+                str(item.get("lease_expires_at") or ""),
+                str(item.get("job_id") or ""),
+            ),
+        )[:limit]
 
     def submit_job(
         self,
@@ -815,6 +975,7 @@ class JobStore:
         """Submit a job exactly once, replaying only identical idempotent requests."""
         now = _utc_now_iso()
         job_name = manifest.get("metadata", {}).get("name", job_id)
+        priority_sort = self._priority_sort_key(priority, now, job_id)
         item: dict[str, Any] = {
             "job_id": job_id,
             "job_name": job_name,
@@ -823,7 +984,8 @@ class JobStore:
             "status": JobStatus.QUEUED.value,
             "region_status": self._region_status(target_region, JobStatus.QUEUED.value),
             "priority": priority,
-            "priority_sort": self._priority_sort_key(priority, now, job_id),
+            "priority_sort": priority_sort,
+            "work_sort": priority_sort,
             "manifest": json.dumps(manifest, separators=(",", ":"), sort_keys=True),
             "submitted_at": now,
             "updated_at": now,
@@ -880,6 +1042,7 @@ class JobStore:
             return None
 
         now = _utc_now_iso()
+        lease_expires_at = _claim_lease_expiry_iso(self.claim_lease_seconds)
         claim_token = uuid.uuid4().hex
         generation = int(item.get("claim_generation", 0)) + 1
         history = self._history_with(
@@ -896,7 +1059,7 @@ class JobStore:
                     "claimed_by = :claimed_by, claim_token = :claim_token, "
                     "claim_generation = :generation, claimed_at = :now, "
                     "updated_at = :now, lease_expires_at = :lease_expires_at, "
-                    "status_history = :history"
+                    "work_sort = :work_sort, status_history = :history"
                 ),
                 ConditionExpression=(
                     "attribute_exists(job_id) AND #status = :queued AND "
@@ -913,7 +1076,8 @@ class JobStore:
                     ":generation": generation,
                     ":now": now,
                     ":expected_updated_at": item.get("updated_at"),
-                    ":lease_expires_at": _claim_lease_expiry_iso(self.claim_lease_seconds),
+                    ":lease_expires_at": lease_expires_at,
+                    ":work_sort": lease_expires_at,
                     ":history": history,
                 },
                 ReturnValues="ALL_NEW",
@@ -935,11 +1099,13 @@ class JobStore:
     ) -> bool:
         """Renew an unexpired claim; an expired or fenced owner cannot regain it."""
         now = _utc_now_iso()
+        lease_expires_at = _claim_lease_expiry_iso(self.claim_lease_seconds)
         try:
             self._table.update_item(
                 Key={"job_id": job_id},
                 UpdateExpression=(
-                    "SET lease_expires_at = :lease_expires_at, lease_renewed_at = :now"
+                    "SET lease_expires_at = :lease_expires_at, work_sort = :work_sort, "
+                    "lease_renewed_at = :now"
                 ),
                 ConditionExpression=(
                     "attribute_exists(job_id) AND target_region = :target_region AND "
@@ -956,7 +1122,8 @@ class JobStore:
                     ":claim_token": claim_token,
                     ":generation": claim_generation,
                     ":now": now,
-                    ":lease_expires_at": _claim_lease_expiry_iso(self.claim_lease_seconds),
+                    ":lease_expires_at": lease_expires_at,
+                    ":work_sort": lease_expires_at,
                 },
             )
             return True
@@ -1020,9 +1187,24 @@ class JobStore:
             return None
 
         now = _utc_now_iso()
+        priority_sort = str(
+            item.get("priority_sort")
+            or self._priority_sort_key(
+                self._legacy_priority(item),
+                str(item.get("submitted_at") or item.get("updated_at") or now),
+                job_id,
+            )
+        )
+        work_sort = (
+            str(item.get("lease_expires_at") or priority_sort)
+            if destination in {JobStatus.CLAIMED.value, JobStatus.APPLYING.value}
+            else priority_sort
+        )
         update_parts = [
             "#status = :destination",
             "region_status = :region_status",
+            "priority_sort = :priority_sort",
+            "work_sort = :work_sort",
             "updated_at = :now",
             "status_history = :history",
         ]
@@ -1031,6 +1213,8 @@ class JobStore:
             ":destination": destination,
             ":expected": expected,
             ":region_status": self._region_status(target_region, destination),
+            ":priority_sort": priority_sort,
+            ":work_sort": work_sort,
             ":target_region": target_region,
             ":now": now,
             ":expected_updated_at": item.get("updated_at"),
@@ -1291,11 +1475,20 @@ class JobStore:
                 timestamp=now,
                 message="Expired worker claim fenced and recovered",
             )
+            priority_sort = str(
+                item.get("priority_sort")
+                or self._priority_sort_key(
+                    self._legacy_priority(item),
+                    str(item.get("submitted_at") or item.get("updated_at") or now),
+                    str(job_id),
+                )
+            )
             try:
                 self._table.update_item(
                     Key={"job_id": job_id},
                     UpdateExpression=(
                         "SET #status = :queued, region_status = :region_status, "
+                        "priority_sort = :priority_sort, work_sort = :priority_sort, "
                         "updated_at = :now, status_history = :history "
                         "REMOVE claimed_by, claim_token, lease_expires_at"
                     ),
@@ -1309,6 +1502,7 @@ class JobStore:
                     ExpressionAttributeValues={
                         ":queued": JobStatus.QUEUED.value,
                         ":region_status": self._region_status(region, JobStatus.QUEUED.value),
+                        ":priority_sort": priority_sort,
                         ":expected": expected_status,
                         ":region": region,
                         ":owner": owner,

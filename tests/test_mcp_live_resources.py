@@ -42,22 +42,40 @@ def _read_resource(uri: str) -> str:
 
 
 class TestEksContextResolution:
-    def test_builds_account_qualified_partition_aware_arn(self):
+    @pytest.mark.parametrize(
+        ("region", "partition"),
+        [
+            ("us-gov-west-1", "aws-us-gov"),
+            ("eusc-de-east-1", "aws-eusc"),
+            ("us-iso-east-1", "aws-iso"),
+        ],
+    )
+    def test_builds_configured_project_account_and_partition_aware_arn(
+        self,
+        region: str,
+        partition: str,
+    ):
         sts = MagicMock()
         sts.get_caller_identity.return_value = {"Account": "123456789012"}
         session = MagicMock()
-        session.get_partition_for_region.return_value = "aws-us-gov"
+        session.get_partition_for_region.return_value = partition
+        config = MagicMock(project_name="foo-regional-api-bar")
 
         with (
+            patch("resources._eks.get_config", return_value=config) as get_config,
             patch("resources._eks.boto3.client", return_value=sts) as client,
             patch("resources._eks.boto3.session.Session", return_value=session),
         ):
             from resources._eks import eks_context_for_region
 
-            arn = eks_context_for_region("us-gov-west-1")
+            arn = eks_context_for_region(region)
 
-        assert arn == ("arn:aws-us-gov:eks:us-gov-west-1:123456789012:cluster/gco-us-gov-west-1")
-        client.assert_called_once_with("sts", region_name="us-gov-west-1")
+        assert arn == (
+            f"arn:{partition}:eks:{region}:123456789012:cluster/foo-regional-api-bar-{region}"
+        )
+        get_config.assert_called_once_with()
+        client.assert_called_once_with("sts", region_name=region)
+        session.get_partition_for_region.assert_called_once_with(region)
 
     def test_rejects_invalid_sts_account(self):
         sts = MagicMock()
@@ -68,7 +86,18 @@ class TestEksContextResolution:
         ):
             from resources._eks import eks_context_for_region
 
-            eks_context_for_region("us-east-1")
+            eks_context_for_region("us-east-1", project_name="gco")
+
+    def test_rejects_invalid_project_before_aws_calls(self):
+        from resources._eks import eks_context_for_region
+
+        with (
+            patch("resources._eks.boto3.client") as client,
+            pytest.raises(ValueError, match="project name"),
+        ):
+            eks_context_for_region("us-east-1", project_name="../other")
+
+        client.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

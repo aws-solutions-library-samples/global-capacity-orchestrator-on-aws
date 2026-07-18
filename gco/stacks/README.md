@@ -12,13 +12,14 @@ AWS CDK stack definitions that create the GCO cloud infrastructure. Each stack i
 
 ## Overview
 
-GCO has six stack types: global state/routing, the global API and backend PKI, per-region workload infrastructure, always-deployed per-region aggregation bridges with optional direct access, cross-region monitoring, and an optional analytics environment. Dependencies—not construction order in `app.py`—determine deployment sequencing. Each regional stack creates one VPC, EKS Auto Mode cluster, internal application load balancer, storage layer, Lambda functions, and platform images.
+GCO has six stack types: global state plus optional commercial-partition routing, the global API and backend PKI, per-region workload infrastructure, always-deployed per-region aggregation bridges, cross-region monitoring, and an optional analytics environment. Direct regional access is optional in `aws` and required elsewhere. Dependencies—not construction order in `app.py`—determine deployment sequencing. Each regional stack creates one VPC, EKS Auto Mode cluster, internal application load balancer, storage layer, Lambda functions, and platform images.
 
 ## Stack Dependency Order
 
 ```text
 1. GCOGlobalStack
-   ├─ Global Accelerator, DynamoDB tables, S3 buckets, SSM registry
+   ├─ Shared DynamoDB/S3/ECR/SSM resources in every partition
+   ├─ Global Accelerator only in the commercial `aws` partition
    └─ prerequisite for all global/control-plane features
 2. GCOAnalyticsStack (optional)
    └─ depends on Global; when enabled, the global API depends on its Studio integration
@@ -28,7 +29,7 @@ GCO has six stack types: global state/routing, the global API and backend PKI, p
 4. GCORegionalStack (×N)
    └─ depends on Global + Global API; resolves its stable regional ACM leaf ARN
 5. GCORegionalApiGatewayStack (×N, always deployed)
-   └─ each instance depends on its matching Regional stack; direct callers are optional
+   └─ each instance depends on its matching Regional stack; direct callers are optional in `aws` and required elsewhere
 6. GCOMonitoringStack
    └─ depends on every Regional stack
 ```
@@ -37,10 +38,10 @@ GCO has six stack types: global state/routing, the global API and backend PKI, p
 
 | File | Description |
 |------|-------------|
-| `global_stack.py` | Global Accelerator, SSM parameters, S3 model bucket, DynamoDB tables (templates, webhooks, inference endpoints) |
+| `global_stack.py` | Partition-wide shared state plus Global Accelerator and endpoint groups in `aws` only |
 | `api_gateway_global_stack.py` | Edge-optimized API Gateway with IAM auth, HMAC proxy, SigV4 regional aggregator, KMS-encrypted deployment root, scheduled TLS certificate manager, stable regional ACM leaves, WAF, logging, and alarms |
 | `regional_stack.py` | Per-region VPC (spans all AZs in the region), EKS Auto Mode cluster, ALB, EFS/FSx storage, ECR images, Lambda functions (kubectl-applier, helm-installer, GA registration), IRSA roles |
-| `regional_api_gateway_stack.py` | Always-deployed aggregation bridge with IAM auth and a VPC Lambda that resolves/verifies the internal ALB and connects with HMAC plus private-root TLS; `regional_api_enabled` controls only additional direct same-account callers |
+| `regional_api_gateway_stack.py` | Always-deployed aggregation bridge with IAM auth and VPC Lambdas that resolve/verify the internal ALB and connect with HMAC plus private-root TLS; direct same-account callers are optional in `aws` and forced on elsewhere |
 | `monitoring_stack.py` | Cross-region CloudWatch dashboard (GA, API Gateway, Lambda, SQS, DynamoDB, EKS, ALB widgets), SNS alerting, and CloudWatch alarms |
 | `analytics_stack.py` | Optional SageMaker Studio, EMR Serverless, Cognito, and presigned-URL integration |
 | `nag_suppressions.py` | cdk-nag v3 finding acknowledgments and five policy-validation rule-pack registrations |

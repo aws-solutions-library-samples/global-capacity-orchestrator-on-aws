@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# dependency-scan.sh — check Python, Docker, Helm, and EKS-addon versions
+# dependency-scan.sh — check Python, Node.js, Docker, Helm, and EKS versions
 # =============================================================================
 #
 # Invoked by .github/workflows/deps-scan.yml (monthly schedule).
@@ -23,15 +23,17 @@
 #   - Pre-commit hook revisions in .pre-commit-config.yaml compared
 #     against the latest tag published upstream (GitHub API)
 #   - CDK enum constants from gco/stacks/constants.py compared against the
-#     installed aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, AURORA_POSTGRES_VERSION)
+#     installed aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, LAMBDA_NODEJS_RUNTIME,
+#     AURORA_POSTGRES_VERSION)
 #   - Latest stable Python release from endoflife.date — public endpoint
 #   - CI tooling the workflows install by hand: Trivy (TRIVY_VERSION), Helm and
 #     kubectl (HELM_VERSION / KUBECTL_VERSION), kubeconform
-#     (KUBECONFORM_VERSION), and kind + its node image — public endpoints,
-#     no AWS creds
+#     (KUBECONFORM_VERSION), Metrics Server (METRICS_SERVER_VERSION), and kind
+#     + its node image — public endpoints, no AWS creds
 #   - Version consistency: ruff (pyproject / pre-commit / lint workflow),
-#     python-version across workflows, and any *_VERSION env pin that resolves
-#     to different values across workflow files
+#     Python and Node runtime pins, npm packageManager + CDK CLI pins, every
+#     owned npm graph's lockfile/Dependabot coverage, and duplicated *_VERSION
+#     workflow environment pins
 #   - Base-image security epochs (APT_SECURITY_EPOCH / DNF_SECURITY_EPOCH)
 #     older than SECURITY_EPOCH_STALE_DAYS
 #   - Suppression expiries: .trivyignore / .pip-audit-ignore entries expiring
@@ -595,7 +597,7 @@ EMR_COUNT="$(wc -l < "$EMR_RESULTS" 2>/dev/null | tr -d ' ')"
 # ever see it.
 #
 # Same-family scoping (see bedrock_model_family) means we only flag a newer
-# release of the same model line (e.g. a newer Amazon Nova Pro) — never a
+# release of the same model line (e.g. a newer Amazon Nova Premier) — never a
 # different tier or provider, since switching those is a human decision,
 # not drift. When a newer release is reported, bump DEFAULT_BEDROCK_MODEL_ID
 # (and the mirrored advisor constant), then re-capture the scaffold fixture
@@ -840,9 +842,10 @@ PRECOMMIT_COUNT="$(wc -l < "$PRECOMMIT_RESULTS" 2>/dev/null | tr -d ' ')"
 # library, or simply because the latest published release added one)
 # but ``constants.py`` still pins an older one.
 #
-# Two enums are tracked today:
+# Three enums are tracked today:
 #
 #   - ``LAMBDA_PYTHON_RUNTIME`` → ``aws_cdk.aws_lambda.Runtime.PYTHON_X_Y``
+#   - ``LAMBDA_NODEJS_RUNTIME`` → ``aws_cdk.aws_lambda.Runtime.NODEJS_<major>_X``
 #   - ``AURORA_POSTGRES_VERSION`` → ``aws_cdk.aws_rds.AuroraPostgresEngineVersion.VER_X_Y``
 #
 # The deps-scan workflow installs the latest ``aws-cdk-lib`` for this
@@ -871,6 +874,22 @@ else
     if [ "$(compare_semver "$cur_v" "$lat_v")" = "newer" ]; then
       echo "  - LAMBDA_PYTHON_RUNTIME: ${LAMBDA_RT_CURRENT} -> ${LAMBDA_RT_LATEST}"
       echo "LAMBDA_PYTHON_RUNTIME|aws_lambda.Runtime|${LAMBDA_RT_CURRENT}|${LAMBDA_RT_LATEST}" >> "$CDK_ENUM_RESULTS"
+    fi
+  fi
+
+  # Lambda Node.js runtime enum
+  LAMBDA_NODE_RT_CURRENT="$(extract_constant_value LAMBDA_NODEJS_RUNTIME)"
+  LAMBDA_NODE_RT_LATEST="$(get_latest_lambda_nodejs_runtime)"
+  if [ -n "$LAMBDA_NODE_RT_CURRENT" ] && [ -n "$LAMBDA_NODE_RT_LATEST" ] \
+     && [ "$LAMBDA_NODE_RT_CURRENT" != "$LAMBDA_NODE_RT_LATEST" ]; then
+    cur_major="${LAMBDA_NODE_RT_CURRENT#NODEJS_}"
+    cur_major="${cur_major%_X}"
+    lat_major="${LAMBDA_NODE_RT_LATEST#NODEJS_}"
+    lat_major="${lat_major%_X}"
+    if [[ "$cur_major" =~ ^[0-9]+$ ]] && [[ "$lat_major" =~ ^[0-9]+$ ]] \
+       && [ "$lat_major" -gt "$cur_major" ]; then
+      echo "  - LAMBDA_NODEJS_RUNTIME: ${LAMBDA_NODE_RT_CURRENT} -> ${LAMBDA_NODE_RT_LATEST}"
+      echo "LAMBDA_NODEJS_RUNTIME|aws_lambda.Runtime|${LAMBDA_NODE_RT_CURRENT}|${LAMBDA_NODE_RT_LATEST}" >> "$CDK_ENUM_RESULTS"
     fi
   fi
 
@@ -934,7 +953,7 @@ PYTHON_RELEASE_COUNT="$(wc -l < "$PYTHON_RELEASE_RESULTS" 2>/dev/null | tr -d ' 
 # CI tooling pins (public endpoints — no AWS creds)
 #
 # The workflows install their own pinned tooling — Trivy (cve-scan.yml /
-# security.yml), Helm + kubectl (deps-scan.yml), and kubeconform
+# security.yml), Helm + kubectl (deps-scan.yml), kubeconform and Metrics Server
 # (integration-tests.yml) — from plain ``*_VERSION`` env strings, and the
 # integration-tests workflow also pins kind + its node image on the
 # ``helm/kind-action`` step. None of these are ``uses:`` refs or Dockerfile
@@ -977,6 +996,16 @@ check_github_tool "Helm (HELM_VERSION)" "$HELM_PIN" "helm/helm" \
 KUBECONFORM_PIN="$(extract_workflow_env_pin KUBECONFORM_VERSION | head -1)"
 check_github_tool "kubeconform (KUBECONFORM_VERSION)" "$KUBECONFORM_PIN" "yannh/kubeconform" \
   "https://github.com/yannh/kubeconform/releases"
+
+# Metrics Server (kubernetes-sigs/metrics-server) — kind installs this pin so
+# the inference proxy HPA must reach ScalingActive, mirroring the EKS managed
+# add-on contract used in production.
+METRICS_SERVER_PIN="$(extract_workflow_env_pin METRICS_SERVER_VERSION | head -1)"
+check_github_tool \
+  "Metrics Server (METRICS_SERVER_VERSION)" \
+  "$METRICS_SERVER_PIN" \
+  "kubernetes-sigs/metrics-server" \
+  "https://github.com/kubernetes-sigs/metrics-server/releases"
 
 # kind (kubernetes-sigs/kind) — the kind binary on the kind-action step.
 KIND_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind"{print $2}')"
@@ -1031,6 +1060,11 @@ CI_TOOLING_COUNT="$(wc -l < "$CI_TOOLING_RESULTS" 2>/dev/null | tr -d ' ')"
 #     binary ruff-action step in lint.yml.
 #   - python-version across the workflows vs the project's canonical Python
 #     (the LAMBDA_PYTHON_RUNTIME the Lambdas ship on).
+#   - Node major across LAMBDA_NODEJS_RUNTIME, .nvmrc, every package engine,
+#     and Dockerfile.dev; npm across every packageManager and Dockerfile.dev.
+#   - AWS CDK CLI across the locked root npm graph and Dockerfile.dev.
+#   - every repository-owned package.json has a lockfile, exact direct pins,
+#     and a matching npm entry in Dependabot.
 #   - the same tool env pin (TRIVY_VERSION/HELM_VERSION/KUBECTL_VERSION)
 #     resolving to different values in different workflow files.
 # ---------------------------------------------------------------------------
@@ -1059,6 +1093,81 @@ if [ -n "$PY_PINS_UNIQUE" ]; then
     echo "  - python-version pins: ${py_list} (project runtime: ${CANON_PY:-unknown})"
     echo "python-version (CI vs runtime)|CI: ${py_list}; runtime: ${CANON_PY:-unknown}" >> "$CONSISTENCY_RESULTS"
   fi
+fi
+
+NPM_PACKAGE_SOURCES="$(
+  list_npm_package_dirs . | while IFS= read -r package_dir; do
+    [ -n "$package_dir" ] || continue
+    if [ "$package_dir" = "." ]; then
+      echo "package.json"
+    else
+      echo "${package_dir}/package.json"
+    fi
+  done
+)"
+
+NODE_PINS="$(extract_node_major_pins . gco/stacks/constants.py .nvmrc Dockerfile.dev | sort -u)"
+EXPECTED_NODE_SOURCES="$(
+  {
+    printf '%s\n' gco/stacks/constants.py .nvmrc Dockerfile.dev
+    printf '%s\n' "$NPM_PACKAGE_SOURCES"
+  } | sed '/^$/d' | sort -u
+)"
+NODE_PIN_SOURCES="$(printf '%s\n' "$NODE_PINS" | cut -d'|' -f1 | sed '/^$/d' | sort -u)"
+NODE_MISSING="$(comm -23 <(printf '%s\n' "$EXPECTED_NODE_SOURCES") <(printf '%s\n' "$NODE_PIN_SOURCES"))"
+node_distinct="$(printf '%s\n' "$NODE_PINS" | cut -d'|' -f2 | sed '/^$/d' | sort -u | grep -c .)"
+if [ -n "$NODE_MISSING" ] || [ "$node_distinct" -gt 1 ]; then
+  node_detail="$(printf '%s\n' "$NODE_PINS" | awk -F'|' '{printf "%s=%s ", $1, $2}' | sed 's/ *$//')"
+  if [ -n "$NODE_MISSING" ]; then
+    node_missing_list="$(printf '%s\n' "$NODE_MISSING" | paste -sd',' -)"
+    node_detail="${node_detail}; missing=${node_missing_list}"
+  fi
+  echo "  - Node.js major pins disagree or are missing: ${node_detail}"
+  echo "Node.js major (runtime / packages / dev container)|${node_detail}" >> "$CONSISTENCY_RESULTS"
+fi
+
+NPM_PINS="$(extract_npm_version_pins . Dockerfile.dev | sort -u)"
+EXPECTED_NPM_SOURCES="$(
+  {
+    printf '%s\n' Dockerfile.dev
+    printf '%s\n' "$NPM_PACKAGE_SOURCES"
+  } | sed '/^$/d' | sort -u
+)"
+NPM_PIN_SOURCES="$(printf '%s\n' "$NPM_PINS" | cut -d'|' -f1 | sed '/^$/d' | sort -u)"
+NPM_MISSING="$(comm -23 <(printf '%s\n' "$EXPECTED_NPM_SOURCES") <(printf '%s\n' "$NPM_PIN_SOURCES"))"
+npm_distinct="$(printf '%s\n' "$NPM_PINS" | cut -d'|' -f2 | sed '/^$/d' | sort -u | grep -c .)"
+if [ -n "$NPM_MISSING" ] || [ "$npm_distinct" -gt 1 ]; then
+  npm_detail="$(printf '%s\n' "$NPM_PINS" | awk -F'|' '{printf "%s=%s ", $1, $2}' | sed 's/ *$//')"
+  if [ -n "$NPM_MISSING" ]; then
+    npm_missing_list="$(printf '%s\n' "$NPM_MISSING" | paste -sd',' -)"
+    npm_detail="${npm_detail}; missing=${npm_missing_list}"
+  fi
+  echo "  - npm pins disagree or are missing: ${npm_detail}"
+  echo "npm (packageManager / dev container)|${npm_detail}" >> "$CONSISTENCY_RESULTS"
+fi
+
+CDK_CLI_PINS="$(extract_cdk_cli_pins . Dockerfile.dev | sort -u)"
+CDK_CLI_MISSING="$(comm -23 \
+  <(printf '%s\n' Dockerfile.dev package.json | sort -u) \
+  <(printf '%s\n' "$CDK_CLI_PINS" | cut -d'|' -f1 | sed '/^$/d' | sort -u))"
+cdk_cli_distinct="$(printf '%s\n' "$CDK_CLI_PINS" | cut -d'|' -f2 | sed '/^$/d' | sort -u | grep -c .)"
+if [ -n "$CDK_CLI_MISSING" ] || [ "$cdk_cli_distinct" -gt 1 ]; then
+  cdk_detail="$(printf '%s\n' "$CDK_CLI_PINS" | awk -F'|' '{printf "%s=%s ", $1, $2}' | sed 's/ *$//')"
+  if [ -n "$CDK_CLI_MISSING" ]; then
+    cdk_missing_list="$(printf '%s\n' "$CDK_CLI_MISSING" | paste -sd',' -)"
+    cdk_detail="${cdk_detail}; missing=${cdk_missing_list}"
+  fi
+  echo "  - AWS CDK CLI pins disagree or are missing: ${cdk_detail}"
+  echo "AWS CDK CLI (package / dev container)|${cdk_detail}" >> "$CONSISTENCY_RESULTS"
+fi
+
+NPM_MANAGEMENT_PROBLEMS="$(check_npm_package_management . .github/dependabot.yml)"
+if [ -n "$NPM_MANAGEMENT_PROBLEMS" ]; then
+  while IFS='|' read -r manifest problem; do
+    [ -n "$manifest" ] || continue
+    echo "  - npm dependency management: ${manifest}: ${problem}"
+    echo "npm dependency management|${manifest}: ${problem}" >> "$CONSISTENCY_RESULTS"
+  done <<< "$NPM_MANAGEMENT_PROBLEMS"
 fi
 
 for consistency_var in TRIVY_VERSION HELM_VERSION KUBECTL_VERSION; do
@@ -1484,9 +1593,9 @@ summary_row() {
   if [ "$CONSISTENCY_COUNT" -gt 0 ]; then
     echo "## Version Consistency"
     echo ""
-    echo "These versions are pinned in more than one place and must move together."
-    echo "The copies below disagree — reconcile them so local installs, the"
-    echo "pre-commit hooks, and CI all use the same version."
+    echo "These versions and dependency-management surfaces must move together."
+    echo "The rows below identify missing coverage or disagreement across runtime,"
+    echo "package, dev-container, pre-commit, and CI pins."
     echo ""
     emit_md_table "What|Pinned values" "$CONSISTENCY_RESULTS"
     echo ""

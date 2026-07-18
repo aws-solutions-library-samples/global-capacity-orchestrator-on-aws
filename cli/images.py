@@ -8,7 +8,7 @@ container images stored in per-project ECR repositories under the
 ``cli._container_runtime``.
 
 The ECR repository layout mirrors the project naming convention:
-``<account>.dkr.ecr.<region>.amazonaws.com/gco/<name>:<tag>``.
+``<account>.dkr.ecr.<region>.<url-suffix>/gco/<name>:<tag>``.
 
 Read-only methods (``list_repos``, ``list_tags``, ``describe``,
 ``get_uri``, ``replication_get``, ``replication_status``) hit ECR
@@ -40,11 +40,16 @@ from botocore.exceptions import ClientError
 
 from ._container_runtime import detect_container_runtime
 from ._image_uri import (
+    aws_partition,
+    ecr_registry_host,
+)
+from ._image_uri import (
     rewrite_image_uri_for_region as _rewrite_image_uri_for_region,  # noqa: F401
 )
 from .config import GCOConfig, _load_cdk_json, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``ImageManager.build`` -> ``diagrams/code_diagrams/cli/images.ImageManager_build.html``
 #     (PNG: ``diagrams/code_diagrams/cli/images.ImageManager_build.png``)
@@ -156,13 +161,14 @@ class ImageManager:
         return self._account_id_cache
 
     def _registry_host(self) -> str:
-        """Return the ECR registry host for the manager's region."""
-        return f"{self._account_id()}.dkr.ecr.{self.region}.amazonaws.com"
+        """Return the partition-correct ECR registry host for this region."""
+        return ecr_registry_host(self._account_id(), self.region)
 
     def _repo_arn(self, name: str) -> str:
         """Return the full ARN of the repository under the project prefix."""
         return (
-            f"arn:aws:ecr:{self.region}:{self._account_id()}:repository/{self._repo_prefix}/{name}"
+            f"arn:{aws_partition(self.region)}:ecr:{self.region}:{self._account_id()}:"
+            f"repository/{self._repo_prefix}/{name}"
         )
 
     def _ecr_client(self) -> Any:

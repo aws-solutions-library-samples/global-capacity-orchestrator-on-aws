@@ -3,8 +3,8 @@
 The happy-path flows are already covered through the Click-level tests in
 ``tests/test_analytics_cmd.py`` — this module adds targeted tests for the
 pure helpers (SRP math, timestamp formatting, CloudFormation output lookups)
-and for the error branches of the AWS-facing functions so the module keeps
-pace with the >=90% coverage target.
+and for the error branches of the AWS-facing functions so the module protects
+the project-wide 93% coverage floor.
 """
 
 from __future__ import annotations

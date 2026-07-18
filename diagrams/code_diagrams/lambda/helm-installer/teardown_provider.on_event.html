@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
         <title>Helm teardown provider event path (install drain + idempotent execution start)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -205,48 +206,48 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3557=>operation: 'Start ordered teardown on Delete; no-op on Create and Update.'
-op3559=>operation: request_type = event['RequestType']
-op3561=>operation: physical_id = event.get('PhysicalResourceId') or 'helm-teardown'
-cond3564=>condition: if request_type != 'Delete'
-io3571=>inputoutput: output: {'PhysicalResourceId': physical_id}
-e3569=>end: end function return
-op3577=>operation: props = event['ResourceProperties']
-op3579=>operation: state_machine_arn = os.environ['TEARDOWN_STATE_MACHINE_ARN']
-op3581=>operation: install_state_machine_arn = os.environ['INSTALL_STATE_MACHINE_ARN']
-op3583=>operation: execution_name = _execution_name(event)
-op3585=>operation: sfn_client = _sfn()
-sub3587=>subroutine: _stop_running_install_executions(sfn_client, install_state_machine_arn)
-op3589=>operation: execution_input = {'ClusterName': props['ClusterName'], 'Region': props['Region'], 'EnabledCharts': props.get('EnabledCharts', []), 'Charts': props.get('Charts', {}), 'KedaOperatorRoleArn': props.get('KedaOperatorRoleArn'), 'WaitForInFlightSeconds': _IN_FLIGHT_LAMBDA_DRAIN_SECONDS}
-sub3594=>subroutine: sfn_client.start_execution(stateMachineArn=state_machine_arn, name=execution_name, input=json.dumps(execution_input))
-cond3591=>condition: exception raised?
-cond3596=>condition: except ClientError as exc
-cond3601=>operation: raise if  exc.response.get('Error', {}).get('Code') != 'ExecutionAlreadyExists'
-sub3614=>subroutine: logger.info('Started ordered Helm teardown execution %s', execution_name)
-io3619=>inputoutput: output: {'PhysicalResourceId': physical_id}
-e3617=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op3866=>operation: 'Start ordered teardown on Delete; no-op on Create and Update.'
+op3868=>operation: request_type = event['RequestType']
+op3870=>operation: physical_id = event.get('PhysicalResourceId') or 'helm-teardown'
+cond3873=>condition: if request_type != 'Delete'
+io3880=>inputoutput: output: {'PhysicalResourceId': physical_id}
+e3878=>end: end function return
+op3886=>operation: props = event['ResourceProperties']
+op3888=>operation: state_machine_arn = os.environ['TEARDOWN_STATE_MACHINE_ARN']
+op3890=>operation: install_state_machine_arn = os.environ['INSTALL_STATE_MACHINE_ARN']
+op3892=>operation: execution_name = _execution_name(event)
+op3894=>operation: sfn_client = _sfn()
+sub3896=>subroutine: _stop_running_install_executions(sfn_client, install_state_machine_arn)
+op3898=>operation: execution_input = {'ClusterName': props['ClusterName'], 'Region': props['Region'], 'EnabledCharts': props.get('EnabledCharts', []), 'Charts': props.get('Charts', {}), 'KedaOperatorRoleArn': props.get('KedaOperatorRoleArn'), 'WaitForInFlightSeconds': _IN_FLIGHT_LAMBDA_DRAIN_SECONDS}
+sub3903=>subroutine: sfn_client.start_execution(stateMachineArn=state_machine_arn, name=execution_name, input=json.dumps(execution_input))
+cond3900=>condition: exception raised?
+cond3905=>condition: except ClientError as exc
+cond3910=>operation: raise if  exc.response.get('Error', {}).get('Code') != 'ExecutionAlreadyExists'
+sub3923=>subroutine: logger.info('Started ordered Helm teardown execution %s', execution_name)
+io3928=>inputoutput: output: {'PhysicalResourceId': physical_id}
+e3926=>end: end function return
 
-op3557->op3559
-op3559->op3561
-op3561->cond3564
-cond3564(yes)->io3571
-io3571->e3569
-cond3564(no)->op3577
-op3577->op3579
-op3579->op3581
-op3581->op3583
-op3583->op3585
-op3585->sub3587
-sub3587->op3589
-op3589->sub3594
-sub3594->cond3591
-cond3591(yes)->cond3596
-cond3596(yes)->cond3601
-cond3601->sub3614
-sub3614->io3619
-io3619->e3617
-cond3596(no)->sub3614
-cond3591(no)->sub3614
+op3866->op3868
+op3868->op3870
+op3870->cond3873
+cond3873(yes)->io3880
+io3880->e3878
+cond3873(no)->op3886
+op3886->op3888
+op3888->op3890
+op3890->op3892
+op3892->op3894
+op3894->sub3896
+sub3896->op3898
+op3898->sub3903
+sub3903->cond3900
+cond3900(yes)->cond3905
+cond3905(yes)->cond3910
+cond3910->sub3923
+sub3923->io3928
+io3928->e3926
+cond3905(no)->sub3923
+cond3900(no)->sub3923
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -256,6 +257,12 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <div id="canvas"></div>
+        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+          </p>
+          <div id="canvas"></div>
+        </div>
     </body>
 </html>

@@ -428,6 +428,28 @@ if versions:
 " 2>/dev/null
 }
 
+# get_latest_lambda_nodejs_runtime
+#
+# Prints the highest canonical ``NODEJS_<major>_X`` member exposed by the
+# installed aws-cdk-lib. This is the Node equivalent of the Python helper
+# above and feeds the managed Lambda runtime drift check.
+get_latest_lambda_nodejs_runtime() {
+  python3 -c "
+import re
+try:
+    from aws_cdk import aws_lambda
+except Exception:
+    raise SystemExit(0)
+versions = []
+for name in dir(aws_lambda.Runtime):
+    m = re.match(r'^NODEJS_(\d+)_X$', name)
+    if m:
+        versions.append((int(m.group(1)), name))
+if versions:
+    print(max(versions)[1])
+" 2>/dev/null
+}
+
 # get_latest_aurora_postgres_version
 #
 # Imports ``aws_cdk.aws_rds`` and prints the highest ``VER_X_Y`` enum
@@ -953,6 +975,253 @@ extract_python_version_pins() {
   grep -rhoE "python-version:[[:space:]]*\"?[0-9]+\.[0-9]+\"?" "$dir" 2>/dev/null \
     | sed -E "s/python-version:[[:space:]]*//" \
     | tr -d '"'
+}
+
+# list_npm_package_dirs [root]
+#
+# Prints every repository-owned npm package directory. Generated, vendored,
+# virtual-environment, and CDK assembly trees are excluded so a copied
+# ``package.json`` never becomes a false dependency surface.
+list_npm_package_dirs() {
+  local root="${1:-.}"
+  python3 -c "
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1]).resolve()
+excluded = {
+    '.git', '.kiro', '.mypy_cache', '.pytest_cache', '.ruff_cache',
+    'build', 'cdk.out', 'dist', 'node_modules', '__pycache__',
+}
+
+def owned(path):
+    parts = path.relative_to(root).parts[:-1]
+    return not any(
+        part in excluded or part.startswith('.venv') or part.endswith('-build')
+        for part in parts
+    )
+
+for manifest in sorted(root.rglob('package.json')):
+    if not owned(manifest):
+        continue
+    relative = manifest.parent.relative_to(root)
+    print('.' if relative == Path('.') else relative.as_posix())
+" "$root" 2>/dev/null
+}
+
+# check_npm_package_management [root] [dependabot_config]
+#
+# Emits ``package.json|problem`` for every repository-owned npm graph that is
+# not fully reproducible and managed. A graph must have a package-lock.json,
+# an exact npm packageManager pin, exact direct dependency pins, and a matching
+# Dependabot npm directory entry. The all-package npm-audit CI job treats any
+# output as a hard failure; the monthly scan also reports it as consistency
+# drift.
+check_npm_package_management() {
+  local root="${1:-.}"
+  local dependabot="${2:-.github/dependabot.yml}"
+  python3 -c "
+import json, re, sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+dependabot_path = Path(sys.argv[2])
+if not dependabot_path.is_absolute():
+    dependabot_path = root / dependabot_path
+excluded = {
+    '.git', '.kiro', '.mypy_cache', '.pytest_cache', '.ruff_cache',
+    'build', 'cdk.out', 'dist', 'node_modules', '__pycache__',
+}
+exact_version = re.compile(r'^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$')
+
+def owned(path):
+    parts = path.relative_to(root).parts[:-1]
+    return not any(
+        part in excluded or part.startswith('.venv') or part.endswith('-build')
+        for part in parts
+    )
+
+dependabot_dirs = set()
+try:
+    text = dependabot_path.read_text(encoding='utf-8')
+except OSError:
+    text = ''
+for block in re.split(r'(?m)(?=^\s*-\s+package-ecosystem:)', text):
+    if not re.search(r'(?m)^\s*-\s+package-ecosystem:\s*[\"\']?npm[\"\']?\s*$', block):
+        continue
+    match = re.search(r'(?m)^\s+directory:\s*[\"\']?([^\"\'\s]+)', block)
+    if match:
+        dependabot_dirs.add('/' + match.group(1).strip('/'))
+
+for manifest in sorted(root.rglob('package.json')):
+    if not owned(manifest):
+        continue
+    rel_manifest = manifest.relative_to(root).as_posix()
+    rel_dir = manifest.parent.relative_to(root)
+    dependabot_dir = '/' if rel_dir == Path('.') else '/' + rel_dir.as_posix()
+    try:
+        package = json.loads(manifest.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f'{rel_manifest}|invalid JSON: {exc}')
+        continue
+    if not manifest.with_name('package-lock.json').is_file():
+        print(f'{rel_manifest}|missing package-lock.json')
+    manager = package.get('packageManager', '')
+    if not re.fullmatch(r'npm@\d+\.\d+\.\d+', manager):
+        print(f'{rel_manifest}|packageManager must be an exact npm@X.Y.Z pin')
+    for section in ('dependencies', 'devDependencies', 'optionalDependencies'):
+        for name, version in (package.get(section) or {}).items():
+            if not isinstance(version, str) or not exact_version.fullmatch(version):
+                print(f'{rel_manifest}|{section}.{name} must use an exact version pin')
+    if dependabot_dir not in dependabot_dirs:
+        print(f'{rel_manifest}|missing Dependabot npm entry for {dependabot_dir}')
+" "$root" "$dependabot" 2>/dev/null
+}
+
+# extract_node_major_pins [root] [constants] [nvmrc] [dockerfile]
+#
+# Emits ``source|major`` for every place that intentionally mirrors the
+# repository Node major: the Lambda runtime constant, .nvmrc, every owned npm
+# graph's engine, and Dockerfile.dev. The driver reports missing sources and
+# disagreement; the CDK enum check separately detects a newer Lambda runtime.
+extract_node_major_pins() {
+  local root="${1:-.}"
+  local constants="${2:-gco/stacks/constants.py}"
+  local nvmrc="${3:-.nvmrc}"
+  local dockerfile="${4:-Dockerfile.dev}"
+  python3 -c "
+import json, re, sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+excluded = {
+    '.git', '.kiro', '.mypy_cache', '.pytest_cache', '.ruff_cache',
+    'build', 'cdk.out', 'dist', 'node_modules', '__pycache__',
+}
+
+def resolve(path):
+    candidate = Path(path)
+    return candidate if candidate.is_absolute() else root / candidate
+
+def emit(source, value):
+    match = re.search(r'\d+', str(value))
+    if match:
+        print(f'{source}|{int(match.group())}')
+
+def owned(path):
+    parts = path.relative_to(root).parts[:-1]
+    return not any(
+        part in excluded or part.startswith('.venv') or part.endswith('-build')
+        for part in parts
+    )
+
+try:
+    text = resolve(sys.argv[2]).read_text(encoding='utf-8')
+    match = re.search(r'^LAMBDA_NODEJS_RUNTIME\s*=\s*\"NODEJS_(\d+)_X\"', text, re.MULTILINE)
+    if match:
+        emit('gco/stacks/constants.py', match.group(1))
+except OSError:
+    pass
+try:
+    emit('.nvmrc', resolve(sys.argv[3]).read_text(encoding='utf-8').strip())
+except OSError:
+    pass
+try:
+    text = resolve(sys.argv[4]).read_text(encoding='utf-8')
+    match = re.search(r'^\s*ARG\s+NODE_MAJOR=(\d+)\s*$', text, re.MULTILINE)
+    if match:
+        emit('Dockerfile.dev', match.group(1))
+except OSError:
+    pass
+for manifest in sorted(root.rglob('package.json')):
+    if not owned(manifest):
+        continue
+    try:
+        package = json.loads(manifest.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        continue
+    emit(manifest.relative_to(root).as_posix(), (package.get('engines') or {}).get('node', ''))
+" "$root" "$constants" "$nvmrc" "$dockerfile" 2>/dev/null
+}
+
+# extract_npm_version_pins [root] [dockerfile]
+#
+# Emits every package.json packageManager npm version plus Dockerfile.dev's
+# NPM_VERSION so Dependabot/tooling updates cannot leave contributor and CI
+# npm versions disagreeing.
+extract_npm_version_pins() {
+  local root="${1:-.}"
+  local dockerfile="${2:-Dockerfile.dev}"
+  python3 -c "
+import json, re, sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+excluded = {
+    '.git', '.kiro', '.mypy_cache', '.pytest_cache', '.ruff_cache',
+    'build', 'cdk.out', 'dist', 'node_modules', '__pycache__',
+}
+
+def owned(path):
+    parts = path.relative_to(root).parts[:-1]
+    return not any(
+        part in excluded or part.startswith('.venv') or part.endswith('-build')
+        for part in parts
+    )
+
+for manifest in sorted(root.rglob('package.json')):
+    if not owned(manifest):
+        continue
+    try:
+        package = json.loads(manifest.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        continue
+    match = re.fullmatch(r'npm@(\d+\.\d+\.\d+)', package.get('packageManager', ''))
+    if match:
+        print(f'{manifest.relative_to(root).as_posix()}|{match.group(1)}')
+docker = Path(sys.argv[2])
+if not docker.is_absolute():
+    docker = root / docker
+try:
+    text = docker.read_text(encoding='utf-8')
+    match = re.search(r'^\s*ARG\s+NPM_VERSION=(\d+\.\d+\.\d+)\s*$', text, re.MULTILINE)
+    if match:
+        print(f'Dockerfile.dev|{match.group(1)}')
+except OSError:
+    pass
+" "$root" "$dockerfile" 2>/dev/null
+}
+
+# extract_cdk_cli_pins [root] [dockerfile]
+#
+# Emits the root tooling graph's aws-cdk version and Dockerfile.dev's global
+# CDK CLI pin. Both execution paths must synthesize with the same CLI release.
+extract_cdk_cli_pins() {
+  local root="${1:-.}"
+  local dockerfile="${2:-Dockerfile.dev}"
+  python3 -c "
+import json, re, sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+try:
+    package = json.loads((root / 'package.json').read_text(encoding='utf-8'))
+    version = (package.get('devDependencies') or {}).get('aws-cdk', '')
+    if re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?', version):
+        print(f'package.json|{version}')
+except (OSError, json.JSONDecodeError):
+    pass
+docker = Path(sys.argv[2])
+if not docker.is_absolute():
+    docker = root / docker
+try:
+    text = docker.read_text(encoding='utf-8')
+    match = re.search(r'^\s*ARG\s+CDK_VERSION=(\S+)\s*$', text, re.MULTILINE)
+    if match:
+        print(f'Dockerfile.dev|{match.group(1)}')
+except OSError:
+    pass
+" "$root" "$dockerfile" 2>/dev/null
 }
 
 # parse_suppression_expiries <file>

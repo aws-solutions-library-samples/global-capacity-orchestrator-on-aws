@@ -3,15 +3,15 @@ Global API Gateway stack - Single authenticated entry point for all regions.
 
 This stack creates the centralized API Gateway that serves as the authenticated
 entry point for all GCO API requests. It provides:
-- Edge-optimized endpoint using the AWS-managed CloudFront distribution for global ingress and DDoS protection (API response caching is not configured)
+- Edge-optimized endpoint in the commercial ``aws`` partition; regional endpoint elsewhere
 - IAM authentication (AWS SigV4) for all requests
-- Lambda proxy that adds a short-lived, per-request HMAC envelope
+- Global Accelerator-backed HMAC proxy routes in ``aws`` only
 - SigV4-authenticated aggregation through regional API Gateway bridges
 - Secrets Manager signing key with automatic rotation
 - Multi-region replication for the signing key
 - CloudWatch logging for audit and debugging
 
-Security Flow:
+Security Flow in the commercial ``aws`` partition:
     1. Client signs request with AWS credentials (SigV4)
     2. CloudFront edge location receives request (managed by AWS)
     3. API Gateway validates IAM permissions
@@ -27,9 +27,15 @@ Secret Rotation:
     - After validation, AWSPENDING becomes AWSCURRENT
     - Multi-region replication ensures all regions receive the new key
 
+Outside ``aws``, the Global Accelerator proxy Lambdas and catch-all workload
+routes are omitted. The regional global API retains authenticated aggregate
+routes, while callers use IAM-authenticated regional bridges for workload
+control and inference.
+
 The HMAC envelope authenticates each request but does not encrypt its payload;
 transport confidentiality is a separate property of the network path. Direct
-requests to Global Accelerator or regional ALBs cannot mint a valid envelope.
+requests to Global Accelerator (when present) or regional ALBs cannot mint a
+valid envelope.
 """
 
 import json
@@ -61,6 +67,9 @@ from aws_cdk import custom_resources as cr
 from constructs import Construct
 
 from gco.stacks.constants import (
+    AGGREGATOR_REGIONAL_API_ROUTES,
+    DEFAULT_MAX_REQUEST_BODY_BYTES,
+    LAMBDA_NODEJS_RUNTIME,
     LAMBDA_PYTHON_RUNTIME,
     api_gateway_auth_secret_name,
     backend_tls_certificate_parameter_prefix,
@@ -68,9 +77,11 @@ from gco.stacks.constants import (
     backend_tls_root_secret_name,
     backend_tls_server_name,
     cross_region_aggregator_role_name,
+    validated_request_body_limit,
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-07-18T01:03:40Z
 # Flowchart(s) generated from this file:
 #   * ``GCOApiGatewayGlobalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.png``)
@@ -142,7 +153,7 @@ class GCOApiGatewayGlobalStack(Stack):
         self,
         scope: Construct,
         construct_id: str,
-        global_accelerator_dns: str,
+        global_accelerator_dns: str | None,
         regional_endpoints: dict[str, str] | None = None,
         analytics_config: AnalyticsApiConfig | None = None,
         project_name: str = "gco",
@@ -150,6 +161,7 @@ class GCOApiGatewayGlobalStack(Stack):
         registry_region: str | None = None,
         certificate_regions: list[str] | None = None,
         backend_tls_config: dict[str, Any] | None = None,
+        max_request_body_bytes: int = DEFAULT_MAX_REQUEST_BODY_BYTES,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -160,7 +172,7 @@ class GCOApiGatewayGlobalStack(Stack):
         # Defaults to ``"gco"`` so the rendered names are byte-for-byte
         # identical to the pre-#139 literals for the stock deployment.
         self.project_name = project_name
-        self.ga_dns = global_accelerator_dns
+        self.ga_dns = str(global_accelerator_dns).strip() if global_accelerator_dns else None
         self.regional_endpoints = regional_endpoints or {}
         # Regional ALB hostnames and backend-TLS public metadata are registered
         # in the global stack's SSM region, which may differ from this stack.
@@ -191,6 +203,7 @@ class GCOApiGatewayGlobalStack(Stack):
         self.backend_tls_certificate_parameter_prefix = backend_tls_certificate_parameter_prefix(
             self.project_name
         )
+        self.max_request_body_bytes = validated_request_body_limit(max_request_body_bytes)
 
         default_api_gateway_config: dict[str, Any] = {
             "throttle_rate_limit": 1000,
@@ -225,10 +238,13 @@ class GCOApiGatewayGlobalStack(Stack):
         # Create the shared backend HMAC signing key.
         self.secret = self._create_secret()
 
-        # Keep control-plane requests on the established buffered Python
-        # proxy; inference gets a separate Node.js response-streaming runtime.
-        self.proxy_lambda = self._create_proxy_lambda()
-        self.inference_proxy_lambda = self._create_inference_proxy_lambda()
+        # Global Accelerator-backed proxy routes exist only where that global
+        # service is available. In other partitions the global API retains its
+        # aggregate routes while callers use the regional IAM APIs directly.
+        self.proxy_lambda = self._create_proxy_lambda() if self.ga_dns is not None else None
+        self.inference_proxy_lambda = (
+            self._create_inference_proxy_lambda() if self.ga_dns is not None else None
+        )
 
         # Create cross-region aggregator Lambda
         self.aggregator_lambda = self._create_aggregator_lambda()
@@ -313,7 +329,11 @@ class GCOApiGatewayGlobalStack(Stack):
         self.backend_tls_key.grant_encrypt_decrypt(manager_role)
         manager_role.add_to_policy(
             iam.PolicyStatement(
-                actions=["acm:AddTagsToCertificate", "acm:ImportCertificate"],
+                actions=[
+                    "acm:AddTagsToCertificate",
+                    "acm:ImportCertificate",
+                    "acm:ListCertificates",
+                ],
                 resources=["*"],
             )
         )
@@ -330,7 +350,12 @@ class GCOApiGatewayGlobalStack(Stack):
         )
         manager_role.add_to_policy(
             iam.PolicyStatement(
-                actions=["ssm:DeleteParameter", "ssm:GetParameter", "ssm:PutParameter"],
+                actions=[
+                    "ssm:DeleteParameter",
+                    "ssm:GetParameter",
+                    "ssm:GetParametersByPath",
+                    "ssm:PutParameter",
+                ],
                 resources=[
                     f"arn:{self.partition}:ssm:{self.registry_region}:{self.account}:"
                     f"parameter/{project_name}/backend-tls/*"
@@ -473,6 +498,24 @@ class GCOApiGatewayGlobalStack(Stack):
             comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
+        self.backend_tls_reconciliation_heartbeat_alarm = cloudwatch.Alarm(
+            self,
+            "BackendTlsReconciliationHeartbeatAlarm",
+            alarm_description=(
+                "Backend TLS reconciliation has not completed within two schedule intervals"
+            ),
+            metric=cloudwatch.Metric(
+                namespace="GCO/BackendTLS",
+                metric_name="ReconciliationSuccess",
+                dimensions_map={"Project": project_name},
+                statistic="Sum",
+                period=Duration.hours(config["rotation_schedule_hours"] * 2),
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.BREACHING,
+        )
         self.backend_tls_root_expiry_alarm = cloudwatch.Alarm(
             self,
             "BackendTlsRootExpiryAlarm",
@@ -532,9 +575,9 @@ class GCOApiGatewayGlobalStack(Stack):
                         "Resource::*",
                         "Action::kms:GenerateDataKey*",
                         "Action::kms:ReEncrypt*",
-                        "Resource::arn:aws:acm:*:<AWS::AccountId>:certificate/*",
+                        "Resource::arn:<AWS::Partition>:acm:*:<AWS::AccountId>:certificate/*",
                         (
-                            f"Resource::arn:aws:ssm:{self.registry_region}:"
+                            f"Resource::arn:<AWS::Partition>:ssm:{self.registry_region}:"
                             f"<AWS::AccountId>:parameter/{project_name}/backend-tls/*"
                         ),
                     ],
@@ -603,6 +646,7 @@ class GCOApiGatewayGlobalStack(Stack):
         for alarm in [
             self.backend_tls_manager_error_alarm,
             self.backend_tls_rotation_dlq_alarm,
+            self.backend_tls_reconciliation_heartbeat_alarm,
             self.backend_tls_root_expiry_alarm,
             *self.backend_tls_expiry_alarms,
         ]:
@@ -743,7 +787,9 @@ class GCOApiGatewayGlobalStack(Stack):
         return rotation_lambda
 
     def _create_proxy_lambda(self) -> lambda_.Function:
-        """Create the authenticated global/regional backend proxy Lambda."""
+        """Create the authenticated Global Accelerator backend proxy Lambda."""
+        if self.ga_dns is None:
+            raise RuntimeError("The global proxy requires a Global Accelerator endpoint")
 
         # Create IAM role
         lambda_role = iam.Role(
@@ -831,6 +877,8 @@ class GCOApiGatewayGlobalStack(Stack):
 
     def _create_inference_proxy_lambda(self) -> lambda_.Function:
         """Create the inference-only Lambda response-streaming proxy."""
+        if self.ga_dns is None:
+            raise RuntimeError("The global inference proxy requires Global Accelerator")
         role = iam.Role(
             self,
             "InferenceStreamingProxyRole",
@@ -863,14 +911,15 @@ class GCOApiGatewayGlobalStack(Stack):
         function = lambda_.Function(
             self,
             "InferenceStreamingProxyFunction",
-            runtime=lambda_.Runtime.NODEJS_22_X,
+            runtime=getattr(lambda_.Runtime, LAMBDA_NODEJS_RUNTIME),
             handler="index.handler",
-            code=lambda_.Code.from_asset("lambda/inference-streaming-proxy"),
+            code=lambda_.Code.from_asset("lambda/inference-streaming-proxy-build"),
             timeout=Duration.minutes(15),
             memory_size=256,
             role=role,
             environment={
                 "ROUTING_MODE": "global",
+                "MAX_REQUEST_BODY_BYTES": str(self.max_request_body_bytes),
                 "GLOBAL_ACCELERATOR_ENDPOINT": self.ga_dns,
                 "SECRET_ARN": self.secret.secret_arn,
                 "BACKEND_TLS_SERVER_NAME": self.backend_tls_server_name,
@@ -950,7 +999,14 @@ class GCOApiGatewayGlobalStack(Stack):
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 actions=["execute-api:Invoke"],
-                resources=[f"arn:{self.partition}:execute-api:*:{self.account}:*/*/*/api/v1/*"],
+                resources=[
+                    (
+                        f"arn:{self.partition}:execute-api:{region}:{self.account}:"
+                        f"*/*/{method}/{path}"
+                    )
+                    for region in self.certificate_regions
+                    for method, path in AGGREGATOR_REGIONAL_API_ROUTES
+                ],
             )
         )
 
@@ -973,6 +1029,7 @@ class GCOApiGatewayGlobalStack(Stack):
             environment={
                 "PROJECT_NAME": self.project_name,
                 "TARGET_REGIONS": json.dumps(self.certificate_regions),
+                "AWS_URL_SUFFIX": self.url_suffix,
             },
             log_group=aggregator_log_group,
             description="Aggregates data through SigV4-authenticated regional GCO APIs",
@@ -997,13 +1054,20 @@ class GCOApiGatewayGlobalStack(Stack):
                         "Resource::*",
                         *[
                             (
-                                f"Resource::arn:aws:cloudformation:{region}:"
+                                f"Resource::arn:<AWS::Partition>:cloudformation:{region}:"
                                 f"<AWS::AccountId>:stack/{self.project_name}-regional-api-"
                                 f"{region}/*"
                             )
                             for region in self.certificate_regions
                         ],
-                        ("Resource::arn:aws:execute-api:*:<AWS::AccountId>:*/*/*/api/v1/*"),
+                        *[
+                            (
+                                f"Resource::arn:<AWS::Partition>:execute-api:{region}:"
+                                f"<AWS::AccountId>:*/*/{method}/{path}"
+                            )
+                            for region in self.certificate_regions
+                            for method, path in AGGREGATOR_REGIONAL_API_ROUTES
+                        ],
                     ],
                 },
             ],
@@ -1035,22 +1099,29 @@ class GCOApiGatewayGlobalStack(Stack):
                 f"got {configured_log_level!r}"
             )
 
-        # Create a REST API with an edge-optimized endpoint. API Gateway uses
-        # an AWS-managed CloudFront distribution for global edge ingress and
-        # DDoS protection; this stack does not configure API response caching.
+        # Edge-optimized API Gateway endpoints are a commercial-partition
+        # capability. Regional endpoints preserve the same IAM contract in
+        # partitions where the Global Accelerator data path is unavailable.
+        endpoint_type = (
+            apigateway.EndpointType.EDGE
+            if self.ga_dns is not None
+            else apigateway.EndpointType.REGIONAL
+        )
         api = apigateway.RestApi(
             self,
             "GCOGlobalApi",
             rest_api_name=f"{self.project_name}-global-api",
-            description="Global authenticated API for GCO (Global Capacity Orchestrator on AWS) (edge-optimized)",
-            endpoint_types=[apigateway.EndpointType.EDGE],
+            description="Authenticated global aggregation API for GCO",
+            endpoint_types=[endpoint_type],
             deploy=True,
             deploy_options=apigateway.StageOptions(
                 stage_name="prod",
                 throttling_rate_limit=self.api_gateway_config["throttle_rate_limit"],
                 throttling_burst_limit=self.api_gateway_config["throttle_burst_limit"],
                 logging_level=logging_levels[configured_log_level],
-                data_trace_enabled=True,
+                # Never put inference prompts/responses (or other API bodies)
+                # into execution logs. Standard access logs and metrics remain.
+                data_trace_enabled=False,
                 metrics_enabled=self.api_gateway_config["metrics_enabled"],
                 tracing_enabled=self.api_gateway_config["tracing_enabled"],
                 access_log_destination=apigateway.LogGroupLogDestination(api_log_group),
@@ -1094,44 +1165,42 @@ class GCOApiGatewayGlobalStack(Stack):
             )
         )
 
-        # Create Lambda integration
-        lambda_integration = apigateway.LambdaIntegration(
-            self.proxy_lambda, proxy=True, timeout=Duration.seconds(29)
-        )
-
-        # Create /api resource
+        # Create /api/v1. Aggregate routes are available in every partition;
+        # the GA-backed catch-all control-plane and inference routes are added
+        # only when the global data path exists.
         api_resource = api.root.add_resource("api")
         v1_resource = api_resource.add_resource("v1")
 
-        # Add proxy resource to catch all paths
-        proxy_resource = v1_resource.add_resource("{proxy+}")
-
-        # Add methods with IAM authentication
-        for method in ["GET", "POST", "PUT", "DELETE", "PATCH"]:
-            proxy_resource.add_method(
-                method,
-                lambda_integration,
-                authorization_type=apigateway.AuthorizationType.IAM,
-                method_responses=[
-                    apigateway.MethodResponse(status_code="200"),
-                    apigateway.MethodResponse(status_code="400"),
-                    apigateway.MethodResponse(status_code="403"),
-                    apigateway.MethodResponse(status_code="500"),
-                ],
+        if self.proxy_lambda is not None:
+            lambda_integration = apigateway.LambdaIntegration(
+                self.proxy_lambda,
+                proxy=True,
+                timeout=Duration.seconds(29),
             )
+            proxy_resource = v1_resource.add_resource("{proxy+}")
+            for method in ["GET", "POST", "PUT", "DELETE", "PATCH"]:
+                proxy_resource.add_method(
+                    method,
+                    lambda_integration,
+                    authorization_type=apigateway.AuthorizationType.IAM,
+                    method_responses=[
+                        apigateway.MethodResponse(status_code="200"),
+                        apigateway.MethodResponse(status_code="400"),
+                        apigateway.MethodResponse(status_code="403"),
+                        apigateway.MethodResponse(status_code="500"),
+                    ],
+                )
 
-        # Create global aggregation routes
         self._create_global_routes(api, v1_resource)
 
-        # `/inference/*` uses a dedicated InvokeWithResponseStream
-        # integration; request bodies remain buffered by API Gateway.
-        inference_integration = apigateway.LambdaIntegration(
-            self.inference_proxy_lambda,
-            proxy=True,
-            timeout=Duration.minutes(15),
-            response_transfer_mode=apigateway.ResponseTransferMode.STREAM,
-        )
-        self._create_inference_routes(api, inference_integration)
+        if self.inference_proxy_lambda is not None:
+            inference_integration = apigateway.LambdaIntegration(
+                self.inference_proxy_lambda,
+                proxy=True,
+                timeout=Duration.minutes(15),
+                response_transfer_mode=apigateway.ResponseTransferMode.STREAM,
+            )
+            self._create_inference_routes(api, inference_integration)
 
         return api
 
@@ -1507,7 +1576,8 @@ class GCOApiGatewayGlobalStack(Stack):
         # Rule priority ordering:
         #   0  -> PerIPRateLimit (evaluated FIRST so abusive IPs are blocked
         #         before expensive managed rule groups run)
-        #   1-6 -> AWS Managed Rule Groups
+        #   1  -> Preserve the CRS 8 KiB body limit outside /inference/*
+        #   2-7 -> AWS Managed Rule Groups
         waf_config = self.node.try_get_context("waf") or {}
         per_ip_rate_limit = int(waf_config.get("per_ip_rate_limit", 100))
 
@@ -1549,15 +1619,82 @@ class GCOApiGatewayGlobalStack(Stack):
                         sampled_requests_enabled=True,
                     ),
                 ),
-                # Rule 1: AWS Managed Rules - Common Rule Set (OWASP Top 10)
+                # Rule 1: Preserve the CRS 8 KiB body limit for every route
+                # except the deployed /prod/inference/{proxy+} route. API Gateway
+                # invoke URLs include the stage in the client URI that WAF inspects,
+                # and the trailing slash is the route boundary: /prod/inference-extra
+                # must remain subject to this limit. Inference accepts bodies up to
+                # the backend's authoritative 1 MiB limit. MATCH fails closed on
+                # oversized control-plane bodies beyond WAF's inspection window.
+                wafv2.CfnWebACL.RuleProperty(
+                    name="NonInferenceBodySizeLimit",
+                    priority=1,
+                    action=wafv2.CfnWebACL.RuleActionProperty(block={}),
+                    statement=wafv2.CfnWebACL.StatementProperty(
+                        and_statement=wafv2.CfnWebACL.AndStatementProperty(
+                            statements=[
+                                wafv2.CfnWebACL.StatementProperty(
+                                    size_constraint_statement=wafv2.CfnWebACL.SizeConstraintStatementProperty(
+                                        comparison_operator="GT",
+                                        field_to_match=wafv2.CfnWebACL.FieldToMatchProperty(
+                                            body=wafv2.CfnWebACL.BodyProperty(
+                                                oversize_handling="MATCH"
+                                            )
+                                        ),
+                                        size=8_192,
+                                        text_transformations=[
+                                            wafv2.CfnWebACL.TextTransformationProperty(
+                                                priority=0,
+                                                type="NONE",
+                                            )
+                                        ],
+                                    )
+                                ),
+                                wafv2.CfnWebACL.StatementProperty(
+                                    not_statement=wafv2.CfnWebACL.NotStatementProperty(
+                                        statement=wafv2.CfnWebACL.StatementProperty(
+                                            byte_match_statement=wafv2.CfnWebACL.ByteMatchStatementProperty(
+                                                field_to_match=wafv2.CfnWebACL.FieldToMatchProperty(
+                                                    uri_path={}
+                                                ),
+                                                positional_constraint="STARTS_WITH",
+                                                search_string="/prod/inference/",
+                                                text_transformations=[
+                                                    wafv2.CfnWebACL.TextTransformationProperty(
+                                                        priority=0,
+                                                        type="NONE",
+                                                    )
+                                                ],
+                                            )
+                                        )
+                                    )
+                                ),
+                            ]
+                        )
+                    ),
+                    visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
+                        cloud_watch_metrics_enabled=True,
+                        metric_name="NonInferenceBodySizeLimit",
+                        sampled_requests_enabled=True,
+                    ),
+                ),
+                # Rule 2: AWS Managed Rules - Common Rule Set (OWASP Top 10).
+                # Override only SizeRestrictions_BODY: every other CRS rule
+                # continues to block normally, including body-content rules.
                 wafv2.CfnWebACL.RuleProperty(
                     name="AWSManagedRulesCommonRuleSet",
-                    priority=1,
+                    priority=2,
                     override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
                     statement=wafv2.CfnWebACL.StatementProperty(
                         managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
                             vendor_name="AWS",
                             name="AWSManagedRulesCommonRuleSet",
+                            rule_action_overrides=[
+                                wafv2.CfnWebACL.RuleActionOverrideProperty(
+                                    name="SizeRestrictions_BODY",
+                                    action_to_use=wafv2.CfnWebACL.RuleActionProperty(count={}),
+                                )
+                            ],
                         )
                     ),
                     visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
@@ -1566,10 +1703,10 @@ class GCOApiGatewayGlobalStack(Stack):
                         sampled_requests_enabled=True,
                     ),
                 ),
-                # Rule 2: AWS Managed Rules - Known Bad Inputs
+                # Rule 3: AWS Managed Rules - Known Bad Inputs
                 wafv2.CfnWebACL.RuleProperty(
                     name="AWSManagedRulesKnownBadInputsRuleSet",
-                    priority=2,
+                    priority=3,
                     override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
                     statement=wafv2.CfnWebACL.StatementProperty(
                         managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
@@ -1583,10 +1720,10 @@ class GCOApiGatewayGlobalStack(Stack):
                         sampled_requests_enabled=True,
                     ),
                 ),
-                # Rule 3: AWS Managed Rules - SQL Injection
+                # Rule 4: AWS Managed Rules - SQL Injection
                 wafv2.CfnWebACL.RuleProperty(
                     name="AWSManagedRulesSQLiRuleSet",
-                    priority=3,
+                    priority=4,
                     override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
                     statement=wafv2.CfnWebACL.StatementProperty(
                         managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
@@ -1600,10 +1737,10 @@ class GCOApiGatewayGlobalStack(Stack):
                         sampled_requests_enabled=True,
                     ),
                 ),
-                # Rule 4: AWS Managed Rules - Linux OS (protects against Linux-specific attacks)
+                # Rule 5: AWS Managed Rules - Linux OS (protects against Linux-specific attacks)
                 wafv2.CfnWebACL.RuleProperty(
                     name="AWSManagedRulesLinuxRuleSet",
-                    priority=4,
+                    priority=5,
                     override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
                     statement=wafv2.CfnWebACL.StatementProperty(
                         managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
@@ -1617,10 +1754,10 @@ class GCOApiGatewayGlobalStack(Stack):
                         sampled_requests_enabled=True,
                     ),
                 ),
-                # Rule 5: AWS Managed Rules - Amazon IP Reputation List
+                # Rule 6: AWS Managed Rules - Amazon IP Reputation List
                 wafv2.CfnWebACL.RuleProperty(
                     name="AWSManagedRulesAmazonIpReputationList",
-                    priority=5,
+                    priority=6,
                     override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
                     statement=wafv2.CfnWebACL.StatementProperty(
                         managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
@@ -1634,10 +1771,10 @@ class GCOApiGatewayGlobalStack(Stack):
                         sampled_requests_enabled=True,
                     ),
                 ),
-                # Rule 6: AWS Managed Rules - Anonymous IP List (blocks Tor, VPNs, proxies)
+                # Rule 7: AWS Managed Rules - Anonymous IP List (blocks Tor, VPNs, proxies)
                 wafv2.CfnWebACL.RuleProperty(
                     name="AWSManagedRulesAnonymousIpList",
-                    priority=6,
+                    priority=7,
                     override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
                     statement=wafv2.CfnWebACL.StatementProperty(
                         managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(

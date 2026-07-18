@@ -26,6 +26,7 @@ class TestProjectEcrAugmentation:
             account="123456789012",
             regions=["us-east-1", "eu-west-1"],
             global_region="us-east-2",
+            url_suffix="amazonaws.com",
         )
         # Operator's entries come first, then the project ECRs starting
         # with the global region (where ``gco-global`` provisions the
@@ -49,6 +50,7 @@ class TestProjectEcrAugmentation:
             account="123456789012",
             regions=["us-east-2"],
             global_region="us-east-2",
+            url_suffix="amazonaws.com",
         )
         assert out == ["123456789012.dkr.ecr.us-east-2.amazonaws.com"]
 
@@ -62,6 +64,7 @@ class TestProjectEcrAugmentation:
             account="123456789012",
             regions=["us-east-2"],
             global_region="us-east-2",
+            url_suffix="amazonaws.com",
         )
         # Order preserved, no duplicate ECR host emitted.
         assert out == [
@@ -80,6 +83,7 @@ class TestProjectEcrAugmentation:
             account="",
             regions=["us-east-1"],
             global_region="us-east-2",
+            url_suffix="amazonaws.com",
         )
         assert out == ["docker.io"]
 
@@ -93,6 +97,7 @@ class TestProjectEcrAugmentation:
             account="123456789012",
             regions=[],
             global_region="us-east-2",
+            url_suffix="amazonaws.com",
         )
         assert out == [
             "docker.io",
@@ -108,12 +113,14 @@ class TestProjectEcrAugmentation:
             account="123456789012",
             regions=["us-east-1"],
             global_region="us-east-2",
+            url_suffix="amazonaws.com",
         )
         second = _augment_trusted_registries_with_project_ecr(
             first,
             account="123456789012",
             regions=["us-east-1"],
             global_region="us-east-2",
+            url_suffix="amazonaws.com",
         )
         assert first == second
 
@@ -131,6 +138,7 @@ class TestProjectEcrAugmentation:
             account="999999999999",
             regions=regions,
             global_region="us-east-2",
+            url_suffix="amazonaws.com",
         )
         for region in regions:
             assert f"999999999999.dkr.ecr.{region}.amazonaws.com" in out
@@ -144,6 +152,7 @@ class TestProjectEcrAugmentation:
             account="123456789012",
             regions=["us-east-1"],
             global_region="us-east-2",
+            url_suffix="amazonaws.com",
         )
         # Caller's list must be untouched.
         assert base == ["docker.io"]

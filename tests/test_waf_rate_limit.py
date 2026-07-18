@@ -7,7 +7,10 @@ managed rule groups), aggregating by IP with a Block action and a
 default limit of 100 requests per 5-minute window. Also verifies the
 ``waf.per_ip_rate_limit`` cdk.json context override flows through to
 the synthesized rule, throttling abusive source IPs before they
-reach the backend.
+reach the backend. The same synthesized WebACL assertions verify that the
+managed CRS body-size rule alone is counted, while an explicit 8 KiB block is
+retained for non-inference routes and `/prod/inference/*` reaches the authoritative
+1 MiB backend middleware.
 """
 
 from __future__ import annotations
@@ -125,3 +128,72 @@ class TestWafRateLimitRule:
                 )
             },
         )
+
+    def test_crs_counts_only_managed_body_size_restriction(self):
+        """Only CRS SizeRestrictions_BODY is overridden; all other CRS rules block."""
+        template = _synth(cdk.App(), construct_id="test-waf-crs-body-override")
+        web_acls = template.find_resources("AWS::WAFv2::WebACL")
+        (web_acl,) = web_acls.values()
+        rules = web_acl["Properties"]["Rules"]
+        crs_rule = next(rule for rule in rules if rule["Name"] == "AWSManagedRulesCommonRuleSet")
+
+        assert crs_rule["Priority"] == 2
+        assert crs_rule["OverrideAction"] == {"None": {}}
+        managed_statement = crs_rule["Statement"]["ManagedRuleGroupStatement"]
+        assert managed_statement["VendorName"] == "AWS"
+        assert managed_statement["Name"] == "AWSManagedRulesCommonRuleSet"
+        assert managed_statement["RuleActionOverrides"] == [
+            {
+                "Name": "SizeRestrictions_BODY",
+                "ActionToUse": {"Count": {}},
+            }
+        ]
+
+    def test_non_inference_body_limit_preserves_8_kib_control_plane_cap(self):
+        """Bodies over 8 KiB block outside /prod/inference/*, including WAF oversize bodies."""
+        template = _synth(cdk.App(), construct_id="test-waf-non-inference-body-limit")
+        web_acls = template.find_resources("AWS::WAFv2::WebACL")
+        (web_acl,) = web_acls.values()
+        rules = web_acl["Properties"]["Rules"]
+        body_rule = next(rule for rule in rules if rule["Name"] == "NonInferenceBodySizeLimit")
+
+        assert body_rule["Priority"] == 1
+        assert body_rule["Action"] == {"Block": {}}
+        assert body_rule["Statement"] == {
+            "AndStatement": {
+                "Statements": [
+                    {
+                        "SizeConstraintStatement": {
+                            "ComparisonOperator": "GT",
+                            "FieldToMatch": {
+                                "Body": {"OversizeHandling": "MATCH"},
+                            },
+                            "Size": 8192,
+                            "TextTransformations": [
+                                {"Priority": 0, "Type": "NONE"},
+                            ],
+                        }
+                    },
+                    {
+                        "NotStatement": {
+                            "Statement": {
+                                "ByteMatchStatement": {
+                                    "FieldToMatch": {"UriPath": {}},
+                                    "PositionalConstraint": "STARTS_WITH",
+                                    "SearchString": "/prod/inference/",
+                                    "TextTransformations": [
+                                        {"Priority": 0, "Type": "NONE"},
+                                    ],
+                                }
+                            }
+                        }
+                    },
+                ]
+            }
+        }
+
+        inference_prefix = body_rule["Statement"]["AndStatement"]["Statements"][1]["NotStatement"][
+            "Statement"
+        ]["ByteMatchStatement"]["SearchString"]
+        assert "/prod/inference/model/v1/completions".startswith(inference_prefix)
+        assert not "/prod/inference-extra/model".startswith(inference_prefix)
