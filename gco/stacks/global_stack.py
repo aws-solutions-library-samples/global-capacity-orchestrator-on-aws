@@ -710,39 +710,10 @@ class GCOGlobalStack(Stack):
             projection_type=dynamodb.ProjectionType.ALL,
         )
 
-        # Existing deployments already have both worker-facing GSIs below.
-        # Retain them unchanged during the staged migration: DynamoDB permits
-        # only one GSI create/delete per table update, and this release adds the
-        # unified work index after which old indexes can be removed one at a
-        # time in later releases.
-        self.jobs_table.add_global_secondary_index(
-            index_name="region-status-priority-index",
-            partition_key=dynamodb.Attribute(
-                name="region_status",
-                type=dynamodb.AttributeType.STRING,
-            ),
-            sort_key=dynamodb.Attribute(
-                name="priority_sort",
-                type=dynamodb.AttributeType.STRING,
-            ),
-            projection_type=dynamodb.ProjectionType.ALL,
-        )
-
-        self.jobs_table.add_global_secondary_index(
-            index_name="region-status-lease-index",
-            partition_key=dynamodb.Attribute(
-                name="region_status",
-                type=dynamodb.AttributeType.STRING,
-            ),
-            sort_key=dynamodb.Attribute(
-                name="lease_expires_at",
-                type=dynamodb.AttributeType.STRING,
-            ),
-            projection_type=dynamodb.ProjectionType.ALL,
-        )
-
         # ``work_sort`` is priority/FIFO for queued records and lease expiry for
-        # claimed or applying records. Workers repeatedly backfill legacy rows
+        # claimed or applying records. This unified worker index is the only GSI
+        # added by this release because DynamoDB permits only one GSI creation or
+        # deletion per table update. Workers repeatedly backfill legacy rows
         # through the retained region-status-index during mixed-version rollouts.
         self.jobs_table.add_global_secondary_index(
             index_name="region-status-work-index",

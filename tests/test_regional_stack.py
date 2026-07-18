@@ -1998,8 +1998,6 @@ class TestGlobalStackDynamoDBTables:
 
         expected_indexes = {
             "region-status-index",
-            "region-status-priority-index",
-            "region-status-lease-index",
             "region-status-work-index",
             "namespace-index",
             "status-index",
@@ -2007,14 +2005,6 @@ class TestGlobalStackDynamoDBTables:
         assert set(indexes) == expected_indexes
 
         expected_key_schemas = {
-            "region-status-priority-index": [
-                {"AttributeName": "region_status", "KeyType": "HASH"},
-                {"AttributeName": "priority_sort", "KeyType": "RANGE"},
-            ],
-            "region-status-lease-index": [
-                {"AttributeName": "region_status", "KeyType": "HASH"},
-                {"AttributeName": "lease_expires_at", "KeyType": "RANGE"},
-            ],
             "region-status-work-index": [
                 {"AttributeName": "region_status", "KeyType": "HASH"},
                 {"AttributeName": "work_sort", "KeyType": "RANGE"},
