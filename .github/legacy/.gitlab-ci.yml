@@ -470,9 +470,9 @@ test:workload-imports:
     - python -c "from gco.services.health_api import app; print('health-monitor OK')"
     - echo "=== Testing manifest-processor ==="
     - python -c "from gco.services.manifest_api import app; print('manifest-processor OK')"
-    # Verify inference-monitor can import (uses its own minimal requirements)
+    # Verify inference-monitor can import (uses its production image dependency group)
     - echo "=== Testing inference-monitor ==="
-    - pip install -e ".[inference-monitor]" -q
+    - pip install -e ".[image-inference-monitor]" -q
     - python -c "from gco.services.inference_monitor import InferenceMonitor; print('inference-monitor OK')"
     # Verify services can be fully imported (catches circular imports that simple imports miss)
     # importlib.import_module executes all module-level code including deferred router imports

@@ -29,16 +29,17 @@ RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
 # Create non-root user
 RUN groupadd -r gco && useradd -r -g gco -u 1000 gco
 
-# Install only the service's direct runtime roots. The all-extras lockfile is
-# a constraints source, not an install list, so development, test, CDK, MCP,
-# diagram, and optional analytics packages stay out of the production image.
+# Install only this service's direct runtime roots. The roots live in the
+# image-queue-processor optional-dependency group; Python 3.14's tomllib emits
+# a temporary requirements file so pyproject.toml remains the sole direct-pin
+# source. requirements-lock.txt constrains the complete transitive graph.
 #
 # pip flags + bash retry loop guard against transient PyPI/CDN drops
 # (see Dockerfile.dev for the rationale; same pattern across every
 # image build in the repo).
-COPY requirements-lock.txt ./
-COPY dockerfiles/queue-processor-requirements.txt ./requirements-runtime.txt
-RUN for attempt in 1 2 3; do \
+COPY pyproject.toml requirements-lock.txt ./
+RUN python -c 'import pathlib, tomllib; config = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8")); dependencies = config["project"]["optional-dependencies"]["image-queue-processor"]; pathlib.Path("requirements-runtime.txt").write_text("-c requirements-lock.txt\n" + "\n".join(dependencies) + "\n", encoding="utf-8")' \
+    && for attempt in 1 2 3; do \
         if pip install --no-cache-dir \
             --retries 10 --timeout 120 --resume-retries 5 \
             -r requirements-runtime.txt; then \
@@ -50,7 +51,8 @@ RUN for attempt in 1 2 3; do \
         fi; \
         echo "pip install attempt ${attempt} failed; retrying in 10s..."; \
         sleep 10; \
-    done
+    done \
+    && rm requirements-runtime.txt
 
 # Keep source-only edits from invalidating the expensive dependency layer.
 COPY gco/ ./gco/

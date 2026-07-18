@@ -181,20 +181,14 @@ _OBSERVABILITY_STORAGE_CLASS = "gco-observability-gp3"
 
 _SERVICE_IMAGE_BUILD_INPUTS = (
     "dockerfiles/health-monitor-dockerfile",
-    "dockerfiles/health-monitor-requirements.txt",
     "dockerfiles/manifest-processor-dockerfile",
-    "dockerfiles/manifest-processor-requirements.txt",
     "dockerfiles/inference-proxy-dockerfile",
-    "dockerfiles/inference-proxy-requirements.txt",
     "dockerfiles/inference-monitor-dockerfile",
-    "dockerfiles/inference-monitor-requirements.txt",
     "dockerfiles/queue-processor-dockerfile",
-    "dockerfiles/queue-processor-requirements.txt",
 )
 _SERVICE_IMAGE_COMMON_EXCLUDES = (
     "cli/**",
     "gco/stacks/**",
-    "pyproject.toml",
     "dockerfiles/README.md",
 )
 
@@ -820,7 +814,6 @@ class GCORegionalStack(Stack):
             platform=ecr_assets.Platform.LINUX_AMD64,
             exclude=_service_image_asset_excludes(
                 "dockerfiles/health-monitor-dockerfile",
-                "dockerfiles/health-monitor-requirements.txt",
             ),
         )
 
@@ -843,7 +836,6 @@ class GCORegionalStack(Stack):
             platform=ecr_assets.Platform.LINUX_AMD64,
             exclude=_service_image_asset_excludes(
                 "dockerfiles/manifest-processor-dockerfile",
-                "dockerfiles/manifest-processor-requirements.txt",
             ),
         )
 
@@ -865,7 +857,6 @@ class GCORegionalStack(Stack):
             platform=ecr_assets.Platform.LINUX_AMD64,
             exclude=_service_image_asset_excludes(
                 "dockerfiles/inference-proxy-dockerfile",
-                "dockerfiles/inference-proxy-requirements.txt",
             ),
         )
 
@@ -900,7 +891,6 @@ class GCORegionalStack(Stack):
             platform=ecr_assets.Platform.LINUX_AMD64,
             exclude=_service_image_asset_excludes(
                 "dockerfiles/inference-monitor-dockerfile",
-                "dockerfiles/inference-monitor-requirements.txt",
             ),
         )
 
@@ -928,7 +918,6 @@ class GCORegionalStack(Stack):
                 platform=ecr_assets.Platform.LINUX_AMD64,
                 exclude=_service_image_asset_excludes(
                     "dockerfiles/queue-processor-dockerfile",
-                    "dockerfiles/queue-processor-requirements.txt",
                 ),
             )
 
@@ -1679,21 +1668,18 @@ class GCORegionalStack(Stack):
             )
         )
 
-        # Add SQS permissions for KEDA to scale based on queue depth
-        self.service_account_role.add_to_policy(
+        # The SQS queue processor runs as gco-manifest-processor-sa. Keep
+        # queue consumption on that dedicated platform identity; KEDA has its
+        # own read-only queue role and general workload identities must not be
+        # able to receive or delete submitted jobs.
+        self.manifest_processor_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 actions=[
-                    "sqs:GetQueueAttributes",
-                    "sqs:GetQueueUrl",
                     "sqs:ReceiveMessage",
                     "sqs:DeleteMessage",
-                    "sqs:SendMessage",
                 ],
-                resources=[
-                    self.job_queue.queue_arn,
-                    self.job_dlq.queue_arn,
-                ],
+                resources=[self.job_queue.queue_arn],
             )
         )
 

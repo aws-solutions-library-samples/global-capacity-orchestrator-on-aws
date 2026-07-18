@@ -9,6 +9,8 @@ Focus areas:
 - ``install_chart`` runs the stuck-release preflight before every
   ``helm upgrade --install`` so interrupted prior upgrades never block
   the current deploy.
+- KEDA teardown deletes and waits for all of its custom resources before
+  Helm removes the operator and CRDs.
 
 These tests mock ``subprocess.run`` directly so they never invoke
 ``helm`` or ``kubectl`` for real.
@@ -295,6 +297,97 @@ class TestInstallChartWaitControl:
         assert args[args.index("--timeout") + 1] == "3m"
 
 
+class TestKedaCustomResourceCleanup:
+    """KEDA instances must disappear while its finalizer controller is live."""
+
+    def test_discovers_and_deletes_namespaced_then_cluster_resources(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(
+                    0,
+                    stdout=(
+                        "scaledjobs.keda.sh\n"
+                        "scaledobjects.keda.sh\n"
+                        "triggerauthentications.keda.sh\n"
+                    ),
+                ),
+                _completed(0, stdout="clustertriggerauthentications.keda.sh\n"),
+                _completed(0, stdout="cloudeventsources.eventing.keda.sh\n"),
+                _completed(0),
+                _completed(0, stdout="deleted namespaced resources"),
+                _completed(0, stdout="deleted cluster resources"),
+            ]
+
+            success, message = helm_handler._delete_keda_custom_resources("/tmp/kc")
+
+        assert success is True
+        assert "5 KEDA custom resource type" in message
+        namespaced_delete = mock_run.call_args_list[4].args[0]
+        cluster_delete = mock_run.call_args_list[5].args[0]
+        assert namespaced_delete.index("delete") < namespaced_delete.index("--all-namespaces")
+        assert "scaledjobs.keda.sh" in namespaced_delete[namespaced_delete.index("delete") + 1]
+        assert "--wait=true" in namespaced_delete
+        assert "--all-namespaces" not in cluster_delete
+        assert "clustertriggerauthentications.keda.sh" in cluster_delete
+
+    def test_discovery_failure_blocks_cleanup(self):
+        with patch.object(
+            helm_handler.subprocess,
+            "run",
+            return_value=_completed(1, stderr="api discovery unavailable"),
+        ) as mock_run:
+            success, message = helm_handler._delete_keda_custom_resources("/tmp/kc")
+
+        assert success is False
+        assert "api discovery unavailable" in message
+        assert mock_run.call_count == 1
+
+    def test_keda_cleanup_runs_before_helm_uninstall(self):
+        calls = []
+
+        def _cleanup(_kubeconfig):
+            calls.append("cleanup")
+            return True, "clean"
+
+        def _helm(*_args, **_kwargs):
+            calls.append("helm")
+            return 0, "", ""
+
+        with (
+            patch.object(helm_handler, "_delete_keda_custom_resources", side_effect=_cleanup),
+            patch.object(helm_handler, "run_helm", side_effect=_helm),
+        ):
+            success, _ = helm_handler.uninstall_chart("keda", "keda", "/tmp/kc")
+
+        assert success is True
+        assert calls == ["cleanup", "helm"]
+
+    def test_cleanup_failure_prevents_helm_uninstall(self):
+        with (
+            patch.object(
+                helm_handler,
+                "_delete_keda_custom_resources",
+                return_value=(False, "scaledjobs remain"),
+            ),
+            patch.object(helm_handler, "run_helm") as mock_run,
+        ):
+            success, message = helm_handler.uninstall_chart("keda", "keda", "/tmp/kc")
+
+        assert success is False
+        assert "scaledjobs remain" in message
+        mock_run.assert_not_called()
+
+    def test_non_keda_uninstall_skips_custom_resource_cleanup(self):
+        with (
+            patch.object(helm_handler, "_delete_keda_custom_resources") as mock_cleanup,
+            patch.object(helm_handler, "run_helm", return_value=(0, "", "")),
+        ):
+            success, _ = helm_handler.uninstall_chart("volcano", "volcano", "/tmp/kc")
+
+        assert success is True
+        mock_cleanup.assert_not_called()
+
+
 class TestHandleTask:
     """``handle_task`` performs exactly one helm op per call and raises on failure."""
 
@@ -371,9 +464,16 @@ class TestHandleTask:
         mock_status.assert_called_once_with("keda", "failed", "api timeout")
 
     def test_not_found_uninstall_remains_idempotent_success(self):
-        with patch.object(
-            helm_handler, "run_helm", return_value=(1, "", "release: not found")
-        ) as mock_run:
+        with (
+            patch.object(
+                helm_handler,
+                "_delete_keda_custom_resources",
+                return_value=(True, "clean"),
+            ),
+            patch.object(
+                helm_handler, "run_helm", return_value=(1, "", "release: not found")
+            ) as mock_run,
+        ):
             success, message = helm_handler.uninstall_chart("keda", "keda", "/tmp/kc")
 
         assert success is True
@@ -385,7 +485,14 @@ class TestHandleTask:
     def test_generic_not_found_uninstall_is_failure(self):
         """A Kubernetes/resource NotFound must not be mistaken for release absence."""
         error = 'Error: services "keda-operator" not found while uninstalling release'
-        with patch.object(helm_handler, "run_helm", return_value=(1, "", error)):
+        with (
+            patch.object(
+                helm_handler,
+                "_delete_keda_custom_resources",
+                return_value=(True, "clean"),
+            ),
+            patch.object(helm_handler, "run_helm", return_value=(1, "", error)),
+        ):
             success, message = helm_handler.uninstall_chart("keda", "keda", "/tmp/kc")
 
         assert success is False

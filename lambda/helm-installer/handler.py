@@ -74,6 +74,14 @@ HELM_INSTALL_RETRY_DELAY_SECONDS = 30
 HELM_UNINSTALL_TIMEOUT = "2m"
 HELM_UNINSTALL_COMMAND_TIMEOUT_SECONDS = 150
 
+# KEDA's Helm release owns CRDs whose instances carry operator-managed
+# finalizers. Delete and wait for every KEDA custom resource while the operator
+# is still running; otherwise Helm can remove the controller first and leave a
+# CRD permanently Terminating during CloudFormation stack deletion.
+KEDA_API_GROUPS = ("keda.sh", "eventing.keda.sh")
+KEDA_CUSTOM_RESOURCE_DELETE_TIMEOUT = "90s"
+KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS = 120
+
 
 def _record_addon_status(chart_name: str, status: str, message: str) -> None:
     """Record a single chart's install outcome to SSM (best-effort).
@@ -514,8 +522,94 @@ def install_chart(
         return False, f"Failed to install {chart_name}: {stderr}"
 
 
+def _delete_keda_custom_resources(kubeconfig: str) -> tuple[bool, str]:
+    """Delete all KEDA custom resources before uninstalling its controller.
+
+    Resource discovery keeps this compatible with the exact KEDA chart version
+    in use instead of maintaining a second CRD list here. Namespaced resources
+    (including ``ScaledJob``) are deleted first across every namespace, then
+    cluster-scoped authentication resources. ``kubectl delete --wait`` does not
+    return until operator-owned finalizers are gone, so Helm can safely remove
+    the controller and CRDs afterwards.
+    """
+    env = os.environ.copy()
+    env["KUBECONFIG"] = kubeconfig
+    common = ["kubectl", "--kubeconfig", kubeconfig, "--request-timeout=30s"]
+    resources_by_scope: dict[bool, list[str]] = {True: [], False: []}
+
+    for api_group in KEDA_API_GROUPS:
+        for namespaced in (True, False):
+            try:
+                discovery = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - fixed argv, no shell=True
+                    [
+                        *common,
+                        "api-resources",
+                        f"--api-group={api_group}",
+                        "--verbs=list,delete",
+                        f"--namespaced={'true' if namespaced else 'false'}",
+                        "-o",
+                        "name",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                return False, f"Timed out discovering {api_group} custom resources"
+
+            if discovery.returncode != 0:
+                error = (discovery.stderr or discovery.stdout).strip()
+                return False, f"Failed to discover {api_group} custom resources: {error}"
+            resources_by_scope[namespaced].extend(discovery.stdout.split())
+
+    deleted_types = 0
+    for namespaced in (True, False):
+        resources = list(dict.fromkeys(resources_by_scope[namespaced]))
+        if not resources:
+            continue
+
+        command = [
+            *common,
+            "delete",
+            ",".join(resources),
+            "--all",
+            "--ignore-not-found=true",
+            "--wait=true",
+            f"--timeout={KEDA_CUSTOM_RESOURCE_DELETE_TIMEOUT}",
+        ]
+        if namespaced:
+            command.append("--all-namespaces")
+
+        try:
+            deletion = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - discovered KEDA resource names, no shell=True
+                command,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            scope = "namespaced" if namespaced else "cluster-scoped"
+            return False, f"Timed out deleting {scope} KEDA custom resources"
+
+        if deletion.returncode != 0:
+            error = (deletion.stderr or deletion.stdout).strip()
+            scope = "namespaced" if namespaced else "cluster-scoped"
+            return False, f"Failed to delete {scope} KEDA custom resources: {error}"
+        deleted_types += len(resources)
+
+    return True, f"Deleted and waited for {deleted_types} KEDA custom resource type(s)"
+
+
 def uninstall_chart(chart_name: str, namespace: str, kubeconfig: str) -> tuple[bool, str]:
     """Uninstall a Helm chart within the synchronous teardown budget."""
+    if chart_name == "keda":
+        cleaned, cleanup_message = _delete_keda_custom_resources(kubeconfig)
+        if not cleaned:
+            return False, f"KEDA pre-uninstall cleanup failed: {cleanup_message}"
+        logger.info(cleanup_message)
+
     args = [
         "uninstall",
         chart_name,

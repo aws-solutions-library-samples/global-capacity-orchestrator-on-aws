@@ -54,7 +54,7 @@ spec:
           app: queue-processor
           project: gco
       spec:
-        # Uses the manifest-processor SA (IRSA for SQS + K8s manifest access)
+        # Uses the manifest-processor SA (dedicated IRSA role for SQS + K8s access)
         serviceAccountName: gco-manifest-processor-sa
         securityContext:
           runAsNonRoot: true
@@ -80,7 +80,7 @@ spec:
             value: "{{REGION}}"
           # IRSA credentials — EKS Auto Mode doesn't auto-inject these
           - name: AWS_ROLE_ARN
-            value: "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+            value: "{{MANIFEST_PROCESSOR_ROLE_ARN}}"
           - name: AWS_WEB_IDENTITY_TOKEN_FILE
             value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
           - name: ALLOWED_NAMESPACES

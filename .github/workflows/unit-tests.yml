@@ -498,7 +498,7 @@ jobs:
         # and the CI run would falsely flag drift.
         #
         # ``--all-extras`` pins every optional-dependency group (dev, test,
-        # cdk, mcp, typecheck, lint, security, inference-monitor). Without
+        # cdk, mcp, typecheck, lint, security, and all five image groups). Without
         # it, only the runtime ``dependencies`` list gets resolved and CI's
         # own toolchain (pytest, pytest-xdist, moto, ruff, mypy, aws-cdk-lib,
         # etc.) installs against live PyPI on every run. That means a
@@ -573,10 +573,10 @@ jobs:
           python-version: "3.14"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
-      - name: Install core + inference-monitor extras
+      - name: Install core + inference-monitor image dependencies
         run: |
           pip install -e .
-          pip install -e ".[inference-monitor]"
+          pip install -e ".[image-inference-monitor]"
       - name: Import health-monitor + manifest-processor
         run: |
           python -c "from gco.services.health_api import app; print('health-monitor OK')"
