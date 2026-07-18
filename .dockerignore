@@ -1,6 +1,6 @@
-# Exclude everything by default, then allowlist only what the Dockerfiles need.
-# This keeps the CDK asset fingerprint stable — only changes to actual service
-# code (gco/, cli/, pyproject.toml, dockerfiles/) trigger a Docker rebuild.
+# Exclude everything by default, then allowlist only what root-context builds
+# need. Regional CDK service assets add per-image exclusions so CLI metadata and
+# another service's Docker inputs do not invalidate unrelated image hashes.
 *
 
 # Allow the source packages and build config

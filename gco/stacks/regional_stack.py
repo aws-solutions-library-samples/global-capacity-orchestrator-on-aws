@@ -179,6 +179,34 @@ def _compute_kubectl_cluster_shared_replacements(
 _OBSERVABILITY_STORAGE_CLASS = "gco-observability-gp3"
 
 
+_SERVICE_IMAGE_BUILD_INPUTS = (
+    "dockerfiles/health-monitor-dockerfile",
+    "dockerfiles/health-monitor-requirements.txt",
+    "dockerfiles/manifest-processor-dockerfile",
+    "dockerfiles/manifest-processor-requirements.txt",
+    "dockerfiles/inference-proxy-dockerfile",
+    "dockerfiles/inference-proxy-requirements.txt",
+    "dockerfiles/inference-monitor-dockerfile",
+    "dockerfiles/inference-monitor-requirements.txt",
+    "dockerfiles/queue-processor-dockerfile",
+    "dockerfiles/queue-processor-requirements.txt",
+)
+_SERVICE_IMAGE_COMMON_EXCLUDES = (
+    "cli/**",
+    "gco/stacks/**",
+    "pyproject.toml",
+    "dockerfiles/README.md",
+)
+
+
+def _service_image_asset_excludes(*included_paths: str) -> list[str]:
+    """Exclude inputs that cannot affect one production service image."""
+    included = set(included_paths)
+    return list(_SERVICE_IMAGE_COMMON_EXCLUDES) + [
+        path for path in _SERVICE_IMAGE_BUILD_INPUTS if path not in included
+    ]
+
+
 def _compute_kubectl_observability_replacements(
     enabled: bool, *, grafana_admin_password_rotation_schedule: str = ""
 ) -> dict[str, str]:
@@ -790,6 +818,10 @@ class GCORegionalStack(Stack):
             directory=".",  # Root directory
             file="dockerfiles/health-monitor-dockerfile",
             platform=ecr_assets.Platform.LINUX_AMD64,
+            exclude=_service_image_asset_excludes(
+                "dockerfiles/health-monitor-dockerfile",
+                "dockerfiles/health-monitor-requirements.txt",
+            ),
         )
 
         # Create ECR repository for manifest processor
@@ -809,6 +841,10 @@ class GCORegionalStack(Stack):
             directory=".",
             file="dockerfiles/manifest-processor-dockerfile",
             platform=ecr_assets.Platform.LINUX_AMD64,
+            exclude=_service_image_asset_excludes(
+                "dockerfiles/manifest-processor-dockerfile",
+                "dockerfiles/manifest-processor-requirements.txt",
+            ),
         )
 
         # Create and build the inference-only data-plane proxy image. Keeping
@@ -827,6 +863,10 @@ class GCORegionalStack(Stack):
             directory=".",
             file="dockerfiles/inference-proxy-dockerfile",
             platform=ecr_assets.Platform.LINUX_AMD64,
+            exclude=_service_image_asset_excludes(
+                "dockerfiles/inference-proxy-dockerfile",
+                "dockerfiles/inference-proxy-requirements.txt",
+            ),
         )
 
         # Output image URIs for reference
@@ -858,6 +898,10 @@ class GCORegionalStack(Stack):
             directory=".",
             file="dockerfiles/inference-monitor-dockerfile",
             platform=ecr_assets.Platform.LINUX_AMD64,
+            exclude=_service_image_asset_excludes(
+                "dockerfiles/inference-monitor-dockerfile",
+                "dockerfiles/inference-monitor-requirements.txt",
+            ),
         )
 
         CfnOutput(
@@ -882,6 +926,10 @@ class GCORegionalStack(Stack):
                 directory=".",
                 file="dockerfiles/queue-processor-dockerfile",
                 platform=ecr_assets.Platform.LINUX_AMD64,
+                exclude=_service_image_asset_excludes(
+                    "dockerfiles/queue-processor-dockerfile",
+                    "dockerfiles/queue-processor-requirements.txt",
+                ),
             )
 
             CfnOutput(

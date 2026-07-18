@@ -1,0 +1,7 @@
+# Direct runtime roots for gco.services.queue_processor.
+# requirements-lock.txt constrains the complete transitive dependency graph.
+-c requirements-lock.txt
+
+boto3==1.43.38
+kubernetes==36.0.2
+pyyaml==6.0.3

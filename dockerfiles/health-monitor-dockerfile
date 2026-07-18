@@ -22,21 +22,19 @@ RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
 # Create non-root user
 RUN groupadd -r gco && useradd -r -g gco -u 1000 gco
 
-# Copy project metadata and install Python dependencies
-# Use the lockfile for reproducible transitive dependency versions,
-# then install the project itself without re-resolving.
+# Install only the service's direct runtime roots. The all-extras lockfile is
+# a constraints source, not an install list, so development, test, CDK, MCP,
+# diagram, and optional analytics packages stay out of the production image.
 #
 # pip flags + bash retry loop guard against transient PyPI/CDN drops
 # (see Dockerfile.dev for the rationale; same pattern across every
 # image build in the repo).
 COPY requirements-lock.txt ./
-COPY pyproject.toml ./
-COPY gco/ ./gco/
-COPY cli/ ./cli/
+COPY dockerfiles/health-monitor-requirements.txt ./requirements-runtime.txt
 RUN for attempt in 1 2 3; do \
         if pip install --no-cache-dir \
             --retries 10 --timeout 120 --resume-retries 5 \
-            -r requirements-lock.txt; then \
+            -r requirements-runtime.txt; then \
             break; \
         fi; \
         if [ "${attempt}" -eq 3 ]; then \
@@ -45,8 +43,10 @@ RUN for attempt in 1 2 3; do \
         fi; \
         echo "pip install attempt ${attempt} failed; retrying in 10s..."; \
         sleep 10; \
-    done \
-    && pip install --no-cache-dir --no-deps .
+    done
+
+# Keep source-only edits from invalidating the expensive dependency layer.
+COPY gco/ ./gco/
 
 # Set Python path
 ENV PYTHONPATH=/app
