@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
+from cli.config import GCOConfig
 from cli.main import cli
 
 
@@ -23,15 +24,12 @@ def runner():
     return CliRunner()
 
 
-# Patch config loading for all tests
+# Patch config loading for all tests with the concrete type Click passes to subcommands.
 @pytest.fixture(autouse=True)
 def mock_config():
-    mock_cfg = MagicMock()
-    mock_cfg.output_format = "table"
-    mock_cfg.global_region = "us-east-2"
-    mock_cfg.project_name = "gco"
-    with patch("cli.main.get_config", return_value=mock_cfg):
-        yield mock_cfg
+    config = GCOConfig()
+    with patch("cli.main.get_config", return_value=config):
+        yield config
 
 
 # =============================================================================
@@ -1100,3 +1098,711 @@ class TestInferenceModels:
             result = runner.invoke(cli, ["inference", "models", "ep"])
         assert result.exit_code != 0
         assert "Failed to list models" in result.output
+
+
+# =============================================================================
+# Remaining inference command behavior
+# =============================================================================
+
+
+class TestInferenceInvokeRemaining:
+    @staticmethod
+    def _endpoint(image="vllm/vllm-openai:v0.8.0", **spec_updates):
+        spec = {"image": image, "env": {}}
+        spec.update(spec_updates)
+        return {
+            "endpoint_name": "ep",
+            "ingress_path": "/inference/ep",
+            "spec": spec,
+        }
+
+    @staticmethod
+    def _buffered_response(payload):
+        response = MagicMock()
+        response.ok = True
+        response.status_code = 200
+        response.json.return_value = payload
+        return response
+
+    @staticmethod
+    def _stream_response(chunks, content_type="text/event-stream; charset=utf-8"):
+        response = MagicMock()
+        response.ok = True
+        response.status_code = 200
+        response.headers = {"content-type": content_type}
+        response.iter_content.return_value = chunks
+        return response
+
+    def _invoke_stream(self, runner, response):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint(env={"MODEL": "org/model"})
+        mock_client = MagicMock()
+        mock_client.make_authenticated_request.return_value = response
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(
+                cli,
+                ["inference", "invoke", "ep", "--prompt", "hello", "--stream"],
+            )
+        return result, mock_client
+
+    @pytest.mark.parametrize(
+        ("raw_data", "expected_error"),
+        [
+            ("{not-json", "Failed to invoke endpoint"),
+            ('["not", "an", "object"]', "--data must contain a JSON object"),
+        ],
+    )
+    def test_invoke_rejects_invalid_raw_json(self, runner, raw_data, expected_error):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint()
+        mock_client = MagicMock()
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(
+                cli,
+                ["inference", "invoke", "ep", "--data", raw_data],
+            )
+
+        assert result.exit_code != 0
+        assert expected_error in result.output
+        mock_client.make_authenticated_request.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("spec_updates", "expected_model"),
+        [
+            ({"env": {"MODEL": "org/env-model"}}, "org/env-model"),
+            (
+                {"args": ["--dtype", "auto", "--model", "org/argument-model"]},
+                "org/argument-model",
+            ),
+        ],
+    )
+    def test_invoke_selects_model_from_stored_spec(self, runner, spec_updates, expected_model):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint(**spec_updates)
+        mock_client = MagicMock()
+        mock_client.make_authenticated_request.return_value = self._buffered_response(
+            {"choices": [{"text": "done"}]}
+        )
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(cli, ["inference", "invoke", "ep", "-p", "hello"])
+
+        assert result.exit_code == 0
+        assert mock_client.make_authenticated_request.call_count == 1
+        request = mock_client.make_authenticated_request.call_args.kwargs
+        assert request["body"]["model"] == expected_model
+
+    @pytest.mark.parametrize(
+        ("discovery_outcome", "expected_model"),
+        [
+            ("success", "org/discovered-model"),
+            ("empty", "ep"),
+            ("malformed", "ep"),
+            ("failed", "ep"),
+        ],
+    )
+    def test_invoke_vllm_model_discovery_falls_back_safely(
+        self, runner, discovery_outcome, expected_model
+    ):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint()
+
+        discovery_response = MagicMock()
+        discovery_response.ok = discovery_outcome != "failed"
+        discovery_response.status_code = 503 if discovery_outcome == "failed" else 200
+        if discovery_outcome == "success":
+            discovery_response.json.return_value = {"data": [{"id": "org/discovered-model"}]}
+        elif discovery_outcome == "empty":
+            discovery_response.json.return_value = {"data": []}
+        elif discovery_outcome == "malformed":
+            discovery_response.json.side_effect = __import__("json").JSONDecodeError(
+                "malformed models response", "", 0
+            )
+
+        invoke_response = self._buffered_response({"choices": [{"text": "done"}]})
+        mock_client = MagicMock()
+        mock_client.make_authenticated_request.side_effect = [
+            discovery_response,
+            invoke_response,
+        ]
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(cli, ["inference", "invoke", "ep", "-p", "hello"])
+
+        assert result.exit_code == 0
+        discovery_request, invoke_request = mock_client.make_authenticated_request.call_args_list
+        assert discovery_request.kwargs["method"] == "GET"
+        assert discovery_request.kwargs["path"] == "/inference/ep/v1/models"
+        assert invoke_request.kwargs["body"]["model"] == expected_model
+
+    def test_invoke_unknown_image_uses_openai_fallback(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint(image="example/custom-server:v1")
+        mock_client = MagicMock()
+        mock_client.make_authenticated_request.return_value = self._buffered_response(
+            {"choices": [{"text": "fallback"}]}
+        )
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(cli, ["inference", "invoke", "ep", "-p", "hello"])
+
+        assert result.exit_code == 0
+        assert mock_client.make_authenticated_request.call_count == 1
+        request = mock_client.make_authenticated_request.call_args.kwargs
+        assert request["path"] == "/inference/ep/v1/completions"
+        assert request["body"]["model"] == "ep"
+
+    @pytest.mark.parametrize(
+        ("payload", "expected_output"),
+        [
+            ({"generated_text": "dict result"}, "dict result"),
+            ([{"generated_text": "list result"}], "list result"),
+            ({"generated_text": ""}, '"generated_text": ""'),
+        ],
+    )
+    def test_invoke_buffered_generated_text_shapes(self, runner, payload, expected_output):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint(image="tgi:latest")
+        mock_client = MagicMock()
+        mock_client.make_authenticated_request.return_value = self._buffered_response(payload)
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(cli, ["inference", "invoke", "ep", "-p", "hello"])
+
+        assert result.exit_code == 0
+        assert expected_output in result.output
+
+    def test_invoke_stream_http_error_closes_response(self, runner):
+        response = MagicMock()
+        response.ok = False
+        response.status_code = 503
+        response.text = "service unavailable"
+        response.headers = {}
+
+        result, _ = self._invoke_stream(runner, response)
+
+        assert result.exit_code != 0
+        assert "HTTP 503" in result.output
+        response.close.assert_called_once_with()
+
+    def test_invoke_stream_honors_explicit_charset(self, runner):
+        response = self._stream_response(
+            ["snowman: ☃".encode("utf-16-le")],
+            content_type="text/event-stream; charset=utf-16-le",
+        )
+
+        result, _ = self._invoke_stream(runner, response)
+
+        assert result.exit_code == 0
+        assert "snowman: ☃" in result.output
+        response.close.assert_called_once_with()
+
+    def test_invoke_stream_invalid_charset_falls_back_to_utf8(self, runner):
+        response = self._stream_response(
+            ["café".encode()],
+            content_type="text/event-stream; charset=not-a-real-charset",
+        )
+
+        result, _ = self._invoke_stream(runner, response)
+
+        assert result.exit_code == 0
+        assert "café" in result.output
+        response.close.assert_called_once_with()
+
+    def test_invoke_stream_accepts_str_and_skips_empty_chunks(self, runner):
+        response = self._stream_response([b"", "", "first", b" second"])
+
+        result, _ = self._invoke_stream(runner, response)
+
+        assert result.exit_code == 0
+        assert "first second" in result.output
+        response.close.assert_called_once_with()
+
+    def test_invoke_stream_decodes_split_multibyte_and_flushes_remainder(self, runner):
+        response = self._stream_response([b"caf\xc3", b"\xa9 tail", b"\xe2\x82"])
+
+        result, _ = self._invoke_stream(runner, response)
+
+        assert result.exit_code == 0
+        assert "café tail�" in result.output
+        response.close.assert_called_once_with()
+
+    def test_invoke_stream_iteration_error_closes_response(self, runner):
+        response = self._stream_response([])
+        response.iter_content.side_effect = RuntimeError("stream interrupted")
+
+        result, _ = self._invoke_stream(runner, response)
+
+        assert result.exit_code != 0
+        assert "Failed to invoke endpoint: stream interrupted" in result.output
+        response.close.assert_called_once_with()
+
+
+class TestInferenceCanaryTransitions:
+    CASES = [
+        (
+            "promote",
+            "promote_canary",
+            "Promoted: all traffic now serving canary:v2",
+            "Promotion failed",
+            "Failed to promote canary",
+        ),
+        (
+            "rollback",
+            "rollback_canary",
+            "Rolled back: all traffic now serving primary:v1",
+            "Rollback failed",
+            "Failed to rollback canary",
+        ),
+    ]
+
+    @staticmethod
+    def _endpoint():
+        return {
+            "endpoint_name": "ep",
+            "spec": {
+                "image": "primary:v1",
+                "canary": {"image": "canary:v2", "weight": 15},
+            },
+        }
+
+    @pytest.mark.parametrize(
+        ("command", "manager_method", "success_output", "false_output", "error_output"),
+        CASES,
+    )
+    def test_transition_missing_endpoint(
+        self,
+        runner,
+        command,
+        manager_method,
+        success_output,
+        false_output,
+        error_output,
+    ):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = None
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(cli, ["inference", command, "ep", "--yes"])
+
+        assert result.exit_code != 0
+        assert "Endpoint 'ep' not found" in result.output
+        getattr(mock_mgr, manager_method).assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("command", "manager_method", "success_output", "false_output", "error_output"),
+        CASES,
+    )
+    def test_transition_without_canary(
+        self,
+        runner,
+        command,
+        manager_method,
+        success_output,
+        false_output,
+        error_output,
+    ):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = {
+            "endpoint_name": "ep",
+            "spec": {"image": "primary:v1"},
+        }
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(cli, ["inference", command, "ep", "--yes"])
+
+        assert result.exit_code != 0
+        assert "has no active canary" in result.output
+        getattr(mock_mgr, manager_method).assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("command", "manager_method", "success_output", "false_output", "error_output"),
+        CASES,
+    )
+    def test_transition_confirmation_cancelled(
+        self,
+        runner,
+        command,
+        manager_method,
+        success_output,
+        false_output,
+        error_output,
+    ):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint()
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                ["inference", command, "ep"],
+                input="n\n",
+            )
+
+        assert result.exit_code == 0
+        assert "Cancelled" in result.output
+        getattr(mock_mgr, manager_method).assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("command", "manager_method", "success_output", "false_output", "error_output"),
+        CASES,
+    )
+    def test_transition_success(
+        self,
+        runner,
+        command,
+        manager_method,
+        success_output,
+        false_output,
+        error_output,
+    ):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint()
+        getattr(mock_mgr, manager_method).return_value = {
+            "spec": {"image": "canary:v2" if command == "promote" else "primary:v1"}
+        }
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(cli, ["inference", command, "ep", "--yes"])
+
+        assert result.exit_code == 0
+        assert success_output in result.output
+        getattr(mock_mgr, manager_method).assert_called_once_with("ep")
+
+    @pytest.mark.parametrize(
+        ("command", "manager_method", "success_output", "false_output", "error_output"),
+        CASES,
+    )
+    def test_transition_false_result(
+        self,
+        runner,
+        command,
+        manager_method,
+        success_output,
+        false_output,
+        error_output,
+    ):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint()
+        getattr(mock_mgr, manager_method).return_value = None
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(cli, ["inference", command, "ep", "--yes"])
+
+        assert result.exit_code != 0
+        assert false_output in result.output
+
+    @pytest.mark.parametrize(
+        ("command", "manager_method", "success_output", "false_output", "error_output"),
+        CASES,
+    )
+    def test_transition_value_error(
+        self,
+        runner,
+        command,
+        manager_method,
+        success_output,
+        false_output,
+        error_output,
+    ):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint()
+        getattr(mock_mgr, manager_method).side_effect = ValueError("invalid canary state")
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(cli, ["inference", command, "ep", "--yes"])
+
+        assert result.exit_code != 0
+        assert "invalid canary state" in result.output
+        assert error_output not in result.output
+
+    @pytest.mark.parametrize(
+        ("command", "manager_method", "success_output", "false_output", "error_output"),
+        CASES,
+    )
+    def test_transition_generic_error(
+        self,
+        runner,
+        command,
+        manager_method,
+        success_output,
+        false_output,
+        error_output,
+    ):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint()
+        getattr(mock_mgr, manager_method).side_effect = RuntimeError("backend unavailable")
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(cli, ["inference", command, "ep", "--yes"])
+
+        assert result.exit_code != 0
+        assert f"{error_output}: backend unavailable" in result.output
+
+
+class TestInferenceSetTopology:
+    def test_set_topology_success(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.set_topology.return_value = {
+            "endpoint_name": "ep",
+            "spec": {"mooncake": {"prefill_replicas": 3, "decode_replicas": 2}},
+        }
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                ["inference", "set-topology", "ep", "--prefill", "3", "--decode", "2"],
+            )
+
+        assert result.exit_code == 0
+        assert "topology set to 3p2d" in result.output
+        mock_mgr.set_topology.assert_called_once_with("ep", 3, 2)
+
+    def test_set_topology_non_table_prints_result(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.set_topology.return_value = {
+            "endpoint_name": "ep",
+            "prefill_replicas": 4,
+            "decode_replicas": 5,
+        }
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                [
+                    "--output",
+                    "json",
+                    "inference",
+                    "set-topology",
+                    "ep",
+                    "--prefill",
+                    "4",
+                    "--decode",
+                    "5",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert '"prefill_replicas": 4' in result.output
+        assert '"decode_replicas": 5' in result.output
+
+    def test_set_topology_not_found(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.set_topology.return_value = None
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                ["inference", "set-topology", "ep", "--prefill", "1", "--decode", "1"],
+            )
+
+        assert result.exit_code != 0
+        assert "Endpoint 'ep' not found" in result.output
+
+    def test_set_topology_value_error(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.set_topology.side_effect = ValueError("prefill must be positive")
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                ["inference", "set-topology", "ep", "--prefill", "1", "--decode", "1"],
+            )
+
+        assert result.exit_code != 0
+        assert "prefill must be positive" in result.output
+        assert "Failed to set topology" not in result.output
+
+    def test_set_topology_generic_error(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.set_topology.side_effect = RuntimeError("write failed")
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                ["inference", "set-topology", "ep", "--prefill", "1", "--decode", "1"],
+            )
+
+        assert result.exit_code != 0
+        assert "Failed to set topology: write failed" in result.output
+
+
+class TestInferenceConfigureStore:
+    @staticmethod
+    def _endpoint(store=None):
+        return {
+            "endpoint_name": "ep",
+            "spec": {"mooncake": {"store": store or {}}},
+        }
+
+    @pytest.mark.parametrize(
+        ("option_args", "expected_update"),
+        [
+            (["--enable-store"], {"enabled": True}),
+            (["--disable-store"], {"enabled": False}),
+            (["--no-cold-tier"], {"cold_tier_enabled": False}),
+            (["--offload", "cpu"], {"offload": "cpu"}),
+            (["--global-segment-size", "4096"], {"global_segment_size": 4096}),
+            (["--local-buffer-size", "2048"], {"local_buffer_size": 2048}),
+        ],
+    )
+    def test_configure_store_merges_each_option(self, runner, option_args, expected_update):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint({"preserved": "value"})
+        mock_mgr.configure_store.return_value = {"endpoint_name": "ep"}
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                ["inference", "configure-store", "ep", *option_args],
+            )
+
+        assert result.exit_code == 0
+        store_config = mock_mgr.configure_store.call_args.args[1]
+        assert store_config["preserved"] == "value"
+        for key, value in expected_update.items():
+            assert store_config[key] == value
+
+    def test_configure_store_cold_tier_enables_store(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint({"enabled": False, "offload": "disk"})
+        mock_mgr.configure_store.return_value = {"endpoint_name": "ep"}
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                ["inference", "configure-store", "ep", "--cold-tier"],
+            )
+
+        assert result.exit_code == 0
+        store_config = mock_mgr.configure_store.call_args.args[1]
+        assert store_config == {
+            "enabled": True,
+            "offload": "disk",
+            "cold_tier_enabled": True,
+        }
+
+    def test_configure_store_rejects_no_settings(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint()
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(cli, ["inference", "configure-store", "ep"])
+
+        assert result.exit_code != 0
+        assert "No store settings given" in result.output
+        mock_mgr.configure_store.assert_not_called()
+
+    def test_configure_store_tolerates_malformed_stored_spec(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = {
+            "endpoint_name": "ep",
+            "spec": ["not", "a", "mapping"],
+        }
+        mock_mgr.configure_store.return_value = {"endpoint_name": "ep"}
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                ["inference", "configure-store", "ep", "--offload", "disk"],
+            )
+
+        assert result.exit_code == 0
+        mock_mgr.configure_store.assert_called_once_with("ep", {"offload": "disk"})
+
+    def test_configure_store_missing_endpoint(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = None
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                ["inference", "configure-store", "ep", "--enable-store"],
+            )
+
+        assert result.exit_code != 0
+        assert "Endpoint 'ep' not found" in result.output
+        mock_mgr.configure_store.assert_not_called()
+
+    def test_configure_store_false_result(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint()
+        mock_mgr.configure_store.return_value = None
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                ["inference", "configure-store", "ep", "--enable-store"],
+            )
+
+        assert result.exit_code != 0
+        assert "Endpoint 'ep' not found" in result.output
+
+    def test_configure_store_value_error(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint()
+        mock_mgr.configure_store.side_effect = ValueError("invalid store size")
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                ["inference", "configure-store", "ep", "--enable-store"],
+            )
+
+        assert result.exit_code != 0
+        assert "invalid store size" in result.output
+        assert "Failed to configure store" not in result.output
+
+    def test_configure_store_generic_error(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint()
+        mock_mgr.configure_store.side_effect = RuntimeError("database unavailable")
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                ["inference", "configure-store", "ep", "--enable-store"],
+            )
+
+        assert result.exit_code != 0
+        assert "Failed to configure store: database unavailable" in result.output
+
+
+class TestInferencePopulateKv:
+    def test_populate_kv_non_table_prints_result(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.populate_kv_cache.return_value = {
+            "files_uploaded": 3,
+            "s3_uri": "s3://region-bucket/mooncake-kv/ep/",
+        }
+        with patch("cli.models.get_regional_bucket_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                [
+                    "--output",
+                    "json",
+                    "inference",
+                    "populate-kv",
+                    "ep",
+                    "./warm-cache",
+                    "--region",
+                    "us-west-2",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert '"files_uploaded": 3' in result.output
+        assert "s3://region-bucket/mooncake-kv/ep/" in result.output
+        mock_mgr.populate_kv_cache.assert_called_once_with("./warm-cache", "us-west-2", "ep")
+
+    def test_populate_kv_error(self, runner):
+        mock_mgr = MagicMock()
+        mock_mgr.populate_kv_cache.side_effect = RuntimeError("upload failed")
+        with patch("cli.models.get_regional_bucket_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                [
+                    "inference",
+                    "populate-kv",
+                    "ep",
+                    "./warm-cache",
+                    "--region",
+                    "us-west-2",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "Failed to populate KV cache: upload failed" in result.output
