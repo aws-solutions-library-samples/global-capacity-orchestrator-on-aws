@@ -998,9 +998,8 @@ class TestInferenceHealth:
         ):
             result = runner.invoke(cli, ["-o", "json", "inference", "health", "ep"])
         assert result.exit_code == 0
-        # Table format shows status icon and latency (autouse mock_config forces table)
-        assert "healthy" in result.output
-        assert "HTTP 200" in result.output
+        assert '"status": "healthy"' in result.output
+        assert '"http_status": 200' in result.output
 
 
 class TestInferenceModels:
