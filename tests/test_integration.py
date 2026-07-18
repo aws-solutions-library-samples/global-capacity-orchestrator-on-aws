@@ -257,6 +257,7 @@ class TestKubernetesManifests:
         valid_api_versions = {
             "v1",
             "apps/v1",
+            "autoscaling/v2",
             "batch/v1",
             "networking.k8s.io/v1",
             "rbac.authorization.k8s.io/v1",

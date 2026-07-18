@@ -608,6 +608,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_task_status.py` | Tests for the disk-backed task status writer. |
 | `test_task_status_coverage.py` | Branch coverage for the disk-backed task-status reader and writer (`gco_mcp/tools/_task_status.py`): orphaned-PID rewrite, prune edge cases, and malformed-record guards. |
 | `test_tasks_cmd_coverage.py` | Coverage for the `gco tasks` command helpers and subcommands (`cli/commands/tasks_cmd.py`): PID liveness, state colorization, duration formatting, and the list, show, tail, and prune paths. |
+| `test_tls_certificate_manager.py` | Tests for the TLS certificate manager Lambda: strict project ownership, ACM certificate discovery and reconciliation, SSM state recovery, cryptographic legacy-certificate migration, and safe cleanup of managed resources. |
 | `test_trusted_registries_augmentation.py` | Tests for ``_augment_trusted_registries_with_project_ecr``. |
 | `test_waf_rate_limit.py` | Tests for the WAF PerIPRateLimit rule on GCOApiGatewayGlobalStack. |
 | `test_webhook_dispatcher.py` | Tests for gco/services/webhook_dispatcher.WebhookDispatcher. |
