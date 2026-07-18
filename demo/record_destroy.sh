@@ -19,17 +19,17 @@
 #   bash demo/record_destroy.sh
 #
 # Options (via environment variables):
-#   GCO_EXPECTED_GIT_SHA  Optional full SHA guard; when set, HEAD must match
-#                         and only the four lifecycle artifacts may be dirty
-#   GCO_EXPECTED_ACCOUNT_ID Optional 12-digit AWS account guard
-#   DEMO_COLS=120        Terminal width (default: 120)
-#   DEMO_ROWS=37         Terminal height (default: 37)
-#   DEMO_SPEED=10        Playback speed for GIF (default: 10 — deploy is long)
-#   DEMO_THEME=monokai   agg color theme (default: monokai)
-#   DEMO_FONT_FAMILY     agg font fallback chain (default: see lib_demo.sh)
-#   SKIP_GIF=1           Only produce the .cast file
-#   SKIP_SANITIZE=1      Skip account/access-key redaction (debugging only)
-#   SKIP_EMOJI_STRIP=1   Skip emoji substitution (debugging only)
+#   GCO_EXPECTED_GIT_SHA     Optional full SHA guard; when set, HEAD must match
+#                            and only the four lifecycle artifacts may be dirty
+#   GCO_EXPECTED_ACCOUNT_ID  Optional 12-digit AWS account guard
+#   DEMO_COLS=120            Terminal width (default: 120)
+#   DEMO_ROWS=37             Terminal height (default: 37)
+#   DEMO_SPEED=10            Playback speed for GIF (default: 10 — deploy is long)
+#   DEMO_THEME=monokai       agg color theme (default: monokai)
+#   DEMO_FONT_FAMILY         agg font fallback chain (default: see lib_demo.sh)
+#   SKIP_GIF=1               Only produce the .cast file
+#   SKIP_SANITIZE=1          Skip account/access-key redaction (debugging only)
+#   SKIP_EMOJI_STRIP=1       Skip emoji substitution (debugging only)
 #
 # The raw cast and GIF are written under a same-filesystem temporary directory.
 # The tracked pair is published only after these passes succeed. Because POSIX
