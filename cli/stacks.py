@@ -2194,7 +2194,7 @@ class StackManager:
     @staticmethod
     def _change_set_missing(exc: ClientError) -> bool:
         """Return whether CloudFormation authoritatively reports an absent change set."""
-        return exc.response.get("Error", {}).get("Code") == "ChangeSetNotFound"
+        return bool(exc.response.get("Error", {}).get("Code") == "ChangeSetNotFound")
 
     def _describe_stack_target(
         self,

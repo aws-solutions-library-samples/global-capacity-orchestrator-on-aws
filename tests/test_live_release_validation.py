@@ -1180,11 +1180,13 @@ class TestLocalOnlyRuntime:
     def test_fallback_report_does_not_bypass_dedicated_directory_rejection(
         self,
         tmp_path: Path,
+        monkeypatch,
         capsys,
     ) -> None:
         from scripts.live_release_validation import __main__ as live_main
         from scripts.live_release_validation.models import RunSettings
 
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
         report_dir = tmp_path / "private"
         report_dir.mkdir(mode=0o700)
         unrelated = report_dir / "unrelated.txt"
