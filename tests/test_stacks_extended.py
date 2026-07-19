@@ -1107,9 +1107,21 @@ class TestDestroyTimeoutAndReconciliation:
             control_region=control_region,
         )
         config = MagicMock(project_name="acme", api_gateway_region=control_region)
+        stack_name = f"acme-regional-api-{candidate_region}"
+        partition = "aws-cn" if control_region.startswith("cn-") else "aws"
+        stack_id = (
+            f"arn:{partition}:cloudformation:{control_region}:123456789012:"
+            f"stack/{stack_name}/stack-id"
+        )
         cloudformation = MagicMock()
         cloudformation.describe_stacks.return_value = {
-            "Stacks": [{"StackStatus": "UPDATE_COMPLETE"}]
+            "Stacks": [
+                {
+                    "StackName": stack_name,
+                    "StackId": stack_id,
+                    "StackStatus": "UPDATE_COMPLETE",
+                }
+            ]
         }
         with (
             patch(
@@ -1136,19 +1148,13 @@ class TestDestroyTimeoutAndReconciliation:
             patch.object(StackManager, "_cloudformation_delete_stack") as direct_delete,
         ):
             manager = StackManager(config, project_root=tmp_path)
-            assert (
-                manager.destroy(
-                    f"acme-regional-api-{candidate_region}",
-                    force=True,
-                )
-                is False
-            )
+            assert manager.destroy(stack_name, force=True) is False
 
         mock_run.assert_called_once()
-        cloudformation_client.assert_called_once_with(
-            "cloudformation",
-            region_name=control_region,
-        )
+        assert cloudformation_client.call_args_list == [
+            call("cloudformation", region_name=control_region),
+            call("cloudformation", region_name=control_region),
+        ]
         direct_delete.assert_not_called()
 
     def test_destroy_fails_closed_for_mixed_partition_root_config(self, tmp_path):
