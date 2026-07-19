@@ -694,6 +694,21 @@ class TestFindCdkJson:
 class TestStackManagerOperations:
     """Tests for StackManager operations."""
 
+    @pytest.fixture(autouse=True)
+    def isolate_named_deploy_boundaries(self):
+        """Stub AWS-facing preflight boundaries outside these argv/result tests."""
+        from cli.stacks import StackManager
+
+        with (
+            patch.object(StackManager, "_get_deploy_region", return_value="us-east-1"),
+            patch.object(StackManager, "ensure_bootstrapped", return_value=True),
+            patch.object(StackManager, "_check_and_fix_stuck_stack"),
+            patch.object(StackManager, "_mirror_images_if_enabled"),
+            patch.object(StackManager, "_get_stack_status", return_value=None),
+            patch.object(StackManager, "_diagnose_deploy_failure"),
+        ):
+            yield
+
     def test_get_python_path_includes_site_packages(self):
         """Test that _get_python_path includes site-packages directories."""
         from cli.stacks import StackManager
@@ -1873,6 +1888,9 @@ class TestStackManagerDeploymentExtended:
         with (
             patch("cli.stacks._detect_container_runtime", return_value=None),
             patch("cli.stacks.subprocess.run") as mock_run,
+            patch.object(StackManager, "_get_deploy_region", return_value="us-east-1"),
+            patch.object(StackManager, "ensure_bootstrapped", return_value=True),
+            patch.object(StackManager, "_check_and_fix_stuck_stack"),
         ):
             mock_run.return_value = MagicMock(returncode=0, stdout="/usr/bin/cdk")
 
