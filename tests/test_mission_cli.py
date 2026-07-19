@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import sys
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -157,7 +158,7 @@ def _install_terminal_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     from mission import _engine_factory  # noqa: PLC0415
     from mission.engine import MissionEngine  # noqa: PLC0415
 
-    import cli.commands.mission_cmd as mission_command  # noqa: PLC0415
+    mission_command = import_module("cli.commands.mission_cmd")
 
     async def _empty_metadata() -> tuple[dict[str, Any], dict[str, str]]:
         return {}, {}
