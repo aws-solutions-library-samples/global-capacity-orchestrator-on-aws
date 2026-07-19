@@ -2533,6 +2533,21 @@ class TestBuildHelmInstallerPackage:
 class TestStackManagerDeployWithOptions:
     """Tests for deploy method with various options."""
 
+    @pytest.fixture(autouse=True)
+    def isolate_named_deploy_boundaries(self):
+        """Stub AWS-facing preflight boundaries outside these argv tests."""
+        from cli.stacks import StackManager
+
+        with (
+            patch.object(StackManager, "_get_deploy_region", return_value="us-east-1"),
+            patch.object(StackManager, "ensure_bootstrapped", return_value=True),
+            patch.object(StackManager, "_check_and_fix_stuck_stack"),
+            patch.object(StackManager, "_mirror_images_if_enabled"),
+            patch.object(StackManager, "_get_stack_status", return_value=None),
+            patch.object(StackManager, "_diagnose_deploy_failure"),
+        ):
+            yield
+
     def test_deploy_with_all_options(self):
         """Test deploy with all options specified."""
         from cli.stacks import StackManager
