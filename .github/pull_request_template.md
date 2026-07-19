@@ -33,6 +33,26 @@ Delete any sections that don't apply.
 
 <!-- If deployed to a real account, note what was verified. -->
 
+## Live release validation
+
+<!--
+Select one decision and explain it. Live validation is normally required for
+changes to deployed infrastructure/lifecycle or real AWS runtime integration.
+It is usually not required for isolated, quickly validated CLI behavior;
+CI/test-tooling-only changes; routine dependency bumps with no deployed effect;
+docs/test-only changes; and behavior-preserving refactors. These are risk-based
+categories: live-resource CLI changes and runtime-affecting dependency bumps can
+still require validation. See ../docs/LIVE_RELEASE_VALIDATION.md.
+-->
+
+- [ ] Not required (explain the applicability decision below)
+- [ ] Required and completed locally with `--actions all` for this exact SHA; the `PASSED` Markdown report was manually attached to the pull request
+- [ ] Required but pending explicit validation-account and KMS-deletion authorization
+
+**Applicability rationale:**
+
+**Manual report attachment or comment link (never attach `checkpoint.json`):**
+
 ## Checklist
 
 - [ ] Documentation updated (README, `docs/`, inline docstrings) as needed

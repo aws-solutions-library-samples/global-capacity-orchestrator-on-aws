@@ -14,6 +14,15 @@ from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
+from tests._scaffold_replay import PREMIER_FIXTURE, PREMIER_MODEL_ID
+
+
+def _premier_advisor_mock() -> MagicMock:
+    """Return an advisor mock tied to the validated Premier fixture."""
+    advisor = MagicMock()
+    advisor.model_id = PREMIER_FIXTURE.model_id
+    return advisor
+
 
 class TestCapacityCmdAiRecommend:
     """Cover the ai_recommend CLI command."""
@@ -25,7 +34,7 @@ class TestCapacityCmdAiRecommend:
         from cli.main import cli
 
         mock_fmt_fn.return_value = MagicMock()
-        mock_advisor = MagicMock()
+        mock_advisor = _premier_advisor_mock()
         mock_advisor.get_recommendation.return_value = BedrockCapacityRecommendation(
             recommended_region="us-east-1",
             recommended_instance_type="g5.xlarge",
@@ -63,6 +72,9 @@ class TestCapacityCmdAiRecommend:
         assert "ALTERNATIVE" in result.output
         assert "WARNING" in result.output
         assert "RAW AI RESPONSE" in result.output
+        mock_advisor_fn.assert_called_once()
+        assert mock_advisor_fn.call_args.kwargs["model_id"] is None
+        assert mock_advisor.model_id == PREMIER_MODEL_ID
 
     @patch("cli.capacity.get_bedrock_capacity_advisor")
     @patch("cli.commands.capacity_cmd.get_output_formatter")
@@ -70,7 +82,9 @@ class TestCapacityCmdAiRecommend:
         from cli.main import cli
 
         mock_fmt_fn.return_value = MagicMock()
-        mock_advisor_fn.return_value.get_recommendation.side_effect = RuntimeError("fail")
+        mock_advisor = _premier_advisor_mock()
+        mock_advisor.get_recommendation.side_effect = RuntimeError("fail")
+        mock_advisor_fn.return_value = mock_advisor
 
         runner = CliRunner()
         result = runner.invoke(cli, ["capacity", "ai-recommend", "-w", "test"])
@@ -83,15 +97,15 @@ class TestCapacityCmdAiRecommend:
         from cli.main import cli
 
         mock_fmt_fn.return_value = MagicMock()
-        mock_advisor_fn.return_value.get_recommendation.return_value = (
-            BedrockCapacityRecommendation(
-                recommended_region="us-west-2",
-                recommended_instance_type="g4dn.xlarge",
-                recommended_capacity_type="on-demand",
-                reasoning="Only option.",
-                confidence="medium",
-            )
+        mock_advisor = _premier_advisor_mock()
+        mock_advisor.get_recommendation.return_value = BedrockCapacityRecommendation(
+            recommended_region="us-west-2",
+            recommended_instance_type="g4dn.xlarge",
+            recommended_capacity_type="on-demand",
+            reasoning="Only option.",
+            confidence="medium",
         )
+        mock_advisor_fn.return_value = mock_advisor
 
         runner = CliRunner()
         result = runner.invoke(cli, ["capacity", "ai-recommend"])

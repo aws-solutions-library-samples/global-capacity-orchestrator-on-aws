@@ -135,11 +135,9 @@ def ai_recommend(
         min_memory_gb: Minimum GPU memory in GB.
         fault_tolerance: Tolerance for interruptions ("low", "medium", "high").
         max_cost: Maximum acceptable cost per hour in USD.
-        model: Bedrock model ID to use for analysis. Omit to use the
-            server default (Amazon Nova Premier, us.amazon.nova-premier-v1:0 — a
-            first-party model with no First-Time-Use form); the CLI and
-            capacity advisor resolve that default, so it lives in one
-            place rather than being duplicated here.
+        model: Bedrock model ID to use for analysis. Omit to use
+            `cdk.json` `context.bedrock.default_model_id`. Mission and the
+            capacity advisor consume that one shared configuration value.
     """
     args = ["capacity", "ai-recommend", "-w", workload]
     if instance_type:

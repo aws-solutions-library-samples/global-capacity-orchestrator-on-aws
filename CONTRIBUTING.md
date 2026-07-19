@@ -18,6 +18,7 @@ Thank you for contributing to GCO (Global Capacity Orchestrator on AWS)! This gu
 - [Testing](#testing)
   - [Running Tests Locally](#running-tests-locally)
   - [Pre-Pull-Request Verification](#pre-pull-request-verification)
+  - [Live Release Validation Applicability](#live-release-validation-applicability)
   - [CI/CD Pipeline](#cicd-pipeline)
   - [Integration Tests](#integration-tests)
 - [Documentation](#documentation)
@@ -427,6 +428,19 @@ full sequence before submitting.
 For what to update alongside code changes, see the [Testing](#testing) and
 [Documentation](#documentation) guidance below and the
 [Contributing section of the README](README.md#contributing).
+
+### Live Release Validation Applicability
+
+Live release validation is a separate, explicitly authorized local operator process for behavior that mocked/offline CI cannot prove. Use the highest-risk row that applies to the pull request.
+
+| Decision | Typical changes |
+|---|---|
+| **Required** | CDK or CloudFormation topology and lifecycle changes; deploy/destroy or retained-resource cleanup changes; IAM, networking, regional routing, EKS/Kubernetes runtime wiring; and deployed service or Lambda behavior that depends on real AWS integration |
+| **Usually not required** | Isolated CLI changes that fast mocked/offline tests completely validate; CI/workflow/test-tooling-only changes; routine dependency bumps with no deployed runtime or infrastructure effect; docs-only or test-only changes; and behavior-preserving refactors |
+
+These are risk categories, not blanket path exemptions. A CLI command that mutates live AWS resources still requires validation, while a dependency bump may require it if it changes a deployed image, AWS SDK behavior, CDK output, or runtime integration. Explain the decision in the pull request; maintainers may require validation when impact is uncertain.
+
+When required, obtain explicit account and KMS-deletion authorization, run `python -m scripts.live_release_validation --actions all` only on a developer's local machine, and manually attach the generated Markdown report to the pull request for the exact SHA. Never invoke the harness from GitHub Actions and never upload `checkpoint.json`. See the [Live Release Validation runbook](docs/LIVE_RELEASE_VALIDATION.md) for the safety gates and complete command.
 
 ### CI/CD Pipeline
 

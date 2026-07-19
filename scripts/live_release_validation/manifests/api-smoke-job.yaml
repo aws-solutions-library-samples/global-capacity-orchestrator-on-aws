@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gco-live-api-__RUN_TOKEN__
+  namespace: gco-jobs
+  labels:
+    app.kubernetes.io/name: gco-live-release-validation
+    gco.aws/validation-run: __RUN_TOKEN__
+    gco.aws/validation-path: api
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gco-live-release-validation
+        gco.aws/validation-run: __RUN_TOKEN__
+        gco.aws/validation-path: api
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: smoke
+          # BusyBox 1.38.0 multi-platform index from the official Docker Hub tag API:
+          # https://hub.docker.com/v2/repositories/library/busybox/tags/1.38.0
+          image: docker.io/library/busybox:1.38.0@sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "echo GCO_LIVE_API___RUN_TOKEN__"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi

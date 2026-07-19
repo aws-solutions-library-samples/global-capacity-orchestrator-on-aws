@@ -220,7 +220,7 @@ Example:
 
 The simplest and most common criterion shape: "this tool ran and succeeded". The Evaluate phase counts entries in `obs["tool_results"]` whose `tool_name` matches the criterion's `tool_name` and whose `_status` equals `"ok"`. Met when the count is at least `min_count`.
 
-This kind is **server-evaluated** — it never goes through the predicate AST sandbox, so a sampling model that prefers any Python idiom that the predicate validator rejects (`r.startswith(...)`, `list(r.items())`, `getattr(r, ...)`, etc.) cannot block this kind from being structurally valid. Prefer `tool_call_succeeded` over a `predicate` whenever the goal is "this tool succeeded N times".
+This kind is **server-evaluated** — it never goes through the predicate AST sandbox, so a sampling model that prefers any Python idiom that the predicate validator rejects (`r.count(...)`, `list(r.items())`, `getattr(r, ...)`, etc.) cannot block this kind from being structurally valid. Prefer `tool_call_succeeded` over a `predicate` whenever the goal is "this tool succeeded N times".
 
 | Key | Type | Description |
 |-----|------|-------------|
@@ -315,7 +315,7 @@ No other names are visible — no `print`, no `open`, no `__import__`, no `eval`
 
 ### Allowed method calls
 
-A small set of read-only methods may be called on any value the predicate can produce (`obs`, a subscript result, a callable result, or a comprehension-bound name):
+A small set of read-only methods may be called on any value the predicate can produce (`obs`, a subscript result, a literal or container expression, a safe-call result, or a comprehension-bound name):
 
 | Method | Notes |
 |--------|-------|
@@ -323,8 +323,9 @@ A small set of read-only methods may be called on any value the predicate can pr
 | `.keys()`, `.values()`, `.items()` | Read-only dict views; the comprehension protocol then iterates. |
 | `.lower()`, `.upper()` | Pure string transformations used in case-insensitive substring search like `'foo' in str(x).lower()`. |
 | `.strip()` | Pure string transformation — leading and trailing whitespace removed. |
+| `.startswith(prefix[, start[, end]])` | Pure string prefix test used to classify metric and event names. |
 
-These seven methods land in this list because they are pure read-only accessors / transformations that cannot mutate state, escape the sandbox, or reach a builtin that the eval-time namespace blocks. Method names outside this list (`.append`, `.update`, `.pop`, `.setdefault`, `.count`, `.startswith`, `.split`, ...) are rejected at parse time.
+These eight methods land in this list because they are pure read-only accessors / transformations that cannot mutate state, escape the sandbox, or reach a builtin that the eval-time namespace blocks. Method names outside this list (`.append`, `.update`, `.pop`, `.setdefault`, `.count`, `.split`, ...) are rejected at parse time.
 
 ### Allowed operators and constructs
 
@@ -335,7 +336,7 @@ These seven methods land in this list because they are pure read-only accessors 
 - Ternary: `a if b else c`
 - Containers: list / tuple / dict / set literals
 - Comprehensions: list / set / dict / generator (target names cannot shadow `obs` or any allowed callable)
-- Calls: bare-name calls to one of the twelve stdlib callables, or read-only method calls from the seven-method allowlist above.
+- Calls: bare-name calls to one of the twelve stdlib callables, or read-only method calls from the eight-method allowlist above.
 - Attribute access: only `obs.<attr>` (one level deep). Attribute names cannot start with `__`. Anything more elaborate (chained walks, attributes on a subscript) is rejected — use subscripting for nested data.
 - Subscripts: any `value[...]` chain whose ultimate base is an allowed name. Slices with step (`xs[::2]`) are allowed; the slice values themselves go through the same allowlist check.
 - f-strings: allowed; embedded expressions re-enter the same allowlist check.
@@ -353,9 +354,9 @@ These seven methods land in this list because they are pure read-only accessors 
 | `obs[(0).__class__]` | `attribute_target_not_allowed` |
 | `obs.a.b` (chained attribute access) | `attribute_target_not_allowed` |
 | `obs["xs"].append(1)` (mutating method) | `call_target_method_not_allowed` |
-| `obs["xs"].count(0)` (read-only method outside the seven-method allowlist) | `call_target_method_not_allowed` |
-| `getattr(obs, "x").get("y")` (call-then-call shape) | `call_target_not_allowed` |
-| `dict(other={"a": 1})` (only the eight pure callables are allowed) | `call_target_not_allowed` |
+| `obs["xs"].count(0)` (read-only method outside the eight-method allowlist) | `call_target_method_not_allowed` |
+| `getattr(obs, "x").get("y")` (receiver contains the forbidden `getattr` call) | `call_target_not_allowed` |
+| `dict(other={"a": 1})` (only the twelve pure callables are allowed) | `call_target_not_allowed` |
 | `{**other}` | `dict_unpacking` |
 | `func(*args)` where `func` is not on the callable allowlist | `call_target_not_allowed` |
 | `getattr(obs, "x")` | `call_target_not_allowed` |
@@ -375,6 +376,7 @@ all(r.get("_status") == "ok" and r.get("tool_name") == "find_docs"
     for r in obs["tool_results"])
 len(obs.get("errors", [])) == 0
 any(k == "val_loss" for k in obs["metrics"].keys())
+any(k.startswith("val_") for k in obs["metrics"].keys())
 any("inference" in str(r).lower() for r in obs["tool_results"])
 str(obs.get("count", 0)) == "0"
 obs["metrics"]["loss"] < 0.5 and obs["metrics"]["accuracy"] > 0.9
@@ -388,17 +390,17 @@ __import__("os").system("rm -rf /")             # → call_target_not_allowed
 obs.__class__                                   # → dunder_attribute
 obs.metrics.loss                                # → attribute_target_not_allowed (chained attribute)
 obs["xs"].append(1)                             # → call_target_method_not_allowed
-any(k.startswith("v") for k in obs["m"].keys()) # → call_target_method_not_allowed
+obs["xs"].count(0)                              # → call_target_method_not_allowed
 [x for x in obs["xs"] for x in [1,2]]           # → comprehension_target_shadows_allowlist
 lambda r: r["score"] > 0.9                      # → forbidden_node
 ```
 
 ### Why the eval is safe
 
-The validated AST is compiled and evaluated with `eval(code, globals_, locals_)` where:
+The validated expression is evaluated with an explicit namespace:
 
-- `globals_` is `{"__builtins__": {}}` — the empty mapping is the standard Python sandbox idiom for stripping the builtin namespace. Without `__builtins__`, even a tree that smuggled past the validator could not look up `__import__`, `open`, `compile`, `exec`, etc.
-- `locals_` exposes only `obs` plus the eight whitelisted callables.
+- `globals_` contains `{"__builtins__": {}}`, `obs`, and the twelve whitelisted callables. The callables and `obs` must be globals because Python compiles comprehensions and generator expressions into nested scopes that do not resolve free names from the separate `locals` mapping. No other globals are exposed.
+- `locals_` is empty. The explicit empty `__builtins__` entry prevents Python from automatically inserting the normal builtin namespace, so even a tree that smuggled past validation cannot look up `__import__`, `open`, `compile`, `exec`, or similar capabilities.
 
 The double defence (AST allowlist plus empty `__builtins__`) is the same pattern used by the wider script sandbox (`gco_mcp/mission/sandbox.py`). The validator is exercised by a Hypothesis property test (`tests/test_mission_predicate_security.py`) that synthesises forbidden constructs and asserts the evaluator is never reached.
 
@@ -805,7 +807,7 @@ Resolution precedence at session start:
 
 Defaults:
 
-- Model — `us.amazon.nova-premier-v1:0` (Amazon Nova Premier — a first-party model that needs no Anthropic First-Time-Use form). Override via `GCO_MISSION_BEDROCK_MODEL_ID` or `--bedrock-model-id`; see [Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection).
+- Model — `cdk.json` `context.bedrock.default_model_id` (stock value: `us.amazon.nova-premier-v1:0`, Amazon Nova Premier — a first-party model that needs no Anthropic First-Time-Use form). Override via `GCO_MISSION_BEDROCK_MODEL_ID` or `--bedrock-model-id`; see [Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection).
 - Region — `us-east-1`. Override via `GCO_MISSION_BEDROCK_REGION`.
 
 Every sampling attempt emits one structured audit event (`sampling_purpose`, `sampling_status`, `sampling_backend`, `sampling_model_id`, `model_output_bytes`, `validation_error`). Sampling rejections (transport errors, malformed JSON, schema mismatch, allowlist or budget violations, AST rejections on proposed scripts) cause an automatic deterministic fallback — the iteration still runs.

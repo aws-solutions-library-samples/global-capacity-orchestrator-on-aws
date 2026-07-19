@@ -9,14 +9,14 @@
 #
 #   - Python packages pinned in pyproject.toml
 #   - Docker images referenced from workflows, K8s manifests, examples,
-#     and Helm chart values
+#     local live-validation manifests, and Helm chart values
 #   - Helm chart versions from charts.yaml
 #   - EKS add-on versions from gco/stacks/constants.py (AWS creds)
 #   - EKS Kubernetes minor from cdk.json (AWS creds)
 #   - Aurora PostgreSQL engine versions (AWS creds)
 #   - EMR Serverless release labels (AWS creds)
-#   - Bedrock default model id from gco_mcp/mission/sampling.py compared
-#     against the newest system-defined inference profile in the same
+#   - Bedrock default model id from cdk.json context.bedrock.default_model_id
+#     compared against the newest system-defined inference profile in the same
 #     model family (AWS creds)
 #   - Dockerfile.dev ARG pins (Node LTS major, npm, CDK CLI, kubectl,
 #     AWS CLI v2, Docker CLI, Docker Buildx) — public endpoints, no AWS creds needed
@@ -274,6 +274,10 @@ grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+" lambda/kubectl-applier-simp
 
 echo "Checking example manifest images..."
 grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+" examples/ 2>/dev/null \
+  | sed 's/image: //' >> "$ALL_IMAGES" || true
+
+echo "Checking local live-validation manifest images..."
+grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+" scripts/live_release_validation/manifests/ 2>/dev/null \
   | sed 's/image: //' >> "$ALL_IMAGES" || true
 
 echo "Checking Helm chart value images..."
@@ -588,20 +592,19 @@ EMR_COUNT="$(wc -l < "$EMR_RESULTS" 2>/dev/null | tr -d ' ')"
 # ---------------------------------------------------------------------------
 # Bedrock default model (best-effort — requires AWS credentials)
 #
-# Compares the default Bedrock model id pinned in
-# gco_mcp/mission/sampling.py (DEFAULT_BEDROCK_MODEL_ID, mirrored by
-# cli/capacity/advisor.py BedrockCapacityAdvisor.DEFAULT_MODEL) against the
-# newest system-defined inference profile in the SAME model family, as
-# listed by aws bedrock list-inference-profiles. This id lives in a Python
-# constant, so neither Dependabot nor the manifest/Dockerfile sweeps above
-# ever see it.
+# Compares the shared default Bedrock model id in
+# cdk.json (context.bedrock.default_model_id) against the newest
+# system-defined inference profile in the SAME model family, as listed by
+# aws bedrock list-inference-profiles. The Python consumers resolve this one
+# configuration value through gco.bedrock, so the scan and both advisory paths
+# cannot silently diverge.
 #
 # Same-family scoping (see bedrock_model_family) means we only flag a newer
 # release of the same model line (e.g. a newer Amazon Nova Premier) — never a
 # different tier or provider, since switching those is a human decision,
-# not drift. When a newer release is reported, bump DEFAULT_BEDROCK_MODEL_ID
-# (and the mirrored advisor constant), then re-capture the scaffold fixture
-# with scripts/capture_scaffold_fixtures.py.
+# not drift. When a newer release is reported, update
+# context.bedrock.default_model_id in cdk.json, then re-capture the scaffold
+# fixture with scripts/capture_scaffold_fixtures.py.
 #
 # IAM action: bedrock:ListInferenceProfiles. Pinned to us-east-1 (the
 # advisor + Mission sampling default region) regardless of the workflow's
@@ -613,10 +616,10 @@ echo "=== Checking Bedrock default model ==="
 
 BEDROCK_MODEL_RESULTS="$(mktemp)"
 BEDROCK_MODEL_SKIP_REASON=""
-CURRENT_BEDROCK_MODEL="$(extract_default_bedrock_model gco_mcp/mission/sampling.py)"
+CURRENT_BEDROCK_MODEL="$(extract_default_bedrock_model cdk.json)"
 
 if [ -z "$CURRENT_BEDROCK_MODEL" ]; then
-  BEDROCK_MODEL_SKIP_REASON="Could not read DEFAULT_BEDROCK_MODEL_ID from gco_mcp/mission/sampling.py."
+  BEDROCK_MODEL_SKIP_REASON="Could not read context.bedrock.default_model_id from cdk.json."
   echo "  $BEDROCK_MODEL_SKIP_REASON"
 elif ! aws sts get-caller-identity >/dev/null 2>&1; then
   BEDROCK_MODEL_SKIP_REASON="No AWS credentials available (scan needs bedrock:ListInferenceProfiles). Configure OIDC to enable."
@@ -626,7 +629,7 @@ else
   if [ -n "$LATEST_BEDROCK_MODEL" ] && [ "$CURRENT_BEDROCK_MODEL" != "$LATEST_BEDROCK_MODEL" ] \
      && [ "$(compare_bedrock_model "$CURRENT_BEDROCK_MODEL" "$LATEST_BEDROCK_MODEL")" = "newer" ]; then
     echo "  - bedrock default model: ${CURRENT_BEDROCK_MODEL} -> ${LATEST_BEDROCK_MODEL}"
-    echo "DEFAULT_BEDROCK_MODEL_ID|${CURRENT_BEDROCK_MODEL}|${LATEST_BEDROCK_MODEL}" >> "$BEDROCK_MODEL_RESULTS"
+    echo "context.bedrock.default_model_id|${CURRENT_BEDROCK_MODEL}|${LATEST_BEDROCK_MODEL}" >> "$BEDROCK_MODEL_RESULTS"
   fi
 fi
 
@@ -1505,13 +1508,12 @@ summary_row() {
   if [ "$BEDROCK_MODEL_COUNT" -gt 0 ]; then
     echo "## Bedrock Default Model"
     echo ""
-    echo "The default Bedrock model id pinned in \`gco_mcp/mission/sampling.py\`"
-    echo "(\`DEFAULT_BEDROCK_MODEL_ID\`, mirrored by \`cli/capacity/advisor.py\`) is"
-    echo "behind a newer system-defined inference profile in the same model"
-    echo "family. Bump the constant in both files, then re-capture the scaffold"
-    echo "fixture (\`scripts/capture_scaffold_fixtures.py\`)."
+    echo "The default Bedrock model id configured at \`cdk.json\`"
+    echo "(\`context.bedrock.default_model_id\`) is behind a newer system-defined"
+    echo "inference profile in the same model family. Update that one value, then"
+    echo "re-capture the scaffold fixture (\`scripts/capture_scaffold_fixtures.py\`)."
     echo ""
-    emit_md_table "Constant|Current|Latest" "$BEDROCK_MODEL_RESULTS"
+    emit_md_table "Configuration key|Current|Latest" "$BEDROCK_MODEL_RESULTS"
     echo ""
   fi
 

@@ -46,6 +46,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
+from gco.bedrock import get_default_bedrock_model_id
+
 from . import validation as _validation
 from .types import Criterion, CriterionResult, IterationRecord, Observation, Strategy
 from .validation import MissionValidationError
@@ -60,6 +62,9 @@ from .validation import MissionValidationError
 
 
 if TYPE_CHECKING:  # pragma: no cover - import-time only
+    # Runtime access is provided lazily by ``__getattr__`` below.
+    DEFAULT_BEDROCK_MODEL_ID: str
+
     # ``fastmcp.Context`` is the concrete type expected by
     # :class:`MCPSamplingBackend`. Kept behind ``TYPE_CHECKING`` so the
     # runtime import surface stays pure-stdlib; the backend itself
@@ -96,6 +101,18 @@ __all__ = [
     "select_sampling_backend",
     "validate_strategy_against_catalog",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve the historical Mission default only when explicitly accessed."""
+    if name == "DEFAULT_BEDROCK_MODEL_ID":
+        return get_default_bedrock_model_id()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    """Advertise the lazy compatibility alias to introspection tools."""
+    return sorted({*globals(), "DEFAULT_BEDROCK_MODEL_ID"})
 
 
 # ---------------------------------------------------------------------------
@@ -194,17 +211,15 @@ def _summarise_environment_context(env: Mapping[str, Any]) -> dict[str, Any]:
 # Bedrock backend tunables
 # ---------------------------------------------------------------------------
 
-#: Default Bedrock model identifier. Mirrors
-#: ``cli.capacity.advisor.BedrockCapacityAdvisor.DEFAULT_MODEL`` so an
-#: operator gets the same model for Mission sampling and the capacity
-#: advisor. Amazon Nova Premier is a first-party Amazon model: access is
-#: enabled by default in commercial Regions and, unlike the Anthropic
-#: models, it needs no First-Time-Use (FTU) form, so the advisory path
-#: works out of the box on a fresh account. Operators with regulatory
-#: or model-governance requirements can override per call via the
-#: ``GCO_MISSION_BEDROCK_MODEL_ID`` env var or the ``--bedrock-model-id``
-#: CLI flag — see docs/CUSTOMIZATION.md ("Bedrock Model Selection").
-DEFAULT_BEDROCK_MODEL_ID: str = "us.amazon.nova-premier-v1:0"
+#: Default Bedrock model identifier, loaded lazily from
+#: ``cdk.json`` ``context.bedrock.default_model_id`` through the lightweight
+#: :mod:`gco.bedrock` resolver. The module-level compatibility attribute keeps
+#: existing Mission integrations stable without coupling unrelated imports to
+#: Bedrock configuration resolution.
+#:
+#: Operators with regulatory or model-governance requirements can override per
+#: call via ``GCO_MISSION_BEDROCK_MODEL_ID`` or ``--bedrock-model-id``; see
+#: docs/CUSTOMIZATION.md ("Bedrock Model Selection").
 
 #: Default Bedrock region. The capacity advisor pins ``us-east-1`` for
 #: the same reason: cross-region inference profiles routinely surface
@@ -941,7 +956,7 @@ class BedrockSamplingBackend:
     from (in order of precedence) the explicit constructor argument,
     the matching environment variable
     (:data:`ENV_BEDROCK_MODEL_ID` / :data:`ENV_BEDROCK_REGION`), and
-    finally the module-level default
+    finally the shared ``cdk.json`` default
     (:data:`DEFAULT_BEDROCK_MODEL_ID` /
     :data:`DEFAULT_BEDROCK_REGION`). The ``boto3`` client itself is
     constructed lazily on the first :meth:`sample` call so that
@@ -980,16 +995,20 @@ class BedrockSamplingBackend:
         Args:
             model_id: Optional explicit model id. When ``None``, falls
                 back to the :data:`ENV_BEDROCK_MODEL_ID` environment
-                variable, then to :data:`DEFAULT_BEDROCK_MODEL_ID`.
+                variable, then to the shared ``cdk.json`` default exposed as
+                :data:`DEFAULT_BEDROCK_MODEL_ID`.
             region: Optional explicit region. When ``None``, falls back
                 to :data:`ENV_BEDROCK_REGION`, then to
                 :data:`DEFAULT_BEDROCK_REGION`.
         """
-        self.model_id: str = (
-            model_id
-            if model_id is not None
-            else os.environ.get(ENV_BEDROCK_MODEL_ID, DEFAULT_BEDROCK_MODEL_ID)
-        )
+        if model_id is not None:
+            self.model_id = model_id
+        elif ENV_BEDROCK_MODEL_ID in os.environ:
+            # Preserve the existing explicit-environment semantics, including
+            # an intentionally empty value, without evaluating the fallback.
+            self.model_id = os.environ[ENV_BEDROCK_MODEL_ID]
+        else:
+            self.model_id = get_default_bedrock_model_id()
         self._region: str = (
             region
             if region is not None

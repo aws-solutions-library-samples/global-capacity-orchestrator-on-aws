@@ -422,9 +422,19 @@ class TestJobManagerOperations:
                 mock_aws.return_value = mock_aws_client
 
                 manager = JobManager()
-                result = manager.delete_job("test-job", "gco-jobs")
+                result = manager.delete_job(
+                    "test-job",
+                    "gco-jobs",
+                    expected_uid="uid-123",
+                )
 
                 assert result["status"] == "deleted"
+                mock_aws_client.delete_job.assert_called_once_with(
+                    job_name="test-job",
+                    namespace="gco-jobs",
+                    region="us-east-1",
+                    expected_uid="uid-123",
+                )
 
 
 class TestJobManagerWait:

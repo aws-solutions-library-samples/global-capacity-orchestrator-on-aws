@@ -12,6 +12,7 @@ For contributor-facing docs (how to run tests locally, release process, dependen
   - [Satellites](#satellites)
   - [Naming conventions](#naming-conventions)
   - [Cross-cutting defaults](#cross-cutting-defaults)
+- [Live release validation stays local](#live-release-validation-stays-local)
 - [Composite actions](#composite-actions)
 - [CodeQL config](#codeql-config)
 - [README badges](#readme-badges)
@@ -101,6 +102,12 @@ All CI workflows share the same safety defaults:
 - Caching: `actions/setup-python@v6` with `cache: pip` and `cache-dependency-path: requirements-lock.txt`. Mypy jobs add an explicit `actions/cache@v5` on `.mypy_cache/`.
 - AWS auth (when a future test needs it) uses OIDC via `aws-actions/configure-aws-credentials@v4` — not long-lived access keys.
 
+## Live release validation stays local
+
+Live release validation is intentionally outside GitHub Actions. No file under `workflows/` may invoke `scripts.live_release_validation`, upload its reports, or upload `checkpoint.json`; the offline guard contracts scan every YAML workflow for those regressions. A developer runs the harness locally only after explicit authorization and manually attaches the resulting Markdown report to the pull request. Ordinary CI remains mocked/offline and never receives the checkpoint, which carries resumable destructive authority.
+
+A full local run is normally required for changes to deployed CDK/CloudFormation lifecycle, deploy/destroy and retained-resource cleanup, IAM/networking/regional routing, EKS/Kubernetes wiring, or deployed service/Lambda integrations that cannot be established offline. It is usually not required for isolated CLI behavior fully covered by fast mocked tests, CI/test-tooling-only changes, dependency bumps with no deployed runtime effect, docs/test-only changes, and behavior-preserving refactors. These are risk-based defaults: a live-resource CLI change or a dependency bump that alters deployed behavior can still require a run. Record the decision in the pull request and follow [`docs/LIVE_RELEASE_VALIDATION.md`](../docs/LIVE_RELEASE_VALIDATION.md) when required.
+
 ## Composite actions
 
 Shared logic used by multiple jobs. Invoked with `uses: ./.github/actions/<name>`.
@@ -177,7 +184,7 @@ Ecosystems tracked:
 | EKS Kubernetes version | `kubernetes_version` in `cdk.json` | Requires AWS credentials (via OIDC). Compares against the newest minor still in EKS **standard support** (`eks describe-cluster-versions`) and reports the standard-support end date so upgrade urgency is visible. See [Maintenance](../docs/MAINTENANCE.md#upgrading-the-eks-kubernetes-version) for the upgrade steps |
 | Aurora PostgreSQL engine | `AURORA_POSTGRES_VERSION_DISPLAY` from `gco/stacks/constants.py` | Requires AWS credentials (via OIDC). Queries `rds describe-db-engine-versions` for the latest minor release within the same major line |
 | EMR Serverless | `EMR_SERVERLESS_RELEASE_LABEL` from `gco/stacks/constants.py` | Requires AWS credentials (via OIDC). Lists release labels (`emr list-release-labels`) and reports a newer release in the same major line, or a new major line when one exists |
-| Bedrock default model | `DEFAULT_BEDROCK_MODEL_ID` from `gco_mcp/mission/sampling.py` (mirrored by `cli/capacity/advisor.py`) | Requires AWS credentials (via OIDC). Lists system-defined inference profiles (`bedrock list-inference-profiles`, pinned to us-east-1) and reports drift when a newer release exists in the *same model family*. The id is a Python constant, so Dependabot never sees it |
+| Bedrock default model | `context.bedrock.default_model_id` from `cdk.json` (consumed by both advisory paths through `gco.bedrock`) | Requires AWS credentials (via OIDC). Lists system-defined inference profiles (`bedrock list-inference-profiles`, pinned to us-east-1) and reports drift when a newer release exists in the *same model family*. Dependabot does not inspect this deployment configuration value |
 | Dockerfile.dev pins | `ARG` pins in `Dockerfile.dev` (Node LTS major, npm, CDK CLI, kubectl, AWS CLI v2, Docker CLI, Buildx) | Public endpoints, no AWS creds. Each ARG resolves against its own upstream (`nodejs/Release`, the npm/CDK registries, `dl.k8s.io`, `aws/aws-cli` tags, `moby/moby`, `docker/buildx`) |
 | Pre-commit hooks | `repo:` / `rev:` blocks in `.pre-commit-config.yaml` | Calls `GET /repos/{owner}/{repo}/tags` on GitHub for each hook and reports drift when our pinned `rev:` is older than the highest semver-shaped tag. Unauthenticated; SHA pins and non-GitHub repos are skipped silently |
 | CDK enum constants | `LAMBDA_PYTHON_RUNTIME`, `LAMBDA_NODEJS_RUNTIME`, and `AURORA_POSTGRES_VERSION` from `gco/stacks/constants.py` | Introspects the installed `aws-cdk-lib` (the `deps-scan` workflow installs the latest) for `aws_lambda.Runtime.PYTHON_X_Y`, `aws_lambda.Runtime.NODEJS_<major>_X`, and `aws_rds.AuroraPostgresEngineVersion.VER_X_Y`, then reports drift when a pinned enum is older than the highest matching member exposed by the library. Skipped with a note when `aws-cdk-lib` isn't importable |
@@ -230,7 +237,7 @@ The console output shows each surface's drift inline. To trigger the exact workf
 - **New Aurora engine version** — update `AURORA_POSTGRES_VERSION` and `AURORA_POSTGRES_VERSION_DISPLAY` in `gco/stacks/constants.py`.
 - **New pre-commit hook** — nothing to change; `extract_precommit_hooks` walks every `repo:` block in `.pre-commit-config.yaml` and the GitHub-tags lookup picks up the hook automatically (as long as the upstream lives on GitHub and tags semver-shaped releases).
 - **New CDK enum constant** — add the constant in `gco/stacks/constants.py`, then add a comparison block in `dependency-scan.sh`'s "Checking CDK enum constants" section that calls a new `get_latest_<name>` helper from `lib_dependency_scan.sh`. Pattern-match the existing `LAMBDA_PYTHON_RUNTIME` and `AURORA_POSTGRES_VERSION` blocks.
-- **New default Bedrock model** — bump `DEFAULT_BEDROCK_MODEL_ID` in `gco_mcp/mission/sampling.py` and `BedrockCapacityAdvisor.DEFAULT_MODEL` in `cli/capacity/advisor.py` (kept identical by `tests/test_default_bedrock_model_consistency.py`); the "Checking Bedrock default model" section then tracks the new model family automatically. If the new model has no captured scaffold fixture yet, run `python scripts/capture_scaffold_fixtures.py --model <id>`.
+- **New default Bedrock model** — change `cdk.json` `context.bedrock.default_model_id`; `gco.bedrock` supplies that value to Mission and the capacity advisor, while `tests/test_default_bedrock_model_consistency.py` guards the runtime aliases and packaged config. The "Checking Bedrock default model" section tracks the new model family automatically. If the model has no captured scaffold fixture yet, run `python scripts/capture_scaffold_fixtures.py --model <id>`.
 - **New CI tool pin** — add a `check_github_tool <name> <pin> <owner/repo> <url>` call in the "Checking CI tooling pins" section (or a `dl.k8s.io` / registry lookup for non-GitHub tools), reading the current pin via `extract_workflow_env_pin` or `extract_kind_pins` from `lib_dependency_scan.sh`.
 - **New consistency check** — add an extractor to `lib_dependency_scan.sh` and a comparison block in the "Checking version consistency" section that records disagreeing copies to `CONSISTENCY_RESULTS`.
 - **New recurring-hygiene check** (suppression file, base-image epoch, lockfile, …) — add a parser to `lib_dependency_scan.sh` and a section that filters by the shared thresholds (`SUPPRESSION_EXPIRY_WARN_DAYS`, `SECURITY_EPOCH_STALE_DAYS`). Remember to wire the new `*_COUNT` into the summary, the all-zero `has_drift` gate, and both `rm -f` cleanup lines.

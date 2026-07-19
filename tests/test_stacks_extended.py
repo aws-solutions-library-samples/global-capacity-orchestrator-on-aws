@@ -15,13 +15,65 @@ round-trips and the deploy() integration with ensure_bootstrapped.
 
 import json
 import os
+import signal
 import subprocess
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
+
+
+class _FakePopenProcess:
+    """Deterministic ``Popen`` process used by direct ``_run_cdk`` tests."""
+
+    def __init__(
+        self,
+        *,
+        pid=4242,
+        returncode=0,
+        stdout=None,
+        stderr=None,
+        communicate_error=None,
+        wait_errors=(),
+    ):
+        self.pid = pid
+        self.returncode = None
+        self._completed_returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+        self._communicate_error = communicate_error
+        self._wait_errors = list(wait_errors)
+        self.communicate_timeouts = []
+        self.poll_calls = 0
+        self.wait_timeouts = []
+        self.terminate_calls = 0
+        self.kill_calls = 0
+
+    def communicate(self, timeout=None):
+        self.communicate_timeouts.append(timeout)
+        if self._communicate_error is not None:
+            raise self._communicate_error
+        self.returncode = self._completed_returncode
+        return self._stdout, self._stderr
+
+    def poll(self):
+        self.poll_calls += 1
+        return self.returncode
+
+    def wait(self, timeout=None):
+        self.wait_timeouts.append(timeout)
+        if self._wait_errors:
+            raise self._wait_errors.pop(0)
+        self.returncode = self._completed_returncode
+        return self.returncode
+
+    def terminate(self):
+        self.terminate_calls += 1
+
+    def kill(self):
+        self.kill_calls += 1
 
 
 class TestStackManagerGetOutputs:
@@ -382,43 +434,61 @@ class TestRunCdkMethod:
     """Tests for StackManager._run_cdk method."""
 
     def test_run_cdk_with_env(self):
-        """Test running CDK with custom environment."""
+        """Popen receives merged custom environment and captured text pipes."""
         from cli.stacks import StackManager
 
         config = MagicMock()
+        manager = StackManager(config)
+        manager._cdk_path = "cdk"
+        process = _FakePopenProcess(stdout="output", stderr="")
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="output", stderr="")
-
-            manager = StackManager(config)
-            manager._cdk_path = "cdk"
+        with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build"),
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+        ):
             result = manager._run_cdk(
                 ["list"],
                 capture_output=True,
                 env={"CUSTOM_VAR": "value"},
             )
 
-            assert result.returncode == 0
-            # Verify env was passed
-            call_kwargs = mock_run.call_args[1]
-            assert "CUSTOM_VAR" in call_kwargs["env"]
+        assert result.returncode == 0
+        assert result.stdout == "output"
+        assert mock_popen.call_args.args[0] == ["cdk", "list"]
+        call_kwargs = mock_popen.call_args.kwargs
+        assert call_kwargs["cwd"] == manager.project_root
+        assert call_kwargs["stdout"] is subprocess.PIPE
+        assert call_kwargs["stderr"] is subprocess.PIPE
+        assert call_kwargs["text"] is True
+        assert call_kwargs["env"]["CUSTOM_VAR"] == "value"
+        assert call_kwargs["env"]["PYTHONPATH"]
+        assert call_kwargs["start_new_session"] is (os.name == "posix")
+        assert process.communicate_timeouts == [None]
 
     def test_run_cdk_without_capture(self):
-        """Test running CDK without capturing output."""
+        """Popen inherits output streams when capture is disabled."""
         from cli.stacks import StackManager
 
         config = MagicMock()
+        manager = StackManager(config)
+        manager._cdk_path = "cdk"
+        process = _FakePopenProcess()
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-
-            manager = StackManager(config)
-            manager._cdk_path = "cdk"
+        with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build"),
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+        ):
             result = manager._run_cdk(["deploy"], capture_output=False)
 
-            assert result.returncode == 0
-            call_kwargs = mock_run.call_args[1]
-            assert "capture_output" not in call_kwargs or call_kwargs.get("capture_output") is False
+        assert result.returncode == 0
+        assert mock_popen.call_args.args[0] == ["cdk", "deploy"]
+        call_kwargs = mock_popen.call_args.kwargs
+        assert call_kwargs["stdout"] is None
+        assert call_kwargs["stderr"] is None
+        assert call_kwargs["start_new_session"] is (os.name == "posix")
+        assert process.communicate_timeouts == [None]
 
 
 class TestFindCdkExecutable:
@@ -584,6 +654,83 @@ class TestIsBootstrapped:
         cf.describe_stacks.return_value = {"Stacks": []}
         mgr = self._make_manager()
         assert mgr.is_bootstrapped("us-east-2") is False
+
+
+class TestStrictBootstrapValidation:
+    """Strict mode reuses only the exact preflighted CDKToolkit stack."""
+
+    _STACK_ID = "arn:aws:cloudformation:us-east-1:123456789012:stack/CDKToolkit/toolkit-uuid"
+
+    def _make_manager(self):
+        config = MagicMock()
+        with patch(
+            "cli.stacks.StackManager._find_project_root",
+            return_value=Path("/tmp"),  # nosec B108 - test fixture using temp directory
+        ):
+            return __import__("cli.stacks", fromlist=["StackManager"]).StackManager(config)
+
+    @patch("boto3.client")
+    def test_accepts_exact_healthy_identity(self, mock_boto_client):
+        cfn = MagicMock()
+        mock_boto_client.return_value = cfn
+        cfn.describe_stacks.return_value = {
+            "Stacks": [
+                {
+                    "StackName": "CDKToolkit",
+                    "StackId": self._STACK_ID,
+                    "StackStatus": "CREATE_COMPLETE",
+                }
+            ]
+        }
+        manager = self._make_manager()
+
+        manager._validate_bootstrap_stack(
+            "us-east-1",
+            {"stack_id": self._STACK_ID, "status": "CREATE_COMPLETE"},
+        )
+
+        cfn.describe_stacks.assert_called_once_with(StackName=self._STACK_ID)
+
+    @pytest.mark.parametrize(
+        ("stack_name", "stack_id", "status", "message"),
+        (
+            ("Replacement", _STACK_ID, "CREATE_COMPLETE", "identity changed"),
+            (
+                "CDKToolkit",
+                _STACK_ID.replace("toolkit-uuid", "replacement"),
+                "CREATE_COMPLETE",
+                "identity changed",
+            ),
+            ("CDKToolkit", _STACK_ID, "UPDATE_COMPLETE", "status changed"),
+        ),
+    )
+    @patch("boto3.client")
+    def test_rejects_changed_identity_or_status(
+        self,
+        mock_boto_client,
+        stack_name,
+        stack_id,
+        status,
+        message,
+    ):
+        cfn = MagicMock()
+        mock_boto_client.return_value = cfn
+        cfn.describe_stacks.return_value = {
+            "Stacks": [
+                {
+                    "StackName": stack_name,
+                    "StackId": stack_id,
+                    "StackStatus": status,
+                }
+            ]
+        }
+        manager = self._make_manager()
+
+        with pytest.raises(RuntimeError, match=message):
+            manager._validate_bootstrap_stack(
+                "us-east-1",
+                {"stack_id": self._STACK_ID, "status": "CREATE_COMPLETE"},
+            )
 
 
 class TestEnsureBootstrapped:
@@ -768,6 +915,39 @@ class TestGetDeployRegion:
         """Unrecognized stack name without gco- prefix → None."""
         mgr = self._make_manager()
         assert mgr._get_deploy_region("some-other-stack") is None
+
+
+class TestStrictDeployStackOwnership:
+    """Strict deploy mode never adopts a same-name stack without a checkpointed ARN."""
+
+    _STACK_ID = "arn:aws:cloudformation:us-east-1:123456789012:stack/gco-live-global/stack-uuid"
+
+    def test_rejects_uncheckpointed_healthy_same_name_stack(self):
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        cloudformation = MagicMock()
+        cloudformation.describe_stacks.return_value = {
+            "Stacks": [
+                {
+                    "StackName": "gco-live-global",
+                    "StackId": self._STACK_ID,
+                    "StackStatus": "CREATE_COMPLETE",
+                }
+            ]
+        }
+
+        with (
+            patch.object(manager, "_get_deploy_region", return_value="us-east-1"),
+            patch("boto3.client", return_value=cloudformation),
+            pytest.raises(RuntimeError, match="Refusing to adopt uncheckpointed stack"),
+        ):
+            manager._check_and_fix_stuck_stack(
+                "gco-live-global",
+                strict_ownership=True,
+            )
+
+        cloudformation.delete_stack.assert_not_called()
 
 
 class TestDeployCallsEnsureBootstrapped:
@@ -1220,6 +1400,254 @@ class TestDestroyTimeoutAndReconciliation:
             assert manager.destroy("gco-us-east-1", force=True) is False
 
 
+class TestDestroyCloudFormationConvergence:
+    """Regression coverage for AWS-side delete convergence and phase barriers."""
+
+    def test_destroy_timeout_waits_for_active_cloudformation_delete(self):
+        """A CDK timeout is not failure while CloudFormation is deleting."""
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        timeout = subprocess.TimeoutExpired(cmd=["cdk"], timeout=2700)
+        with (
+            patch.object(StackManager, "_run_cdk", side_effect=timeout),
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=True),
+            patch.object(StackManager, "_get_stack_status", return_value="DELETE_IN_PROGRESS"),
+            patch.object(
+                StackManager,
+                "_wait_for_stack_delete_convergence",
+                return_value=True,
+            ) as mock_wait,
+            patch.object(StackManager, "_cloudformation_delete_stack") as mock_direct_delete,
+        ):
+            manager = StackManager(config)
+            assert manager.destroy("gco-us-east-1", force=True) is True
+
+        mock_wait.assert_called_once_with(
+            "gco-us-east-1",
+            initial_status="DELETE_IN_PROGRESS",
+        )
+        mock_direct_delete.assert_not_called()
+
+    def test_destroy_nonzero_exit_waits_for_active_cloudformation_delete(self):
+        """A nonzero CDK exit also defers to an active AWS delete."""
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        with (
+            patch.object(
+                StackManager,
+                "_run_cdk",
+                return_value=MagicMock(returncode=1),
+            ),
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=True),
+            patch.object(StackManager, "_get_stack_status", return_value="DELETE_IN_PROGRESS"),
+            patch.object(
+                StackManager,
+                "_wait_for_stack_delete_convergence",
+                return_value=True,
+            ) as mock_wait,
+        ):
+            manager = StackManager(config)
+            assert manager.destroy("gco-us-east-1", force=True) is True
+
+        mock_wait.assert_called_once_with(
+            "gco-us-east-1",
+            initial_status="DELETE_IN_PROGRESS",
+        )
+
+    def test_destroy_delete_failed_fails_without_starting_direct_delete(self):
+        """DELETE_FAILED is terminal and must not trigger a second delete."""
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        with (
+            patch.object(
+                StackManager,
+                "_run_cdk",
+                return_value=MagicMock(returncode=1),
+            ),
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=True),
+            patch.object(StackManager, "_get_stack_status", return_value="DELETE_FAILED"),
+            patch.object(StackManager, "_print_stack_delete_heartbeat") as mock_heartbeat,
+            patch.object(StackManager, "_cloudformation_delete_stack") as mock_direct_delete,
+        ):
+            manager = StackManager(config)
+            assert manager.destroy("gco-us-east-1", force=True) is False
+
+        mock_heartbeat.assert_called_once_with(
+            "gco-us-east-1",
+            "DELETE_FAILED",
+            None,
+        )
+        mock_direct_delete.assert_not_called()
+
+    def test_delete_convergence_deadline_fails_closed(self):
+        """A present stack at the AWS convergence deadline remains failure."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        with (
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=True),
+            patch.object(StackManager, "_print_stack_delete_heartbeat") as mock_heartbeat,
+            patch("cli.stacks.time.monotonic", side_effect=[0.0, 0.0, 1.0]),
+            patch("cli.stacks.time.sleep") as mock_sleep,
+        ):
+            assert (
+                manager._wait_for_stack_delete_convergence(
+                    "gco-us-east-1",
+                    timeout=0.5,
+                    poll_interval=0.1,
+                    heartbeat_interval=0.1,
+                )
+                is False
+            )
+
+        mock_heartbeat.assert_called_once_with(
+            "gco-us-east-1",
+            "DELETE_IN_PROGRESS",
+            None,
+        )
+        mock_sleep.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        (
+            ("timeout", float("nan")),
+            ("timeout", float("inf")),
+            ("poll_interval", float("nan")),
+            ("poll_interval", float("inf")),
+            ("heartbeat_interval", float("nan")),
+            ("heartbeat_interval", float("inf")),
+        ),
+    )
+    def test_delete_convergence_rejects_non_finite_budgets(self, field, value):
+        """NaN/Infinity can never disable the bounded delete deadline."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        kwargs = {
+            "timeout": 1.0,
+            "poll_interval": 0.1,
+            "heartbeat_interval": 0.1,
+        }
+        kwargs[field] = value
+        with pytest.raises(ValueError, match="positive and finite"):
+            manager._wait_for_stack_delete_convergence("gco-us-east-1", **kwargs)
+
+    @pytest.mark.parametrize("regional_destroy_succeeded", (False, True))
+    def test_regional_barrier_prevents_api_and_global_destroy(
+        self,
+        regional_destroy_succeeded,
+    ):
+        """Failure or lingering regional resources block dependent globals."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock(project_name="gco"))
+        thread = MagicMock()
+        stop_events = []
+
+        def start_watchdog(_stack_name, stop_event):
+            stop_events.append(stop_event)
+            return thread
+
+        stacks = ["gco-global", "gco-api-gateway", "gco-us-east-1"]
+        with (
+            patch.object(manager, "list_stacks", return_value=stacks),
+            patch.object(manager, "_image_registry_destroy_preflight", return_value=True),
+            patch.object(manager, "cleanup_orphaned_bastions"),
+            patch.object(manager, "_cleanup_backup_vault"),
+            patch.object(manager, "_start_eks_sg_watchdog", side_effect=start_watchdog),
+            patch.object(manager, "_cleanup_eks_security_groups"),
+            patch.object(
+                manager,
+                "destroy",
+                return_value=regional_destroy_succeeded,
+            ) as mock_destroy,
+            patch.object(manager, "_stack_exists_in_cloudformation", return_value=True),
+        ):
+            overall_success, _successful, failed = manager.destroy_orchestrated(force=True)
+
+        assert overall_success is False
+        assert "gco-us-east-1" in failed
+        mock_destroy.assert_called_once()
+        destroy_kwargs = mock_destroy.call_args.kwargs
+        assert destroy_kwargs["stack_name"] == "gco-us-east-1"
+        assert destroy_kwargs["force"] is True
+        assert destroy_kwargs["expected_stack_id"] is None
+        assert destroy_kwargs["expected_stack_ids"] is None
+        assert destroy_kwargs["authorize_stack"] is None
+        assert destroy_kwargs["allow_bootstrap"] is True
+        assert destroy_kwargs["bootstrap_stacks"] is None
+        assert stop_events[0].is_set()
+        thread.join.assert_called_once_with(timeout=5)
+
+    def test_regional_watchdog_stops_when_destroy_raises(self):
+        """An unexpected regional destroy exception cannot leak a watchdog."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock(project_name="gco"))
+        thread = MagicMock()
+        stop_events = []
+
+        def start_watchdog(_stack_name, stop_event):
+            stop_events.append(stop_event)
+            return thread
+
+        stacks = ["gco-global", "gco-api-gateway", "gco-us-east-1"]
+        with (
+            patch.object(manager, "list_stacks", return_value=stacks),
+            patch.object(manager, "_image_registry_destroy_preflight", return_value=True),
+            patch.object(manager, "cleanup_orphaned_bastions"),
+            patch.object(manager, "_cleanup_backup_vault"),
+            patch.object(manager, "_start_eks_sg_watchdog", side_effect=start_watchdog),
+            patch.object(manager, "_cleanup_eks_security_groups") as mock_cleanup,
+            patch.object(manager, "destroy", side_effect=RuntimeError("destroy failed")),
+            pytest.raises(RuntimeError, match="destroy failed"),
+        ):
+            manager.destroy_orchestrated(force=True)
+
+        assert stop_events[0].is_set()
+        thread.join.assert_called_once_with(timeout=5)
+        mock_cleanup.assert_called_once_with("gco-us-east-1")
+
+    def test_started_watchdogs_stop_when_later_start_raises(self):
+        """A later watchdog startup exception stops every allocated event."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock(project_name="gco"))
+        thread = MagicMock()
+        stop_events = []
+
+        def start_watchdog(stack_name, stop_event):
+            stop_events.append(stop_event)
+            if stack_name == "gco-us-west-2":
+                raise RuntimeError("watchdog failed")
+            return thread
+
+        stacks = [
+            "gco-global",
+            "gco-api-gateway",
+            "gco-us-east-1",
+            "gco-us-west-2",
+        ]
+        with (
+            patch.object(manager, "list_stacks", return_value=stacks),
+            patch.object(manager, "_image_registry_destroy_preflight", return_value=True),
+            patch.object(manager, "cleanup_orphaned_bastions"),
+            patch.object(manager, "_cleanup_backup_vault"),
+            patch.object(manager, "_start_eks_sg_watchdog", side_effect=start_watchdog),
+            patch.object(manager, "_cleanup_eks_security_groups") as mock_cleanup,
+            pytest.raises(RuntimeError, match="watchdog failed"),
+        ):
+            manager.destroy_orchestrated(force=True)
+
+        assert len(stop_events) == 2
+        assert all(stop_event.is_set() for stop_event in stop_events)
+        thread.join.assert_called_once_with(timeout=5)
+        mock_cleanup.assert_called_once_with("gco-us-east-1")
+
+
 class TestDeployTimeoutAndReconciliation:
     def test_deploy_passes_timeout_to_run_cdk_with_default_budget(self):
         """``deploy()`` must pass the default 60-minute timeout."""
@@ -1408,46 +1836,86 @@ class TestDeployTimeoutAndReconciliation:
 
 class TestRunCdkTimeout:
     def test_run_cdk_no_timeout_default(self):
-        """Without an explicit timeout, _run_cdk doesn't pass one
-        through (preserves existing behaviour for synth / list)."""
+        """Without an explicit timeout, communicate waits without a deadline."""
         from cli.stacks import StackManager
 
         config = MagicMock()
         manager = StackManager(config)
+        manager._cdk_path = "cdk"
+        process = _FakePopenProcess(stdout="", stderr="")
 
-        with patch("cli.stacks.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build"),
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+        ):
             manager._run_cdk(["list"], capture_output=True)
 
-        assert mock_run.call_args.kwargs.get("timeout") is None
+        assert process.communicate_timeouts == [None]
+        assert "timeout" not in mock_popen.call_args.kwargs
 
     def test_run_cdk_propagates_timeout_kwarg(self):
-        """When ``timeout`` is set, it reaches subprocess.run."""
+        """An explicit timeout reaches ``Popen.communicate`` exactly."""
         from cli.stacks import StackManager
 
         config = MagicMock()
         manager = StackManager(config)
+        manager._cdk_path = "cdk"
+        process = _FakePopenProcess(stdout="", stderr="")
 
-        with patch("cli.stacks.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build"),
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+        ):
             manager._run_cdk(["list"], capture_output=True, timeout=42.0)
 
-        assert mock_run.call_args.kwargs["timeout"] == 42.0
+        assert process.communicate_timeouts == [42.0]
+        assert "timeout" not in mock_popen.call_args.kwargs
 
     def test_run_cdk_re_raises_timeout_expired(self):
-        """When subprocess.run raises TimeoutExpired, _run_cdk re-raises
-        so callers can verify post-state via CloudFormation."""
-        import subprocess
-
+        """A timeout terminates the POSIX process group before being re-raised."""
         from cli.stacks import StackManager
 
         config = MagicMock()
         manager = StackManager(config)
+        manager._cdk_path = "cdk"
+        process = _FakePopenProcess(
+            pid=9876,
+            communicate_error=subprocess.TimeoutExpired(
+                cmd=["cdk", "destroy"],
+                timeout=10.0,
+                output="partial stdout",
+                stderr="partial stderr",
+            ),
+            wait_errors=(subprocess.TimeoutExpired(cmd=["cdk", "destroy"], timeout=30),),
+        )
 
-        with patch("cli.stacks.subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.TimeoutExpired(cmd=["cdk"], timeout=10)
-            with pytest.raises(subprocess.TimeoutExpired):
-                manager._run_cdk(["destroy"], timeout=10.0)
+        with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build"),
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+            patch("cli.stacks.os.name", "posix"),
+            patch("cli.stacks.os.killpg") as mock_killpg,
+            pytest.raises(subprocess.TimeoutExpired) as exc_info,
+        ):
+            manager._run_cdk(["destroy"], timeout=10.0)
+
+        assert mock_popen.call_args.args[0] == ["cdk", "destroy"]
+        assert mock_popen.call_args.kwargs["start_new_session"] is True
+        assert process.communicate_timeouts == [10.0]
+        assert process.poll_calls == 2
+        assert process.wait_timeouts == [30, None]
+        assert process.terminate_calls == 0
+        assert process.kill_calls == 0
+        assert mock_killpg.call_args_list == [
+            call(9876, signal.SIGTERM),
+            call(9876, signal.SIGKILL),
+        ]
+        assert exc_info.value.cmd == ["cdk", "destroy"]
+        assert exc_info.value.timeout == 10.0
+        assert exc_info.value.output == "partial stdout"
+        assert exc_info.value.stderr == "partial stderr"
 
 
 class TestGetStackStatus:

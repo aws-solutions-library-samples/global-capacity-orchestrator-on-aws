@@ -604,9 +604,15 @@ class TestGCOAWSClientRequests:
                 )
                 client._cache_timestamp = time.time()
 
-                result = client.delete_job("test-job", "default")
+                result = client.delete_job(
+                    "test-job",
+                    "default",
+                    expected_uid="uid:123/abc",
+                )
 
                 assert result["deleted"] is True
+                request_url = mock_request.call_args.kwargs["url"]
+                assert request_url.endswith("?expected_uid=uid%3A123%2Fabc")
 
 
 class TestGCOAWSClientDiscoverRegionalStacks:

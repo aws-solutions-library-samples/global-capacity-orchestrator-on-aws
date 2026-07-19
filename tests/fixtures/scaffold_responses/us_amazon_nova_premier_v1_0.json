@@ -1,0 +1,29 @@
+{
+  "model_id": "us.amazon.nova-premier-v1:0",
+  "region": "us-east-1",
+  "captured_at": "2026-07-18T18:57:17.239634+00:00",
+  "captures": {
+    "search_inference_docs": {
+      "prompt_directive": "Find documentation about inference endpoints.",
+      "prompt_allowlist": [
+        "find_examples",
+        "find_docs"
+      ],
+      "raw_response": "[\n  {\n    \"criterion_id\": \"tool_docs_success\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_docs\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"docs_mention_inference\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"any('inference' in str(r).lower() for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"valid_tool_usage\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"all(r.get('tool_name') in {'find_docs', 'find_examples'} for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"at_least_one_tool_called\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs['tool_results']) >= 1\"\n  }\n]"
+    },
+    "metric_drive_loss": {
+      "prompt_directive": "Drive validation loss below 0.1 on the demo training tool.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "raw_response": "[\n  {\n    \"criterion_id\": \"val_loss_threshold\",\n    \"kind\": \"metric_threshold\",\n    \"required\": true,\n    \"metric\": \"metrics.val_loss\",\n    \"op\": \"<\",\n    \"target\": 0.1\n  },\n  {\n    \"criterion_id\": \"find_examples_success\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"has_val_loss_metric\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"'val_loss' in obs['metrics'].keys()\"\n  },\n  {\n    \"criterion_id\": \"all_tools_succeeded\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"all(r.get('_status') == 'ok' for r in obs['tool_results'])\"\n  }\n]"
+    },
+    "event_goal_reached": {
+      "prompt_directive": "Wait for the training job to emit a goal_reached event.",
+      "prompt_allowlist": [
+        "find_examples"
+      ],
+      "raw_response": "[\n  {\n    \"criterion_id\": \"goal_event_emitted\",\n    \"kind\": \"event\",\n    \"required\": true,\n    \"event_name\": \"goal_reached\"\n  },\n  {\n    \"criterion_id\": \"find_examples_succeeded\",\n    \"kind\": \"tool_call_succeeded\",\n    \"required\": true,\n    \"tool_name\": \"find_examples\"\n  },\n  {\n    \"criterion_id\": \"no_errors\",\n    \"kind\": \"predicate\",\n    \"required\": true,\n    \"expression\": \"len(obs.get('errors', [])) == 0\"\n  },\n  {\n    \"criterion_id\": \"all_tools_succeeded\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"all(r.get('_status') == 'ok' for r in obs['tool_results'])\"\n  },\n  {\n    \"criterion_id\": \"valid_metrics_exist\",\n    \"kind\": \"predicate\",\n    \"required\": false,\n    \"expression\": \"any(k.startswith('val_') for k in obs['metrics'].keys())\"\n  }\n]"
+    }
+  }
+}

@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
+from kubernetes import client as kubernetes_client
 
 from gco.models import ManifestSubmissionRequest
 from gco.services.api_shared import (
@@ -522,15 +523,44 @@ async def get_job_metrics(namespace: str, name: str) -> Response:
 
 
 @router.delete("/{namespace}/{name}")
-async def delete_job(namespace: str, name: str) -> Response:
-    """Delete a Job and its pods."""
+async def delete_job(
+    namespace: str,
+    name: str,
+    expected_uid: str | None = Query(
+        None,
+        min_length=1,
+        max_length=128,
+        description="Optional immutable Kubernetes UID deletion precondition",
+    ),
+) -> Response:
+    """Delete a Job, optionally requiring its immutable Kubernetes UID."""
     processor = _check_processor()
     _check_namespace(namespace, processor)
 
     try:
-        processor.batch_v1.delete_namespaced_job(
-            name=name, namespace=namespace, propagation_policy="Background"
-        )
+        delete_kwargs: dict[str, Any] = {
+            "name": name,
+            "namespace": namespace,
+        }
+        deleted_uid: str | None = None
+        if expected_uid is not None:
+            current = processor.batch_v1.read_namespaced_job(name=name, namespace=namespace)
+            deleted_uid = str(getattr(current.metadata, "uid", "") or "")
+            if deleted_uid != expected_uid:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Job '{name}' UID changed; expected {expected_uid!r}, "
+                        f"found {deleted_uid or 'unknown'!r}"
+                    ),
+                )
+            delete_kwargs["body"] = kubernetes_client.V1DeleteOptions(
+                propagation_policy="Background",
+                preconditions=kubernetes_client.V1Preconditions(uid=expected_uid),
+            )
+        else:
+            delete_kwargs["propagation_policy"] = "Background"
+        processor.batch_v1.delete_namespaced_job(**delete_kwargs)
 
         response = {
             "cluster_id": processor.cluster_id,
@@ -538,6 +568,7 @@ async def delete_job(namespace: str, name: str) -> Response:
             "timestamp": datetime.now(UTC).isoformat(),
             "job_name": name,
             "namespace": namespace,
+            "uid": deleted_uid,
             "status": "deleted",
             "message": "Job deleted successfully",
         }
@@ -547,7 +578,13 @@ async def delete_job(namespace: str, name: str) -> Response:
     except HTTPException:
         raise
     except Exception as e:
-        if "NotFound" in str(e) or "404" in str(e):
+        status = getattr(e, "status", None)
+        if status == 409:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Job '{name}' changed before its UID-preconditioned delete",
+            ) from e
+        if status == 404 or "NotFound" in str(e) or "404" in str(e):
             raise HTTPException(
                 status_code=404, detail=f"Job '{name}' not found in namespace '{namespace}'"
             ) from e

@@ -409,9 +409,10 @@ def build_scaffold_prompt(
         "  ``len``, ``min``, ``max``, ``sum``, ``abs``,\n"
         "  ``any``, ``all``, ``sorted``,\n"
         "  ``str``, ``int``, ``float``, ``bool`` (type coercions).\n"
-        "Read-only method calls on any value (seven, all pure):\n"
+        "Read-only method calls on any value (eight, all pure):\n"
         "  ``.get(key[, default])``, ``.keys()``, ``.values()``,\n"
-        "  ``.items()``, ``.lower()``, ``.upper()``, ``.strip()``\n"
+        "  ``.items()``, ``.lower()``, ``.upper()``, ``.strip()``,\n"
+        "  ``.startswith(prefix[, start[, end]])``\n"
         "Operators: arithmetic, comparisons (<, <=, >, >=, ==, !=,\n"
         "  is, is not, in, not in), boolean (and, or, not), ternary\n"
         "  (a if b else c).\n"
@@ -424,10 +425,10 @@ def build_scaffold_prompt(
         "  for read-only access; subscript form is preferred). Nested\n"
         "  walks like ``obs.a.b`` are rejected — use ``obs['a']['b']``.\n"
         "\n"
-        "Method calls outside the seven pure-accessor names are\n"
+        "Method calls outside the eight pure-accessor names are\n"
         "rejected (no ``.append``, ``.update``, ``.pop``, ``.count``,\n"
-        "``.startswith``, ``.split``, etc.). Calls to non-allowlisted\n"
-        "names (``list``, ``dict``, ``getattr``, ``isinstance``, ...)\n"
+        "``.split``, etc.). Calls to non-allowlisted names\n"
+        "(``list``, ``dict``, ``getattr``, ``isinstance``, ...)\n"
         "are rejected."
     )
     sections.append("")
@@ -444,13 +445,13 @@ def build_scaffold_prompt(
         "  any('inference' in str(r).lower() for r in obs['tool_results'])\n"
         "  len(obs.get('errors', [])) == 0\n"
         "  any(k == 'val_loss' for k in obs['metrics'].keys())\n"
+        "  any(k.startswith('val_') for k in obs['metrics'].keys())\n"
         "\n"
         "REJECTED predicate expressions (will fail validation):\n"
         "  obs.metrics.val_loss < 0.1       # nested attribute walk; use obs['metrics']['val_loss']\n"  # noqa: E501
         "  obs['tool_results'].count('ok')  # ``.count`` is not on the method allowlist\n"
         "  obs['tool_results'].append(1)    # ``.append`` mutates and is not allowed\n"
         "  any(r.split(',') for r in obs['tool_results'])  # ``.split`` not on method allowlist\n"
-        "  any(k.startswith('val_') for k in obs['metrics'].keys())  # ``.startswith`` not on method allowlist\n"  # noqa: E501
         "  getattr(obs, 'tool_results')     # ``getattr`` not on callable allowlist\n"
         "  obs['x'].y.z                     # attribute walk after subscript"
     )

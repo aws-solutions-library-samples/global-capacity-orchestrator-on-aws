@@ -78,6 +78,7 @@ aws-exports.js
 # Temporary files
 tmp/
 temp/
+.live-release-validation/
 
 # Other
 test_plan.md

@@ -651,7 +651,11 @@ class GCOAWSClient:
         return str(response.json().get("logs", ""))
 
     def delete_job(
-        self, job_name: str, namespace: str, region: str | None = None
+        self,
+        job_name: str,
+        namespace: str,
+        region: str | None = None,
+        expected_uid: str | None = None,
     ) -> dict[str, Any]:
         """
         Delete a job.
@@ -664,8 +668,13 @@ class GCOAWSClient:
         Returns:
             Deletion result dictionary
         """
+        path = f"/api/v1/jobs/{quote(namespace, safe='')}/{quote(job_name, safe='')}"
+        if expected_uid is not None:
+            path += f"?expected_uid={quote(expected_uid, safe='')}"
         response = self.make_authenticated_request(
-            method="DELETE", path=f"/api/v1/jobs/{namespace}/{job_name}", target_region=region
+            method="DELETE",
+            path=path,
+            target_region=region,
         )
 
         response.raise_for_status()

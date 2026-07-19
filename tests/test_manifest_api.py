@@ -963,6 +963,91 @@ class TestDeleteJobEndpoint:
                 assert data["status"] == "deleted"
                 assert data["job_name"] == "test-job"
 
+    def test_delete_job_with_expected_uid_uses_kubernetes_precondition(
+        self, mock_manifest_processor
+    ):
+        """Expected UID is re-read and passed atomically to Kubernetes delete."""
+        mock_manifest_processor.batch_v1 = MagicMock()
+        current = MagicMock()
+        current.metadata.uid = "uid-123"
+        mock_manifest_processor.batch_v1.read_namespaced_job.return_value = current
+
+        with patch(
+            "gco.services.manifest_api.create_manifest_processor_from_env",
+            return_value=mock_manifest_processor,
+        ):
+            from fastapi.testclient import TestClient
+
+            from gco.services.manifest_api import app
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.delete(
+                    "/api/v1/jobs/default/test-job?expected_uid=uid-123",
+                    headers={},
+                )
+
+        assert response.status_code == 200
+        assert response.json()["uid"] == "uid-123"
+        mock_manifest_processor.batch_v1.read_namespaced_job.assert_called_once_with(
+            name="test-job",
+            namespace="default",
+        )
+        delete_kwargs = mock_manifest_processor.batch_v1.delete_namespaced_job.call_args.kwargs
+        assert delete_kwargs["name"] == "test-job"
+        assert delete_kwargs["namespace"] == "default"
+        assert delete_kwargs["body"].propagation_policy == "Background"
+        assert delete_kwargs["body"].preconditions.uid == "uid-123"
+
+    def test_delete_job_rejects_changed_uid(self, mock_manifest_processor):
+        """A same-name replacement cannot satisfy an older deletion authority."""
+        mock_manifest_processor.batch_v1 = MagicMock()
+        current = MagicMock()
+        current.metadata.uid = "replacement-uid"
+        mock_manifest_processor.batch_v1.read_namespaced_job.return_value = current
+
+        with patch(
+            "gco.services.manifest_api.create_manifest_processor_from_env",
+            return_value=mock_manifest_processor,
+        ):
+            from fastapi.testclient import TestClient
+
+            from gco.services.manifest_api import app
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.delete(
+                    "/api/v1/jobs/default/test-job?expected_uid=original-uid",
+                    headers={},
+                )
+
+        assert response.status_code == 409
+        mock_manifest_processor.batch_v1.delete_namespaced_job.assert_not_called()
+
+    def test_delete_job_maps_kubernetes_uid_conflict(self, mock_manifest_processor):
+        """A race after the UID read remains a conflict, not a generic 500."""
+        mock_manifest_processor.batch_v1 = MagicMock()
+        current = MagicMock()
+        current.metadata.uid = "uid-123"
+        mock_manifest_processor.batch_v1.read_namespaced_job.return_value = current
+        conflict = RuntimeError("precondition failed")
+        conflict.status = 409
+        mock_manifest_processor.batch_v1.delete_namespaced_job.side_effect = conflict
+
+        with patch(
+            "gco.services.manifest_api.create_manifest_processor_from_env",
+            return_value=mock_manifest_processor,
+        ):
+            from fastapi.testclient import TestClient
+
+            from gco.services.manifest_api import app
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.delete(
+                    "/api/v1/jobs/default/test-job?expected_uid=uid-123",
+                    headers={},
+                )
+
+        assert response.status_code == 409
+
     def test_delete_job_not_found(self, mock_manifest_processor):
         """Test deleting a non-existent job returns 404."""
         mock_manifest_processor.batch_v1 = MagicMock()

@@ -786,6 +786,29 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "related": ["CONCEPTS", "CLI", "SCHEDULERS"],
     },
+    "LIVE_RELEASE_VALIDATION": {
+        "summary": "Local operator deploy-test-destroy harness for exact-commit live validation, guaranteed cleanup, and manually attached pull request reports.",
+        "topics": [
+            "deployment",
+            "runbooks",
+            "security",
+            "automation",
+            "multi-region",
+        ],
+        "keywords": [
+            "live release validation",
+            "local script",
+            "dedicated validation account",
+            "exact commit",
+            "deploy test destroy",
+            "checkpoint",
+            "resume",
+            "kms pending deletion",
+            "manual pull request upload",
+            "pull request comment",
+        ],
+        "related": ["RUNBOOKS", "MAINTENANCE", "CLI"],
+    },
     "MAINTENANCE": {
         "summary": "Routine upkeep — adding instance types to the nodepool lists, EKS Kubernetes version upgrades, base-image security-epoch refreshes, CVE-suppression renewals, and acting on the monthly dependency scan.",
         "topics": [

@@ -1508,14 +1508,15 @@ export GCO_MISSION_BEDROCK_MODEL_ID="us.anthropic.claude-sonnet-4-5-20250929-v1:
 export GCO_MISSION_BEDROCK_REGION="eu-west-1"   # default: us-east-1
 ```
 
-**3. Change the default for everyone** — edit the two constants that pin it. They are deliberately kept identical by a CI test (`tests/test_default_bedrock_model_consistency.py`):
+**3. Change the default for everyone** — edit the one canonical value:
 
-| File | Constant |
-|------|----------|
-| `gco_mcp/mission/sampling.py` | `DEFAULT_BEDROCK_MODEL_ID` |
-| `cli/capacity/advisor.py` | `BedrockCapacityAdvisor.DEFAULT_MODEL` |
+| File | Key |
+|------|-----|
+| `cdk.json` | `context.bedrock.default_model_id` |
 
-Resolution order: per-call flag (`--model` / `--bedrock-model-id` / MCP `model=`) → `GCO_MISSION_BEDROCK_MODEL_ID` (Mission path only) → the pinned default constant.
+Both Python consumers resolve that value through `gco.bedrock`. The same `cdk.json` is shipped as package data so installed CLI and MCP entry points retain the default when they run outside a source checkout. `tests/test_default_bedrock_model_consistency.py` guards the resolver, compatibility aliases, package-data declaration, inference-profile shape, and captured fixture.
+
+Resolution order: per-call flag (`--model` / `--bedrock-model-id` / MCP `model=`) → `GCO_MISSION_BEDROCK_MODEL_ID` (Mission path only) → `cdk.json` `context.bedrock.default_model_id`.
 
 ### What to check when choosing a model
 

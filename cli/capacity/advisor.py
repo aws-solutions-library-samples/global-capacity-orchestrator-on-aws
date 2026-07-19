@@ -12,6 +12,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from cli.config import GCOConfig, get_config
+from gco.bedrock import get_default_bedrock_model_id
 
 from .checker import CapacityChecker
 from .multi_region import MultiRegionCapacityChecker, compute_price_trend
@@ -47,6 +48,13 @@ class CapacityPredictionResult:
     raw_response: str = ""
 
 
+class _SharedBedrockModelDefault:
+    """Lazily expose the historical advisor class attribute as a string."""
+
+    def __get__(self, instance: object, owner: type[Any] | None = None) -> str:
+        return get_default_bedrock_model_id()
+
+
 class BedrockCapacityAdvisor:
     """
     AI-powered capacity advisor using Amazon Bedrock.
@@ -58,14 +66,10 @@ class BedrockCapacityAdvisor:
     before making production decisions.
     """
 
-    # Default model to use if none specified. Amazon Nova Premier is a
-    # first-party Amazon model — access is enabled by default in
-    # commercial Regions with no Anthropic First-Time-Use (FTU) form —
-    # so the advisor works out of the box. Mirrors
-    # gco_mcp/mission/sampling.py::DEFAULT_BEDROCK_MODEL_ID. Override per
-    # call with --model (CLI) or model_id (constructor); see
-    # docs/CUSTOMIZATION.md ("Bedrock Model Selection").
-    DEFAULT_MODEL = "us.amazon.nova-premier-v1:0"
+    # Backward-compatible lazy class alias for callers that inspect the
+    # advisor default. Resolution occurs only when this Bedrock-specific
+    # attribute (or an advisor without an explicit model) is used.
+    DEFAULT_MODEL = _SharedBedrockModelDefault()
 
     def __init__(self, config: GCOConfig | None = None, model_id: str | None = None):
         self.config = config or get_config()

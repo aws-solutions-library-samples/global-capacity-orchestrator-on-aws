@@ -38,6 +38,11 @@
       "Owner": "platform-team"
     },
 
+    "_comment_bedrock": "Shared default for optional advisory Bedrock features. Mission sampling and the capacity advisor both consume this system-defined cross-Region inference-profile ID; explicit command/environment overrides still take precedence.",
+    "bedrock": {
+      "default_model_id": "us.amazon.nova-premier-v1:0"
+    },
+
     "_comment_eks": "EKS cluster version and access posture. GCO runs EKS Auto Mode (https://docs.aws.amazon.com/eks/latest/userguide/automode.html), so node provisioning is managed by AWS — GPU/inference/EFA/Neuron compute is steered via the Karpenter NodePool manifests in lambda/kubectl-applier-simple/manifests/ (40-* through 44-*).",
 
     "_comment_kubernetes_version": "EKS minor version. kubectl in Dockerfile.dev should track this within the ±1 minor skew policy (https://kubernetes.io/releases/version-skew-policy/).",

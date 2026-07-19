@@ -1600,7 +1600,7 @@ This command gathers comprehensive capacity data including:
 - Current cluster utilization (queue depth, GPU/CPU usage)
 - Running and pending job counts
 
-The data is analyzed by an LLM (Claude by default) to provide intelligent recommendations.
+The data is analyzed by the Bedrock model selected by `cdk.json` `context.bedrock.default_model_id` (Amazon Nova Premier in the stock configuration) to provide intelligent recommendations.
 
 **Requirements:**
 
@@ -1619,7 +1619,7 @@ The data is analyzed by an LLM (Claude by default) to provide intelligent recomm
 | `--min-memory-gb` | | Minimum memory in GB |
 | `--fault-tolerance` | `-f` | Fault tolerance level: `high`, `medium`, `low` |
 | `--max-cost` | | Maximum cost per hour in USD |
-| `--model` | `-m` | Bedrock model ID to use |
+| `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.default_model_id`) |
 | `--raw` | | Show raw AI response |
 
 **Example:**
@@ -1972,7 +1972,7 @@ gco capacity predict [OPTIONS]
 | `--region` | `-r` | AWS region (omit when using `--all-regions`) |
 | `--all-regions` | `-a` | Predict across every region that has historical data for the instance type |
 | `--hours` | `-H` | Hours of history to analyze (default 168 = 7 days) |
-| `--model` | `-m` | Bedrock model ID to use |
+| `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.default_model_id`) |
 | `--raw` | | Show the raw AI response |
 
 **Example:**
@@ -3988,7 +3988,8 @@ in this order:
 2. MCP host capability (only when running inside an MCP host).
 3. Bedrock credential probe — when `boto3` resolves credentials, the
    Bedrock backend is selected with the model id from
-   `GCO_MISSION_BEDROCK_MODEL_ID` (or the default).
+   `GCO_MISSION_BEDROCK_MODEL_ID` (or `cdk.json`
+   `context.bedrock.default_model_id`).
 4. Otherwise sampling is off and the loop runs deterministically.
 
 <details>
@@ -4289,7 +4290,7 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_ENABLE_MISSION` | Gate the `gco mission` subcommand group (`true`/`false`). With the flag unset, every subcommand exits 2 with a hint. |
 | `GCO_ENABLE_ALL_TOOLS` | Umbrella flag that satisfies every per-tool gate including `GCO_ENABLE_MISSION`. |
 | `GCO_MISSION_STATE_BACKEND` | Persistence backend for sessions (`filesystem` or `dynamodb`). Unrecognised values fall back to filesystem with a one-line warning. |
-| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the default Bedrock model id (Amazon Nova Premier, `us.amazon.nova-premier-v1:0`) used by the CLI sampling backend. See [Customization → Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). |
+| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the shared `cdk.json` `context.bedrock.default_model_id` used by the CLI sampling backend (stock value: Amazon Nova Premier, `us.amazon.nova-premier-v1:0`). See [Customization → Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). |
 | `GCO_MISSION_BEDROCK_REGION` | Override the default Bedrock region (`us-east-1`). |
 
 ## Examples

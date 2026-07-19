@@ -765,7 +765,11 @@ class JobManager:
         return header + "\n".join(lines)
 
     def delete_job(
-        self, job_name: str, namespace: str, region: str | None = None
+        self,
+        job_name: str,
+        namespace: str,
+        region: str | None = None,
+        expected_uid: str | None = None,
     ) -> dict[str, Any]:
         """
         Delete a job.
@@ -779,7 +783,10 @@ class JobManager:
             Deletion result
         """
         return self._aws_client.delete_job(
-            job_name=job_name, namespace=namespace, region=region or self.config.default_region
+            job_name=job_name,
+            namespace=namespace,
+            region=region or self.config.default_region,
+            expected_uid=expected_uid,
         )
 
     def wait_for_job(

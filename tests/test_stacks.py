@@ -22,6 +22,57 @@ import pytest
 from botocore.exceptions import ClientError
 
 
+class _FakePopenProcess:
+    """Deterministic ``Popen`` process used by direct ``_run_cdk`` tests."""
+
+    def __init__(
+        self,
+        *,
+        pid=4242,
+        returncode=0,
+        stdout=None,
+        stderr=None,
+        communicate_error=None,
+        wait_errors=(),
+    ):
+        self.pid = pid
+        self.returncode = None
+        self._completed_returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+        self._communicate_error = communicate_error
+        self._wait_errors = list(wait_errors)
+        self.communicate_timeouts = []
+        self.poll_calls = 0
+        self.wait_timeouts = []
+        self.terminate_calls = 0
+        self.kill_calls = 0
+
+    def communicate(self, timeout=None):
+        self.communicate_timeouts.append(timeout)
+        if self._communicate_error is not None:
+            raise self._communicate_error
+        self.returncode = self._completed_returncode
+        return self._stdout, self._stderr
+
+    def poll(self):
+        self.poll_calls += 1
+        return self.returncode
+
+    def wait(self, timeout=None):
+        self.wait_timeouts.append(timeout)
+        if self._wait_errors:
+            raise self._wait_errors.pop(0)
+        self.returncode = self._completed_returncode
+        return self.returncode
+
+    def terminate(self):
+        self.terminate_calls += 1
+
+    def kill(self):
+        self.kill_calls += 1
+
+
 class TestContainerRuntimeDetection:
     """Tests for container runtime detection."""
 
@@ -673,26 +724,33 @@ class TestStackManagerOperations:
         assert any(p for p in paths if p)
 
     def test_run_cdk_sets_pythonpath(self):
-        """Test that _run_cdk sets PYTHONPATH in environment."""
+        """Test that _run_cdk sets PYTHONPATH in the Popen environment."""
         from cli.stacks import StackManager
 
         config = MagicMock()
         manager = StackManager(config)
+        manager._cdk_path = "cdk"
+        process = _FakePopenProcess(stdout="", stderr="")
 
         with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
             patch.object(manager, "_ensure_lambda_build") as mock_prepare,
-            patch("subprocess.run") as mock_run,
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
         ):
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            result = manager._run_cdk(["list"], capture_output=True)
 
-            manager._run_cdk(["list"], capture_output=True)
-
-            # Verify subprocess.run was called with env containing PYTHONPATH
-            call_kwargs = mock_run.call_args[1]
-            assert "env" in call_kwargs
-            assert "PYTHONPATH" in call_kwargs["env"]
-            assert call_kwargs["env"]["PYTHONPATH"]  # Should be non-empty
-            mock_prepare.assert_called_once_with()
+        assert result.returncode == 0
+        assert mock_popen.call_args.args[0] == ["cdk", "list"]
+        call_kwargs = mock_popen.call_args.kwargs
+        assert call_kwargs["cwd"] == manager.project_root
+        assert call_kwargs["stdout"] is subprocess.PIPE
+        assert call_kwargs["stderr"] is subprocess.PIPE
+        assert call_kwargs["text"] is True
+        assert call_kwargs["start_new_session"] is (os.name == "posix")
+        assert "PYTHONPATH" in call_kwargs["env"]
+        assert call_kwargs["env"]["PYTHONPATH"]
+        assert process.communicate_timeouts == [None]
+        mock_prepare.assert_called_once_with()
 
     def test_run_cdk_treats_a_path_with_spaces_as_one_executable(self):
         """CDK executable paths are argv entries, not shell command strings."""
@@ -700,16 +758,19 @@ class TestStackManagerOperations:
 
         manager = StackManager(MagicMock())
         manager._cdk_path = "/Applications/CDK Tools/bin/cdk"
+        process = _FakePopenProcess(stdout="", stderr="")
         with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
             patch.object(manager, "_ensure_lambda_build"),
-            patch("subprocess.run", return_value=MagicMock(returncode=0)) as mock_run,
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
         ):
             manager._run_cdk(["list"], capture_output=True)
 
-        assert mock_run.call_args.args[0] == [
+        assert mock_popen.call_args.args[0] == [
             "/Applications/CDK Tools/bin/cdk",
             "list",
         ]
+        assert process.communicate_timeouts == [None]
 
     @pytest.mark.parametrize(
         "command",
@@ -720,13 +781,18 @@ class TestStackManagerOperations:
         from cli.stacks import StackManager
 
         manager = StackManager(MagicMock())
+        manager._cdk_path = "cdk"
+        process = _FakePopenProcess(stdout="", stderr="")
         with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
             patch.object(manager, "_ensure_lambda_build") as mock_prepare,
-            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
         ):
             manager._run_cdk(command, capture_output=True)
 
         mock_prepare.assert_called_once_with()
+        mock_popen.assert_called_once()
+        assert process.communicate_timeouts == [None]
 
     def test_list_stacks(self):
         """Test listing CDK stacks."""
@@ -3718,16 +3784,22 @@ class TestAutoMirrorOnDeploy:
             mgr._mirror_images_if_enabled(stack_name="gco-us-east-1", all_stacks=False)
         mock_mirror.assert_not_called()
 
-    def test_regional_stack_mirrors_its_region(self):
+    def test_regional_stack_mirrors_its_region_and_forwards_run_tags(self):
         mgr = self._manager()
+        run_tags = {"GcoLiveValidationRun": "run-123"}
         with (
             patch("cli._image_mirror.read_mirror_config", return_value=self._ENABLED),
             patch("cli._image_mirror.mirror_images") as mock_mirror,
         ):
-            mgr._mirror_images_if_enabled(stack_name="gco-us-east-1", all_stacks=False)
+            mgr._mirror_images_if_enabled(
+                stack_name="gco-us-east-1",
+                all_stacks=False,
+                repository_tags=run_tags,
+            )
         mock_mirror.assert_called_once()
         assert mock_mirror.call_args.args[0] == "us-east-1"
         assert mock_mirror.call_args.kwargs["ecr_namespace"] == "gco/dockerhub"
+        assert mock_mirror.call_args.kwargs["repository_tags"] == run_tags
 
     def test_named_global_stack_skipped(self):
         mgr = self._manager()

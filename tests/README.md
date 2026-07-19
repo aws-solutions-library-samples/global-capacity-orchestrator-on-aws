@@ -576,7 +576,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_costs_cmd_extended.py` | Extended tests for cli/commands/costs_cmd.py. |
 | `test_cross_region_aggregator_extended.py` | Extended coverage tests for the cross-region aggregator Lambda. |
 | `test_dag.py` | Tests for the job-DAG pipeline feature in cli/dag.py. |
-| `test_default_bedrock_model_consistency.py` | Guards that the default Bedrock model id stays identical across the two advisory subsystems that pin it independently — `DEFAULT_BEDROCK_MODEL_ID` in `gco_mcp/mission/sampling.py` and `BedrockCapacityAdvisor.DEFAULT_MODEL` in `cli/capacity/advisor.py` — and that it has the system-defined inference-profile shape the deps-scan Bedrock-model drift check assumes. |
+| `test_default_bedrock_model_consistency.py` | Guards that `cdk.json` `context.bedrock.default_model_id` is the sole operational Bedrock default, both advisory subsystems resolve it through `gco.bedrock`, the canonical file ships as package data, and the selected system-defined inference profile has a complete scaffold replay fixture. |
 | `test_drift_detection.py` | Tests for the CloudFormation drift-detection resources on the regional stack. |
 | `test_ephemeral_bastion.py` | The ephemeral SSM bastion lifecycle (`cli/ephemeral_bastion.py`): validated `aws` CLI argv builders with orphan safeguards (IMDSv2, shutdown-terminate, self-terminate user-data, `gco:ephemeral` tags), network/AMI discovery, and the atomic create/destroy lifecycle, with the AWS CLI shell-out mocked. |
 | `test_ga_registration.py` | Tests for the Global Accelerator registration Lambda (lambda/ga-registration/handler.py). |

@@ -36,19 +36,21 @@ targets must not shadow a name from the allowlist).
 
 Calls: bare-name calls to one of the twelve stdlib callables above, OR
 read-only method calls — ``.get(key[, default])``, ``.keys()``,
-``.values()``, ``.items()``, ``.lower()``, ``.upper()``, ``.strip()``.
-Method calls accept any receiver the predicate could otherwise
-produce: ``Name`` (``obs``), ``Subscript``
-(``obs['tool_results']``), or comprehension-bound names
-(``r.get('_status')`` inside ``for r in obs['tool_results']``). Method
-calls outside the allowlist (``.update``, ``.pop``, ``.count``,
-``.append``, ``.startswith``, ...) are rejected with
+``.values()``, ``.items()``, ``.lower()``, ``.upper()``, ``.strip()``,
+and ``.startswith(prefix[, start[, end]])``. A method receiver may be any
+expression that the predicate AST otherwise allows, including data names,
+subscripts, literals and container expressions, safe-call results, and
+comprehension-bound names. The receiver is recursively validated before the
+method call is accepted. Method calls outside the allowlist (``.update``,
+``.pop``, ``.count``, ``.append``, ...) are rejected with
 ``call_target_method_not_allowed``.
 
-Attribute access: only ``obs.<attr>`` (one level), and the attribute
-name itself must not start with ``__``. Anything more elaborate
-(chained attribute walks, attributes on calls or subscripts) is
-rejected — predicates that need nested data should use subscripting.
+Attribute access: a bare attribute read is allowed only as ``obs.<attr>``
+(one level), and the attribute name itself must not start with ``__``.
+Bare chained walks and bare attributes on calls or subscripts are rejected.
+This restriction does not prohibit an allowlisted read-only method call: its
+receiver is validated as an ordinary allowed expression by ``visit_Call``.
+Predicates that need nested data should otherwise use subscripting.
 
 Subscripts: any ``value[...]`` chain whose ultimate base is an allowlisted
 name. Rejection happens automatically because every nested ``Name`` lookup
@@ -91,14 +93,14 @@ in scope) regardless of input.
 """
 
 _ALLOWED_METHOD_CALLS: Final[frozenset[str]] = frozenset(
-    {"get", "keys", "values", "items", "lower", "upper", "strip"}
+    {"get", "keys", "values", "items", "lower", "upper", "strip", "startswith"}
 )
 """Read-only methods a predicate may invoke on any value.
 
 Models trained on Python idioms gravitate toward ``r.get('_status')``,
-``r.items()``, and ``str(...).lower()`` for case-insensitive substring
-search. The seven methods listed here are all pure read-only
-accessors / transformations:
+``r.items()``, ``str(...).lower()`` for case-insensitive substring
+search, and ``k.startswith('val_')`` for key classification. The eight
+methods listed here are all pure read-only accessors / transformations:
 
 * ``dict.get(key[, default])`` returns the value at ``key`` (or
   ``default``); identical to subscript except it tolerates missing
@@ -111,8 +113,10 @@ accessors / transformations:
 * ``str.strip()`` returns a new string with leading and trailing
   whitespace removed; common in normalising values before
   comparison.
+* ``str.startswith()`` returns whether a string begins with a prefix;
+  models commonly use it to classify metric and event names.
 
-None of the seven can mutate state, escape ``__builtins__``, or reach a
+None of the eight can mutate state, escape ``__builtins__``, or reach a
 callable that we did not already opt into through the eval-time
 sandbox (``__builtins__`` is empty; ``eval`` / ``compile`` /
 ``__import__`` / ``getattr`` / ``setattr`` / ``open`` are all
@@ -127,12 +131,13 @@ Method-call gating still applies in two places:
    ``r.pop(...)``, ``r.setdefault(...)``, etc. raise
    ``call_target_method_not_allowed`` even though they would otherwise
    parse as ``Attribute -> Call``.
-2. Method calls are only permitted on values produced by the
-   predicate's allowed surface — ``Name``, ``Subscript``, comprehension
-   targets. A method call on a literal expression (``[1, 2].count(1)``)
-   parses but the call goes through ``visit_Call`` → still rejected
-   because the receiver is not on the data namespace. See
-   ``visit_Call`` for the full set of acceptable receivers.
+2. The receiver expression is recursively validated against the same AST
+   allowlist as the rest of the predicate. Literals, containers, safe-call
+   results, subscripts, data names, and comprehension targets are therefore
+   valid receivers when their expression is otherwise allowed. This does not
+   widen the method set: ``[1, 2].count(1)`` is rejected because ``count`` is
+   not allowlisted, while ``" x ".strip()`` and ``str(value).lower()`` use
+   allowlisted methods on valid receiver expressions.
 """
 
 _ALLOWED_DATA_NAMES: Final[frozenset[str]] = frozenset({"obs"})
@@ -434,7 +439,8 @@ class _PredicateValidator(ast.NodeVisitor):
                 "attribute_target_not_allowed",
                 node,
                 "attribute access is only allowed on 'obs' "
-                "(or as a read-only method call on a dict/list)",
+                "(or as an allowlisted read-only method call on an otherwise "
+                "allowed expression)",
             )
         # The base Name is in _ALLOWED_DATA_NAMES, so we know it passes
         # the visit_Name check; visit it anyway to stay regular.
@@ -465,8 +471,8 @@ class _PredicateValidator(ast.NodeVisitor):
         #    ``len(x)``, ``any(...)``, ``sorted(xs)``. The validator
         #    enforces the name appears on the allowlist.
         # 2. Method calls of the form ``<expr>.<method>(...)`` where
-        #    ``<method>`` is in ``_ALLOWED_METHOD_CALLS`` (the four
-        #    pure dict/list read accessors). The receiver expression
+        #    ``<method>`` is in ``_ALLOWED_METHOD_CALLS`` (explicit
+        #    read-only accessors and transformations). The receiver expression
         #    is validated through the normal visit chain so a method
         #    call on something the predicate cannot otherwise see
         #    (e.g. ``getattr(x, 'y').get(...)``) is rejected at the
@@ -511,7 +517,7 @@ class _PredicateValidator(ast.NodeVisitor):
             self._reject(
                 "call_target_not_name",
                 node,
-                "predicate calls must target a bare callable name or a read-only dict/list method",
+                "predicate calls must target a bare callable name or a read-only method",
             )
         for arg in node.args:
             self.visit(arg)

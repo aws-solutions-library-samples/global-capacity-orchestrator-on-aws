@@ -1055,8 +1055,8 @@ EOF
 
 # ── extract_default_bedrock_model ──────────────────────────────────────
 
-@test "extract_default_bedrock_model: reads the pinned id from sampling.py" {
-    run extract_default_bedrock_model "gco_mcp/mission/sampling.py"
+@test "extract_default_bedrock_model: reads the configured id from cdk.json" {
+    run extract_default_bedrock_model "cdk.json"
     [ "$status" -eq 0 ]
     # A system-defined inference-profile id: geography.provider.model-vMAJOR:MINOR.
     [ -n "$output" ]
@@ -1064,27 +1064,22 @@ EOF
     [[ "$output" == *":"* ]]
 }
 
-@test "extract_default_bedrock_model: returns the exact pinned constant value" {
-    # Pin the helper output against the source of truth via an
-    # independent regex (mirroring the constant's real ``: str``
-    # annotation) so any drift between the two surfaces here.
+@test "extract_default_bedrock_model: returns the exact cdk context value" {
     expected="$(python3 -c '
-import re
-with open("gco_mcp/mission/sampling.py") as f:
-    m = re.search(r"DEFAULT_BEDROCK_MODEL_ID\s*(?::[^=]+)?=\s*\"([^\"]+)\"", f.read())
-print(m.group(1) if m else "")
+import json
+with open("cdk.json") as handle:
+    print(json.load(handle)["context"]["bedrock"]["default_model_id"])
 ')"
     [ -n "$expected" ]
-    run extract_default_bedrock_model "gco_mcp/mission/sampling.py"
+    run extract_default_bedrock_model "cdk.json"
     [ "$status" -eq 0 ]
     [ "$output" = "$expected" ]
 }
 
-@test "extract_default_bedrock_model: parses the constant from a fixture (with : str annotation)" {
+@test "extract_default_bedrock_model: parses context.bedrock.default_model_id" {
     tmpfile="$(mktemp)"
     cat > "$tmpfile" <<'EOF'
-# comment
-DEFAULT_BEDROCK_MODEL_ID: str = "us.amazon.nova-pro-v1:0"
+{"context":{"bedrock":{"default_model_id":"us.amazon.nova-pro-v1:0"}}}
 EOF
     run extract_default_bedrock_model "$tmpfile"
     [ "$status" -eq 0 ]
@@ -1092,9 +1087,18 @@ EOF
     rm -f "$tmpfile"
 }
 
-@test "extract_default_bedrock_model: empty when the constant is absent" {
+@test "extract_default_bedrock_model: empty when the context key is absent" {
     tmpfile="$(mktemp)"
-    echo "no model constant here" > "$tmpfile"
+    echo '{"context":{}}' > "$tmpfile"
+    run extract_default_bedrock_model "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_default_bedrock_model: empty when JSON is malformed" {
+    tmpfile="$(mktemp)"
+    echo '{not-json' > "$tmpfile"
     run extract_default_bedrock_model "$tmpfile"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
@@ -1102,7 +1106,7 @@ EOF
 }
 
 @test "extract_default_bedrock_model: empty when file is missing" {
-    run extract_default_bedrock_model "/nonexistent/sampling.py"
+    run extract_default_bedrock_model "/nonexistent/cdk.json"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }

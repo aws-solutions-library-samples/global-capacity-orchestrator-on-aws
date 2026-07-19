@@ -631,37 +631,34 @@ if m:
 " "$file" 2>/dev/null
 }
 
-# extract_default_bedrock_model [sampling_py_path]
+# extract_default_bedrock_model [cdk_json_path]
 #
-# Prints the default Bedrock model id pinned in
-# ``gco_mcp/mission/sampling.py`` as ``DEFAULT_BEDROCK_MODEL_ID`` — the
-# system-defined cross-Region inference-profile id GCO routes its
-# advisory LLM calls to (Mission strategy-revision / final-lessons
-# sampling and, mirrored in ``cli/capacity/advisor.py`` as
-# ``BedrockCapacityAdvisor.DEFAULT_MODEL``, the capacity advisor) when
-# no per-call override is supplied.
+# Prints the shared default Bedrock model id from
+# ``cdk.json`` ``context.bedrock.default_model_id``. Mission sampling and
+# the capacity advisor both resolve this system-defined cross-Region inference
+# profile through ``gco.bedrock`` when no explicit override is supplied.
 #
-# This id lives in a Python constant, not a Dockerfile/manifest/CDK
-# enum, so none of the other extractors here see it. It feeds the
-# Bedrock-model drift check in dependency-scan.sh, which compares it
-# against the newest profile in the same model family
-# (get_latest_bedrock_model) so a newer release surfaces in the
-# monthly report — the cue to bump the constant (and re-capture the
-# scaffold fixture under tests/fixtures/scaffold_responses/).
+# This value feeds the Bedrock-model drift check in dependency-scan.sh, which
+# compares it against the newest profile in the same model family
+# (get_latest_bedrock_model). A newer release is the cue to update cdk.json and
+# re-capture the scaffold fixture under tests/fixtures/scaffold_responses/.
 #
-# The regex tolerates the ``: str`` type annotation on the constant.
-# Prints nothing if the file or constant is absent — the caller treats
-# an empty result as "skip", same as the other extractors here.
+# Prints nothing if the file is absent, malformed, or does not contain a
+# non-empty string at the expected path. The caller treats empty output as a
+# skip, matching the other extractors in this library.
 extract_default_bedrock_model() {
-  local file="${1:-gco_mcp/mission/sampling.py}"
+  local file="${1:-cdk.json}"
   [ -f "$file" ] || return 0
   python3 -c "
-import re, sys
-with open(sys.argv[1]) as f:
-    text = f.read()
-m = re.search(r'^DEFAULT_BEDROCK_MODEL_ID\s*(?::[^=]+)?=\s*\"([^\"]+)\"', text, re.MULTILINE)
-if m:
-    print(m.group(1))
+import json, sys
+try:
+    with open(sys.argv[1]) as handle:
+        data = json.load(handle)
+    value = data.get('context', {}).get('bedrock', {}).get('default_model_id')
+except Exception:
+    value = None
+if isinstance(value, str) and value.strip():
+    print(value.strip())
 " "$file" 2>/dev/null
 }
 

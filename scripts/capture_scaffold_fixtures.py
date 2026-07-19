@@ -19,7 +19,7 @@ Usage:
     python scripts/capture_scaffold_fixtures.py
 
     # Capture a single model.
-    python scripts/capture_scaffold_fixtures.py --model us.amazon.nova-premier-v1:0
+    python scripts/capture_scaffold_fixtures.py --model MODEL_ID
 
     # Use a different region.
     python scripts/capture_scaffold_fixtures.py --region us-west-2
@@ -46,7 +46,9 @@ from typing import Any, cast
 # Mirror the path-injection pattern used throughout the Mission tree
 # so ``mission.*`` resolves regardless of how the script is launched.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "gco_mcp"))
+for _path in (str(_REPO_ROOT), str(_REPO_ROOT / "gco_mcp")):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 import mission.criteria_scaffold as criteria_scaffold  # noqa: E402
 from mission.sampling import (  # noqa: E402
@@ -54,6 +56,8 @@ from mission.sampling import (  # noqa: E402
     SamplingPrompt,
     SamplingTransportError,
 )
+
+from gco.bedrock import get_default_bedrock_model_id  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -108,7 +112,7 @@ _DIRECTIVES: tuple[_Directive, ...] = (
 # so the replay test stays representative of the long tail of
 # Pythonic emission shapes. When a new family or size lands in
 # Bedrock, add it here and re-run the capture script.
-_DEFAULT_MODELS: tuple[str, ...] = (
+_CURATED_MODELS: tuple[str, ...] = (
     # Anthropic family — kept for cross-family diversity. NOTE: Anthropic
     # models require a one-time First-Time-Use (FTU) form per account/org
     # before first invoke, so they are NOT the GCO default.
@@ -117,9 +121,9 @@ _DEFAULT_MODELS: tuple[str, ...] = (
     "us.anthropic.claude-opus-4-5-20251101-v1:0",
     "us.anthropic.claude-3-5-haiku-20241022-v1:0",
     "us.anthropic.claude-3-haiku-20240307-v1:0",
-    # Amazon Nova family — first-party, no FTU form; nova-premier is the GCO
-    # default (DEFAULT_BEDROCK_MODEL_ID). Every visible CRIS profile.
-    "us.amazon.nova-premier-v1:0",
+    # Amazon Nova family — first-party, no FTU form. The configured GCO
+    # default is prepended lazily by ``_default_models`` and deduplicated from
+    # this curated set before any paid calls are made.
     "us.amazon.nova-pro-v1:0",
     "us.amazon.nova-lite-v1:0",
     "us.amazon.nova-micro-v1:0",
@@ -135,6 +139,11 @@ _DEFAULT_MODELS: tuple[str, ...] = (
     # DeepSeek family.
     "us.deepseek.r1-v1:0",
 )
+
+
+def _default_models() -> tuple[str, ...]:
+    """Return the configured default plus the curated set, in stable order."""
+    return tuple(dict.fromkeys((get_default_bedrock_model_id(), *_CURATED_MODELS)))
 
 
 _FIXTURE_DIR = _REPO_ROOT / "tests" / "fixtures" / "scaffold_responses"
@@ -289,7 +298,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 async def _main_async(args: argparse.Namespace) -> int:
-    models = tuple(args.models) if args.models else _DEFAULT_MODELS
+    requested_models = tuple(args.models) if args.models else _default_models()
+    # Repeated --model values and overlap between the configured default and
+    # curated set must never duplicate paid Bedrock calls or fixture writes.
+    models = tuple(dict.fromkeys(requested_models))
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     successes = 0

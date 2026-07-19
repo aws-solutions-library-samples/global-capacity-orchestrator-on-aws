@@ -221,17 +221,85 @@ class _FakeEcr:
 
 
 class TestEnsureRepository:
-    def test_creates_when_missing(self):
+    _REPOSITORY = "gco/dockerhub/volcanosh/vc-scheduler"
+    _RUN_TAGS = {
+        "GcoLiveValidationRun": "run-123",
+        "gco:project": "gco-live",
+    }
+
+    def test_creates_and_tags_atomically_when_missing(self):
         ecr = _FakeEcr().client
-        mirror.ensure_repository(ecr, "gco/dockerhub/volcanosh/vc-scheduler")
-        ecr.create_repository.assert_called_once_with(
-            repositoryName="gco/dockerhub/volcanosh/vc-scheduler"
+
+        created = mirror.ensure_repository(
+            ecr,
+            self._REPOSITORY,
+            repository_tags=self._RUN_TAGS,
         )
 
-    def test_idempotent_when_exists(self):
+        assert created is True
+        ecr.create_repository.assert_called_once_with(
+            repositoryName=self._REPOSITORY,
+            tags=[
+                {"Key": "GcoLiveValidationRun", "Value": "run-123"},
+                {"Key": "gco:project", "Value": "gco-live"},
+            ],
+        )
+        ecr.tag_resource.assert_not_called()
+
+    def test_creation_callback_receives_exact_acknowledgement_synchronously(self):
+        ecr = _FakeEcr().client
+        repository = {
+            "repositoryName": self._REPOSITORY,
+            "repositoryArn": ("arn:aws:ecr:us-east-1:123456789012:repository/" + self._REPOSITORY),
+            "registryId": "123456789012",
+            "createdAt": "2026-07-17T00:00:00+00:00",
+        }
+        ecr.create_repository.return_value = {"repository": repository}
+        observed = []
+
+        assert (
+            mirror.ensure_repository(
+                ecr,
+                self._REPOSITORY,
+                repository_tags=self._RUN_TAGS,
+                on_created=lambda acknowledgement: observed.append(acknowledgement),
+            )
+            is True
+        )
+
+        assert observed == [repository]
+
+    def test_creation_callback_fails_closed_without_acknowledgement(self):
+        ecr = _FakeEcr().client
+        ecr.create_repository.return_value = {}
+
+        with pytest.raises(RuntimeError, match="omitted its acknowledgement"):
+            mirror.ensure_repository(
+                ecr,
+                self._REPOSITORY,
+                repository_tags=self._RUN_TAGS,
+                on_created=MagicMock(),
+            )
+
+    def test_existing_repository_is_never_tagged_or_adopted(self):
         ecr = _FakeEcr().client
         ecr.create_repository.side_effect = ecr.exceptions.RepositoryAlreadyExistsException()
-        mirror.ensure_repository(ecr, "gco/dockerhub/volcanosh/vc-scheduler")  # no raise
+
+        created = mirror.ensure_repository(
+            ecr,
+            self._REPOSITORY,
+            repository_tags=self._RUN_TAGS,
+        )
+
+        assert created is False
+        ecr.create_repository.assert_called_once_with(
+            repositoryName=self._REPOSITORY,
+            tags=[
+                {"Key": "GcoLiveValidationRun", "Value": "run-123"},
+                {"Key": "gco:project", "Value": "gco-live"},
+            ],
+        )
+        ecr.tag_resource.assert_not_called()
 
 
 class TestTagExists:

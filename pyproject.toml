@@ -12,6 +12,9 @@ include = ["cli", "cli.*", "gco", "gco.*", "gco_mcp", "gco_mcp.*"]
 # still discover and package it.
 namespaces = true
 
+[tool.setuptools.data-files]
+"share/gco" = ["cdk.json"]
+
 [tool.setuptools.dynamic]
 version = {attr = "gco._version.__version__"}
 

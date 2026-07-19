@@ -62,7 +62,7 @@ import base64
 import json
 import shutil
 import subprocess  # nosec B404 - invokes container CLI / skopeo with fixed, non-shell argv
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -110,6 +110,7 @@ _VOLCANO_UPSTREAM_REGISTRY = "docker.io"
 # Default logger — callers may pass their own ``log`` callable (e.g. to route
 # through a deploy progress stream).
 LogFn = Callable[[str], None]
+RepositoryCreatedCallback = Callable[[str, Mapping[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -337,13 +338,37 @@ def resolve_copy_strategy(runtime: str) -> str:
     )
 
 
-def ensure_repository(ecr_client: Any, repo_name: str, log: LogFn = print) -> None:
-    """Create the ECR repository if it does not already exist (idempotent)."""
+def ensure_repository(
+    ecr_client: Any,
+    repo_name: str,
+    log: LogFn = print,
+    repository_tags: Mapping[str, str] | None = None,
+    on_created: Callable[[Mapping[str, Any]], None] | None = None,
+) -> bool:
+    """Create a repository and synchronously publish its causal acknowledgement."""
+    kwargs: dict[str, Any] = {"repositoryName": repo_name}
+    if repository_tags:
+        kwargs["tags"] = [
+            {"Key": str(key), "Value": str(value)} for key, value in sorted(repository_tags.items())
+        ]
     try:
-        ecr_client.create_repository(repositoryName=repo_name)
+        response = ecr_client.create_repository(**kwargs)
+        repository = response.get("repository") if isinstance(response, dict) else None
+        if on_created is not None:
+            if not isinstance(repository, dict):
+                raise RuntimeError(
+                    f"ECR create_repository omitted its acknowledgement for {repo_name}"
+                )
+            if str(repository.get("repositoryName") or "") != repo_name:
+                raise RuntimeError(
+                    f"ECR create_repository acknowledged a different repository for {repo_name}"
+                )
+            on_created(repository)
         log(f"  created ECR repository {repo_name}")
+        return True
     except ecr_client.exceptions.RepositoryAlreadyExistsException:
         log(f"  ECR repository {repo_name} already exists")
+        return False
 
 
 def tag_exists(ecr_client: Any, repo_name: str, tag: str) -> bool:
@@ -525,6 +550,8 @@ def mirror_images(
     charts_path: Path | None = None,
     skip_existing: bool = True,
     log: LogFn = print,
+    repository_tags: Mapping[str, str] | None = None,
+    on_repository_created: RepositoryCreatedCallback | None = None,
 ) -> dict[str, Any]:
     """Mirror the configured upstream images into ECR for ``region`` (full flow).
 
@@ -563,8 +590,24 @@ def mirror_images(
     ecr_client = boto3.client("ecr", region_name=region)
     mirrored: list[str] = []
     skipped: list[str] = []
+    created_repositories: list[str] = []
     for item in plan:
-        ensure_repository(ecr_client, item.dest_repo, log=log)
+        if ensure_repository(
+            ecr_client,
+            item.dest_repo,
+            log=log,
+            repository_tags=repository_tags,
+            on_created=(
+                (
+                    lambda repository, selected_region=region: on_repository_created(
+                        selected_region, repository
+                    )
+                )
+                if on_repository_created is not None
+                else None
+            ),
+        ):
+            created_repositories.append(item.dest_repo)
         if skip_existing and tag_exists(ecr_client, item.dest_repo, item.tag):
             log(f"  skip (already mirrored): {item.dest_ref}")
             skipped.append(item.dest_ref)
@@ -577,4 +620,5 @@ def mirror_images(
         "strategy": strategy,
         "mirrored": mirrored,
         "skipped": skipped,
+        "created_repositories": sorted(set(created_repositories)),
     }

@@ -1052,16 +1052,18 @@ class TestPredicateOperators:
             with pytest.raises(PredicateRejected):
                 parse_predicate(src)
 
-    def test_predicate_rejects_str_or_list_method_outside_allowlist(self) -> None:
-        """Other read-only methods (``startswith``, ``count``) still reject."""
+    def test_predicate_accepts_startswith_method(self) -> None:
+        """The read-only string prefix test is part of the method allowlist."""
+        from mission.predicate import parse_predicate
+
+        parse_predicate("any(k.startswith('val_') for k in obs['metrics'].keys())")
+
+    def test_predicate_rejects_read_only_method_outside_allowlist(self) -> None:
+        """Read-only methods outside the explicit allowlist still reject."""
         from mission.predicate import PredicateRejected, parse_predicate
 
-        for src in (
-            "any(k.startswith('val_') for k in obs['metrics'].keys())",
-            "obs['xs'].count(0) > 0",
-        ):
-            with pytest.raises(PredicateRejected):
-                parse_predicate(src)
+        with pytest.raises(PredicateRejected):
+            parse_predicate("obs['xs'].count(0) > 0")
 
     def test_predicate_rejects_dunder_method(self) -> None:
         """Dunder method calls reject even though the receiver is allowed."""
