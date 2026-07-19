@@ -1651,7 +1651,7 @@ class TestDestroyCloudFormationConvergence:
 
         def start_watchdog(stack_name, stop_event, **_kwargs):
             stop_events.append(stop_event)
-            if stack_name == "gco-us-west-2":
+            if stack_name == "gco-us-east-1":
                 raise RuntimeError("watchdog failed")
             return thread
 
@@ -1676,7 +1676,7 @@ class TestDestroyCloudFormationConvergence:
         assert all(stop_event.is_set() for stop_event in stop_events)
         thread.join.assert_called_once_with(timeout=5)
         mock_cleanup.assert_called_once_with(
-            "gco-us-east-1",
+            "gco-us-west-2",
             region=None,
             security_group_id=None,
             vpc_id=None,
