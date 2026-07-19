@@ -18,6 +18,8 @@ _ECR_MANIFEST_MEDIA_TYPES = (
     "application/vnd.oci.image.index.v1+json",
 )
 
+_GLOBAL_ACCELERATOR_CONTROL_REGIONS = {"aws": "us-west-2"}
+
 _REGIONAL_PROJECT_RESOURCE_CATEGORIES = (
     "tagged_resources",
     "eks_clusters",
@@ -654,12 +656,31 @@ def _list_project_ecr_repositories(
     )
 
 
-def _list_global_accelerators(session: Any, seed_region: str, project_name: str) -> list[str]:
+def _global_accelerator_control_region(session: Any, seed_region: str) -> str | None:
+    """Return the partition's supported Global Accelerator control Region."""
     partition = session.get_partition_for_region(seed_region)
-    service_regions = session.get_available_regions("globalaccelerator", partition_name=partition)
-    if not service_regions:
+    control_region = _GLOBAL_ACCELERATOR_CONTROL_REGIONS.get(str(partition))
+    if control_region is None:
+        return None
+    service_regions = set(
+        session.get_available_regions("globalaccelerator", partition_name=partition)
+    )
+    if control_region not in service_regions:
+        raise RuntimeError(
+            "AWS SDK does not advertise the required Global Accelerator control Region "
+            f"{control_region} for partition {partition}"
+        )
+    return control_region
+
+
+def _list_global_accelerators(
+    session: Any,
+    control_region: str | None,
+    project_name: str,
+) -> list[str]:
+    if control_region is None:
         return []
-    client = session.client("globalaccelerator", region_name=service_regions[0])
+    client = session.client("globalaccelerator", region_name=control_region)
     accelerators: list[dict[str, Any]] = []
     token: str | None = None
     while True:
@@ -1251,14 +1272,14 @@ def collect_project_resources(
     scanner_regions["iam"] = ["global"]
     completed_scanners.append("iam")
 
-    global_accelerators = _list_global_accelerators(session, seed_region, project_name)
-    scanner_regions["global_accelerators"] = sorted(
-        set(
-            session.get_available_regions(
-                "globalaccelerator",
-                partition_name=partition,
-            )
-        )
+    global_accelerator_region = _global_accelerator_control_region(session, seed_region)
+    global_accelerators = _list_global_accelerators(
+        session,
+        global_accelerator_region,
+        project_name,
+    )
+    scanner_regions["global_accelerators"] = (
+        [global_accelerator_region] if global_accelerator_region else []
     )
     completed_scanners.append("global_accelerators")
 
