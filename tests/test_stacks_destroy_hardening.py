@@ -609,8 +609,18 @@ class TestCleanupOrphanedBastions:
             assert manager.cleanup_orphaned_bastions(stacks) == 2
 
         assert cleanup.call_count == 2
-        cleanup.assert_any_call("gco-us-east-1")
-        cleanup.assert_any_call("gco-eu-west-1")
+        cleanup.assert_any_call(
+            "gco-us-east-1",
+            region=None,
+            vpc_id=None,
+            fail_closed=False,
+        )
+        cleanup.assert_any_call(
+            "gco-eu-west-1",
+            region=None,
+            vpc_id=None,
+            fail_closed=False,
+        )
 
 
 class TestWaitForBastionNetworkInterfaces:
