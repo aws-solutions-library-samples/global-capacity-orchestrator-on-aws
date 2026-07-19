@@ -375,7 +375,11 @@ class TestCloudFormationHelpers:
         cfn.describe_stacks.assert_called_once_with(StackName=self._STACK_ID)
         authorize.assert_called_once_with("gco-global", "us-east-2", self._STACK_ID)
         cfn.delete_stack.assert_called_once_with(StackName=self._STACK_ID)
-        wait.assert_called_once_with("gco-global", expected_stack_id=self._STACK_ID)
+        wait.assert_called_once_with(
+            "gco-global",
+            expected_stack_id=self._STACK_ID,
+            require_expected_identity=False,
+        )
 
     def test_cloudformation_delete_stack_rejects_same_name_replacement(self, manager: Any) -> None:
         missing = ClientError(
