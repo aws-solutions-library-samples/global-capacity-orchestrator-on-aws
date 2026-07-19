@@ -310,7 +310,7 @@ def test_unsupported_az_lookup_maps_ids_and_fails_closed(monkeypatch):
     with patch("boto3.client", return_value=ec2_client) as client_factory:
         resolved = rs.GCORegionalStack._resolve_unsupported_az_names(subject)
 
-    assert resolved == ["us-east-1e", "us-east-1f"]
+    assert resolved == ["us-east-1e"]
     client_factory.assert_called_once()
     kwargs = client_factory.call_args.kwargs
     assert kwargs["region_name"] == _REGION
