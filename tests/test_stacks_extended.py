@@ -1572,7 +1572,7 @@ class TestDestroyCloudFormationConvergence:
         thread = MagicMock()
         stop_events = []
 
-        def start_watchdog(_stack_name, stop_event):
+        def start_watchdog(_stack_name, stop_event, **_kwargs):
             stop_events.append(stop_event)
             return thread
 
@@ -1615,7 +1615,7 @@ class TestDestroyCloudFormationConvergence:
         thread = MagicMock()
         stop_events = []
 
-        def start_watchdog(_stack_name, stop_event):
+        def start_watchdog(_stack_name, stop_event, **_kwargs):
             stop_events.append(stop_event)
             return thread
 
@@ -1644,7 +1644,7 @@ class TestDestroyCloudFormationConvergence:
         thread = MagicMock()
         stop_events = []
 
-        def start_watchdog(stack_name, stop_event):
+        def start_watchdog(stack_name, stop_event, **_kwargs):
             stop_events.append(stop_event)
             if stack_name == "gco-us-west-2":
                 raise RuntimeError("watchdog failed")
