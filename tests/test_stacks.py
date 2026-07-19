@@ -1310,10 +1310,12 @@ class TestStackManagerOrchestrated:
 
         with (
             patch("cli.stacks._detect_container_runtime", return_value="docker"),
+            patch.object(StackManager, "_get_deploy_region", return_value="us-east-1"),
             patch.object(StackManager, "ensure_bootstrapped", return_value=True),
             patch.object(StackManager, "_ensure_lambda_build"),
             patch.object(StackManager, "_sync_lambda_sources"),
             patch.object(StackManager, "_check_and_fix_stuck_stack"),
+            patch.object(StackManager, "_mirror_images_if_enabled"),
             patch.object(StackManager, "_get_stack_status", return_value="CREATE_COMPLETE"),
             patch.object(StackManager, "_run_cdk") as mock_run,
         ):
