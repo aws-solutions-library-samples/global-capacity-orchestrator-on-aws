@@ -3045,9 +3045,11 @@ class TestStackManagerDeployAnalyticsAutoApiGateway:
 
         with (
             patch("cli.stacks._detect_container_runtime", return_value="docker"),
+            patch.object(StackManager, "_get_deploy_region", return_value="us-east-2"),
             patch.object(StackManager, "_run_cdk") as mock_run,
             patch.object(StackManager, "_check_and_fix_stuck_stack"),
             patch.object(StackManager, "ensure_bootstrapped", return_value=True),
+            patch.object(StackManager, "_mirror_images_if_enabled"),
             patch.object(StackManager, "_get_stack_status", return_value="CREATE_COMPLETE"),
         ):
             mock_run.return_value = MagicMock(returncode=0)
@@ -3072,9 +3074,11 @@ class TestStackManagerDeployAnalyticsAutoApiGateway:
 
         with (
             patch("cli.stacks._detect_container_runtime", return_value="docker"),
+            patch.object(StackManager, "_get_deploy_region", return_value="us-east-1"),
             patch.object(StackManager, "_run_cdk") as mock_run,
             patch.object(StackManager, "_check_and_fix_stuck_stack"),
             patch.object(StackManager, "ensure_bootstrapped", return_value=True),
+            patch.object(StackManager, "_mirror_images_if_enabled"),
             patch.object(StackManager, "_get_stack_status", return_value="CREATE_COMPLETE"),
         ):
             mock_run.return_value = MagicMock(returncode=0)
@@ -3130,6 +3134,7 @@ class TestStackManagerOrchestratedParallel:
 
         with (
             patch.object(StackManager, "list_stacks") as mock_list,
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=False),
             patch.object(StackManager, "destroy") as mock_destroy,
         ):
             mock_list.return_value = [
