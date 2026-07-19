@@ -1634,7 +1634,12 @@ class TestDestroyCloudFormationConvergence:
 
         assert stop_events[0].is_set()
         thread.join.assert_called_once_with(timeout=5)
-        mock_cleanup.assert_called_once_with("gco-us-east-1")
+        mock_cleanup.assert_called_once_with(
+            "gco-us-east-1",
+            region=None,
+            security_group_id=None,
+            vpc_id=None,
+        )
 
     def test_started_watchdogs_stop_when_later_start_raises(self):
         """A later watchdog startup exception stops every allocated event."""
@@ -1670,7 +1675,12 @@ class TestDestroyCloudFormationConvergence:
         assert len(stop_events) == 2
         assert all(stop_event.is_set() for stop_event in stop_events)
         thread.join.assert_called_once_with(timeout=5)
-        mock_cleanup.assert_called_once_with("gco-us-east-1")
+        mock_cleanup.assert_called_once_with(
+            "gco-us-east-1",
+            region=None,
+            security_group_id=None,
+            vpc_id=None,
+        )
 
 
 class TestDeployTimeoutAndReconciliation:
