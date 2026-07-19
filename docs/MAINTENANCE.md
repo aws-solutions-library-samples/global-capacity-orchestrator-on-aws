@@ -269,43 +269,57 @@ graphs *are* tracked by Dependabot; see
 
 GCO's two optional, advisory Bedrock features — Mission sampling (`gco mission
 ...`) and the capacity advisor (`gco capacity ai-recommend` / `predict` and the
-`ai_recommend` MCP tool) — default to **Amazon Nova Premier**
-(`us.amazon.nova-premier-v1:0`). That id has one checked-in source:
-`cdk.json` `context.bedrock.default_model_id`. Mission sampling and the capacity
-advisor both resolve it through the lightweight `gco.bedrock` module; the same
-file is shipped as package data for installed CLI/MCP use. The consistency test
-guards both compatibility aliases, packaging, inference-profile shape, and the
-captured default-model fixture.
+`ai_recommend` MCP tool) — default to **Amazon Nova 2 Lite** through its global
+cross-Region inference profile (`global.amazon.nova-2-lite-v1:0`). The model id
+and reasoning preference have one checked-in source: `cdk.json`
+`context.bedrock`, whose stock `thinking.effort` is `high` (Nova 2 Lite's maximum
+supported effort). Mission sampling and the capacity advisor resolve both
+values through the lightweight `gco.bedrock` module; the same file is shipped
+as package data for installed CLI/MCP use. The consistency test guards the
+compatibility aliases, reasoning translation, packaging, inference-profile
+shape, and captured default-model fixture.
+
+High reasoning maps to Converse
+`additionalModelRequestFields.reasoningConfig.maxReasoningEffort=high`. AWS
+requires `maxTokens`, `temperature`, and `topP` to be unset at this effort, so
+GCO omits those controls for the canonical default. Reasoning tokens are billed
+as output tokens and high effort can materially increase cost and latency.
+Explicit model overrides keep their existing inference controls and do not
+inherit Nova-specific reasoning fields.
 
 Because it is a deployment configuration value — not a `pyproject.toml` entry,
 a Dockerfile `FROM`, or a manifest image — Dependabot never sees it. The monthly
 [`deps-scan`](../.github/CI.md#dependency-scan-script) closes that gap: its
 **Bedrock default model** check reads the `cdk.json` context value, lists the
 system-defined inference profiles in `us-east-1`, and flags a newer release **in
-the same model family** — a future Nova Premier generation, never a jump to a
-different tier or provider (that is a choice, not drift). The check needs AWS
+the same model family** — a future global Nova Lite generation, never a jump to
+a different scope, tier, or provider (that is a choice, not drift). The check needs AWS
 credentials via OIDC; without them the scan skips it with a noted reason, so a
 credential-less run is not a false "up to date".
 
 When the scan flags a newer same-family model (or you decide to move the default
 deliberately):
 
-1. Change `cdk.json` `context.bedrock.default_model_id` to the new id. The id
-   must be a system-defined **inference profile** (`us.` / `eu.` / `apac.`
-   prefix), not a bare model id, so requests route cross-Region. Update the
-   intentionally independent `_EXPECTED_DEFAULT_MODEL_ID` and
-   `_EXPECTED_FIXTURE_NAME` review pins in
-   `tests/test_default_bedrock_model_consistency.py`; those assertions are not
-   runtime defaults, but they make a model-family or fixture-name change
+1. Change `cdk.json` `context.bedrock.default_model_id` to the new id and set
+   `context.bedrock.thinking.effort` to a level the model supports. The stock
+   value is a system-defined **global inference profile**; global profiles can
+   route worldwide and are unsuitable when a geography boundary is required.
+   Use an appropriate geography-scoped profile (`us.` / `eu.` / `jp.` / etc.)
+   where data residency requires it. Update the intentionally independent
+   `_EXPECTED_DEFAULT_MODEL_ID`, `_EXPECTED_FIXTURE_NAME`, and thinking review
+   pins in `tests/test_default_bedrock_model_consistency.py`; those assertions
+   are not runtime defaults, but they make model, fixture, and reasoning changes
    explicit in review.
-2. If the new model has no captured scaffolder fixture yet, refresh the replay
-   corpus: `python scripts/capture_scaffold_fixtures.py --model <id>`.
+2. Capture a genuine fixture for the exact profile id:
+   `python3 scripts/capture_scaffold_fixtures.py --model <id> --region us-east-1`.
+   The canonical directive set makes three paid calls; high reasoning can make
+   the run substantially slower and more expensive.
 3. Run the Mission and capacity suites, then open a PR. The consistency guard
    proves both runtime aliases and the dependency scanner still resolve the
    same `cdk.json` value.
 
 Picking a *different* model — for regulatory, data-residency, model-governance,
-or cost reasons — rather than tracking Nova Premier releases is an operator choice,
+or cost reasons — rather than tracking Nova Lite releases is an operator choice,
 not routine maintenance; the override paths (per-call flag,
 `GCO_MISSION_BEDROCK_MODEL_ID`, or changing the default) live in
 [Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). Both

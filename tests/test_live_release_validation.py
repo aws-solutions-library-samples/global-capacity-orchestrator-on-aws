@@ -820,6 +820,399 @@ class TestEcrOwnershipCleanup:
         assert residual["regional"] == {}
 
 
+class TestProtectedBaselineIdentity:
+    _REGION = "us-east-1"
+    _STACK_ID = (
+        "arn:aws:cloudformation:us-east-1:123456789012:stack/GCOGitHubOIDCStack/protected-uuid"
+    )
+    _ROLE_NAME = "gco-live-protected-role"
+    _ECR_ARN = "arn:aws:ecr:us-east-1:123456789012:repository/gco-live/protected"
+
+    def _baseline(self) -> dict[str, object]:
+        return {
+            "protected_stacks": {
+                self._REGION: [
+                    {
+                        "name": "GCOGitHubOIDCStack",
+                        "stack_id": self._STACK_ID,
+                        "physical_resources": [
+                            {
+                                "logical_id": "GitHubActionsRole",
+                                "resource_type": "AWS::IAM::Role",
+                                "physical_id": self._ROLE_NAME,
+                            }
+                        ],
+                    }
+                ]
+            },
+            "ecr_repositories": {
+                self._REGION: [
+                    {
+                        "name": "gco-live/protected",
+                        "arn": self._ECR_ARN,
+                    }
+                ]
+            },
+        }
+
+    def test_stack_fingerprint_captures_paginated_resources_in_stable_order(self) -> None:
+        cloudformation = MagicMock()
+        cloudformation.describe_stacks.return_value = {
+            "Stacks": [
+                {
+                    "StackName": "GCOGitHubOIDCStack",
+                    "StackId": self._STACK_ID,
+                    "StackStatus": "CREATE_COMPLETE",
+                }
+            ]
+        }
+        cloudformation.get_template.return_value = {"TemplateBody": {"Resources": {}}}
+        cloudformation.get_stack_policy.return_value = {"StackPolicyBody": {"Statement": []}}
+        paginator = cloudformation.get_paginator.return_value
+        paginator.paginate.return_value = [
+            {
+                "StackResourceSummaries": [
+                    {
+                        "LogicalResourceId": "ZRole",
+                        "ResourceType": "AWS::IAM::Role",
+                        "PhysicalResourceId": "z-role",
+                    }
+                ]
+            },
+            {
+                "StackResourceSummaries": [
+                    {
+                        "LogicalResourceId": "AProvider",
+                        "ResourceType": "Custom::Provider",
+                        "PhysicalResourceId": "provider-identity",
+                    }
+                ]
+            },
+        ]
+        session = MagicMock()
+        session.client.return_value = cloudformation
+
+        result = inventory.describe_stack_fingerprint(
+            session,
+            self._REGION,
+            "GCOGitHubOIDCStack",
+        )
+
+        assert result is not None
+        assert result["physical_resources"] == [
+            {
+                "logical_id": "AProvider",
+                "resource_type": "Custom::Provider",
+                "physical_id": "provider-identity",
+            },
+            {
+                "logical_id": "ZRole",
+                "resource_type": "AWS::IAM::Role",
+                "physical_id": "z-role",
+            },
+        ]
+        cloudformation.get_paginator.assert_called_once_with("list_stack_resources")
+        paginator.paginate.assert_called_once_with(StackName=self._STACK_ID)
+
+    def test_comparison_reports_protected_physical_identity_drift(self) -> None:
+        expected = self._baseline()
+        actual = json.loads(json.dumps(expected))
+        actual["protected_stacks"][self._REGION][0]["physical_resources"][0]["physical_id"] = (
+            f"{self._ROLE_NAME}-replacement"
+        )
+
+        differences = inventory.compare_baseline(expected, actual)
+
+        assert len(differences) == 1
+        assert differences[0]["category"] == "protected_stacks"
+        assert differences[0]["region"] == self._REGION
+
+    def test_filter_removes_only_exact_stack_role_and_ecr_identities(self) -> None:
+        replacement_stack_id = self._STACK_ID.replace("protected-uuid", "replacement-uuid")
+        exact_role_arn = f"arn:aws:iam::123456789012:role/path/{self._ROLE_NAME}"
+        nearby_role_arn = f"{exact_role_arn}-extra"
+        nearby_ecr_arn = f"{self._ECR_ARN}-extra"
+        project_inventory = {
+            "cloudformation_stacks": {
+                self._REGION: [
+                    {
+                        "name": "GCOGitHubOIDCStack",
+                        "stack_id": self._STACK_ID,
+                    },
+                    {
+                        "name": "GCOGitHubOIDCStack",
+                        "stack_id": replacement_stack_id,
+                    },
+                ]
+            },
+            "regional": {
+                self._REGION: {
+                    "tagged_resources": [
+                        {"arn": self._ECR_ARN, "tags": {}},
+                        {"arn": nearby_ecr_arn, "tags": {}},
+                    ],
+                    "ecr_repositories": [
+                        "gco-live/protected",
+                        "gco-live/protected-extra",
+                    ],
+                }
+            },
+            "iam_roles": [exact_role_arn, nearby_role_arn],
+        }
+
+        filtered = actions._strip_baseline_ecr(project_inventory, self._baseline())
+
+        assert filtered["cloudformation_stacks"] == {
+            self._REGION: [
+                {
+                    "name": "GCOGitHubOIDCStack",
+                    "stack_id": replacement_stack_id,
+                }
+            ]
+        }
+        assert filtered["iam_roles"] == [nearby_role_arn]
+        assert filtered["regional"][self._REGION]["ecr_repositories"] == [
+            "gco-live/protected-extra"
+        ]
+        assert filtered["regional"][self._REGION]["tagged_resources"] == [
+            {"arn": nearby_ecr_arn, "tags": {}}
+        ]
+
+    def test_filter_requires_complete_protected_resource_authority(self) -> None:
+        baseline = self._baseline()
+        del baseline["protected_stacks"][self._REGION][0]["physical_resources"]
+
+        with pytest.raises(RuntimeError, match="omitted physical resources"):
+            actions._strip_baseline_ecr({}, baseline)
+
+    @pytest.mark.parametrize("protected_stacks", [[], "", 0, False])
+    def test_filter_rejects_falsey_non_object_stack_authority(
+        self, protected_stacks: object
+    ) -> None:
+        with pytest.raises(RuntimeError, match="protected_stacks must be an object"):
+            actions._strip_baseline_ecr({}, {"protected_stacks": protected_stacks})
+
+    @pytest.mark.parametrize("baseline", [{}, {"protected_stacks": None}])
+    def test_missing_or_null_protected_stack_authority_is_empty(
+        self, baseline: dict[str, object]
+    ) -> None:
+        assert actions._baseline_protected_identities(baseline) == ({}, {})
+
+    def test_backup_inventory_matches_cloudformation_physical_ids(self) -> None:
+        plan_id = "plan-123"
+        other_plan_id = "plan-789"
+        selection_id = "selection-456"
+        vault_name = "gco-live-vault"
+        baseline = {
+            "protected_stacks": {
+                self._REGION: [
+                    {
+                        "stack_id": self._STACK_ID,
+                        "physical_resources": [
+                            {
+                                "logical_id": "BackupPlan",
+                                "resource_type": "AWS::Backup::BackupPlan",
+                                "physical_id": plan_id,
+                            },
+                            {
+                                "logical_id": "BackupSelection",
+                                "resource_type": "AWS::Backup::BackupSelection",
+                                "physical_id": selection_id,
+                            },
+                            {
+                                "logical_id": "BackupVault",
+                                "resource_type": "AWS::Backup::BackupVault",
+                                "physical_id": vault_name,
+                            },
+                        ],
+                    }
+                ]
+            }
+        }
+        plan_arn = f"arn:aws:backup:{self._REGION}:123456789012:backup-plan:{plan_id}"
+        vault_arn = f"arn:aws:backup:{self._REGION}:123456789012:backup-vault:{vault_name}"
+        project_inventory = {
+            "regional": {
+                self._REGION: {
+                    "backup_plans": [plan_arn, f"{plan_arn}-other"],
+                    "backup_selections": [
+                        f"{plan_id}:{selection_id}",
+                        f"{other_plan_id}:{selection_id}",
+                        f"{plan_id}:{selection_id}-other",
+                    ],
+                    "backup_vaults": [vault_arn, f"{vault_arn}-other"],
+                }
+            }
+        }
+
+        filtered = actions._strip_baseline_ecr(project_inventory, baseline)
+
+        assert filtered["regional"][self._REGION] == {
+            "backup_plans": [f"{plan_arn}-other"],
+            "backup_selections": [
+                f"{other_plan_id}:{selection_id}",
+                f"{plan_id}:{selection_id}-other",
+            ],
+            "backup_vaults": [f"{vault_arn}-other"],
+        }
+
+    def test_tagged_inventory_matches_exact_stack_and_physical_identities(self) -> None:
+        account_id = "123456789012"
+        lambda_name = "gco-protected-function"
+        table_name = "gco-protected-table"
+        bucket_name = "gco-protected-bucket"
+        queue_name = "gco-protected-queue"
+        queue_url = f"https://sqs.{self._REGION}.amazonaws.com/{account_id}/{queue_name}"
+        key_id = "12345678-1234-1234-1234-123456789012"
+        baseline = {
+            "protected_stacks": {
+                self._REGION: [
+                    {
+                        "stack_id": self._STACK_ID,
+                        "physical_resources": [
+                            {
+                                "logical_id": "Function",
+                                "resource_type": "AWS::Lambda::Function",
+                                "physical_id": lambda_name,
+                            },
+                            {
+                                "logical_id": "Table",
+                                "resource_type": "AWS::DynamoDB::Table",
+                                "physical_id": table_name,
+                            },
+                            {
+                                "logical_id": "Bucket",
+                                "resource_type": "AWS::S3::Bucket",
+                                "physical_id": bucket_name,
+                            },
+                            {
+                                "logical_id": "Queue",
+                                "resource_type": "AWS::SQS::Queue",
+                                "physical_id": queue_url,
+                            },
+                            {
+                                "logical_id": "Key",
+                                "resource_type": "AWS::KMS::Key",
+                                "physical_id": key_id,
+                            },
+                        ],
+                    }
+                ]
+            }
+        }
+        exact_arns = [
+            f"arn:aws:lambda:{self._REGION}:{account_id}:function:{lambda_name}",
+            f"arn:aws:dynamodb:{self._REGION}:{account_id}:table/{table_name}",
+            f"arn:aws:s3:::{bucket_name}",
+            f"arn:aws:sqs:{self._REGION}:{account_id}:{queue_name}",
+            f"arn:aws:kms:{self._REGION}:{account_id}:key/{key_id}",
+        ]
+        nearby_arns = [f"{arn}-other" for arn in exact_arns]
+        stack_tagged_arn = (
+            f"arn:aws:ssm:{self._REGION}:{account_id}:parameter/protected-stack-resource"
+        )
+        nearby_stack_id = self._STACK_ID.replace("protected-uuid", "replacement-uuid")
+        project_inventory = {
+            "regional": {
+                self._REGION: {
+                    "tagged_resources": [
+                        *({"arn": arn, "tags": {}} for arn in exact_arns),
+                        *({"arn": arn, "tags": {}} for arn in nearby_arns),
+                        {
+                            "arn": stack_tagged_arn,
+                            "tags": {"aws:cloudformation:stack-id": self._STACK_ID},
+                        },
+                        {
+                            "arn": f"{stack_tagged_arn}-other",
+                            "tags": {"aws:cloudformation:stack-id": nearby_stack_id},
+                        },
+                    ]
+                }
+            }
+        }
+
+        filtered = actions._strip_baseline_ecr(project_inventory, baseline)
+
+        assert filtered["regional"][self._REGION]["tagged_resources"] == [
+            *({"arn": arn, "tags": {}} for arn in nearby_arns),
+            {
+                "arn": f"{stack_tagged_arn}-other",
+                "tags": {"aws:cloudformation:stack-id": nearby_stack_id},
+            },
+        ]
+
+    def test_authoritative_eks_inventory_keeps_unrelated_cluster_names(self) -> None:
+        eks = MagicMock()
+        eks.get_paginator.return_value.paginate.return_value = [
+            {"clusters": ["unrelated", "gco-live-west"]},
+            {"clusters": ["gco-live", "unrelated"]},
+        ]
+        session = MagicMock()
+        session.client.return_value = eks
+
+        assert inventory._list_eks_clusters(session, self._REGION, None) == [
+            "gco-live",
+            "gco-live-west",
+            "unrelated",
+        ]
+        assert inventory._list_eks_clusters(session, self._REGION, "gco-live") == [
+            "gco-live",
+            "gco-live-west",
+        ]
+
+    def test_filter_suppresses_only_authoritatively_orphaned_eks_pods(self) -> None:
+        existing_pod = (
+            "arn:aws:eks:us-east-1:123456789012:podidentityassociation/gco-live-existing/a-existing"
+        )
+        orphaned_pod = (
+            "arn:aws:eks:us-east-1:123456789012:podidentityassociation/gco-live-orphan/a-orphan"
+        )
+        malformed_pod = "arn:aws:eks:us-east-1:123456789012:podidentityassociation/gco-live-orphan"
+        non_pod_eks = "arn:aws:eks:us-east-1:123456789012:cluster/gco-live-orphan"
+        wrong_region_pod = (
+            "arn:aws:eks:us-west-2:123456789012:"
+            "podidentityassociation/gco-live-orphan/a-wrong-region"
+        )
+        unscanned_region_pod = (
+            "arn:aws:eks:us-west-2:123456789012:podidentityassociation/gco-live-orphan/a-unscanned"
+        )
+        project_inventory = {
+            "cloudformation_stacks": {},
+            "authoritative_eks_clusters": {
+                self._REGION: ["gco-live-existing"],
+            },
+            "regional": {
+                self._REGION: {
+                    "tagged_resources": [
+                        {"arn": orphaned_pod, "tags": {}},
+                        {"arn": existing_pod, "tags": {}},
+                        {"arn": malformed_pod, "tags": {}},
+                        {"arn": non_pod_eks, "tags": {}},
+                        {"arn": wrong_region_pod, "tags": {}},
+                    ]
+                },
+                "us-west-2": {"tagged_resources": [{"arn": unscanned_region_pod, "tags": {}}]},
+            },
+        }
+        baseline = {"protected_stacks": {}, "ecr_repositories": {}}
+
+        filtered = actions._strip_baseline_ecr(project_inventory, baseline)
+
+        east_arns = {
+            record["arn"] for record in filtered["regional"][self._REGION]["tagged_resources"]
+        }
+        assert orphaned_pod not in east_arns
+        assert east_arns == {
+            existing_pod,
+            malformed_pod,
+            non_pod_eks,
+            wrong_region_pod,
+        }
+        assert filtered["regional"]["us-west-2"]["tagged_resources"] == [
+            {"arn": unscanned_region_pod, "tags": {}}
+        ]
+
+
 class TestStrictDestroyCheckpointing:
     def _destroy_context(self, *, destroyed: bool = False) -> SimpleNamespace:
         stack_id = "arn:aws:cloudformation:us-east-1:123456789012:stack/gco-live-global/stack-uuid"

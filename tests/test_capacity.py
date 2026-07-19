@@ -2183,6 +2183,7 @@ class TestBedrockCapacityAdvisor:
             advisor = BedrockCapacityAdvisor(model_id="anthropic.claude-3-haiku-20240307-v1:0")
 
             assert advisor.model_id == "anthropic.claude-3-haiku-20240307-v1:0"
+            assert advisor._uses_default_model is False
 
     @patch("cli.capacity.advisor.get_config")
     def test_gather_capacity_data(self, mock_config):
@@ -2290,6 +2291,7 @@ class TestBedrockCapacityAdvisor:
                 "output": {
                     "message": {
                         "content": [
+                            {"reasoningContent": {"reasoningText": {"text": "[REDACTED]"}}},
                             {
                                 "text": json.dumps(
                                     {
@@ -2303,7 +2305,7 @@ class TestBedrockCapacityAdvisor:
                                         "warnings": [],
                                     }
                                 )
-                            }
+                            },
                         ]
                     }
                 }
@@ -2326,6 +2328,14 @@ class TestBedrockCapacityAdvisor:
                 assert rec.recommended_instance_type == "g4dn.xlarge"
                 assert rec.recommended_capacity_type == "spot"
                 assert rec.confidence == "high"
+                request = mock_bedrock.converse.call_args.kwargs
+                assert "inferenceConfig" not in request
+                assert request["additionalModelRequestFields"] == {
+                    "reasoningConfig": {
+                        "type": "enabled",
+                        "maxReasoningEffort": "high",
+                    }
+                }
 
     @patch("cli.capacity.advisor.get_config")
     def test_get_recommendation_access_denied(self, mock_config):
@@ -2419,6 +2429,7 @@ class TestGetBedrockCapacityAdvisor:
 
             assert advisor is not None
             assert advisor.model_id == BedrockCapacityAdvisor.DEFAULT_MODEL
+            assert advisor._uses_default_model is True
 
     @patch("cli.capacity.advisor.get_config")
     def test_get_bedrock_capacity_advisor_with_model(self, mock_config):

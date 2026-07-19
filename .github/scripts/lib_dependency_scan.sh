@@ -671,7 +671,7 @@ if isinstance(value, str) and value.strip():
 # purely-numeric token (model version, generation, date) dropped:
 #
 #   us.amazon.nova-pro-v1:0                       -> us.amazon.nova-pro
-#   us.amazon.nova-2-lite-v1:0                    -> us.amazon.nova-lite
+#   global.amazon.nova-2-lite-v1:0                -> global.amazon.nova-lite
 #   us.anthropic.claude-sonnet-4-5-20250929-v1:0  -> us.anthropic.claude-sonnet
 #
 # Folding the numeric generation token into the version key (rather
@@ -732,9 +732,9 @@ print('same' if a == b else ('newer' if b > a else 'older'))
 # switching tier/provider is a human decision, not drift.
 #
 # Region defaults to us-east-1 (matches the advisor + Mission sampling
-# default region) regardless of the workflow's configured region, so
-# the us.* cross-Region profiles resolve consistently. Empty output on
-# any failure (no creds, throttling, schema change) — the caller
+# default region) regardless of the workflow's configured region, so both
+# global.* and geography-scoped cross-Region profiles resolve consistently.
+# Empty output on any failure (no creds, throttling, schema change) — the caller
 # treats an empty result as "skip", same as the other AWS-creds
 # helpers.
 #

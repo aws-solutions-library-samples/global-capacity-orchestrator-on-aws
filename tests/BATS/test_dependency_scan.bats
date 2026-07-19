@@ -1118,11 +1118,11 @@ EOF
     [ "$result" = "us.amazon.nova-pro" ]
 }
 
-@test "bedrock_model_family: Nova 2 Lite folds the generation into the version" {
-    # The numeric generation token is dropped from the family so Nova 1
-    # Lite and Nova 2 Lite share a family (and compare by version).
-    result="$(bedrock_model_family "us.amazon.nova-2-lite-v1:0")"
-    [ "$result" = "us.amazon.nova-lite" ]
+@test "bedrock_model_family: global Nova 2 Lite preserves global scope and folds generation" {
+    # The numeric generation token is dropped from the family so later Nova
+    # Lite generations compare within the same global-profile family.
+    result="$(bedrock_model_family "global.amazon.nova-2-lite-v1:0")"
+    [ "$result" = "global.amazon.nova-lite" ]
 }
 
 @test "bedrock_model_family: Claude Sonnet drops the model version and date" {
@@ -1191,6 +1191,28 @@ SHIM
     # v2:0 is the newest ACTIVE nova-pro; the LEGACY v9:0 is skipped and
     # other families (nova-lite, claude) are filtered out.
     [ "$output" = "us.amazon.nova-pro-v2:0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_model: selects the newest ACTIVE global Nova Lite profile" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/aws" <<'SHIM'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"inferenceProfileSummaries":[
+  {"inferenceProfileId":"global.amazon.nova-2-lite-v1:0","status":"ACTIVE"},
+  {"inferenceProfileId":"global.amazon.nova-3-lite-v1:0","status":"ACTIVE"},
+  {"inferenceProfileId":"global.amazon.nova-9-lite-v1:0","status":"LEGACY"},
+  {"inferenceProfileId":"us.amazon.nova-8-lite-v1:0","status":"ACTIVE"},
+  {"inferenceProfileId":"global.amazon.nova-9-pro-v1:0","status":"ACTIVE"}
+]}
+JSON
+SHIM
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_model \
+        "global.amazon.nova-2-lite-v1:0" us-east-1
+    [ "$status" -eq 0 ]
+    [ "$output" = "global.amazon.nova-3-lite-v1:0" ]
     rm -rf "$tmpdir"
 }
 

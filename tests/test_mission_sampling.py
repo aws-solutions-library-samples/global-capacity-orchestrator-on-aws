@@ -692,6 +692,7 @@ import unittest.mock as mock  # noqa: E402
 
 from mission.sampling import (  # noqa: E402
     BEDROCK_MAX_TOKENS,
+    BEDROCK_READ_TIMEOUT_SECONDS,
     BEDROCK_TEMPERATURE,
     DEFAULT_BEDROCK_MODEL_ID,
     DEFAULT_BEDROCK_REGION,
@@ -760,6 +761,7 @@ def test_bedrock_backend_resolves_defaults(monkeypatch) -> None:
     backend = BedrockSamplingBackend()
     assert backend.model_id == DEFAULT_BEDROCK_MODEL_ID
     assert backend._region == DEFAULT_BEDROCK_REGION
+    assert backend._uses_default_model is True
 
 
 def test_bedrock_backend_resolves_from_env(monkeypatch) -> None:
@@ -770,6 +772,7 @@ def test_bedrock_backend_resolves_from_env(monkeypatch) -> None:
     backend = BedrockSamplingBackend()
     assert backend.model_id == "anthropic.test-model-v1"
     assert backend._region == "eu-west-2"
+    assert backend._uses_default_model is False
 
 
 def test_bedrock_backend_constructor_args_override_env(monkeypatch) -> None:
@@ -780,6 +783,7 @@ def test_bedrock_backend_constructor_args_override_env(monkeypatch) -> None:
     backend = BedrockSamplingBackend(model_id="from-arg", region="from-arg-region")
     assert backend.model_id == "from-arg"
     assert backend._region == "from-arg-region"
+    assert backend._uses_default_model is False
 
 
 def test_bedrock_backend_used_path() -> None:
@@ -790,6 +794,26 @@ def test_bedrock_backend_used_path() -> None:
         out = _run(backend.sample(_make_prompt()))
     assert out == "ok"
     assert len(fake_client.converse_calls) == 1
+
+
+def test_bedrock_backend_skips_reasoning_content_before_final_text() -> None:
+    """Nova reasoning blocks do not obscure the final response text."""
+    response = {
+        "output": {
+            "message": {
+                "content": [
+                    {"reasoningContent": {"reasoningText": {"text": "[REDACTED]"}}},
+                    {"text": "final answer"},
+                ]
+            }
+        }
+    }
+    fake_client = _FakeBedrockClient(response=response)
+    with _patch_boto3_session(fake_client):
+        backend = BedrockSamplingBackend(model_id="m", region="us-east-1")
+        out = _run(backend.sample(_make_prompt()))
+
+    assert out == "final answer"
 
 
 def test_bedrock_backend_no_credentials() -> None:
@@ -909,7 +933,8 @@ def test_bedrock_backend_lazy_client_init() -> None:
         assert fake_session.client.call_count == 1
         first_call_kwargs = fake_session.client.call_args
         assert first_call_kwargs.args == ("bedrock-runtime",)
-        assert first_call_kwargs.kwargs == {"region_name": DEFAULT_BEDROCK_REGION}
+        assert first_call_kwargs.kwargs["region_name"] == DEFAULT_BEDROCK_REGION
+        assert first_call_kwargs.kwargs["config"].read_timeout == BEDROCK_READ_TIMEOUT_SECONDS
 
         # Second sample: client cached, no further client(...) calls.
         _run(backend.sample(_make_prompt()))
@@ -919,8 +944,7 @@ def test_bedrock_backend_lazy_client_init() -> None:
 
 
 def test_bedrock_backend_passes_correct_inference_config() -> None:
-    """The Converse call carries the prompt text, the resolved model id,
-    and the pinned inference config."""
+    """Explicit other-model overrides retain their existing inference controls."""
     fake_client = _FakeBedrockClient(response=_well_shaped_response("ok"))
     with _patch_boto3_session(fake_client):
         backend = BedrockSamplingBackend(model_id="explicit-model", region="us-west-2")
@@ -936,6 +960,24 @@ def test_bedrock_backend_passes_correct_inference_config() -> None:
     assert kwargs["inferenceConfig"] == {
         "maxTokens": BEDROCK_MAX_TOKENS,
         "temperature": BEDROCK_TEMPERATURE,
+    }
+    assert "additionalModelRequestFields" not in kwargs
+
+
+def test_bedrock_backend_applies_default_high_reasoning_without_sampling_controls() -> None:
+    """The canonical Nova 2 default receives the native maximum-effort fields."""
+    fake_client = _FakeBedrockClient(response=_well_shaped_response("ok"))
+    with _patch_boto3_session(fake_client):
+        backend = BedrockSamplingBackend(region="us-east-1")
+        _run(backend.sample(_make_prompt()))
+
+    kwargs = fake_client.converse_calls[0]
+    assert "inferenceConfig" not in kwargs
+    assert kwargs["additionalModelRequestFields"] == {
+        "reasoningConfig": {
+            "type": "enabled",
+            "maxReasoningEffort": "high",
+        }
     }
 
 

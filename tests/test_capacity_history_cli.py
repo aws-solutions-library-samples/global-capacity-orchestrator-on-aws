@@ -9,13 +9,13 @@ from click.testing import CliRunner
 
 from cli.capacity.advisor import CapacityPredictionResult
 from cli.main import cli
-from tests._scaffold_replay import PREMIER_FIXTURE, PREMIER_MODEL_ID
+from tests._scaffold_replay import DEFAULT_FIXTURE, DEFAULT_MODEL_ID
 
 
-def _premier_advisor_mock() -> MagicMock:
-    """Return an advisor mock tied to the validated Premier fixture."""
+def _default_advisor_mock() -> MagicMock:
+    """Return an advisor mock tied to the validated default-model fixture."""
     advisor = MagicMock()
-    advisor.model_id = PREMIER_FIXTURE.model_id
+    advisor.model_id = DEFAULT_FIXTURE.model_id
     return advisor
 
 
@@ -134,7 +134,7 @@ def _rnf(op="GetItem"):
 class TestPredict:
     @patch("cli.capacity.get_bedrock_capacity_advisor")
     def test_predict_renders_table(self, mock_get_advisor):
-        advisor = _premier_advisor_mock()
+        advisor = _default_advisor_mock()
         advisor.predict_capacity_window.return_value = CapacityPredictionResult(
             instance_type="g5.xlarge",
             region="us-east-1",
@@ -152,11 +152,11 @@ class TestPredict:
         assert "Monday" in result.output
         mock_get_advisor.assert_called_once()
         assert mock_get_advisor.call_args.kwargs["model_id"] is None
-        assert advisor.model_id == PREMIER_MODEL_ID
+        assert advisor.model_id == DEFAULT_MODEL_ID
 
     @patch("cli.capacity.get_bedrock_capacity_advisor")
     def test_predict_no_samples_warns(self, mock_get_advisor):
-        advisor = _premier_advisor_mock()
+        advisor = _default_advisor_mock()
         advisor.predict_capacity_window.side_effect = ValueError(
             "No historical capacity samples for g5.xlarge in us-east-1 yet."
         )
@@ -169,7 +169,7 @@ class TestPredict:
 
     @patch("cli.capacity.get_bedrock_capacity_advisor")
     def test_predict_table_missing_hints(self, mock_get_advisor):
-        advisor = _premier_advisor_mock()
+        advisor = _default_advisor_mock()
         advisor.predict_capacity_window.side_effect = _rnf("GetStatistics")
         mock_get_advisor.return_value = advisor
         result = CliRunner().invoke(
@@ -233,7 +233,7 @@ class TestHistoryFriendlyErrors:
 class TestPredictAllRegions:
     @patch("cli.capacity.get_bedrock_capacity_advisor")
     def test_all_regions_renders_each(self, mock_get_advisor):
-        advisor = _premier_advisor_mock()
+        advisor = _default_advisor_mock()
         advisor.predict_capacity_windows_all_regions.return_value = [
             CapacityPredictionResult(
                 instance_type="g5.xlarge",
@@ -261,7 +261,7 @@ class TestPredictAllRegions:
 
     @patch("cli.capacity.get_bedrock_capacity_advisor")
     def test_all_regions_no_data_warns(self, mock_get_advisor):
-        advisor = _premier_advisor_mock()
+        advisor = _default_advisor_mock()
         advisor.predict_capacity_windows_all_regions.side_effect = ValueError(
             "No historical capacity samples for g5.xlarge in any region yet."
         )

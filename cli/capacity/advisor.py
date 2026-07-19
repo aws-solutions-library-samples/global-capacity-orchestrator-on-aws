@@ -9,10 +9,16 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from cli.config import GCOConfig, get_config
-from gco.bedrock import get_default_bedrock_model_id
+from gco.bedrock import (
+    BEDROCK_READ_TIMEOUT_SECONDS,
+    build_bedrock_converse_options,
+    extract_bedrock_converse_text,
+    get_default_bedrock_model_id,
+)
 
 from .checker import CapacityChecker
 from .multi_region import MultiRegionCapacityChecker, compute_price_trend
@@ -76,11 +82,16 @@ class BedrockCapacityAdvisor:
         self._session = boto3.Session()
         self._capacity_checker = CapacityChecker(config)
         self._multi_region_checker = MultiRegionCapacityChecker(config)
-        self.model_id = model_id or self.DEFAULT_MODEL
+        self._uses_default_model = model_id is None
+        self.model_id = self.DEFAULT_MODEL if self._uses_default_model else model_id
 
     def _get_bedrock_client(self) -> Any:
         """Get Bedrock runtime client."""
-        return self._session.client("bedrock-runtime", region_name="us-east-1")
+        return self._session.client(
+            "bedrock-runtime",
+            region_name="us-east-1",
+            config=Config(read_timeout=BEDROCK_READ_TIMEOUT_SECONDS),
+        )
 
     def gather_capacity_data(
         self,
@@ -539,11 +550,16 @@ Respond ONLY with the JSON object, no additional text."""
             response = bedrock.converse(
                 modelId=self.model_id,
                 messages=[{"role": "user", "content": [{"text": prompt}]}],
-                inferenceConfig={"maxTokens": 2048, "temperature": 0.1},
+                **build_bedrock_converse_options(
+                    self.model_id,
+                    inference_config={"maxTokens": 2048, "temperature": 0.1},
+                    apply_default_reasoning=self._uses_default_model,
+                ),
             )
 
-            # Extract response text
-            response_text = response["output"]["message"]["content"][0]["text"]
+            # Extended reasoning precedes the final answer with a
+            # ``reasoningContent`` block; return the first real text block.
+            response_text = extract_bedrock_converse_text(response)
 
             # Parse JSON response
             # Find JSON in response (in case model adds extra text)
@@ -670,9 +686,13 @@ Respond ONLY with the JSON object, no additional text."""
         response = bedrock.converse(
             modelId=self.model_id,
             messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"maxTokens": 2048, "temperature": 0.2},
+            **build_bedrock_converse_options(
+                self.model_id,
+                inference_config={"maxTokens": 2048, "temperature": 0.2},
+                apply_default_reasoning=self._uses_default_model,
+            ),
         )
-        text = response["output"]["message"]["content"][0]["text"]
+        text = extract_bedrock_converse_text(response)
 
         parsed: dict[str, Any] = {}
         start = text.find("{")

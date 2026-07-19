@@ -33,6 +33,8 @@ seen continues to round-trip through the validator.
 ```text
 tests/fixtures/scaffold_responses/
 ├── README.md                                   # this file
+├── global_amazon_nova_2_lite_v1_0.json           # canonical default
+├── us_amazon_nova_premier_v1_0.json              # historical capture
 ├── us_anthropic_claude_sonnet_4_5_*.json
 ├── us_anthropic_claude_haiku_4_5_*.json
 ├── us_amazon_nova_pro_v1_0.json
@@ -74,25 +76,34 @@ just want to add a model to the safety net — run the capture script
 once and commit the resulting JSON:
 
 ```bash
-# Capture against a single new model.
-python scripts/capture_scaffold_fixtures.py \
+# Capture the canonical global Nova 2 Lite default. This makes exactly
+# three sequential paid Converse calls, one per canonical directive.
+python3 scripts/capture_scaffold_fixtures.py \
+  --model global.amazon.nova-2-lite-v1:0 \
+  --region us-east-1
+
+# Capture against a different single model.
+python3 scripts/capture_scaffold_fixtures.py \
   --model us.amazon.nova-micro-v1:0
 
 # Capture against every model in the default list (re-captures
 # existing entries and refreshes them).
-python scripts/capture_scaffold_fixtures.py
+python3 scripts/capture_scaffold_fixtures.py
 ```
 
 The script needs AWS credentials with `bedrock:InvokeModel` access
-to the listed models. Failures (denied access, transient errors)
-are reported per-model and never abort the run — every model that
-does succeed lands in the fixture directory and protects the
-validator path on every CI run thereafter.
+to the listed models. When the requested id is the configured default, the
+script also applies `cdk.json` `context.bedrock.thinking`; the stock Nova 2 Lite
+`high` effort setting can materially increase billed output tokens and latency.
+AWS requires `maxTokens`, `temperature`, and `topP` to remain unset in that
+mode. Failures (denied access, transient errors) are reported per-model and
+never abort the run — every model that does succeed lands in the fixture
+directory and protects the validator path on every CI run thereafter.
 
 After capturing, run the replay test and commit:
 
 ```bash
-python -m pytest tests/test_scaffold_fixture_replay.py -v
+python3 -m pytest tests/test_scaffold_fixture_replay.py -v
 git add tests/fixtures/scaffold_responses/<new_fixture>.json
 ```
 

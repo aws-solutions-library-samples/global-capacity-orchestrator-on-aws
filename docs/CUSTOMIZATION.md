@@ -1477,11 +1477,26 @@ GCO uses an Amazon Bedrock model for two optional, **advisory** features:
 - **Mission sampling** — the goal-directed Mission engine can ask a model for strategy-revision rationales and final-report lessons (`gco mission ...`).
 - **Capacity advisor** — `gco capacity ai-recommend` and `gco capacity predict` send capacity data to a model for a placement/timing recommendation, and the `ai_recommend` MCP tool does the same.
 
-Both default to **Amazon Nova Premier** (`us.amazon.nova-premier-v1:0`). Nova Premier is the default because:
+Both default to **Amazon Nova 2 Lite** through its system-defined global
+cross-Region inference profile (`global.amazon.nova-2-lite-v1:0`). It is the
+default because:
 
-- `us.amazon.nova-premier-v1:0` is Amazon's system-defined US geographic cross-Region inference profile for Nova Premier.
-- As a first-party Amazon model it does **not** require the one-time **First-Time-Use (FTU)** form that Anthropic asks each account (or organization) to submit before first invocation — so the advisory paths work on a fresh account with no extra onboarding step.
+- The global profile maximizes throughput by allowing Bedrock to route across
+  supported worldwide Regions. Choose a geography-scoped profile instead when
+  your workload has data-residency constraints.
+- As a first-party Amazon model it does **not** require the one-time
+  **First-Time-Use (FTU)** form that Anthropic asks each account (or
+  organization) to submit before first invocation.
+- The stock `cdk.json` configuration enables Nova 2 Lite extended thinking at
+  `high`, its maximum supported reasoning effort. GCO translates that setting
+  to Converse `reasoningConfig` and skips the leading `reasoningContent` block
+  when reading the final answer.
 
+> **Cost and latency:** reasoning tokens are billed as output tokens. High
+> effort can materially increase latency and token usage. AWS requires
+> `maxTokens`, `temperature`, and `topP` to be unset at high effort, so GCO
+> omits them for the canonical default.
+>
 > These Bedrock features are advisory and degrade gracefully. When no model is reachable (no credentials, model not enabled, or access denied) the Mission engine falls back to its deterministic templates and the capacity advisor surfaces a clear error. Core orchestration never depends on Bedrock.
 
 ### Choosing a different model
@@ -1510,23 +1525,43 @@ export GCO_MISSION_BEDROCK_REGION="eu-west-1"   # default: us-east-1
 
 **3. Change the default for everyone** — edit the one canonical value:
 
-| File | Key |
-|------|-----|
-| `cdk.json` | `context.bedrock.default_model_id` |
+| File | Keys |
+|------|------|
+| `cdk.json` | `context.bedrock.default_model_id`, `context.bedrock.thinking.effort` |
 
-Both Python consumers resolve that value through `gco.bedrock`. The same `cdk.json` is shipped as package data so installed CLI and MCP entry points retain the default when they run outside a source checkout. `tests/test_default_bedrock_model_consistency.py` guards the resolver, compatibility aliases, package-data declaration, inference-profile shape, and captured fixture.
+Both Python consumers resolve those values through `gco.bedrock`. The same
+`cdk.json` is shipped as package data so installed CLI and MCP entry points
+retain the default when they run outside a source checkout.
+`tests/test_default_bedrock_model_consistency.py` guards the resolver,
+compatibility aliases, package-data declaration, inference-profile shape,
+reasoning translation, and captured fixture.
+
+The canonical thinking setting applies only when the selected model id equals
+the configured default. A per-call or environment override for Anthropic or
+another model keeps that caller's normal inference controls and receives no
+Nova-specific `reasoningConfig`.
 
 Resolution order: per-call flag (`--model` / `--bedrock-model-id` / MCP `model=`) → `GCO_MISSION_BEDROCK_MODEL_ID` (Mission path only) → `cdk.json` `context.bedrock.default_model_id`.
 
 ### What to check when choosing a model
 
 - **Access** — the model (or its cross-Region inference profile) must be enabled in your account and reachable from the configured Region. Third-party models may require AWS Marketplace subscription permissions and, for Anthropic, the FTU form. See the AWS guide on [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html).
-- **Inference profile vs base id** — GCO pins a system-defined **inference profile** id (the `us.` / `eu.` / `apac.` prefix) so requests route across Regions. Prefer a profile id over a bare model id where one exists.
+- **Inference profile vs base id** — GCO pins a system-defined **global
+  inference profile** id (`global.`) for maximum throughput. Global profiles
+  may route worldwide; use a geography-scoped profile (`us.`, `eu.`, `jp.`,
+  etc.) where a residency boundary is required. Prefer a profile id over a
+  bare model id where one exists.
 - **Converse API support** — GCO calls the Bedrock **Converse** API, so the model must support it (the defaults and every entry in the curated set in `scripts/capture_scaffold_fixtures.py` do).
 
 ### Staying current
 
-The monthly **deps-scan** workflow compares the pinned default against the newest system-defined inference profile in the *same model family* (for example, a newer Amazon Nova Premier release) and opens a GitHub issue when a newer one is available, so the default never silently falls behind. It uses read-only Bedrock list permissions on the CI OIDC role; see [CI documentation](../.github/CI.md#dependency-scan-script) and `.github/scripts/dependency-scan.sh`.
+The monthly **deps-scan** workflow compares the pinned default against the
+newest system-defined inference profile in the *same scope and model family*
+(for example, a newer global Amazon Nova Lite release) and opens a GitHub issue
+when one is available. It will not cross-suggest a geographic profile, another
+tier, or another provider. It uses read-only Bedrock list permissions on the CI
+OIDC role; see [CI documentation](../.github/CI.md#dependency-scan-script) and
+`.github/scripts/dependency-scan.sh`.
 
 ## CDK-nag Compliance
 

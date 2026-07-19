@@ -600,7 +600,7 @@ EMR_COUNT="$(wc -l < "$EMR_RESULTS" 2>/dev/null | tr -d ' ')"
 # cannot silently diverge.
 #
 # Same-family scoping (see bedrock_model_family) means we only flag a newer
-# release of the same model line (e.g. a newer Amazon Nova Premier) — never a
+# release of the same model line (e.g. a newer global Amazon Nova Lite) — never a
 # different tier or provider, since switching those is a human decision,
 # not drift. When a newer release is reported, update
 # context.bedrock.default_model_id in cdk.json, then re-capture the scaffold

@@ -105,7 +105,13 @@ Captures raw Bedrock model output for the Mission scaffolder prompt across a cur
 # access, transient errors) are reported and never abort the run.
 python3 scripts/capture_scaffold_fixtures.py
 
-# Capture a single model.
+# Capture the canonical global Nova 2 Lite fixture. This makes three
+# sequential paid Converse calls and applies the stock high reasoning effort.
+python3 scripts/capture_scaffold_fixtures.py \
+  --model global.amazon.nova-2-lite-v1:0 \
+  --region us-east-1
+
+# Capture a different single model.
 python3 scripts/capture_scaffold_fixtures.py \
   --model us.anthropic.claude-haiku-4-5-20251001-v1:0
 
@@ -113,7 +119,15 @@ python3 scripts/capture_scaffold_fixtures.py \
 python3 scripts/capture_scaffold_fixtures.py --region us-west-2
 ```
 
-Requires AWS credentials with `bedrock:InvokeModel` access to the listed models. Schedule it as a quarterly canary if you want fresh data; otherwise the existing fixtures continue to protect the validator surface. The full lifecycle (adding a new model, what to do when the replay test fires red) is documented in [`tests/fixtures/scaffold_responses/README.md`](../tests/fixtures/scaffold_responses/README.md).
+Requires AWS credentials with `bedrock:InvokeModel` access to the listed
+models. The configured default also consumes `cdk.json`
+`context.bedrock.thinking`; the stock Nova 2 Lite `high` effort can materially
+increase billed output tokens and latency, and leaves `maxTokens`,
+`temperature`, and `topP` unset as required by AWS. Schedule capture as a
+quarterly canary if you want fresh data; otherwise the existing fixtures
+continue to protect the validator surface. The full lifecycle (adding a new
+model, what to do when the replay test fires red) is documented in
+[`tests/fixtures/scaffold_responses/README.md`](../tests/fixtures/scaffold_responses/README.md).
 
 ### MCP Install Smoke Test
 

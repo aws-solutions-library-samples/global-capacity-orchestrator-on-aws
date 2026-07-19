@@ -69,6 +69,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -257,23 +258,36 @@ def _augment_trusted_registries_with_project_ecr(
     return augmented
 
 
+def _deployment_timestamp() -> str:
+    """Return the synth-time token that deliberately retriggers convergence."""
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _load_helm_chart_order() -> list[str]:
     """Return helm chart names in their canonical install order.
 
     Reads ``lambda/helm-installer/charts.yaml`` (the source of truth, in file
     order) so the Step Functions state machine has exactly one task per chart,
     in the same order every deploy — kueue stays last because its mutating
-    webhook intercepts every Job/Deployment. Falls back to an empty list if the
-    file can't be read (the synth-time tests assert it is non-empty).
+    webhook intercepts every Job/Deployment. Missing or malformed chart data
+    aborts synthesis rather than silently omitting every Helm install/uninstall.
     """
     charts_path = Path(__file__).resolve().parents[2] / "lambda" / "helm-installer" / "charts.yaml"
     try:
         with open(charts_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-    except OSError:
-        return []
-    charts = data.get("charts", {})
-    return list(charts.keys()) if isinstance(charts, dict) else []
+            data = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError) as exc:
+        raise RuntimeError(f"Unable to load Helm chart order from {charts_path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Helm chart config {charts_path} must be an object")
+    charts = data.get("charts")
+    if not isinstance(charts, dict) or not charts:
+        raise RuntimeError(
+            f"Helm chart config {charts_path} must contain a non-empty charts object"
+        )
+    if any(not isinstance(name, str) or not name for name in charts):
+        raise RuntimeError(f"Helm chart config {charts_path} contains an invalid chart name")
+    return list(charts)
 
 
 class GCORegionalStack(Stack):
@@ -938,11 +952,10 @@ class GCORegionalStack(Stack):
         map ID -> name for the deploy account.
 
         Returns an empty list when the region has no restriction (the common
-        case), when the deploy account is not resolved (environment-agnostic
-        synth in CI/unit tests never sets ``CDK_DEFAULT_ACCOUNT``, and CDK uses
-        placeholder AZs that never include a real restricted zone), or when the
-        EC2 lookup fails. In every one of those cases the caller falls back to
-        selecting all private subnets, matching the pre-existing behavior.
+        case) or when the deploy account is not resolved. A credentialed,
+        environment-specific synth fails closed if EC2 cannot resolve every
+        restricted AZ ID; selecting all private subnets in that case could hand
+        EKS a known-unsupported control-plane subnet.
         """
         unsupported_ids = EKS_UNSUPPORTED_AZ_IDS.get(self.deployment_region, ())
         if not unsupported_ids:
@@ -965,11 +978,33 @@ class GCORegionalStack(Stack):
             response = ec2_client.describe_availability_zones(
                 Filters=[{"Name": "zone-id", "Values": list(unsupported_ids)}]
             )
-            return [zone["ZoneName"] for zone in response.get("AvailabilityZones", [])]
-        except Exception:
-            # No credentials / throttling / API error: fall back to no filtering
-            # rather than break synthesis.
-            return []
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unable to resolve EKS-unsupported Availability Zones in "
+                f"{self.deployment_region}: {exc}"
+            ) from exc
+
+        zones = response.get("AvailabilityZones")
+        if not isinstance(zones, list):
+            raise RuntimeError(
+                f"EC2 returned malformed Availability Zone data for {self.deployment_region}"
+            )
+        names_by_id = {
+            zone_id: zone_name
+            for zone in zones
+            if isinstance(zone, dict)
+            and isinstance((zone_id := zone.get("ZoneId")), str)
+            and isinstance((zone_name := zone.get("ZoneName")), str)
+            and zone_id in unsupported_ids
+            and zone_name
+        }
+        missing_ids = [zone_id for zone_id in unsupported_ids if zone_id not in names_by_id]
+        if missing_ids:
+            raise RuntimeError(
+                f"EC2 did not resolve EKS-unsupported Availability Zone IDs in "
+                f"{self.deployment_region}: {', '.join(missing_ids)}"
+            )
+        return [names_by_id[zone_id] for zone_id in unsupported_ids]
 
     def _eks_control_plane_subnets(self) -> ec2.SubnetSelection:
         """Private-subnet selection for the EKS control plane, excluding any AZ
@@ -2707,9 +2742,7 @@ class GCORegionalStack(Stack):
         # Apply manifests using custom resource
         # Build image replacements dict
         # Include a deployment timestamp to force pod rollouts when code changes
-        from datetime import UTC, datetime
-
-        deployment_timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        deployment_timestamp = _deployment_timestamp()
 
         # Get resource thresholds from config
         thresholds = self.config.get_resource_thresholds()
@@ -3933,6 +3966,7 @@ class GCORegionalStack(Stack):
             environment={
                 "STATE_MACHINE_ARN": self.helm_install_state_machine.state_machine_arn,
             },
+            tracing=lambda_.Tracing.ACTIVE,
         )
         self.helm_install_state_machine.grant_start_execution(helm_orchestrator_on_event)
 
@@ -4022,10 +4056,10 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "Start on the helm-install state machine requires the "
-                        "execution-ARN wildcard (arn:...:execution:<sm>:*) because "
-                        "execution names are generated at runtime. The finding is a "
-                        "granular execution-ARN wildcard that cannot be enumerated at "
+                        "X-Ray write APIs require Resource::*. Start on the helm-install "
+                        "state machine also requires the execution-ARN wildcard "
+                        "(arn:...:execution:<sm>:*) because execution names are "
+                        "generated at runtime. Neither wildcard can be enumerated at "
                         "synth time, so no appliesTo filter is supplied."
                     ),
                 },
@@ -4631,7 +4665,8 @@ class GCORegionalStack(Stack):
             ),
             snapshot_retention_limit=valkey_config.get("snapshot_retention_limit", 1),
             tags=[
-                CfnTag(key="Project", value="gco"),
+                CfnTag(key="Project", value=self.config.get_project_name()),
+                CfnTag(key="gco:project", value=self.config.get_project_name()),
                 CfnTag(key="Region", value=self.deployment_region),
             ],
         )

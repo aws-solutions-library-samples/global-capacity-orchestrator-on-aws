@@ -3,7 +3,8 @@
 The replay fixtures are test inputs, not optional best-effort data.  Loading the
 catalog therefore fails loudly when a JSON file is malformed, a required field
 is missing, or one of the three canonical directive captures is absent.  CLI
-and pipeline tests import the same validated Premier fixture from this module.
+and pipeline tests import the same validated default-model fixture from this
+module.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from gco.bedrock import DEFAULT_BEDROCK_MODEL_ID
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "scaffold_responses"
 
-PREMIER_MODEL_ID = DEFAULT_BEDROCK_MODEL_ID
+DEFAULT_MODEL_ID = DEFAULT_BEDROCK_MODEL_ID
 CANONICAL_CAPTURE_SLUGS = (
     "search_inference_docs",
     "metric_drive_loss",
@@ -208,19 +209,19 @@ def load_fixture_catalog(
     if duplicate_model_ids:
         raise FixtureContractError("duplicate fixture model ids: " + ", ".join(duplicate_model_ids))
 
-    if PREMIER_MODEL_ID not in model_ids:
-        raise FixtureContractError(f"default model fixture is missing: {PREMIER_MODEL_ID}")
+    if DEFAULT_MODEL_ID not in model_ids:
+        raise FixtureContractError(f"default model fixture is missing: {DEFAULT_MODEL_ID}")
 
     return fixtures
 
 
 FIXTURES = load_fixture_catalog()
 FIXTURES_BY_MODEL = {fixture.model_id: fixture for fixture in FIXTURES}
-PREMIER_FIXTURE = FIXTURES_BY_MODEL[PREMIER_MODEL_ID]
-PREMIER_FIXTURE_PATH = FIXTURE_DIR / f"{model_fixture_slug(PREMIER_MODEL_ID)}.json"
-if PREMIER_FIXTURE.path != PREMIER_FIXTURE_PATH:
+DEFAULT_FIXTURE = FIXTURES_BY_MODEL[DEFAULT_MODEL_ID]
+DEFAULT_FIXTURE_PATH = FIXTURE_DIR / f"{model_fixture_slug(DEFAULT_MODEL_ID)}.json"
+if DEFAULT_FIXTURE.path != DEFAULT_FIXTURE_PATH:
     raise FixtureContractError(
-        f"Premier fixture must be stored at {PREMIER_FIXTURE_PATH}, not {PREMIER_FIXTURE.path}"
+        f"Default fixture must be stored at {DEFAULT_FIXTURE_PATH}, not {DEFAULT_FIXTURE.path}"
     )
 
 REPLAY_CASES = tuple(capture for fixture in FIXTURES for capture in fixture.captures)

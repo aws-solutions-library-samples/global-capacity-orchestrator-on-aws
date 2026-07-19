@@ -21,6 +21,10 @@ from ..output import get_output_formatter
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
 
+def _discard_mirror_log(_message: str) -> None:
+    """Suppress human progress logs when machine-readable output is requested."""
+
+
 @click.group()
 @pass_config
 def images(config: Any) -> None:
@@ -50,11 +54,12 @@ def images_init(config: Any, name: Any, retain: Any) -> None:
     try:
         manager = get_image_manager(config)
         result = manager.init(name, retain=retain)
-        if result.get("created"):
-            formatter.print_success(f"Created repository {result['name']}")
+        if config.output_format == "table":
+            if result.get("created"):
+                formatter.print_success(f"Created repository {result['name']}")
+            else:
+                formatter.print_info(f"Repository {result['name']} already existed")
         else:
-            formatter.print_info(f"Repository {result['name']} already existed")
-        if config.output_format != "table":
             formatter.print(result)
     except Exception as e:
         formatter.print_error(f"Failed to init repository: {e}")
@@ -192,11 +197,13 @@ def images_build(
             build_args=args_dict or None,
             platform=platform,
             retain=retain,
+            quiet=config.output_format != "table",
         )
-        formatter.print_success(f"Built and pushed {result['image_uri']}")
-        if result.get("digest"):
-            formatter.print_info(f"Digest: {result['digest']}")
-        if config.output_format != "table":
+        if config.output_format == "table":
+            formatter.print_success(f"Built and pushed {result['image_uri']}")
+            if result.get("digest"):
+                formatter.print_info(f"Digest: {result['digest']}")
+        else:
             formatter.print(result)
     except Exception as e:
         formatter.print_error(f"Failed to build image: {e}")
@@ -222,12 +229,17 @@ def images_push(
     formatter = get_output_formatter(config)
     try:
         result = get_image_manager(config).push(
-            name=name, tag=tag, local_image=local_image, retain=retain
+            name=name,
+            tag=tag,
+            local_image=local_image,
+            retain=retain,
+            quiet=config.output_format != "table",
         )
-        formatter.print_success(f"Pushed {result['image_uri']}")
-        if result.get("digest"):
-            formatter.print_info(f"Digest: {result['digest']}")
-        if config.output_format != "table":
+        if config.output_format == "table":
+            formatter.print_success(f"Pushed {result['image_uri']}")
+            if result.get("digest"):
+                formatter.print_info(f"Digest: {result['digest']}")
+        else:
             formatter.print(result)
     except Exception as e:
         formatter.print_error(f"Failed to push image: {e}")
@@ -292,36 +304,41 @@ def images_mirror(
 
     formatter = get_output_formatter(config)
     namespace = (ecr_namespace or mirror.cdk_default_namespace()).strip("/")
+    table_output = config.output_format == "table"
     try:
         if dry_run:
             # Partition metadata is local, so this remains free of AWS API calls.
             registry_host = mirror._registry_host("<account>", region)
             plan = mirror.plan_from_sources(mirror.collect_source_refs(), registry_host, namespace)
-            formatter.print_info(
-                f"[dry-run] would mirror {len(plan)} image(s) into namespace {namespace!r}:"
-            )
-            for item in plan:
-                formatter.print_info(f"  {item.source_ref}  ->  {item.dest_ref}")
-            if config.output_format != "table":
-                formatter.print(
-                    {
-                        "region": region,
-                        "ecr_namespace": namespace,
-                        "images": [
-                            {"source_ref": i.source_ref, "dest_ref": i.dest_ref} for i in plan
-                        ],
-                    }
+            result = {
+                "region": region,
+                "ecr_namespace": namespace,
+                "images": [
+                    {"source_ref": item.source_ref, "dest_ref": item.dest_ref} for item in plan
+                ],
+            }
+            if table_output:
+                formatter.print_info(
+                    f"[dry-run] would mirror {len(plan)} image(s) into namespace {namespace!r}:"
                 )
+                for item in plan:
+                    formatter.print_info(f"  {item.source_ref}  ->  {item.dest_ref}")
+            else:
+                formatter.print(result)
             return
 
         result = mirror.mirror_images(
-            region, ecr_namespace=namespace, skip_existing=not no_skip_existing
+            region,
+            ecr_namespace=namespace,
+            skip_existing=not no_skip_existing,
+            log=print if table_output else _discard_mirror_log,
         )
-        formatter.print_success(
-            f"Mirrored {len(result['mirrored'])}, skipped {len(result['skipped'])} "
-            f"into {result['registry']} (strategy: {result['strategy']})."
-        )
-        if config.output_format != "table":
+        if table_output:
+            formatter.print_success(
+                f"Mirrored {len(result['mirrored'])}, skipped {len(result['skipped'])} "
+                f"into {result['registry']} (strategy: {result['strategy']})."
+            )
+        else:
             formatter.print(result)
     except Exception as e:
         formatter.print_error(f"Failed to mirror images: {e}")

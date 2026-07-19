@@ -8,6 +8,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from cli.capacity.advisor import BedrockCapacityAdvisor, CapacityPredictionResult
+from gco.bedrock import DEFAULT_BEDROCK_MODEL_ID
 
 BASE_DATA = {"timestamp": "t", "regions_analyzed": [], "instance_types_analyzed": []}
 
@@ -79,15 +80,20 @@ class TestGatherHistoricalContext:
         assert _advisor()._gather_historical_context(capacity_data) == {}
 
 
-def _predict_advisor(client):
+def _predict_advisor(client, model_id="test-model", *, uses_default_model=False):
     adv = BedrockCapacityAdvisor.__new__(BedrockCapacityAdvisor)
-    adv.model_id = "test-model"
+    adv.model_id = model_id
+    adv._uses_default_model = uses_default_model
     adv._get_bedrock_client = MagicMock(return_value=client)
     return adv
 
 
-def _converse(text):
-    return {"output": {"message": {"content": [{"text": text}]}}}
+def _converse(text, *, with_reasoning=False):
+    content = []
+    if with_reasoning:
+        content.append({"reasoningContent": {"reasoningText": {"text": "[REDACTED]"}}})
+    content.append({"text": text})
+    return {"output": {"message": {"content": content}}}
 
 
 _PREDICT_STATS = {
@@ -132,14 +138,27 @@ class TestPredictCapacityWindow:
             '{"best_windows": [{"day": "Monday", "hour_range": "13:00-16:00 UTC", '
             '"why": "peak availability"}], "avoid_windows": [{"day": "Friday", '
             '"hour_range": "18:00-22:00 UTC", "why": "contention"}], '
-            '"reasoning": "Mondays score highest.", "confidence": "high"}'
+            '"reasoning": "Mondays score highest.", "confidence": "high"}',
+            with_reasoning=True,
         )
-        result = _predict_advisor(client).predict_capacity_window("g5.xlarge", "us-east-1")
+        result = _predict_advisor(
+            client,
+            model_id=DEFAULT_BEDROCK_MODEL_ID,
+            uses_default_model=True,
+        ).predict_capacity_window("g5.xlarge", "us-east-1")
         assert isinstance(result, CapacityPredictionResult)
         assert result.confidence == "high"
         assert result.best_windows[0]["day"] == "Monday"
         assert result.avoid_windows[0]["day"] == "Friday"
         assert "Mondays" in result.reasoning
+        request = client.converse.call_args.kwargs
+        assert "inferenceConfig" not in request
+        assert request["additionalModelRequestFields"] == {
+            "reasoningConfig": {
+                "type": "enabled",
+                "maxReasoningEffort": "high",
+            }
+        }
 
     @patch("cli.capacity.history.get_capacity_history_store")
     def test_raises_when_no_samples(self, mock_get_store):

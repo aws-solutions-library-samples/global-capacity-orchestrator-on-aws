@@ -387,6 +387,7 @@ class ImageManager:
         build_args: dict[str, str] | None = None,
         platform: str = "linux/amd64",
         retain: bool = False,
+        quiet: bool = False,
     ) -> dict[str, Any]:
         """Build a container image and push it to the project's ECR repo.
 
@@ -400,6 +401,8 @@ class ImageManager:
                 ``linux/amd64``).
             retain: When True, mark the repository with ``gco:retain=true``
                 so it survives stack destroys.
+            quiet: Capture container build output instead of writing it to the
+                command's output stream. Used for machine-readable CLI output.
 
         Returns:
             ``{"image_uri", "digest", "size_bytes", ...}``.
@@ -437,7 +440,10 @@ class ImageManager:
         build_cmd.append(str(ctx))
 
         logger.info("Building image: %s", " ".join(build_cmd))
-        subprocess.run(build_cmd, check=True, cwd=str(ctx))
+        build_run_kwargs: dict[str, Any] = {"check": True, "cwd": str(ctx)}
+        if quiet:
+            build_run_kwargs.update(capture_output=True, text=True)
+        subprocess.run(build_cmd, **build_run_kwargs)
 
         push_result = subprocess.run(
             [runtime, "push", full_uri],
@@ -470,12 +476,14 @@ class ImageManager:
         tag: str,
         local_image: str,
         retain: bool = False,
+        quiet: bool = False,
     ) -> dict[str, Any]:
         """Push an already-built local image to the project's ECR repo.
 
         Tags ``local_image`` as the project URI before invoking
         ``<runtime> push``. Skips the build step but otherwise mirrors
-        ``build`` (init repo, login, push, optional retain tag).
+        ``build`` (init repo, login, push, optional retain tag). When ``quiet``
+        is true, the local tag command is captured for machine-readable output.
         """
         validated_name = self._validate_name(name)
         validated_tag = self._validate_tag(tag)
@@ -489,7 +497,10 @@ class ImageManager:
 
         full_uri = f"{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}"
 
-        subprocess.run([runtime, "tag", local_image, full_uri], check=True)
+        tag_run_kwargs: dict[str, Any] = {"check": True}
+        if quiet:
+            tag_run_kwargs.update(capture_output=True, text=True)
+        subprocess.run([runtime, "tag", local_image, full_uri], **tag_run_kwargs)
         push_result = subprocess.run(
             [runtime, "push", full_uri],
             capture_output=True,

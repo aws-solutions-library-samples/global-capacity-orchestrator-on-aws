@@ -60,6 +60,9 @@ async def webhooks_create(
         namespace: Only deliver events for jobs in this namespace.
         secret: Optional secret for HMAC signature verification.
     """
+    if not events:
+        raise ValueError("events must contain at least one webhook event")
+
     args = ["webhooks", "create", "--url", url]
     for event in events:
         args += ["--event", event]

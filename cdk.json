@@ -38,9 +38,12 @@
       "Owner": "platform-team"
     },
 
-    "_comment_bedrock": "Shared default for optional advisory Bedrock features. Mission sampling and the capacity advisor both consume this system-defined cross-Region inference-profile ID; explicit command/environment overrides still take precedence.",
+    "_comment_bedrock": "Shared defaults for optional advisory Bedrock features. Mission sampling and the capacity advisor both consume this system-defined global cross-Region inference-profile ID and its Nova 2 reasoning preference; explicit command/environment model overrides still take precedence and do not inherit Nova-specific thinking fields.",
     "bedrock": {
-      "default_model_id": "us.amazon.nova-premier-v1:0"
+      "default_model_id": "global.amazon.nova-2-lite-v1:0",
+      "thinking": {
+        "effort": "high"
+      }
     },
 
     "_comment_eks": "EKS cluster version and access posture. GCO runs EKS Auto Mode (https://docs.aws.amazon.com/eks/latest/userguide/automode.html), so node provisioning is managed by AWS — GPU/inference/EFA/Neuron compute is steered via the Karpenter NodePool manifests in lambda/kubectl-applier-simple/manifests/ (40-* through 44-*).",

@@ -178,12 +178,44 @@ def describe_stack(session: Any, region: str, stack_name: str) -> dict[str, Any]
     }
 
 
+def _list_stack_resource_identities(client: Any, stack_id: str) -> list[dict[str, str]]:
+    """Return every stack resource's exact physical identity in stable order."""
+    identities: list[dict[str, str]] = []
+    logical_ids: set[str] = set()
+    for page in client.get_paginator("list_stack_resources").paginate(StackName=stack_id):
+        for resource in page.get("StackResourceSummaries", []):
+            logical_id = str(resource.get("LogicalResourceId") or "")
+            resource_type = str(resource.get("ResourceType") or "")
+            physical_id = str(resource.get("PhysicalResourceId") or "")
+            if not logical_id or not resource_type or not physical_id:
+                raise RuntimeError(
+                    "CloudFormation omitted a protected stack resource identity for "
+                    f"{stack_id}: {json.dumps(resource, sort_keys=True, default=str)}"
+                )
+            if logical_id in logical_ids:
+                raise RuntimeError(
+                    f"CloudFormation duplicated protected stack resource {stack_id}:{logical_id}"
+                )
+            logical_ids.add(logical_id)
+            identities.append(
+                {
+                    "logical_id": logical_id,
+                    "resource_type": resource_type,
+                    "physical_id": physical_id,
+                }
+            )
+    return sorted(
+        identities,
+        key=lambda item: (item["logical_id"], item["resource_type"], item["physical_id"]),
+    )
+
+
 def describe_stack_fingerprint(
     session: Any,
     region: str,
     stack_name: str,
 ) -> dict[str, Any] | None:
-    """Return template and canonical stack-policy fingerprints."""
+    """Return template, policy, and exact physical-resource fingerprints."""
     stack = describe_stack(session, region, stack_name)
     if stack is None:
         return None
@@ -218,6 +250,7 @@ def describe_stack_fingerprint(
         **stack,
         "template_sha256": hashlib.sha256(template_bytes).hexdigest(),
         "stack_policy": stack_policy,
+        "physical_resources": _list_stack_resource_identities(client, stack["stack_id"]),
     }
 
 
@@ -513,16 +546,23 @@ def compare_baseline(expected: dict[str, Any], actual: dict[str, Any]) -> list[d
     return differences
 
 
-def _list_eks_clusters(session: Any, region: str, project_name: str) -> list[str]:
+def _list_eks_clusters(
+    session: Any,
+    region: str,
+    project_name: str | None,
+) -> list[str]:
+    """List all clusters, optionally narrowing the authoritative result to the project."""
     client = session.client("eks", region_name=region)
-    names: list[str] = []
+    names: set[str] = set()
     for page in client.get_paginator("list_clusters").paginate():
-        names.extend(
-            str(name)
-            for name in page.get("clusters", [])
-            if _project_owned_name(str(name), project_name)
-        )
-    return sorted(set(names))
+        for raw_name in page.get("clusters", []):
+            name = str(raw_name or "")
+            if not name:
+                raise RuntimeError(f"EKS returned a cluster without a name in {region}")
+            names.add(name)
+    if project_name is None:
+        return sorted(names)
+    return sorted(name for name in names if _project_owned_name(name, project_name))
 
 
 def _list_sqs_queues(session: Any, region: str, project_name: str) -> list[str]:
@@ -1191,6 +1231,7 @@ def collect_project_resources(
         region: {category: [] for category in _REGIONAL_PROJECT_RESOURCE_CATEGORIES}
         for region in regions
     }
+    authoritative_eks_clusters: dict[str, list[str]] = {}
     completed_scanners: list[str] = []
     scanner_regions: dict[str, list[str]] = {}
 
@@ -1242,7 +1283,14 @@ def collect_project_resources(
         applicable_regions = sorted(set(regions) & service_regions[service])
         scanner_regions[scanner] = applicable_regions
         for region in applicable_regions:
-            regional[region][category] = collector(session, region, project_name)
+            if scanner == "eks_clusters":
+                cluster_names = _list_eks_clusters(session, region, None)
+                authoritative_eks_clusters[region] = cluster_names
+                regional[region][category] = [
+                    name for name in cluster_names if _project_owned_name(name, project_name)
+                ]
+            else:
+                regional[region][category] = collector(session, region, project_name)
         completed_scanners.append(scanner)
 
         if scanner == "ec2_instances":
@@ -1303,6 +1351,7 @@ def collect_project_resources(
     return {
         "coverage": coverage,
         "cloudformation_stacks": cloudformation_stacks,
+        "authoritative_eks_clusters": authoritative_eks_clusters,
         "regional": populated_regional,
         "global_accelerators": global_accelerators,
         "s3_buckets": s3_buckets,

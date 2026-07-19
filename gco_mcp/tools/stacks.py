@@ -66,7 +66,9 @@ def _expected_stack_count_for_all() -> int | None:
         return None
     if not isinstance(cdk_regions, dict):
         return None
-    regional = cdk_regions.get("regional") or []
+    if "regional" not in cdk_regions:
+        return None
+    regional = cdk_regions["regional"]
     if not isinstance(regional, list):
         return None
     # Three fixed stacks (global / api-gateway / monitoring) plus one

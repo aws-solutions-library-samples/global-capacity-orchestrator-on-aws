@@ -16,19 +16,23 @@ Usage:
     # Capture every default model against every canonical directive
     # (writes one JSON file per model under
     # tests/fixtures/scaffold_responses/).
-    python scripts/capture_scaffold_fixtures.py
+    python3 scripts/capture_scaffold_fixtures.py
 
     # Capture a single model.
-    python scripts/capture_scaffold_fixtures.py --model MODEL_ID
+    python3 scripts/capture_scaffold_fixtures.py --model MODEL_ID
 
     # Use a different region.
-    python scripts/capture_scaffold_fixtures.py --region us-west-2
+    python3 scripts/capture_scaffold_fixtures.py --region us-west-2
 
 The script needs AWS credentials with ``bedrock:InvokeModel`` access
-to the listed models. Failures (missing model access, transient
-ClientError) are reported per-model and never abort the run — every
-model that does succeed lands in the fixture directory and protects
-the validator path on every CI run thereafter.
+to the listed models. The configured default also consumes
+``cdk.json`` ``context.bedrock.thinking``. With the stock Nova 2 Lite
+``high`` effort setting, each capture can use substantially more billed
+output tokens and take longer; AWS requires maxTokens, temperature, and
+topP to remain unset in that mode. Failures (missing model access,
+transient ClientError) are reported per-model and never abort the run —
+every model that does succeed lands in the fixture directory and
+protects the validator path on every CI run thereafter.
 """
 
 from __future__ import annotations
@@ -192,6 +196,13 @@ class _PromptAdapter:
         return self._text
 
 
+def _backend_for_capture(model_id: str, region: str) -> BedrockSamplingBackend:
+    """Preserve canonical-policy provenance while keeping overrides explicit."""
+    if model_id == get_default_bedrock_model_id():
+        return BedrockSamplingBackend.from_canonical_default(region=region)
+    return BedrockSamplingBackend(model_id=model_id, region=region)
+
+
 async def _capture_one(
     backend: BedrockSamplingBackend,
     directive: _Directive,
@@ -233,7 +244,7 @@ async def _capture_model(
     or not at all — an incomplete fixture would silently weaken the
     replay test.
     """
-    backend = BedrockSamplingBackend(model_id=model_id, region=region)
+    backend = _backend_for_capture(model_id, region)
     captures: dict[str, dict[str, Any]] = {}
     for directive in _DIRECTIVES:
         try:

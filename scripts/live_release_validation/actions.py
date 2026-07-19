@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from boto3.dynamodb.types import TypeDeserializer
 from botocore.exceptions import ClientError
@@ -128,23 +128,431 @@ def _project_ecr_name(name: str, project_name: str) -> bool:
     return name == project_name or name.startswith((f"{project_name}/", f"{project_name}-"))
 
 
+_PROTECTED_REGIONAL_RESOURCE_CATEGORIES = {
+    "AWS::ApiGateway::RestApi": "api_gateway_v1_apis",
+    "AWS::ApiGatewayV2::Api": "api_gateway_v2_apis",
+    "AWS::Backup::BackupPlan": "backup_plans",
+    "AWS::Backup::BackupSelection": "backup_selections",
+    "AWS::Backup::BackupVault": "backup_vaults",
+    "AWS::DynamoDB::Table": "dynamodb_tables",
+    "AWS::EC2::EIP": "elastic_ips",
+    "AWS::EC2::Instance": "instances",
+    "AWS::EC2::NetworkInterface": "network_interfaces",
+    "AWS::EC2::SecurityGroup": "security_groups",
+    "AWS::EC2::Subnet": "subnets",
+    "AWS::EC2::VPC": "vpcs",
+    "AWS::ECR::Repository": "ecr_repositories",
+    "AWS::EKS::Cluster": "eks_clusters",
+    "AWS::ElasticLoadBalancingV2::LoadBalancer": "load_balancers",
+    "AWS::KMS::Key": "kms_keys",
+    "AWS::Lambda::Function": "lambda_functions",
+    "AWS::Logs::LogGroup": "cloudwatch_log_groups",
+    "AWS::SQS::Queue": "sqs_queues",
+    "AWS::SecretsManager::Secret": "secrets",
+}
+_PROTECTED_GLOBAL_RESOURCE_CATEGORIES = {
+    "AWS::GlobalAccelerator::Accelerator": "global_accelerators",
+    "AWS::IAM::Group": "iam_groups",
+    "AWS::IAM::InstanceProfile": "iam_instance_profiles",
+    "AWS::IAM::ManagedPolicy": "iam_policies",
+    "AWS::IAM::Role": "iam_roles",
+    "AWS::IAM::User": "iam_users",
+    "AWS::S3::Bucket": "s3_buckets",
+}
+_IAM_ARN_RESOURCE_KINDS = {
+    "AWS::IAM::Group": "group",
+    "AWS::IAM::InstanceProfile": "instance-profile",
+    "AWS::IAM::ManagedPolicy": "policy",
+    "AWS::IAM::Role": "role",
+    "AWS::IAM::User": "user",
+}
+_BACKUP_ARN_RESOURCE_PREFIXES = {
+    "AWS::Backup::BackupPlan": "backup-plan:",
+    "AWS::Backup::BackupVault": "backup-vault:",
+}
+_CLOUDFORMATION_STACK_ID_TAG = "aws:cloudformation:stack-id"
+_SQS_DNS_SUFFIXES = {
+    "aws": "amazonaws.com",
+    "aws-cn": "amazonaws.com.cn",
+    "aws-us-gov": "amazonaws.com",
+}
+
+
+def _baseline_protected_identities(
+    baseline: dict[str, Any],
+) -> tuple[dict[str, set[str]], dict[str, dict[str, set[str]]]]:
+    """Validate and index exact protected stack and physical-resource identities."""
+    protected_stacks = baseline.get("protected_stacks")
+    if protected_stacks is None:
+        protected_stacks = {}
+    elif not isinstance(protected_stacks, dict):
+        raise RuntimeError("Baseline protected_stacks must be an object")
+
+    stack_ids: dict[str, set[str]] = {}
+    resource_ids: dict[str, dict[str, set[str]]] = {}
+    for raw_region, stacks in protected_stacks.items():
+        region = str(raw_region)
+        if not isinstance(stacks, list):
+            raise RuntimeError(f"Protected stack baseline for {region} must be a list")
+        for stack in stacks:
+            if not isinstance(stack, dict):
+                raise RuntimeError(f"Protected stack baseline for {region} is malformed")
+            stack_id = str(stack.get("stack_id") or "")
+            if not stack_id:
+                raise RuntimeError(f"Protected stack baseline for {region} omitted its stack ID")
+            stack_ids.setdefault(region, set()).add(stack_id)
+            resources = stack.get("physical_resources")
+            if not isinstance(resources, list):
+                raise RuntimeError(
+                    f"Protected stack baseline {region}:{stack_id} omitted physical resources"
+                )
+            for resource in resources:
+                if not isinstance(resource, dict):
+                    raise RuntimeError(
+                        f"Protected stack baseline {region}:{stack_id} has a malformed resource"
+                    )
+                resource_type = str(resource.get("resource_type") or "")
+                physical_id = str(resource.get("physical_id") or "")
+                logical_id = str(resource.get("logical_id") or "")
+                if not resource_type or not physical_id or not logical_id:
+                    raise RuntimeError(
+                        f"Protected stack baseline {region}:{stack_id} has an incomplete resource"
+                    )
+                resource_ids.setdefault(region, {}).setdefault(resource_type, set()).add(
+                    physical_id
+                )
+    return stack_ids, resource_ids
+
+
+def _iam_arn_name(arn: str, resource_kind: str) -> str | None:
+    parts = arn.split(":", 5)
+    if len(parts) != 6 or parts[0] != "arn" or parts[2] != "iam":
+        return None
+    prefix = f"{resource_kind}/"
+    resource = parts[5]
+    if not resource.startswith(prefix):
+        return None
+    name = resource[len(prefix) :].rsplit("/", 1)[-1]
+    return name or None
+
+
+def _lambda_arn_name(arn: str) -> str | None:
+    parts = arn.split(":", 5)
+    if len(parts) != 6 or parts[0] != "arn" or parts[2] != "lambda":
+        return None
+    resource = parts[5]
+    if not resource.startswith("function:"):
+        return None
+    name = resource.removeprefix("function:")
+    return name if name and ":" not in name else None
+
+
+def _backup_arn_physical_id(arn: str, resource_prefix: str) -> str | None:
+    parts = arn.split(":", 5)
+    if len(parts) != 6 or parts[0] != "arn" or parts[2] != "backup":
+        return None
+    resource = parts[5]
+    if not resource.startswith(resource_prefix):
+        return None
+    physical_id = resource.removeprefix(resource_prefix)
+    return physical_id or None
+
+
+def _sqs_queue_name_from_physical_id(
+    physical_id: str,
+    *,
+    partition: str,
+    region: str,
+    account_id: str,
+) -> str | None:
+    """Normalize an exact SQS queue name or CloudFormation queue URL."""
+    if "://" not in physical_id:
+        return physical_id or None
+
+    dns_suffix = _SQS_DNS_SUFFIXES.get(partition)
+    parsed = urlsplit(physical_id)
+    if (
+        dns_suffix is None
+        or parsed.scheme != "https"
+        or parsed.hostname != f"sqs.{region}.{dns_suffix}"
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    path_parts = parsed.path.strip("/").split("/")
+    if len(path_parts) != 2 or path_parts[0] != account_id:
+        return None
+    return path_parts[1] or None
+
+
+def _tagged_arn_matches_protected_physical_id(
+    resource_type: str,
+    arn: str,
+    physical_id: str,
+) -> bool:
+    """Match a Tagging API ARN to one exact CloudFormation physical ID."""
+    if arn == physical_id:
+        return True
+
+    parts = arn.split(":", 5)
+    if len(parts) != 6 or parts[0] != "arn":
+        return False
+    partition, service, region, account_id, resource = (
+        parts[1],
+        parts[2],
+        parts[3],
+        parts[4],
+        parts[5],
+    )
+
+    if resource_type == "AWS::Lambda::Function":
+        return _lambda_arn_name(arn) == physical_id
+    if resource_type == "AWS::DynamoDB::Table":
+        return (
+            service == "dynamodb"
+            and resource.startswith("table/")
+            and "/" not in resource.removeprefix("table/")
+            and resource.removeprefix("table/") == physical_id
+        )
+    if resource_type == "AWS::S3::Bucket":
+        return (
+            service == "s3" and bool(resource) and "/" not in resource and resource == physical_id
+        )
+    if resource_type == "AWS::SQS::Queue":
+        if service != "sqs" or not region or not account_id or not resource:
+            return False
+        queue_name = _sqs_queue_name_from_physical_id(
+            physical_id,
+            partition=partition,
+            region=region,
+            account_id=account_id,
+        )
+        return queue_name == resource
+    if resource_type == "AWS::KMS::Key":
+        return (
+            service == "kms"
+            and resource.startswith("key/")
+            and "/" not in resource.removeprefix("key/")
+            and resource.removeprefix("key/") == physical_id
+        )
+    return False
+
+
+def _tagged_resource_is_protected(
+    record: Any,
+    *,
+    protected_stack_ids: set[str],
+    protected_resource_ids: dict[str, set[str]],
+    exact_arns: set[str],
+) -> bool:
+    """Return whether a tagged record has one exact protected identity."""
+    if not isinstance(record, Mapping):
+        return False
+    arn = str(record.get("arn") or "")
+    if not arn:
+        return False
+    if arn in exact_arns:
+        return True
+
+    tags = record.get("tags")
+    if isinstance(tags, Mapping):
+        stack_id = str(tags.get(_CLOUDFORMATION_STACK_ID_TAG) or "")
+        if stack_id in protected_stack_ids:
+            return True
+
+    return any(
+        _tagged_arn_matches_protected_physical_id(resource_type, arn, physical_id)
+        for resource_type, physical_ids in protected_resource_ids.items()
+        for physical_id in physical_ids
+    )
+
+
+def _matches_protected_physical_identity(
+    resource_type: str,
+    category: str,
+    candidate: Any,
+    physical_id: str,
+    *,
+    protected_backup_plan_ids: set[str] | None = None,
+) -> bool:
+    """Match one inventory record without any prefix or ownership-name fallback."""
+    if category == "kms_keys":
+        if not isinstance(candidate, dict):
+            return False
+        return physical_id in {
+            str(candidate.get("key_id") or ""),
+            str(candidate.get("arn") or ""),
+        }
+    if not isinstance(candidate, str):
+        return False
+    if resource_type == "AWS::Backup::BackupSelection":
+        plan_id, separator, selection_id = candidate.partition(":")
+        return bool(
+            separator
+            and selection_id == physical_id
+            and plan_id in (protected_backup_plan_ids or set())
+        )
+    if candidate == physical_id:
+        return True
+    backup_prefix = _BACKUP_ARN_RESOURCE_PREFIXES.get(resource_type)
+    if backup_prefix is not None:
+        return _backup_arn_physical_id(candidate, backup_prefix) == physical_id
+    iam_kind = _IAM_ARN_RESOURCE_KINDS.get(resource_type)
+    if iam_kind is not None:
+        return _iam_arn_name(candidate, iam_kind) == physical_id
+    if resource_type == "AWS::Lambda::Function":
+        return _lambda_arn_name(candidate) == physical_id
+    return False
+
+
+def _eks_pod_parent_cluster(arn: str, expected_region: str) -> str | None:
+    """Parse only complete regional EKS pod ARNs; malformed records stay visible."""
+    parts = arn.split(":", 5)
+    if (
+        len(parts) != 6
+        or parts[0] != "arn"
+        or not parts[1]
+        or parts[2] != "eks"
+        or parts[3] != expected_region
+        or not parts[4]
+    ):
+        return None
+    resource_parts = parts[5].split("/")
+    if len(resource_parts) != 3 or resource_parts[0] != "podidentityassociation":
+        return None
+    if any(not component for component in resource_parts):
+        return None
+    return resource_parts[1]
+
+
 def _strip_baseline_ecr(
     project_inventory: dict[str, Any], baseline: dict[str, Any]
 ) -> dict[str, Any]:
-    """Do not classify pre-existing, exactly-compared ECR repos as residuals."""
-    allowed = {
-        region: {str(item["name"]) for item in repositories}
-        for region, repositories in baseline.get("ecr_repositories", {}).items()
-    }
+    """Strip only exact protected identities and provably stale EKS pod records."""
+    protected_stack_ids, protected_resource_ids = _baseline_protected_identities(baseline)
+    baseline_ecr_names: dict[str, set[str]] = {}
+    baseline_ecr_arns: dict[str, set[str]] = {}
+    for raw_region, repositories in (baseline.get("ecr_repositories") or {}).items():
+        region = str(raw_region)
+        for repository in repositories:
+            name = str(repository.get("name") or "")
+            arn = str(repository.get("arn") or "")
+            if name:
+                baseline_ecr_names.setdefault(region, set()).add(name)
+            if arn:
+                baseline_ecr_arns.setdefault(region, set()).add(arn)
+
     inventory = copy.deepcopy(project_inventory)
+    stacks_by_region = inventory.get("cloudformation_stacks")
+    if isinstance(stacks_by_region, dict):
+        for region, stacks in list(stacks_by_region.items()):
+            exact_stack_ids = protected_stack_ids.get(str(region), set())
+            remaining = [
+                stack for stack in stacks if str(stack.get("stack_id") or "") not in exact_stack_ids
+            ]
+            if remaining:
+                stacks_by_region[region] = remaining
+            else:
+                stacks_by_region.pop(region)
+
+    authoritative_clusters = inventory.get("authoritative_eks_clusters")
     for region, resources in list(inventory.get("regional", {}).items()):
-        resources["ecr_repositories"] = [
-            name
-            for name in resources.get("ecr_repositories", [])
-            if name not in allowed.get(region, set())
-        ]
+        region_key = str(region)
+        region_stack_ids = protected_stack_ids.get(region_key, set())
+        region_resource_ids = protected_resource_ids.get(region_key, {})
+        exact_tagged_arns = {
+            physical_id
+            for physical_ids in region_resource_ids.values()
+            for physical_id in physical_ids
+            if physical_id.startswith("arn:")
+        }
+        exact_tagged_arns.update(region_stack_ids)
+        exact_tagged_arns.update(baseline_ecr_arns.get(region_key, set()))
+        if "tagged_resources" in resources:
+            resources["tagged_resources"] = [
+                record
+                for record in resources.get("tagged_resources", [])
+                if not _tagged_resource_is_protected(
+                    record,
+                    protected_stack_ids=region_stack_ids,
+                    protected_resource_ids=region_resource_ids,
+                    exact_arns=exact_tagged_arns,
+                )
+            ]
+
+        protected_backup_plan_ids = region_resource_ids.get(
+            "AWS::Backup::BackupPlan",
+            set(),
+        )
+        for resource_type, category in _PROTECTED_REGIONAL_RESOURCE_CATEGORIES.items():
+            if category not in resources:
+                continue
+            physical_ids = region_resource_ids.get(resource_type, set())
+            if physical_ids:
+                resources[category] = [
+                    candidate
+                    for candidate in resources.get(category, [])
+                    if not any(
+                        _matches_protected_physical_identity(
+                            resource_type,
+                            category,
+                            candidate,
+                            physical_id,
+                            protected_backup_plan_ids=protected_backup_plan_ids,
+                        )
+                        for physical_id in physical_ids
+                    )
+                ]
+
+        if "ecr_repositories" in resources:
+            resources["ecr_repositories"] = [
+                name
+                for name in resources.get("ecr_repositories", [])
+                if name not in baseline_ecr_names.get(str(region), set())
+            ]
+
+        if (
+            "tagged_resources" in resources
+            and isinstance(authoritative_clusters, dict)
+            and region in authoritative_clusters
+            and isinstance(authoritative_clusters[region], list)
+        ):
+            existing_clusters = {str(name) for name in authoritative_clusters[region]}
+            resources["tagged_resources"] = [
+                record
+                for record in resources["tagged_resources"]
+                if (
+                    (parent := _eks_pod_parent_cluster(str(record.get("arn") or ""), region))
+                    is None
+                    or parent in existing_clusters
+                )
+            ]
+
         if not any(resources.values()):
             inventory["regional"].pop(region)
+
+    for resource_type, category in _PROTECTED_GLOBAL_RESOURCE_CATEGORIES.items():
+        if category not in inventory:
+            continue
+        physical_ids = {
+            physical_id
+            for resources_by_type in protected_resource_ids.values()
+            for physical_id in resources_by_type.get(resource_type, set())
+        }
+        if physical_ids:
+            inventory[category] = [
+                candidate
+                for candidate in inventory.get(category, [])
+                if not any(
+                    _matches_protected_physical_identity(
+                        resource_type,
+                        category,
+                        candidate,
+                        physical_id,
+                    )
+                    for physical_id in physical_ids
+                )
+            ]
     return inventory
 
 

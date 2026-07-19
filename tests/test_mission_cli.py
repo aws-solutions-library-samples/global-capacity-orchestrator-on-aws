@@ -48,8 +48,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 from cli.main import cli  # noqa: E402
 from tests._scaffold_replay import (  # noqa: E402
-    PREMIER_FIXTURE,
-    PREMIER_MODEL_ID,
+    DEFAULT_FIXTURE,
+    DEFAULT_MODEL_ID,
     ScaffoldReplayCapture,
 )
 
@@ -114,11 +114,11 @@ def _enable_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GCO_ENABLE_ALL_TOOLS", raising=False)
 
 
-class _PremierReplayBackend:
-    """Sampling backend that returns one validated genuine Premier capture."""
+class _DefaultReplayBackend:
+    """Sampling backend that returns one validated genuine default capture."""
 
     backend_name = "bedrock"
-    model_id = PREMIER_MODEL_ID
+    model_id = DEFAULT_MODEL_ID
 
     def __init__(self, capture: ScaffoldReplayCapture) -> None:
         self._capture = capture
@@ -128,14 +128,14 @@ class _PremierReplayBackend:
         return self._capture.raw_response
 
 
-def _install_premier_sampling(
+def _install_default_sampling(
     monkeypatch: pytest.MonkeyPatch,
     capture_slug: str = "event_goal_reached",
 ) -> tuple[ScaffoldReplayCapture, list[tuple[str | None, Any, str]]]:
     """Resolve sampling to a replay backend and record model overrides."""
     from mission import sampling as mission_sampling  # noqa: PLC0415
 
-    capture = PREMIER_FIXTURE.capture(capture_slug)
+    capture = DEFAULT_FIXTURE.capture(capture_slug)
     selections: list[tuple[str | None, Any, str]] = []
 
     monkeypatch.setattr(
@@ -145,7 +145,7 @@ def _install_premier_sampling(
     )
 
     def _select(_ctx: Any, model_id: str | None = None, prefs: Any = None) -> Any:
-        backend = _PremierReplayBackend(capture)
+        backend = _DefaultReplayBackend(capture)
         selections.append((model_id, prefs, backend.model_id))
         return backend
 
@@ -186,7 +186,7 @@ def _start_args(criteria: Path, *, run: bool = False) -> list[str]:
         "mission",
         "start",
         "--directive",
-        "Exercise the Nova Premier default.",
+        "Exercise the canonical Bedrock default.",
         "--criteria-file",
         str(criteria),
         "--max-iterations",
@@ -411,23 +411,23 @@ class TestMissionCli:
 
 
 # ---------------------------------------------------------------------------
-# Replay-backed Nova Premier default coverage
+# Replay-backed canonical default coverage
 # ---------------------------------------------------------------------------
 
 
-class TestMissionPremierReplayCli:
+class TestMissionDefaultReplayCli:
     """Pin default-model behavior across every upgraded Mission command."""
 
-    def test_start_defers_to_the_replay_backed_premier_default(
+    def test_start_defers_to_the_replay_backed_default(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         isolated_backend: Path,
     ) -> None:
-        """``start`` omits an override so later engine resolution uses Premier."""
+        """``start`` omits an override so later engine resolution uses the default."""
         _enable_flag(monkeypatch)
         criteria = _write_criteria(tmp_path)
-        _capture, selections = _install_premier_sampling(monkeypatch)
+        _capture, selections = _install_default_sampling(monkeypatch)
 
         result = CliRunner().invoke(cli, _start_args(criteria))
 
@@ -440,39 +440,39 @@ class TestMissionPremierReplayCli:
             (isolated_backend / f"{payload['session_id']}.json").read_text(encoding="utf-8")
         )
         assert "bedrock_model_id" not in persisted
-        assert PREMIER_FIXTURE.model_id == PREMIER_MODEL_ID
+        assert DEFAULT_FIXTURE.model_id == DEFAULT_MODEL_ID
 
-    def test_start_run_resolves_an_omitted_override_to_premier(
+    def test_start_run_resolves_an_omitted_override_to_default(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         isolated_backend: Path,
     ) -> None:
-        """``start --run`` builds both engine samplers with Premier."""
+        """``start --run`` builds both engine samplers with the default."""
         _enable_flag(monkeypatch)
         criteria = _write_criteria(tmp_path)
-        _capture, selections = _install_premier_sampling(monkeypatch)
+        _capture, selections = _install_default_sampling(monkeypatch)
         _install_terminal_engine(monkeypatch)
 
         result = CliRunner().invoke(cli, _start_args(criteria, run=True))
 
         assert result.exit_code == 0, result.stderr
         assert selections
-        assert all(selection == (None, None, PREMIER_MODEL_ID) for selection in selections)
+        assert all(selection == (None, None, DEFAULT_MODEL_ID) for selection in selections)
         sessions = list(isolated_backend.glob("mission-*.json"))
         assert len(sessions) == 1
         assert "bedrock_model_id" not in json.loads(sessions[0].read_text(encoding="utf-8"))
 
-    def test_iterate_resolves_the_persisted_default_to_premier(
+    def test_iterate_resolves_the_persisted_default(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         isolated_backend: Path,
     ) -> None:
-        """``iterate`` passes the persisted absent override to Premier selection."""
+        """``iterate`` passes the persisted absent override to default selection."""
         _enable_flag(monkeypatch)
         criteria = _write_criteria(tmp_path)
-        _capture, selections = _install_premier_sampling(monkeypatch)
+        _capture, selections = _install_default_sampling(monkeypatch)
         runner = CliRunner()
         start = runner.invoke(cli, _start_args(criteria))
         assert start.exit_code == 0, start.stderr
@@ -483,13 +483,13 @@ class TestMissionPremierReplayCli:
 
         assert result.exit_code == 0, result.stderr
         assert selections
-        assert all(selection == (None, None, PREMIER_MODEL_ID) for selection in selections)
+        assert all(selection == (None, None, DEFAULT_MODEL_ID) for selection in selections)
         persisted = json.loads(
             (isolated_backend / f"{session_id}.json").read_text(encoding="utf-8")
         )
         assert "bedrock_model_id" not in persisted
 
-    def test_complete_preserves_the_premier_default_contract(
+    def test_complete_preserves_the_default_contract(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
@@ -498,7 +498,7 @@ class TestMissionPremierReplayCli:
         """``complete`` changes lifecycle state without inventing a model override."""
         _enable_flag(monkeypatch)
         criteria = _write_criteria(tmp_path)
-        _capture, selections = _install_premier_sampling(monkeypatch)
+        _capture, selections = _install_default_sampling(monkeypatch)
         runner = CliRunner()
         start = runner.invoke(cli, _start_args(criteria))
         assert start.exit_code == 0, start.stderr
@@ -513,7 +513,7 @@ class TestMissionPremierReplayCli:
         )
         assert persisted["status"] == "completed"
         assert "bedrock_model_id" not in persisted
-        assert PREMIER_FIXTURE.model_id == PREMIER_MODEL_ID
+        assert DEFAULT_FIXTURE.model_id == DEFAULT_MODEL_ID
 
 
 # ---------------------------------------------------------------------------
@@ -1137,7 +1137,7 @@ class TestMissionScaffoldCriteriaCli:
     ) -> None:
         """The genuine Premier response becomes validated scaffolded output."""
         _enable_flag(monkeypatch)
-        capture, selections = _install_premier_sampling(monkeypatch, "metric_drive_loss")
+        capture, selections = _install_default_sampling(monkeypatch, "metric_drive_loss")
         output_path = tmp_path / "out.json"
         args = [
             "mission",
@@ -1154,7 +1154,7 @@ class TestMissionScaffoldCriteriaCli:
         result = CliRunner().invoke(cli, args)
 
         assert result.exit_code == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
-        assert selections == [(None, None, PREMIER_MODEL_ID)]
+        assert selections == [(None, None, DEFAULT_MODEL_ID)]
         envelope = json.loads(result.stdout)
         assert envelope["sampling_path"] is True
         loaded = json.loads(output_path.read_text(encoding="utf-8"))
@@ -1615,15 +1615,15 @@ class TestMissionRunCli:
         report = json.loads(result.stdout)
         assert "session_id" in report
 
-    def test_run_with_sampling_consumes_the_premier_replay(
+    def test_run_with_sampling_consumes_the_default_replay(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         isolated_backend: Path,  # noqa: ARG002
     ) -> None:
-        """``run`` scaffolds from Premier while the omitted model selects it."""
+        """``run`` scaffolds from the default fixture while the model override is omitted."""
         _enable_flag(monkeypatch)
-        capture, selections = _install_premier_sampling(monkeypatch, "event_goal_reached")
+        capture, selections = _install_default_sampling(monkeypatch, "event_goal_reached")
         mission_command = import_module("cli.commands.mission_cmd")
 
         driven_sessions: list[tuple[str, bool]] = []
@@ -1632,7 +1632,7 @@ class TestMissionRunCli:
             driven_sessions.append((session_id, dry_run))
 
         monkeypatch.setattr(mission_command, "_run_to_completion", _record_run)
-        save_path = tmp_path / "premier-criteria.json"
+        save_path = tmp_path / "default-criteria.json"
         args = [
             "mission",
             "run",
@@ -1652,7 +1652,7 @@ class TestMissionRunCli:
         result = CliRunner().invoke(cli, args)
 
         assert result.exit_code == 0, result.stderr
-        assert selections == [(None, None, PREMIER_MODEL_ID)]
+        assert selections == [(None, None, DEFAULT_MODEL_ID)]
         assert len(driven_sessions) == 1
         criteria = json.loads(save_path.read_text(encoding="utf-8"))
         assert {criterion["criterion_id"] for criterion in criteria} >= {

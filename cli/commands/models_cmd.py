@@ -38,17 +38,18 @@ def models_upload(config: Any, local_path: Any, name: Any) -> None:
 
     try:
         manager = get_model_manager(config)
-        formatter.print_info(f"Uploading {local_path} as '{name}'...")
+        if config.output_format == "table":
+            formatter.print_info(f"Uploading {local_path} as '{name}'...")
         result = manager.upload(local_path, name)
 
-        formatter.print_success(
-            f"Uploaded {result['files_uploaded']} file(s) to {result['s3_uri']}"
-        )
-        formatter.print_info(
-            f"Use --model-source {result['s3_uri']} when deploying inference endpoints"
-        )
-
-        if config.output_format != "table":
+        if config.output_format == "table":
+            formatter.print_success(
+                f"Uploaded {result['files_uploaded']} file(s) to {result['s3_uri']}"
+            )
+            formatter.print_info(
+                f"Use --model-source {result['s3_uri']} when deploying inference endpoints"
+            )
+        else:
             formatter.print(result)
 
     except Exception as e:
@@ -89,14 +90,15 @@ def models_upload_regional(config: Any, local_path: Any, region: Any, prefix: An
 
     try:
         manager = get_regional_bucket_manager(config)
-        formatter.print_info(f"Uploading {local_path} to region '{region}'...")
+        if config.output_format == "table":
+            formatter.print_info(f"Uploading {local_path} to region '{region}'...")
         result = manager.upload(local_path, region, prefix=prefix)
 
-        formatter.print_success(
-            f"Uploaded {result['files_uploaded']} file(s) to {result['s3_uri']}"
-        )
-
-        if config.output_format != "table":
+        if config.output_format == "table":
+            formatter.print_success(
+                f"Uploaded {result['files_uploaded']} file(s) to {result['s3_uri']}"
+            )
+        else:
             formatter.print(result)
 
     except Exception as e:
