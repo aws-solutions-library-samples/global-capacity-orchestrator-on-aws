@@ -1135,7 +1135,7 @@ class TestMissionScaffoldCriteriaCli:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """The genuine Premier response becomes validated scaffolded output."""
+        """The genuine default-model response becomes validated scaffolded output."""
         _enable_flag(monkeypatch)
         capture, selections = _install_default_sampling(monkeypatch, "metric_drive_loss")
         output_path = tmp_path / "out.json"
@@ -1158,10 +1158,20 @@ class TestMissionScaffoldCriteriaCli:
         envelope = json.loads(result.stdout)
         assert envelope["sampling_path"] is True
         loaded = json.loads(output_path.read_text(encoding="utf-8"))
-        assert {criterion["criterion_id"] for criterion in loaded} >= {
-            "val_loss_threshold",
-            "has_val_loss_metric",
-        }
+        assert any(
+            criterion.get("kind") == "metric_threshold"
+            and criterion.get("required") is True
+            and criterion.get("metric") == "metrics.val_loss"
+            and criterion.get("op") == "<"
+            and criterion.get("target") == 0.1
+            for criterion in loaded
+        )
+        assert any(
+            criterion.get("kind") == "tool_call_succeeded"
+            and criterion.get("required") is True
+            and criterion.get("tool_name") == "find_examples"
+            for criterion in loaded
+        )
 
     def test_scaffold_criteria_falls_back_when_sampling_fails(
         self,
@@ -1655,10 +1665,12 @@ class TestMissionRunCli:
         assert selections == [(None, None, DEFAULT_MODEL_ID)]
         assert len(driven_sessions) == 1
         criteria = json.loads(save_path.read_text(encoding="utf-8"))
-        assert {criterion["criterion_id"] for criterion in criteria} >= {
-            "goal_event_emitted",
-            "valid_metrics_exist",
-        }
+        assert any(
+            criterion.get("kind") == "event"
+            and criterion.get("required") is True
+            and criterion.get("event_name") == "goal_reached"
+            for criterion in criteria
+        )
         scaffold_event = json.loads(result.stderr)
         assert scaffold_event["sampling_path"] is True
 
