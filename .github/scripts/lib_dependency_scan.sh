@@ -671,7 +671,7 @@ if isinstance(value, str) and value.strip():
 # purely-numeric token (model version, generation, date) dropped:
 #
 #   us.amazon.nova-pro-v1:0                       -> us.amazon.nova-pro
-#   global.amazon.nova-2-lite-v1:0                -> global.amazon.nova-lite
+#   global.amazon.nova-3-lite-v1:0                -> global.amazon.nova-lite
 #   us.anthropic.claude-sonnet-4-5-20250929-v1:0  -> us.anthropic.claude-sonnet
 #
 # Folding the numeric generation token into the version key (rather

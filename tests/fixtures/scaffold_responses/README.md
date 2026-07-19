@@ -33,8 +33,8 @@ seen continues to round-trip through the validator.
 ```text
 tests/fixtures/scaffold_responses/
 ├── README.md                                   # this file
-├── global_amazon_nova_2_lite_v1_0.json           # canonical default
-├── us_amazon_nova_premier_v1_0.json              # historical capture
+├── global_amazon_nova_2_lite_v1_0.json         # canonical default
+├── us_amazon_nova_premier_v1_0.json            # historical capture
 ├── us_anthropic_claude_sonnet_4_5_*.json
 ├── us_anthropic_claude_haiku_4_5_*.json
 ├── us_amazon_nova_pro_v1_0.json

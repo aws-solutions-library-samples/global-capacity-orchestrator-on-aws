@@ -4056,12 +4056,11 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "X-Ray write APIs require Resource::*. Start on the helm-install "
-                        "state machine also requires the execution-ARN wildcard "
-                        "(arn:...:execution:<sm>:*) because execution names are "
-                        "generated at runtime. Neither wildcard can be enumerated at "
-                        "synth time, so no appliesTo filter is supplied."
+                        "Lambda active tracing requires X-Ray write APIs against "
+                        "Resource::*, as X-Ray does not expose resource-level "
+                        "permissions for these telemetry calls."
                     ),
+                    "appliesTo": ["Resource::*"],
                 },
             ],
         )

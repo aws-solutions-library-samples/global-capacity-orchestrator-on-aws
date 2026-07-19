@@ -83,7 +83,7 @@ class BedrockCapacityAdvisor:
         self._capacity_checker = CapacityChecker(config)
         self._multi_region_checker = MultiRegionCapacityChecker(config)
         self._uses_default_model = model_id is None
-        self.model_id = self.DEFAULT_MODEL if self._uses_default_model else model_id
+        self.model_id: str = self.DEFAULT_MODEL if model_id is None else model_id
 
     def _get_bedrock_client(self) -> Any:
         """Get Bedrock runtime client."""
