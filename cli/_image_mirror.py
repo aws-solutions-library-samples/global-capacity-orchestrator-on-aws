@@ -113,6 +113,18 @@ LogFn = Callable[[str], None]
 RepositoryCreatedCallback = Callable[[str, Mapping[str, Any]], None]
 
 
+def _bind_repository_created_callback(
+    callback: RepositoryCreatedCallback,
+    region: str,
+) -> Callable[[Mapping[str, Any]], None]:
+    """Bind one target Region without obscuring the callback's payload type."""
+
+    def notify(repository: Mapping[str, Any]) -> None:
+        callback(region, repository)
+
+    return notify
+
+
 @dataclass(frozen=True)
 class MirrorItem:
     """One image to copy: ``source_ref`` -> ``dest_ref`` (repo ``dest_repo``)."""
@@ -591,21 +603,18 @@ def mirror_images(
     mirrored: list[str] = []
     skipped: list[str] = []
     created_repositories: list[str] = []
+    on_created = (
+        _bind_repository_created_callback(on_repository_created, region)
+        if on_repository_created is not None
+        else None
+    )
     for item in plan:
         if ensure_repository(
             ecr_client,
             item.dest_repo,
             log=log,
             repository_tags=repository_tags,
-            on_created=(
-                (
-                    lambda repository, selected_region=region: on_repository_created(
-                        selected_region, repository
-                    )
-                )
-                if on_repository_created is not None
-                else None
-            ),
+            on_created=on_created,
         ):
             created_repositories.append(item.dest_repo)
         if skip_existing and tag_exists(ecr_client, item.dest_repo, item.tag):

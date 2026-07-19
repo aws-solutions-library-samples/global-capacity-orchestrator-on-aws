@@ -3,6 +3,9 @@ kind: Job
 metadata:
   name: gco-live-sqs-__RUN_TOKEN__
   namespace: gco-jobs
+  annotations:
+    # The cluster-managed gco-jobs/default-deny-ingress policy selects all pods.
+    checkov.io/skip1: CKV2_K8S_6=Protected by the cluster-managed gco-jobs default-deny-ingress NetworkPolicy
   labels:
     app.kubernetes.io/name: gco-live-release-validation
     gco.aws/validation-run: __RUN_TOKEN__
@@ -18,6 +21,7 @@ spec:
         gco.aws/validation-path: sqs
     spec:
       restartPolicy: Never
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534

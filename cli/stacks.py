@@ -58,7 +58,7 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from threading import Event, Lock, Thread, local
-from typing import TYPE_CHECKING, Any, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO, TypedDict
 
 from botocore.exceptions import ClientError
 
@@ -116,7 +116,20 @@ StackAuthorizationCallback = Callable[[str, str, str], None]
 CleanupOutcomeCallback = Callable[[str, dict[str, Any]], None]
 ChangeSetPreparedCallback = Callable[[str, str, str, str, str], None]
 PreparedChangeSetAuthority = Mapping[str, Mapping[str, Mapping[str, str]]]
-EcrRepositoryCreatedCallback = Callable[[str, dict[str, Any]], None]
+EcrRepositoryCreatedCallback = Callable[[str, Mapping[str, Any]], None]
+
+
+class _StackOperationSafetyKwargs(TypedDict):
+    """Type-preserving keyword bundle shared by strict deploy and destroy calls."""
+
+    allow_bootstrap: bool
+    bootstrap_stacks: Mapping[str, Mapping[str, str]] | None
+    expected_stack_ids: Mapping[str, str | None] | None
+    prepared_change_sets: PreparedChangeSetAuthority | None
+    authorize_stack: StackAuthorizationCallback | None
+    strict_deployment_token: str | None
+    on_change_set_prepared: ChangeSetPreparedCallback | None
+    on_ecr_repository_created: EcrRepositoryCreatedCallback | None
 
 
 @dataclass(frozen=True)
@@ -1312,7 +1325,7 @@ class StackManager:
             )
             raise subprocess.TimeoutExpired(
                 cdk_cmd,
-                timeout,
+                exc.timeout,
                 output=exc.output,
                 stderr=exc.stderr,
             ) from exc
@@ -2173,7 +2186,7 @@ class StackManager:
     @staticmethod
     def _stack_missing(exc: ClientError) -> bool:
         error = exc.response.get("Error", {})
-        return (
+        return bool(
             error.get("Code") == "ValidationError"
             and "does not exist" in str(error.get("Message", "")).lower()
         )
@@ -2207,6 +2220,8 @@ class StackManager:
             if len(stacks) != 1:
                 raise RuntimeError(f"CloudFormation returned an invalid identity for {stack_name}")
             stack = stacks[0]
+            if not isinstance(stack, dict):
+                raise RuntimeError(f"CloudFormation returned an invalid identity for {stack_name}")
             stack_id = str(stack.get("StackId") or "")
             if stack.get("StackName") != stack_name or not stack_id:
                 raise RuntimeError(f"CloudFormation returned an invalid identity for {stack_name}")
@@ -2714,6 +2729,7 @@ class StackManager:
 
         strict_identity = expected_stack_ids is not None
         if strict_identity:
+            assert expected_stack_ids is not None
             if api_gateway_stack not in expected_stack_ids:
                 raise RuntimeError(
                     f"Strict teardown lacks authoritative target state for {api_gateway_stack}"
@@ -3642,7 +3658,7 @@ class StackManager:
 
         successful: list[str] = []
         failed: list[str] = []
-        deployment_safety = {
+        deployment_safety: _StackOperationSafetyKwargs = {
             "allow_bootstrap": allow_bootstrap,
             "bootstrap_stacks": bootstrap_stacks,
             "expected_stack_ids": expected_stack_ids,
@@ -3953,8 +3969,8 @@ class StackManager:
         project_name = self.config.project_name
         base_regional_stacks: list[str] = []
         for stack_name in regional_stacks:
-            region = self._get_deploy_region(stack_name)
-            if region and stack_name == f"{project_name}-{region}":
+            deploy_region = self._get_deploy_region(stack_name)
+            if deploy_region and stack_name == f"{project_name}-{deploy_region}":
                 base_regional_stacks.append(stack_name)
 
         resolved: dict[str, dict[str, str]] = {}
@@ -4102,6 +4118,7 @@ class StackManager:
         app_stacks = self.list_stacks()
         strict_identity = expected_stack_ids is not None
         if strict_identity:
+            assert expected_stack_ids is not None
             missing = sorted(set(app_stacks) - set(expected_stack_ids))
             if missing:
                 raise RuntimeError(
@@ -4160,7 +4177,7 @@ class StackManager:
                 authorize_stack=authorize_stack,
             )
 
-        destroy_safety = {
+        destroy_safety: _StackOperationSafetyKwargs = {
             "expected_stack_ids": expected_stack_ids,
             "prepared_change_sets": prepared_change_sets,
             "authorize_stack": authorize_stack,

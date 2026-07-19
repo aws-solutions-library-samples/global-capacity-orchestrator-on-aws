@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
-from typing import Any, Literal
+from typing import Any, Literal, TextIO, cast
 
 SCHEMA_VERSION = 2
 ActionStatus = Literal["passed", "failed", "skipped"]
@@ -169,27 +169,28 @@ def _read_private_text(path: Path) -> str:
             _validate_private_regular_file(path)
             return path.read_text(encoding="utf-8")
 
-        file_descriptor: int | None = os.open(
+        opened_descriptor = os.open(
             path.name,
             os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
             dir_fd=descriptor,
         )
+        descriptor_to_close: int | None = opened_descriptor
         try:
-            _validate_private_regular_metadata(os.fstat(file_descriptor), path)
-            handle = os.fdopen(file_descriptor, mode="r", encoding="utf-8")
-            file_descriptor = None
-            with handle:
-                return handle.read()
+            _validate_private_regular_metadata(os.fstat(opened_descriptor), path)
+            text_handle: TextIO = os.fdopen(opened_descriptor, mode="r", encoding="utf-8")
+            descriptor_to_close = None
+            with text_handle:
+                return text_handle.read()
         finally:
-            if file_descriptor is not None:
-                os.close(file_descriptor)
+            if descriptor_to_close is not None:
+                os.close(descriptor_to_close)
 
 
 def atomic_write_text(path: Path, content: str) -> None:
     """Atomically persist owner-only text relative to a pinned private directory."""
     with _open_private_directory(path.parent) as descriptor:
         if descriptor is None:
-            temporary: Path | None = None
+            temporary_path_to_unlink: Path | None = None
             try:
                 with tempfile.NamedTemporaryFile(
                     mode="w",
@@ -198,34 +199,37 @@ def atomic_write_text(path: Path, content: str) -> None:
                     prefix=f".{path.name}.",
                     suffix=".tmp",
                     delete=False,
-                ) as handle:
-                    temporary = Path(handle.name)
-                    handle.write(content)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, path)
-                temporary = None
+                ) as named_handle:
+                    temporary_path = Path(named_handle.name)
+                    temporary_path_to_unlink = temporary_path
+                    named_handle.write(content)
+                    named_handle.flush()
+                    os.fsync(named_handle.fileno())
+                os.replace(temporary_path, path)
+                temporary_path_to_unlink = None
             finally:
-                if temporary is not None:
-                    temporary.unlink(missing_ok=True)
+                if temporary_path_to_unlink is not None:
+                    temporary_path_to_unlink.unlink(missing_ok=True)
             return
 
-        temporary_name: str | None = f".{path.name}.{secrets.token_hex(16)}.tmp"
-        file_descriptor: int | None = None
+        temporary_name = f".{path.name}.{secrets.token_hex(16)}.tmp"
+        temporary_name_to_unlink: str | None = temporary_name
+        descriptor_to_close: int | None = None
         try:
-            file_descriptor = os.open(
+            opened_descriptor = os.open(
                 temporary_name,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
                 _PRIVATE_FILE_MODE,
                 dir_fd=descriptor,
             )
-            os.fchmod(file_descriptor, _PRIVATE_FILE_MODE)
-            handle = os.fdopen(file_descriptor, mode="w", encoding="utf-8")
-            file_descriptor = None
-            with handle:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
+            descriptor_to_close = opened_descriptor
+            os.fchmod(opened_descriptor, _PRIVATE_FILE_MODE)
+            text_handle: TextIO = os.fdopen(opened_descriptor, mode="w", encoding="utf-8")
+            descriptor_to_close = None
+            with text_handle:
+                text_handle.write(content)
+                text_handle.flush()
+                os.fsync(text_handle.fileno())
 
             os.replace(
                 temporary_name,
@@ -233,13 +237,13 @@ def atomic_write_text(path: Path, content: str) -> None:
                 src_dir_fd=descriptor,
                 dst_dir_fd=descriptor,
             )
-            temporary_name = None
+            temporary_name_to_unlink = None
         finally:
-            if file_descriptor is not None:
-                os.close(file_descriptor)
-            if temporary_name is not None:
+            if descriptor_to_close is not None:
+                os.close(descriptor_to_close)
+            if temporary_name_to_unlink is not None:
                 with suppress(FileNotFoundError):
-                    os.unlink(temporary_name, dir_fd=descriptor)
+                    os.unlink(temporary_name_to_unlink, dir_fd=descriptor)
 
 
 def atomic_write_json(path: Path, value: Any) -> None:
@@ -392,7 +396,10 @@ class RunCheckpoint:
 
     def to_dict(self) -> dict[str, Any]:
         self.updated_at = utc_now()
-        return to_jsonable(self)
+        serialized = to_jsonable(self)
+        if not isinstance(serialized, dict):
+            raise TypeError("RunCheckpoint did not serialize to an object")
+        return serialized
 
     @classmethod
     def from_path(cls, path: Path) -> RunCheckpoint:
@@ -441,7 +448,10 @@ class ValidationReport:
     schema_version: int = SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
-        return to_jsonable(self)
+        serialized = to_jsonable(self)
+        if not isinstance(serialized, dict):
+            raise TypeError("ValidationReport did not serialize to an object")
+        return serialized
 
     def write(self, directory: Path) -> tuple[Path, Path]:
         """Write both attachable formats and return their paths."""
@@ -543,7 +553,12 @@ class RunContext:
         has been observed together with the expected run/path labels.
         """
         with self.state_lock:
-            jobs = self.checkpoint.state.setdefault("jobs", [])
+            raw_jobs = self.checkpoint.state.setdefault("jobs", [])
+            if not isinstance(raw_jobs, list) or any(
+                not isinstance(item, dict) for item in raw_jobs
+            ):
+                raise RuntimeError("Checkpoint jobs must be a list of objects")
+            jobs = cast(list[dict[str, Any]], raw_jobs)
             matches = [
                 item
                 for item in jobs

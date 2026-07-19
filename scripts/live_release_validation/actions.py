@@ -8,10 +8,10 @@ import re
 import subprocess
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 from boto3.dynamodb.types import TypeDeserializer
@@ -171,10 +171,10 @@ def _strip_expected_retained_ecr(
     for record in ctx.checkpoint.state.get("created_ecr_repositories", []):
         region = str(record["region"])
         name = str(record["name"])
-        key = (region, name)
-        if key in created_keys or key in baseline_repositories:
+        repository_key = (region, name)
+        if repository_key in created_keys or repository_key in baseline_repositories:
             raise RuntimeError(f"Invalid retained ECR repository authority for {region}:{name}")
-        created_keys.add(key)
+        created_keys.add(repository_key)
         repositories = repositories_by_region.get(region, [])
         matches = [repository for repository in repositories if repository.get("name") == name]
         if len(matches) > 1:
@@ -205,22 +205,26 @@ def _strip_expected_retained_ecr(
         region = str(record["region"])
         name = str(record["repository"])
         tag = str(record["tag"])
-        key = (region, name, tag)
-        if key in observed_delta_keys or (region, name) in created_keys:
-            raise RuntimeError(f"Invalid retained ECR image-delta authority for {key}")
-        observed_delta_keys.add(key)
+        image_key = (region, name, tag)
+        if image_key in observed_delta_keys or (region, name) in created_keys:
+            raise RuntimeError(f"Invalid retained ECR image-delta authority for {image_key}")
+        observed_delta_keys.add(image_key)
         baseline_repository = baseline_repositories.get((region, name))
         if baseline_repository is None or _image_with_tag(baseline_repository, tag) is not None:
-            raise RuntimeError(f"Retained ECR image delta is not absent from the baseline: {key}")
+            raise RuntimeError(
+                f"Retained ECR image delta is not absent from the baseline: {image_key}"
+            )
         repositories = repositories_by_region.get(region, [])
         matches = [repository for repository in repositories if repository.get("name") == name]
         if len(matches) != 1:
-            raise RuntimeError(f"Baseline ECR repository changed before final comparison: {key}")
+            raise RuntimeError(
+                f"Baseline ECR repository changed before final comparison: {image_key}"
+            )
         repository = matches[0]
         images = repository.get("images", [])
         tagged_images = [image for image in images if tag in image.get("tags", [])]
         if len(tagged_images) > 1:
-            raise RuntimeError(f"Retained ECR tag resolves to multiple images: {key}")
+            raise RuntimeError(f"Retained ECR tag resolves to multiple images: {image_key}")
         if not tagged_images:
             accepted["image_deltas"].append(
                 {"region": region, "repository": name, "tag": tag, "already_absent": True}
@@ -228,7 +232,7 @@ def _strip_expected_retained_ecr(
             continue
         image = tagged_images[0]
         if _ecr_image_identity(image) != record.get("identity"):
-            raise RuntimeError(f"Retained ECR image identity changed for {key}")
+            raise RuntimeError(f"Retained ECR image identity changed for {image_key}")
         remaining_tags = sorted(value for value in image.get("tags", []) if value != tag)
         baseline_digest_matches = [
             baseline_image
@@ -236,7 +240,7 @@ def _strip_expected_retained_ecr(
             if baseline_image.get("digest") == image.get("digest")
         ]
         if len(baseline_digest_matches) > 1:
-            raise RuntimeError(f"Baseline ECR digest is ambiguous for {key}")
+            raise RuntimeError(f"Baseline ECR digest is ambiguous for {image_key}")
         if remaining_tags or baseline_digest_matches:
             image["tags"] = remaining_tags
         else:
@@ -457,7 +461,11 @@ def _record_stack_identity(
 
     with ctx.state_lock:
         records = _owned_stacks(ctx).get(region)
-        previous = records.get(stack_name) if records is not None else None
+        if records is None:
+            raise RuntimeError(
+                f"Stack {region}:{stack_name} was observed without prepared-change-set authority"
+            )
+        previous = records.get(stack_name)
         if previous is None:
             raise RuntimeError(
                 f"Stack {region}:{stack_name} was observed without prepared-change-set authority"
@@ -710,18 +718,19 @@ def _ecr_creation_identity(repository: dict[str, Any]) -> dict[str, Any]:
 def _record_ecr_repository_creation(
     ctx: RunContext,
     region: str,
-    repository: dict[str, Any],
+    repository: Mapping[str, Any],
 ) -> None:
     """Persist the synchronous create_repository acknowledgement before any copy."""
     name = str(repository.get("repositoryName") or "")
     arn = str(repository.get("repositoryArn") or "")
     registry_id = str(repository.get("registryId") or "")
     created_at_raw = repository.get("createdAt")
-    created_at = (
-        created_at_raw.isoformat()
-        if hasattr(created_at_raw, "isoformat")
-        else str(created_at_raw or "")
-    )
+    if created_at_raw is None:
+        created_at = ""
+    elif hasattr(created_at_raw, "isoformat"):
+        created_at = str(created_at_raw.isoformat())
+    else:
+        created_at = str(created_at_raw)
     expected = {
         (str(item["region"]), str(item["repository"]))
         for item in ctx.checkpoint.state.get("expected_ecr_images", [])
@@ -1223,7 +1232,7 @@ def action_deploy(ctx: RunContext) -> dict[str, Any]:
         }
         expected_stack_ids[stack_name] = stack_id
 
-    def on_repository_created(region: str, repository: dict[str, Any]) -> None:
+    def on_repository_created(region: str, repository: Mapping[str, Any]) -> None:
         _record_ecr_repository_creation(ctx, region, repository)
 
     expected_stack_ids = {
@@ -1675,6 +1684,10 @@ def _complete_job_lifecycle(
     marker: str,
 ) -> dict[str, Any]:
     appeared = _wait_for_owned_job_appearance(ctx, record)
+    if appeared is None:
+        raise RuntimeError(
+            f"Job {record['namespace']}/{record['name']} never appeared in {record['region']}"
+        )
     final, history = _wait_for_owned_job_terminal(ctx, record)
     status = _job_status(final)
     if status != "succeeded":
@@ -1938,7 +1951,12 @@ def _register_central_job(
         "body": copy.deepcopy(body),
     }
     with ctx.state_lock:
-        central_jobs = ctx.checkpoint.state.setdefault("central_jobs", [])
+        raw_central_jobs = ctx.checkpoint.state.setdefault("central_jobs", [])
+        if not isinstance(raw_central_jobs, list) or any(
+            not isinstance(item, dict) for item in raw_central_jobs
+        ):
+            raise RuntimeError("Checkpoint central_jobs must be a list of objects")
+        central_jobs = cast(list[dict[str, Any]], raw_central_jobs)
         matches = [
             item
             for item in central_jobs
@@ -1969,9 +1987,13 @@ def _central_workload_record(
     ctx: RunContext,
     central_record: dict[str, Any],
 ) -> dict[str, Any]:
+    raw_jobs = ctx.checkpoint.state.get("jobs", [])
+    if not isinstance(raw_jobs, list) or any(not isinstance(item, dict) for item in raw_jobs):
+        raise RuntimeError("Checkpoint jobs must be a list of objects")
+    jobs = cast(list[dict[str, Any]], raw_jobs)
     matches = [
         record
-        for record in ctx.checkpoint.state.get("jobs", [])
+        for record in jobs
         if record.get("path") == "dynamodb"
         and record.get("name") == central_record.get("job_name")
         and record.get("namespace") == central_record.get("namespace")

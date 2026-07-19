@@ -46,7 +46,7 @@ def _installed_cdk_json_path() -> Path | None:
         files = distribution.files or ()
         for relative_path in files:
             if tuple(relative_path.parts[-3:]) == _INSTALLED_DATA_PARTS:
-                return Path(distribution.locate_file(relative_path)).resolve()
+                return Path(str(distribution.locate_file(relative_path))).resolve()
     except metadata.PackageNotFoundError:
         return None
     except Exception as exc:

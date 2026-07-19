@@ -1067,6 +1067,8 @@ class TestCheckpointPersistence:
             original_ancestor.rename(displaced_ancestor)
             replacement_directory = original_ancestor / "live-report"
             replacement_directory.mkdir(parents=True, mode=0o700)
+            # This regression fixture must have the exact private-directory mode.
+            # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
             os.chmod(replacement_directory, 0o700)
             real_replace(source, destination, **kwargs)
 
@@ -1089,6 +1091,8 @@ class TestCheckpointPersistence:
 
         report_dir = tmp_path / "shared"
         report_dir.mkdir(mode=0o755)
+        # Deliberately nonprivate to verify the production code rejects it.
+        # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         os.chmod(report_dir, 0o755)
 
         with pytest.raises(PermissionError, match="mode 0700"):
