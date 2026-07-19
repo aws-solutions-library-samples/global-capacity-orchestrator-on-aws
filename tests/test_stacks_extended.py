@@ -1078,7 +1078,11 @@ class TestDestroyTimeoutAndReconciliation:
             assert manager.destroy("acme-regional-api-us-west-2", force=True) is True
 
         mock_run.assert_not_called()
-        mock_delete.assert_called_once_with("acme-regional-api-us-west-2")
+        mock_delete.assert_called_once_with(
+            "acme-regional-api-us-west-2",
+            expected_stack_id=None,
+            authorize_stack=None,
+        )
 
     @pytest.mark.parametrize(
         ("control_region", "configured_region", "candidate_region"),
