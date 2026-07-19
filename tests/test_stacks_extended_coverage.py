@@ -794,7 +794,7 @@ class TestEksSgWatchdog:
         # promptly. The cleanup helper is mocked to record call count.
         calls = []
 
-        def fake_cleanup(name: str) -> None:
+        def fake_cleanup(name: str, **_kwargs) -> None:
             calls.append(name)
             stop.set()
 
@@ -807,7 +807,7 @@ class TestEksSgWatchdog:
     def test_watchdog_swallows_cleanup_exception(self, manager: Any) -> None:
         stop = threading.Event()
 
-        def fake_cleanup(name: str) -> None:
+        def fake_cleanup(name: str, **_kwargs) -> None:
             stop.set()
             raise RuntimeError("transient")
 
