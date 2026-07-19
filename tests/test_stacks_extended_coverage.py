@@ -2471,6 +2471,7 @@ class TestCdkWorkerCancellation:
         with (
             patch.object(manager, "_ensure_cdk_toolchain"),
             patch.object(manager, "_ensure_lambda_build"),
+            patch.object(manager, "_get_python_path", return_value="test-pythonpath"),
             patch("cli.stacks.os.name", "nt"),
             patch(
                 "cli.stacks.subprocess.CREATE_NEW_PROCESS_GROUP",
