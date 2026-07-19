@@ -1624,7 +1624,7 @@ class TestMissionRunCli:
         """``run`` scaffolds from Premier while the omitted model selects it."""
         _enable_flag(monkeypatch)
         capture, selections = _install_premier_sampling(monkeypatch, "event_goal_reached")
-        import cli.commands.mission_cmd as mission_command
+        mission_command = import_module("cli.commands.mission_cmd")
 
         driven_sessions: list[tuple[str, bool]] = []
 
