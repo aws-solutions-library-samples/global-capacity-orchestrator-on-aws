@@ -1171,6 +1171,7 @@ class TestStackManagerOrchestrated:
             patch.object(StackManager, "_cleanup_backup_vault"),
             patch.object(StackManager, "_start_eks_sg_watchdog", return_value=thread),
             patch.object(StackManager, "_cleanup_eks_security_groups"),
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=False),
             patch.object(StackManager, "destroy", return_value=True) as mock_destroy,
         ):
             manager = StackManager(config)
@@ -1342,6 +1343,7 @@ class TestStackManagerOrchestrated:
 
         with (
             patch.object(StackManager, "list_stacks") as mock_list,
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=False),
             patch.object(StackManager, "destroy") as mock_destroy,
         ):
             mock_list.return_value = ["gco-global", "gco-us-east-1"]
@@ -1403,6 +1405,7 @@ class TestStackManagerOrchestrated:
 
         with (
             patch.object(StackManager, "list_stacks") as mock_list,
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=False),
             patch.object(StackManager, "destroy") as mock_destroy,
             patch.object(StackManager, "_image_registry_destroy_preflight") as mock_preflight,
             patch.object(StackManager, "_cleanup_backup_vault") as mock_cleanup_vault,
@@ -1418,14 +1421,15 @@ class TestStackManagerOrchestrated:
             assert mock_destroy.call_count >= 2
             mock_cleanup_vault.assert_called_once()
 
-    def test_destroy_orchestrated_continues_on_failure(self):
-        """Test that orchestrated destruction continues even on failure."""
+    def test_destroy_orchestrated_failure_blocks_dependent_stacks(self):
+        """A regional failure prevents dependent API and global teardown."""
         from cli.stacks import StackManager
 
         config = MagicMock()
 
         with (
             patch.object(StackManager, "list_stacks") as mock_list,
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=False),
             patch.object(StackManager, "destroy") as mock_destroy,
         ):
             mock_list.return_value = [
@@ -1433,16 +1437,16 @@ class TestStackManagerOrchestrated:
                 "gco-api-gateway",
                 "gco-us-east-1",
             ]
-            # First fails, rest succeed
-            mock_destroy.side_effect = [False, True, True]
+            mock_destroy.return_value = False
 
             manager = StackManager(config)
             success, successful, failed = manager.destroy_orchestrated(force=True)
 
             assert success is False
-            # Should continue trying all stacks
-            assert mock_destroy.call_count == 3
-            assert len(failed) == 1
+            assert successful == []
+            assert failed == ["gco-us-east-1"]
+            mock_destroy.assert_called_once()
+            assert mock_destroy.call_args.kwargs["stack_name"] == "gco-us-east-1"
 
     def test_destroy_orchestrated_with_callbacks(self):
         """Test orchestrated destruction with callbacks."""
@@ -1460,6 +1464,7 @@ class TestStackManagerOrchestrated:
 
         with (
             patch.object(StackManager, "list_stacks") as mock_list,
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=False),
             patch.object(StackManager, "destroy") as mock_destroy,
         ):
             mock_list.return_value = ["gco-global", "gco-us-east-1"]
@@ -1592,6 +1597,7 @@ class TestParallelDeployment:
             patch.object(StackManager, "_cleanup_backup_vault"),
             patch.object(StackManager, "_start_eks_sg_watchdog", return_value=thread),
             patch.object(StackManager, "_cleanup_eks_security_groups"),
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=False),
             patch.object(StackManager, "destroy", return_value=True),
             patch.object(StackManager, "_destroy_stacks_parallel", side_effect=destroy_batch),
         ):
@@ -1688,6 +1694,7 @@ class TestParallelDeployment:
 
         with (
             patch.object(StackManager, "list_stacks") as mock_list,
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=False),
             patch.object(StackManager, "destroy") as mock_destroy,
             patch("shutil.rmtree"),
         ):
@@ -1710,8 +1717,8 @@ class TestParallelDeployment:
             assert len(successful) == 4
             assert failed == []
 
-    def test_destroy_orchestrated_parallel_with_failure(self):
-        """Test parallel destruction handles failures correctly."""
+    def test_destroy_orchestrated_parallel_failure_blocks_global(self):
+        """A parallel regional failure prevents dependent global teardown."""
         from cli.stacks import StackManager
 
         config = MagicMock()
@@ -1721,6 +1728,7 @@ class TestParallelDeployment:
 
         with (
             patch.object(StackManager, "list_stacks") as mock_list,
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=False),
             patch.object(StackManager, "destroy") as mock_destroy,
             patch("shutil.rmtree"),
         ):
@@ -1740,8 +1748,12 @@ class TestParallelDeployment:
 
             assert success is False
             assert "gco-us-west-2" in failed
-            # Global stack should still be destroyed
-            assert "gco-global" in successful
+            assert "gco-us-east-1" in successful
+            assert "gco-global" not in successful
+            assert {call.kwargs["stack_name"] for call in mock_destroy.call_args_list} == {
+                "gco-us-east-1",
+                "gco-us-west-2",
+            }
 
     def test_deploy_uses_separate_output_dirs_for_parallel(self):
         """Test that parallel deployment uses separate CDK output directories."""
