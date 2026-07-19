@@ -3496,8 +3496,8 @@ class TestCleanupEksSecurityGroups:
             )
             mock_ec2.delete_security_group.assert_called_once_with(GroupId="sg-12345")
 
-    def test_cleanup_detaches_enis_before_deleting_sg(self):
-        """Test that cleanup detaches ENIs before deleting the security group."""
+    def test_cleanup_waits_for_enis_before_deleting_sg(self):
+        """Service-managed ENIs block cleanup without being detached or deleted."""
         from cli.stacks import StackManager
 
         config = MagicMock()
@@ -3527,15 +3527,18 @@ class TestCleanupEksSecurityGroups:
             patch.object(StackManager, "_find_project_root", return_value=Path(".")),
         ):
             manager = StackManager(config)
-            manager._cleanup_eks_security_groups("gco-us-east-1")
+            outcome = manager._cleanup_eks_security_groups("gco-us-east-1")
 
-            mock_ec2.detach_network_interface.assert_called_once_with(
-                AttachmentId="attach-xyz", Force=True
-            )
-            mock_ec2.delete_network_interface.assert_called_once_with(
-                NetworkInterfaceId="eni-abc123"
-            )
-            mock_ec2.delete_security_group.assert_called_once_with(GroupId="sg-12345")
+            mock_ec2.detach_network_interface.assert_not_called()
+            mock_ec2.delete_network_interface.assert_not_called()
+            mock_ec2.delete_security_group.assert_not_called()
+            assert outcome["blocked_by_enis"] == [
+                {
+                    "group_id": "sg-12345",
+                    "group_name": "eks-cluster-sg-gco-us-east-1-123456",
+                    "network_interface_ids": ["eni-abc123"],
+                }
+            ]
 
     def test_cleanup_no_orphaned_sgs(self):
         """Test that cleanup does nothing when no orphaned SGs exist."""
@@ -3657,7 +3660,7 @@ class TestEksSgWatchdog:
 
         calls: list[str] = []
 
-        def fake_cleanup(stack_name):
+        def fake_cleanup(stack_name, **_kwargs):
             calls.append(stack_name)
 
         stop = Event()
@@ -3710,7 +3713,7 @@ class TestEksSgWatchdog:
         mgr = self._make_manager()
         first_call_done = Event()
 
-        def flaky_cleanup(stack_name):
+        def flaky_cleanup(stack_name, **_kwargs):
             first_call_done.set()
             raise RuntimeError("simulated AWS throttle")
 
@@ -3742,7 +3745,7 @@ class TestEksSgWatchdog:
 
         started_stacks: list[str] = []
 
-        def fake_start_watchdog(self_ref, stack_name, stop_event):
+        def fake_start_watchdog(self_ref, stack_name, stop_event, **_kwargs):
             started_stacks.append(stack_name)
             # Return a no-op thread that exits immediately when stop is set.
             from threading import Thread
@@ -3758,6 +3761,7 @@ class TestEksSgWatchdog:
             patch("cli.stacks._detect_container_runtime", return_value="docker"),
             patch.object(StackManager, "list_stacks") as mock_list,
             patch.object(StackManager, "destroy", return_value=True),
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=False),
             patch.object(StackManager, "_cleanup_backup_vault"),
             patch.object(StackManager, "_cleanup_eks_security_groups"),
             patch.object(
@@ -3793,11 +3797,11 @@ class TestEksSgWatchdog:
 
         final_cleanup_calls: list[str] = []
 
-        def record_cleanup(self_ref, stack_name):
+        def record_cleanup(self_ref, stack_name, **_kwargs):
             final_cleanup_calls.append(stack_name)
 
         # No-op watchdog: start and stop cleanly without recording cleanup.
-        def fake_start_watchdog(self_ref, stack_name, stop_event):
+        def fake_start_watchdog(self_ref, stack_name, stop_event, **_kwargs):
             from threading import Thread
 
             def _noop():
@@ -3811,6 +3815,7 @@ class TestEksSgWatchdog:
             patch("cli.stacks._detect_container_runtime", return_value="docker"),
             patch.object(StackManager, "list_stacks") as mock_list,
             patch.object(StackManager, "destroy", return_value=True),
+            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=False),
             patch.object(StackManager, "_cleanup_backup_vault"),
             patch.object(
                 StackManager,
@@ -4019,7 +4024,18 @@ class TestStackExistsInCloudFormation:
                 "DescribeStacks",
             )
         else:
-            fake_cfn.describe_stacks.return_value = {"Stacks": [{"StackStatus": status}]}
+            fake_cfn.describe_stacks.return_value = {
+                "Stacks": [
+                    {
+                        "StackName": "gco-us-east-1",
+                        "StackId": (
+                            "arn:aws:cloudformation:us-east-1:123456789012:"
+                            "stack/gco-us-east-1/regional-id"
+                        ),
+                        "StackStatus": status,
+                    }
+                ]
+            }
         with (
             patch.object(StackManager, "_get_destroy_region", return_value="us-east-1"),
             patch("boto3.client", return_value=fake_cfn),
@@ -4060,7 +4076,18 @@ class TestDestroyReconciliationDeleteFailed:
         config = MagicMock()
         config.api_gateway_region = "us-east-2"
         fake_cfn = MagicMock()
-        fake_cfn.describe_stacks.return_value = {"Stacks": [{"StackStatus": "DELETE_FAILED"}]}
+        fake_cfn.describe_stacks.return_value = {
+            "Stacks": [
+                {
+                    "StackName": "gco-us-east-1",
+                    "StackId": (
+                        "arn:aws:cloudformation:us-east-1:123456789012:"
+                        "stack/gco-us-east-1/regional-id"
+                    ),
+                    "StackStatus": "DELETE_FAILED",
+                }
+            ]
+        }
 
         with (
             patch.object(StackManager, "_run_cdk") as mock_run,
