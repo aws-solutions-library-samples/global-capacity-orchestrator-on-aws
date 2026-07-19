@@ -2059,7 +2059,18 @@ class TestCheckAndFixStuckStack:
         manager.project_root = Path(".")
 
         mock_cfn = MagicMock()
-        mock_cfn.describe_stacks.return_value = {"Stacks": [{"StackStatus": "REVIEW_IN_PROGRESS"}]}
+        stack_id = (
+            "arn:aws:cloudformation:us-east-1:123456789012:stack/gco-monitoring/monitoring-id"
+        )
+        mock_cfn.describe_stacks.return_value = {
+            "Stacks": [
+                {
+                    "StackName": "gco-monitoring",
+                    "StackId": stack_id,
+                    "StackStatus": "REVIEW_IN_PROGRESS",
+                }
+            ]
+        }
         mock_waiter = MagicMock()
         mock_cfn.get_waiter.return_value = mock_waiter
 
@@ -2069,8 +2080,11 @@ class TestCheckAndFixStuckStack:
         ):
             manager._check_and_fix_stuck_stack("gco-monitoring")
 
-        mock_cfn.delete_stack.assert_called_once_with(StackName="gco-monitoring")
-        mock_waiter.wait.assert_called_once()
+        mock_cfn.delete_stack.assert_called_once_with(StackName=stack_id)
+        mock_waiter.wait.assert_called_once_with(
+            StackName=stack_id,
+            WaiterConfig={"Delay": 10, "MaxAttempts": 60},
+        )
 
     def test_deletes_rollback_complete_stack(self):
         from cli.stacks import StackManager
@@ -2081,7 +2095,16 @@ class TestCheckAndFixStuckStack:
         manager.project_root = Path(".")
 
         mock_cfn = MagicMock()
-        mock_cfn.describe_stacks.return_value = {"Stacks": [{"StackStatus": "ROLLBACK_COMPLETE"}]}
+        stack_id = "arn:aws:cloudformation:us-east-1:123456789012:stack/gco-global/global-id"
+        mock_cfn.describe_stacks.return_value = {
+            "Stacks": [
+                {
+                    "StackName": "gco-global",
+                    "StackId": stack_id,
+                    "StackStatus": "ROLLBACK_COMPLETE",
+                }
+            ]
+        }
         mock_waiter = MagicMock()
         mock_cfn.get_waiter.return_value = mock_waiter
 
@@ -2091,7 +2114,7 @@ class TestCheckAndFixStuckStack:
         ):
             manager._check_and_fix_stuck_stack("gco-global")
 
-        mock_cfn.delete_stack.assert_called_once()
+        mock_cfn.delete_stack.assert_called_once_with(StackName=stack_id)
 
     def test_skips_healthy_stack(self):
         from cli.stacks import StackManager
@@ -2102,7 +2125,18 @@ class TestCheckAndFixStuckStack:
         manager.project_root = Path(".")
 
         mock_cfn = MagicMock()
-        mock_cfn.describe_stacks.return_value = {"Stacks": [{"StackStatus": "CREATE_COMPLETE"}]}
+        mock_cfn.describe_stacks.return_value = {
+            "Stacks": [
+                {
+                    "StackName": "gco-us-east-1",
+                    "StackId": (
+                        "arn:aws:cloudformation:us-east-1:123456789012:"
+                        "stack/gco-us-east-1/regional-id"
+                    ),
+                    "StackStatus": "CREATE_COMPLETE",
+                }
+            ]
+        }
 
         with (
             patch.object(manager, "_get_deploy_region", return_value="us-east-1"),
