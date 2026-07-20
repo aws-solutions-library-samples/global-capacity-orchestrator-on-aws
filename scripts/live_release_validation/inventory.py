@@ -29,6 +29,8 @@ _REGIONAL_PROJECT_RESOURCE_CATEGORIES = (
     "instances",
     "vpcs",
     "subnets",
+    "nat_gateways",
+    "flow_logs",
     "network_interfaces",
     "security_groups",
     "elastic_ips",
@@ -612,26 +614,34 @@ def _list_load_balancers(session: Any, region: str, project_name: str) -> list[s
     return sorted(set(owned))
 
 
-def _list_instances(session: Any, region: str, project_name: str) -> list[str]:
+def _list_instance_inventory(
+    session: Any,
+    region: str,
+    project_name: str,
+) -> tuple[list[str], list[str]]:
+    """Return project-owned and all active EC2 instance IDs separately."""
     client = session.client("ec2", region_name=region)
     state_filter = {
         "Name": "instance-state-name",
         "Values": ["pending", "running", "stopping", "stopped", "shutting-down"],
     }
-    instance_ids: set[str] = set()
+    project_instance_ids: set[str] = set()
+    all_instance_ids: set[str] = set()
     paginator = client.get_paginator("describe_instances")
     for page in paginator.paginate(Filters=[state_filter]):
         for reservation in page.get("Reservations", []):
             for instance in reservation.get("Instances", []):
-                if not _ec2_resource_is_project_owned(instance, project_name):
-                    continue
                 instance_id = str(instance.get("InstanceId") or "")
                 if not instance_id:
-                    raise RuntimeError(
-                        f"EC2 returned a project-owned instance without an ID in {region}"
-                    )
-                instance_ids.add(instance_id)
-    return sorted(instance_ids)
+                    raise RuntimeError(f"EC2 returned an instance without an ID in {region}")
+                all_instance_ids.add(instance_id)
+                if _ec2_resource_is_project_owned(instance, project_name):
+                    project_instance_ids.add(instance_id)
+    return sorted(project_instance_ids), sorted(all_instance_ids)
+
+
+def _list_instances(session: Any, region: str, project_name: str) -> list[str]:
+    return _list_instance_inventory(session, region, project_name)[0]
 
 
 def _list_project_kms_keys(
@@ -806,34 +816,56 @@ def _list_project_ec2_networking(
     region: str,
     project_name: str,
     project_instance_ids: Iterable[str],
-) -> dict[str, list[str]]:
-    """Collect tagged networking plus untagged dependants of owned resources."""
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Return project-owned networking and unfiltered live ID authority separately."""
     client = session.client("ec2", region_name=region)
 
     vpc_ids: set[str] = set()
+    all_vpc_ids: set[str] = set()
     for vpc in _ec2_items(client, "describe_vpcs", "Vpcs"):
         vpc_id = str(vpc.get("VpcId") or "")
         if not vpc_id:
             raise RuntimeError(f"EC2 returned a VPC without an ID in {region}")
+        all_vpc_ids.add(vpc_id)
         if _ec2_resource_is_project_owned(vpc, project_name):
             vpc_ids.add(vpc_id)
 
     subnet_ids: set[str] = set()
+    all_subnet_ids: set[str] = set()
     for subnet in _ec2_items(client, "describe_subnets", "Subnets"):
         subnet_id = str(subnet.get("SubnetId") or "")
         if not subnet_id:
             raise RuntimeError(f"EC2 returned a subnet without an ID in {region}")
+        all_subnet_ids.add(subnet_id)
         if (
             _ec2_resource_is_project_owned(subnet, project_name)
             or str(subnet.get("VpcId") or "") in vpc_ids
         ):
             subnet_ids.add(subnet_id)
 
+    nat_gateway_ids: set[str] = set()
+    all_nat_gateway_ids: set[str] = set()
+    for nat_gateway in _ec2_items(client, "describe_nat_gateways", "NatGateways"):
+        nat_gateway_id = str(nat_gateway.get("NatGatewayId") or "")
+        if not nat_gateway_id:
+            raise RuntimeError(f"EC2 returned a NAT gateway without an ID in {region}")
+        if str(nat_gateway.get("State") or "") == "deleted":
+            continue
+        all_nat_gateway_ids.add(nat_gateway_id)
+        if (
+            _ec2_resource_is_project_owned(nat_gateway, project_name)
+            or str(nat_gateway.get("VpcId") or "") in vpc_ids
+            or str(nat_gateway.get("SubnetId") or "") in subnet_ids
+        ):
+            nat_gateway_ids.add(nat_gateway_id)
+
     security_group_ids: set[str] = set()
+    all_security_group_ids: set[str] = set()
     for security_group in _ec2_items(client, "describe_security_groups", "SecurityGroups"):
         group_id = str(security_group.get("GroupId") or "")
         if not group_id:
             raise RuntimeError(f"EC2 returned a security group without an ID in {region}")
+        all_security_group_ids.add(group_id)
         if (
             _ec2_resource_is_project_owned(security_group, project_name)
             or _project_owned_name(str(security_group.get("GroupName") or ""), project_name)
@@ -843,6 +875,7 @@ def _list_project_ec2_networking(
 
     instance_ids = set(project_instance_ids)
     network_interface_ids: set[str] = set()
+    all_network_interface_ids: set[str] = set()
     for interface in _ec2_items(
         client,
         "describe_network_interfaces",
@@ -851,6 +884,7 @@ def _list_project_ec2_networking(
         interface_id = str(interface.get("NetworkInterfaceId") or "")
         if not interface_id:
             raise RuntimeError(f"EC2 returned a network interface without an ID in {region}")
+        all_network_interface_ids.add(interface_id)
         group_ids = {str(group.get("GroupId") or "") for group in interface.get("Groups", [])}
         attachment_instance_id = str((interface.get("Attachment") or {}).get("InstanceId") or "")
         if (
@@ -862,11 +896,27 @@ def _list_project_ec2_networking(
         ):
             network_interface_ids.add(interface_id)
 
+    flow_log_ids: set[str] = set()
+    all_flow_log_ids: set[str] = set()
+    project_network_resource_ids = vpc_ids | subnet_ids | network_interface_ids | instance_ids
+    for flow_log in _ec2_items(client, "describe_flow_logs", "FlowLogs"):
+        flow_log_id = str(flow_log.get("FlowLogId") or "")
+        if not flow_log_id:
+            raise RuntimeError(f"EC2 returned a flow log without an ID in {region}")
+        all_flow_log_ids.add(flow_log_id)
+        if (
+            _ec2_resource_is_project_owned(flow_log, project_name)
+            or str(flow_log.get("ResourceId") or "") in project_network_resource_ids
+        ):
+            flow_log_ids.add(flow_log_id)
+
     elastic_ip_ids: set[str] = set()
+    all_elastic_ip_ids: set[str] = set()
     for address in client.describe_addresses().get("Addresses", []):
         identifier = str(address.get("AllocationId") or address.get("PublicIp") or "")
         if not identifier:
             raise RuntimeError(f"EC2 returned an Elastic IP without an identity in {region}")
+        all_elastic_ip_ids.add(identifier)
         if (
             _ec2_resource_is_project_owned(address, project_name)
             or str(address.get("NetworkInterfaceId") or "") in network_interface_ids
@@ -874,13 +924,25 @@ def _list_project_ec2_networking(
         ):
             elastic_ip_ids.add(identifier)
 
-    return {
+    project_resources = {
         "vpcs": sorted(vpc_ids),
         "subnets": sorted(subnet_ids),
+        "nat_gateways": sorted(nat_gateway_ids),
+        "flow_logs": sorted(flow_log_ids),
         "network_interfaces": sorted(network_interface_ids),
         "security_groups": sorted(security_group_ids),
         "elastic_ips": sorted(elastic_ip_ids),
     }
+    authoritative_resources = {
+        "vpcs": sorted(all_vpc_ids),
+        "subnets": sorted(all_subnet_ids),
+        "nat_gateways": sorted(all_nat_gateway_ids),
+        "flow_logs": sorted(all_flow_log_ids),
+        "network_interfaces": sorted(all_network_interface_ids),
+        "security_groups": sorted(all_security_group_ids),
+        "elastic_ips": sorted(all_elastic_ip_ids),
+    }
+    return project_resources, authoritative_resources
 
 
 def _list_lambda_functions(session: Any, region: str, project_name: str) -> list[str]:
@@ -1198,6 +1260,7 @@ def collect_project_resources(
     session: Any,
     *,
     enabled_regions: Iterable[str],
+    expected_account: str,
     project_name: str,
     seed_region: str,
 ) -> dict[str, Any]:
@@ -1206,6 +1269,8 @@ def collect_project_resources(
     partition = session.get_partition_for_region(seed_region)
     if not partition:
         raise RuntimeError(f"Could not resolve AWS partition for {seed_region}")
+    if len(expected_account) != 12 or not expected_account.isdigit():
+        raise RuntimeError("EC2 existence authority requires an exact 12-digit account ID")
 
     service_names = (
         "resourcegroupstaggingapi",
@@ -1232,6 +1297,7 @@ def collect_project_resources(
         for region in regions
     }
     authoritative_eks_clusters: dict[str, list[str]] = {}
+    authoritative_ec2_resources: dict[str, dict[str, list[str]]] = {}
     completed_scanners: list[str] = []
     scanner_regions: dict[str, list[str]] = {}
 
@@ -1289,6 +1355,14 @@ def collect_project_resources(
                 regional[region][category] = [
                     name for name in cluster_names if _project_owned_name(name, project_name)
                 ]
+            elif scanner == "ec2_instances":
+                project_instances, all_instances = _list_instance_inventory(
+                    session,
+                    region,
+                    project_name,
+                )
+                regional[region][category] = project_instances
+                authoritative_ec2_resources.setdefault(region, {})[category] = all_instances
             else:
                 regional[region][category] = collector(session, region, project_name)
         completed_scanners.append(scanner)
@@ -1296,14 +1370,14 @@ def collect_project_resources(
         if scanner == "ec2_instances":
             scanner_regions["ec2_networking"] = applicable_regions
             for region in applicable_regions:
-                regional[region].update(
-                    _list_project_ec2_networking(
-                        session,
-                        region,
-                        project_name,
-                        regional[region]["instances"],
-                    )
+                project_networking, authoritative_networking = _list_project_ec2_networking(
+                    session,
+                    region,
+                    project_name,
+                    regional[region]["instances"],
                 )
+                regional[region].update(project_networking)
+                authoritative_ec2_resources.setdefault(region, {}).update(authoritative_networking)
             completed_scanners.append("ec2_networking")
 
     backup_regions = sorted(set(regions) & service_regions["backup"])
@@ -1350,8 +1424,10 @@ def collect_project_resources(
     }
     return {
         "coverage": coverage,
+        "authority_scope": {"partition": partition, "account": expected_account},
         "cloudformation_stacks": cloudformation_stacks,
         "authoritative_eks_clusters": authoritative_eks_clusters,
+        "authoritative_ec2_resources": authoritative_ec2_resources,
         "regional": populated_regional,
         "global_accelerators": global_accelerators,
         "s3_buckets": s3_buckets,

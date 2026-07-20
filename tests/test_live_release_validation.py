@@ -45,6 +45,7 @@ def _context(*, state: dict[str, object] | None = None) -> SimpleNamespace:
     )
     settings = SimpleNamespace(
         run_id="run-123",
+        expected_account="123456789012",
         poll_interval_seconds=0,
         job_timeout_seconds=30,
         queue_timeout_seconds=30,
@@ -1160,24 +1161,464 @@ class TestProtectedBaselineIdentity:
             "gco-live-west",
         ]
 
+    def test_protected_networking_inventory_matches_exact_physical_ids(self) -> None:
+        nat_gateway_id = "nat-11111111111111111"
+        flow_log_id = "fl-22222222222222222"
+        nat_gateway_arn = f"arn:aws:ec2:{self._REGION}:123456789012:natgateway/{nat_gateway_id}"
+        flow_log_arn = f"arn:aws:ec2:{self._REGION}:123456789012:vpc-flow-log/{flow_log_id}"
+        nearby_nat_gateway_arn = (
+            f"arn:aws:ec2:{self._REGION}:123456789012:natgateway/nat-33333333333333333"
+        )
+        nearby_flow_log_arn = (
+            f"arn:aws:ec2:{self._REGION}:123456789012:vpc-flow-log/fl-44444444444444444"
+        )
+        wrong_account_nat_gateway_arn = nat_gateway_arn.replace(
+            "123456789012",
+            "999999999999",
+        )
+        wrong_region_flow_log_arn = flow_log_arn.replace(self._REGION, "us-west-2")
+        wrong_partition_nat_gateway_arn = nat_gateway_arn.replace(
+            "arn:aws:",
+            "arn:aws-us-gov:",
+        )
+        baseline = {
+            "protected_stacks": {
+                self._REGION: [
+                    {
+                        "stack_id": self._STACK_ID,
+                        "physical_resources": [
+                            {
+                                "logical_id": "NatGateway",
+                                "resource_type": "AWS::EC2::NatGateway",
+                                "physical_id": nat_gateway_id,
+                            },
+                            {
+                                "logical_id": "FlowLog",
+                                "resource_type": "AWS::EC2::FlowLog",
+                                "physical_id": flow_log_id,
+                            },
+                        ],
+                    }
+                ]
+            }
+        }
+        project_inventory = {
+            "authority_scope": {"partition": "aws", "account": "123456789012"},
+            "regional": {
+                self._REGION: {
+                    "tagged_resources": [
+                        {"arn": nat_gateway_arn, "tags": {}},
+                        {"arn": flow_log_arn, "tags": {}},
+                        {"arn": nearby_nat_gateway_arn, "tags": {}},
+                        {"arn": nearby_flow_log_arn, "tags": {}},
+                        {"arn": wrong_account_nat_gateway_arn, "tags": {}},
+                        {"arn": wrong_region_flow_log_arn, "tags": {}},
+                        {"arn": wrong_partition_nat_gateway_arn, "tags": {}},
+                    ],
+                    "nat_gateways": [nat_gateway_id, "nat-33333333333333333"],
+                    "flow_logs": [flow_log_id, "fl-44444444444444444"],
+                }
+            },
+        }
+
+        filtered = actions._strip_baseline_ecr(project_inventory, baseline)
+
+        assert filtered["regional"][self._REGION] == {
+            "tagged_resources": [
+                {"arn": nearby_nat_gateway_arn, "tags": {}},
+                {"arn": nearby_flow_log_arn, "tags": {}},
+                {"arn": wrong_account_nat_gateway_arn, "tags": {}},
+                {"arn": wrong_region_flow_log_arn, "tags": {}},
+                {"arn": wrong_partition_nat_gateway_arn, "tags": {}},
+            ],
+            "nat_gateways": ["nat-33333333333333333"],
+            "flow_logs": ["fl-44444444444444444"],
+        }
+
+    def test_protected_networking_tagged_arns_require_trusted_scope(self) -> None:
+        nat_gateway_id = "nat-11111111111111111"
+        nat_gateway_arn = f"arn:aws:ec2:{self._REGION}:123456789012:natgateway/{nat_gateway_id}"
+        baseline = {
+            "protected_stacks": {
+                self._REGION: [
+                    {
+                        "stack_id": self._STACK_ID,
+                        "physical_resources": [
+                            {
+                                "logical_id": "NatGateway",
+                                "resource_type": "AWS::EC2::NatGateway",
+                                "physical_id": nat_gateway_id,
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        project_inventory = {
+            "regional": {
+                self._REGION: {
+                    "tagged_resources": [{"arn": nat_gateway_arn, "tags": {}}],
+                }
+            }
+        }
+
+        filtered = actions._strip_baseline_ecr(project_inventory, baseline)
+
+        assert filtered["regional"][self._REGION]["tagged_resources"] == [
+            {"arn": nat_gateway_arn, "tags": {}}
+        ]
+
+    def test_instance_inventory_separates_project_owned_from_all_active_ids(self) -> None:
+        project_instance = "i-11111111111111111"
+        unrelated_instance = "i-22222222222222222"
+        ec2 = MagicMock()
+        paginator = ec2.get_paginator.return_value
+        paginator.paginate.return_value = [
+            {
+                "Reservations": [
+                    {
+                        "Instances": [
+                            {
+                                "InstanceId": project_instance,
+                                "Tags": [{"Key": "gco:project", "Value": "gco-live"}],
+                            },
+                            {"InstanceId": unrelated_instance, "Tags": []},
+                        ]
+                    }
+                ]
+            }
+        ]
+        session = MagicMock()
+        session.client.return_value = ec2
+
+        project_ids, all_ids = inventory._list_instance_inventory(
+            session,
+            self._REGION,
+            "gco-live",
+        )
+
+        assert project_ids == [project_instance]
+        assert all_ids == [project_instance, unrelated_instance]
+        ec2.get_paginator.assert_called_once_with("describe_instances")
+        paginator.paginate.assert_called_once_with(
+            Filters=[
+                {
+                    "Name": "instance-state-name",
+                    "Values": ["pending", "running", "stopping", "stopped", "shutting-down"],
+                }
+            ]
+        )
+
+    def test_ec2_networking_inventory_separates_owned_from_live_authority(self) -> None:
+        project_vpc = "vpc-11111111111111111"
+        unrelated_vpc = "vpc-22222222222222222"
+        project_subnet = "subnet-11111111111111111"
+        unrelated_subnet = "subnet-22222222222222222"
+        project_nat = "nat-11111111111111111"
+        unrelated_nat = "nat-22222222222222222"
+        deleted_nat = "nat-33333333333333333"
+        project_group = "sg-11111111111111111"
+        unrelated_group = "sg-22222222222222222"
+        project_interface = "eni-11111111111111111"
+        unrelated_interface = "eni-22222222222222222"
+        project_flow_log = "fl-11111111111111111"
+        unrelated_flow_log = "fl-22222222222222222"
+        project_eip = "eipalloc-11111111111111111"
+        unrelated_eip = "eipalloc-22222222222222222"
+        pages = {
+            "describe_vpcs": [
+                {
+                    "Vpcs": [
+                        {
+                            "VpcId": project_vpc,
+                            "Tags": [{"Key": "gco:project", "Value": "gco-live"}],
+                        }
+                    ]
+                },
+                {"Vpcs": [{"VpcId": unrelated_vpc, "Tags": []}]},
+            ],
+            "describe_subnets": [
+                {
+                    "Subnets": [
+                        {"SubnetId": project_subnet, "VpcId": project_vpc, "Tags": []},
+                        {"SubnetId": unrelated_subnet, "VpcId": unrelated_vpc, "Tags": []},
+                    ]
+                }
+            ],
+            "describe_nat_gateways": [
+                {
+                    "NatGateways": [
+                        {
+                            "NatGatewayId": project_nat,
+                            "VpcId": project_vpc,
+                            "SubnetId": project_subnet,
+                            "State": "available",
+                        },
+                        {
+                            "NatGatewayId": unrelated_nat,
+                            "VpcId": unrelated_vpc,
+                            "SubnetId": unrelated_subnet,
+                            "State": "available",
+                        },
+                        {
+                            "NatGatewayId": deleted_nat,
+                            "State": "deleted",
+                            "Tags": [{"Key": "gco:project", "Value": "gco-live"}],
+                        },
+                    ]
+                }
+            ],
+            "describe_security_groups": [
+                {
+                    "SecurityGroups": [
+                        {"GroupId": project_group, "VpcId": project_vpc, "Tags": []},
+                        {"GroupId": unrelated_group, "VpcId": unrelated_vpc, "Tags": []},
+                    ]
+                }
+            ],
+            "describe_network_interfaces": [
+                {
+                    "NetworkInterfaces": [
+                        {
+                            "NetworkInterfaceId": project_interface,
+                            "VpcId": project_vpc,
+                            "SubnetId": project_subnet,
+                            "Groups": [{"GroupId": project_group}],
+                        },
+                        {
+                            "NetworkInterfaceId": unrelated_interface,
+                            "VpcId": unrelated_vpc,
+                            "SubnetId": unrelated_subnet,
+                            "Groups": [{"GroupId": unrelated_group}],
+                        },
+                    ]
+                }
+            ],
+            "describe_flow_logs": [
+                {
+                    "FlowLogs": [
+                        {"FlowLogId": project_flow_log, "ResourceId": project_vpc},
+                        {"FlowLogId": unrelated_flow_log, "ResourceId": unrelated_vpc},
+                    ]
+                }
+            ],
+        }
+        paginators = {}
+        for operation, operation_pages in pages.items():
+            paginator = MagicMock()
+            paginator.paginate.return_value = operation_pages
+            paginators[operation] = paginator
+        ec2 = MagicMock()
+        ec2.get_paginator.side_effect = paginators.__getitem__
+        ec2.describe_addresses.return_value = {
+            "Addresses": [
+                {"AllocationId": project_eip, "NetworkInterfaceId": project_interface},
+                {"AllocationId": unrelated_eip, "NetworkInterfaceId": unrelated_interface},
+            ]
+        }
+        session = MagicMock()
+        session.client.return_value = ec2
+
+        project_resources, authoritative_resources = inventory._list_project_ec2_networking(
+            session,
+            self._REGION,
+            "gco-live",
+            ["i-11111111111111111"],
+        )
+
+        assert project_resources == {
+            "vpcs": [project_vpc],
+            "subnets": [project_subnet],
+            "nat_gateways": [project_nat],
+            "flow_logs": [project_flow_log],
+            "network_interfaces": [project_interface],
+            "security_groups": [project_group],
+            "elastic_ips": [project_eip],
+        }
+        assert authoritative_resources == {
+            "vpcs": [project_vpc, unrelated_vpc],
+            "subnets": [project_subnet, unrelated_subnet],
+            "nat_gateways": [project_nat, unrelated_nat],
+            "flow_logs": [project_flow_log, unrelated_flow_log],
+            "network_interfaces": [project_interface, unrelated_interface],
+            "security_groups": [project_group, unrelated_group],
+            "elastic_ips": [project_eip, unrelated_eip],
+        }
+        assert deleted_nat not in authoritative_resources["nat_gateways"]
+        assert paginators["describe_vpcs"].paginate.call_count == 1
+
+    def test_filter_suppresses_only_authoritatively_absent_ec2_records(self) -> None:
+        live_unowned_subnet = "subnet-aaaaaaaaaaaaaaaaa"
+        absent_subnet = "subnet-bbbbbbbbbbbbbbbbb"
+        absent_nat = "nat-ccccccccccccccccc"
+        absent_flow_log = "fl-ddddddddddddddddd"
+        absent_instance = "i-eeeeeeeeeeeeeeeee"
+        retained_arns = [
+            f"arn:aws:ec2:{self._REGION}:123456789012:subnet/{live_unowned_subnet}",
+            f"arn:aws-us-gov:ec2:{self._REGION}:123456789012:subnet/{absent_subnet}",
+            f"arn:aws:ec2:{self._REGION}:999999999999:subnet/{absent_subnet}",
+            f"arn:aws:ec2:us-west-2:123456789012:subnet/{absent_subnet}",
+            f"arn:aws:ec2:{self._REGION}:123456789012:subnet/{absent_subnet}-nearby",
+            f"arn:aws:ec2:{self._REGION}:123456789012:subnet/subnet-not-hexadecimal",
+        ]
+        absent_arns = [
+            f"arn:aws:ec2:{self._REGION}:123456789012:subnet/{absent_subnet}",
+            f"arn:aws:ec2:{self._REGION}:123456789012:natgateway/{absent_nat}",
+            f"arn:aws:ec2:{self._REGION}:123456789012:vpc-flow-log/{absent_flow_log}",
+            f"arn:aws:ec2:{self._REGION}:123456789012:instance/{absent_instance}",
+        ]
+        project_inventory = {
+            "cloudformation_stacks": {},
+            "authority_scope": {"partition": "aws", "account": "123456789012"},
+            "coverage": {
+                "complete": True,
+                "completed_scanners": ["ec2_instances", "ec2_networking"],
+                "scanner_regions": {
+                    "ec2_instances": [self._REGION],
+                    "ec2_networking": [self._REGION],
+                },
+            },
+            "authoritative_ec2_resources": {
+                self._REGION: {
+                    "instances": [],
+                    "subnets": [live_unowned_subnet],
+                    "nat_gateways": [],
+                    "flow_logs": [],
+                }
+            },
+            "regional": {
+                self._REGION: {
+                    "tagged_resources": [
+                        *({"arn": arn, "tags": {}} for arn in absent_arns),
+                        *({"arn": arn, "tags": {}} for arn in retained_arns),
+                    ]
+                }
+            },
+        }
+
+        filtered = actions._strip_baseline_ecr(
+            project_inventory,
+            {"protected_stacks": {}, "ecr_repositories": {}},
+        )
+
+        assert filtered["regional"][self._REGION]["tagged_resources"] == [
+            {"arn": arn, "tags": {}} for arn in retained_arns
+        ]
+
+    @pytest.mark.parametrize(
+        "authority_case",
+        [
+            "missing-complete",
+            "false-complete",
+            "missing-completed-scanners",
+            "malformed-scope",
+            "unscanned-region",
+        ],
+    )
+    def test_tag_reconciliation_requires_complete_scoped_authority(
+        self,
+        authority_case: str,
+    ) -> None:
+        ec2_arn = f"arn:aws:ec2:{self._REGION}:123456789012:subnet/subnet-aaaaaaaaaaaaaaaaa"
+        eks_arn = (
+            f"arn:aws:eks:{self._REGION}:123456789012:"
+            "pod/gco-live-orphan/default/example/11111111-1111-1111-1111-111111111111"
+        )
+        coverage: dict[str, object] = {
+            "complete": True,
+            "completed_scanners": ["ec2_instances", "ec2_networking", "eks_clusters"],
+            "scanner_regions": {
+                "ec2_instances": [self._REGION],
+                "ec2_networking": [self._REGION],
+                "eks_clusters": [self._REGION],
+            },
+        }
+        authority_scope = {"partition": "aws", "account": "123456789012"}
+        if authority_case == "missing-complete":
+            coverage.pop("complete")
+        elif authority_case == "false-complete":
+            coverage["complete"] = False
+        elif authority_case == "missing-completed-scanners":
+            coverage["completed_scanners"] = []
+        elif authority_case == "malformed-scope":
+            authority_scope["account"] = "not-an-account"
+        elif authority_case == "unscanned-region":
+            coverage["scanner_regions"] = {
+                "ec2_instances": [],
+                "ec2_networking": [],
+                "eks_clusters": [],
+            }
+        project_inventory = {
+            "cloudformation_stacks": {},
+            "authority_scope": authority_scope,
+            "coverage": coverage,
+            "authoritative_eks_clusters": {self._REGION: []},
+            "authoritative_ec2_resources": {self._REGION: {"subnets": []}},
+            "regional": {
+                self._REGION: {
+                    "tagged_resources": [
+                        {"arn": ec2_arn, "tags": {}},
+                        {"arn": eks_arn, "tags": {}},
+                    ]
+                }
+            },
+        }
+
+        filtered = actions._strip_baseline_ecr(
+            project_inventory,
+            {"protected_stacks": {}, "ecr_repositories": {}},
+        )
+
+        assert filtered["regional"][self._REGION]["tagged_resources"] == [
+            {"arn": ec2_arn, "tags": {}},
+            {"arn": eks_arn, "tags": {}},
+        ]
+
     def test_filter_suppresses_only_authoritatively_orphaned_eks_pods(self) -> None:
         existing_pod = (
-            "arn:aws:eks:us-east-1:123456789012:podidentityassociation/gco-live-existing/a-existing"
+            "arn:aws:eks:us-east-1:123456789012:"
+            "pod/gco-live-existing/default/example/11111111-1111-1111-1111-111111111111"
         )
         orphaned_pod = (
-            "arn:aws:eks:us-east-1:123456789012:podidentityassociation/gco-live-orphan/a-orphan"
+            "arn:aws:eks:us-east-1:123456789012:"
+            "pod/gco-live-orphan/default/example/22222222-2222-2222-2222-222222222222"
         )
-        malformed_pod = "arn:aws:eks:us-east-1:123456789012:podidentityassociation/gco-live-orphan"
+        existing_association = (
+            "arn:aws:eks:us-east-1:123456789012:"
+            "podidentityassociation/gco-live-existing/a-11111111111111111"
+        )
+        orphaned_association = (
+            "arn:aws:eks:us-east-1:123456789012:"
+            "podidentityassociation/gco-live-orphan/a-22222222222222222"
+        )
+        malformed_pod = "arn:aws:eks:us-east-1:123456789012:pod/gco-live-orphan/default/example"
+        malformed_complete_pod = (
+            "arn:aws:eks:us-east-1:123456789012:"
+            "pod/gco-live-orphan/default/example/not-a-canonical-uuid"
+        )
+        malformed_association = (
+            "arn:aws:eks:us-east-1:123456789012:"
+            "podidentityassociation/gco-live-orphan/a-not-canonical"
+        )
+        wrong_partition_pod = orphaned_pod.replace("arn:aws:", "arn:aws-us-gov:")
+        wrong_account_pod = orphaned_pod.replace("123456789012", "999999999999")
         non_pod_eks = "arn:aws:eks:us-east-1:123456789012:cluster/gco-live-orphan"
         wrong_region_pod = (
             "arn:aws:eks:us-west-2:123456789012:"
-            "podidentityassociation/gco-live-orphan/a-wrong-region"
+            "pod/gco-live-orphan/default/example/33333333-3333-3333-3333-333333333333"
         )
         unscanned_region_pod = (
-            "arn:aws:eks:us-west-2:123456789012:podidentityassociation/gco-live-orphan/a-unscanned"
+            "arn:aws:eks:us-west-2:123456789012:"
+            "pod/gco-live-orphan/default/example/44444444-4444-4444-4444-444444444444"
         )
         project_inventory = {
             "cloudformation_stacks": {},
+            "authority_scope": {"partition": "aws", "account": "123456789012"},
+            "coverage": {
+                "complete": True,
+                "completed_scanners": ["eks_clusters"],
+                "scanner_regions": {"eks_clusters": [self._REGION]},
+            },
             "authoritative_eks_clusters": {
                 self._REGION: ["gco-live-existing"],
             },
@@ -1186,7 +1627,13 @@ class TestProtectedBaselineIdentity:
                     "tagged_resources": [
                         {"arn": orphaned_pod, "tags": {}},
                         {"arn": existing_pod, "tags": {}},
+                        {"arn": orphaned_association, "tags": {}},
+                        {"arn": existing_association, "tags": {}},
                         {"arn": malformed_pod, "tags": {}},
+                        {"arn": malformed_complete_pod, "tags": {}},
+                        {"arn": malformed_association, "tags": {}},
+                        {"arn": wrong_partition_pod, "tags": {}},
+                        {"arn": wrong_account_pod, "tags": {}},
                         {"arn": non_pod_eks, "tags": {}},
                         {"arn": wrong_region_pod, "tags": {}},
                     ]
@@ -1202,9 +1649,15 @@ class TestProtectedBaselineIdentity:
             record["arn"] for record in filtered["regional"][self._REGION]["tagged_resources"]
         }
         assert orphaned_pod not in east_arns
+        assert orphaned_association not in east_arns
         assert east_arns == {
             existing_pod,
+            existing_association,
             malformed_pod,
+            malformed_complete_pod,
+            malformed_association,
+            wrong_partition_pod,
+            wrong_account_pod,
             non_pod_eks,
             wrong_region_pod,
         }

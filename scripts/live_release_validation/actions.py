@@ -136,7 +136,9 @@ _PROTECTED_REGIONAL_RESOURCE_CATEGORIES = {
     "AWS::Backup::BackupVault": "backup_vaults",
     "AWS::DynamoDB::Table": "dynamodb_tables",
     "AWS::EC2::EIP": "elastic_ips",
+    "AWS::EC2::FlowLog": "flow_logs",
     "AWS::EC2::Instance": "instances",
+    "AWS::EC2::NatGateway": "nat_gateways",
     "AWS::EC2::NetworkInterface": "network_interfaces",
     "AWS::EC2::SecurityGroup": "security_groups",
     "AWS::EC2::Subnet": "subnets",
@@ -170,6 +172,21 @@ _BACKUP_ARN_RESOURCE_PREFIXES = {
     "AWS::Backup::BackupPlan": "backup-plan:",
     "AWS::Backup::BackupVault": "backup-vault:",
 }
+_EC2_ID_SUFFIX = r"(?:[0-9a-f]{8}|[0-9a-f]{17})"
+_EC2_TAGGED_RESOURCE_IDENTITIES: dict[str, tuple[str, re.Pattern[str]]] = {
+    "elastic-ip": ("elastic_ips", re.compile(rf"eipalloc-{_EC2_ID_SUFFIX}")),
+    "instance": ("instances", re.compile(rf"i-{_EC2_ID_SUFFIX}")),
+    "natgateway": ("nat_gateways", re.compile(rf"nat-{_EC2_ID_SUFFIX}")),
+    "network-interface": ("network_interfaces", re.compile(rf"eni-{_EC2_ID_SUFFIX}")),
+    "security-group": ("security_groups", re.compile(rf"sg-{_EC2_ID_SUFFIX}")),
+    "subnet": ("subnets", re.compile(rf"subnet-{_EC2_ID_SUFFIX}")),
+    "vpc": ("vpcs", re.compile(rf"vpc-{_EC2_ID_SUFFIX}")),
+    "vpc-flow-log": ("flow_logs", re.compile(rf"fl-{_EC2_ID_SUFFIX}")),
+}
+_EKS_CLUSTER_NAME = re.compile(r"[0-9A-Za-z][A-Za-z0-9_-]{0,99}")
+_EKS_ASSOCIATION_ID = re.compile(r"a-[0-9a-z]{17}")
+_KUBERNETES_DNS_LABEL = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?")
+_KUBERNETES_POD_UID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _CLOUDFORMATION_STACK_ID_TAG = "aws:cloudformation:stack-id"
 _SQS_DNS_SUFFIXES = {
     "aws": "amazonaws.com",
@@ -289,6 +306,10 @@ def _tagged_arn_matches_protected_physical_id(
     resource_type: str,
     arn: str,
     physical_id: str,
+    *,
+    expected_partition: str,
+    expected_region: str,
+    expected_account: str,
 ) -> bool:
     """Match a Tagging API ARN to one exact CloudFormation physical ID."""
     if arn == physical_id:
@@ -335,6 +356,23 @@ def _tagged_arn_matches_protected_physical_id(
             and "/" not in resource.removeprefix("key/")
             and resource.removeprefix("key/") == physical_id
         )
+    expected_ec2_category = {
+        "AWS::EC2::FlowLog": "flow_logs",
+        "AWS::EC2::NatGateway": "nat_gateways",
+    }.get(resource_type)
+    if expected_ec2_category is not None:
+        return bool(
+            expected_partition
+            and expected_region
+            and re.fullmatch(r"\d{12}", expected_account)
+            and _ec2_tagged_resource_identity(
+                arn,
+                expected_region,
+                expected_partition,
+                expected_account,
+            )
+            == (expected_ec2_category, physical_id)
+        )
     return False
 
 
@@ -344,6 +382,9 @@ def _tagged_resource_is_protected(
     protected_stack_ids: set[str],
     protected_resource_ids: dict[str, set[str]],
     exact_arns: set[str],
+    expected_partition: str,
+    expected_region: str,
+    expected_account: str,
 ) -> bool:
     """Return whether a tagged record has one exact protected identity."""
     if not isinstance(record, Mapping):
@@ -361,7 +402,14 @@ def _tagged_resource_is_protected(
             return True
 
     return any(
-        _tagged_arn_matches_protected_physical_id(resource_type, arn, physical_id)
+        _tagged_arn_matches_protected_physical_id(
+            resource_type,
+            arn,
+            physical_id,
+            expected_partition=expected_partition,
+            expected_region=expected_region,
+            expected_account=expected_account,
+        )
         for resource_type, physical_ids in protected_resource_ids.items()
         for physical_id in physical_ids
     )
@@ -405,30 +453,89 @@ def _matches_protected_physical_identity(
     return False
 
 
-def _eks_pod_parent_cluster(arn: str, expected_region: str) -> str | None:
-    """Parse only complete regional EKS pod ARNs; malformed records stay visible."""
+def _valid_kubernetes_dns_subdomain(value: str) -> bool:
+    return bool(
+        value
+        and len(value) <= 253
+        and all(_KUBERNETES_DNS_LABEL.fullmatch(label) for label in value.split("."))
+    )
+
+
+def _eks_pod_parent_cluster(
+    arn: str,
+    expected_region: str,
+    expected_partition: str,
+    expected_account: str,
+) -> str | None:
+    """Parse canonical in-scope EKS pod identities; malformed records stay visible."""
     parts = arn.split(":", 5)
     if (
         len(parts) != 6
         or parts[0] != "arn"
-        or not parts[1]
+        or parts[1] != expected_partition
         or parts[2] != "eks"
         or parts[3] != expected_region
-        or not parts[4]
+        or parts[4] != expected_account
     ):
         return None
     resource_parts = parts[5].split("/")
-    if len(resource_parts) != 3 or resource_parts[0] != "podidentityassociation":
-        return None
     if any(not component for component in resource_parts):
         return None
-    return resource_parts[1]
+    if resource_parts[0] == "pod":
+        if len(resource_parts) != 5:
+            return None
+        _kind, cluster, namespace, pod_name, pod_uid = resource_parts
+        if (
+            not _EKS_CLUSTER_NAME.fullmatch(cluster)
+            or not _KUBERNETES_DNS_LABEL.fullmatch(namespace)
+            or not _valid_kubernetes_dns_subdomain(pod_name)
+            or not _KUBERNETES_POD_UID.fullmatch(pod_uid)
+        ):
+            return None
+        return cluster
+    if resource_parts[0] == "podidentityassociation":
+        if len(resource_parts) != 3:
+            return None
+        _kind, cluster, association_id = resource_parts
+        if not _EKS_CLUSTER_NAME.fullmatch(cluster) or not _EKS_ASSOCIATION_ID.fullmatch(
+            association_id
+        ):
+            return None
+        return cluster
+    return None
+
+
+def _ec2_tagged_resource_identity(
+    arn: str,
+    expected_region: str,
+    expected_partition: str,
+    expected_account: str,
+) -> tuple[str, str] | None:
+    """Map only canonical in-scope EC2 ARNs to authoritative live identities."""
+    parts = arn.split(":", 5)
+    if (
+        len(parts) != 6
+        or parts[0] != "arn"
+        or parts[1] != expected_partition
+        or parts[2] != "ec2"
+        or parts[3] != expected_region
+        or parts[4] != expected_account
+    ):
+        return None
+    resource_kind, separator, resource_id = parts[5].partition("/")
+    identity = _EC2_TAGGED_RESOURCE_IDENTITIES.get(resource_kind)
+    if not separator or not resource_id or "/" in resource_id or identity is None:
+        return None
+    category, resource_id_pattern = identity
+    if not resource_id_pattern.fullmatch(resource_id):
+        return None
+    return category, resource_id
 
 
 def _strip_baseline_ecr(
     project_inventory: dict[str, Any], baseline: dict[str, Any]
 ) -> dict[str, Any]:
-    """Strip only exact protected identities and provably stale EKS pod records."""
+    """Strip only exact protected identities and authoritatively absent tag records."""
     protected_stack_ids, protected_resource_ids = _baseline_protected_identities(baseline)
     baseline_ecr_names: dict[str, set[str]] = {}
     baseline_ecr_arns: dict[str, set[str]] = {}
@@ -456,6 +563,49 @@ def _strip_baseline_ecr(
                 stacks_by_region.pop(region)
 
     authoritative_clusters = inventory.get("authoritative_eks_clusters")
+    authoritative_ec2_resources = inventory.get("authoritative_ec2_resources")
+    authority_scope = inventory.get("authority_scope")
+    expected_partition = (
+        str(authority_scope.get("partition") or "") if isinstance(authority_scope, Mapping) else ""
+    )
+    expected_account = (
+        str(authority_scope.get("account") or "") if isinstance(authority_scope, Mapping) else ""
+    )
+    has_exact_authority_scope = bool(
+        expected_partition and re.fullmatch(r"\d{12}", expected_account)
+    )
+    coverage = inventory.get("coverage")
+    coverage_complete = isinstance(coverage, Mapping) and coverage.get("complete") is True
+    completed_scanners = (
+        {str(scanner) for scanner in coverage.get("completed_scanners", [])}
+        if isinstance(coverage, Mapping) and isinstance(coverage.get("completed_scanners"), list)
+        else set()
+    )
+    scanner_regions = coverage.get("scanner_regions") if isinstance(coverage, Mapping) else None
+    eks_scanner_regions = (
+        {str(region) for region in scanner_regions.get("eks_clusters", [])}
+        if isinstance(scanner_regions, Mapping)
+        and isinstance(scanner_regions.get("eks_clusters"), list)
+        else set()
+    )
+    instance_scanner_regions = (
+        {str(region) for region in scanner_regions.get("ec2_instances", [])}
+        if isinstance(scanner_regions, Mapping)
+        and isinstance(scanner_regions.get("ec2_instances"), list)
+        else set()
+    )
+    network_scanner_regions = (
+        {str(region) for region in scanner_regions.get("ec2_networking", [])}
+        if isinstance(scanner_regions, Mapping)
+        and isinstance(scanner_regions.get("ec2_networking"), list)
+        else set()
+    )
+    has_complete_eks_authority = coverage_complete and "eks_clusters" in completed_scanners
+    has_complete_ec2_authority = coverage_complete and {
+        "ec2_instances",
+        "ec2_networking",
+    }.issubset(completed_scanners)
+    ec2_scanner_regions = instance_scanner_regions & network_scanner_regions
     for region, resources in list(inventory.get("regional", {}).items()):
         region_key = str(region)
         region_stack_ids = protected_stack_ids.get(region_key, set())
@@ -477,6 +627,9 @@ def _strip_baseline_ecr(
                     protected_stack_ids=region_stack_ids,
                     protected_resource_ids=region_resource_ids,
                     exact_arns=exact_tagged_arns,
+                    expected_partition=expected_partition,
+                    expected_region=region_key,
+                    expected_account=expected_account,
                 )
             ]
 
@@ -511,8 +664,47 @@ def _strip_baseline_ecr(
                 if name not in baseline_ecr_names.get(str(region), set())
             ]
 
+        region_ec2_authority = (
+            authoritative_ec2_resources.get(region_key)
+            if isinstance(authoritative_ec2_resources, dict)
+            else None
+        )
         if (
             "tagged_resources" in resources
+            and has_exact_authority_scope
+            and has_complete_ec2_authority
+            and region_key in ec2_scanner_regions
+            and isinstance(region_ec2_authority, dict)
+        ):
+            authoritative_ec2_ids = {
+                category: {str(candidate) for candidate in candidates}
+                for category, candidates in region_ec2_authority.items()
+                if category in {item[0] for item in _EC2_TAGGED_RESOURCE_IDENTITIES.values()}
+                and isinstance(candidates, list)
+            }
+            resources["tagged_resources"] = [
+                record
+                for record in resources["tagged_resources"]
+                if (
+                    (
+                        identity := _ec2_tagged_resource_identity(
+                            str(record.get("arn") or ""),
+                            region_key,
+                            expected_partition,
+                            expected_account,
+                        )
+                    )
+                    is None
+                    or identity[0] not in authoritative_ec2_ids
+                    or identity[1] in authoritative_ec2_ids[identity[0]]
+                )
+            ]
+
+        if (
+            "tagged_resources" in resources
+            and has_exact_authority_scope
+            and has_complete_eks_authority
+            and region_key in eks_scanner_regions
             and isinstance(authoritative_clusters, dict)
             and region in authoritative_clusters
             and isinstance(authoritative_clusters[region], list)
@@ -522,7 +714,14 @@ def _strip_baseline_ecr(
                 record
                 for record in resources["tagged_resources"]
                 if (
-                    (parent := _eks_pod_parent_cluster(str(record.get("arn") or ""), region))
+                    (
+                        parent := _eks_pod_parent_cluster(
+                            str(record.get("arn") or ""),
+                            region_key,
+                            expected_partition,
+                            expected_account,
+                        )
+                    )
                     is None
                     or parent in existing_clusters
                 )
@@ -1568,6 +1767,7 @@ def action_baseline(ctx: RunContext) -> dict[str, Any]:
     project_inventory = collect_project_resources(
         ctx.session,
         enabled_regions=enabled_regions,
+        expected_account=ctx.settings.expected_account,
         project_name=ctx.config.project_name,
         seed_region=ctx.config.global_region,
     )
@@ -3253,6 +3453,7 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
     project_inventory = collect_project_resources(
         ctx.session,
         enabled_regions=enabled_regions,
+        expected_account=ctx.settings.expected_account,
         project_name=ctx.config.project_name,
         seed_region=ctx.config.global_region,
     )
