@@ -3021,6 +3021,12 @@ class StackManager:
         except ClientError as exc:
             if self._change_set_missing(exc):
                 return
+            # DescribeChangeSet reports a stack-style ValidationError when both
+            # the deterministic change set and its fresh target stack are absent.
+            # The target was authoritatively checked immediately above; only an
+            # empty create history can safely interpret this as "not prepared".
+            if expected_stack_id is None and not prepared_change_sets and self._stack_missing(exc):
+                return
             raise RuntimeError(
                 f"Could not preflight strict change set {change_set_name} for {stack_name}"
             ) from exc
