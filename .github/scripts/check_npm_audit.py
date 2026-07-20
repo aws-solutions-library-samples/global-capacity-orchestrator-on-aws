@@ -99,7 +99,9 @@ def _load_report(path: Path) -> dict[str, Any]:
         report = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid npm-audit JSON in {path}: {exc}") from exc
-    if not isinstance(report, dict) or isinstance(report.get("error"), dict):
+    if not isinstance(report, dict):
+        raise ValueError("npm-audit report must be a JSON object")
+    if isinstance(report.get("error"), dict):
         raise ValueError(f"npm audit returned an operational error: {report.get('error')!r}")
     if not isinstance(report.get("vulnerabilities"), dict):
         raise ValueError("npm-audit report is missing the vulnerabilities object")
