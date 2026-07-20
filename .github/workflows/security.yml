@@ -174,8 +174,12 @@ jobs:
             report_name="${report_name//\//-}"
             echo "=== Auditing ${package_dir} ==="
             npm ci --prefix "$package_dir" --ignore-scripts --no-audit --no-fund
-            if ! npm audit --prefix "$package_dir" --audit-level=high \
-              --json > "npm-audit-reports/${report_name}.json"; then
+            npm audit --prefix "$package_dir" --audit-level=high \
+              --json > "npm-audit-reports/${report_name}.json" || true
+            if ! python3 .github/scripts/check_npm_audit.py \
+              --report "npm-audit-reports/${report_name}.json" \
+              --package-dir "$package_dir" \
+              --ignore-file .github/config/.npm-audit-ignore; then
               audit_status=1
             fi
             npm audit --prefix "$package_dir" --audit-level=high || true

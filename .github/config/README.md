@@ -13,6 +13,7 @@ every consumer now points at them explicitly — each section below says where.
 - [`.gitleaks.toml`](#gitleakstoml)
 - [`.kics.yaml`](#kicsyaml)
 - [`.markdownlint-cli2.yaml`](#markdownlint-cli2yaml)
+- [`.npm-audit-ignore`](#npm-audit-ignore)
 - [`.pip-audit-ignore`](#pip-audit-ignore)
 - [`.trivyignore`](#trivyignore)
 - [`.yamllint.yml`](#yamllintyml)
@@ -48,6 +49,18 @@ markdownlint-cli2 rule set, globs, and ignores for Markdown linting.
   (the action's `config:` input) and the `markdownlint-cli2` pre-commit hook
   (`--config`). The VS Code markdownlint extension can be pointed at this path
   too.
+
+## `.npm-audit-ignore`
+
+Exact, dated npm advisory suppressions scoped to one package graph, package,
+advisory ID, and installed node path. The file documents each risk decision and
+its upstream remediation tracker; entries expire inclusively and cannot hide
+additional findings.
+
+- **Used by:** `security:npm-audit:all-packages` in
+  `.github/workflows/security.yml`. `.github/scripts/check_npm_audit.py`
+  validates npm's JSON report, rejects expired or stale entries, and fails on
+  every unmatched high or critical vulnerability.
 
 ## `.pip-audit-ignore`
 

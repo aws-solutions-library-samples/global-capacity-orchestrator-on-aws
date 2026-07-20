@@ -1,0 +1,30 @@
+# =============================================================================
+# .npm-audit-ignore — Temporary exact npm-audit suppressions
+# =============================================================================
+#
+# Read by .github/scripts/check_npm_audit.py. npm has no native advisory
+# ignore-file support, so the checker compares each HIGH/CRITICAL finding with
+# every field below and fails closed when any field differs.
+#
+# Rules:
+#   1. Scope every entry to one package graph, package, advisory, and node path.
+#   2. Every entry MUST carry an expiration date (exp:YYYY-MM-DD). The listed
+#      date is expired; there is no grace day.
+#   3. Document the risk decision and link upstream tracking immediately above
+#      the entry.
+#   4. Remove an entry as soon as the dependency graph no longer reports it.
+#      The checker rejects stale as well as expired suppressions.
+#
+# Format (exactly five pipe-delimited fields):
+#   package-dir|package|advisory|node-path|exp:YYYY-MM-DD
+# =============================================================================
+
+# GHSA-3jxr-9vmj-r5cp / CVE-2026-13149 — brace-expansion CPU denial of service.
+# cdk-dia resolves aws-cdk-lib 2.261.0, whose immutable npm tarball bundles
+# minimatch -> brace-expansion 5.0.6. npm audit fix and overrides cannot replace
+# bundled dependencies. AWS assessed the affected minimatch calls as synth-time
+# processing of trusted, developer-authored patterns—not untrusted remote input—
+# and is tracking a rebuilt aws-cdk-lib release here:
+# https://github.com/aws/aws-cdk/issues/38257
+# Remove this entry and refresh package-lock.json as soon as that release lands.
+.|brace-expansion|GHSA-3jxr-9vmj-r5cp|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-08-20
