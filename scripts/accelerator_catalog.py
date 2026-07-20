@@ -2,9 +2,10 @@
 """Validate and maintain GCO's EC2 accelerator catalog.
 
 Normal CI is deliberately offline: ``validate`` compares the checked-in catalog
-with Karpenter NodePools and ``cdk.json``. The monthly dependency workflow runs
-``check-online`` to compare that catalog with the union of NVIDIA GPU and AWS
-Neuron instance types returned by EC2 in every enabled commercial Region.
+with Karpenter NodePools plus the capacity-history watch lists in ``cdk.json``
+and ``ConfigLoader``. The monthly dependency workflow runs ``check-online`` to
+compare that catalog with the union of NVIDIA GPU and AWS Neuron instance types
+returned by EC2 in every enabled commercial Region.
 
 Online reads are sequential and paginated. Botocore adaptive retries protect the
 monthly scan from transient EC2 throttling without making the deterministic test
@@ -14,6 +15,7 @@ suite depend on credentials or a mutable cloud catalog.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import sys
 from dataclasses import dataclass
@@ -26,6 +28,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CATALOG_PATH = ROOT / "gco" / "config" / "accelerator_catalog.json"
 DEFAULT_CDK_PATH = ROOT / "cdk.json"
+DEFAULT_CONFIG_LOADER_PATH = ROOT / "gco" / "config" / "config_loader.py"
 DEFAULT_MANIFESTS_PATH = ROOT / "lambda" / "kubectl-applier-simple" / "manifests"
 
 Accelerator = Literal["nvidia", "neuron"]
@@ -115,9 +118,11 @@ class FamilyPolicy:
         generation = raw.get("generation")
         if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
             raise CatalogError(f"families.{name}.generation must be a non-negative integer")
-        manifest_allowed_value = raw.get(
-            "manifest_allowed", lifecycle_value in {"active", "announced"}
-        )
+        if lifecycle_value == "announced" and "manifest_allowed" not in raw:
+            raise CatalogError(
+                f"families.{name}.manifest_allowed is required for announced families"
+            )
+        manifest_allowed_value = raw.get("manifest_allowed", lifecycle_value == "active")
         if not isinstance(manifest_allowed_value, bool):
             raise CatalogError(f"families.{name}.manifest_allowed must be a boolean")
         reason_value = raw.get("reason")
@@ -149,7 +154,7 @@ class FamilyPolicy:
             "generation": self.generation,
             "lifecycle": self.lifecycle,
         }
-        default_allowed = self.lifecycle in {"active", "announced"}
+        default_allowed = self.lifecycle == "active"
         if self.manifest_allowed != default_allowed or self.lifecycle == "announced":
             result["manifest_allowed"] = self.manifest_allowed
         if self.reason is not None:
@@ -265,7 +270,7 @@ class ValidationReport:
 
     def to_text(self) -> str:
         if self.ok:
-            return "Accelerator catalog validation passed: NodePools and watch list are current.\n"
+            return "Accelerator catalog validation passed: NodePools and both watch lists are current.\n"
         lines = [f"Accelerator catalog validation failed with {len(self.findings)} finding(s):"]
         for finding in self.findings:
             lines.append(f"\nERROR [{finding.code}] {finding.title}")
@@ -286,8 +291,8 @@ class ValidationReport:
             lines.extend(
                 [
                     "",
-                    "The checked-in EC2 catalog, Karpenter families, and "
-                    "`historical.watch_instance_types` are synchronized.",
+                    "The checked-in EC2 catalog, Karpenter families, and capacity-history "
+                    "watch lists in `cdk.json` and `ConfigLoader` are synchronized.",
                 ]
             )
             return "\n".join(lines) + "\n"
@@ -474,12 +479,81 @@ def validate_nodepools(
     return tuple(findings)
 
 
+def _watch_list_findings(
+    catalog: Catalog,
+    watched: tuple[str, ...],
+    *,
+    location: Path,
+    code_prefix: str,
+    subject: str,
+    target: str,
+    peer: str,
+) -> tuple[Finding, ...]:
+    """Compare one capacity-history watch list with the normalized catalog."""
+    findings: list[Finding] = []
+    if len(watched) != len(set(watched)):
+        duplicates = sorted(item for item in set(watched) if watched.count(item) > 1)
+        findings.append(
+            Finding(
+                code=f"{code_prefix}-duplicates",
+                title=f"{subject} contains duplicate instance types",
+                locations=(str(location),),
+                detail=f"Duplicate values: {', '.join(duplicates)}.",
+                recommendation=f"Remove duplicate entries from {target}.",
+            )
+        )
+
+    expected = set(catalog.instance_types)
+    actual = set(watched)
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    if missing:
+        findings.append(
+            Finding(
+                code=f"{code_prefix}-missing",
+                title=f"{subject} omits accelerator instance types",
+                locations=(str(location),),
+                detail=f"Missing {len(missing)} catalog type(s): {', '.join(missing)}.",
+                recommendation=(
+                    f"Add every listed type to {target} and mirror the same default in {peer}."
+                ),
+            )
+        )
+    if unexpected:
+        findings.append(
+            Finding(
+                code=f"{code_prefix}-unexpected",
+                title=f"{subject} contains types outside the catalog",
+                locations=(str(location),),
+                detail=f"Unexpected {len(unexpected)} type(s): {', '.join(unexpected)}.",
+                recommendation=(
+                    "Refresh and review the catalog before retaining these entries, or remove "
+                    f"them from {target}."
+                ),
+            )
+        )
+    if not missing and not unexpected and watched != catalog.instance_types:
+        findings.append(
+            Finding(
+                code=f"{code_prefix}-order",
+                title=f"{subject} is not in normalized catalog order",
+                locations=(str(location),),
+                detail="The values are complete but their order differs from the checked-in catalog.",
+                recommendation=(
+                    f"Replace {target} with gco/config/accelerator_catalog.json instance_types so "
+                    "future catalog refreshes produce reviewable diffs."
+                ),
+            )
+        )
+    return tuple(findings)
+
+
 def validate_watch_instance_types(
     catalog: Catalog, cdk_path: Path = DEFAULT_CDK_PATH
 ) -> tuple[Finding, ...]:
     """Require cdk.json's capacity-history watch list to exactly match the catalog."""
     try:
-        parsed: object = json.loads(cdk_path.read_text())
+        parsed: object = json.loads(cdk_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise CatalogError(f"cannot read {cdk_path}: {exc}") from exc
     root = _mapping(parsed, str(cdk_path))
@@ -489,62 +563,100 @@ def validate_watch_instance_types(
         historical.get("watch_instance_types"),
         f"{cdk_path}: context.historical.watch_instance_types",
     )
-    findings: list[Finding] = []
-    if len(watched) != len(set(watched)):
-        duplicates = sorted(item for item in set(watched) if watched.count(item) > 1)
-        findings.append(
-            Finding(
-                code="watch-list-duplicates",
-                title="capacity-history watch list contains duplicate instance types",
-                locations=(str(cdk_path),),
-                detail=f"Duplicate values: {', '.join(duplicates)}.",
-                recommendation="Remove duplicate entries and use the catalog's normalized order.",
-            )
+    return _watch_list_findings(
+        catalog,
+        watched,
+        location=cdk_path,
+        code_prefix="watch-list",
+        subject="capacity-history watch list",
+        target="context.historical.watch_instance_types",
+        peer="ConfigLoader.get_capacity_history_config()",
+    )
+
+
+def _load_config_loader_watch_instance_types(
+    config_loader_path: Path = DEFAULT_CONFIG_LOADER_PATH,
+) -> tuple[str, ...]:
+    """Read ConfigLoader's literal fallback without importing CDK or boto3."""
+    try:
+        source = config_loader_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(config_loader_path))
+    except (OSError, SyntaxError) as exc:
+        raise CatalogError(f"cannot parse {config_loader_path}: {exc}") from exc
+
+    classes = [
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ConfigLoader"
+    ]
+    if len(classes) != 1:
+        raise CatalogError(f"{config_loader_path}: expected exactly one ConfigLoader class")
+    methods = [
+        node
+        for node in classes[0].body
+        if isinstance(node, ast.FunctionDef) and node.name == "get_capacity_history_config"
+    ]
+    if len(methods) != 1:
+        raise CatalogError(
+            f"{config_loader_path}: expected exactly one get_capacity_history_config method"
         )
-    expected = set(catalog.instance_types)
-    actual = set(watched)
-    missing = sorted(expected - actual)
-    unexpected = sorted(actual - expected)
-    if missing:
-        findings.append(
-            Finding(
-                code="watch-list-missing",
-                title="capacity-history watch list omits accelerator instance types",
-                locations=(str(cdk_path),),
-                detail=f"Missing {len(missing)} catalog type(s): {', '.join(missing)}.",
-                recommendation=(
-                    "Add every listed type to context.historical.watch_instance_types and mirror "
-                    "the same default in ConfigLoader.get_capacity_history_config()."
-                ),
-            )
+
+    default_configs: list[ast.Dict] = []
+    for statement in methods[0].body:
+        if not isinstance(statement, (ast.AnnAssign, ast.Assign)):
+            continue
+        targets = (
+            (statement.target,)
+            if isinstance(statement, ast.AnnAssign)
+            else tuple(statement.targets)
         )
-    if unexpected:
-        findings.append(
-            Finding(
-                code="watch-list-unexpected",
-                title="capacity-history watch list contains types outside the catalog",
-                locations=(str(cdk_path),),
-                detail=f"Unexpected {len(unexpected)} type(s): {', '.join(unexpected)}.",
-                recommendation=(
-                    "Refresh and review the catalog before retaining these entries, or remove them "
-                    "from context.historical.watch_instance_types."
-                ),
-            )
+        if (
+            len(targets) == 1
+            and isinstance(targets[0], ast.Name)
+            and targets[0].id == "default_config"
+            and isinstance(statement.value, ast.Dict)
+        ):
+            default_configs.append(statement.value)
+    if len(default_configs) != 1:
+        raise CatalogError(
+            f"{config_loader_path}: expected one literal default_config in "
+            "ConfigLoader.get_capacity_history_config()"
         )
-    if not missing and not unexpected and watched != catalog.instance_types:
-        findings.append(
-            Finding(
-                code="watch-list-order",
-                title="capacity-history watch list is not in normalized catalog order",
-                locations=(str(cdk_path),),
-                detail="The values are complete but their order differs from the checked-in catalog.",
-                recommendation=(
-                    "Replace the list with gco/config/accelerator_catalog.json instance_types so "
-                    "future catalog refreshes produce reviewable diffs."
-                ),
-            )
+
+    watch_values: list[ast.expr] = []
+    for key, value in zip(default_configs[0].keys, default_configs[0].values, strict=True):
+        if isinstance(key, ast.Constant) and key.value == "watch_instance_types":
+            watch_values.append(value)
+    if len(watch_values) != 1:
+        raise CatalogError(
+            f"{config_loader_path}: expected one default_config watch_instance_types value"
         )
-    return tuple(findings)
+    try:
+        parsed_watch_values: object = ast.literal_eval(watch_values[0])
+    except (SyntaxError, TypeError, ValueError) as exc:
+        raise CatalogError(
+            f"{config_loader_path}: default_config watch_instance_types must be a literal list"
+        ) from exc
+    return _string_list(
+        parsed_watch_values,
+        f"{config_loader_path}: ConfigLoader.get_capacity_history_config() "
+        "default_config.watch_instance_types",
+    )
+
+
+def validate_config_loader_watch_instance_types(
+    catalog: Catalog,
+    config_loader_path: Path = DEFAULT_CONFIG_LOADER_PATH,
+) -> tuple[Finding, ...]:
+    """Require ConfigLoader's fallback watch list to exactly match the catalog."""
+    watched = _load_config_loader_watch_instance_types(config_loader_path)
+    return _watch_list_findings(
+        catalog,
+        watched,
+        location=config_loader_path,
+        code_prefix="config-loader-watch-list",
+        subject="ConfigLoader capacity-history default watch list",
+        target="ConfigLoader.get_capacity_history_config() default watch_instance_types",
+        peer="cdk.json context.historical.watch_instance_types",
+    )
 
 
 def validate_repository(
@@ -552,6 +664,7 @@ def validate_repository(
     catalog_path: Path = DEFAULT_CATALOG_PATH,
     manifests_path: Path = DEFAULT_MANIFESTS_PATH,
     cdk_path: Path = DEFAULT_CDK_PATH,
+    config_loader_path: Path = DEFAULT_CONFIG_LOADER_PATH,
 ) -> ValidationReport:
     """Run every deterministic repository validation without AWS access."""
     catalog = Catalog.load(catalog_path)
@@ -559,6 +672,7 @@ def validate_repository(
     findings = [
         *validate_nodepools(catalog, nodepools),
         *validate_watch_instance_types(catalog, cdk_path),
+        *validate_config_loader_watch_instance_types(catalog, config_loader_path),
     ]
     return ValidationReport(tuple(sorted(findings, key=Finding.sort_key)))
 
@@ -856,6 +970,7 @@ def _build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH)
     validate.add_argument("--manifests", type=Path, default=DEFAULT_MANIFESTS_PATH)
     validate.add_argument("--cdk-config", type=Path, default=DEFAULT_CDK_PATH)
+    validate.add_argument("--config-loader", type=Path, default=DEFAULT_CONFIG_LOADER_PATH)
     validate.add_argument("--format", choices=("text", "markdown"), default="text")
     validate.add_argument("--output", type=Path)
 
@@ -885,6 +1000,7 @@ def main(argv: list[str] | None = None) -> int:
                 catalog_path=args.catalog,
                 manifests_path=args.manifests,
                 cdk_path=args.cdk_config,
+                config_loader_path=args.config_loader,
             )
             content = report.to_markdown() if args.format == "markdown" else report.to_text()
             _write_or_print(content, args.output)
