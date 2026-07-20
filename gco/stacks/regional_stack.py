@@ -3099,6 +3099,7 @@ class GCORegionalStack(Stack):
             service_token=self.helm_installer_provider.service_token,
             properties=convergence_properties,
         )
+        converge_trigger.node.add_dependency(self.helm_installer_provider_log_group)
 
         # The trigger (and therefore the whole convergence pipeline) must run
         # after the cluster, shared storage, managed-addon IRSA patches, and Pod
@@ -3368,8 +3369,9 @@ class GCORegionalStack(Stack):
         )
 
         # Provider framework fronts the Lambda so CloudFormation invocation,
-        # response signalling and retries are handled for us. An explicit log
-        # group avoids the default LogRetention custom resource.
+        # response signalling, and retries are handled for us. The explicit
+        # group retains one week of logs and is ordered after the custom
+        # resource during deletion so teardown cannot recreate it.
         ga_deregistration_log_group = logs.LogGroup(
             self,
             "GaDeregistrationProviderLogGroup",
@@ -3404,6 +3406,7 @@ class GCORegionalStack(Stack):
         # teardown, releasing the GA ENIs so the subnets can be removed cleanly.
         self.ga_deregistration_resource = ga_deregistration
         ga_deregistration.node.add_dependency(self.vpc)
+        ga_deregistration.node.add_dependency(ga_deregistration_log_group)
 
         # cdk-nag: the deregistration Lambda needs globalaccelerator Describe*/
         # RemoveEndpoints with Resource: * (these Global Accelerator APIs do not
@@ -3983,28 +3986,20 @@ class GCORegionalStack(Stack):
             )
         )
 
-        # Create log group for the custom-resource provider framework
-        helm_provider_log_group = logs.LogGroup(
+        # The framework group is explicitly managed with bounded retention.
+        # HelmInstallCharts depends on it below, forcing the trigger's final
+        # provider invocation to finish before CloudFormation removes the group.
+        self.helm_installer_provider_log_group = logs.LogGroup(
             self,
             "HelmInstallerProviderLogGroup",
             retention=logs.RetentionDays.ONE_WEEK,
             removal_policy=RemovalPolicy.DESTROY,
         )
-
-        # Fire-and-forget custom-resource provider: onEvent starts the helm
-        # install state machine and the resource completes immediately. The
-        # cluster's CloudFormation lifecycle is deliberately NOT bound to the
-        # helm batch finishing — a slow chart (e.g. volcano retrying docker.io
-        # pulls) would otherwise keep the execution RUNNING past CloudFormation's
-        # ~1h custom-resource ceiling and trigger a rollback that destroys the
-        # cluster. Charts converge in the background; status lives in SSM and is
-        # surfaced via `gco stacks addons status` / re-converged with
-        # `gco stacks addons install`. No isComplete handler => no waiter.
         self.helm_installer_provider = cr.Provider(
             self,
             "HelmInstallerProvider",
             on_event_handler=helm_orchestrator_on_event,
-            log_group=helm_provider_log_group,
+            log_group=self.helm_installer_provider_log_group,
         )
 
         # Unlike create/update convergence, stack deletion must be synchronous:
@@ -4295,6 +4290,7 @@ class GCORegionalStack(Stack):
         self.helm_teardown_resource.node.add_dependency(self.cluster)
         self.helm_teardown_resource.node.add_dependency(self.helm_installer_access_entry)
         self.helm_teardown_resource.node.add_dependency(self.helm_install_state_machine)
+        self.helm_teardown_resource.node.add_dependency(provider_log_group)
 
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 

@@ -648,8 +648,9 @@ def _list_project_kms_keys(
     session: Any,
     region: str,
     project_name: str,
+    validation_run_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """List exact customer-managed KMS keys tagged to project stacks."""
+    """List project keys while isolating prior validation runs pending deletion."""
     client = session.client("kms", region_name=region)
     keys: list[dict[str, Any]] = []
     for page in client.get_paginator("list_keys").paginate():
@@ -677,7 +678,19 @@ def _list_project_kms_keys(
                 marker = response.get("NextMarker") if response.get("Truncated") else None
                 if not marker:
                     break
-            if not _tags_are_project_owned(tags, project_name):
+            project_owned = _tags_are_project_owned(tags, project_name)
+            validation_owner = tags.get("GcoLiveValidationRun")
+            state = str(metadata.get("KeyState") or "")
+            if validation_run_id:
+                if validation_owner and validation_owner != validation_run_id:
+                    if state == "PendingDeletion":
+                        # Successful runs leave exact keys pending for seven days.
+                        # They are neither baseline contamination nor authority for
+                        # this run; active keys from another run still fail closed.
+                        continue
+                elif not validation_owner and not project_owned:
+                    continue
+            elif not project_owned:
                 continue
             deletion_date = metadata.get("DeletionDate")
             keys.append(
@@ -1263,6 +1276,7 @@ def collect_project_resources(
     expected_account: str,
     project_name: str,
     seed_region: str,
+    validation_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Collect project resources with explicit, fail-closed scanner coverage."""
     regions = sorted(set(enabled_regions))
@@ -1355,6 +1369,13 @@ def collect_project_resources(
                 regional[region][category] = [
                     name for name in cluster_names if _project_owned_name(name, project_name)
                 ]
+            elif scanner == "kms_keys":
+                regional[region][category] = _list_project_kms_keys(
+                    session,
+                    region,
+                    project_name,
+                    validation_run_id,
+                )
             elif scanner == "ec2_instances":
                 project_instances, all_instances = _list_instance_inventory(
                     session,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import subprocess
@@ -10,6 +11,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote, urlsplit
@@ -39,9 +41,27 @@ _HEALTHY_STACK_STATUSES = {"CREATE_COMPLETE", "UPDATE_COMPLETE"}
 _RUN_STACK_TAG = "GcoLiveValidationRun"
 _RUN_JOB_LABEL = "gco.aws/validation-run"
 _PATH_JOB_LABEL = "gco.aws/validation-path"
-_EKS_KEY_LOGICAL_ID_FRAGMENT = "EksSecretsEncryptionKey"
+_EKS_KEY_LOGICAL_ID = "EksSecretsEncryptionKey74AFFE88"
 _KMS_PENDING_WINDOW_DAYS = 7
+_LOG_CLEANUP_TOKEN_TAG = "GcoLiveValidationCleanupToken"
+_LOG_CLEANUP_HELPER_STACK_PREFIX = "LiveValidationLogCleanup"
+_LOG_CLEANUP_HELPER_RUN_TAG = "LiveValidationHelperRun"
+_LOG_CLEANUP_HELPER_TOKEN_TAG = "LiveValidationHelperToken"
+_LOG_CLEANUP_ROLE_RUN_TAG = "LiveValidationCleanupRoleRun"
+_LOG_CLEANUP_ROLE_TOKEN_TAG = "LiveValidationCleanupRoleToken"
+_LOG_CLEANUP_ROLE_OUTPUT = "CleanupRoleArn"
+_LOG_CLEANUP_ROLE_POLICY_NAME = "DeleteTaggedLogGroups"
+_LOG_CLEANUP_SESSION_SECONDS = 900
+_LOG_CLEANUP_STACK_POLL_ATTEMPTS = 120
+_LOG_CLEANUP_STACK_POLL_SECONDS = 5
+_LOG_GROUP_SOURCE_TYPES = {
+    "AWS::EKS::Cluster",
+    "AWS::Lambda::Function",
+    "AWS::Logs::LogGroup",
+}
+_EKS_LOG_GROUP_SUFFIXES = ("application", "dataplane", "host", "performance")
 _CENTRAL_QUEUE_IDEMPOTENCY_NAMESPACE = uuid.UUID("88284d12-1e04-47d5-8871-607a9e4dac09")
+_LOG_CLEANUP_HELPER_NAMESPACE = uuid.UUID("83af5e0b-f987-4ca6-8bb6-aa174c57096c")
 
 
 @dataclass(frozen=True)
@@ -1511,66 +1531,1097 @@ def _kms_tags(client: Any, key_id: str) -> dict[str, str]:
             return tags
 
 
-def _checkpoint_retained_kms_keys(ctx: RunContext) -> list[dict[str, Any]]:
-    """Capture exact retained EKS keys while their owning stacks still exist."""
-    owned_stacks = _owned_stacks(ctx)
-    with ctx.state_lock:
-        records = ctx.checkpoint.state.setdefault("owned_kms_keys", [])
-        by_arn = {str(item["arn"]): item for item in records}
+def _validated_owned_kms_identity(
+    ctx: RunContext,
+    record: Mapping[str, Any],
+) -> tuple[str, str, str, str]:
+    """Validate immutable stack-resource authority for one run-owned KMS key."""
+    region = str(record.get("region") or "")
+    key_id = str(record.get("key_id") or "")
+    arn = str(record.get("arn") or "")
+    stack_name = str(record.get("stack_name") or "")
+    stack_id = str(record.get("stack_id") or "")
+    logical_id = str(record.get("logical_id") or "")
+    target_regions = ctx.checkpoint.state.get("target_stack_regions")
+    if not isinstance(target_regions, dict) or str(target_regions.get(stack_name) or "") != region:
+        raise RuntimeError(f"KMS checkpoint target stack is invalid for {arn or key_id}")
+    partition = ctx.session.get_partition_for_region(region)
+    if not partition:
+        raise RuntimeError(f"Could not resolve AWS partition for KMS key in {region}")
+    expected_arn = f"arn:{partition}:kms:{region}:{ctx.settings.expected_account}:key/{key_id}"
+    expected_stack_prefix = (
+        f"arn:{partition}:cloudformation:{region}:{ctx.settings.expected_account}:"
+        f"stack/{stack_name}/"
+    )
+    owned_stack_record = _owned_stack_record(ctx, region, stack_name)
+    expected_stack_id = str((owned_stack_record or {}).get("stack_id") or "")
+    if not key_id or arn != expected_arn:
+        raise RuntimeError(f"KMS checkpoint ARN is invalid for {arn or key_id}")
+    if (
+        not stack_name
+        or not expected_stack_id.startswith(expected_stack_prefix)
+        or stack_id != expected_stack_id
+        or (owned_stack_record or {}).get("run_tag") != ctx.settings.run_id
+    ):
+        raise RuntimeError(f"KMS checkpoint stack identity is invalid for {arn}")
+    if (
+        record.get("ownership_authority") != "cloudformation-stack-resource"
+        or not logical_id
+        or record.get("run_tag") != ctx.settings.run_id
+    ):
+        raise RuntimeError(f"KMS checkpoint authority is incomplete for {arn}")
 
-        for region in ctx.deployment_regions:
-            stack_name = f"{ctx.config.project_name}-{region}"
-            stack_record = owned_stacks.get(region, {}).get(stack_name)
+    retained_identity = (
+        stack_name == f"{ctx.config.project_name}-{region}" and logical_id == _EKS_KEY_LOGICAL_ID
+    )
+    cleanup_policy = str(record.get("cleanup_policy") or "")
+    if not cleanup_policy and retained_identity:
+        cleanup_policy = "harness-schedule"
+    if cleanup_policy == "harness-schedule":
+        if not retained_identity:
+            raise RuntimeError(f"Retained KMS checkpoint identity is invalid for {arn}")
+    elif cleanup_policy == "cloudformation-delete":
+        if retained_identity:
+            raise RuntimeError(f"Retained EKS key cannot use CloudFormation cleanup: {arn}")
+    else:
+        raise RuntimeError(f"KMS checkpoint cleanup policy is invalid for {arn}")
+    return region, key_id, arn, cleanup_policy
+
+
+def _validated_retained_kms_identity(
+    ctx: RunContext,
+    record: Mapping[str, Any],
+) -> tuple[str, str, str]:
+    """Validate exact retained-EKS authority before harness-scheduled deletion."""
+    region, key_id, arn, cleanup_policy = _validated_owned_kms_identity(ctx, record)
+    if cleanup_policy != "harness-schedule":
+        raise RuntimeError(f"KMS key is not harness-retained: {arn}")
+    return region, key_id, arn
+
+
+def _derived_log_group_names(resource_type: str, physical_id: str) -> tuple[str, ...]:
+    if resource_type == "AWS::Logs::LogGroup":
+        return (physical_id,)
+    if resource_type == "AWS::Lambda::Function":
+        return (f"/aws/lambda/{physical_id}",)
+    if resource_type == "AWS::EKS::Cluster":
+        return (
+            f"/aws/eks/{physical_id}/cluster",
+            *(
+                f"/aws/containerinsights/{physical_id}/{suffix}"
+                for suffix in _EKS_LOG_GROUP_SUFFIXES
+            ),
+        )
+    return ()
+
+
+def _live_eks_cluster_identity(
+    ctx: RunContext,
+    region: str,
+    cluster_name: str,
+) -> dict[str, str]:
+    """Require the exact ACTIVE service-side cluster before deriving log authority."""
+    partition = ctx.session.get_partition_for_region(region)
+    if not partition:
+        raise RuntimeError(f"Could not resolve AWS partition for EKS cluster in {region}")
+    expected_arn = (
+        f"arn:{partition}:eks:{region}:{ctx.settings.expected_account}:cluster/{cluster_name}"
+    )
+    response = ctx.session.client("eks", region_name=region).describe_cluster(name=cluster_name)
+    cluster = response.get("cluster")
+    if not isinstance(cluster, dict):
+        raise RuntimeError(f"EKS omitted cluster identity for {region}:{cluster_name}")
+    identity = {
+        "name": str(cluster.get("name") or ""),
+        "arn": str(cluster.get("arn") or ""),
+        "status": str(cluster.get("status") or ""),
+    }
+    if identity != {"name": cluster_name, "arn": expected_arn, "status": "ACTIVE"}:
+        raise RuntimeError(
+            f"EKS cluster identity is not exact and ACTIVE for {region}:{cluster_name}"
+        )
+    return identity
+
+
+def _validated_owned_log_group_identity(
+    ctx: RunContext,
+    record: Mapping[str, Any],
+) -> tuple[str, str]:
+    """Validate an exact log-group name derived from a checkpointed stack resource."""
+    region = str(record.get("region") or "")
+    name = str(record.get("name") or "")
+    stack_name = str(record.get("stack_name") or "")
+    stack_id = str(record.get("stack_id") or "")
+    resource_type = str(record.get("source_resource_type") or "")
+    logical_id = str(record.get("source_logical_id") or "")
+    physical_id = str(record.get("source_physical_id") or "")
+    target_regions = ctx.checkpoint.state.get("target_stack_regions")
+    if not isinstance(target_regions, dict) or str(target_regions.get(stack_name) or "") != region:
+        raise RuntimeError(f"Log-group checkpoint target stack is invalid for {region}:{name}")
+    partition = ctx.session.get_partition_for_region(region)
+    if not partition:
+        raise RuntimeError(f"Could not resolve AWS partition for log group in {region}")
+    expected_stack_prefix = (
+        f"arn:{partition}:cloudformation:{region}:{ctx.settings.expected_account}:"
+        f"stack/{stack_name}/"
+    )
+    owned_stack_record = _owned_stack_record(ctx, region, stack_name)
+    expected_stack_id = str((owned_stack_record or {}).get("stack_id") or "")
+    if (
+        not name
+        or not logical_id
+        or resource_type not in _LOG_GROUP_SOURCE_TYPES
+        or name not in _derived_log_group_names(resource_type, physical_id)
+    ):
+        raise RuntimeError(f"Log-group checkpoint source is invalid for {region}:{name}")
+    source_service_identity = record.get("source_service_identity")
+    if resource_type == "AWS::EKS::Cluster":
+        expected_source_identity = {
+            "name": physical_id,
+            "arn": (
+                f"arn:{partition}:eks:{region}:{ctx.settings.expected_account}:"
+                f"cluster/{physical_id}"
+            ),
+            "status": "ACTIVE",
+        }
+        if source_service_identity != expected_source_identity:
+            raise RuntimeError(
+                f"Log-group checkpoint lacks exact live EKS identity for {region}:{name}"
+            )
+    elif source_service_identity not in (None, {}):
+        raise RuntimeError(f"Unexpected service identity for log group {region}:{name}")
+    cleanup_token = str(record.get("cleanup_token") or "")
+    expected_cleanup_token = str(ctx.checkpoint.state.get("log_group_cleanup_token") or "")
+    if (
+        not expected_stack_id.startswith(expected_stack_prefix)
+        or stack_id != expected_stack_id
+        or (owned_stack_record or {}).get("run_tag") != ctx.settings.run_id
+        or record.get("run_tag") != ctx.settings.run_id
+        or record.get("ownership_authority") != "cloudformation-stack-resource-derived"
+        or record.get("authority_phase") != "pre-destroy"
+        or not cleanup_token
+        or cleanup_token != expected_cleanup_token
+    ):
+        raise RuntimeError(f"Log-group checkpoint authority is invalid for {region}:{name}")
+    return region, name
+
+
+def _describe_exact_log_group(client: Any, name: str) -> dict[str, Any] | None:
+    kwargs: dict[str, Any] = {"logGroupNamePrefix": name, "limit": 50}
+    while True:
+        response = client.describe_log_groups(**kwargs)
+        for log_group in response.get("logGroups", []):
+            if not isinstance(log_group, Mapping):
+                raise RuntimeError("CloudWatch Logs returned a non-object log-group record")
+            candidate = cast(Mapping[str, Any], log_group)
+            if str(candidate.get("logGroupName") or "") == name:
+                return {str(key): value for key, value in candidate.items()}
+        token = response.get("nextToken")
+        if not token:
+            return None
+        kwargs["nextToken"] = token
+
+
+def _log_group_identity(client: Any, region: str, name: str) -> dict[str, Any] | None:
+    log_group = _describe_exact_log_group(client, name)
+    if log_group is None:
+        return None
+    arn = str(log_group.get("logGroupArn") or log_group.get("arn") or "").removesuffix(":*")
+    creation_time = log_group.get("creationTime")
+    if not arn or not isinstance(creation_time, int):
+        raise RuntimeError(f"CloudWatch Logs omitted identity for {region}:{name}")
+    tags = client.list_tags_for_resource(resourceArn=arn).get("tags") or {}
+    return {
+        "arn": arn,
+        "creation_time": creation_time,
+        "tags": {str(key): str(value) for key, value in tags.items()},
+    }
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def _cleanup_principal_identity(ctx: RunContext, caller_arn: str) -> dict[str, str]:
+    """Resolve a renewable caller session to one immutable IAM principal."""
+    region = ctx.config.global_region
+    partition = ctx.session.get_partition_for_region(region)
+    account = ctx.settings.expected_account
+    if not partition:
+        raise RuntimeError(f"Could not resolve AWS partition for cleanup authority in {region}")
+    if not caller_arn or "*" in caller_arn:
+        raise RuntimeError("Cleanup authority principal ARN is empty or contains a wildcard")
+
+    iam = ctx.session.client("iam", region_name=region)
+    iam_prefix = f"arn:{partition}:iam::{account}:"
+    if caller_arn.startswith(f"{iam_prefix}user/"):
+        user_name = caller_arn.rsplit("/", 1)[-1]
+        user = iam.get_user(UserName=user_name).get("User")
+        principal_arn = str((user or {}).get("Arn") or "")
+        principal_id = str((user or {}).get("UserId") or "")
+        if principal_arn != caller_arn or not principal_id:
+            raise RuntimeError(f"IAM returned an invalid user identity for {caller_arn}")
+        return {"arn": principal_arn, "principal_id": principal_id}
+
+    if caller_arn.startswith(f"{iam_prefix}role/"):
+        role_name = caller_arn.rsplit("/", 1)[-1]
+        role = iam.get_role(RoleName=role_name).get("Role")
+        principal_arn = str((role or {}).get("Arn") or "")
+        principal_id = str((role or {}).get("RoleId") or "")
+        if principal_arn != caller_arn or not principal_id:
+            raise RuntimeError(f"IAM returned an invalid role identity for {caller_arn}")
+        return {"arn": principal_arn, "principal_id": principal_id}
+
+    assumed_prefix = f"arn:{partition}:sts::{account}:assumed-role/"
+    if caller_arn.startswith(assumed_prefix):
+        role_session = caller_arn.removeprefix(assumed_prefix)
+        role_resource, separator, session_name = role_session.rpartition("/")
+        role_name = role_resource.rsplit("/", 1)[-1]
+        if not separator or not role_name or not session_name:
+            raise RuntimeError(f"Malformed assumed-role caller ARN: {caller_arn}")
+        role = iam.get_role(RoleName=role_name).get("Role")
+        principal_arn = str((role or {}).get("Arn") or "")
+        principal_id = str((role or {}).get("RoleId") or "")
+        if (
+            not principal_arn.startswith(f"{iam_prefix}role/")
+            or principal_arn.rsplit("/", 1)[-1] != role_name
+            or not principal_id
+        ):
+            raise RuntimeError(f"IAM returned an invalid underlying role identity for {caller_arn}")
+        return {"arn": principal_arn, "principal_id": principal_id}
+    raise RuntimeError(
+        f"Log cleanup requires an exact IAM user or STS assumed-role caller; found {caller_arn}"
+    )
+
+
+def _log_cleanup_policy(
+    ctx: RunContext,
+    cleanup_token: str,
+    records: list[dict[str, Any]],
+) -> tuple[dict[str, Any], str]:
+    partitions: set[str] = set()
+    for record in records:
+        region, _name = _validated_owned_log_group_identity(ctx, record)
+        partition = ctx.session.get_partition_for_region(region)
+        if not partition:
+            raise RuntimeError(f"Could not resolve AWS partition for log cleanup in {region}")
+        partitions.add(partition)
+    if len(partitions) != 1:
+        raise RuntimeError("Log cleanup requires all authorized groups to share one AWS partition")
+    partition = next(iter(partitions))
+    return (
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": "logs:DeleteLogGroup",
+                    "Resource": (
+                        f"arn:{partition}:logs:*:{ctx.settings.expected_account}:log-group:*"
+                    ),
+                    "Condition": {
+                        "StringEquals": {
+                            f"aws:ResourceTag/{_RUN_STACK_TAG}": ctx.settings.run_id,
+                            f"aws:ResourceTag/{_LOG_CLEANUP_TOKEN_TAG}": cleanup_token,
+                        }
+                    },
+                }
+            ],
+        },
+        partition,
+    )
+
+
+def _log_cleanup_helper_spec(ctx: RunContext) -> dict[str, Any] | None:
+    records = ctx.checkpoint.state.get("owned_log_groups", [])
+    if not isinstance(records, list):
+        raise RuntimeError("Checkpoint owned_log_groups must be a list")
+    if not records:
+        return None
+    cleanup_token = str(ctx.checkpoint.state.get("log_group_cleanup_token") or "")
+    if not re.fullmatch(r"[0-9a-f]{32}", cleanup_token):
+        raise RuntimeError("Checkpoint log-group cleanup token is malformed")
+    if any(not isinstance(record, dict) for record in records):
+        raise RuntimeError("Checkpoint owned_log_groups must contain objects")
+    policy, partition = _log_cleanup_policy(ctx, cleanup_token, records)
+    helper_region = str(ctx.config.global_region)
+    if ctx.session.get_partition_for_region(helper_region) != partition:
+        raise RuntimeError("Cleanup helper Region is outside the log groups' AWS partition")
+
+    existing_helper = ctx.checkpoint.state.get("log_cleanup_helper")
+    if existing_helper is not None and not isinstance(existing_helper, dict):
+        raise RuntimeError("Checkpoint log_cleanup_helper must be an object")
+    if isinstance(existing_helper, dict):
+        first_caller_arn = str(existing_helper.get("first_caller_arn") or "")
+        trusted_principal_arn = str(existing_helper.get("trusted_principal_arn") or "")
+        trusted_principal_id = str(existing_helper.get("trusted_principal_id") or "")
+        if not first_caller_arn or not trusted_principal_arn or not trusted_principal_id:
+            raise RuntimeError("Checkpoint cleanup helper lacks immutable caller identity")
+    else:
+        first_caller_arn = str(ctx.checkpoint.state.get("account_arn") or "")
+        principal_identity = _cleanup_principal_identity(ctx, first_caller_arn)
+        trusted_principal_arn = principal_identity["arn"]
+        trusted_principal_id = principal_identity["principal_id"]
+    expected_iam_prefix = f"arn:{partition}:iam::{ctx.settings.expected_account}:"
+    if (
+        not trusted_principal_arn.startswith(
+            (f"{expected_iam_prefix}user/", f"{expected_iam_prefix}role/")
+        )
+        or "*" in trusted_principal_arn
+        or not re.fullmatch(r"[A-Z0-9]+", trusted_principal_id)
+    ):
+        raise RuntimeError("Checkpoint cleanup helper canonical principal is invalid")
+    stable_id = uuid.uuid5(
+        _LOG_CLEANUP_HELPER_NAMESPACE,
+        f"{partition}:{ctx.settings.expected_account}:{ctx.settings.run_id}:{cleanup_token}",
+    ).hex[:20]
+    stack_name = f"{_LOG_CLEANUP_HELPER_STACK_PREFIX}-{stable_id}"
+    role_name = stack_name
+    project_name = str(ctx.config.project_name)
+    if any(
+        name == project_name or name.startswith((f"{project_name}-", f"{project_name}/"))
+        for name in (stack_name, role_name)
+    ):
+        raise RuntimeError("Cleanup helper identity overlaps project inventory naming")
+    role_arn = f"arn:{partition}:iam::{ctx.settings.expected_account}:role/{role_name}"
+    trust_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"AWS": trusted_principal_arn},
+                "Action": "sts:AssumeRole",
+                "Condition": {"StringEquals": {"sts:ExternalId": cleanup_token}},
+            }
+        ],
+    }
+    template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Description": "Temporary least-privilege role for live-validation log cleanup",
+        "Resources": {
+            "CleanupRole": {
+                "Type": "AWS::IAM::Role",
+                "Properties": {
+                    "RoleName": role_name,
+                    "MaxSessionDuration": 3600,
+                    "AssumeRolePolicyDocument": trust_policy,
+                    "Policies": [
+                        {
+                            "PolicyName": _LOG_CLEANUP_ROLE_POLICY_NAME,
+                            "PolicyDocument": policy,
+                        }
+                    ],
+                    "Tags": [
+                        {"Key": _LOG_CLEANUP_ROLE_RUN_TAG, "Value": ctx.settings.run_id},
+                        {"Key": _LOG_CLEANUP_ROLE_TOKEN_TAG, "Value": cleanup_token},
+                    ],
+                },
+            }
+        },
+        "Outputs": {_LOG_CLEANUP_ROLE_OUTPUT: {"Value": {"Fn::GetAtt": ["CleanupRole", "Arn"]}}},
+    }
+    template_body = _canonical_json(template)
+    return {
+        "schema_version": 1,
+        "region": helper_region,
+        "stack_name": stack_name,
+        "role_name": role_name,
+        "role_arn": role_arn,
+        "partition": partition,
+        "run_id": ctx.settings.run_id,
+        "cleanup_token": cleanup_token,
+        "first_caller_arn": first_caller_arn,
+        "trusted_principal_arn": trusted_principal_arn,
+        "trusted_principal_id": trusted_principal_id,
+        "role_policy": policy,
+        "trust_policy": trust_policy,
+        "template": template,
+        "template_body": template_body,
+        "template_sha256": hashlib.sha256(template_body.encode("utf-8")).hexdigest(),
+    }
+
+
+def _prepare_log_cleanup_helper_record(
+    ctx: RunContext,
+    spec: Mapping[str, Any],
+) -> dict[str, Any]:
+    immutable_keys = (
+        "schema_version",
+        "region",
+        "stack_name",
+        "role_name",
+        "role_arn",
+        "partition",
+        "run_id",
+        "cleanup_token",
+        "trusted_principal_arn",
+        "trusted_principal_id",
+        "template_sha256",
+    )
+    with ctx.state_lock:
+        record = ctx.checkpoint.state.get("log_cleanup_helper")
+        if record is None:
+            record = {key: spec[key] for key in immutable_keys}
+            record.update(
+                {
+                    "first_caller_arn": spec["first_caller_arn"],
+                    "active_stack_id": None,
+                    "lifecycle": "prepared",
+                    "create_sequence": 0,
+                    "stack_history": [],
+                }
+            )
+            ctx.checkpoint.state["log_cleanup_helper"] = record
+        elif not isinstance(record, dict):
+            raise RuntimeError("Checkpoint log_cleanup_helper must be an object")
+        elif any(record.get(key) != spec[key] for key in immutable_keys):
+            raise RuntimeError("Checkpoint log cleanup helper identity changed")
+        ctx.persist_callback(ctx.checkpoint)
+        return record
+
+
+def _helper_stack_id_prefix(ctx: RunContext, spec: Mapping[str, Any]) -> str:
+    return (
+        f"arn:{spec['partition']}:cloudformation:{spec['region']}:"
+        f"{ctx.settings.expected_account}:stack/{spec['stack_name']}/"
+    )
+
+
+def _record_log_cleanup_helper_stack(
+    ctx: RunContext,
+    spec: Mapping[str, Any],
+    stack_id: str,
+    status: str,
+) -> None:
+    if not stack_id.startswith(_helper_stack_id_prefix(ctx, spec)):
+        raise RuntimeError(f"Cleanup helper returned an invalid stack ID: {stack_id}")
+    with ctx.state_lock:
+        record = _prepare_log_cleanup_helper_record(ctx, spec)
+        active_stack_id = str(record.get("active_stack_id") or "")
+        if active_stack_id and active_stack_id != stack_id:
+            raise RuntimeError("Cleanup helper stack generation changed without absence proof")
+        history = record.setdefault("stack_history", [])
+        if not isinstance(history, list):
+            raise RuntimeError("Checkpoint cleanup helper stack_history must be a list")
+        if not any(item.get("stack_id") == stack_id for item in history if isinstance(item, dict)):
+            history.append({"stack_id": stack_id, "first_observed_at": utc_now()})
+        record["active_stack_id"] = stack_id
+        record["lifecycle"] = status
+        record["last_observed_at"] = utc_now()
+        ctx.persist_callback(ctx.checkpoint)
+
+
+def _mark_log_cleanup_helper_absent(
+    ctx: RunContext,
+    stack_id: str | None,
+) -> None:
+    with ctx.state_lock:
+        record = ctx.checkpoint.state.get("log_cleanup_helper")
+        if not isinstance(record, dict):
+            return
+        active_stack_id = str(record.get("active_stack_id") or "")
+        if stack_id and active_stack_id and active_stack_id != stack_id:
+            raise RuntimeError("Cleanup helper absence proof refers to a different stack")
+        record["active_stack_id"] = None
+        record["lifecycle"] = "deleted"
+        record["last_deleted_stack_id"] = stack_id
+        record["deleted_at"] = utc_now()
+        ctx.persist_callback(ctx.checkpoint)
+
+
+def _template_document(template_body: Any) -> dict[str, Any]:
+    if isinstance(template_body, str):
+        try:
+            template_body = json.loads(template_body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Cleanup helper template is not canonical JSON") from exc
+    if not isinstance(template_body, dict):
+        raise RuntimeError("Cleanup helper template is not a JSON object")
+    return template_body
+
+
+def _validate_log_cleanup_helper_stack(
+    ctx: RunContext,
+    spec: Mapping[str, Any],
+    stack: Mapping[str, Any],
+) -> str:
+    stack_id = str(stack.get("stack_id") or "")
+    if (
+        stack.get("name") != spec["stack_name"]
+        or not stack_id.startswith(_helper_stack_id_prefix(ctx, spec))
+        or stack.get("termination_protection")
+    ):
+        raise RuntimeError("Cleanup helper CloudFormation identity is invalid")
+    tags = stack.get("tags") or {}
+    if (
+        tags.get(_LOG_CLEANUP_HELPER_RUN_TAG) != spec["run_id"]
+        or tags.get(_LOG_CLEANUP_HELPER_TOKEN_TAG) != spec["cleanup_token"]
+        or tags.get("gco:project") is not None
+        or tags.get("Project") is not None
+    ):
+        raise RuntimeError("Cleanup helper CloudFormation tags are invalid")
+    cfn = ctx.session.client("cloudformation", region_name=spec["region"])
+    body = _template_document(
+        cfn.get_template(StackName=stack_id, TemplateStage="Original").get("TemplateBody")
+    )
+    observed_hash = hashlib.sha256(_canonical_json(body).encode("utf-8")).hexdigest()
+    if observed_hash != spec["template_sha256"]:
+        raise RuntimeError("Cleanup helper CloudFormation template changed")
+    return stack_id
+
+
+def _validate_log_cleanup_helper_role(
+    ctx: RunContext,
+    spec: Mapping[str, Any],
+    helper_record: dict[str, Any],
+    stack_id: str,
+) -> dict[str, str]:
+    iam = ctx.session.client("iam", region_name=spec["region"])
+    role = iam.get_role(RoleName=spec["role_name"]).get("Role")
+    if not isinstance(role, dict):
+        raise RuntimeError("IAM omitted the cleanup helper role")
+    tags = {
+        str(item.get("Key")): str(item.get("Value") or "")
+        for item in role.get("Tags", [])
+        if item.get("Key") is not None
+    }
+    if (
+        str(role.get("RoleName") or "") != spec["role_name"]
+        or str(role.get("Arn") or "") != spec["role_arn"]
+        or str(role.get("Path") or "") != "/"
+        or int(role.get("MaxSessionDuration") or 0) != 3600
+        or role.get("AssumeRolePolicyDocument") != spec["trust_policy"]
+        or tags.get(_LOG_CLEANUP_ROLE_RUN_TAG) != spec["run_id"]
+        or tags.get(_LOG_CLEANUP_ROLE_TOKEN_TAG) != spec["cleanup_token"]
+    ):
+        raise RuntimeError("Cleanup helper IAM role identity changed")
+    inline = iam.list_role_policies(RoleName=spec["role_name"])
+    if inline.get("IsTruncated") or inline.get("PolicyNames") != [_LOG_CLEANUP_ROLE_POLICY_NAME]:
+        raise RuntimeError("Cleanup helper IAM inline policies changed")
+    role_policy = iam.get_role_policy(
+        RoleName=spec["role_name"],
+        PolicyName=_LOG_CLEANUP_ROLE_POLICY_NAME,
+    ).get("PolicyDocument")
+    if role_policy != spec["role_policy"]:
+        raise RuntimeError("Cleanup helper IAM delete policy changed")
+    attached = iam.list_attached_role_policies(RoleName=spec["role_name"])
+    if attached.get("IsTruncated") or attached.get("AttachedPolicies"):
+        raise RuntimeError("Cleanup helper IAM role gained a managed policy")
+    created = role.get("CreateDate")
+    identity = {
+        "arn": str(role["Arn"]),
+        "role_id": str(role.get("RoleId") or ""),
+        "created_at": created.isoformat() if created is not None else "",
+    }
+    if not identity["role_id"] or not identity["created_at"]:
+        raise RuntimeError("IAM omitted immutable cleanup role identity")
+    history = helper_record.get("stack_history")
+    if not isinstance(history, list):
+        raise RuntimeError("Checkpoint cleanup helper stack_history must be a list")
+    generation = next(
+        (
+            item
+            for item in history
+            if isinstance(item, dict) and str(item.get("stack_id") or "") == stack_id
+        ),
+        None,
+    )
+    if generation is None:
+        raise RuntimeError("Cleanup role identity has no exact helper stack generation")
+    observed = generation.get("observed_role_identity")
+    if observed is None:
+        generation["observed_role_identity"] = identity
+        ctx.persist()
+    elif observed != identity:
+        raise RuntimeError("Cleanup helper IAM role generation changed within its stack")
+    return identity
+
+
+def _wait_for_log_cleanup_helper(
+    ctx: RunContext,
+    spec: Mapping[str, Any],
+    stack_id: str,
+    *,
+    deleting: bool,
+) -> dict[str, Any] | None:
+    for _attempt in range(_LOG_CLEANUP_STACK_POLL_ATTEMPTS):
+        stack = describe_stack(ctx.session, str(spec["region"]), stack_id)
+        status = str((stack or {}).get("status") or "")
+        if deleting and (stack is None or status == "DELETE_COMPLETE"):
+            return None
+        if not deleting and stack is not None and status == "CREATE_COMPLETE":
+            return stack
+        if status == "DELETE_FAILED":
+            raise RuntimeError(f"Cleanup helper stack deletion failed: {stack_id}")
+        if not deleting and stack is not None and not status.endswith("_IN_PROGRESS"):
+            raise RuntimeError(f"Cleanup helper stack creation ended in {status}: {stack_id}")
+        time.sleep(_LOG_CLEANUP_STACK_POLL_SECONDS)
+    operation = "deletion" if deleting else "creation"
+    raise RuntimeError(f"Cleanup helper stack {operation} timed out: {stack_id}")
+
+
+def _current_cleanup_trusted_principal(ctx: RunContext) -> tuple[str, dict[str, str]]:
+    identity = ctx.session.client("sts", region_name=ctx.config.global_region).get_caller_identity()
+    account = str(identity.get("Account") or "")
+    caller_arn = str(identity.get("Arn") or "")
+    if account != ctx.settings.expected_account:
+        raise RuntimeError("Cleanup helper caller account changed")
+    return caller_arn, _cleanup_principal_identity(ctx, caller_arn)
+
+
+def _ensure_log_cleanup_helper(ctx: RunContext) -> dict[str, Any]:
+    records = ctx.checkpoint.state.get("owned_log_groups", [])
+    if not isinstance(records, list):
+        raise RuntimeError("Checkpoint owned_log_groups must be a list")
+    if not records or all(bool(record.get("deleted")) for record in records):
+        return {"needed": False}
+    spec = _log_cleanup_helper_spec(ctx)
+    if spec is None:
+        return {"needed": False}
+    helper_record = _prepare_log_cleanup_helper_record(ctx, spec)
+    caller_arn, current_principal = _current_cleanup_trusted_principal(ctx)
+    if (
+        current_principal["arn"] != spec["trusted_principal_arn"]
+        or current_principal["principal_id"] != spec["trusted_principal_id"]
+    ):
+        raise RuntimeError("Cleanup helper caller principal changed since authority creation")
+
+    region = str(spec["region"])
+    cfn = ctx.session.client("cloudformation", region_name=region)
+    stack: dict[str, Any] | None = None
+    active_stack_id = str(helper_record.get("active_stack_id") or "")
+    if active_stack_id:
+        stack = describe_stack(ctx.session, region, active_stack_id)
+        if stack is not None and stack.get("status") == "DELETE_COMPLETE":
+            _mark_log_cleanup_helper_absent(ctx, active_stack_id)
+            active_stack_id = ""
+            stack = None
+    if stack is None:
+        named_stack = describe_stack(ctx.session, region, str(spec["stack_name"]))
+        if named_stack is not None and named_stack.get("status") != "DELETE_COMPLETE":
+            named_stack_id = _validate_log_cleanup_helper_stack(ctx, spec, named_stack)
+            if active_stack_id and named_stack_id != active_stack_id:
+                raise RuntimeError("A different cleanup helper stack generation appeared")
+            _record_log_cleanup_helper_stack(
+                ctx,
+                spec,
+                named_stack_id,
+                str(named_stack.get("status") or ""),
+            )
+            active_stack_id = named_stack_id
+            stack = named_stack
+    if stack is not None and stack.get("status") == "DELETE_IN_PROGRESS":
+        _wait_for_log_cleanup_helper(ctx, spec, active_stack_id, deleting=True)
+        _mark_log_cleanup_helper_absent(ctx, active_stack_id)
+        active_stack_id = ""
+        stack = None
+
+    if stack is None:
+        with ctx.state_lock:
+            helper_record = _prepare_log_cleanup_helper_record(ctx, spec)
+            helper_record["create_sequence"] = int(helper_record.get("create_sequence") or 0) + 1
+            sequence = helper_record["create_sequence"]
+            helper_record["lifecycle"] = "create-intent"
+            helper_record["create_intent_at"] = utc_now()
+            ctx.persist_callback(ctx.checkpoint)
+        token = f"live-validation-{spec['stack_name']}-{sequence}"
+        try:
+            response = cfn.create_stack(
+                StackName=spec["stack_name"],
+                TemplateBody=spec["template_body"],
+                Capabilities=["CAPABILITY_NAMED_IAM"],
+                ClientRequestToken=token[:128],
+                EnableTerminationProtection=False,
+                OnFailure="ROLLBACK",
+                TimeoutInMinutes=10,
+                Tags=[
+                    {"Key": _LOG_CLEANUP_HELPER_RUN_TAG, "Value": spec["run_id"]},
+                    {"Key": _LOG_CLEANUP_HELPER_TOKEN_TAG, "Value": spec["cleanup_token"]},
+                ],
+            )
+            active_stack_id = str(response.get("StackId") or "")
+            _record_log_cleanup_helper_stack(ctx, spec, active_stack_id, "CREATE_IN_PROGRESS")
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "AlreadyExistsException":
+                raise
+            stack = describe_stack(ctx.session, region, str(spec["stack_name"]))
+            if stack is None:
+                raise RuntimeError("Cleanup helper name exists but cannot be described") from exc
+            active_stack_id = _validate_log_cleanup_helper_stack(ctx, spec, stack)
+            _record_log_cleanup_helper_stack(
+                ctx,
+                spec,
+                active_stack_id,
+                str(stack.get("status") or ""),
+            )
+
+    stack = _wait_for_log_cleanup_helper(ctx, spec, active_stack_id, deleting=False)
+    if stack is None:
+        raise RuntimeError("Cleanup helper disappeared after creation")
+    _validate_log_cleanup_helper_stack(ctx, spec, stack)
+    outputs = stack.get("outputs") or {}
+    if outputs.get(_LOG_CLEANUP_ROLE_OUTPUT) != spec["role_arn"]:
+        raise RuntimeError("Cleanup helper role output changed")
+    helper_record = _prepare_log_cleanup_helper_record(ctx, spec)
+    _validate_log_cleanup_helper_role(ctx, spec, helper_record, active_stack_id)
+    _record_log_cleanup_helper_stack(ctx, spec, active_stack_id, "CREATE_COMPLETE")
+    return {
+        "needed": True,
+        "region": region,
+        "stack_id": active_stack_id,
+        "stack_name": spec["stack_name"],
+        "role_arn": spec["role_arn"],
+        "partition": spec["partition"],
+        "caller_arn": caller_arn,
+        "trusted_principal_arn": spec["trusted_principal_arn"],
+        "session_policy": spec["role_policy"],
+        "external_id": spec["cleanup_token"],
+    }
+
+
+def _delete_log_cleanup_helper(ctx: RunContext) -> dict[str, Any]:
+    helper_record = ctx.checkpoint.state.get("log_cleanup_helper")
+    if helper_record is None:
+        return {"needed": False, "deleted": True}
+    if not isinstance(helper_record, dict):
+        raise RuntimeError("Checkpoint log_cleanup_helper must be an object")
+    spec = _log_cleanup_helper_spec(ctx)
+    if spec is None:
+        raise RuntimeError("Cleanup helper exists without log-group authority records")
+    helper_record = _prepare_log_cleanup_helper_record(ctx, spec)
+    region = str(spec["region"])
+    cfn = ctx.session.client("cloudformation", region_name=region)
+    active_stack_id = str(helper_record.get("active_stack_id") or "")
+    stack = describe_stack(ctx.session, region, active_stack_id) if active_stack_id else None
+    if stack is not None and stack.get("status") == "DELETE_COMPLETE":
+        stack = None
+    if stack is None:
+        named_stack = describe_stack(ctx.session, region, str(spec["stack_name"]))
+        if named_stack is not None and named_stack.get("status") != "DELETE_COMPLETE":
+            named_stack_id = _validate_log_cleanup_helper_stack(ctx, spec, named_stack)
+            if active_stack_id and named_stack_id != active_stack_id:
+                raise RuntimeError("Refusing to delete a replacement cleanup helper stack")
+            active_stack_id = named_stack_id
+            stack = named_stack
+            _record_log_cleanup_helper_stack(
+                ctx,
+                spec,
+                active_stack_id,
+                str(stack.get("status") or ""),
+            )
+    if stack is None:
+        _mark_log_cleanup_helper_absent(ctx, active_stack_id or None)
+        return {
+            "needed": bool(active_stack_id),
+            "deleted": True,
+            "already_absent": True,
+            "stack_id": active_stack_id or None,
+        }
+
+    active_stack_id = _validate_log_cleanup_helper_stack(ctx, spec, stack)
+    status = str(stack.get("status") or "")
+    if status == "CREATE_COMPLETE":
+        _validate_log_cleanup_helper_role(ctx, spec, helper_record, active_stack_id)
+    if status != "DELETE_IN_PROGRESS":
+        with ctx.state_lock:
+            helper_record["lifecycle"] = "delete-intent"
+            helper_record["delete_intent_at"] = utc_now()
+            ctx.persist_callback(ctx.checkpoint)
+        cfn.delete_stack(
+            StackName=active_stack_id,
+            ClientRequestToken=(
+                f"delete-{spec['stack_name']}-{active_stack_id.rsplit('/', 1)[-1]}"[:128]
+            ),
+        )
+        helper_record["lifecycle"] = "DELETE_IN_PROGRESS"
+        ctx.persist()
+    _wait_for_log_cleanup_helper(ctx, spec, active_stack_id, deleting=True)
+    replacement = describe_stack(ctx.session, region, str(spec["stack_name"]))
+    if replacement is not None and replacement.get("status") != "DELETE_COMPLETE":
+        raise RuntimeError("Cleanup helper stack name was replaced during deletion")
+    _mark_log_cleanup_helper_absent(ctx, active_stack_id)
+    return {"needed": True, "deleted": True, "stack_id": active_stack_id}
+
+
+def _checkpoint_owned_log_groups(ctx: RunContext) -> list[dict[str, Any]]:
+    """Tag and checkpoint exact log groups while their source stacks are still live."""
+    target_regions = ctx.checkpoint.state.get("target_stack_regions")
+    if not isinstance(target_regions, dict):
+        raise RuntimeError("Checkpoint target_stack_regions must be an object")
+    try:
+        run_started_ms = int(datetime.fromisoformat(ctx.checkpoint.created_at).timestamp() * 1000)
+    except ValueError as exc:
+        raise RuntimeError("Checkpoint created_at is not a valid timestamp") from exc
+
+    with ctx.state_lock:
+        cleanup_token = str(ctx.checkpoint.state.get("log_group_cleanup_token") or "")
+        if not cleanup_token:
+            cleanup_token = uuid.uuid4().hex
+            ctx.checkpoint.state["log_group_cleanup_token"] = cleanup_token
+        if not re.fullmatch(r"[0-9a-f]{32}", cleanup_token):
+            raise RuntimeError("Checkpoint log-group cleanup token is malformed")
+        records = ctx.checkpoint.state.setdefault("owned_log_groups", [])
+        if not isinstance(records, list):
+            raise RuntimeError("Checkpoint owned_log_groups must be a list")
+        by_identity = {
+            (str(item.get("region") or ""), str(item.get("name") or "")): item
+            for item in records
+            if isinstance(item, dict)
+        }
+        for stack_name, raw_region in sorted(target_regions.items()):
+            region = str(raw_region)
+            stack_record = _owned_stack_record(ctx, region, str(stack_name))
             if stack_record is None:
                 continue
             live_stack = describe_stack(ctx.session, region, stack_record["stack_id"])
-            if live_stack is None:
+            if (
+                live_stack is None
+                or str(live_stack.get("status") or "").startswith("DELETE")
+                or (live_stack.get("tags") or {}).get(_RUN_STACK_TAG) != ctx.settings.run_id
+            ):
+                # Destructive authority is never created or completed from a
+                # deleted-stack tombstone. Existing pre-destroy records remain usable.
                 continue
             cfn = ctx.session.client("cloudformation", region_name=region)
-            matching_resources: list[dict[str, Any]] = []
-            for page in cfn.get_paginator("list_stack_resources").paginate(
+            pages = cfn.get_paginator("list_stack_resources").paginate(
                 StackName=stack_record["stack_id"]
-            ):
-                matching_resources.extend(
+            )
+            resources = [
+                item
+                for page in pages
+                for item in page.get("StackResourceSummaries", [])
+                if str(item.get("ResourceType") or "") in _LOG_GROUP_SOURCE_TYPES
+                and item.get("LogicalResourceId")
+                and item.get("PhysicalResourceId")
+                and str(item.get("ResourceStatus") or "") in {"CREATE_COMPLETE", "UPDATE_COMPLETE"}
+            ]
+            logs = ctx.session.client("logs", region_name=region)
+            lambda_client = ctx.session.client("lambda", region_name=region)
+            for resource in resources:
+                resource_type = str(resource["ResourceType"])
+                physical_id = str(resource["PhysicalResourceId"])
+                source_service_identity = None
+                if resource_type == "AWS::EKS::Cluster":
+                    source_service_identity = _live_eks_cluster_identity(ctx, region, physical_id)
+                names = _derived_log_group_names(resource_type, physical_id)
+                if resource_type == "AWS::Lambda::Function":
+                    function = lambda_client.get_function_configuration(FunctionName=physical_id)
+                    default_name = f"/aws/lambda/{physical_id}"
+                    configured_name = str(
+                        (function.get("LoggingConfig") or {}).get("LogGroup") or default_name
+                    )
+                    names = (default_name,) if configured_name == default_name else ()
+                for name in names:
+                    key = (region, name)
+                    candidate = {
+                        "region": region,
+                        "name": name,
+                        "stack_name": str(stack_name),
+                        "stack_id": stack_record["stack_id"],
+                        "source_resource_type": resource_type,
+                        "source_logical_id": str(resource["LogicalResourceId"]),
+                        "source_physical_id": physical_id,
+                        "ownership_authority": "cloudformation-stack-resource-derived",
+                        "authority_phase": "pre-destroy",
+                        "run_tag": ctx.settings.run_id,
+                        "cleanup_token": cleanup_token,
+                    }
+                    if source_service_identity is not None:
+                        candidate["source_service_identity"] = source_service_identity
+                    _validated_owned_log_group_identity(ctx, candidate)
+                    identity = _log_group_identity(logs, region, name)
+                    if identity is None:
+                        if resource_type == "AWS::Logs::LogGroup":
+                            raise RuntimeError(
+                                f"CloudFormation log group is absent before teardown: {region}:{name}"
+                            )
+                        try:
+                            logs.create_log_group(
+                                logGroupName=name,
+                                tags={
+                                    _RUN_STACK_TAG: ctx.settings.run_id,
+                                    _LOG_CLEANUP_TOKEN_TAG: cleanup_token,
+                                },
+                            )
+                        except ClientError as exc:
+                            if (
+                                exc.response.get("Error", {}).get("Code")
+                                != "ResourceAlreadyExistsException"
+                            ):
+                                raise
+                        identity = _log_group_identity(logs, region, name)
+                    if identity is None:
+                        raise RuntimeError(f"Log group could not be checkpointed: {region}:{name}")
+                    if identity["creation_time"] < run_started_ms:
+                        raise RuntimeError(
+                            f"Log group predates this validation run: {region}:{name}"
+                        )
+                    tags = identity.get("tags") or {}
+                    for tag_key, expected_value in (
+                        (_RUN_STACK_TAG, ctx.settings.run_id),
+                        (_LOG_CLEANUP_TOKEN_TAG, cleanup_token),
+                    ):
+                        if tag_key in tags and tags[tag_key] != expected_value:
+                            raise RuntimeError(
+                                f"Log-group authority tag changed for {region}:{name}:{tag_key}"
+                            )
+                    logs.tag_resource(
+                        resourceArn=identity["arn"],
+                        tags={
+                            _RUN_STACK_TAG: ctx.settings.run_id,
+                            _LOG_CLEANUP_TOKEN_TAG: cleanup_token,
+                        },
+                    )
+                    identity = _log_group_identity(logs, region, name)
+                    if identity is None:
+                        raise RuntimeError(
+                            f"Log group vanished while checkpointing: {region}:{name}"
+                        )
+                    expected_tags = identity.get("tags") or {}
+                    if (
+                        expected_tags.get(_RUN_STACK_TAG) != ctx.settings.run_id
+                        or expected_tags.get(_LOG_CLEANUP_TOKEN_TAG) != cleanup_token
+                    ):
+                        raise RuntimeError(
+                            f"Log-group authority tags were not applied: {region}:{name}"
+                        )
+                    previous = by_identity.get(key)
+                    immutable = tuple(candidate)
+                    if previous is not None:
+                        if any(previous.get(field) != candidate[field] for field in immutable):
+                            raise RuntimeError(f"Log-group ownership changed for {region}:{name}")
+                        observed = previous.get("observed_identity")
+                        if not isinstance(observed, dict) or observed != identity:
+                            raise RuntimeError(f"Log-group identity changed for {region}:{name}")
+                        continue
+                    candidate["observed_identity"] = identity
+                    records.append(candidate)
+                    by_identity[key] = candidate
+        ctx.persist_callback(ctx.checkpoint)
+        return copy.deepcopy(records)
+
+
+def _checkpoint_retained_kms_keys(ctx: RunContext) -> list[dict[str, Any]]:
+    """Capture every exact stack-owned KMS key plus teardown log-group candidates."""
+    _checkpoint_owned_log_groups(ctx)
+    owned_stacks = _owned_stacks(ctx)
+    target_regions = ctx.checkpoint.state.get("target_stack_regions")
+    if not isinstance(target_regions, dict):
+        raise RuntimeError("Checkpoint target_stack_regions must be an object")
+    with ctx.state_lock:
+        records = ctx.checkpoint.state.setdefault("owned_kms_keys", [])
+        if not isinstance(records, list):
+            raise RuntimeError("Checkpoint owned_kms_keys must be a list")
+        by_arn = {str(item.get("arn") or ""): item for item in records if isinstance(item, dict)}
+
+        for stack_name, raw_region in sorted(target_regions.items()):
+            region = str(raw_region)
+            stack_record = owned_stacks.get(region, {}).get(str(stack_name))
+            if stack_record is None:
+                continue
+            live_stack = describe_stack(ctx.session, region, stack_record["stack_id"])
+            live_source_authority = (
+                live_stack is not None
+                and not str(live_stack.get("status") or "").startswith("DELETE")
+                and live_stack.get("stack_id") == stack_record["stack_id"]
+                and (live_stack.get("tags") or {}).get(_RUN_STACK_TAG) == ctx.settings.run_id
+            )
+            cfn = ctx.session.client("cloudformation", region_name=region)
+            try:
+                pages = cfn.get_paginator("list_stack_resources").paginate(
+                    StackName=stack_record["stack_id"]
+                )
+                matching_resources = [
                     item
+                    for page in pages
                     for item in page.get("StackResourceSummaries", [])
                     if item.get("ResourceType") == "AWS::KMS::Key"
-                    and _EKS_KEY_LOGICAL_ID_FRAGMENT in str(item.get("LogicalResourceId") or "")
+                    and item.get("LogicalResourceId")
                     and item.get("PhysicalResourceId")
-                )
-            if live_stack.get("status") in _HEALTHY_STACK_STATUSES and len(matching_resources) != 1:
+                ]
+            except ClientError as exc:
+                if (
+                    exc.response.get("Error", {}).get("Code") == "ValidationError"
+                    and live_stack is None
+                ):
+                    continue
+                raise
+            retained_resources = [
+                item
+                for item in matching_resources
+                if str(stack_name) == f"{ctx.config.project_name}-{region}"
+                and str(item.get("LogicalResourceId") or "") == _EKS_KEY_LOGICAL_ID
+            ]
+            if (
+                live_stack is not None
+                and live_stack.get("status") in _HEALTHY_STACK_STATUSES
+                and str(stack_name) == f"{ctx.config.project_name}-{region}"
+                and len(retained_resources) != 1
+            ):
                 raise RuntimeError(
                     f"Expected one retained EKS KMS key in {stack_name}; found "
-                    f"{len(matching_resources)}"
+                    f"{len(retained_resources)}"
                 )
 
             for resource in matching_resources:
                 key_id = str(resource["PhysicalResourceId"])
+                logical_id = str(resource["LogicalResourceId"])
+                partition = ctx.session.get_partition_for_region(region)
+                if not partition:
+                    raise RuntimeError(f"Could not resolve AWS partition for KMS key in {region}")
+                derived_arn = (
+                    f"arn:{partition}:kms:{region}:{ctx.settings.expected_account}:key/{key_id}"
+                )
+                previous = by_arn.get(derived_arn)
+                if previous is None and not live_source_authority:
+                    # Deleted-stack tombstones may reconcile exact records that
+                    # were persisted pre-destroy, but can never create authority.
+                    continue
                 kms = ctx.session.client("kms", region_name=region)
-                metadata = kms.describe_key(KeyId=key_id).get("KeyMetadata", {})
+                try:
+                    metadata = kms.describe_key(KeyId=key_id).get("KeyMetadata", {})
+                except ClientError as exc:
+                    if exc.response.get("Error", {}).get("Code") != "NotFoundException":
+                        raise
+                    if previous is not None:
+                        previous["scheduled"] = True
+                        previous["deleted"] = True
+                    continue
                 arn = str(metadata.get("Arn") or "")
                 tags = _kms_tags(kms, key_id)
                 if tags.get(_RUN_STACK_TAG) != ctx.settings.run_id:
                     raise RuntimeError(
                         f"KMS key {arn or key_id} lacks the exact live-validation run tag"
                     )
-                if tags.get("aws:cloudformation:stack-id") != stack_record["stack_id"]:
-                    raise RuntimeError(
-                        f"KMS key {arn or key_id} lacks exact CloudFormation stack ownership"
-                    )
+                cleanup_policy = (
+                    "harness-schedule"
+                    if str(stack_name) == f"{ctx.config.project_name}-{region}"
+                    and logical_id == _EKS_KEY_LOGICAL_ID
+                    else "cloudformation-delete"
+                )
+                deletion_date = metadata.get("DeletionDate")
+                state = str(metadata.get("KeyState") or "")
                 candidate = {
                     "region": region,
                     "key_id": key_id,
                     "arn": arn,
-                    "stack_name": stack_name,
+                    "stack_name": str(stack_name),
                     "stack_id": stack_record["stack_id"],
-                    "logical_id": str(resource.get("LogicalResourceId") or ""),
+                    "logical_id": logical_id,
+                    "ownership_authority": "cloudformation-stack-resource",
+                    "cleanup_policy": cleanup_policy,
                     "run_tag": ctx.settings.run_id,
-                    "scheduled": False,
-                    "deletion_date": None,
+                    "scheduled": state == "PendingDeletion",
+                    "deletion_date": (
+                        deletion_date.isoformat() if deletion_date is not None else None
+                    ),
                 }
+                _validated_owned_kms_identity(ctx, candidate)
+                if arn != derived_arn:
+                    raise RuntimeError(f"KMS returned an unexpected ARN for {key_id}: {arn}")
                 previous = by_arn.get(arn)
                 if previous is not None:
+                    previous.setdefault("cleanup_policy", cleanup_policy)
                     for key in (
                         "region",
                         "key_id",
@@ -1578,15 +2629,30 @@ def _checkpoint_retained_kms_keys(ctx: RunContext) -> list[dict[str, Any]]:
                         "stack_name",
                         "stack_id",
                         "logical_id",
+                        "ownership_authority",
+                        "cleanup_policy",
                         "run_tag",
                     ):
                         if previous.get(key) != candidate[key]:
                             raise RuntimeError(f"KMS ownership changed for {arn}: {key}")
+                    if candidate["scheduled"]:
+                        previous["scheduled"] = True
+                        previous["deletion_date"] = candidate["deletion_date"]
                     continue
                 if not arn:
                     raise RuntimeError(f"KMS key {key_id} omitted its ARN")
+                refreshed_stack = describe_stack(ctx.session, region, stack_record["stack_id"])
+                if not (
+                    refreshed_stack is not None
+                    and not str(refreshed_stack.get("status") or "").startswith("DELETE")
+                    and refreshed_stack.get("stack_id") == stack_record["stack_id"]
+                    and (refreshed_stack.get("tags") or {}).get(_RUN_STACK_TAG)
+                    == ctx.settings.run_id
+                ):
+                    continue
                 records.append(candidate)
                 by_arn[arn] = candidate
+                ctx.persist_callback(ctx.checkpoint)
         ctx.persist_callback(ctx.checkpoint)
         return copy.deepcopy(records)
 
@@ -1770,6 +2836,7 @@ def action_baseline(ctx: RunContext) -> dict[str, Any]:
         expected_account=ctx.settings.expected_account,
         project_name=ctx.config.project_name,
         seed_region=ctx.config.global_region,
+        validation_run_id=ctx.settings.run_id,
     )
     disallowed_inventory = _strip_baseline_ecr(project_inventory, baseline)
     if not project_resources_are_absent(disallowed_inventory):
@@ -3125,62 +4192,227 @@ def _cleanup_new_ecr_repositories(ctx: RunContext) -> dict[str, Any]:
     return {"repositories": results, "automatic_deletion": False}
 
 
+def _cleanup_owned_log_groups(ctx: RunContext) -> dict[str, Any]:
+    """Delete pre-authorized logs through an assumed role and atomic tag condition."""
+    records = ctx.checkpoint.state.get("owned_log_groups", [])
+    if not isinstance(records, list):
+        raise RuntimeError("Checkpoint owned_log_groups must be a list")
+    results: list[dict[str, Any]] = []
+    authorization: dict[str, Any] = {"needed": False}
+    try:
+        if records:
+            stack_absence = _verify_target_stack_absence(ctx)
+            if not stack_absence["all_absent"]:
+                raise RuntimeError(
+                    "Log-group cleanup requires every exact target stack to be absent"
+                )
+
+        cleanup_token = str(ctx.checkpoint.state.get("log_group_cleanup_token") or "")
+        pending: list[tuple[dict[str, Any], str, str, dict[str, Any]]] = []
+        if records and not re.fullmatch(r"[0-9a-f]{32}", cleanup_token):
+            raise RuntimeError("Checkpoint log-group cleanup token is malformed")
+        for record in records:
+            region, name = _validated_owned_log_group_identity(ctx, record)
+            logs = ctx.session.client("logs", region_name=region)
+            identity = _log_group_identity(logs, region, name)
+            if identity is None:
+                record["deleted"] = True
+                results.append({"region": region, "name": name, "already_absent": True})
+                ctx.persist()
+                continue
+            observed = record.get("observed_identity")
+            if not isinstance(observed, dict) or any(
+                identity.get(field) != observed.get(field) for field in ("arn", "creation_time")
+            ):
+                raise RuntimeError(f"Log-group generation changed before deletion: {region}:{name}")
+            tags = identity.get("tags") or {}
+            if (
+                tags.get(_RUN_STACK_TAG) != ctx.settings.run_id
+                or tags.get(_LOG_CLEANUP_TOKEN_TAG) != cleanup_token
+            ):
+                raise RuntimeError(
+                    f"Log-group authority tags changed before deletion: {region}:{name}"
+                )
+            pending.append((record, region, name, identity))
+
+        authorization = {"needed": bool(pending)}
+        if pending:
+            helper = _ensure_log_cleanup_helper(ctx)
+            if not helper.get("needed"):
+                raise RuntimeError("Log cleanup role was not created for pending groups")
+            session_name = (
+                "live-validation-logs-"
+                + uuid.uuid5(_LOG_CLEANUP_HELPER_NAMESPACE, ctx.settings.run_id).hex[:16]
+            )
+            assumption = ctx.session.client("sts", region_name=helper["region"]).assume_role(
+                RoleArn=helper["role_arn"],
+                RoleSessionName=session_name,
+                DurationSeconds=_LOG_CLEANUP_SESSION_SECONDS,
+                ExternalId=helper["external_id"],
+                Policy=_canonical_json(helper["session_policy"]),
+            )
+            credentials = assumption.get("Credentials") or {}
+            if any(
+                not credentials.get(field)
+                for field in ("AccessKeyId", "SecretAccessKey", "SessionToken")
+            ):
+                raise RuntimeError("AssumeRole omitted cleanup session credentials")
+            assumed_user_arn = str((assumption.get("AssumedRoleUser") or {}).get("Arn") or "")
+            expected_assumed_arn = (
+                f"arn:{helper['partition']}:sts::{ctx.settings.expected_account}:assumed-role/"
+                f"{helper['role_arn'].rsplit('/', 1)[-1]}/{session_name}"
+            )
+            if assumed_user_arn != expected_assumed_arn:
+                raise RuntimeError("AssumeRole returned an unexpected cleanup principal")
+
+            restricted_clients: dict[str, Any] = {}
+            for record, region, name, identity in pending:
+                restricted_logs = restricted_clients.setdefault(
+                    region,
+                    ctx.session.client(
+                        "logs",
+                        region_name=region,
+                        aws_access_key_id=credentials["AccessKeyId"],
+                        aws_secret_access_key=credentials["SecretAccessKey"],
+                        aws_session_token=credentials["SessionToken"],
+                    ),
+                )
+                restricted_logs.delete_log_group(logGroupName=name)
+                normal_logs = ctx.session.client("logs", region_name=region)
+                for _attempt in range(10):
+                    if _describe_exact_log_group(normal_logs, name) is None:
+                        break
+                    time.sleep(1)
+                else:
+                    raise RuntimeError(f"Log group remained after deletion: {region}:{name}")
+                record["deleted"] = True
+                results.append(
+                    {
+                        "region": region,
+                        "name": name,
+                        "arn": identity["arn"],
+                        "creation_time": identity["creation_time"],
+                        "stack_id": record["stack_id"],
+                        "source_logical_id": record["source_logical_id"],
+                        "source_resource_type": record["source_resource_type"],
+                        "authority_phase": record["authority_phase"],
+                        "atomic_resource_tag_condition": True,
+                        "deleted": True,
+                    }
+                )
+                ctx.persist()
+            expiration = credentials.get("Expiration")
+            authorization = {
+                "needed": True,
+                "mode": "sts-assume-role-session-policy",
+                "role_arn": helper["role_arn"],
+                "helper_stack_id": helper["stack_id"],
+                "atomic_resource_tag_condition": True,
+                "condition_tag_keys": [_RUN_STACK_TAG, _LOG_CLEANUP_TOKEN_TAG],
+                "session_expiration": (expiration.isoformat() if expiration is not None else None),
+            }
+    except Exception as cleanup_exc:
+        try:
+            _delete_log_cleanup_helper(ctx)
+        except Exception as helper_exc:
+            evidence = {
+                "log_cleanup_error": f"{type(cleanup_exc).__name__}: {cleanup_exc}",
+                "helper_cleanup_error": f"{type(helper_exc).__name__}: {helper_exc}",
+            }
+            raise RuntimeError(
+                "Log-group and cleanup-helper deletion both failed: "
+                + json.dumps(evidence, sort_keys=True)
+            ) from cleanup_exc
+        raise
+    helper_cleanup = _delete_log_cleanup_helper(ctx)
+    return {
+        "log_groups": results,
+        "authorization": authorization,
+        "helper_stack_cleanup": helper_cleanup,
+    }
+
+
 def _schedule_retained_kms_keys(ctx: RunContext) -> dict[str, Any]:
     records = ctx.checkpoint.state.get("owned_kms_keys", [])
-    if records and not ctx.settings.confirm_kms_key_deletion:
+    retained_records = [
+        record
+        for record in records
+        if _validated_owned_kms_identity(ctx, record)[3] == "harness-schedule"
+    ]
+    if retained_records and not ctx.settings.confirm_kms_key_deletion:
         raise RuntimeError("Retained KMS keys exist but this identity did not confirm key deletion")
     results: list[dict[str, Any]] = []
     for record in records:
-        region = str(record["region"])
+        region, key_id, arn, cleanup_policy = _validated_owned_kms_identity(ctx, record)
+        record.setdefault("cleanup_policy", cleanup_policy)
         kms = ctx.session.client("kms", region_name=region)
         try:
-            metadata = kms.describe_key(KeyId=record["key_id"]).get("KeyMetadata", {})
+            metadata = kms.describe_key(KeyId=key_id).get("KeyMetadata", {})
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") == "NotFoundException":
                 record["scheduled"] = True
                 record["deleted"] = True
-                results.append({"arn": record["arn"], "already_absent": True})
+                results.append(
+                    {
+                        "arn": arn,
+                        "cleanup_policy": cleanup_policy,
+                        "already_absent": True,
+                    }
+                )
                 ctx.persist()
                 continue
             raise
-        if metadata.get("Arn") != record["arn"]:
-            raise RuntimeError(f"KMS key ARN changed for {record['key_id']}")
-        tags = _kms_tags(kms, str(record["key_id"]))
+        if metadata.get("Arn") != arn:
+            raise RuntimeError(f"KMS key ARN changed for {key_id}")
+        tags = _kms_tags(kms, key_id)
         if tags.get(_RUN_STACK_TAG) != record["run_tag"]:
-            raise RuntimeError(f"KMS run ownership changed for {record['arn']}")
-        if tags.get("aws:cloudformation:stack-id") != record["stack_id"]:
-            raise RuntimeError(f"KMS stack ownership changed for {record['arn']}")
+            raise RuntimeError(f"KMS run ownership changed for {arn}")
 
         state = str(metadata.get("KeyState") or "")
-        if state != "PendingDeletion":
+        if state != "PendingDeletion" and cleanup_policy == "harness-schedule":
             if state not in {"Enabled", "Disabled"}:
-                raise RuntimeError(
-                    f"KMS key {record['arn']} is {state}; refusing to schedule deletion"
-                )
+                raise RuntimeError(f"KMS key {arn} is {state}; refusing to schedule deletion")
             kms.schedule_key_deletion(
-                KeyId=record["key_id"],
+                KeyId=key_id,
                 PendingWindowInDays=_KMS_PENDING_WINDOW_DAYS,
             )
-            metadata = kms.describe_key(KeyId=record["key_id"]).get("KeyMetadata", {})
+            metadata = kms.describe_key(KeyId=key_id).get("KeyMetadata", {})
             state = str(metadata.get("KeyState") or "")
         if state != "PendingDeletion":
-            raise RuntimeError(f"KMS key {record['arn']} did not enter PendingDeletion")
+            raise RuntimeError(
+                f"Expected {cleanup_policy} KMS key {arn} to be PendingDeletion; found {state}"
+            )
         deletion_date = metadata.get("DeletionDate")
         record["scheduled"] = True
         record["deletion_date"] = deletion_date.isoformat() if deletion_date is not None else None
+        if not record["deletion_date"]:
+            raise RuntimeError(f"Pending-deletion KMS key omitted its deletion date: {arn}")
         results.append(
             {
-                "arn": record["arn"],
+                "arn": arn,
                 "state": state,
+                "cleanup_policy": cleanup_policy,
                 "deletion_date": record["deletion_date"],
             }
         )
         ctx.persist()
-    return {"keys": results, "pending_window_days": _KMS_PENDING_WINDOW_DAYS}
+    return {
+        "keys": results,
+        "deletion_window": {
+            "harness_schedule_days": _KMS_PENDING_WINDOW_DAYS,
+            "cloudformation_delete": "observed per key deletion_date",
+        },
+    }
 
 
 def _retained_resource_cleanup(ctx: RunContext) -> dict[str, Any]:
     result: dict[str, Any] = {"started_at": utc_now(), "errors": []}
+    try:
+        result["cloudwatch_logs"] = _cleanup_owned_log_groups(ctx)
+    except Exception as exc:  # noqa: BLE001 - preserve partial evidence
+        result["errors"].append(
+            {"phase": "cloudwatch-logs", "error": f"{type(exc).__name__}: {exc}"}
+        )
     try:
         result["ecr_images"] = _cleanup_new_ecr_images(ctx)
     except Exception as exc:  # noqa: BLE001 - preserve partial evidence
@@ -3212,10 +4444,13 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
 
     initial_absence = _verify_target_stack_absence(ctx)
     if ctx.checkpoint.destroyed and initial_absence["all_absent"]:
+        _checkpoint_retained_kms_keys(ctx)
+        retained_cleanup = _retained_resource_cleanup(ctx)
         return {
             "needed": True,
             "already_destroyed": True,
             "stack_absence": initial_absence,
+            "retained_cleanup": retained_cleanup,
             "attempts": ctx.checkpoint.state.get("destroy_attempts", []),
             "workload_cleanup_attempts": ctx.checkpoint.state.get("workload_cleanup_attempts", []),
             "retained_cleanup_attempts": ctx.checkpoint.state.get("retained_cleanup_attempts", []),
@@ -3270,6 +4505,7 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
             ctx.persist()
 
         try:
+            helper_authority = _ensure_log_cleanup_helper(ctx)
             _reconcile_stack_ownership(ctx)
             expected_stack_ids = {
                 name: (
@@ -3334,6 +4570,7 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
                 "successful_stacks": successful,
                 "failed_stacks": failed,
                 "helper_outcomes": helper_outcomes,
+                "log_cleanup_helper": helper_authority,
             }
             if overall:
                 absence_before_cleanup = _verify_target_stack_absence(ctx)
@@ -3364,6 +4601,16 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
                 }
             attempt["overall_success"] = False
             attempt["error"] = f"{type(exc).__name__}: {exc}"
+        if not overall:
+            try:
+                attempt["log_cleanup_helper_cleanup"] = _delete_log_cleanup_helper(ctx)
+            except Exception as helper_exc:  # noqa: BLE001 - retain both teardown failures
+                helper_error = f"{type(helper_exc).__name__}: {helper_exc}"
+                attempt["log_cleanup_helper_cleanup_error"] = helper_error
+                previous_error = str(attempt.get("error") or "")
+                attempt["error"] = "; ".join(
+                    part for part in (previous_error, f"cleanup helper: {helper_error}") if part
+                )
         attempt["ended_at"] = utc_now()
         attempts.append(attempt)
         ctx.persist()
@@ -3404,27 +4651,74 @@ def _strip_expected_pending_kms(
     project_inventory: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     inventory = copy.deepcopy(project_inventory)
-    expected = {
-        (str(item["region"]), str(item["arn"])): item
-        for item in ctx.checkpoint.state.get("owned_kms_keys", [])
-        if item.get("scheduled")
-    }
+    expected: dict[tuple[str, str], dict[str, Any]] = {}
     accepted: list[dict[str, Any]] = []
+    for record in ctx.checkpoint.state.get("owned_kms_keys", []):
+        region, key_id, arn, cleanup_policy = _validated_owned_kms_identity(ctx, record)
+        identity = (region, arn)
+        if not record.get("scheduled"):
+            raise RuntimeError(f"Owned KMS key was not scheduled for deletion: {arn}")
+        if identity in expected:
+            raise RuntimeError(f"Duplicate KMS checkpoint identity: {region}:{arn}")
+
+        kms = ctx.session.client("kms", region_name=region)
+        try:
+            metadata = kms.describe_key(KeyId=key_id).get("KeyMetadata", {})
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "NotFoundException":
+                raise
+            evidence = {
+                "region": region,
+                "key_id": key_id,
+                "arn": arn,
+                "state": "Deleted",
+                "already_absent": True,
+                "stack_id": record["stack_id"],
+                "logical_id": record["logical_id"],
+                "ownership_authority": record["ownership_authority"],
+                "cleanup_policy": cleanup_policy,
+                "run_tag": record["run_tag"],
+            }
+        else:
+            if metadata.get("Arn") != arn:
+                raise RuntimeError(f"KMS key ARN changed for {key_id}")
+            state = str(metadata.get("KeyState") or "")
+            if state != "PendingDeletion":
+                raise RuntimeError(
+                    f"Expected {cleanup_policy} KMS key {arn} to be PendingDeletion; found {state}"
+                )
+            tags = _kms_tags(kms, key_id)
+            if tags.get(_RUN_STACK_TAG) != record["run_tag"]:
+                raise RuntimeError(f"KMS run ownership changed for {arn}")
+            deletion_date = metadata.get("DeletionDate")
+            observed_deletion_date = (
+                deletion_date.isoformat() if deletion_date is not None else None
+            )
+            if not observed_deletion_date or observed_deletion_date != record.get("deletion_date"):
+                raise RuntimeError(f"KMS deletion date changed for {arn}")
+            evidence = {
+                "region": region,
+                "key_id": key_id,
+                "arn": arn,
+                "state": state,
+                "description": str(metadata.get("Description") or ""),
+                "deletion_date": observed_deletion_date,
+                "tags": tags,
+                "stack_id": record["stack_id"],
+                "logical_id": record["logical_id"],
+                "ownership_authority": record["ownership_authority"],
+                "cleanup_policy": cleanup_policy,
+                "run_tag": record["run_tag"],
+            }
+        expected[identity] = evidence
+        accepted.append(evidence)
+
     for region, resources in list(inventory.get("regional", {}).items()):
-        remaining = []
-        for key in resources.get("kms_keys", []):
-            record = expected.get((region, str(key.get("arn") or "")))
-            tags = key.get("tags") or {}
-            if (
-                record is not None
-                and key.get("state") == "PendingDeletion"
-                and tags.get(_RUN_STACK_TAG) == record["run_tag"]
-                and tags.get("aws:cloudformation:stack-id") == record["stack_id"]
-            ):
-                accepted.append(key)
-            else:
-                remaining.append(key)
-        resources["kms_keys"] = remaining
+        resources["kms_keys"] = [
+            key
+            for key in resources.get("kms_keys", [])
+            if (region, str(key.get("arn") or "")) not in expected
+        ]
         if not any(resources.values()):
             inventory["regional"].pop(region)
     return inventory, accepted
@@ -3456,6 +4750,7 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
         expected_account=ctx.settings.expected_account,
         project_name=ctx.config.project_name,
         seed_region=ctx.config.global_region,
+        validation_run_id=ctx.settings.run_id,
     )
     residual_inventory = _strip_baseline_ecr(
         project_inventory,

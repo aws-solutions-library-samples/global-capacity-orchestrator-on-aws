@@ -447,6 +447,9 @@ class GCOApiGatewayGlobalStack(Stack):
             },
         )
         self.backend_tls_resource.node.add_dependency(self.backend_tls_root_secret)
+        # CloudFormation reverses dependencies on delete, so the provider's
+        # final invocation completes before its managed log group is removed.
+        self.backend_tls_resource.node.add_dependency(provider_log_group)
 
         self.backend_tls_rotation_dlq = sqs.Queue(
             self,
