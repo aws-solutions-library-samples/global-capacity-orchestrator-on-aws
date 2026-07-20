@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "last_refreshed_at": "2026-07-20T20:58:42Z",
   "source": {
     "api": "ec2:DescribeInstanceTypes",
     "partition": "aws",
@@ -10,160 +11,212 @@
   "families": {
     "g4dn": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-general-x86",
       "generation": 4,
       "lifecycle": "active"
     },
     "g5": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-general-x86",
       "generation": 5,
       "lifecycle": "active"
     },
     "g5g": {
       "accelerator": "nvidia",
-      "architectures": ["arm64"],
+      "architectures": [
+        "arm64"
+      ],
       "track": "nvidia-general-arm",
       "generation": 5,
       "lifecycle": "active"
     },
     "g6": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-general-x86",
       "generation": 6,
       "lifecycle": "active"
     },
     "g6e": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-general-x86",
       "generation": 6,
       "lifecycle": "active"
     },
     "g6f": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-general-x86",
       "generation": 6,
       "lifecycle": "active"
     },
     "g7": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-general-x86",
       "generation": 7,
       "lifecycle": "active"
     },
     "g7e": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-general-x86",
       "generation": 7,
       "lifecycle": "active"
     },
     "gr6": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-general-x86",
       "generation": 6,
       "lifecycle": "active"
     },
     "gr6f": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-general-x86",
       "generation": 6,
       "lifecycle": "active"
     },
     "inf1": {
       "accelerator": "neuron",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "neuron-inference-x86",
       "generation": 1,
       "lifecycle": "active"
     },
     "inf2": {
       "accelerator": "neuron",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "neuron-inference-x86",
       "generation": 2,
       "lifecycle": "active"
     },
     "p3": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-accelerated-x86",
       "generation": 3,
       "lifecycle": "end-of-life",
-      "manifest_allowed": false,
       "reason": "No p3 instance type remains in the enabled-Region EC2 catalog, and V100 capacity should not be selected for new workloads.",
-      "replacements": ["p4d", "p5", "p5e", "p5en"]
+      "replacements": [
+        "p4d",
+        "p5",
+        "p5e",
+        "p5en"
+      ]
     },
     "p3dn": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-accelerated-x86",
       "generation": 3,
       "lifecycle": "deprecated",
-      "manifest_allowed": false,
       "reason": "EC2 still advertises p3dn.24xlarge, but the V100 family is retained only for capacity-history observation and must not receive new Karpenter scheduling.",
-      "replacements": ["p4d", "p5", "p5e", "p5en"]
+      "replacements": [
+        "p4d",
+        "p5",
+        "p5e",
+        "p5en"
+      ]
     },
     "p4d": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-accelerated-x86",
       "generation": 4,
       "lifecycle": "active"
     },
     "p4de": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-accelerated-x86",
       "generation": 4,
       "lifecycle": "active"
     },
     "p5": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-accelerated-x86",
       "generation": 5,
       "lifecycle": "active"
     },
     "p5e": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-accelerated-x86",
       "generation": 5,
       "lifecycle": "active"
     },
     "p5en": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-accelerated-x86",
       "generation": 5,
       "lifecycle": "active"
     },
     "p6-b200": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-accelerated-x86",
       "generation": 6,
       "lifecycle": "active"
     },
     "p6-b300": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-accelerated-x86",
       "generation": 6,
       "lifecycle": "active"
     },
     "p6e-gb200": {
       "accelerator": "nvidia",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "nvidia-accelerated-x86",
       "generation": 6,
       "lifecycle": "announced",
@@ -172,21 +225,27 @@
     },
     "trn1": {
       "accelerator": "neuron",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "neuron-training-x86",
       "generation": 1,
       "lifecycle": "active"
     },
     "trn1n": {
       "accelerator": "neuron",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "neuron-training-x86",
       "generation": 1,
       "lifecycle": "active"
     },
     "trn2": {
       "accelerator": "neuron",
-      "architectures": ["amd64"],
+      "architectures": [
+        "amd64"
+      ],
       "track": "neuron-training-x86",
       "generation": 2,
       "lifecycle": "active"

@@ -23,7 +23,7 @@ Utility scripts for development, testing, and operations.
 | `setup-cluster-access.sh` | Configures kubectl access to a GCO EKS cluster. Adds your IAM principal to the cluster's access entries and verifies connectivity. |
 | `setup-dev-alias.sh` | Builds (or refreshes) the `gco-dev` image from `Dockerfile.dev`, then installs a `gco` shell function (between `# >>> gco >>>` markers) into your shell rc file so the CLI runs inside the dev container against your current directory. Auto-detects the container runtime (Docker/Finch/Podman), picks the matching socket mount, and is safe to re-run (`--no-build` skips the rebuild). |
 | `bump_version.py` | Bumps the project version across all locations (pyproject.toml, CLI, docs). Supports major, minor, and patch increments. |
-| `accelerator_catalog.py` | Validates the checked-in NVIDIA GPU/AWS Neuron catalog against Karpenter NodePools and both capacity-history watch lists; can capture, compare, and safely refresh the catalog from enabled-Region EC2 discovery. Offline `validate` is deterministic; online commands are sequential, paginated, and use adaptive retries. |
+| `accelerator_catalog.py` | Validates the checked-in NVIDIA GPU/AWS Neuron catalog against Karpenter NodePools and both capacity-history watch lists; can capture, compare, and safely refresh the catalog from enabled-Region EC2 discovery. Successful refreshes embed a UTC `last_refreshed_at` timestamp. Offline `validate` is deterministic; online commands are sequential, paginated, and use adaptive retries. |
 | `dump_nag_findings.py` | Dev-only debugging helper: runs the `tests/test_nag_compliance.py` harness and prints every cdk-nag finding grouped by rule + resource path + config. Use this when the compliance test gate fails in CI and you want a compact per-finding view instead of pytest's `AssertionError` repr. |
 | `test_webhook_delivery.py` | Tests the webhook dispatcher by sending sample events and verifying delivery, HMAC signatures, and retry behavior. |
 | `capture_scaffold_fixtures.py` | Captures raw model output for the Mission scaffolder prompt across a curated cross-family Bedrock model set. Writes one JSON file per model under `tests/fixtures/scaffold_responses/` for the replay test (`tests/test_scaffold_fixture_replay.py`) to drive on every CI run. See the [fixture-replay runbook](../tests/fixtures/scaffold_responses/README.md) for the full lifecycle. |
@@ -158,8 +158,9 @@ python scripts/accelerator_catalog.py refresh \
 ```
 
 `refresh` refuses an unreviewed family or EC2 metadata that conflicts with
-checked-in policy. It updates only the catalog type list; the maintainer must
-review NodePool scheduling eligibility and synchronize `cdk.json`
+checked-in policy. It updates the catalog type list and embeds a UTC
+`last_refreshed_at` timestamp; read-only commands never rewrite that timestamp.
+The maintainer must review NodePool scheduling eligibility and synchronize `cdk.json`
 `historical.watch_instance_types` plus the `ConfigLoader` fallback. Follow the
 complete [maintenance runbook](../docs/MAINTENANCE.md#adding-a-new-instance-type-or-family).
 

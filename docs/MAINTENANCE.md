@@ -147,6 +147,10 @@ drift, and `2` means the online check itself failed.
      --output /tmp/accelerator_catalog.json
    ```
 
+   Successful refresh output embeds `last_refreshed_at` as a UTC ISO-8601
+   timestamp. Read-only `validate`, `capture`, and `check-online` runs never
+   rewrite that timestamp.
+
 5. Review the diff, then replace the catalog's `instance_types` with the approved
    output. Synchronize `historical.watch_instance_types` in `cdk.json` and the
    fallback in `gco/config/config_loader.py`; offline validation reports every

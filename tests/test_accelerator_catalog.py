@@ -60,6 +60,7 @@ def test_unreferenced_p7_names_nodepools_that_need_updates() -> None:
     )
     synthetic = Catalog(
         schema_version=catalog.schema_version,
+        last_refreshed_at=catalog.last_refreshed_at,
         source=catalog.source,
         families={**catalog.families, "p7": p7},
         instance_types=tuple(sorted((*catalog.instance_types, "p7.48xlarge"))),

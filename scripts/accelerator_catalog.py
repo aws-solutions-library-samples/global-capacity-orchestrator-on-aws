@@ -17,6 +17,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -51,6 +52,21 @@ def _string(value: object, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise CatalogError(f"{label} must be a non-empty string")
     return value
+
+
+def _utc_timestamp(value: object, label: str) -> str:
+    timestamp = _string(value, label)
+    if "T" not in timestamp or not timestamp.endswith("Z"):
+        raise CatalogError(f"{label} must be an ISO 8601 UTC timestamp ending in Z")
+    try:
+        datetime.fromisoformat(f"{timestamp[:-1]}+00:00")
+    except ValueError as exc:
+        raise CatalogError(f"{label} must be an ISO 8601 UTC timestamp ending in Z") from exc
+    return timestamp
+
+
+def _current_utc_timestamp() -> str:
+    return datetime.now(tz=UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _string_list(value: object, label: str, *, allow_empty: bool = False) -> tuple[str, ...]:
@@ -148,6 +164,7 @@ class Catalog:
     """Normalized checked-in accelerator catalog."""
 
     schema_version: int
+    last_refreshed_at: str
     source: dict[str, object]
     families: dict[str, FamilyPolicy]
     instance_types: tuple[str, ...]
@@ -162,6 +179,9 @@ class Catalog:
         schema_version = raw.get("schema_version")
         if schema_version != 1:
             raise CatalogError(f"{path}: schema_version must be 1")
+        last_refreshed_at = _utc_timestamp(
+            raw.get("last_refreshed_at"), f"{path}: last_refreshed_at"
+        )
         source = _mapping(raw.get("source"), f"{path}: source")
         family_values = _mapping(raw.get("families"), f"{path}: families")
         families = {
@@ -181,6 +201,7 @@ class Catalog:
                 )
         return cls(
             schema_version=1,
+            last_refreshed_at=last_refreshed_at,
             source=source,
             families=families,
             instance_types=instance_types,
@@ -193,6 +214,7 @@ class Catalog:
     def to_mapping(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
+            "last_refreshed_at": self.last_refreshed_at,
             "source": self.source,
             "families": {
                 name: policy.to_mapping() for name, policy in sorted(self.families.items())
@@ -795,7 +817,7 @@ def compare_catalog(catalog: Catalog, discovery: Discovery) -> CatalogDrift:
 
 
 def refresh_catalog(catalog: Catalog, discovery: Discovery, output_path: Path) -> None:
-    """Write discovered types only after every family has reviewed metadata."""
+    """Write discovered types and a UTC timestamp after policy validation."""
     unknown_families = sorted(set(discovery.families) - set(catalog.families))
     if unknown_families:
         details = ", ".join(unknown_families)
@@ -811,6 +833,7 @@ def refresh_catalog(catalog: Catalog, discovery: Discovery, output_path: Path) -
         )
     refreshed = Catalog(
         schema_version=catalog.schema_version,
+        last_refreshed_at=_current_utc_timestamp(),
         source=catalog.source,
         families=catalog.families,
         instance_types=discovery.instance_types,
