@@ -494,6 +494,16 @@ class GCORegionalStack(Stack):
         if self.global_accelerator_enabled:
             self._create_ga_registration_lambda()
 
+        # Create the provider framework log group before the Helm installer so
+        # both the provider and convergence trigger share an explicit lifecycle
+        # anchor, including when the expensive installer builder is substituted.
+        self.helm_installer_provider_log_group = logs.LogGroup(
+            self,
+            "HelmInstallerProviderLogGroup",
+            retention=logs.RetentionDays.ONE_WEEK,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
         # Create Helm installer Lambda for KEDA and other Helm-based installations
         self._create_helm_installer_lambda()
 
@@ -3986,15 +3996,9 @@ class GCORegionalStack(Stack):
             )
         )
 
-        # The framework group is explicitly managed with bounded retention.
-        # HelmInstallCharts depends on it below, forcing the trigger's final
-        # provider invocation to finish before CloudFormation removes the group.
-        self.helm_installer_provider_log_group = logs.LogGroup(
-            self,
-            "HelmInstallerProviderLogGroup",
-            retention=logs.RetentionDays.ONE_WEEK,
-            removal_policy=RemovalPolicy.DESTROY,
-        )
+        # HelmInstallCharts depends on this explicit bounded-retention group,
+        # forcing the trigger's final provider invocation to finish before
+        # CloudFormation removes the group.
         self.helm_installer_provider = cr.Provider(
             self,
             "HelmInstallerProvider",
