@@ -15,6 +15,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 
 | Document | Audience | Description |
 |----------|----------|-------------|
+| [Project Tenets](../TENETS.md) | Everyone | Normative north star and prioritized decision guidance for safety, truth, security, accelerator policy, operations, and maintainability |
 | [Core Concepts](CONCEPTS.md) | New users | What GCO is, the problems it solves, and how the key components work together |
 | [Learning Path](LEARNING_PATH.md) | New users / new to Kubernetes | A staged, hands-on path from zero to productive, with a Kubernetes primer and role-based tracks |
 | [Architecture](ARCHITECTURE.md) | Engineers | Deep dive into the multi-region infrastructure, security layers, data flow, and scale characteristics |
@@ -57,21 +58,23 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 
 If you're new to GCO:
 
-1. [Learning Path](LEARNING_PATH.md) — the guided route through the docs below, with a Kubernetes primer for newcomers
-2. [Core Concepts](CONCEPTS.md) — understand what it does
-3. [Quick Start](../QUICKSTART.md) — get it running
-4. [CLI Reference](CLI.md) — learn the commands
-5. [Inference Guide](INFERENCE.md) — deploy inference endpoints
-6. [Schedulers Overview](SCHEDULERS.md) — pick the right scheduler for your workload
+1. [Project Tenets](../TENETS.md) — understand the north star and how trade-offs are resolved
+2. [Learning Path](LEARNING_PATH.md) — the guided route through the docs below, with a Kubernetes primer for newcomers
+3. [Core Concepts](CONCEPTS.md) — understand what it does
+4. [Quick Start](../QUICKSTART.md) — get it running
+5. [CLI Reference](CLI.md) — learn the commands
+6. [Inference Guide](INFERENCE.md) — deploy inference endpoints
+7. [Schedulers Overview](SCHEDULERS.md) — pick the right scheduler for your workload
 
 If you're customizing or operating:
 
-1. [Architecture](ARCHITECTURE.md) — understand the infrastructure
-2. [Customization](CUSTOMIZATION.md) — tune for your needs
-3. [Cluster Shared Bucket](CLUSTER_SHARED_BUCKET.md) — the always-on shared storage layer
-4. [Analytics Environment](ANALYTICS.md) — optional Studio + EMR for interactive analysis
-5. [Mission](MISSION.md) — run goal-directed iteration loops
-6. [Schedulers Overview](SCHEDULERS.md) — configure scheduling tools
-7. [Troubleshooting](TROUBLESHOOTING.md) — fix issues
-8. [Operational Runbooks](RUNBOOKS.md) — incident response procedures
-9. [Maintenance](MAINTENANCE.md) — keep instance types, the EKS version, and pinned tooling current
+1. [Project Tenets](../TENETS.md) — apply the project's prioritized decision framework
+2. [Architecture](ARCHITECTURE.md) — understand the infrastructure
+3. [Customization](CUSTOMIZATION.md) — tune for your needs
+4. [Cluster Shared Bucket](CLUSTER_SHARED_BUCKET.md) — the always-on shared storage layer
+5. [Analytics Environment](ANALYTICS.md) — optional Studio + EMR for interactive analysis
+6. [Mission](MISSION.md) — run goal-directed iteration loops
+7. [Schedulers Overview](SCHEDULERS.md) — configure scheduling tools
+8. [Troubleshooting](TROUBLESHOOTING.md) — fix issues
+9. [Operational Runbooks](RUNBOOKS.md) — incident response procedures
+10. [Maintenance](MAINTENANCE.md) — keep the accelerator catalog, EKS version, and pinned tooling current

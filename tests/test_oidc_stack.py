@@ -236,6 +236,32 @@ class TestOIDCIAMPolicy:
             },
         )
 
+    def test_policy_has_ec2_accelerator_catalog_describe_actions(self):
+        """Policy should allow the monthly accelerator catalog scan."""
+        template = _synth_stack()
+        template.has_resource_properties(
+            "AWS::IAM::Policy",
+            {
+                "PolicyDocument": {
+                    "Statement": Match.array_with(
+                        [
+                            Match.object_like(
+                                {
+                                    "Action": Match.array_with(
+                                        [
+                                            "ec2:DescribeInstanceTypes",
+                                            "ec2:DescribeRegions",
+                                        ]
+                                    ),
+                                    "Effect": "Allow",
+                                }
+                            )
+                        ]
+                    )
+                }
+            },
+        )
+
     def test_policy_has_rds_describe(self):
         """Policy should allow rds:DescribeDBEngineVersions."""
         template = _synth_stack()

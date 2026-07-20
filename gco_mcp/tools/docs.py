@@ -1,36 +1,35 @@
 """Documentation discovery MCP tool.
 
-Wraps two catalogs defined in ``gco_mcp/resources/docs.py`` — ``DOC_METADATA``
-(the ``docs/*.md`` guides) and ``PACKAGE_DOC_METADATA`` (the package-level
-READMEs that live next to the code under ``gco_mcp/``) — and exposes a single
-``find_docs`` tool the LLM can call with a free-text query plus an optional
-topic filter. The two catalogs are merged into one searchable view; each
-result carries a ``resource_uri`` so the caller knows the exact resource to
-fetch (``docs://gco/docs/{name}`` for a guide, ``docs://gco/packages/{name}``
-for a package README). Scoring is a deterministic weighted sum of topic and
-summary/name substring matches; results are sorted by score descending then
-name ascending so callers iterating with ``limit`` always see a stable
-ordering.
+Wraps three catalogs defined in ``gco_mcp/resources/docs.py``:
+``DOC_METADATA`` (the ``docs/*.md`` guides), ``ROOT_DOC_METADATA`` (selected
+project-level Markdown files at the repository root), and
+``PACKAGE_DOC_METADATA`` (package-level READMEs next to code under
+``gco_mcp/``). It exposes one ``find_docs`` tool with a free-text query plus an
+optional topic filter. The catalogs are merged into one searchable view; each
+result carries the exact resource URI to fetch. Scoring is a deterministic
+weighted sum of topic and summary/name substring matches; results are sorted by
+score descending then name ascending so callers iterating with ``limit`` always
+see a stable ordering.
 """
 
 from audit import audit_logged
-from resources.docs import DOC_METADATA, PACKAGE_DOC_METADATA
+from resources.docs import DOC_METADATA, PACKAGE_DOC_METADATA, ROOT_DOC_METADATA
 from server import mcp
 
 
 def _catalog() -> dict[str, dict[str, str | list[str]]]:
-    """Return the merged doc catalog: ``docs/*.md`` guides plus package READMEs.
+    """Return the merged guide, root-document, and package-README catalog.
 
-    The two catalogs use disjoint key spaces by construction —
-    ``DOC_METADATA`` keys are uppercase doc stems (``ARCHITECTURE``) and
-    ``PACKAGE_DOC_METADATA`` keys are lowercase slugs (``mcp-mission``) — so a
-    plain merge never drops an entry.
+    Catalog keys are required to be pairwise disjoint by the docs-index tests,
+    so a plain merge cannot silently replace an entry.
     """
-    return {**DOC_METADATA, **PACKAGE_DOC_METADATA}
+    return {**DOC_METADATA, **ROOT_DOC_METADATA, **PACKAGE_DOC_METADATA}
 
 
 def _resource_uri(name: str) -> str:
     """Map a catalog key to the resource URI that serves its content."""
+    if name in ROOT_DOC_METADATA:
+        return f"docs://gco/{name}"
     if name in PACKAGE_DOC_METADATA:
         return f"docs://gco/packages/{name}"
     return f"docs://gco/docs/{name}"
@@ -99,11 +98,9 @@ async def find_docs(
 ) -> list[dict[str, object]]:
     """`find_docs` — search the docs catalog by topic and free-text query.
 
-    Searches both the ``docs/*.md`` guides and the package-level READMEs that
-    live next to the code under ``gco_mcp/``. Each result carries a
-    ``resource_uri`` naming the exact resource to fetch
-    (``docs://gco/docs/{name}`` for a guide, ``docs://gco/packages/{name}``
-    for a package README).
+    Searches the ``docs/*.md`` guides, selected root project documents, and
+    package-level READMEs that live next to code under ``gco_mcp/``. Each
+    result carries a ``resource_uri`` naming the exact resource to fetch.
 
     Args:
         query: Free-text query matched against the doc's keywords, summary,

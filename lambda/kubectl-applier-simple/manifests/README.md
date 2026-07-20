@@ -109,7 +109,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 
 | File | Contents |
 |------|----------|
-| `40-nodepool-gpu-x86.yaml` | x86_64 GPU pool (g4dn, g5, g6, g6e, g6f, gr6, gr6f, g7, g7e, p3, p3dn) — on-demand + spot |
+| `40-nodepool-gpu-x86.yaml` | x86_64 GPU pool (g4dn, g5, g6, g6e, g6f, gr6, gr6f, g7, g7e) — on-demand + spot; deprecated V100 p3/p3dn families are observation-only and excluded from new scheduling |
 | `41-nodepool-gpu-arm.yaml` | ARM64 GPU pool (g5g) — on-demand + spot |
 | `42-nodepool-inference.yaml` | Inference GPU pool (g4dn, g5, g6, g6e, g6f, gr6, gr6f, g7, g7e) — on-demand + spot, WhenEmpty consolidation |
 | `43-nodepool-efa.yaml` | EFA pool (p4d, p4de, p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200) — high-performance distributed training (keeps p4d) |

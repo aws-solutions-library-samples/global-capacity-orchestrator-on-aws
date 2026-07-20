@@ -29,7 +29,7 @@ This stack is **standalone** — it does not depend on or affect the main GCO in
 
 1. **IAM OIDC Identity Provider** — trusts `token.actions.githubusercontent.com` (the GitHub OIDC issuer). Skipped if one already exists in the account.
 2. **IAM Role** — assumable only by GitHub Actions workflows from your repository. The trust policy restricts access to a specific GitHub org/repo.
-3. **IAM Policy** — attached to the role. By default grants read-only permissions needed for the dependency scan workflow (`eks:DescribeAddonVersions`, `eks:DescribeClusterVersions`, `elasticmapreduce:ListReleaseLabels`, `rds:DescribeDBEngineVersions`). You can expand this for your own needs.
+3. **IAM Policy** — attached to the role. By default grants only the read APIs used by the monthly dependency scan: Bedrock model/profile discovery, EC2 Region and accelerator-catalog discovery, EKS add-on and cluster-version discovery, EMR release labels, RDS engine versions, and STS caller identity. You can expand this for your own needs.
 
 ## Prerequisites
 
@@ -63,8 +63,15 @@ The default policy in `policy.json` grants minimal read-only permissions for the
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "CIDependencyScan",
       "Effect": "Allow",
       "Action": [
+        "bedrock:ListFoundationModels",
+        "bedrock:GetFoundationModel",
+        "bedrock:ListInferenceProfiles",
+        "bedrock:GetInferenceProfile",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeRegions",
         "eks:DescribeAddonVersions",
         "eks:DescribeClusterVersions",
         "elasticmapreduce:ListReleaseLabels",
@@ -148,7 +155,7 @@ The tests verify:
 - Stack synthesizes without errors
 - OIDC provider is created with the correct issuer URL
 - IAM role trust policy restricts to the correct GitHub repo
-- IAM policy contains the expected actions
+- IAM policy contains the complete read-only dependency-scan action set, including EC2 catalog discovery
 - Branch restriction works when specified
 - Custom repo names are reflected in the trust policy
 

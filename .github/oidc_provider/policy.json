@@ -9,6 +9,8 @@
         "bedrock:GetFoundationModel",
         "bedrock:ListInferenceProfiles",
         "bedrock:GetInferenceProfile",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeRegions",
         "eks:DescribeAddonVersions",
         "eks:DescribeClusterVersions",
         "elasticmapreduce:ListReleaseLabels",

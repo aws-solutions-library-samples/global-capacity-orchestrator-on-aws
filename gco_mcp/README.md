@@ -891,7 +891,7 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
-| `find_docs` | Search documentation pages and package READMEs by query or topic; each hit carries the `resource_uri` to fetch | safe | — |
+| `find_docs` | Search documentation guides, registered root documents, and package READMEs by query or topic; each hit carries the `resource_uri` to fetch | safe | — |
 
 ### Mission (Goal-Directed Loop)
 
@@ -948,6 +948,7 @@ Beyond tools, the MCP server exposes documentation, source code, examples, and o
 | `docs://gco/index` | Browse all available docs, examples, and resource groups |
 | `docs://gco/README` | Project README and overview |
 | `docs://gco/QUICKSTART` | Quick start guide — deploy in under 60 minutes |
+| `docs://gco/TENETS` | Normative project tenets, prioritized decision framework, and north-star guidance |
 | `docs://gco/CONTRIBUTING` | Contributing guide |
 | `docs://gco/docs/{name}` | Any doc by name (ARCHITECTURE, CLI, INFERENCE, CONCEPTS, etc.) |
 | `docs://gco/docs/by-topic/{topic}` | Listing of docs whose metadata mentions the given topic |

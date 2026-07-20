@@ -219,6 +219,7 @@ class TestMCPProtocolResources:
             uris = {str(r.uri) for r in resources}
             assert any("docs://gco/index" in u for u in uris)
             assert any("docs://gco/README" in u for u in uris)
+            assert any("docs://gco/TENETS" in u for u in uris)
             assert any("source://gco/index" in u for u in uris)
 
     @pytest.mark.asyncio
@@ -244,6 +245,19 @@ class TestMCPProtocolResources:
             text = result[0].text if result else ""
             assert "GCO" in text
             assert len(text) > 100
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_read_tenets_resource(self):
+        """Reading docs://gco/TENETS should return north-star guidance."""
+        from fastmcp import Client
+
+        async with Client(run_mcp.mcp) as client:
+            result = await client.read_resource("docs://gco/TENETS")
+            text = result[0].text if result else ""
+            assert "# GCO Tenets" in text
+            assert "## North Star" in text
+            assert "## Decision Framework" in text
 
     @pytest.mark.asyncio
     @pytest.mark.integration
@@ -434,6 +448,7 @@ class TestMCPProtocolResources:
             text = result[0].text if result else ""
             assert "tests://gco/index" in text
             assert "config://gco/index" in text
+            assert "docs://gco/TENETS" in text
             assert "docs://gco/examples/guide" in text
 
     @pytest.mark.asyncio

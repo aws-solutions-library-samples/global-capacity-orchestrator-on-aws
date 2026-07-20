@@ -36,6 +36,43 @@ setup() {
     shellcheck -x "$LIB"
 }
 
+# ── accelerator catalog reporting ───────────────────────────────────────────
+
+@test "offline accelerator catalog validator passes the committed repository" {
+    run python3 scripts/accelerator_catalog.py validate
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Accelerator catalog validation passed"* ]]
+}
+
+@test "parse_accelerator_drift_count returns the exact valid count" {
+    tmpfile="$(mktemp)"
+    printf '%s\n' \
+        '{"status":"drift","drift_count":7,"added_count":4,"removed_count":2,"metadata_change_count":1,"regions_checked":17}' \
+        > "$tmpfile"
+    run parse_accelerator_drift_count "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$output" = "7" ]
+    rm -f "$tmpfile"
+}
+
+@test "parse_accelerator_drift_count rejects malformed JSON" {
+    tmpfile="$(mktemp)"
+    printf '%s\n' '{not-json' > "$tmpfile"
+    run parse_accelerator_drift_count "$tmpfile"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+}
+
+@test "parse_accelerator_drift_count rejects a missing count" {
+    tmpfile="$(mktemp)"
+    printf '%s\n' '{"status":"current","regions_checked":17}' > "$tmpfile"
+    run parse_accelerator_drift_count "$tmpfile"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+}
+
 # ── parse_image_registry ─────────────────────────────────────────────────────
 
 @test "parse_image_registry: nvcr.io image returns nvcr.io registry" {

@@ -12,8 +12,8 @@ Helper scripts invoked by GitHub Actions workflows. Separated from the workflows
 
 | File | Invoked By | Description |
 |------|------------|-------------|
-| `dependency-scan.sh` | `deps-scan.yml` (monthly) | Checks for outdated Python packages, Docker images, Helm charts, EKS add-on, and Bedrock default-model versions. Writes a Markdown report and sets `has_drift=true` on `$GITHUB_OUTPUT` if any are outdated. |
-| `lib_dependency_scan.sh` | `dependency-scan.sh` | Sourceable helper functions — image registry parsing (`parse_image_registry`), semver comparison (`compare_semver`), tag filtering (`is_semver_tag`, `is_project_image`), and Bedrock model-family/version helpers (`bedrock_model_family`, `compare_bedrock_model`, `get_latest_bedrock_model`). Extracted so BATS tests can exercise the logic without running the full scan. |
+| `dependency-scan.sh` | `deps-scan.yml` (monthly) | Checks pinned dependency surfaces, always runs deterministic accelerator catalog/NodePool/watch-list validation, and—with AWS credentials—compares the checked-in accelerator catalog with the live enabled-Region EC2 union. Writes one Markdown report and sets `has_drift=true` for version drift, policy findings, catalog drift, or operational check failures. |
+| `lib_dependency_scan.sh` | `dependency-scan.sh` | Sourceable helper functions — image registry parsing (`parse_image_registry`), semver comparison (`compare_semver`), tag filtering (`is_semver_tag`, `is_project_image`), Bedrock model-family/version helpers, and strict accelerator JSON summary parsing (`parse_accelerator_drift_count`). Extracted so BATS tests can exercise logic without running the full scan. |
 | `check_pip_audit_ignore.py` | `security.yml` (`security:pip-audit:deps`) | Validates the project-local `.github/config/.pip-audit-ignore` suppression file. Fails the workflow when any entry's `exp:YYYY-MM-DD` marker is on-or-before today (inclusive) or when an entry is missing the marker entirely. Importable as a module (`check_file()`, `main()`) so it can be exercised by pytest fixtures rather than only ever run end-to-end through CI. |
 | `validate_helm_charts.py` | `integration-tests.yml` (`integration:helm:charts-valid`) | Validates every `(chart, version)` pinned in `lambda/helm-installer/charts.yaml`. Structural checks run always (required fields, SemVer version, `oci://`/`use_oci` consistency); `--mode online` additionally resolves each chart at its exact pinned version (`helm show chart`) and renders it (`helm template`) so a typo'd name or a version that never shipped fails in CI rather than mid-deploy. Every entry is checked, including `enabled: false` charts. Importable (`validate_structure()`, `build_refs()`, `validate_online()`, `main()`) for pytest. |
 | `run-semgrep.sh` | `security.yml` (`security:semgrep:sast`) | Runs `semgrep scan --config auto --error` with repo-wide rule suppressions loaded from `.github/config/semgrep-excluded-rules.txt` — each non-comment, non-blank line becomes a `--exclude-rule` flag, so the suppression list lives in a reviewable data file instead of being hardwired into the workflow. POSIX `sh` (the semgrep container image is not guaranteed to ship bash). Tested by `tests/BATS/test_run_semgrep.bats`. |
@@ -27,6 +27,10 @@ Shell scripts are tested by BATS:
 # From the repository root
 bats tests/BATS/test_dependency_scan.bats
 bats tests/BATS/test_run_semgrep.bats
+
+# The same deterministic accelerator guard run by normal CI and the monthly scan
+python scripts/accelerator_catalog.py validate
+pytest tests/test_accelerator_catalog.py -q
 ```
 
 Python helpers ship with pytest tests under `tests/`:

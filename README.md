@@ -120,6 +120,7 @@ See the [Quick Start](#quick-start) for the full install + first-job walkthrough
 <details>
 <summary><b>Table of Contents</b></summary>
 
+- [Project Tenets](#project-tenets)
 - [Why GCO?](#why-gco)
 - [Quick Start](#quick-start)
 - [Architecture Overview](#architecture-overview)
@@ -135,6 +136,15 @@ See the [Quick Start](#quick-start) for the full install + first-job walkthrough
 - [Security](#security)
 
 </details>
+
+## Project Tenets
+
+GCO is guided by the prioritized [project tenets](TENETS.md), beginning with workload,
+data, and account safety and anchored by the north star **One API. Every Accelerator.
+Any Region.** The tenets define how the project resolves trade-offs across truthful
+state, security, regional behavior, accelerator policy, automation, recovery,
+operations, cost, and maintainability. Earlier tenets outrank later ones; durable
+exceptions require an [Architecture Decision Record](docs/adr/README.md).
 
 ## Why GCO?
 
@@ -449,6 +459,7 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 
 | Your Goal | Read This |
 |-----------|-----------|
+| Understand the project's north star and decision priorities | [Project Tenets](TENETS.md) |
 | Understand what GCO does | [Core Concepts](docs/CONCEPTS.md) |
 | Follow a guided learning path (new to GCO or Kubernetes) | [Learning Path](docs/LEARNING_PATH.md) |
 | Get running in under 60 minutes | [Quick Start Guide](QUICKSTART.md) |
@@ -519,6 +530,7 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 ```text
 .
 ├── app.py                               # CDK app entry point
+├── TENETS.md                            # Prioritized project principles and north-star guidance
 ├── cdk.json                             # CDK configuration (regions, features, thresholds)
 ├── pyproject.toml                       # Project metadata, dependencies, and CLI installation
 │

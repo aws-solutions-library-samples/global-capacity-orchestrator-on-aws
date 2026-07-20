@@ -18,6 +18,8 @@
 #   - Bedrock default model id from cdk.json context.bedrock.default_model_id
 #     compared against the newest system-defined inference profile in the same
 #     model family (AWS creds)
+#   - Accelerator catalog and Karpenter NodePool policy (offline), plus live
+#     NVIDIA GPU / AWS Neuron EC2 catalog drift across enabled Regions (AWS creds)
 #   - Dockerfile.dev ARG pins (Node LTS major, npm, CDK CLI, kubectl,
 #     AWS CLI v2, Docker CLI, Docker Buildx) — public endpoints, no AWS creds needed
 #   - Pre-commit hook revisions in .pre-commit-config.yaml compared
@@ -1270,6 +1272,128 @@ LOCKFILE_COUNT="$(wc -l < "$LOCKFILE_RESULTS" 2>/dev/null | tr -d ' ')"
 [ -z "$LOCKFILE_COUNT" ] && LOCKFILE_COUNT=0
 
 # ---------------------------------------------------------------------------
+# Accelerator catalog and Karpenter NodePools
+#
+# The deterministic check always runs and validates the reviewed catalog
+# against every NodePool plus the exact cdk.json capacity-history watch list.
+# With AWS credentials, the monthly job also compares the catalog against the
+# union of NVIDIA GPU / AWS Neuron types returned across enabled commercial
+# Regions. Ordinary policy/catalog drift joins the rolling dependency issue;
+# execution or parser failures become one operational finding, never a
+# false-clean result.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking accelerator catalog and Karpenter NodePools ==="
+
+ACCELERATOR_OFFLINE_REPORT="$(mktemp)"
+ACCELERATOR_ONLINE_REPORT="$(mktemp)"
+ACCELERATOR_ONLINE_SUMMARY="$(mktemp)"
+ACCELERATOR_OFFLINE_ERROR="$(mktemp)"
+ACCELERATOR_ONLINE_ERROR="$(mktemp)"
+ACCELERATOR_OFFLINE_COUNT=0
+ACCELERATOR_ONLINE_COUNT=0
+ACCELERATOR_SKIP_REASON=""
+ACCELERATOR_SUMMARY_SKIP_REASON=""
+
+write_accelerator_operational_report() {
+  local report_path="$1" title="$2" detail="$3" error_path="$4"
+  {
+    echo "## ${title}"
+    echo ""
+    echo "**Status: OPERATIONAL ERROR.**"
+    echo ""
+    echo "### Accelerator maintenance check could not complete"
+    echo ""
+    echo "- **Why:** ${detail}"
+    echo "- **Recommended change:** Re-run the command locally, repair the tool or credentials, and do not treat this scan as current until it succeeds."
+    if [ -s "$error_path" ]; then
+      echo "- **Tool output:**"
+      sed 's/^/    /' "$error_path"
+    fi
+  } > "$report_path"
+}
+
+python3 scripts/accelerator_catalog.py validate \
+  --format markdown \
+  --output "$ACCELERATOR_OFFLINE_REPORT" \
+  2>"$ACCELERATOR_OFFLINE_ERROR"
+ACCELERATOR_OFFLINE_STATUS=$?
+if [ "$ACCELERATOR_OFFLINE_STATUS" -eq 0 ]; then
+  echo "  Offline NodePool/watch-list policy is current."
+elif [ "$ACCELERATOR_OFFLINE_STATUS" -eq 1 ]; then
+  ACCELERATOR_OFFLINE_COUNT="$(grep -c '^### ' "$ACCELERATOR_OFFLINE_REPORT" || true)"
+  if ! [[ "$ACCELERATOR_OFFLINE_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    ACCELERATOR_OFFLINE_COUNT=1
+    write_accelerator_operational_report \
+      "$ACCELERATOR_OFFLINE_REPORT" \
+      "Offline accelerator catalog validation" \
+      "The validator reported drift but emitted no parseable actionable findings." \
+      "$ACCELERATOR_OFFLINE_ERROR"
+  else
+    echo "  Found ${ACCELERATOR_OFFLINE_COUNT} offline accelerator policy finding(s)."
+  fi
+else
+  ACCELERATOR_OFFLINE_COUNT=1
+  write_accelerator_operational_report \
+    "$ACCELERATOR_OFFLINE_REPORT" \
+    "Offline accelerator catalog validation" \
+    "The deterministic validator exited with status ${ACCELERATOR_OFFLINE_STATUS}." \
+    "$ACCELERATOR_OFFLINE_ERROR"
+  echo "  Offline accelerator validator failed operationally."
+fi
+
+if ! aws sts get-caller-identity >/dev/null 2>&1; then
+  ACCELERATOR_SKIP_REASON="No AWS credentials available for the online EC2 catalog check (needs ec2:DescribeRegions and ec2:DescribeInstanceTypes); offline policy validation still ran."
+  echo "  $ACCELERATOR_SKIP_REASON"
+else
+  python3 scripts/accelerator_catalog.py check-online \
+    --report "$ACCELERATOR_ONLINE_REPORT" \
+    --json-summary \
+    >"$ACCELERATOR_ONLINE_SUMMARY" \
+    2>"$ACCELERATOR_ONLINE_ERROR"
+  ACCELERATOR_ONLINE_STATUS=$?
+  if [ "$ACCELERATOR_ONLINE_STATUS" -eq 0 ] || [ "$ACCELERATOR_ONLINE_STATUS" -eq 1 ]; then
+    if ACCELERATOR_ONLINE_COUNT="$(parse_accelerator_drift_count "$ACCELERATOR_ONLINE_SUMMARY")"; then
+      if { [ "$ACCELERATOR_ONLINE_STATUS" -eq 0 ] && [ "$ACCELERATOR_ONLINE_COUNT" -ne 0 ]; } \
+         || { [ "$ACCELERATOR_ONLINE_STATUS" -eq 1 ] && [ "$ACCELERATOR_ONLINE_COUNT" -eq 0 ]; }; then
+        ACCELERATOR_ONLINE_COUNT=1
+        write_accelerator_operational_report \
+          "$ACCELERATOR_ONLINE_REPORT" \
+          "Online EC2 accelerator catalog drift" \
+          "The command exit status disagreed with its JSON drift summary." \
+          "$ACCELERATOR_ONLINE_ERROR"
+        echo "  Online accelerator scan returned an inconsistent result."
+      elif [ "$ACCELERATOR_ONLINE_COUNT" -eq 0 ]; then
+        echo "  Live EC2 accelerator catalog is current."
+      else
+        echo "  Found ${ACCELERATOR_ONLINE_COUNT} live EC2 catalog drift finding(s)."
+      fi
+    else
+      ACCELERATOR_ONLINE_COUNT=1
+      write_accelerator_operational_report \
+        "$ACCELERATOR_ONLINE_REPORT" \
+        "Online EC2 accelerator catalog drift" \
+        "The online scanner emitted a missing or malformed JSON summary." \
+        "$ACCELERATOR_ONLINE_ERROR"
+      echo "  Online accelerator scan summary could not be parsed."
+    fi
+  else
+    ACCELERATOR_ONLINE_COUNT=1
+    write_accelerator_operational_report \
+      "$ACCELERATOR_ONLINE_REPORT" \
+      "Online EC2 accelerator catalog drift" \
+      "The online scanner exited with status ${ACCELERATOR_ONLINE_STATUS}." \
+      "$ACCELERATOR_ONLINE_ERROR"
+    echo "  Online accelerator scanner failed operationally."
+  fi
+fi
+
+ACCELERATOR_COUNT=$((ACCELERATOR_OFFLINE_COUNT + ACCELERATOR_ONLINE_COUNT))
+if [ -n "$ACCELERATOR_SKIP_REASON" ] && [ "$ACCELERATOR_COUNT" -eq 0 ]; then
+  ACCELERATOR_SUMMARY_SKIP_REASON="$ACCELERATOR_SKIP_REASON"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary + Markdown report
 # ---------------------------------------------------------------------------
 echo ""
@@ -1302,6 +1426,11 @@ if [ -n "$BEDROCK_MODEL_SKIP_REASON" ]; then
 else
   echo "Bedrock default model:    $BEDROCK_MODEL_COUNT"
 fi
+if [ -n "$ACCELERATOR_SKIP_REASON" ]; then
+  echo "Accelerator catalog:      ${ACCELERATOR_COUNT} (online skipped)"
+else
+  echo "Accelerator catalog:      $ACCELERATOR_COUNT"
+fi
 echo "Dockerfile.dev pins:      $DOCKERFILE_COUNT"
 echo "Pre-commit hooks:         $PRECOMMIT_COUNT"
 if [ -n "$CDK_ENUM_SKIP_REASON" ]; then
@@ -1329,6 +1458,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 0 ] \
    && [ "$CDK_ENUM_COUNT" -eq 0 ] \
    && [ "$PYTHON_RELEASE_COUNT" -eq 0 ] \
    && [ "$BEDROCK_MODEL_COUNT" -eq 0 ] \
+   && [ "$ACCELERATOR_COUNT" -eq 0 ] \
    && [ "$CI_TOOLING_COUNT" -eq 0 ] \
    && [ "$CONSISTENCY_COUNT" -eq 0 ] \
    && [ "$EPOCH_COUNT" -eq 0 ] \
@@ -1355,6 +1485,10 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 0 ] \
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}Bedrock model skipped: $BEDROCK_MODEL_SKIP_REASON"
   fi
+  if [ -n "$ACCELERATOR_SKIP_REASON" ]; then
+    [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
+    SKIP_NOTES="${SKIP_NOTES}Online accelerator catalog skipped: $ACCELERATOR_SKIP_REASON"
+  fi
   if [ -n "$CDK_ENUM_SKIP_REASON" ]; then
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}CDK enums skipped: $CDK_ENUM_SKIP_REASON"
@@ -1368,12 +1502,16 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 0 ] \
   else
     echo "All dependencies are up to date."
   fi
-  rm -f "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS"
+  rm -f "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "# Dependency Update Report"
       echo ""
       echo "All scanned surfaces are up to date."
+      if [ -n "$SKIP_NOTES" ]; then
+        echo ""
+        echo "_Skipped checks: ${SKIP_NOTES}_"
+      fi
     } >> "$GITHUB_STEP_SUMMARY"
   fi
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
@@ -1421,6 +1559,7 @@ summary_row() {
   summary_row "Aurora PostgreSQL Engine" "$AURORA_COUNT"         "$AURORA_SKIP_REASON"       "routine"
   summary_row "EMR Serverless"           "$EMR_COUNT"            "$EMR_SKIP_REASON"          "routine"
   summary_row "Bedrock Default Model"    "$BEDROCK_MODEL_COUNT"  "$BEDROCK_MODEL_SKIP_REASON" "routine"
+  summary_row "Accelerator Catalog and NodePools" "$ACCELERATOR_COUNT" "$ACCELERATOR_SUMMARY_SKIP_REASON" "act soon"
   summary_row "Dockerfile.dev Pins"      "$DOCKERFILE_COUNT"     ""                          "routine"
   summary_row "Pre-commit Hooks"         "$PRECOMMIT_COUNT"      ""                          "routine"
   summary_row "CDK Enum Constants"       "$CDK_ENUM_COUNT"       "$CDK_ENUM_SKIP_REASON"     "routine"
@@ -1515,6 +1654,25 @@ summary_row() {
     echo ""
     emit_md_table "Configuration key|Current|Latest" "$BEDROCK_MODEL_RESULTS"
     echo ""
+  fi
+
+  if [ "$ACCELERATOR_COUNT" -gt 0 ]; then
+    echo "## Accelerator Catalog and NodePools"
+    echo ""
+    echo "The offline check keeps reviewed lifecycle/generation policy, Karpenter"
+    echo "NodePools, and \`historical.watch_instance_types\` synchronized. The online"
+    echo "check compares the catalog with EC2 across enabled commercial Regions."
+    echo "Follow each recommended change; review family metadata before refreshing"
+    echo "the checked-in catalog."
+    echo ""
+    if [ -s "$ACCELERATOR_OFFLINE_REPORT" ]; then
+      sed -E 's/^### /#### /; s/^## /### /' "$ACCELERATOR_OFFLINE_REPORT"
+      echo ""
+    fi
+    if [ -s "$ACCELERATOR_ONLINE_REPORT" ]; then
+      sed -E 's/^### /#### /; s/^## /### /' "$ACCELERATOR_ONLINE_REPORT"
+      echo ""
+    fi
   fi
 
   if [ "$DOCKERFILE_COUNT" -gt 0 ]; then
@@ -1649,7 +1807,7 @@ summary_row() {
   fi
 
   # ----- Skipped checks (collapsed) -----
-  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}" ]; then
+  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}" ]; then
     echo "<details>"
     echo "<summary>Skipped checks</summary>"
     echo ""
@@ -1658,6 +1816,7 @@ summary_row() {
     [ -n "$AURORA_SKIP_REASON" ]        && echo "- **Aurora PostgreSQL Engine:** $AURORA_SKIP_REASON"
     [ -n "$EMR_SKIP_REASON" ]           && echo "- **EMR Serverless:** $EMR_SKIP_REASON"
     [ -n "$BEDROCK_MODEL_SKIP_REASON" ] && echo "- **Bedrock Default Model:** $BEDROCK_MODEL_SKIP_REASON"
+    [ -n "$ACCELERATOR_SKIP_REASON" ]   && echo "- **Online Accelerator Catalog:** $ACCELERATOR_SKIP_REASON"
     [ -n "$CDK_ENUM_SKIP_REASON" ]      && echo "- **CDK Enum Constants:** $CDK_ENUM_SKIP_REASON"
     [ -n "$PYTHON_RELEASE_SKIP_REASON" ] && echo "- **Python Release:** $PYTHON_RELEASE_SKIP_REASON"
     echo ""
@@ -1668,17 +1827,19 @@ summary_row() {
   echo "## Action Required"
   echo ""
   echo "1. Review changelogs for breaking changes (see the per-row **Ref** links)"
-  echo "2. Update versions in \`pyproject.toml\`, manifests, \`charts.yaml\`, or the"
+  echo "2. Follow accelerator findings exactly; review lifecycle/generation metadata"
+  echo "   before running \`python scripts/accelerator_catalog.py refresh\`"
+  echo "3. Update versions in \`pyproject.toml\`, manifests, \`charts.yaml\`, or the"
   echo "   pinned \`*_VERSION\` env / ARG values"
-  echo "3. Regenerate \`requirements-lock.txt\` if Python deps changed"
-  echo "4. Reconcile any **Version Consistency** rows so every copy of a pin agrees"
-  echo "5. Run tests locally to verify compatibility, then open a PR"
+  echo "4. Regenerate \`requirements-lock.txt\` if Python deps changed"
+  echo "5. Reconcile any **Version Consistency** rows so every copy of a pin agrees"
+  echo "6. Run tests locally to verify compatibility, then open a PR"
   echo ""
   echo "---"
   echo "_Automatically created by the \`deps-scan\` workflow._"
 } > "$REPORT_FILE"
 
-rm -f "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS"
+rm -f "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   echo "has_drift=true"            >> "$GITHUB_OUTPUT"

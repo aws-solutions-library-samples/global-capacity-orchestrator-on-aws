@@ -8,6 +8,7 @@ import aws_cdk as cdk
 import pytest
 
 from gco.config.config_loader import ConfigLoader, ConfigValidationError
+from scripts.accelerator_catalog import Catalog
 
 
 def _loader(valid_cdk_context, historical=None):
@@ -27,7 +28,8 @@ class TestDefaults:
         assert cfg["poll_interval_minutes"] == 15
         assert cfg["capacity_block_duration_hours"] == 24
         assert cfg["capacity_block_long_duration_hours"] == 1512
-        assert len(cfg["watch_instance_types"]) == 59
+        expected_types = list(Catalog.load().instance_types)
+        assert cfg["watch_instance_types"] == expected_types
         assert cfg["enabled_regions"] == []
 
     def test_default_watch_instance_types_are_well_formed(self, valid_cdk_context):
@@ -65,7 +67,8 @@ class TestEnabledOverride:
         cfg = loader.get_capacity_history_config()
         assert cfg["poll_interval_minutes"] == 5
         assert cfg["retention_days"] == 90
-        assert len(cfg["watch_instance_types"]) == 59
+        expected_types = list(Catalog.load().instance_types)
+        assert cfg["watch_instance_types"] == expected_types
 
     def test_block_duration_overrides_merge(self, valid_cdk_context):
         loader = _loader(

@@ -1017,6 +1017,49 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
 
 
 # ---------------------------------------------------------------------------
+# Root-doc metadata — searchable project-level guidance that deliberately lives
+# at the repository root rather than under ``docs/``. Keep this separate from
+# ``DOC_METADATA`` so the strict 1:1 metadata-to-``docs/*.md`` invariant remains
+# meaningful. Root docs use static ``docs://gco/{name}`` resources.
+# ---------------------------------------------------------------------------
+
+ROOT_DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
+    "TENETS": {
+        "path": "TENETS.md",
+        "summary": (
+            "Prioritized project tenets and north-star guidance for safety, truth, "
+            "security, global capacity orchestration, automation, operations, cost, "
+            "and maintainability."
+        ),
+        "topics": [
+            "concepts",
+            "architecture",
+            "security",
+            "automation",
+            "multi-region",
+            "deployment",
+            "cost",
+        ],
+        "keywords": [
+            "tenets",
+            "north star",
+            "principles",
+            "decision framework",
+            "project ethos",
+            "safety",
+            "truth",
+            "reversibility",
+            "least privilege",
+            "capacity policy",
+            "deterministic automation",
+            "definition of done",
+        ],
+        "related": ["ARCHITECTURE", "MAINTENANCE", "LIVE_RELEASE_VALIDATION"],
+    }
+}
+
+
+# ---------------------------------------------------------------------------
 # Package-doc metadata — used by ``find_docs`` and the
 # ``docs://gco/packages/...`` resources to describe the package-level READMEs
 # that live next to the code (under ``gco_mcp/``) rather than in ``docs/``. These
@@ -1140,6 +1183,7 @@ def docs_index() -> str:
     sections.append("## Project Overview")
     sections.append("- `docs://gco/README` — Project README and overview")
     sections.append("- `docs://gco/QUICKSTART` — Quick start guide (deploy in under 60 minutes)")
+    sections.append("- `docs://gco/TENETS` — Prioritized project tenets and north-star guidance")
     sections.append("- `docs://gco/CONTRIBUTING` — Contributing guide\n")
 
     sections.append("## Documentation")
@@ -1272,6 +1316,25 @@ def quickstart_resource() -> str:
     if not path.is_file():
         return "QUICKSTART.md not found."
     return path.read_text()
+
+
+@mcp.resource("docs://gco/TENETS")
+def tenets_resource() -> str:
+    """Prioritized project tenets and north-star decision guidance."""
+    meta = ROOT_DOC_METADATA["TENETS"]
+    rel_path = str(meta["path"])
+    path = PROJECT_ROOT / rel_path
+    if not path.is_file():
+        return f"{rel_path} not found."
+    content = path.read_text()
+    topics = meta.get("topics", [])
+    related = meta.get("related", [])
+    header_lines = []
+    if isinstance(topics, list) and topics:
+        header_lines.append(f"<!-- Topics: {', '.join(str(t) for t in topics)} -->")
+    if isinstance(related, list) and related:
+        header_lines.append(f"<!-- Related: {', '.join(str(r) for r in related)} -->")
+    return "\n".join(header_lines) + "\n\n" + content
 
 
 @mcp.resource("docs://gco/CONTRIBUTING")

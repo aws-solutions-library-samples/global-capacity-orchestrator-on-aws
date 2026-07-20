@@ -1,0 +1,275 @@
+{
+  "schema_version": 1,
+  "source": {
+    "api": "ec2:DescribeInstanceTypes",
+    "partition": "aws",
+    "region_scope": "Union of every commercial Region enabled for the scanning account",
+    "selection": "Instance types with an NVIDIA GPU or at least one AWS Neuron device",
+    "maintenance_command": "python scripts/accelerator_catalog.py check-online"
+  },
+  "families": {
+    "g4dn": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-general-x86",
+      "generation": 4,
+      "lifecycle": "active"
+    },
+    "g5": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-general-x86",
+      "generation": 5,
+      "lifecycle": "active"
+    },
+    "g5g": {
+      "accelerator": "nvidia",
+      "architectures": ["arm64"],
+      "track": "nvidia-general-arm",
+      "generation": 5,
+      "lifecycle": "active"
+    },
+    "g6": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-general-x86",
+      "generation": 6,
+      "lifecycle": "active"
+    },
+    "g6e": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-general-x86",
+      "generation": 6,
+      "lifecycle": "active"
+    },
+    "g6f": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-general-x86",
+      "generation": 6,
+      "lifecycle": "active"
+    },
+    "g7": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-general-x86",
+      "generation": 7,
+      "lifecycle": "active"
+    },
+    "g7e": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-general-x86",
+      "generation": 7,
+      "lifecycle": "active"
+    },
+    "gr6": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-general-x86",
+      "generation": 6,
+      "lifecycle": "active"
+    },
+    "gr6f": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-general-x86",
+      "generation": 6,
+      "lifecycle": "active"
+    },
+    "inf1": {
+      "accelerator": "neuron",
+      "architectures": ["amd64"],
+      "track": "neuron-inference-x86",
+      "generation": 1,
+      "lifecycle": "active"
+    },
+    "inf2": {
+      "accelerator": "neuron",
+      "architectures": ["amd64"],
+      "track": "neuron-inference-x86",
+      "generation": 2,
+      "lifecycle": "active"
+    },
+    "p3": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-accelerated-x86",
+      "generation": 3,
+      "lifecycle": "end-of-life",
+      "manifest_allowed": false,
+      "reason": "No p3 instance type remains in the enabled-Region EC2 catalog, and V100 capacity should not be selected for new workloads.",
+      "replacements": ["p4d", "p5", "p5e", "p5en"]
+    },
+    "p3dn": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-accelerated-x86",
+      "generation": 3,
+      "lifecycle": "deprecated",
+      "manifest_allowed": false,
+      "reason": "EC2 still advertises p3dn.24xlarge, but the V100 family is retained only for capacity-history observation and must not receive new Karpenter scheduling.",
+      "replacements": ["p4d", "p5", "p5e", "p5en"]
+    },
+    "p4d": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-accelerated-x86",
+      "generation": 4,
+      "lifecycle": "active"
+    },
+    "p4de": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-accelerated-x86",
+      "generation": 4,
+      "lifecycle": "active"
+    },
+    "p5": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-accelerated-x86",
+      "generation": 5,
+      "lifecycle": "active"
+    },
+    "p5e": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-accelerated-x86",
+      "generation": 5,
+      "lifecycle": "active"
+    },
+    "p5en": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-accelerated-x86",
+      "generation": 5,
+      "lifecycle": "active"
+    },
+    "p6-b200": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-accelerated-x86",
+      "generation": 6,
+      "lifecycle": "active"
+    },
+    "p6-b300": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-accelerated-x86",
+      "generation": 6,
+      "lifecycle": "active"
+    },
+    "p6e-gb200": {
+      "accelerator": "nvidia",
+      "architectures": ["amd64"],
+      "track": "nvidia-accelerated-x86",
+      "generation": 6,
+      "lifecycle": "announced",
+      "manifest_allowed": true,
+      "reason": "Reviewed announced-family override: retain the Karpenter family before EC2 advertises exact instance types so deployments can adopt GB200 availability without another manifest release."
+    },
+    "trn1": {
+      "accelerator": "neuron",
+      "architectures": ["amd64"],
+      "track": "neuron-training-x86",
+      "generation": 1,
+      "lifecycle": "active"
+    },
+    "trn1n": {
+      "accelerator": "neuron",
+      "architectures": ["amd64"],
+      "track": "neuron-training-x86",
+      "generation": 1,
+      "lifecycle": "active"
+    },
+    "trn2": {
+      "accelerator": "neuron",
+      "architectures": ["amd64"],
+      "track": "neuron-training-x86",
+      "generation": 2,
+      "lifecycle": "active"
+    }
+  },
+  "instance_types": [
+    "g4dn.12xlarge",
+    "g4dn.16xlarge",
+    "g4dn.2xlarge",
+    "g4dn.4xlarge",
+    "g4dn.8xlarge",
+    "g4dn.metal",
+    "g4dn.xlarge",
+    "g5.12xlarge",
+    "g5.16xlarge",
+    "g5.24xlarge",
+    "g5.2xlarge",
+    "g5.48xlarge",
+    "g5.4xlarge",
+    "g5.8xlarge",
+    "g5.xlarge",
+    "g5g.16xlarge",
+    "g5g.2xlarge",
+    "g5g.4xlarge",
+    "g5g.8xlarge",
+    "g5g.metal",
+    "g5g.xlarge",
+    "g6.12xlarge",
+    "g6.16xlarge",
+    "g6.24xlarge",
+    "g6.2xlarge",
+    "g6.48xlarge",
+    "g6.4xlarge",
+    "g6.8xlarge",
+    "g6.xlarge",
+    "g6e.12xlarge",
+    "g6e.16xlarge",
+    "g6e.24xlarge",
+    "g6e.2xlarge",
+    "g6e.48xlarge",
+    "g6e.4xlarge",
+    "g6e.8xlarge",
+    "g6e.xlarge",
+    "g6f.2xlarge",
+    "g6f.4xlarge",
+    "g6f.large",
+    "g6f.xlarge",
+    "g7.12xlarge",
+    "g7.24xlarge",
+    "g7.2xlarge",
+    "g7.48xlarge",
+    "g7.4xlarge",
+    "g7.8xlarge",
+    "g7e.12xlarge",
+    "g7e.24xlarge",
+    "g7e.2xlarge",
+    "g7e.48xlarge",
+    "g7e.4xlarge",
+    "g7e.8xlarge",
+    "gr6.4xlarge",
+    "gr6.8xlarge",
+    "gr6f.4xlarge",
+    "inf1.24xlarge",
+    "inf1.2xlarge",
+    "inf1.6xlarge",
+    "inf1.xlarge",
+    "inf2.24xlarge",
+    "inf2.48xlarge",
+    "inf2.8xlarge",
+    "inf2.xlarge",
+    "p3dn.24xlarge",
+    "p4d.24xlarge",
+    "p4de.24xlarge",
+    "p5.48xlarge",
+    "p5.4xlarge",
+    "p5e.48xlarge",
+    "p5en.48xlarge",
+    "p6-b200.48xlarge",
+    "p6-b300.48xlarge",
+    "trn1.2xlarge",
+    "trn1.32xlarge",
+    "trn1n.32xlarge",
+    "trn2.3xlarge",
+    "trn2.48xlarge"
+  ]
+}

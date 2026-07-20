@@ -12,6 +12,7 @@ Thank you for contributing to GCO (Global Capacity Orchestrator on AWS)! This gu
   - [Dependency Management](#dependency-management)
   - [Type Checking](#type-checking)
   - [Authentication](#authentication)
+  - [Tenet-Driven Decisions](#tenet-driven-decisions)
 - [Code Organization](#code-organization)
   - [Directory Structure](#directory-structure)
   - [Adding New Features](#adding-new-features)
@@ -273,6 +274,20 @@ export GCO_DEV_MODE=true
 
 This is intentional — a missing `AUTH_SECRET_ARN` in production should fail loudly rather than silently allowing unauthenticated access.
 
+### Tenet-Driven Decisions
+
+Read [TENETS.md](TENETS.md) before making a change that affects architecture,
+security, accelerator support, destructive operations, regional behavior,
+recovery, or long-term maintenance. The tenets are prioritized: when two
+principles genuinely conflict, the earlier one wins. Reviews should name the
+relevant tenet and the evidence supporting the choice rather than treating the
+document as a generic checklist.
+
+Record an [Architecture Decision Record](docs/adr/README.md) when a decision is
+expensive to reverse, changes a trust boundary, resolves a real tenet conflict,
+or creates a durable exception. A bounded exception should identify its owner,
+scope, compensating controls, and revisit trigger.
+
 ### 1. Create a Feature Branch
 
 ```bash
@@ -401,29 +416,29 @@ pytest tests/ -m integration
 
 ### Pre-Pull-Request Verification
 
-Before you open a pull request, run the same three checks CI runs — the test
-suite (`pytest`), the linter/formatter (`ruff`), and the type checker
-(`mypy`) — so your change is verified locally before it ever reaches the
-pipeline. These are the exact tools invoked by the `unit:pytest:core`,
-`lint:ruff:python`, and `lint:mypy:strict` jobs described under
-[CI/CD Pipeline](#cicd-pipeline), so a clean local run means a clean CI run.
+Before you open a pull request, run the core test, lint/format, and type-check
+commands plus the deterministic accelerator maintenance guard. These are the
+same surfaces invoked by `unit:pytest:core`, `lint:ruff:python`,
+`lint:mypy:strict`, and the explicit accelerator validation steps described
+under [CI/CD Pipeline](#cicd-pipeline).
 
-Run all three from your dev-container shell (the recommended path — see
+Run them from your dev-container shell (the recommended path — see
 [Using the Dev Container (Recommended)](#using-the-dev-container-recommended)):
 
 ```bash
 ruff format --check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 ruff check gco/ cli/ gco_mcp/ tests/ lambda/ scripts/ diagrams/
 mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
+python scripts/accelerator_catalog.py validate
+pytest tests/test_accelerator_catalog.py -q
 pytest tests/ --cov=gco --cov=cli --cov=gco_mcp --cov-fail-under=90
 ```
 
-**Success indicator:** all four commands complete with no reported failures —
-`ruff` reports no formatting diffs and no lint findings, `mypy` reports no type
-errors, and `pytest` reports all tests passing with coverage at or above the
-threshold. When every command exits cleanly, your change is verified and ready
-for a pull request. If any command reports a failure, fix it and re-run the
-full sequence before submitting.
+**Success indicator:** all six commands complete with no reported failures —
+Ruff reports no formatting diffs or lint findings, mypy reports no type errors,
+the accelerator validator and focused tests report a current internally
+consistent catalog, and the aggregate pytest run passes at or above the coverage
+threshold. Fix any failure and re-run the full sequence before submitting.
 
 For what to update alongside code changes, see the [Testing](#testing) and
 [Documentation](#documentation) guidance below and the
@@ -450,7 +465,7 @@ The project uses GitHub Actions for automated testing. Every push and pull reque
 
 | Workflow file | README row | Purpose |
 |---------------|------------|---------|
-| `.github/workflows/unit-tests.yml` | Unit Tests | pytest with coverage, BATS, CLI smoke, CDK synth + config matrix, lockfile freshness, fresh install, workload import checks |
+| `.github/workflows/unit-tests.yml` | Unit Tests | pytest with coverage, explicit offline accelerator catalog/NodePool validation, BATS, CLI smoke, CDK synth + config matrix, lockfile freshness, fresh install, workload import checks |
 | `.github/workflows/integration-tests.yml` | Integration Tests | Per-Dockerfile build + healthcheck, kind cluster E2E (with Calico for NetworkPolicy enforcement), K8s manifest schema, Lambda import validation, cross-module pytest, MCP server pytest |
 | `.github/workflows/security.yml` | Security | bandit, pip-audit, npm audit for every owned graph, trivy (filesystem + per-image), trufflehog, gitleaks, semgrep, checkov, KICS, and CodeQL for Python + JavaScript |
 | `.github/workflows/inference-streaming-proxy.yml` | — (no badge) | Native Node.js 24 tests for the streaming Lambda with 93% line/function/branch gates |
@@ -464,7 +479,7 @@ Each workflow file has a comment header documenting triggers and per-job purpose
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
 | `.github/workflows/release.yml` | Manual (`workflow_dispatch`) | Bump version, tag, and create a GitHub Release with auto-generated notes |
-| `.github/workflows/deps-scan.yml` | `cron: 0 9 1 * *` (monthly) | Check Python/Docker/Helm/EKS-addon versions; open an issue if drift detected |
+| `.github/workflows/deps-scan.yml` | `cron: 0 9 1 * *` (monthly) | Check pinned versions plus deterministic NodePool/watch-list policy and live EC2 accelerator-catalog drift; update one rolling issue when drift is detected |
 | `.github/workflows/cve-scan.yml` | `cron: 0 9 * * 1` (weekly) | Re-run Trivy against current CVE databases |
 
 #### Auto-generated badges
@@ -567,6 +582,7 @@ gco stacks destroy-all -y
 
 ### Documentation Files
 
+- `TENETS.md`: Normative north star and prioritized project decision guidance
 - `README.md`: Overview and quick start
 - `QUICKSTART.md`: Step-by-step setup guide
 - `docs/ARCHITECTURE.md`: Technical architecture
@@ -581,7 +597,14 @@ gco stacks destroy-all -y
 
 ### Architecture Decision Records
 
-Record architecturally significant decisions — ones that are expensive to reverse or that shape the system in ways future contributors must understand — as an [Architecture Decision Record](docs/adr/README.md). Copy `docs/adr/template.md` to the next `docs/adr/NNNN-title.md`, fill in the context, decision, and consequences, then add a row to the ADR index. See [docs/adr/README.md](docs/adr/README.md) for when to write one and the full process.
+Record architecturally significant decisions — ones that are expensive to reverse,
+resolve a real conflict between the prioritized [project tenets](TENETS.md), or
+shape the system in ways future contributors must understand — as an
+[Architecture Decision Record](docs/adr/README.md). Copy `docs/adr/template.md`
+to the next `docs/adr/NNNN-title.md`, fill in the context, decision, and
+consequences, then add a row to the ADR index. See
+[docs/adr/README.md](docs/adr/README.md) for when to write one and the full
+process.
 
 ### Documentation Style
 
@@ -619,6 +642,7 @@ Record architecturally significant decisions — ones that are expensive to reve
 
 - Be constructive and respectful
 - Focus on code quality and maintainability
+- Check the change against the prioritized [project tenets](TENETS.md), starting with the earliest affected tenet
 - Check for security issues
 - Verify documentation is updated
 - Test changes if possible
@@ -683,7 +707,7 @@ After releasing, confirm the auto-generated GitHub Release notes read well (they
 Dependency drift is tracked through three layers:
 
 1. **Dependabot (weekly PRs)** — GitHub Actions, Docker, the locked root npm tooling graph, and the deployable inference-streaming Lambda graph. See `.github/dependabot.yml`. Python packages are intentionally excluded because `requirements-lock.txt` is managed through `pip-compile` and bumped intentionally.
-2. **`deps-scan` workflow (monthly issue)** — runs on the 1st of each month at 09:00 UTC. Checks Python packages, Docker images, Helm charts, EKS add-on versions, Aurora PostgreSQL engine versions, and pre-commit hook revisions. If anything is out of date, it opens a GitHub issue labeled `dependencies, automated`. The scan logic lives in [`.github/scripts/dependency-scan.sh`](.github/scripts/dependency-scan.sh) — see [`.github/CI.md`](.github/CI.md#dependency-scan-script) for the full reference (surfaces checked, inputs, outputs, extension points, failure modes). Pinned versions are centralised in [`gco/stacks/constants.py`](gco/stacks/constants.py).
+2. **`deps-scan` workflow (monthly issue)** — runs on the 1st of each month at 09:00 UTC. Checks Python packages, Docker images, Helm charts, EKS add-on versions, Aurora PostgreSQL engine versions, pre-commit hook revisions, and accelerator catalog/NodePool/watch-list policy. Deterministic accelerator validation always runs offline; with OIDC credentials the scan also compares the checked-in catalog with the live enabled-Region EC2 union. If anything is out of date or an online check cannot run correctly, it updates one GitHub issue labeled `dependencies, automated`. The scan logic lives in [`.github/scripts/dependency-scan.sh`](.github/scripts/dependency-scan.sh) — see [`.github/CI.md`](.github/CI.md#dependency-scan-script) for the full reference (surfaces checked, inputs, outputs, extension points, failure modes). Pinned versions are centralised in [`gco/stacks/constants.py`](gco/stacks/constants.py).
 3. **`cve-scan` workflow (weekly job)** — runs Mondays at 09:00 UTC. Re-runs Trivy against the latest CVE databases. A red run is the signal; the per-push `security.yml` workflow will catch the same issue on the next PR.
 
 #### What Gets Checked by `deps-scan`
@@ -692,7 +716,8 @@ Dependency drift is tracked through three layers:
 - **Node/npm**: Node 24, npm, the CDK CLI, exact package pins, lockfile presence, and Dependabot coverage across every repository-owned `package.json`
 - **Docker Images**: semver-tagged images referenced in `.github/workflows/*.yml`, K8s manifests, examples, and Helm chart values
 - **Helm Charts**: from `lambda/helm-installer/charts.yaml`
-- **EKS Add-ons**: extracted from `gco/stacks/regional_stack.py` (requires AWS credentials via OIDC; falls back gracefully otherwise)
+- **EKS Add-ons**: extracted from `gco/stacks/constants.py` (requires AWS credentials via OIDC; records an explicit skip otherwise)
+- **Accelerator Catalog and NodePools**: always runs `python scripts/accelerator_catalog.py validate` offline to reject deprecated scheduling, surface newer unreferenced generations, and require exact catalog/`watch_instance_types`/`ConfigLoader` synchronization; with AWS credentials, compares the catalog with NVIDIA GPU and AWS Neuron instance types returned by EC2 across enabled commercial Regions
 - **Pre-commit Hooks**: `rev:` pins in `.pre-commit-config.yaml` are compared against the latest tag published by the upstream GitHub repo
 
 #### Running the Dependency Check Manually
@@ -705,7 +730,11 @@ The monthly scan is also wired to `workflow_dispatch`:
 
 #### Checking EKS Addon Versions
 
-EKS addon versions are checked by `deps-scan` when AWS credentials are configured. Without credentials, the addon section is skipped silently. To check manually at any time:
+The EKS add-on check is one of several AWS-backed dependency surfaces. EKS
+cluster-version, Aurora, EMR, Bedrock, and online EC2 accelerator discovery also
+use the OIDC role. Without credentials, each online surface is explicitly marked
+skipped rather than reported current; deterministic accelerator/NodePool
+validation still runs offline. To inspect EKS add-ons manually:
 
 ```bash
 # Check latest versions for all addons used by GCO
@@ -721,10 +750,11 @@ for addon in metrics-server aws-efs-csi-driver amazon-cloudwatch-observability a
 done
 ```
 
-Current addon versions are defined in `gco/stacks/regional_stack.py`. To update:
+Current add-on versions are defined in `gco/stacks/constants.py` and consumed by
+`gco/stacks/regional_stack.py`. To update:
 
 1. Run the command above to get latest versions
-2. Update the `addon_version` parameter for each addon in `regional_stack.py`
+2. Update the matching `EKS_ADDON_*` constants in `gco/stacks/constants.py`
 3. Test the deployment in a non-production environment first
 4. Review the [EKS addon release notes](https://docs.aws.amazon.com/eks/latest/userguide/eks-add-ons.html) for breaking changes
 

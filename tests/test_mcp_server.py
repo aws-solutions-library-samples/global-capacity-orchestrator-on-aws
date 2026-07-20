@@ -1227,7 +1227,8 @@ class TestResourceRegistration:
 
     def test_static_resource_count(self):
         resources = asyncio.run(run_mcp.mcp.list_resources())
-        # docs://index, docs://README, docs://QUICKSTART, docs://CONTRIBUTING,
+        # docs://index, docs://README, docs://QUICKSTART, docs://TENETS,
+        # docs://CONTRIBUTING,
         # docs://examples/README, docs://examples/guide, docs://adr/index,
         # source://index,
         # k8s://manifests/index, iam://policies/index,
@@ -1238,7 +1239,7 @@ class TestResourceRegistration:
         # images://index, images://replication/status,
         # plus three always-on self-introspection resources:
         # mcp://gco/tools/index, mcp://gco/resources/index, mcp://gco/feature-flags.
-        assert len(resources) == 25
+        assert len(resources) == 26
 
     def test_static_resource_uris(self):
         resources = asyncio.run(run_mcp.mcp.list_resources())
@@ -1246,6 +1247,7 @@ class TestResourceRegistration:
         assert "docs://gco/index" in uris
         assert "docs://gco/README" in uris
         assert "docs://gco/QUICKSTART" in uris
+        assert "docs://gco/TENETS" in uris
         assert "docs://gco/CONTRIBUTING" in uris
         assert "docs://gco/examples/README" in uris
         assert "docs://gco/examples/guide" in uris

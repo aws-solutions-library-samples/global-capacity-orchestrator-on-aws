@@ -130,6 +130,41 @@ compare_semver() {
   fi
 }
 
+# parse_accelerator_drift_count <json-summary-file>
+#
+# Validates the machine-readable output from
+# ``scripts/accelerator_catalog.py check-online --json-summary`` and prints
+# its exact non-negative ``drift_count``. The status/count relationship is
+# checked as well: ``current`` means zero and ``drift`` means one or more.
+#
+# Returns non-zero with no output for a missing file, malformed JSON, a
+# missing/invalid count, or an inconsistent status. The dependency-scan
+# driver turns any such parser failure into one operational finding so a
+# broken online scan can never be reported as clean.
+parse_accelerator_drift_count() {
+  local summary_file="$1"
+  [ -f "$summary_file" ] || return 1
+  python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as handle:
+        summary = json.load(handle)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+if not isinstance(summary, dict):
+    raise SystemExit(1)
+count = summary.get('drift_count')
+status = summary.get('status')
+if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+    raise SystemExit(1)
+if status not in {'current', 'drift'}:
+    raise SystemExit(1)
+if (status == 'current') != (count == 0):
+    raise SystemExit(1)
+print(count)
+" "$summary_file" 2>/dev/null
+}
+
 # extract_aurora_versions <file>
 #
 # Extracts Aurora PostgreSQL engine versions from the constants module.

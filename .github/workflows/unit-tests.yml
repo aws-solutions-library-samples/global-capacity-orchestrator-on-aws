@@ -17,7 +17,7 @@
 #   - unit:fresh-install           — pip install from scratch, verify imports
 #   - unit:lockfile:freshness      — requirements-lock.txt matches pyproject.toml
 #   - unit:mcp:install             — uv-installs gco-mcp from source, then launches the server
-#   - unit:pytest:core             — pytest (90% enforced floor; ~92% Python target) + upload coverage artifact
+#   - unit:pytest:core             — offline accelerator policy + pytest (90% enforced floor) + coverage artifact
 #   - unit:workload:imports        — K8s service import + circular-import detection
 #
 # The HTML coverage report is published to GitHub Pages by a separate
@@ -118,6 +118,13 @@ jobs:
         run: |
           pip install -e ".[dev,mcp]"
       - uses: ./.github/actions/build-lambda-package
+      - name: Validate accelerator catalog and NodePools
+        # Deterministic and credential-free: the mutable EC2 catalog is checked
+        # only by the monthly deps scan, while PRs validate the reviewed catalog,
+        # Karpenter families, and exact capacity-history watch list.
+        run: |
+          python scripts/accelerator_catalog.py validate
+          pytest tests/test_accelerator_catalog.py -q
       - name: Run pytest with coverage
         # -n auto distributes tests across all available CPU cores via
         # pytest-xdist. The production asset publisher now uses per-asset
@@ -138,6 +145,7 @@ jobs:
             --ignore=tests/test_nag_compliance.py \
             --ignore=tests/test_cdk_synthesis_matrix.py \
             --ignore=tests/test_project_name_scoping.py \
+            --ignore=tests/test_accelerator_catalog.py \
             --cov=gco --cov=cli --cov=gco_mcp \
             --cov-report=xml --cov-report=html --cov-report=json \
             --cov-report=term-missing \

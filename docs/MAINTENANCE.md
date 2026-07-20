@@ -9,10 +9,10 @@ flow, monitoring and alerting, day-to-day code health, and how a new maintainer
 gets oriented.
 
 This guide is the *how*. The monthly [`deps-scan` workflow](../.github/CI.md#dependency-scan-script)
-is the *when* — it opens an issue when a pinned version falls behind upstream.
-Some lists here (instance families, for example) are deliberately not
-auto-bumped: adding hardware is a human decision, so the scan leaves them to
-this runbook.
+is the *when* — it opens or refreshes one issue when a pinned version or the EC2
+accelerator catalog drifts. Accelerator discovery is automated, but lifecycle,
+architecture, replacement, and NodePool scheduling policy remain explicit human
+review decisions.
 
 ## Table of contents
 
@@ -35,8 +35,8 @@ this runbook.
 
 | Cadence | Task | Trigger |
 |---------|------|---------|
-| Monthly | Review the dependency-scan issue and bump flagged pins | Automated `deps-scan` issue |
-| When AWS ships new hardware | Add instance types / families to the lists below | AWS launch announcement |
+| Monthly | Review the dependency-scan issue, including accelerator catalog and NodePool findings | Automated `deps-scan` issue |
+| When EC2 accelerator drift appears | Review family policy, refresh the catalog, and update eligible NodePools/watch lists together | `deps-scan` **Accelerator Catalog and NodePools** row or AWS launch announcement |
 | When the scan flags EKS standard-support ending (or ~yearly) | Upgrade the EKS Kubernetes minor | `deps-scan` **EKS Kubernetes Version** row |
 | When the scan flags an epoch older than 45 days (or Trivy finds an OS CVE) | Bump the base-image security epoch | `deps-scan` **Base-image Security Epochs** row |
 | ~30 days before a suppression `exp:` date | Renew or drop the CVE suppression | `deps-scan` **Suppression Expiries** row |
@@ -48,80 +48,125 @@ this runbook.
 
 ## Adding a new instance type or family
 
-There is no single list of instance types. Which files you touch depends on
-*why* you are adding the hardware — CLI capacity analysis, a training pool, a
-serving pool, and so on. Use the table, then follow the matching recipe.
+GCO separates three concerns that must not be conflated:
 
-### Where instance types live
+1. **Discovery** — which NVIDIA GPU and AWS Neuron instance types EC2 currently
+   advertises in any enabled commercial Region.
+2. **Observation** — which types the capacity-history poller watches, including
+   types retained for historical visibility.
+3. **Scheduling policy** — which reviewed families each Karpenter NodePool may
+   select for new workloads.
 
-| Purpose | File(s) to edit | Format |
-|---------|-----------------|--------|
-| CLI capacity/spot analysis, `gco capacity` | `cli/capacity/models.py` → `GPU_INSTANCE_SPECS` | Python dict: exact type → `InstanceTypeInfo(vcpus, mem, gpu_count, gpu_type, gpu_mem, arch)` |
-| Default set the capacity advisor probes | `cli/capacity/advisor.py` → default `instance_types` list | Python list of exact types |
-| x86 general GPU pool | `lambda/kubectl-applier-simple/manifests/40-nodepool-gpu-x86.yaml` | Karpenter `instance-family` values |
-| ARM64 GPU pool | `.../41-nodepool-gpu-arm.yaml` | Karpenter `instance-family` values |
-| Inference-optimized GPU pool | `.../42-nodepool-inference.yaml` | Karpenter `instance-family` values |
-| EFA distributed-training pool | `.../43-nodepool-efa.yaml` | Karpenter `instance-family` values |
-| Neuron / Trainium / Inferentia pool | `.../44-nodepool-neuron.yaml` | Karpenter `instance-family` values |
-| Curated ≥80 GB FP8 serving pool (Mooncake) | `.../46-nodepool-mooncake-efa.yaml` | Karpenter `instance-family` values |
-| Example jobs that pin a family | `examples/*.yaml` (e.g. `trainium-job.yaml`, `inferentia-job.yaml`, `megatrain-sft-job.yaml`, `inference-sglang.yaml`) | `nodeSelector` / affinity |
-| Human-facing lists (keep accurate, not load-bearing) | `gco/stacks/regional_stack.py` (nodepool comment block), `README.md`, `docs/CUSTOMIZATION.md` | Prose / comments |
+The checked-in catalog makes the first two concerns complete and deterministic;
+NodePool family lists keep the third concern deliberate.
 
-`45-nodepool-cpu-general.yaml` selects by category and generation rather than a
-family list, so it does **not** need per-hardware edits.
+### Sources of truth
+
+| Purpose | Authoritative file(s) | Contract |
+|---------|-----------------------|----------|
+| EC2 accelerator inventory | `gco/config/accelerator_catalog.json` → `instance_types` | Sorted union of instance types with an NVIDIA GPU or AWS Neuron device across enabled commercial Regions |
+| Reviewed family policy | `gco/config/accelerator_catalog.json` → `families` | Accelerator, architecture, track, generation, lifecycle, scheduling eligibility, reason, and replacements |
+| Capacity-history observation | `cdk.json` → `historical.watch_instance_types`; fallback in `gco/config/config_loader.py` | Both copies must exactly equal the catalog's `instance_types` list |
+| Karpenter scheduling | `lambda/kubectl-applier-simple/manifests/40-*.yaml` through `46-*.yaml` | Explicit `eks.amazonaws.com/instance-family` policy per workload class |
+| Rich CLI hardware/pricing metadata | `cli/capacity/models.py` and the curated defaults in `cli/capacity/advisor.py` | Add only when the CLI needs local vCPU, memory, accelerator, or advisor metadata |
+| Pinned examples and prose | `examples/*.yaml`, `gco/stacks/regional_stack.py`, `README.md`, `docs/CUSTOMIZATION.md` | Keep selectors and human guidance aligned with reviewed scheduling support |
+
+`45-nodepool-cpu-general.yaml` selects by category and generation, so accelerator
+catalog maintenance does not require per-type CPU edits.
 
 > **Instance-family gotcha:** EKS Auto Mode labels a node with the exact family
-> segment AWS uses in its catalog, and a bare entry only matches that one
-> family. `p5`, `p5e`, and `p5en` are three separate families; `p6-b200`,
-> `p6-b300`, and `p6e-gb200` are three more. Enumerate every generation you
-> want — see the header note in `43-nodepool-efa.yaml`.
+> segment AWS uses in its catalog. `p5`, `p5e`, and `p5en` are separate families;
+> `p6-b200`, `p6-b300`, and `p6e-gb200` are separate as well. Catalog presence
+> never makes a family schedulable automatically. For example, `p3dn.24xlarge`
+> remains observable while the deprecated `p3dn` family is prohibited from new
+> NodePools.
 
-### Recipe: a new GPU instance type visible to the CLI
+### Deterministic offline validation
 
-1. Add an entry to `GPU_INSTANCE_SPECS` in `cli/capacity/models.py`. The
-   `gpu_type` field (for example `H100`, `B200`) is what ties the accelerator
-   to its family, so fill it in accurately.
-2. If the type belongs in the advisor's default probe set, add it to the
-   `instance_types` list in `cli/capacity/advisor.py`.
-3. Update the tests that assert on the specs (see [below](#tests-that-must-change-together)).
-
-### Recipe: a new accelerator family for a node pool
-
-1. Add the family string to the `values` list under the
-   `eks.amazonaws.com/instance-family` requirement in the matching NodePool
-   manifest from the table above.
-2. If the family is a new GPU generation, confirm the pool's other
-   requirements still apply (GPU manufacturer, architecture, EFA taint).
-3. For a serving-tier GPU, add it to `46-nodepool-mooncake-efa.yaml` **only** if
-   it is a ≥80 GB FP8-capable part, and keep `p4d` out of that curated pool.
-4. Refresh the human-facing lists (the nodepool comment block in
-   `regional_stack.py`, the `README.md` nodepool summary, and
-   `docs/CUSTOMIZATION.md`) so they stay accurate.
-
-### Tests that must change together
-
-These tests assert on the instance lists and will fail if you edit a list
-without updating them:
-
-- `tests/test_cli.py` — expects `GPU_INSTANCE_SPECS` to contain the baseline
-  types (`g4dn.xlarge`, `g5.xlarge`, `p3.2xlarge`, `p4d.24xlarge`).
-- `tests/test_capacity_history_config.py` — derives the family set from the
-  spec keys and asserts a baseline set is present.
-- `tests/test_mooncake_nodepool_manifest.py` — pins the pool 46 family set
-  **exactly** (`_EXPECTED_FAMILIES`) and requires `p4d` to stay in pool 43.
-  Edit this whenever you change either pool's families.
-- `tests/test_inference.py` — asserts an example's `nodeSelector` family
-  (for example `inf2`); update if you change the referenced example.
-- `tests/test_integration.py` — validates the shape of every manifest under
-  `lambda/kubectl-applier-simple/`, so a new pool must keep the NodePool schema.
-
-Run the focused set after editing:
+Run this before and after every accelerator or NodePool change:
 
 ```bash
-pytest tests/test_cli.py tests/test_capacity_history_config.py \
-  tests/test_mooncake_nodepool_manifest.py tests/test_inference.py \
-  tests/test_integration.py
+python scripts/accelerator_catalog.py validate
+python -m pytest tests/test_accelerator_catalog.py -q
 ```
+
+The validator needs no AWS credentials and fails with actionable guidance when:
+
+- a NodePool references a deprecated or end-of-life family, naming the exact
+  manifest and reviewed replacements;
+- a newer active generation in the same scheduling track is absent from every
+  eligible NodePool, naming the pools to review;
+- `cdk.json` or the `ConfigLoader` fallback omits or adds a watched type; or
+- the catalog, family metadata, architecture, lifecycle, or manifest policy is
+  malformed or contradictory.
+
+Normal pull-request CI runs both commands. Do not replace this deterministic gate
+with live EC2 calls.
+
+### Monthly online drift
+
+The monthly dependency scan always runs offline validation first. With valid OIDC
+credentials it then calls `DescribeRegions` and paginated
+`DescribeInstanceTypes` sequentially, using adaptive retries, and compares the
+live enabled-Region union with the checked-in catalog. Ordinary drift updates the
+same rolling dependency issue and does not fail the scheduled workflow; an API,
+credential, or parser failure becomes one explicit operational finding rather
+than a false “current” result.
+
+Run the same comparison manually with:
+
+```bash
+python scripts/accelerator_catalog.py check-online --json-summary
+
+# Optional human-readable report for review
+python scripts/accelerator_catalog.py check-online \
+  --report /tmp/accelerator-catalog-drift.md --json-summary
+```
+
+Exit code `0` means current, `1` means reviewed action is needed for catalog
+drift, and `2` means the online check itself failed.
+
+### Reviewing and refreshing catalog drift
+
+1. Read every added, removed, and family-metadata change in the report. Confirm
+   it against the AWS launch or lifecycle information; catalog output is
+   untrusted discovery data, not policy.
+2. For a new family, add explicit `accelerator`, `architectures`, `track`,
+   `generation`, and `lifecycle` metadata first. Add `manifest_allowed`,
+   `reason`, and `replacements` when the default active/allowed policy is not
+   correct.
+3. Decide which NodePools, if any, should schedule the family. Check CPU
+   architecture, accelerator class, EFA/RDMA requirements, memory and FP8
+   capability, workload fit, and regional support. Deprecated and end-of-life
+   families must not enter new scheduling.
+4. Refresh to a review file first. The command refuses unknown families and EC2
+   metadata that disagrees with reviewed family policy:
+
+   ```bash
+   python scripts/accelerator_catalog.py refresh \
+     --output /tmp/accelerator_catalog.json
+   ```
+
+5. Review the diff, then replace the catalog's `instance_types` with the approved
+   output. Synchronize `historical.watch_instance_types` in `cdk.json` and the
+   fallback in `gco/config/config_loader.py`; offline validation reports every
+   missing or extra type if either copy is incomplete.
+6. Update NodePools, CLI hardware metadata/advisor defaults, examples, and prose
+   only where the reviewed support decision requires it.
+7. Run the focused suite:
+
+   ```bash
+   python scripts/accelerator_catalog.py validate
+   pytest tests/test_accelerator_catalog.py \
+     tests/test_capacity_history_config.py \
+     tests/test_mooncake_nodepool_manifest.py \
+     tests/test_cli.py tests/test_inference.py tests/test_integration.py
+   ```
+
+For an existing family with a newly released size, no NodePool family edit may
+be necessary, but the catalog and both observation lists still move together.
+For a new generation, the validator intentionally remains advisory until a
+maintainer records the scheduling decision.
 
 ## Upgrading the EKS Kubernetes version
 
@@ -242,8 +287,9 @@ each carry an `exp:YYYY-MM-DD` marker and a justification. The rules:
 
 The monthly [`deps-scan`](../.github/CI.md#dependency-scan-script) issue lists
 every surface that has drifted (Python packages, npm graphs, Docker images,
-Helm charts, EKS add-ons, CI tooling, and more), grouped with an urgency hint
-and per-row links to the upstream changelog. To act on it:
+Helm charts, EKS add-ons, accelerator catalog/NodePool policy, CI tooling, and
+more), grouped with an urgency hint and per-row links to the upstream source.
+To act on it:
 
 1. Follow the report's **Ref** links to review changelogs for breaking changes.
 2. Update the exact version in `pyproject.toml`, the relevant `package.json`, a
@@ -338,6 +384,7 @@ the repo or CI fails — most of this is "when you add X, register it in Y":
 | Add a `docs/*.md` guide | `DOC_METADATA` in `gco_mcp/resources/docs.py` (keep `topics` from the existing small vocabulary; every `related` entry must reference a real key) | `tests/test_mcp_docs_index.py` |
 | Add an `examples/*.yaml` manifest | `EXAMPLE_METADATA` in `gco_mcp/resources/docs.py` | `find_examples` discovery |
 | Add a package README meant for agents | `PACKAGE_DOC_METADATA` in `gco_mcp/resources/docs.py` | `tests/test_mcp_docs_index.py` |
+| Add a normative root document | The root Markdown file, `ROOT_DOC_METADATA`, a static `docs://gco/{name}` resource, and `docs_index()` in `gco_mcp/resources/docs.py` | `tests/test_mcp_docs_index.py`, `tests/test_mcp_server.py`, `tests/test_mcp_integration.py` |
 | Add or rename an MCP tool | the Tool Reference table (and the per-module count) in `gco_mcp/tools/README.md` | `tests/test_docs_coverage.py` |
 | Gate a tool behind a feature flag | `gco_mcp/feature_flags.py`, and document the flag in `gco_mcp/README.md` | — |
 
@@ -475,8 +522,9 @@ rather than lowering the 90% floor.
   line/function/branch coverage.
 - Many tests are **guard tests** that pin an invariant so a partial change
   fails loudly — version-skew guards, manifest-shape guards, the docs index,
-  the pip-audit-ignore validator. A guard failure means "you changed two things
-  that must move together," not "delete the assertion."
+  the pip-audit-ignore validator, and accelerator catalog/NodePool/watch-list
+  synchronization. A guard failure means "you changed things that must move
+  together," not "delete the assertion."
 
 ### Flaky-test triage
 
@@ -680,7 +728,7 @@ catalogue.
 A new maintainer should become productive from the docs alone. Read in this
 order:
 
-1. **Orientation** — [`README.md`](../README.md),
+1. **Orientation** — [`TENETS.md`](../TENETS.md), [`README.md`](../README.md),
    [`QUICKSTART.md`](../QUICKSTART.md), and the [docs index](README.md) (which
    carries a full reading order for users and operators).
 2. **How it is built** — [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) and

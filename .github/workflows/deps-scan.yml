@@ -17,6 +17,8 @@
 #   - Bedrock default model id from cdk.json context.bedrock.default_model_id
 #     compared against the newest system-defined inference profile in the same
 #     model family (AWS creds via OIDC)
+#   - Accelerator catalog and Karpenter NodePool policy (offline), plus live
+#     NVIDIA GPU / AWS Neuron EC2 catalog drift across enabled Regions (OIDC)
 #   - Dockerfile.dev ARG pins (NODE_MAJOR, NPM_VERSION, CDK_VERSION,
 #     KUBECTL_VERSION, AWSCLI_VERSION, DOCKER_VERSION, BUILDX_VERSION) — public endpoints,
 #     no AWS creds needed
@@ -61,6 +63,10 @@ permissions:
 env:
   HELM_VERSION: "v4.2.1"
   KUBECTL_VERSION: "v1.36.2"
+  # All AWS CLI reads are sequential, and adaptive retries absorb transient
+  # account-level contention without increasing the monthly request rate.
+  AWS_RETRY_MODE: adaptive
+  AWS_MAX_ATTEMPTS: "10"
 
 jobs:
   deps-scan:

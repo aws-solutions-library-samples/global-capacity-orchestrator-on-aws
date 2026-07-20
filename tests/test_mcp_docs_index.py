@@ -1,12 +1,11 @@
 """
 Tests for the GCO MCP server's docs-discovery surface.
 
-Covers ``DOC_METADATA`` consistency (every metadata key resolves to a
-real ``docs/*.md`` file and every markdown file has a metadata entry),
-the ``related`` reference closure, the ``find_docs`` tool's topic
-matching and no-arg behaviour, and the two new
-``docs://gco/docs/by-topic/...`` and ``docs://gco/docs/by-related/...``
-resource paths.
+Covers the three searchable catalogs: ``DOC_METADATA`` for ``docs/*.md``,
+``ROOT_DOC_METADATA`` for normative project-root documents, and
+``PACKAGE_DOC_METADATA`` for package READMEs. Tests enforce file/catalog
+symmetry where applicable, pairwise-disjoint keys, related-reference closure,
+``find_docs`` discovery and resource URIs, and the topic/related resource paths.
 """
 
 import asyncio
@@ -20,7 +19,13 @@ from hypothesis import strategies as st
 sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
 
 import run_mcp  # noqa: E402, F401  -- side effect: registers tools and resources
-from resources.docs import DOC_METADATA, DOCS_DIR, PACKAGE_DOC_METADATA, PROJECT_ROOT  # noqa: E402
+from resources.docs import (  # noqa: E402
+    DOC_METADATA,
+    DOCS_DIR,
+    PACKAGE_DOC_METADATA,
+    PROJECT_ROOT,
+    ROOT_DOC_METADATA,
+)
 from tools.docs import find_docs  # noqa: E402
 
 # Pull the shared FastMCP instance with everything registered from
@@ -62,6 +67,62 @@ def test_every_doc_related_reference_resolves() -> None:
 
 
 # =============================================================================
+# ROOT_DOC_METADATA structural invariants
+# =============================================================================
+
+
+@settings(max_examples=100, derandomize=True)
+@given(name=st.sampled_from(sorted(ROOT_DOC_METADATA.keys())))
+def test_every_root_doc_has_file_property(name: str) -> None:
+    """Every root-doc entry points at its declared project-root Markdown file."""
+    rel_path = ROOT_DOC_METADATA[name]["path"]
+    assert isinstance(rel_path, str)
+    assert (PROJECT_ROOT / rel_path).is_file(), f"missing {rel_path}"
+
+
+def test_doc_catalog_keys_are_pairwise_disjoint() -> None:
+    """Merged search catalogs must never overwrite an identically named entry."""
+    catalogs = {
+        "docs": set(DOC_METADATA),
+        "root": set(ROOT_DOC_METADATA),
+        "package": set(PACKAGE_DOC_METADATA),
+    }
+    names = list(catalogs)
+    for index, left in enumerate(names):
+        for right in names[index + 1 :]:
+            overlap = catalogs[left] & catalogs[right]
+            assert not overlap, f"{left}/{right} catalog key collision: {overlap}"
+
+
+def test_every_root_doc_related_reference_resolves() -> None:
+    """Root-doc relations resolve in the merged searchable catalog."""
+    union = set(DOC_METADATA) | set(ROOT_DOC_METADATA) | set(PACKAGE_DOC_METADATA)
+    for name, meta in ROOT_DOC_METADATA.items():
+        related = meta.get("related", [])
+        assert isinstance(related, list), f"{name!r}.related must be a list"
+        for ref in related:
+            assert ref in union, f"{name!r}.related references unknown {ref!r}"
+
+
+def test_find_docs_surfaces_tenets_with_static_resource_uri() -> None:
+    """The root tenets are searchable and point to their static resource."""
+    results = asyncio.run(find_docs(query="north star", limit=50))
+    by_name = {r["name"]: r for r in results}
+    assert "TENETS" in by_name
+    assert by_name["TENETS"]["resource_uri"] == "docs://gco/TENETS"
+
+
+def test_tenets_resource_serves_toc_and_metadata_header() -> None:
+    """The static TENETS resource returns the normative root document."""
+    result = asyncio.run(mcp.read_resource("docs://gco/TENETS"))
+    content = result.contents[0].content
+    assert "<!-- Topics:" in content
+    assert "# GCO Tenets" in content
+    assert "## Table of Contents" in content
+    assert "## North Star" in content
+
+
+# =============================================================================
 # PACKAGE_DOC_METADATA structural invariants
 # =============================================================================
 
@@ -76,14 +137,14 @@ def test_every_package_doc_has_readme_file_property(name: str) -> None:
 
 
 def test_package_doc_keys_are_disjoint_from_doc_metadata() -> None:
-    """The two catalogs must not share keys, or the merged view would collide."""
-    overlap = set(DOC_METADATA.keys()) & set(PACKAGE_DOC_METADATA.keys())
+    """Package keys remain disjoint from both uppercase guide catalogs."""
+    overlap = (set(DOC_METADATA) | set(ROOT_DOC_METADATA)) & set(PACKAGE_DOC_METADATA)
     assert not overlap, f"catalog key collision: {overlap}"
 
 
 def test_every_package_doc_related_reference_resolves() -> None:
     """Each package-doc ``related`` entry resolves in either catalog (the union)."""
-    union = set(DOC_METADATA.keys()) | set(PACKAGE_DOC_METADATA.keys())
+    union = set(DOC_METADATA) | set(ROOT_DOC_METADATA) | set(PACKAGE_DOC_METADATA)
     for name, meta in PACKAGE_DOC_METADATA.items():
         related = meta.get("related", [])
         assert isinstance(related, list), f"{name!r}.related must be a list"
@@ -154,11 +215,12 @@ def test_topic_match_property(data: st.DataObject) -> None:
 
 
 def test_find_docs_no_args_returns_alpha_sorted_first_limit() -> None:
-    """With no filters and no query, the catalog is alpha-sorted and clipped."""
+    """With no filters and no query, the merged catalog is sorted and clipped."""
     results = asyncio.run(find_docs(limit=5))
     assert len(results) == 5
     names = [r["name"] for r in results]
-    assert names == sorted(DOC_METADATA.keys())[:5]
+    all_names = set(DOC_METADATA) | set(ROOT_DOC_METADATA) | set(PACKAGE_DOC_METADATA)
+    assert names == sorted(all_names)[:5]
 
 
 # =============================================================================
