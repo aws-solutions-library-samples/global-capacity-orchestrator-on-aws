@@ -449,6 +449,8 @@ class GCORegionalApiGatewayStack(Stack):
                 ),
             ),
             cloud_watch_role=True,
+            # CDK otherwise retains the generated API Gateway account role.
+            cloud_watch_role_removal_policy=RemovalPolicy.DESTROY,
         )
 
         # The bridge is private at the authorization layer by default: only
