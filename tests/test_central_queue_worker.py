@@ -15,7 +15,10 @@ from gco.services.central_queue_worker import (
     process_queued_jobs_once,
     reconcile_active_jobs_once,
 )
-from gco.services.manifest_processor import RetryableQueuedJobApplyError
+from gco.services.manifest_processor import (
+    QueuedJobNotCreatedError,
+    RetryableQueuedJobApplyError,
+)
 from gco.services.template_store import JobStatus
 
 REGION = "us-east-1"
@@ -380,6 +383,42 @@ class TestProcessQueuedJobsOnce:
         assert terminal_write.kwargs["status"] is JobStatus.FAILED
         assert terminal_write.kwargs["claim_token"] == CLAIM_TOKEN
         assert terminal_write.kwargs["claim_generation"] == CLAIM_GENERATION
+        assert terminal_write.kwargs["workload_not_created"] is True
+
+    @pytest.mark.asyncio
+    async def test_preflight_rejection_persists_explicit_no_workload_proof(self, processor, store):
+        store.get_queued_jobs_for_region.return_value = [{"job_id": "job-1"}]
+        store.claim_job.return_value = _claimed_job()
+        store.transition_job.side_effect = [
+            {"status": JobStatus.APPLYING.value},
+            {"status": JobStatus.FAILED.value},
+        ]
+        processor.apply_queued_job.side_effect = QueuedJobNotCreatedError(
+            "Queued Job validation failed: policy denied"
+        )
+        heartbeat = AsyncMock()
+
+        with patch.object(worker_module, "_lease_heartbeat", heartbeat):
+            result = await process_queued_jobs_once(
+                processor,
+                store,
+                limit=1,
+                owner_id=OWNER,
+            )
+
+        assert result == (
+            1,
+            [
+                {
+                    "job_id": "job-1",
+                    "status": "failed",
+                    "error": "Queued Job validation failed: policy denied",
+                }
+            ],
+        )
+        terminal_write = store.transition_job.call_args_list[-1]
+        assert terminal_write.kwargs["workload_not_created"] is True
+        heartbeat.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_retryable_apply_remains_applying_for_lease_recovery(self, processor, store):
@@ -457,6 +496,7 @@ class TestProcessQueuedJobsOnce:
         assert terminal_write.kwargs["status"] is JobStatus.FAILED
         assert terminal_write.kwargs["error"] == processed[0]["error"]
         assert terminal_write.kwargs["claim_token"] == CLAIM_TOKEN
+        assert "workload_not_created" not in terminal_write.kwargs
 
     @pytest.mark.asyncio
     async def test_pre_set_stop_does_not_claim_any_polled_jobs(self, processor, store):

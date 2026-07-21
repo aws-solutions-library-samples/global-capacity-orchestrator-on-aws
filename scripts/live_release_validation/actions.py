@@ -33,7 +33,7 @@ from .inventory import (
     project_resources_are_absent,
     summarize_project_resources,
 )
-from .models import RunContext, utc_now
+from .models import RunContext, to_jsonable, utc_now
 
 ActionHandler = Callable[[RunContext], dict[str, Any]]
 _TERMINAL_QUEUE_STATUSES = {"succeeded", "failed", "cancelled"}
@@ -41,6 +41,10 @@ _HEALTHY_STACK_STATUSES = {"CREATE_COMPLETE", "UPDATE_COMPLETE"}
 _RUN_STACK_TAG = "GcoLiveValidationRun"
 _RUN_JOB_LABEL = "gco.aws/validation-run"
 _PATH_JOB_LABEL = "gco.aws/validation-path"
+_CENTRAL_MANAGED_BY_LABEL = "gco.io/managed-by"
+_CENTRAL_QUEUE_KEY_LABEL = "gco.io/queue-job-key"
+_CENTRAL_QUEUE_ID_ANNOTATION = "gco.io/queue-job-id"
+_CENTRAL_ORIGINAL_NAME_ANNOTATION = "gco.io/original-job-name"
 _EKS_KEY_LOGICAL_ID = "EksSecretsEncryptionKey74AFFE88"
 _KMS_PENDING_WINDOW_DAYS = 7
 _LOG_CLEANUP_TOKEN_TAG = "GcoLiveValidationCleanupToken"
@@ -3099,9 +3103,46 @@ def _load_manifest(ctx: RunContext, filename: str) -> tuple[list[dict[str, Any]]
     return manifests, name, namespace
 
 
+def _central_workload_identity(record: dict[str, Any]) -> tuple[str, str, str] | None:
+    values = (
+        record.get("k8s_job_name"),
+        record.get("k8s_job_namespace"),
+        record.get("k8s_job_uid"),
+    )
+    populated = [value is not None for value in values]
+    if any(populated) and not all(populated):
+        raise RuntimeError("Checkpoint contains a partial central Kubernetes identity")
+    if not any(populated):
+        return None
+    identity = tuple(str(value or "") for value in values)
+    if not all(identity):
+        raise RuntimeError("Checkpoint contains an empty central Kubernetes identity field")
+    return cast(tuple[str, str, str], identity)
+
+
+def _effective_job_identity(record: dict[str, Any]) -> tuple[str, str]:
+    if record.get("path") == "dynamodb":
+        central_identity = _central_workload_identity(record)
+        if central_identity is None:
+            raise RuntimeError(
+                "Central workload Kubernetes identity has not been bound from DynamoDB"
+            )
+        return central_identity[0], central_identity[1]
+    return str(record["name"]), str(record["namespace"])
+
+
+def _job_reference_identity(record: dict[str, Any]) -> tuple[str, str]:
+    if record.get("path") == "dynamodb":
+        central_identity = _central_workload_identity(record)
+        if central_identity is not None:
+            return central_identity[0], central_identity[1]
+    return str(record["name"]), str(record["namespace"])
+
+
 def _job_api_path(record: dict[str, Any], suffix: str = "") -> str:
-    namespace = quote(str(record["namespace"]), safe="")
-    name = quote(str(record["name"]), safe="")
+    actual_name, actual_namespace = _effective_job_identity(record)
+    namespace = quote(actual_namespace, safe="")
+    name = quote(actual_name, safe="")
     return f"/api/v1/jobs/{namespace}/{name}{suffix}"
 
 
@@ -3123,8 +3164,35 @@ def _verify_response_region(data: dict[str, Any], expected_region: str, operatio
         )
 
 
+def _validate_central_workload_metadata(
+    record: dict[str, Any],
+    metadata: dict[str, Any],
+    labels: dict[str, Any],
+    uid: str,
+) -> None:
+    queue_job_id = str(record.get("central_queue_job_id") or "")
+    expected_uid = str(record.get("k8s_job_uid") or "")
+    if not queue_job_id or not expected_uid:
+        raise RuntimeError("Central workload is missing immutable queue/UID authority")
+    if uid != expected_uid:
+        raise RuntimeError("Kubernetes Job UID differs from persisted central worker identity")
+    if labels.get(_CENTRAL_MANAGED_BY_LABEL) != "central-queue":
+        raise RuntimeError("Central Job managed-by label does not match the worker contract")
+    expected_queue_key = hashlib.sha256(queue_job_id.encode("utf-8")).hexdigest()[:32]
+    if labels.get(_CENTRAL_QUEUE_KEY_LABEL) != expected_queue_key:
+        raise RuntimeError("Central Job queue-key label does not match its queue ID")
+    annotations = metadata.get("annotations")
+    if not isinstance(annotations, dict):
+        raise RuntimeError("Central Job lookup omitted ownership annotations")
+    if annotations.get(_CENTRAL_QUEUE_ID_ANNOTATION) != queue_job_id:
+        raise RuntimeError("Central Job queue ID annotation does not match the checkpoint")
+    if annotations.get(_CENTRAL_ORIGINAL_NAME_ANNOTATION) != record["name"]:
+        raise RuntimeError("Central Job original-name annotation does not match the request")
+
+
 def _get_owned_job(ctx: RunContext, record: dict[str, Any]) -> dict[str, Any] | None:
     """Return a Job only after authoritative HTTP and UID/label verification."""
+    actual_name, actual_namespace = _effective_job_identity(record)
     response = ctx.aws_client.make_authenticated_request(
         method="GET",
         path=_job_api_path(record),
@@ -3134,7 +3202,7 @@ def _get_owned_job(ctx: RunContext, record: dict[str, Any]) -> dict[str, Any] | 
         return None
     if not response.ok:
         raise RuntimeError(
-            f"Job lookup failed for {record['region']}:{record['namespace']}/{record['name']}: "
+            f"Job lookup failed for {record['region']}:{actual_namespace}/{actual_name}: "
             f"{response.status_code} {response.text}"
         )
     data = _response_json(response, "Job lookup")
@@ -3142,7 +3210,7 @@ def _get_owned_job(ctx: RunContext, record: dict[str, Any]) -> dict[str, Any] | 
     metadata = data.get("metadata")
     if not isinstance(metadata, dict):
         raise RuntimeError("Job lookup omitted metadata")
-    if metadata.get("name") != record["name"] or metadata.get("namespace") != record["namespace"]:
+    if metadata.get("name") != actual_name or metadata.get("namespace") != actual_namespace:
         raise RuntimeError("Job lookup returned a different Kubernetes identity")
     labels = metadata.get("labels")
     if not isinstance(labels, dict):
@@ -3154,6 +3222,8 @@ def _get_owned_job(ctx: RunContext, record: dict[str, Any]) -> dict[str, Any] | 
     uid = str(metadata.get("uid") or "")
     if not uid:
         raise RuntimeError("Job lookup omitted metadata.uid")
+    if record.get("path") == "dynamodb":
+        _validate_central_workload_metadata(record, metadata, labels, uid)
     ctx.record_job_uid(record, uid)
     return data
 
@@ -3213,8 +3283,9 @@ def _wait_for_owned_job_appearance(
             return job
         if time.time() >= deadline:
             if raise_on_timeout:
+                actual_name, actual_namespace = _effective_job_identity(record)
                 raise TimeoutError(
-                    f"Job {record['region']}:{record['namespace']}/{record['name']} "
+                    f"Job {record['region']}:{actual_namespace}/{actual_name} "
                     "did not appear before the bounded submission deadline"
                 )
             return None
@@ -3263,8 +3334,9 @@ def _wait_for_owned_job_terminal(
         if status in {"succeeded", "failed"}:
             return job, history
         if time.monotonic() >= deadline:
+            actual_name, actual_namespace = _effective_job_identity(record)
             raise TimeoutError(
-                f"Job {record['region']}:{record['namespace']}/{record['name']} "
+                f"Job {record['region']}:{actual_namespace}/{actual_name} "
                 f"did not complete within {ctx.settings.job_timeout_seconds}s"
             )
         time.sleep(ctx.settings.poll_interval_seconds)
@@ -3273,6 +3345,7 @@ def _wait_for_owned_job_terminal(
 def _owned_job_logs(ctx: RunContext, record: dict[str, Any], tail: int = 200) -> str:
     if _get_owned_job(ctx, record) is None:
         raise RuntimeError("Owned Job disappeared before its logs were read")
+    actual_name, actual_namespace = _effective_job_identity(record)
     response = ctx.aws_client.make_authenticated_request(
         method="GET",
         path=_job_api_path(record, f"/logs?tail={tail}"),
@@ -3282,7 +3355,7 @@ def _owned_job_logs(ctx: RunContext, record: dict[str, Any], tail: int = 200) ->
         raise RuntimeError(f"Job log lookup failed: {response.status_code} {response.text}")
     data = _response_json(response, "Job log lookup")
     _verify_response_region(data, str(record["region"]), "Job log lookup")
-    if data.get("job_name") != record["name"] or data.get("namespace") != record["namespace"]:
+    if data.get("job_name") != actual_name or data.get("namespace") != actual_namespace:
         raise RuntimeError("Job log lookup returned a different Job identity")
     return str(data.get("logs") or "")
 
@@ -3299,15 +3372,26 @@ def _wait_for_owned_job_absence(ctx: RunContext, record: dict[str, Any]) -> None
         else:
             consecutive_absent = 0
         if time.monotonic() >= deadline:
+            actual_name, actual_namespace = _effective_job_identity(record)
             raise TimeoutError(
-                f"Job {record['region']}:{record['namespace']}/{record['name']} remained visible"
+                f"Job {record['region']}:{actual_namespace}/{actual_name} remained visible"
             )
         time.sleep(min(5, ctx.settings.poll_interval_seconds))
 
 
 def _delete_owned_job(ctx: RunContext, record: dict[str, Any]) -> dict[str, Any]:
-    current = _get_owned_job(ctx, record)
     state = str(record.get("submission_state") or "registered")
+    if record.get("path") == "dynamodb" and _central_workload_identity(record) is None:
+        if state in {"registered", "prepared", "not_submitted"}:
+            ctx.mark_job_not_submitted(record)
+            ctx.mark_job_deleted(record)
+            return {"not_submitted": True, "already_absent": True}
+        raise RuntimeError(
+            "Central Job submission may have escaped but no worker-persisted Kubernetes "
+            "identity was bound; cleanup remains unresolved"
+        )
+
+    current = _get_owned_job(ctx, record)
     if current is None and state == "submitting" and not record.get("uid"):
         current = _wait_for_ambiguous_job_reconciliation(ctx, record)
     elif current is None and state == "submitted" and not record.get("uid"):
@@ -3359,26 +3443,30 @@ def _complete_job_lifecycle(
     marker: str,
 ) -> dict[str, Any]:
     appeared = _wait_for_owned_job_appearance(ctx, record)
+    actual_name, actual_namespace = _effective_job_identity(record)
     if appeared is None:
         raise RuntimeError(
-            f"Job {record['namespace']}/{record['name']} never appeared in {record['region']}"
+            f"Job {actual_namespace}/{actual_name} never appeared in {record['region']}"
         )
     final, history = _wait_for_owned_job_terminal(ctx, record)
     status = _job_status(final)
     if status != "succeeded":
         raise RuntimeError(
-            f"Job {record['namespace']}/{record['name']} in {record['region']} "
+            f"Job {actual_namespace}/{actual_name} in {record['region']} "
             f"finished with status {status}"
         )
     logs = _owned_job_logs(ctx, record)
     if marker not in logs:
         raise RuntimeError(f"Job logs did not contain expected marker {marker!r}")
     evidence = {
-        "name": record["name"],
-        "namespace": record["namespace"],
+        "name": actual_name,
+        "namespace": actual_namespace,
+        "requested_name": record["name"],
+        "requested_namespace": record["namespace"],
         "region": record["region"],
         "transport_region": record.get("transport_region"),
         "uid": record.get("uid"),
+        "central_queue_job_id": record.get("central_queue_job_id"),
         "status": status,
         "status_history": history,
         "marker": marker,
@@ -3606,6 +3694,109 @@ def _central_queue_job_id(idempotency_key: str) -> str:
     return str(uuid.uuid5(_CENTRAL_QUEUE_IDEMPOTENCY_NAMESPACE, idempotency_key))
 
 
+def _central_queue_kubernetes_job_name(original_name: str, job_id: str) -> str:
+    suffix = hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:16]
+    prefix = re.sub(r"[^a-z0-9-]+", "-", original_name.lower()).strip("-")
+    prefix = prefix[: 63 - len(suffix) - 1].rstrip("-") or "gco-job"
+    return f"{prefix}-{suffix}"
+
+
+def _central_persisted_kubernetes_identity(
+    job: dict[str, Any],
+    *,
+    required: bool,
+) -> tuple[str, str, str] | None:
+    raw = (
+        job.get("k8s_job_name"),
+        job.get("k8s_job_namespace"),
+        job.get("k8s_job_uid"),
+    )
+    populated = [value is not None for value in raw]
+    if not any(populated):
+        if required:
+            raise RuntimeError("Central DynamoDB record omitted worker Kubernetes identity")
+        return None
+    if not all(populated):
+        raise RuntimeError("Central DynamoDB record contains a partial Kubernetes identity")
+    identity = tuple(str(value or "") for value in raw)
+    if not all(identity):
+        raise RuntimeError("Central DynamoDB record contains an empty Kubernetes identity field")
+    return cast(tuple[str, str, str], identity)
+
+
+def _validate_central_checkpoint_kubernetes_identity(
+    central_record: dict[str, Any],
+    identity: dict[str, str],
+) -> None:
+    """Reject partial or conflicting central identity before mutating either record."""
+    previous = {key: central_record.get(key) for key in identity}
+    populated = [value is not None for value in previous.values()]
+    if any(populated) and not all(populated):
+        raise RuntimeError("Checkpoint central record contains a partial Kubernetes identity")
+    source = central_record.get("k8s_identity_source")
+    if source is not None and source != "dynamodb":
+        raise RuntimeError("Central checkpoint Kubernetes identity has an unexpected source")
+    if source is not None and not any(populated):
+        raise RuntimeError("Central checkpoint identity source has no Kubernetes identity")
+    for key, value in identity.items():
+        if previous[key] is not None and previous[key] != value:
+            raise RuntimeError(f"Central checkpoint Kubernetes identity changed: {key}")
+
+
+def _reconcile_central_workload_identity(
+    ctx: RunContext,
+    central_record: dict[str, Any],
+    persisted_job: dict[str, Any],
+    *,
+    workload_record: dict[str, Any] | None = None,
+    require_identity: bool = True,
+) -> dict[str, Any]:
+    """Bind exact worker evidence without mutating requested replay identity."""
+    _validate_central_job_identity(central_record, persisted_job)
+    identity = _central_persisted_kubernetes_identity(
+        persisted_job,
+        required=require_identity,
+    )
+    record = workload_record or _central_workload_record(ctx, central_record)
+    if identity is None:
+        return record
+
+    actual_name, actual_namespace, actual_uid = identity
+    expected_name = _central_queue_kubernetes_job_name(
+        str(central_record["job_name"]),
+        str(central_record["job_id"]),
+    )
+    if actual_name != expected_name:
+        raise RuntimeError(
+            f"Central worker persisted unexpected Kubernetes Job name {actual_name!r}; "
+            f"expected {expected_name!r}"
+        )
+    if actual_namespace != central_record["namespace"]:
+        raise RuntimeError("Central worker persisted a different Kubernetes namespace")
+
+    central_identity = {
+        "k8s_job_name": actual_name,
+        "k8s_job_namespace": actual_namespace,
+        "k8s_job_uid": actual_uid,
+    }
+    _validate_central_checkpoint_kubernetes_identity(central_record, central_identity)
+    ctx.bind_central_job_identity(
+        record,
+        job_id=str(central_record["job_id"]),
+        name=actual_name,
+        namespace=actual_namespace,
+        uid=actual_uid,
+        appearance_timeout_seconds=_job_appearance_timeout(ctx),
+    )
+    with ctx.state_lock:
+        _validate_central_checkpoint_kubernetes_identity(central_record, central_identity)
+        central_record.update(central_identity)
+        central_record["k8s_identity_source"] = "dynamodb"
+        central_record["workload_appearance_deadline"] = record.get("appearance_deadline")
+        ctx.persist_callback(ctx.checkpoint)
+    return record
+
+
 def _register_central_job(
     ctx: RunContext,
     *,
@@ -3696,6 +3887,86 @@ def _validate_central_job_identity(central_record: dict[str, Any], job: dict[str
     observed_key = job.get("idempotency_key")
     if observed_key is not None and observed_key != central_record["idempotency_key"]:
         raise RuntimeError("Central queue idempotency key changed")
+
+
+def _reconcile_central_cleanup_workload(
+    ctx: RunContext,
+    central_record: dict[str, Any],
+    persisted_job: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Reconcile workload authority from terminal DynamoDB cleanup evidence."""
+    _validate_central_job_identity(central_record, persisted_job)
+    terminal_status = str(persisted_job.get("status") or "unknown")
+    if terminal_status not in _TERMINAL_QUEUE_STATUSES:
+        raise RuntimeError("Central cleanup evidence is not terminal")
+
+    worker_proved_not_created = persisted_job.get("workload_not_created") is True
+    if worker_proved_not_created and terminal_status != "failed":
+        raise RuntimeError(
+            "Central worker no-workload proof is valid only for a failed queue record"
+        )
+    persisted_identity = _central_persisted_kubernetes_identity(
+        persisted_job,
+        required=terminal_status == "succeeded"
+        or (terminal_status == "failed" and not worker_proved_not_created),
+    )
+    workload_record = _central_workload_record(ctx, central_record)
+
+    if worker_proved_not_created:
+        if persisted_identity is not None:
+            raise RuntimeError(
+                "Failed central Job has both no-workload proof and Kubernetes identity"
+            )
+        if _central_workload_identity(workload_record) is not None:
+            raise RuntimeError(
+                "Worker-proven uncreated central Job already has checkpointed workload identity"
+            )
+        if _central_workload_identity(central_record) is not None:
+            raise RuntimeError(
+                "Worker-proven uncreated central Job already has central checkpoint identity"
+            )
+        if workload_record.get("uid"):
+            raise RuntimeError(
+                "Worker-proven uncreated central Job already has Kubernetes UID authority"
+            )
+        job_id = str(central_record["job_id"])
+        state = str(workload_record.get("submission_state") or "registered")
+        prior_proof = workload_record.get("central_worker_not_created_job_id")
+        if state == "deleted":
+            if prior_proof != job_id:
+                raise RuntimeError(
+                    "Deleted central workload lacks matching worker no-workload proof"
+                )
+        else:
+            ctx.mark_central_job_not_created_by_worker(workload_record, job_id=job_id)
+        return workload_record, True
+
+    if terminal_status != "cancelled":
+        return (
+            _reconcile_central_workload_identity(
+                ctx,
+                central_record,
+                persisted_job,
+                workload_record=workload_record,
+            ),
+            False,
+        )
+
+    if persisted_identity is not None or _central_workload_identity(workload_record) is not None:
+        raise RuntimeError("Cancelled-before-claim central Job unexpectedly has workload identity")
+    if workload_record.get("uid"):
+        raise RuntimeError(
+            "Cancelled-before-claim central Job already has Kubernetes UID authority"
+        )
+    job_id = str(central_record["job_id"])
+    state = str(workload_record.get("submission_state") or "registered")
+    prior_proof = workload_record.get("central_cancelled_before_claim_job_id")
+    if state == "deleted":
+        if prior_proof != job_id:
+            raise RuntimeError("Deleted central workload lacks matching cancellation proof")
+    else:
+        ctx.mark_central_job_cancelled_before_claim(workload_record, job_id=job_id)
+    return workload_record, True
 
 
 def _get_central_queue_job(
@@ -3889,6 +4160,12 @@ def action_central_queue_lifecycle(ctx: RunContext) -> dict[str, Any]:
     item = _read_central_job_item(ctx, job_id)
     if item.get("status") != "succeeded":
         raise RuntimeError(f"DynamoDB record {job_id} is {item.get('status')}, expected succeeded")
+    record = _reconcile_central_workload_identity(
+        ctx,
+        central_record,
+        item,
+        workload_record=record,
+    )
     if record.get("deleted"):
         evidence = record.get("validation_evidence")
         if not isinstance(evidence, dict) or evidence.get("marker") != marker:
@@ -3896,6 +4173,18 @@ def action_central_queue_lifecycle(ctx: RunContext) -> dict[str, Any]:
                 "Central Job was deleted without checkpointed live-validation evidence; "
                 "refusing an idempotency replay"
             )
+        actual_name, actual_namespace = _effective_job_identity(record)
+        expected_evidence = {
+            "name": actual_name,
+            "namespace": actual_namespace,
+            "uid": record.get("k8s_job_uid"),
+            "central_queue_job_id": job_id,
+        }
+        for key, expected in expected_evidence.items():
+            if evidence.get(key) != expected:
+                raise RuntimeError(
+                    f"Central Job deletion evidence does not match actual identity: {key}"
+                )
         workload_lifecycle = {
             **copy.deepcopy(evidence),
             "deletion": {"reconciled_checkpointed_deletion": True},
@@ -3912,6 +4201,9 @@ def action_central_queue_lifecycle(ctx: RunContext) -> dict[str, Any]:
         "job_id": job_id,
         "job_name": name,
         "namespace": namespace,
+        "k8s_job_name": record.get("k8s_job_name"),
+        "k8s_job_namespace": record.get("k8s_job_namespace"),
+        "k8s_job_uid": record.get("k8s_job_uid"),
         "target_region": target_region,
         "status_history": history,
         "final_job": final_job,
@@ -4034,18 +4326,11 @@ def _cleanup_central_job(ctx: RunContext, central_job: dict[str, Any]) -> dict[s
             f"Central queue job {job_id} lacks consistent terminal DynamoDB evidence"
         )
 
-    workload_not_submitted = False
-    # The queue state machine permits ``cancelled`` only from ``queued``;
-    # consistent terminal DynamoDB evidence therefore proves no worker ever
-    # claimed the manifest even if the cancellation HTTP response was lost.
-    if terminal_status == "cancelled":
-        workload_record = _central_workload_record(ctx, central_job)
-        if not workload_record.get("uid"):
-            ctx.mark_central_job_cancelled_before_claim(
-                workload_record,
-                job_id=job_id,
-            )
-            workload_not_submitted = True
+    _, workload_not_submitted = _reconcile_central_cleanup_workload(
+        ctx,
+        central_job,
+        persisted,
+    )
 
     outcome = {
         "job_id": job_id,
@@ -4073,13 +4358,40 @@ def cleanup_workloads(ctx: RunContext) -> dict[str, Any]:
         "errors": [],
         "unresolved": [],
     }
+    reconciled_central_workloads: set[int] = set()
     for central_job in ctx.checkpoint.state.get("central_jobs", []):
-        if central_job.get("cleanup_complete"):
-            result["central_jobs"].append(copy.deepcopy(central_job.get("cleanup_result") or {}))
-            continue
         job_id = str(central_job["job_id"])
         try:
-            result["central_jobs"].append(_cleanup_central_job(ctx, central_job))
+            if central_job.get("cleanup_complete"):
+                persisted = _read_central_job_item(ctx, job_id)
+                _validate_central_job_identity(central_job, persisted)
+                persisted_status = str(persisted.get("status") or "unknown")
+                checkpoint_status = str(
+                    central_job.get("status")
+                    or (central_job.get("cleanup_result") or {}).get("terminal_status")
+                    or ""
+                )
+                if persisted_status not in _TERMINAL_QUEUE_STATUSES:
+                    raise RuntimeError(
+                        f"Previously completed central cleanup for {job_id} is no longer terminal"
+                    )
+                if checkpoint_status and checkpoint_status != persisted_status:
+                    raise RuntimeError(
+                        f"Central cleanup status changed from {checkpoint_status} "
+                        f"to {persisted_status}"
+                    )
+                workload_record, _ = _reconcile_central_cleanup_workload(
+                    ctx,
+                    central_job,
+                    persisted,
+                )
+                result["central_jobs"].append(
+                    copy.deepcopy(central_job.get("cleanup_result") or {})
+                )
+            else:
+                result["central_jobs"].append(_cleanup_central_job(ctx, central_job))
+                workload_record = _central_workload_record(ctx, central_job)
+            reconciled_central_workloads.add(id(workload_record))
         except Exception as exc:  # noqa: BLE001 - preserve every unresolved resource
             error = f"{type(exc).__name__}: {exc}"
             result["errors"].append({"resource": f"central:{job_id}", "error": error})
@@ -4088,14 +4400,24 @@ def cleanup_workloads(ctx: RunContext) -> dict[str, Any]:
     for record in ctx.checkpoint.state.get("jobs", []):
         if record.get("deleted"):
             continue
-        reference = f"{record['region']}:{record['namespace']}/{record['name']}"
+        requested_reference = f"{record['region']}:{record['namespace']}/{record['name']}"
+        reference = requested_reference
         try:
+            if record.get("path") == "dynamodb" and id(record) not in reconciled_central_workloads:
+                raise RuntimeError(
+                    "Central workload was not reconciled from terminal DynamoDB evidence "
+                    "in this cleanup attempt"
+                )
+            actual_name, actual_namespace = _job_reference_identity(record)
+            reference = f"{record['region']}:{actual_namespace}/{actual_name}"
             deletion = _delete_owned_job(ctx, record)
             result["jobs"].append(
                 {
                     "region": record["region"],
-                    "namespace": record["namespace"],
-                    "name": record["name"],
+                    "namespace": actual_namespace,
+                    "name": actual_name,
+                    "requested_namespace": record["namespace"],
+                    "requested_name": record["name"],
                     "uid": record.get("uid"),
                     "deletion": deletion,
                 }
@@ -4114,7 +4436,9 @@ def cleanup_workloads(ctx: RunContext) -> dict[str, Any]:
                 )
     for record in ctx.checkpoint.state.get("jobs", []):
         if not record.get("deleted"):
-            reference = f"{record['region']}:{record['namespace']}/{record['name']}"
+            name = str(record.get("k8s_job_name") or record["name"])
+            namespace = str(record.get("k8s_job_namespace") or record["namespace"])
+            reference = f"{record['region']}:{namespace}/{name}"
             if not any(item["resource"] == reference for item in result["unresolved"]):
                 result["unresolved"].append(
                     {"resource": reference, "reason": "UID-bound Job absence is incomplete"}
@@ -4437,6 +4761,105 @@ def _retained_resource_cleanup(ctx: RunContext) -> dict[str, Any]:
     return result
 
 
+def _workload_cleanup_snapshot_sha256(ctx: RunContext) -> str:
+    payload = to_jsonable(
+        {
+            "jobs": copy.deepcopy(ctx.checkpoint.state.get("jobs", [])),
+            "central_jobs": copy.deepcopy(ctx.checkpoint.state.get("central_jobs", [])),
+        }
+    )
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _record_workload_cleanup_barrier(
+    ctx: RunContext,
+    cleanup_result: dict[str, Any],
+) -> dict[str, Any]:
+    if (
+        cleanup_result.get("complete") is not True
+        or cleanup_result.get("errors")
+        or cleanup_result.get("unresolved")
+    ):
+        raise RuntimeError("Cannot checkpoint an incomplete workload cleanup barrier")
+    barrier = {
+        "complete": True,
+        "completed_at": str(cleanup_result.get("ended_at") or utc_now()),
+        "snapshot_sha256": _workload_cleanup_snapshot_sha256(ctx),
+        "job_count": len(ctx.checkpoint.state.get("jobs", [])),
+        "central_job_count": len(ctx.checkpoint.state.get("central_jobs", [])),
+    }
+    ctx.checkpoint.state["workload_cleanup_barrier"] = barrier
+    ctx.persist()
+    return barrier
+
+
+def _validated_workload_cleanup_barrier(ctx: RunContext) -> dict[str, Any]:
+    barrier = ctx.checkpoint.state.get("workload_cleanup_barrier")
+    if not isinstance(barrier, dict) or barrier.get("complete") is not True:
+        raise RuntimeError("Checkpoint lacks a complete workload cleanup barrier")
+    expected = str(barrier.get("snapshot_sha256") or "")
+    current = _workload_cleanup_snapshot_sha256(ctx)
+    if not expected or expected != current:
+        raise RuntimeError("Checkpoint workload identity changed after cleanup completed")
+    return barrier
+
+
+def _resume_workload_cleanup_after_stack_absence(
+    ctx: RunContext,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Use an existing barrier, or create one only for a proven empty legacy run."""
+    jobs = ctx.checkpoint.state.get("jobs", [])
+    central_jobs = ctx.checkpoint.state.get("central_jobs", [])
+    if not isinstance(jobs, list) or not isinstance(central_jobs, list):
+        raise RuntimeError("Checkpoint workload collections must be lists")
+
+    if ctx.checkpoint.state.get("workload_cleanup_barrier") is None:
+        if jobs or central_jobs:
+            raise RuntimeError(
+                "Target stacks are absent but no completed workload cleanup barrier "
+                "was checkpointed"
+            )
+        workload_cleanup = cleanup_workloads(ctx)
+        barrier = _record_workload_cleanup_barrier(ctx, workload_cleanup)
+    else:
+        barrier = _validated_workload_cleanup_barrier(ctx)
+        workload_cleanup = {
+            "complete": True,
+            "reconciled_from_checkpoint_barrier": True,
+            "barrier": copy.deepcopy(barrier),
+        }
+    _validated_workload_cleanup_barrier(ctx)
+    return workload_cleanup, barrier
+
+
+def _record_target_stack_absence(
+    ctx: RunContext,
+    stack_absence: dict[str, Any],
+    *,
+    source: str,
+) -> dict[str, Any]:
+    if stack_absence.get("all_absent") is not True:
+        raise RuntimeError("Cannot checkpoint target stack absence while a stack remains")
+    workload_barrier = _validated_workload_cleanup_barrier(ctx)
+    proof = {
+        "verified_at": utc_now(),
+        "source": source,
+        "workload_cleanup_snapshot_sha256": workload_barrier["snapshot_sha256"],
+        "stack_absence": copy.deepcopy(stack_absence),
+    }
+    ctx.checkpoint.state["target_stacks_absent"] = proof
+    ctx.checkpoint.state.setdefault("target_stack_absence_proofs", []).append(proof)
+    ctx.persist()
+    return proof
+
+
 def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
     """Retry exact-owned teardown, preserving every structured attempt."""
     if not ctx.checkpoint.deployment_attempted:
@@ -4444,12 +4867,33 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
 
     initial_absence = _verify_target_stack_absence(ctx)
     if ctx.checkpoint.destroyed and initial_absence["all_absent"]:
+        workload_cleanup, workload_barrier = _resume_workload_cleanup_after_stack_absence(ctx)
+        absence_proof = _record_target_stack_absence(
+            ctx,
+            initial_absence,
+            source="destroy-already-destroyed-initial-absence",
+        )
         _checkpoint_retained_kms_keys(ctx)
         retained_cleanup = _retained_resource_cleanup(ctx)
+        final_absence = _verify_target_stack_absence(ctx)
+        if not final_absence["all_absent"]:
+            raise RuntimeError(
+                "A target stack reappeared during repeated retained cleanup: "
+                + json.dumps(final_absence["residual"], sort_keys=True)
+            )
+        completion_proof = _record_target_stack_absence(
+            ctx,
+            final_absence,
+            source="destroy-already-destroyed-completion",
+        )
         return {
             "needed": True,
             "already_destroyed": True,
-            "stack_absence": initial_absence,
+            "workload_cleanup": workload_cleanup,
+            "workload_cleanup_barrier": workload_barrier,
+            "stack_absence_proof": absence_proof,
+            "stack_absence_completion_proof": completion_proof,
+            "stack_absence": final_absence,
             "retained_cleanup": retained_cleanup,
             "attempts": ctx.checkpoint.state.get("destroy_attempts", []),
             "workload_cleanup_attempts": ctx.checkpoint.state.get("workload_cleanup_attempts", []),
@@ -4465,6 +4909,44 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
         )
         ctx.persist()
 
+    if initial_absence["all_absent"]:
+        workload_cleanup, workload_barrier = _resume_workload_cleanup_after_stack_absence(ctx)
+        absence_proof = _record_target_stack_absence(
+            ctx,
+            initial_absence,
+            source="destroy-resume-initial-absence",
+        )
+        _checkpoint_new_ecr_repositories(ctx)
+        _checkpoint_new_ecr_images(ctx)
+        _checkpoint_retained_kms_keys(ctx)
+        retained_cleanup = _retained_resource_cleanup(ctx)
+        final_absence = _verify_target_stack_absence(ctx)
+        if not final_absence["all_absent"]:
+            raise RuntimeError(
+                "A target stack reappeared during resumed retained cleanup: "
+                + json.dumps(final_absence["residual"], sort_keys=True)
+            )
+        completion_proof = _record_target_stack_absence(
+            ctx,
+            final_absence,
+            source="destroy-resume-completion",
+        )
+        ctx.checkpoint.destroyed = True
+        ctx.persist()
+        return {
+            "needed": True,
+            "resumed_after_stack_absence": True,
+            "workload_cleanup": workload_cleanup,
+            "workload_cleanup_barrier": workload_barrier,
+            "stack_absence_proof": absence_proof,
+            "stack_absence_completion_proof": completion_proof,
+            "stack_absence": final_absence,
+            "retained_cleanup": retained_cleanup,
+            "attempts": ctx.checkpoint.state.get("destroy_attempts", []),
+            "workload_cleanup_attempts": ctx.checkpoint.state.get("workload_cleanup_attempts", []),
+            "retained_cleanup_attempts": ctx.checkpoint.state.get("retained_cleanup_attempts", []),
+        }
+
     workload_cleanup = cleanup_workloads(ctx)
     if not workload_cleanup.get("complete"):
         raise RuntimeError(
@@ -4477,6 +4959,7 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
                 sort_keys=True,
             )
         )
+    workload_cleanup_barrier = _record_workload_cleanup_barrier(ctx, workload_cleanup)
     _reconcile_stack_ownership(ctx)
     _checkpoint_new_ecr_repositories(ctx)
     _checkpoint_new_ecr_images(ctx)
@@ -4580,6 +5063,11 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
                         "Target stack absence was not proved after destroy: "
                         + json.dumps(absence_before_cleanup["residual"], sort_keys=True)
                     )
+                attempt["target_stack_absence_proof"] = _record_target_stack_absence(
+                    ctx,
+                    absence_before_cleanup,
+                    source="destroy-before-retained-cleanup",
+                )
                 attempt["retained_cleanup"] = _retained_resource_cleanup(ctx)
                 absence_before_completion = _verify_target_stack_absence(ctx)
                 attempt["stack_absence_before_completion"] = absence_before_completion
@@ -4588,6 +5076,11 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
                         "A target stack reappeared during retained cleanup: "
                         + json.dumps(absence_before_completion["residual"], sort_keys=True)
                     )
+                attempt["target_stack_absence_completion_proof"] = _record_target_stack_absence(
+                    ctx,
+                    absence_before_completion,
+                    source="destroy-completion",
+                )
         except Exception as exc:  # noqa: BLE001 - retry and preserve teardown evidence
             overall = False
             if "attempt" not in locals() or attempt.get("sequence") != sequence:
@@ -4620,6 +5113,7 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
             return {
                 "needed": True,
                 "workload_cleanup": workload_cleanup,
+                "workload_cleanup_barrier": workload_cleanup_barrier,
                 "workload_cleanup_attempts": ctx.checkpoint.state.get(
                     "workload_cleanup_attempts", []
                 ),

@@ -720,11 +720,123 @@ class RunContext:
             record["central_cancelled_before_claim_at"] = time.time()
             self.persist_callback(self.checkpoint)
 
+    def mark_central_job_not_created_by_worker(
+        self,
+        record: dict[str, Any],
+        *,
+        job_id: str,
+    ) -> None:
+        """Record explicit worker proof that Kubernetes mutation never began."""
+        if not job_id:
+            raise RuntimeError("Central worker no-workload proof requires a queue Job ID")
+        with self.state_lock:
+            state = str(record.get("submission_state") or "registered")
+            previous_job_id = record.get("central_worker_not_created_job_id")
+            if state == "not_submitted" and previous_job_id == job_id:
+                return
+            if state not in {"submitting", "submitted"}:
+                raise RuntimeError(
+                    f"Cannot apply central worker no-workload proof from state {state!r}"
+                )
+            central_identity = (
+                record.get("k8s_job_name"),
+                record.get("k8s_job_namespace"),
+                record.get("k8s_job_uid"),
+            )
+            if (
+                record.get("path") != "dynamodb"
+                or record.get("uid") is not None
+                or any(value is not None for value in central_identity)
+            ):
+                raise RuntimeError(
+                    "Central worker no-workload proof cannot replace Kubernetes identity evidence"
+                )
+            if record.get("central_cancelled_before_claim_job_id") is not None:
+                raise RuntimeError(
+                    "Central worker no-workload proof conflicts with cancellation proof"
+                )
+            record["submission_state"] = "not_submitted"
+            record["central_worker_not_created_job_id"] = job_id
+            record["central_worker_not_created_at"] = time.time()
+            self.persist_callback(self.checkpoint)
+
+    def bind_central_job_identity(
+        self,
+        record: dict[str, Any],
+        *,
+        job_id: str,
+        name: str,
+        namespace: str,
+        uid: str,
+        appearance_timeout_seconds: int,
+    ) -> bool:
+        """Bind a requested central-queue record to its immutable Kubernetes Job.
+
+        The requested name and namespace remain canonical submission/replay
+        identity. The worker-persisted identity is a separate destructive
+        authority and starts one fresh workload-appearance window when first
+        observed.
+        """
+        if record.get("path") != "dynamodb":
+            raise RuntimeError("Central Kubernetes identity requires a DynamoDB workload record")
+        if not all((job_id, name, namespace, uid)):
+            raise RuntimeError("Central Kubernetes identity fields must all be non-empty")
+        if appearance_timeout_seconds <= 0:
+            raise RuntimeError("Central workload appearance timeout must be positive")
+
+        immutable = {
+            "central_queue_job_id": job_id,
+            "k8s_job_name": name,
+            "k8s_job_namespace": namespace,
+            "k8s_job_uid": uid,
+        }
+        with self.state_lock:
+            present = {key: record.get(key) for key in immutable}
+            populated = [value is not None for value in present.values()]
+            if any(populated):
+                if not all(populated):
+                    raise RuntimeError("Checkpoint contains a partial central Kubernetes identity")
+                for key, value in immutable.items():
+                    if present[key] != value:
+                        raise RuntimeError(
+                            f"Central Kubernetes identity changed for {job_id}: {key}"
+                        )
+                if record.get("uid") != uid:
+                    raise RuntimeError(
+                        "Central Kubernetes UID disagrees with checkpoint ownership authority"
+                    )
+                return False
+
+            previous_uid = record.get("uid")
+            if previous_uid is not None and previous_uid != uid:
+                raise RuntimeError(
+                    f"Kubernetes Job UID changed from {previous_uid!r} to {uid!r}; "
+                    "refusing central ownership"
+                )
+            bound_at = time.time()
+            was_deleted = bool(record.get("deleted"))
+            record.update(immutable)
+            record["uid"] = uid
+            record["central_identity_bound_at"] = bound_at
+            record["appearance_deadline"] = bound_at + appearance_timeout_seconds
+            if was_deleted:
+                record["requested_identity_deletion_superseded_at"] = bound_at
+                record.pop("deleted_at", None)
+            record["deleted"] = False
+            record["submission_state"] = "appeared"
+            self.persist_callback(self.checkpoint)
+            return True
+
     def record_job_uid(self, record: dict[str, Any], uid: str) -> None:
         """Bind a pending Job record to one immutable Kubernetes UID."""
         if not uid:
             raise RuntimeError("Cannot checkpoint an empty Kubernetes Job UID")
         with self.state_lock:
+            persisted_central_uid = record.get("k8s_job_uid")
+            if persisted_central_uid is not None and persisted_central_uid != uid:
+                raise RuntimeError(
+                    "Observed Kubernetes Job UID differs from persisted central worker identity"
+                )
             previous = record.get("uid")
             if previous == uid:
                 return

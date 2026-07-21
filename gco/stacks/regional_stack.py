@@ -135,6 +135,9 @@ from gco.stacks.constants import (
 # <pyflowchart-code-diagram> END
 
 
+_LIVE_VALIDATION_PROVIDER_LOG_CONTEXT = "gco_live_validation_retain_provider_log_groups"
+
+
 @dataclass(frozen=True)
 class SharedBucketIdentity:
     """Identity of the always-on ``Cluster_Shared_Bucket`` owned by ``GCOGlobalStack``.
@@ -383,6 +386,16 @@ class GCORegionalStack(Stack):
         self.deployment_region = region
         self.auth_secret_arn = auth_secret_arn
         self.alb_arn: str | None = None
+        retain_provider_logs = self.node.try_get_context(_LIVE_VALIDATION_PROVIDER_LOG_CONTEXT)
+        self.provider_log_group_removal_policy = (
+            RemovalPolicy.RETAIN
+            if retain_provider_logs is True
+            or (
+                isinstance(retain_provider_logs, str)
+                and retain_provider_logs.strip().casefold() == "true"
+            )
+            else RemovalPolicy.DESTROY
+        )
         supports_global_accelerator = getattr(config, "supports_global_accelerator", None)
         self.global_accelerator_enabled = (
             bool(supports_global_accelerator()) if callable(supports_global_accelerator) else True
@@ -494,14 +507,17 @@ class GCORegionalStack(Stack):
         if self.global_accelerator_enabled:
             self._create_ga_registration_lambda()
 
-        # Create the provider framework log group before the Helm installer so
-        # both the provider and convergence trigger share an explicit lifecycle
-        # anchor, including when the expensive installer builder is substituted.
+        # Provider framework Lambdas can emit their final delete-event log after
+        # CloudFormation has otherwise finished the custom resource. Strict live
+        # validation retains this explicit group through stack deletion so the
+        # harness can remove the same checkpointed generation after every target
+        # stack is absent. Ordinary deployments keep DESTROY semantics and do not
+        # accumulate retained groups.
         self.helm_installer_provider_log_group = logs.LogGroup(
             self,
             "HelmInstallerProviderLogGroup",
             retention=logs.RetentionDays.ONE_WEEK,
-            removal_policy=RemovalPolicy.DESTROY,
+            removal_policy=self.provider_log_group_removal_policy,
         )
 
         # Create Helm installer Lambda for KEDA and other Helm-based installations
@@ -3378,15 +3394,14 @@ class GCORegionalStack(Stack):
             )
         )
 
-        # Provider framework fronts the Lambda so CloudFormation invocation,
-        # response signalling, and retries are handled for us. The explicit
-        # group retains one week of logs and is ordered after the custom
-        # resource during deletion so teardown cannot recreate it.
+        # Strict live validation retains the exact generation through the
+        # provider's final delete invocation; its identity-fenced post-stack
+        # cleanup removes it. Ordinary deployments retain DESTROY semantics.
         ga_deregistration_log_group = logs.LogGroup(
             self,
             "GaDeregistrationProviderLogGroup",
             retention=logs.RetentionDays.ONE_WEEK,
-            removal_policy=RemovalPolicy.DESTROY,
+            removal_policy=self.provider_log_group_removal_policy,
         )
         ga_deregistration_provider = cr.Provider(
             self,
@@ -4264,11 +4279,13 @@ class GCORegionalStack(Stack):
                 "states:DescribeExecution",
             )
 
+        # Strict live validation preserves this generation until exact
+        # post-stack cleanup. Ordinary deployments retain DESTROY semantics.
         provider_log_group = logs.LogGroup(
             self,
             "HelmTeardownProviderLogGroup",
             retention=logs.RetentionDays.ONE_WEEK,
-            removal_policy=RemovalPolicy.DESTROY,
+            removal_policy=self.provider_log_group_removal_policy,
         )
         self.helm_teardown_provider = cr.Provider(
             self,

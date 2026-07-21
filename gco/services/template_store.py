@@ -1149,6 +1149,7 @@ class JobStore:
         claim_token: str | None = None,
         claim_generation: int | None = None,
         expected_k8s_uid: str | None = None,
+        workload_not_created: bool | None = None,
     ) -> dict[str, Any] | None:
         """Apply one fenced compare-and-set lifecycle transition.
 
@@ -1162,6 +1163,15 @@ class JobStore:
         destination = status.value if isinstance(status, JobStatus) else status
         if destination not in _ALLOWED_JOB_TRANSITIONS.get(expected, frozenset()):
             raise ValueError(f"Invalid job transition: {expected} -> {destination}")
+        if workload_not_created is not None:
+            if workload_not_created is not True:
+                raise ValueError("workload_not_created proof must be exactly true")
+            if expected != JobStatus.APPLYING.value:
+                raise ValueError("workload_not_created proof is valid only from the applying state")
+            if destination != JobStatus.FAILED.value:
+                raise ValueError("workload_not_created proof is valid only for failed jobs")
+            if any((k8s_job_name, k8s_job_namespace, k8s_job_uid)):
+                raise ValueError("workload_not_created proof cannot accompany Kubernetes identity")
 
         item = self._get_raw_job(job_id)
         if (
@@ -1170,6 +1180,12 @@ class JobStore:
             or item.get("target_region") != target_region
         ):
             return None
+        if workload_not_created is True and any(
+            attribute in item for attribute in ("k8s_job_name", "k8s_job_namespace", "k8s_job_uid")
+        ):
+            raise ValueError(
+                "workload_not_created proof requires a record without Kubernetes identity"
+            )
 
         claim_is_required = expected in {JobStatus.CLAIMED.value, JobStatus.APPLYING.value}
         if claim_is_required:
@@ -1252,6 +1268,17 @@ class JobStore:
         if expected_k8s_uid is not None:
             conditions.append("k8s_job_uid = :expected_k8s_uid")
             values[":expected_k8s_uid"] = expected_k8s_uid
+        if workload_not_created is True:
+            update_parts.append("workload_not_created = :workload_not_created")
+            values[":workload_not_created"] = True
+            conditions.extend(
+                [
+                    "attribute_not_exists(workload_not_created)",
+                    "attribute_not_exists(k8s_job_name)",
+                    "attribute_not_exists(k8s_job_namespace)",
+                    "attribute_not_exists(k8s_job_uid)",
+                ]
+            )
 
         for attribute, value, placeholder in (
             ("k8s_job_name", k8s_job_name, ":k8s_job_name"),
@@ -1643,6 +1670,7 @@ class JobStore:
             "k8s_job_name": item.get("k8s_job_name"),
             "k8s_job_namespace": item.get("k8s_job_namespace"),
             "k8s_job_uid": item.get("k8s_job_uid"),
+            "workload_not_created": item.get("workload_not_created"),
             "error_message": item.get("error_message"),
             "status_history": self._decode_json(item.get("status_history"), []),
         }

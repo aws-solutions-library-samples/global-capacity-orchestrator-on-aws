@@ -112,6 +112,7 @@ _CLOUDFORMATION_DELETE_TIMEOUT_SECONDS = 7200.0
 _CLOUDFORMATION_DELETE_POLL_SECONDS = 15.0
 _CLOUDFORMATION_DELETE_HEARTBEAT_SECONDS = 60.0
 _BOOTSTRAP_HEALTHY_STATUSES = frozenset({"CREATE_COMPLETE", "UPDATE_COMPLETE"})
+_LIVE_VALIDATION_PROVIDER_LOG_CONTEXT = "gco_live_validation_retain_provider_log_groups"
 StackAuthorizationCallback = Callable[[str, str, str], None]
 CleanupOutcomeCallback = Callable[[str, dict[str, Any]], None]
 ChangeSetPreparedCallback = Callable[[str, str, str, str, str], None]
@@ -1545,6 +1546,8 @@ class StackManager:
                     "prepare-change-set",
                     "--change-set-name",
                     change_set_name,
+                    "--context",
+                    f"{_LIVE_VALIDATION_PROVIDER_LOG_CONTEXT}=true",
                 ]
             )
 

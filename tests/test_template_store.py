@@ -610,6 +610,108 @@ class TestJobStore:
         expression = mock_dynamodb.update_item.call_args.kwargs["UpdateExpression"]
         assert "completed_at = :now" in expression
 
+    def test_transition_failed_can_atomically_prove_no_workload_was_created(
+        self, job_store, mock_dynamodb
+    ):
+        """A fenced pre-create rejection records proof only while identity is absent."""
+        raw_item = self._leased_job(
+            "job-123",
+            "2099-01-01T00:00:00Z",
+            status="applying",
+            claim_token="claim-token",
+        )
+        mock_dynamodb.get_item.return_value = {"Item": raw_item}
+        mock_dynamodb.update_item.return_value = {
+            "Attributes": {
+                **raw_item,
+                "status": "failed",
+                "workload_not_created": True,
+            }
+        }
+
+        result = job_store.transition_job(
+            "job-123",
+            target_region="us-east-1",
+            expected_status=JobStatus.APPLYING,
+            status=JobStatus.FAILED,
+            error="Queued Job validation failed",
+            claimed_by="worker-1",
+            claim_token="claim-token",
+            claim_generation=3,
+            workload_not_created=True,
+        )
+
+        assert result is not None
+        assert result["workload_not_created"] is True
+        update = mock_dynamodb.update_item.call_args.kwargs
+        assert "workload_not_created = :workload_not_created" in update["UpdateExpression"]
+        assert update["ExpressionAttributeValues"][":workload_not_created"] is True
+        conditions = set(update["ConditionExpression"].split(" AND "))
+        assert {
+            "attribute_not_exists(workload_not_created)",
+            "attribute_not_exists(k8s_job_name)",
+            "attribute_not_exists(k8s_job_namespace)",
+            "attribute_not_exists(k8s_job_uid)",
+        }.issubset(conditions)
+
+    @pytest.mark.parametrize(
+        ("source", "destination", "proof", "message"),
+        [
+            (JobStatus.APPLYING, JobStatus.PENDING, True, "valid only for failed"),
+            (JobStatus.APPLYING, JobStatus.FAILED, False, "must be exactly true"),
+            (JobStatus.PENDING, JobStatus.FAILED, True, "only from the applying"),
+            (JobStatus.RUNNING, JobStatus.FAILED, True, "only from the applying"),
+        ],
+    )
+    def test_transition_rejects_invalid_no_workload_proof_contract(
+        self,
+        job_store,
+        mock_dynamodb,
+        source,
+        destination,
+        proof,
+        message,
+    ):
+        """No-workload evidence cannot be false or attached to a nonfailed state."""
+        with pytest.raises(ValueError, match=message):
+            job_store.transition_job(
+                "job-123",
+                target_region="us-east-1",
+                expected_status=source,
+                status=destination,
+                workload_not_created=proof,
+            )
+
+        mock_dynamodb.get_item.assert_not_called()
+        mock_dynamodb.update_item.assert_not_called()
+
+    def test_transition_rejects_no_workload_proof_after_identity_exists(
+        self, job_store, mock_dynamodb
+    ):
+        """A record with any Kubernetes identity can never claim non-creation."""
+        raw_item = self._leased_job(
+            "job-123",
+            "2099-01-01T00:00:00Z",
+            status="applying",
+            claim_token="claim-token",
+        )
+        raw_item["k8s_job_uid"] = "uid-existing"
+        mock_dynamodb.get_item.return_value = {"Item": raw_item}
+
+        with pytest.raises(ValueError, match="without Kubernetes identity"):
+            job_store.transition_job(
+                "job-123",
+                target_region="us-east-1",
+                expected_status=JobStatus.APPLYING,
+                status=JobStatus.FAILED,
+                claimed_by="worker-1",
+                claim_token="claim-token",
+                claim_generation=3,
+                workload_not_created=True,
+            )
+
+        mock_dynamodb.update_item.assert_not_called()
+
     def test_get_job_found(self, job_store, mock_dynamodb):
         """Test getting an existing job."""
         mock_dynamodb.get_item.return_value = {

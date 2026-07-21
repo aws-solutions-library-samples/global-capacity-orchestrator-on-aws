@@ -6,11 +6,13 @@ never create, mutate, or delete live infrastructure.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
 import threading
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -72,7 +74,12 @@ def _context(*, state: dict[str, object] | None = None) -> SimpleNamespace:
     context.prepare_job_submission = MagicMock()
     context.begin_job_submission = MagicMock()
     context.finish_job_submission = MagicMock()
+    context.bind_central_job_identity = MagicMock()
+    context.record_job_uid = MagicMock()
+    context.mark_job_not_submitted = MagicMock()
+    context.mark_job_deleted = MagicMock()
     context.mark_central_job_cancelled_before_claim = MagicMock()
+    context.mark_central_job_not_created_by_worker = MagicMock()
     return context
 
 
@@ -119,13 +126,25 @@ def _real_context(tmp_path: Path):
 
 
 def _central_job(job_id: str, *, status: str = "succeeded") -> dict[str, str]:
-    return {
+    job = {
         "job_id": job_id,
         "job_name": "gco-live-ddb-run-123",
         "namespace": "gco-jobs",
         "target_region": "us-east-1",
         "status": status,
     }
+    if status == "succeeded":
+        job.update(
+            {
+                "k8s_job_name": actions._central_queue_kubernetes_job_name(
+                    job["job_name"],
+                    job_id,
+                ),
+                "k8s_job_namespace": job["namespace"],
+                "k8s_job_uid": "uid-central-1",
+            }
+        )
+    return job
 
 
 class TestCentralQueueResume:
@@ -134,6 +153,191 @@ class TestCentralQueueResume:
 
         key = "gco-live-validation:run-123:central"
         assert actions._central_queue_job_id(key) == str(uuid.uuid5(_IDEMPOTENCY_NAMESPACE, key))
+
+    def test_actual_identity_binding_preserves_requested_replay_identity_and_deadline(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ctx = _real_context(tmp_path)
+        key = "gco-live-validation:run-123:central"
+        job_id = actions._central_queue_job_id(key)
+        record = ctx.register_job(
+            name="gco-live-ddb-run-123",
+            namespace="gco-jobs",
+            region="us-east-1",
+            path="dynamodb",
+            run_label=actions._run_token(ctx.settings.run_id),
+            transport_region=None,
+        )
+        envelope = {
+            "transport": "central-queue",
+            "body": {"manifest": {"kind": "Job"}},
+            "idempotency_key": key,
+            "job_id": job_id,
+            "transport_region": None,
+        }
+        ctx.prepare_job_submission(record, envelope=envelope, resumable=True)
+        ctx.begin_job_submission(record, reconciliation_timeout_seconds=30)
+        ctx.finish_job_submission(
+            record, {"job": _central_job(job_id)}, appearance_timeout_seconds=5
+        )
+        stale_deadline = record["appearance_deadline"]
+        central_record = actions._register_central_job(
+            ctx,
+            job_id=job_id,
+            idempotency_key=key,
+            record=record,
+            marker="GCO_LIVE_DDB_run-123",
+            body=envelope["body"],
+        )
+        persisted = _central_job(job_id)
+
+        with patch("scripts.live_release_validation.models.time.time", return_value=100.0):
+            bound = actions._reconcile_central_workload_identity(
+                ctx,
+                central_record,
+                persisted,
+                workload_record=record,
+            )
+
+        assert bound is record
+        assert record["name"] == "gco-live-ddb-run-123"
+        assert record["namespace"] == "gco-jobs"
+        assert record["submission_envelope"] == envelope
+        assert record["k8s_job_name"] == persisted["k8s_job_name"]
+        assert record["k8s_job_namespace"] == persisted["k8s_job_namespace"]
+        assert record["k8s_job_uid"] == persisted["k8s_job_uid"]
+        assert record["uid"] == persisted["k8s_job_uid"]
+        assert record["appearance_deadline"] == 100.0 + actions._job_appearance_timeout(ctx)
+        assert record["appearance_deadline"] != stale_deadline
+        assert actions._job_api_path(record) == (
+            f"/api/v1/jobs/gco-jobs/{persisted['k8s_job_name']}"
+        )
+
+        original_deadline = record["appearance_deadline"]
+        with patch("scripts.live_release_validation.models.time.time", return_value=200.0):
+            actions._reconcile_central_workload_identity(
+                ctx,
+                central_record,
+                persisted,
+                workload_record=record,
+            )
+        assert record["appearance_deadline"] == original_deadline
+
+        changed = {**persisted, "k8s_job_uid": "uid-central-replaced"}
+        with pytest.raises(RuntimeError, match="identity changed|UID disagrees"):
+            actions._reconcile_central_workload_identity(
+                ctx,
+                central_record,
+                changed,
+                workload_record=record,
+            )
+
+    @pytest.mark.parametrize(
+        ("section", "key", "bad_value", "message"),
+        [
+            ("labels", actions._CENTRAL_MANAGED_BY_LABEL, "foreign", "managed-by"),
+            ("labels", actions._CENTRAL_QUEUE_KEY_LABEL, "bad-key", "queue-key"),
+            ("annotations", actions._CENTRAL_QUEUE_ID_ANNOTATION, "foreign", "queue ID"),
+            (
+                "annotations",
+                actions._CENTRAL_ORIGINAL_NAME_ANNOTATION,
+                "foreign",
+                "original-name",
+            ),
+            ("metadata", "uid", "foreign-uid", "UID differs"),
+        ],
+    )
+    def test_actual_job_lookup_rejects_changed_central_metadata(
+        self,
+        tmp_path: Path,
+        section: str,
+        key: str,
+        bad_value: str,
+        message: str,
+    ) -> None:
+        ctx = _real_context(tmp_path)
+        key_value = "gco-live-validation:run-123:central"
+        job_id = actions._central_queue_job_id(key_value)
+        persisted = _central_job(job_id)
+        record = ctx.register_job(
+            name=persisted["job_name"],
+            namespace=persisted["namespace"],
+            region=persisted["target_region"],
+            path="dynamodb",
+            run_label=actions._run_token(ctx.settings.run_id),
+            transport_region=None,
+        )
+        ctx.bind_central_job_identity(
+            record,
+            job_id=job_id,
+            name=persisted["k8s_job_name"],
+            namespace=persisted["k8s_job_namespace"],
+            uid=persisted["k8s_job_uid"],
+            appearance_timeout_seconds=30,
+        )
+        metadata: dict[str, object] = {
+            "name": persisted["k8s_job_name"],
+            "namespace": persisted["k8s_job_namespace"],
+            "uid": persisted["k8s_job_uid"],
+            "labels": {
+                actions._RUN_JOB_LABEL: actions._run_token(ctx.settings.run_id),
+                actions._PATH_JOB_LABEL: "dynamodb",
+                actions._CENTRAL_MANAGED_BY_LABEL: "central-queue",
+                actions._CENTRAL_QUEUE_KEY_LABEL: hashlib.sha256(
+                    job_id.encode("utf-8")
+                ).hexdigest()[:32],
+            },
+            "annotations": {
+                actions._CENTRAL_QUEUE_ID_ANNOTATION: job_id,
+                actions._CENTRAL_ORIGINAL_NAME_ANNOTATION: record["name"],
+            },
+        }
+        if section == "metadata":
+            metadata[key] = bad_value
+        else:
+            nested = metadata[section]
+            assert isinstance(nested, dict)
+            nested[key] = bad_value
+        ctx.aws_client.make_authenticated_request.return_value = _response(
+            200,
+            {"region": "us-east-1", "metadata": metadata},
+        )
+
+        with pytest.raises(RuntimeError, match=message):
+            actions._get_owned_job(ctx, record)
+
+        request = ctx.aws_client.make_authenticated_request.call_args.kwargs
+        assert request["path"] == f"/api/v1/jobs/gco-jobs/{persisted['k8s_job_name']}"
+
+    def test_persisted_identity_must_match_deterministic_queue_name(self) -> None:
+        ctx = _context()
+        job_id = actions._central_queue_job_id("gco-live-validation:run-123:central")
+        persisted = {**_central_job(job_id), "k8s_job_name": "foreign-job"}
+        record = {
+            "name": persisted["job_name"],
+            "namespace": persisted["namespace"],
+            "region": persisted["target_region"],
+            "path": "dynamodb",
+            "transport_region": None,
+        }
+        central_record = {
+            "job_id": job_id,
+            "idempotency_key": "gco-live-validation:run-123:central",
+            "job_name": persisted["job_name"],
+            "namespace": persisted["namespace"],
+            "target_region": persisted["target_region"],
+            "transport_region": None,
+        }
+
+        with pytest.raises(RuntimeError, match="unexpected Kubernetes Job name"):
+            actions._reconcile_central_workload_identity(
+                ctx,
+                central_record,
+                persisted,
+                workload_record=record,
+            )
+        ctx.bind_central_job_identity.assert_not_called()
 
     def test_submitting_checkpoint_reconciles_without_second_post(self) -> None:
         ctx = _context()
@@ -149,10 +353,19 @@ class TestCentralQueueResume:
             "transport_region": None,
             "submission_state": "submitting",
             "appearance_deadline": 9999999999.0,
+            "central_queue_job_id": job_id,
+            "k8s_job_name": queue_job["k8s_job_name"],
+            "k8s_job_namespace": queue_job["k8s_job_namespace"],
+            "k8s_job_uid": queue_job["k8s_job_uid"],
+            "uid": queue_job["k8s_job_uid"],
             "deleted": True,
             "validation_evidence": {
-                "name": queue_job["job_name"],
-                "namespace": queue_job["namespace"],
+                "name": queue_job["k8s_job_name"],
+                "namespace": queue_job["k8s_job_namespace"],
+                "uid": queue_job["k8s_job_uid"],
+                "central_queue_job_id": job_id,
+                "requested_name": queue_job["job_name"],
+                "requested_namespace": queue_job["namespace"],
                 "region": queue_job["target_region"],
                 "marker": marker,
                 "status": "succeeded",
@@ -192,7 +405,7 @@ class TestCentralQueueResume:
                 "_wait_for_central_queue_terminal",
                 return_value=(queue_job, [{"status": "succeeded", "at": 1.0}]),
             ),
-            patch.object(actions, "_read_central_job_item", return_value={"status": "succeeded"}),
+            patch.object(actions, "_read_central_job_item", return_value=queue_job),
         ):
             result = actions.action_central_queue_lifecycle(ctx)
 
@@ -201,6 +414,14 @@ class TestCentralQueueResume:
         wait_for_appearance.assert_called_once_with(ctx, central_record)
         ctx.aws_client.make_authenticated_request.assert_not_called()
         ctx.finish_job_submission.assert_called_once()
+        ctx.bind_central_job_identity.assert_called_once_with(
+            job_record,
+            job_id=job_id,
+            name=queue_job["k8s_job_name"],
+            namespace=queue_job["k8s_job_namespace"],
+            uid=queue_job["k8s_job_uid"],
+            appearance_timeout_seconds=30,
+        )
 
     def test_submitting_checkpoint_replays_only_exact_persisted_envelope(self) -> None:
         ctx = _context()
@@ -234,10 +455,19 @@ class TestCentralQueueResume:
             "submission_state": "submitting",
             "submission_envelope": envelope,
             "appearance_deadline": 9999999999.0,
+            "central_queue_job_id": job_id,
+            "k8s_job_name": queue_job["k8s_job_name"],
+            "k8s_job_namespace": queue_job["k8s_job_namespace"],
+            "k8s_job_uid": queue_job["k8s_job_uid"],
+            "uid": queue_job["k8s_job_uid"],
             "deleted": True,
             "validation_evidence": {
-                "name": queue_job["job_name"],
-                "namespace": queue_job["namespace"],
+                "name": queue_job["k8s_job_name"],
+                "namespace": queue_job["k8s_job_namespace"],
+                "uid": queue_job["k8s_job_uid"],
+                "central_queue_job_id": job_id,
+                "requested_name": queue_job["job_name"],
+                "requested_namespace": queue_job["namespace"],
                 "region": queue_job["target_region"],
                 "marker": marker,
                 "status": "succeeded",
@@ -282,7 +512,7 @@ class TestCentralQueueResume:
                 "_wait_for_central_queue_terminal",
                 return_value=(queue_job, [{"status": "succeeded", "at": 1.0}]),
             ),
-            patch.object(actions, "_read_central_job_item", return_value={"status": "succeeded"}),
+            patch.object(actions, "_read_central_job_item", return_value=queue_job),
         ):
             result = actions.action_central_queue_lifecycle(ctx)
 
@@ -413,6 +643,314 @@ class TestCentralQueueResume:
             deletion = actions._delete_owned_job(ctx, record)
         assert deletion == {"not_submitted": True, "already_absent": True}
         assert record["deleted"] is True
+
+    def test_real_submission_transition_closes_after_worker_proves_no_workload(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ctx = _real_context(tmp_path)
+        key = "gco-live-validation:run-123:central"
+        job_id = actions._central_queue_job_id(key)
+        record = ctx.register_job(
+            name="gco-live-ddb-run-123",
+            namespace="gco-jobs",
+            region="us-east-1",
+            path="dynamodb",
+            run_label=actions._run_token(ctx.settings.run_id),
+            transport_region=None,
+        )
+        body = {"manifest": {"kind": "Job"}, "target_region": "us-east-1"}
+        ctx.prepare_job_submission(
+            record,
+            envelope={
+                "transport": "central-queue",
+                "body": body,
+                "idempotency_key": key,
+                "job_id": job_id,
+                "transport_region": None,
+            },
+            resumable=True,
+        )
+        ctx.begin_job_submission(record, reconciliation_timeout_seconds=30)
+        failed: dict[str, object] = {
+            **_central_job(job_id, status="failed"),
+            "workload_not_created": True,
+        }
+        ctx.finish_job_submission(record, {"job": failed}, appearance_timeout_seconds=30)
+        central_record = actions._register_central_job(
+            ctx,
+            job_id=job_id,
+            idempotency_key=key,
+            record=record,
+            marker="GCO_LIVE_DDB_run-123",
+            body=body,
+        )
+
+        with (
+            patch.object(actions, "_wait_for_central_queue_appearance", return_value=failed),
+            patch.object(actions, "_read_central_job_item", return_value=failed),
+        ):
+            result = actions._cleanup_central_job(ctx, central_record)
+
+        assert result["terminal_status"] == "failed"
+        assert result["workload_not_submitted"] is True
+        assert record["submission_state"] == "not_submitted"
+        assert record["central_worker_not_created_job_id"] == job_id
+
+        with patch.object(actions, "_get_owned_job", return_value=None):
+            deletion = actions._delete_owned_job(ctx, record)
+        assert deletion == {"not_submitted": True, "already_absent": True}
+        assert record["deleted"] is True
+
+    def test_failed_central_job_without_worker_proof_remains_unresolved(self) -> None:
+        job_id = actions._central_queue_job_id("gco-live-validation:run-123:central")
+        workload = {
+            "name": "gco-live-ddb-run-123",
+            "namespace": "gco-jobs",
+            "region": "us-east-1",
+            "path": "dynamodb",
+            "transport_region": None,
+            "submission_state": "submitted",
+            "uid": None,
+        }
+        ctx = _context(state={"jobs": [workload]})
+        central_record = {
+            "job_id": job_id,
+            "idempotency_key": "gco-live-validation:run-123:central",
+            "job_name": workload["name"],
+            "namespace": workload["namespace"],
+            "target_region": workload["region"],
+            "transport_region": None,
+        }
+
+        with pytest.raises(RuntimeError, match="omitted worker Kubernetes identity"):
+            actions._reconcile_central_cleanup_workload(
+                ctx,
+                central_record,
+                _central_job(job_id, status="failed"),
+            )
+
+        ctx.mark_central_job_not_created_by_worker.assert_not_called()
+
+    def test_failed_central_job_rejects_conflicting_proof_and_identity(self) -> None:
+        job_id = actions._central_queue_job_id("gco-live-validation:run-123:central")
+        persisted: dict[str, object] = {
+            **_central_job(job_id),
+            "status": "failed",
+            "workload_not_created": True,
+        }
+        workload = {
+            "name": persisted["job_name"],
+            "namespace": persisted["namespace"],
+            "region": persisted["target_region"],
+            "path": "dynamodb",
+            "transport_region": None,
+            "submission_state": "submitted",
+            "uid": None,
+        }
+        ctx = _context(state={"jobs": [workload]})
+        central_record = {
+            "job_id": job_id,
+            "idempotency_key": "gco-live-validation:run-123:central",
+            "job_name": persisted["job_name"],
+            "namespace": persisted["namespace"],
+            "target_region": persisted["target_region"],
+            "transport_region": None,
+        }
+
+        with pytest.raises(RuntimeError, match="both no-workload proof and Kubernetes identity"):
+            actions._reconcile_central_cleanup_workload(ctx, central_record, persisted)
+
+        ctx.mark_central_job_not_created_by_worker.assert_not_called()
+
+    def test_cleanup_binds_succeeded_worker_identity(self, tmp_path: Path) -> None:
+        ctx = _real_context(tmp_path)
+        key = "gco-live-validation:run-123:central"
+        job_id = actions._central_queue_job_id(key)
+        record = ctx.register_job(
+            name="gco-live-ddb-run-123",
+            namespace="gco-jobs",
+            region="us-east-1",
+            path="dynamodb",
+            run_label=actions._run_token(ctx.settings.run_id),
+            transport_region=None,
+        )
+        ctx.prepare_job_submission(
+            record,
+            envelope={
+                "transport": "central-queue",
+                "body": {"manifest": {"kind": "Job"}},
+                "idempotency_key": key,
+                "job_id": job_id,
+                "transport_region": None,
+            },
+            resumable=True,
+        )
+        ctx.begin_job_submission(record, reconciliation_timeout_seconds=30)
+        central_record = actions._register_central_job(
+            ctx,
+            job_id=job_id,
+            idempotency_key=key,
+            record=record,
+            marker="GCO_LIVE_DDB_run-123",
+            body={"manifest": {"kind": "Job"}},
+        )
+        persisted = _central_job(job_id)
+
+        with (
+            patch.object(actions, "_wait_for_central_queue_appearance", return_value=persisted),
+            patch.object(actions, "_read_central_job_item", return_value=persisted),
+        ):
+            result = actions._cleanup_central_job(ctx, central_record)
+
+        assert result["terminal_status"] == "succeeded"
+        assert result["workload_not_submitted"] is False
+        assert record["name"] == "gco-live-ddb-run-123"
+        assert record["k8s_job_name"] == persisted["k8s_job_name"]
+        assert record["k8s_job_namespace"] == persisted["k8s_job_namespace"]
+        assert record["uid"] == persisted["k8s_job_uid"]
+
+    def test_already_complete_cleanup_reconciles_missing_actual_identity(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ctx = _real_context(tmp_path)
+        key = "gco-live-validation:run-123:central"
+        job_id = actions._central_queue_job_id(key)
+        record = ctx.register_job(
+            name="gco-live-ddb-run-123",
+            namespace="gco-jobs",
+            region="us-east-1",
+            path="dynamodb",
+            run_label=actions._run_token(ctx.settings.run_id),
+            transport_region=None,
+        )
+        ctx.prepare_job_submission(
+            record,
+            envelope={
+                "transport": "central-queue",
+                "body": {"manifest": {"kind": "Job"}},
+                "idempotency_key": key,
+                "job_id": job_id,
+                "transport_region": None,
+            },
+            resumable=True,
+        )
+        ctx.begin_job_submission(record, reconciliation_timeout_seconds=30)
+        central_record = actions._register_central_job(
+            ctx,
+            job_id=job_id,
+            idempotency_key=key,
+            record=record,
+            marker="GCO_LIVE_DDB_run-123",
+            body={"manifest": {"kind": "Job"}},
+        )
+        central_record.update(
+            {
+                "cleanup_complete": True,
+                "status": "succeeded",
+                "cleanup_result": {"terminal_status": "succeeded", "complete": True},
+            }
+        )
+        record["deleted"] = True
+        record["submission_state"] = "deleted"
+        persisted = _central_job(job_id)
+
+        def delete_reopened_workload(_ctx, workload):
+            _ctx.mark_job_deleted(workload)
+            return {"deleted_after_identity_reconciliation": True}
+
+        with (
+            patch.object(actions, "_read_central_job_item", return_value=persisted),
+            patch.object(
+                actions,
+                "_delete_owned_job",
+                side_effect=delete_reopened_workload,
+            ) as delete_job,
+        ):
+            result = actions.cleanup_workloads(ctx)
+
+        assert result["complete"] is True
+        delete_job.assert_called_once_with(ctx, record)
+        assert record["deleted"] is True
+        assert "requested_identity_deletion_superseded_at" in record
+        assert record["name"] == "gco-live-ddb-run-123"
+        assert record["k8s_job_name"] == persisted["k8s_job_name"]
+        assert record["uid"] == persisted["k8s_job_uid"]
+
+    @pytest.mark.parametrize("checkpoint_identity", ["partial", "conflicting"])
+    def test_failed_central_reconciliation_never_mutates_or_deletes_workload(
+        self,
+        tmp_path: Path,
+        checkpoint_identity: str,
+    ) -> None:
+        ctx = _real_context(tmp_path)
+        key = "gco-live-validation:run-123:central"
+        job_id = actions._central_queue_job_id(key)
+        record = ctx.register_job(
+            name="gco-live-ddb-run-123",
+            namespace="gco-jobs",
+            region="us-east-1",
+            path="dynamodb",
+            run_label=actions._run_token(ctx.settings.run_id),
+            transport_region=None,
+        )
+        ctx.prepare_job_submission(
+            record,
+            envelope={
+                "transport": "central-queue",
+                "body": {"manifest": {"kind": "Job"}},
+                "idempotency_key": key,
+                "job_id": job_id,
+                "transport_region": None,
+            },
+            resumable=True,
+        )
+        ctx.begin_job_submission(record, reconciliation_timeout_seconds=30)
+        central_record = actions._register_central_job(
+            ctx,
+            job_id=job_id,
+            idempotency_key=key,
+            record=record,
+            marker="GCO_LIVE_DDB_run-123",
+            body={"manifest": {"kind": "Job"}},
+        )
+        central_record.update(
+            {
+                "cleanup_complete": True,
+                "status": "succeeded",
+                "cleanup_result": {"terminal_status": "succeeded", "complete": True},
+            }
+        )
+        persisted = _central_job(job_id)
+        if checkpoint_identity == "partial":
+            central_record["k8s_job_name"] = persisted["k8s_job_name"]
+        else:
+            central_record.update(
+                {
+                    "k8s_job_name": persisted["k8s_job_name"],
+                    "k8s_job_namespace": persisted["k8s_job_namespace"],
+                    "k8s_job_uid": "conflicting-uid",
+                    "k8s_identity_source": "dynamodb",
+                }
+            )
+        workload_before = json.loads(json.dumps(record))
+
+        with (
+            patch.object(actions, "_read_central_job_item", return_value=persisted),
+            patch.object(actions, "_delete_owned_job") as delete_job,
+        ):
+            result = actions.cleanup_workloads(ctx)
+
+        assert result["complete"] is False
+        assert record == workload_before
+        delete_job.assert_not_called()
+        assert any(item["resource"] == f"central:{job_id}" for item in result["errors"])
+        assert any(
+            "not reconciled from terminal DynamoDB evidence" in item["error"]
+            for item in result["errors"]
+            if item["resource"].startswith("us-east-1:")
+        )
 
     def test_cleanup_non_observation_remains_an_unresolved_barrier(self) -> None:
         ctx = _context()
@@ -1707,6 +2245,80 @@ class TestStrictDestroyCheckpointing:
         )
         return ctx
 
+    def test_workload_barrier_hash_normalizes_dynamodb_decimals(self) -> None:
+        ctx = self._destroy_context()
+        ctx.checkpoint.state["jobs"] = [{"priority": Decimal("100"), "deleted": True}]
+        ctx.checkpoint.state["central_jobs"] = [
+            {"job_id": "central-job-id", "priority": Decimal("100")}
+        ]
+
+        barrier = actions._record_workload_cleanup_barrier(
+            ctx,
+            {"complete": True, "errors": [], "unresolved": [], "ended_at": "done"},
+        )
+
+        assert len(barrier["snapshot_sha256"]) == 64
+        from scripts.live_release_validation.models import to_jsonable
+
+        reloaded = self._destroy_context()
+        reloaded.checkpoint.state = json.loads(json.dumps(to_jsonable(ctx.checkpoint.state)))
+        assert actions._validated_workload_cleanup_barrier(reloaded) == barrier
+
+    def test_already_destroyed_workloads_require_a_completed_barrier(self) -> None:
+        ctx = self._destroy_context(destroyed=True)
+        ctx.checkpoint.state["jobs"] = [{"name": "unreconciled-job"}]
+        absent = {
+            "all_absent": True,
+            "absent": [{"name": "gco-live-global"}],
+            "residual": [],
+        }
+
+        with (
+            patch.object(actions, "_verify_target_stack_absence", return_value=absent),
+            patch.object(actions, "_checkpoint_retained_kms_keys") as checkpoint_kms,
+            patch.object(actions, "_retained_resource_cleanup") as retained_cleanup,
+            pytest.raises(RuntimeError, match="no completed workload cleanup barrier"),
+        ):
+            actions.destroy_deployment(ctx)
+
+        checkpoint_kms.assert_not_called()
+        retained_cleanup.assert_not_called()
+
+    def test_already_destroyed_empty_legacy_checkpoint_creates_and_proves_barrier(
+        self,
+    ) -> None:
+        ctx = self._destroy_context(destroyed=True)
+        absent = {
+            "all_absent": True,
+            "absent": [{"name": "gco-live-global"}],
+            "residual": [],
+        }
+        cleanup = {
+            "complete": True,
+            "errors": [],
+            "unresolved": [],
+            "ended_at": "done",
+        }
+
+        with (
+            patch.object(actions, "_verify_target_stack_absence", side_effect=[absent, absent]),
+            patch.object(actions, "cleanup_workloads", return_value=cleanup) as cleanup_workloads,
+            patch.object(actions, "_checkpoint_retained_kms_keys"),
+            patch.object(actions, "_retained_resource_cleanup", return_value={"errors": []}),
+        ):
+            result = actions.destroy_deployment(ctx)
+
+        assert result["already_destroyed"] is True
+        assert result["workload_cleanup"] == cleanup
+        assert result["workload_cleanup_barrier"]["job_count"] == 0
+        assert result["workload_cleanup_barrier"]["central_job_count"] == 0
+        assert result["stack_absence"] == absent
+        assert ctx.checkpoint.state["target_stacks_absent"]["source"] == (
+            "destroy-already-destroyed-completion"
+        )
+        cleanup_workloads.assert_called_once_with(ctx)
+        ctx.stack_manager.destroy_orchestrated.assert_not_called()
+
     def test_destroy_passes_exact_ids_and_disables_parallel_bootstrap(self) -> None:
         ctx = self._destroy_context()
         initial = {"all_absent": False, "absent": [], "residual": [{"name": "x"}]}
@@ -1775,6 +2387,76 @@ class TestStrictDestroyCheckpointing:
         ):
             actions.destroy_deployment(ctx)
 
+        ctx.stack_manager.destroy_orchestrated.assert_not_called()
+
+    def test_absent_stack_resume_uses_completed_workload_barrier_without_dynamodb(
+        self,
+    ) -> None:
+        ctx = self._destroy_context()
+        job_id = "central-job-id"
+        actual_name = "gco-live-ddb-run-123-worker"
+        workload = {
+            "name": "gco-live-ddb-run-123",
+            "namespace": "gco-jobs",
+            "region": "us-east-1",
+            "path": "dynamodb",
+            "submission_state": "deleted",
+            "deleted": True,
+            "central_queue_job_id": job_id,
+            "k8s_job_name": actual_name,
+            "k8s_job_namespace": "gco-jobs",
+            "k8s_job_uid": "uid-central-1",
+            "uid": "uid-central-1",
+        }
+        central_job = {
+            "job_id": job_id,
+            "cleanup_complete": True,
+            "status": "succeeded",
+            "k8s_job_name": actual_name,
+            "k8s_job_namespace": "gco-jobs",
+            "k8s_job_uid": "uid-central-1",
+            "k8s_identity_source": "dynamodb",
+        }
+        ctx.checkpoint.state["jobs"] = [workload]
+        ctx.checkpoint.state["central_jobs"] = [central_job]
+        actions._record_workload_cleanup_barrier(
+            ctx,
+            {"complete": True, "errors": [], "unresolved": [], "ended_at": "done"},
+        )
+        ctx.persist.reset_mock()
+        absent = {
+            "all_absent": True,
+            "absent": [{"name": "gco-live-global"}],
+            "residual": [],
+        }
+
+        with (
+            patch.object(
+                actions,
+                "_verify_target_stack_absence",
+                side_effect=[absent, absent],
+            ),
+            patch.object(actions, "cleanup_workloads") as cleanup_workloads,
+            patch.object(actions, "_read_central_job_item") as read_central_job,
+            patch.object(actions, "_checkpoint_new_ecr_repositories"),
+            patch.object(actions, "_checkpoint_new_ecr_images"),
+            patch.object(actions, "_checkpoint_retained_kms_keys"),
+            patch.object(
+                actions,
+                "_retained_resource_cleanup",
+                return_value={"errors": []},
+            ),
+        ):
+            result = actions.destroy_deployment(ctx)
+
+        assert result["resumed_after_stack_absence"] is True
+        assert result["stack_absence"] == absent
+        assert ctx.checkpoint.destroyed is True
+        assert ctx.checkpoint.state["target_stacks_absent"]["source"] == (
+            "destroy-resume-completion"
+        )
+        cleanup_workloads.assert_not_called()
+        read_central_job.assert_not_called()
         ctx.stack_manager.destroy_orchestrated.assert_not_called()
 
     def test_stale_destroyed_checkpoint_is_reopened(self) -> None:
@@ -2139,6 +2821,45 @@ class TestLocalOnlyRuntime:
             pytest.raises(RuntimeError, match="requires a checked-out branch"),
         ):
             actions._resolve_branch(tmp_path)
+
+
+class TestGuaranteedCleanupResume:
+    def test_completed_destroy_dispatch_is_skipped_but_guaranteed_cleanup_revalidates(self) -> None:
+        from scripts.live_release_validation import runner
+
+        instance = object.__new__(runner.LiveValidationRunner)
+        destroy_definition = SimpleNamespace(
+            name="destroy",
+            description="destroy deployment",
+            handler=MagicMock(),
+        )
+        instance.registry = {"destroy": destroy_definition}
+        instance.checkpoint = SimpleNamespace(
+            deployment_attempted=True,
+            destroyed=True,
+            completed_actions=["destroy"],
+            action_results={"destroy": SimpleNamespace(details={"checkpointed": True})},
+            baseline=None,
+            state={},
+        )
+        instance.context = MagicMock()
+        instance.report = SimpleNamespace(cleanup={})
+        instance._identity_verified = True
+        instance._persist_checkpoint = MagicMock()
+
+        assert instance._execute_action(destroy_definition) == {"checkpointed": True}
+        destroy_definition.handler.assert_not_called()
+
+        repeated = {
+            "needed": True,
+            "already_destroyed": True,
+            "stack_absence": {"all_absent": True},
+        }
+        with patch.object(runner, "destroy_deployment", return_value=repeated) as destroy:
+            instance._guaranteed_cleanup()
+
+        destroy.assert_called_once_with(instance.context)
+        assert instance.report.cleanup == {"completed": True, **repeated}
 
 
 class TestReportCompletionStatus:

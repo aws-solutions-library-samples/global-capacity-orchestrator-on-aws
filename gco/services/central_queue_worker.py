@@ -13,7 +13,11 @@ from typing import Any
 
 from kubernetes.client.rest import ApiException
 
-from gco.services.manifest_processor import ManifestProcessor, RetryableQueuedJobApplyError
+from gco.services.manifest_processor import (
+    ManifestProcessor,
+    QueuedJobNotCreatedError,
+    RetryableQueuedJobApplyError,
+)
 from gco.services.structured_logging import sanitize_log_value
 from gco.services.template_store import JobStatus, JobStore
 
@@ -182,7 +186,9 @@ async def process_queued_jobs_once(
             manifest = claimed.get("manifest")
             namespace = claimed.get("namespace")
             if not isinstance(manifest, dict) or not isinstance(namespace, str):
-                raise ValueError("Queued job contains an invalid manifest or namespace")
+                raise QueuedJobNotCreatedError(
+                    "Queued job contains an invalid manifest or namespace"
+                )
 
             heartbeat_done = asyncio.Event()
             claim_lost = asyncio.Event()
@@ -259,6 +265,9 @@ async def process_queued_jobs_once(
             token = claim.get("claim_token") if isinstance(claim, dict) else None
             generation = claim.get("claim_generation") if isinstance(claim, dict) else None
             if token and generation:
+                transition_options: dict[str, Any] = {}
+                if isinstance(exc, QueuedJobNotCreatedError):
+                    transition_options["workload_not_created"] = True
                 try:
                     failed = await asyncio.to_thread(
                         store.transition_job,
@@ -271,6 +280,7 @@ async def process_queued_jobs_once(
                         claimed_by=owner,
                         claim_token=str(token),
                         claim_generation=int(generation),
+                        **transition_options,
                     )
                 except Exception:  # noqa: BLE001 - lease recovery remains the fallback
                     logger.exception(

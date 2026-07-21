@@ -59,7 +59,7 @@ Actions run in registry order. Selecting an individual action automatically incl
 | `topology` | `deploy` | Verify stacks, EKS, API endpoints, queues, and DynamoDB |
 | `api` | `topology` | Run an authenticated API Job through its complete lifecycle |
 | `sqs` | `topology` | Run a direct regional SQS Job through its complete lifecycle |
-| `central-queue` | `topology` | Run the idempotent DynamoDB-backed queue lifecycle |
+| `central-queue` | `topology` | Run the idempotent DynamoDB-backed queue lifecycle, bind the worker-persisted Kubernetes identity, and verify/delete that exact workload |
 | `convergence` | `topology` | Require stable SQS, DLQ, and DynamoDB convergence |
 | `destroy` | `deploy` | Remove all exactly run-owned infrastructure in dependency order |
 | `final-inventory` | `destroy` | Prove target-stack absence, accepted retained resources, and exact protected-baseline preservation |
@@ -169,6 +169,12 @@ Do not edit the checkpoint, move it to another checkout or machine, or use it to
 ## Cleanup, Retained Resources, and Recovery
 
 After exact preflight identity succeeds, normal action failures and handled signals route through same-process cleanup. Workload cleanup runs before stack cleanup; unresolved Job or central-queue evidence blocks stack teardown rather than guessing that deletion is safe. Final inventory independently rechecks stack absence and protected baselines.
+
+The central-queue action deliberately keeps two identities separate. The requested Job name, namespace, body, and idempotency key remain immutable replay identity. After a successful terminal DynamoDB record is read consistently, the harness separately binds the worker-persisted `k8s_job_name`, `k8s_job_namespace`, and `k8s_job_uid`. Every Kubernetes lookup, log read, deletion, and absence check then uses that actual identity and requires the deterministic queue-derived name, queue ID/original-name annotations, managed-by/queue-key labels, validation run/path labels, and exact UID. Cleanup performs the same reconciliation even after an interrupted or already-complete central action; it never guesses the requested name. Both checkpoint records are validated before either is mutated, and a central workload is eligible for deletion only when terminal DynamoDB reconciliation succeeded in that cleanup attempt. A terminal failed record may omit Kubernetes identity only when the regional worker atomically persisted `workload_not_created=true` after an explicit preflight rejection and while every Kubernetes identity attribute was absent; ambiguous lookup/create failures never produce that proof.
+
+A complete pre-destroy workload cleanup is persisted with a digest of every requested and actual workload identity after converting DynamoDB values to canonical JSON primitives. Once exact target-stack absence is observed, that barrier and the absence proof allow a later resume to continue retained-resource cleanup without rereading the now-deleted DynamoDB table. Already-destroyed checkpoints must still validate the same barrier and record fresh stack-absence proof. A legacy checkpoint with no workload records may create an explicit empty barrier; any workload-bearing missing barrier, changed workload identity, or reappearing stack fails closed.
+
+Strict live-validation deploys pass a private CDK context that gives the three explicit custom-resource provider log groups CloudFormation `Retain` semantics. Ordinary synths and deployments keep `Delete` semantics, so routine destroy/redeploy cycles do not accumulate orphaned groups. In live validation, retention prevents a provider's final delete-event invocation from recreating a same-name generation after CloudFormation deletes the original. Before teardown, the harness checkpoints and tags each exact group ARN and creation time. Only after every exact target stack is absent does the restricted cleanup role delete that same retained generation under atomic run/token tag conditions. A changed generation remains a hard failure rather than being adopted by name.
 
 Two ECR residual classes are accepted and reported after exact identity revalidation:
 

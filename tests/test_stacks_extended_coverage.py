@@ -1533,6 +1533,9 @@ class TestStrictPreparedChangeSets:
             )
 
         assert result is True
+        command = run_cdk.call_args.args[0]
+        context_index = command.index("--context")
+        assert command[context_index + 1] == ("gco_live_validation_retain_provider_log_groups=true")
         assert cfn.describe_change_set.call_count == 2
         authorize.assert_called_once_with(self._STACK_NAME, self._REGION, self._STACK_ID)
         prepared.assert_called_once_with(

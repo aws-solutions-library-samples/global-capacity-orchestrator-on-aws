@@ -556,6 +556,31 @@ class TestPollJobsEdgeCases:
         # The sole transition is CLAIMED -> APPLYING; no terminal write follows.
         assert mock_job_store.transition_job.call_count == 1
 
+    def test_preflight_validation_proves_no_kubernetes_operation_started(self):
+        """A deterministic validation rejection is explicit no-workload evidence."""
+        from gco.services.manifest_processor import (
+            ManifestProcessor,
+            QueuedJobNotCreatedError,
+        )
+
+        processor = object.__new__(ManifestProcessor)
+        processor._k8s_timeout = 10
+        processor.batch_v1 = MagicMock()
+        processor.validate_manifest = MagicMock(return_value=(False, "policy denied"))
+        processor._inject_security_defaults = MagicMock()
+        manifest = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {"name": "training"},
+        }
+
+        with pytest.raises(QueuedJobNotCreatedError, match="policy denied"):
+            processor.apply_queued_job(manifest, "gco-jobs", "queue-job-123")
+
+        processor.batch_v1.read_namespaced_job.assert_not_called()
+        processor.batch_v1.create_namespaced_job.assert_not_called()
+        processor._inject_security_defaults.assert_not_called()
+
     def test_timeout_after_create_is_adopted_on_retry(self):
         """A lost create response converges on the persisted deterministic Job."""
         from gco.services.manifest_processor import (
@@ -641,8 +666,10 @@ class TestPollJobsEdgeCases:
 
     def test_poll_jobs_submission_failed(self, mock_manifest_processor):
         """Test poll jobs when deterministic Job validation fails."""
+        from gco.services.manifest_processor import QueuedJobNotCreatedError
+
         mock_job_store = self._claimed_job_store()
-        mock_manifest_processor.apply_queued_job.side_effect = ValueError(
+        mock_manifest_processor.apply_queued_job.side_effect = QueuedJobNotCreatedError(
             "Queued Job validation failed: Validation failed; Resource limit exceeded"
         )
 
@@ -669,6 +696,8 @@ class TestPollJobsEdgeCases:
                 assert len(data["results"]) == 1
                 assert data["results"][0]["status"] == "failed"
                 assert "Validation failed" in data["results"][0]["error"]
+        terminal_write = mock_job_store.transition_job.call_args_list[-1]
+        assert terminal_write.kwargs["workload_not_created"] is True
 
 
 # =============================================================================

@@ -68,9 +68,14 @@ class FeatureConfig(MockConfigLoader):
         return self._optional_features
 
 
-def _app_context(*, feature_rich: bool) -> dict:
+def _app_context(
+    *,
+    feature_rich: bool,
+    retain_provider_log_groups: bool = False,
+) -> dict:
     helm_enabled = feature_rich
     return {
+        rs._LIVE_VALIDATION_PROVIDER_LOG_CONTEXT: retain_provider_log_groups,
         f"availability-zones:account={_ACCOUNT}:region={_REGION}": _AZS,
         "drift_detection": {"enabled": False},
         "mcp_server": {"enabled": False},
@@ -145,8 +150,19 @@ def _create_real_helm_resources_without_docker(stack: rs.GCORegionalStack) -> No
         _REAL_HELM_BUILDER(stack)
 
 
-def _synthesize(*, feature_rich: bool, global_accelerator: bool, logical_name: str):
-    app = cdk.App(context=_app_context(feature_rich=feature_rich))
+def _synthesize(
+    *,
+    feature_rich: bool,
+    global_accelerator: bool,
+    logical_name: str,
+    retain_provider_log_groups: bool = False,
+):
+    app = cdk.App(
+        context=_app_context(
+            feature_rich=feature_rich,
+            retain_provider_log_groups=retain_provider_log_groups,
+        )
+    )
     cdk.Tags.of(app).add("Project", "GCO")
     config = FeatureConfig(
         app,
@@ -183,6 +199,16 @@ def feature_stack():
         feature_rich=True,
         global_accelerator=True,
         logical_name="regional-feature-gap-rich",
+    )
+
+
+@pytest.fixture(scope="module")
+def live_validation_feature_stack():
+    return _synthesize(
+        feature_rich=True,
+        global_accelerator=True,
+        logical_name="regional-feature-gap-live-validation",
+        retain_provider_log_groups=True,
     )
 
 
@@ -697,6 +723,40 @@ def test_helm_providers_are_observable_and_iam_scoped(feature_stack):
     )
     assert any(item.startswith("HelmInstallCharts") for item in _depends_on(ga_deregistration))
     assert convergence["Properties"]["ServiceToken"]
+
+    # Ordinary deploys must not accumulate explicit provider groups. Strict
+    # live-validation synthesis flips only these groups to Retain so its exact
+    # post-stack cleanup can remove the same generation.
+    for logical_id_prefix in (
+        "HelmInstallerProviderLogGroup",
+        "HelmTeardownProviderLogGroup",
+        "GaDeregistrationProviderLogGroup",
+    ):
+        _, log_group = _single_resource(
+            template,
+            "AWS::Logs::LogGroup",
+            logical_id_prefix,
+        )
+        assert log_group["DeletionPolicy"] == "Delete"
+        assert log_group["UpdateReplacePolicy"] == "Delete"
+
+
+def test_provider_log_retention_is_scoped_to_live_validation(
+    live_validation_feature_stack,
+):
+    _stack, template = live_validation_feature_stack
+    for logical_id_prefix in (
+        "HelmInstallerProviderLogGroup",
+        "HelmTeardownProviderLogGroup",
+        "GaDeregistrationProviderLogGroup",
+    ):
+        _, log_group = _single_resource(
+            template,
+            "AWS::Logs::LogGroup",
+            logical_id_prefix,
+        )
+        assert log_group["DeletionPolicy"] == "Retain"
+        assert log_group["UpdateReplacePolicy"] == "Retain"
 
 
 def test_non_ga_partition_omits_registration_and_tears_down_directly(ga_disabled_stack):

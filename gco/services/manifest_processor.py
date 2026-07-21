@@ -99,6 +99,10 @@ class RetryableQueuedJobApplyError(RuntimeError):
     """A deterministic queued Job apply can be retried or adopted safely."""
 
 
+class QueuedJobNotCreatedError(ValueError):
+    """A queued Job was rejected before any Kubernetes operation began."""
+
+
 def _is_retryable_kubernetes_api_error(error: ApiException) -> bool:
     """Classify throttling, server, and transport-like Kubernetes API failures."""
     try:
@@ -996,17 +1000,19 @@ class ManifestProcessor:
         """
         manifest = copy.deepcopy(manifest_data)
         if manifest.get("apiVersion") != "batch/v1" or manifest.get("kind") != "Job":
-            raise ValueError("Central queue accepts only apiVersion 'batch/v1', kind 'Job'")
+            raise QueuedJobNotCreatedError(
+                "Central queue accepts only apiVersion 'batch/v1', kind 'Job'"
+            )
 
         metadata = manifest.get("metadata")
         if not isinstance(metadata, dict):
-            raise ValueError("Queued Job metadata must be an object")
+            raise QueuedJobNotCreatedError("Queued Job metadata must be an object")
         declared_namespace = metadata.get("namespace")
         if declared_namespace is not None and declared_namespace != namespace:
-            raise ValueError("Queued Job namespace does not match the queue envelope")
+            raise QueuedJobNotCreatedError("Queued Job namespace does not match the queue envelope")
         original_name = metadata.get("name")
         if not isinstance(original_name, str) or not original_name:
-            raise ValueError("Queued Job metadata.name is required")
+            raise QueuedJobNotCreatedError("Queued Job metadata.name is required")
 
         deterministic_name = self.queued_job_name(original_name, queue_job_id)
         metadata["name"] = deterministic_name
@@ -1014,7 +1020,9 @@ class ManifestProcessor:
         labels = metadata.setdefault("labels", {})
         annotations = metadata.setdefault("annotations", {})
         if not isinstance(labels, dict) or not isinstance(annotations, dict):
-            raise ValueError("Queued Job metadata labels and annotations must be objects")
+            raise QueuedJobNotCreatedError(
+                "Queued Job metadata labels and annotations must be objects"
+            )
         labels["gco.io/managed-by"] = "central-queue"
         labels["gco.io/queue-job-key"] = hashlib.sha256(queue_job_id.encode("utf-8")).hexdigest()[
             :32
@@ -1024,7 +1032,7 @@ class ManifestProcessor:
 
         is_valid, validation_error = self.validate_manifest(manifest, namespace)
         if not is_valid:
-            raise ValueError(f"Queued Job validation failed: {validation_error}")
+            raise QueuedJobNotCreatedError(f"Queued Job validation failed: {validation_error}")
         self._inject_security_defaults(manifest)
 
         try:
