@@ -51,9 +51,23 @@ def _seed_addon_status(region: str, project: str, chart: str, status: str) -> No
 
 
 def _seed_addon_input(region: str, project: str) -> None:
+    # The orchestrator persists the replay input zlib+base64 encoded because
+    # SSM rejects raw {{PLACEHOLDER}} tokens; seed the same encoding.
+    import base64
+    import zlib
+
+    raw = json.dumps(
+        {
+            "ClusterName": f"{project}-{region}",
+            "ImageReplacements": {"{{CLUSTER_NAME}}": f"{project}-{region}"},
+            "Region": region,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     boto3.client("ssm", region_name=region).put_parameter(
         Name=f"/{project}/addons/{region}/_input",
-        Value=json.dumps({"ClusterName": f"{project}-{region}", "Region": region}),
+        Value=base64.b64encode(zlib.compress(raw.encode("utf-8"), 9)).decode("ascii"),
         Type="String",
         Overwrite=True,
     )

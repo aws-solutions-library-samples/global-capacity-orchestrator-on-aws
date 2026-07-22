@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
@@ -102,7 +103,7 @@ def _poll_iterations(total_wait_seconds: int) -> int:
     return max(1, total_wait_seconds // DRAIN_POLL_INTERVAL_SECONDS)
 
 
-def handler(event: dict, context: object) -> dict:
+def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     """CloudFormation custom resource handler."""
     request_type = event.get("RequestType", "")
     physical_id = event.get("PhysicalResourceId", "analytics-cleanup")
@@ -476,7 +477,7 @@ def _get_sagemaker_home_efs_id(region: str, domain_id: str) -> str:
     sm = boto3.client("sagemaker", region_name=region)
     try:
         resp = sm.describe_domain(DomainId=domain_id)
-        return resp.get("HomeEfsFileSystemId", "")
+        return str(resp.get("HomeEfsFileSystemId", ""))
     except ClientError as e:
         logger.warning("Failed to get HomeEfsFileSystemId for %s: %s", domain_id, e)
         return ""

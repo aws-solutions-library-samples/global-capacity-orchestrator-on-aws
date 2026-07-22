@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -9,6 +10,7 @@ import re
 import subprocess
 import time
 import uuid
+import zlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -1673,6 +1675,35 @@ def _live_eks_cluster_identity(
     return identity
 
 
+def _eks_cluster_log_authority_identity(
+    ctx: RunContext,
+    region: str,
+    cluster_name: str,
+    *,
+    allow_deleted: bool,
+) -> dict[str, str]:
+    """Resolve EKS log authority, tolerating a rolled-back (deleted) cluster.
+
+    A create rollback deletes the cluster itself while its control-plane and
+    Container Insights log groups survive. The DELETED tombstone identity is
+    only ever derived from this run's own stack resource record.
+    """
+    if not allow_deleted:
+        return _live_eks_cluster_identity(ctx, region, cluster_name)
+    partition = ctx.session.get_partition_for_region(region)
+    if not partition:
+        raise RuntimeError(f"Could not resolve AWS partition for EKS cluster in {region}")
+    expected_arn = (
+        f"arn:{partition}:eks:{region}:{ctx.settings.expected_account}:cluster/{cluster_name}"
+    )
+    try:
+        return _live_eks_cluster_identity(ctx, region, cluster_name)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code", "") != "ResourceNotFoundException":
+            raise
+        return {"name": cluster_name, "arn": expected_arn, "status": "DELETED"}
+
+
 def _validated_owned_log_group_identity(
     ctx: RunContext,
     record: Mapping[str, Any],
@@ -1706,15 +1737,17 @@ def _validated_owned_log_group_identity(
         raise RuntimeError(f"Log-group checkpoint source is invalid for {region}:{name}")
     source_service_identity = record.get("source_service_identity")
     if resource_type == "AWS::EKS::Cluster":
-        expected_source_identity = {
-            "name": physical_id,
-            "arn": (
-                f"arn:{partition}:eks:{region}:{ctx.settings.expected_account}:"
-                f"cluster/{physical_id}"
-            ),
-            "status": "ACTIVE",
-        }
-        if source_service_identity != expected_source_identity:
+        expected_arn = (
+            f"arn:{partition}:eks:{region}:{ctx.settings.expected_account}:cluster/{physical_id}"
+        )
+        # ACTIVE is the pre-destroy authority; DELETED is the exact tombstone
+        # recorded when a rolled-back create removed the cluster but left its
+        # control-plane and Container Insights log groups behind.
+        accepted_source_identities = tuple(
+            {"name": physical_id, "arn": expected_arn, "status": status}
+            for status in ("ACTIVE", "DELETED")
+        )
+        if source_service_identity not in accepted_source_identities:
             raise RuntimeError(
                 f"Log-group checkpoint lacks exact live EKS identity for {region}:{name}"
             )
@@ -2664,6 +2697,20 @@ def _checkpoint_owned_log_groups(ctx: RunContext) -> list[dict[str, Any]]:
                 # Destructive authority is never created or completed from a
                 # deleted-stack tombstone. Existing pre-destroy records remain usable.
                 continue
+            # A rolled-back create leaves log groups behind: retained LogGroup
+            # resources, Lambda-created default groups, and EKS control-plane
+            # groups all survive resource deletion. Their stack resources read
+            # DELETE_COMPLETE while the stack itself is still describable, so
+            # rollback statuses widen the resource filter to those tombstones.
+            rolled_back = str(live_stack.get("status") or "") in {
+                "ROLLBACK_COMPLETE",
+                "ROLLBACK_FAILED",
+                "UPDATE_ROLLBACK_COMPLETE",
+                "UPDATE_ROLLBACK_FAILED",
+            }
+            allowed_resource_statuses = {"CREATE_COMPLETE", "UPDATE_COMPLETE"}
+            if rolled_back:
+                allowed_resource_statuses |= {"DELETE_COMPLETE", "DELETE_FAILED", "DELETE_SKIPPED"}
             cfn = ctx.session.client("cloudformation", region_name=region)
             pages = cfn.get_paginator("list_stack_resources").paginate(
                 StackName=stack_record["stack_id"]
@@ -2675,7 +2722,7 @@ def _checkpoint_owned_log_groups(ctx: RunContext) -> list[dict[str, Any]]:
                 if str(item.get("ResourceType") or "") in _LOG_GROUP_SOURCE_TYPES
                 and item.get("LogicalResourceId")
                 and item.get("PhysicalResourceId")
-                and str(item.get("ResourceStatus") or "") in {"CREATE_COMPLETE", "UPDATE_COMPLETE"}
+                and str(item.get("ResourceStatus") or "") in allowed_resource_statuses
             ]
             logs = ctx.session.client("logs", region_name=region)
             lambda_client = ctx.session.client("lambda", region_name=region)
@@ -2684,15 +2731,31 @@ def _checkpoint_owned_log_groups(ctx: RunContext) -> list[dict[str, Any]]:
                 physical_id = str(resource["PhysicalResourceId"])
                 source_service_identity = None
                 if resource_type == "AWS::EKS::Cluster":
-                    source_service_identity = _live_eks_cluster_identity(ctx, region, physical_id)
+                    source_service_identity = _eks_cluster_log_authority_identity(
+                        ctx,
+                        region,
+                        physical_id,
+                        allow_deleted=rolled_back,
+                    )
                 names = _derived_log_group_names(resource_type, physical_id)
                 if resource_type == "AWS::Lambda::Function":
-                    function = lambda_client.get_function_configuration(FunctionName=physical_id)
                     default_name = f"/aws/lambda/{physical_id}"
-                    configured_name = str(
-                        (function.get("LoggingConfig") or {}).get("LogGroup") or default_name
-                    )
-                    names = (default_name,) if configured_name == default_name else ()
+                    try:
+                        function = lambda_client.get_function_configuration(
+                            FunctionName=physical_id
+                        )
+                    except ClientError as exc:
+                        error_code = exc.response.get("Error", {}).get("Code", "")
+                        if not (rolled_back and error_code == "ResourceNotFoundException"):
+                            raise
+                        # The rolled-back function is gone; only its default
+                        # log group can remain.
+                        names = (default_name,)
+                    else:
+                        configured_name = str(
+                            (function.get("LoggingConfig") or {}).get("LogGroup") or default_name
+                        )
+                        names = (default_name,) if configured_name == default_name else ()
                 for name in names:
                     key = (region, name)
                     candidate = {
@@ -3468,6 +3531,21 @@ def _topology_json_object(
     return parsed
 
 
+def _decode_replay_input_parameter(stored_value: str, description: str) -> str:
+    """Reverse the helm orchestrator's zlib+base64 replay-input encoding.
+
+    The orchestrator stores the convergence execution input encoded because
+    SSM rejects raw ``{{PLACEHOLDER}}`` tokens. ``input_sha256`` in the
+    companion ``_execution`` parameter is always computed over the decoded
+    canonical JSON returned here.
+    """
+    try:
+        compressed = base64.b64decode(stored_value.encode("ascii"), validate=True)
+        return zlib.decompress(compressed).decode("utf-8")
+    except (ValueError, zlib.error, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"{description} is not zlib+base64 replay input: {exc}") from exc
+
+
 def _ssm_string_parameter(client: Any, name: str) -> str:
     """Read one exact String parameter and reject a malformed SDK response."""
     response = client.get_parameter(Name=name)
@@ -3789,7 +3867,10 @@ def _converge_region_addons(
     input_parameter = f"{parameter_root}/_input"
     ssm = ctx.session.client("ssm", region_name=region)
     execution_json = _ssm_string_parameter(ssm, execution_parameter)
-    input_json = _ssm_string_parameter(ssm, input_parameter)
+    input_json = _decode_replay_input_parameter(
+        _ssm_string_parameter(ssm, input_parameter),
+        f"SSM parameter {input_parameter}",
+    )
     execution = _topology_json_object(
         execution_json,
         f"SSM parameter {execution_parameter}",

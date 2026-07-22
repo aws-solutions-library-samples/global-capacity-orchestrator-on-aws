@@ -281,12 +281,14 @@ jobs:
         run: |
           set -uo pipefail
           FAILED=0
-          for d in lambda/api-gateway-proxy \
+          for d in lambda/analytics-cleanup lambda/analytics-presigned-url \
+                   lambda/api-gateway-proxy lambda/capacity-poller \
                    lambda/cross-region-aggregator lambda/drift-detection \
                    lambda/ga-registration lambda/helm-installer \
+                   lambda/helm-orchestrator lambda/image-lookup \
                    lambda/kubectl-applier-simple lambda/proxy-shared \
                    lambda/regional-api-proxy lambda/secret-rotation \
-                   lambda/tls-certificate-manager; do
+                   lambda/tls-certificate-manager lambda/tls-shared; do
             echo "=== typecheck: $d ==="
             if ! mypy "$d"; then
               FAILED=1

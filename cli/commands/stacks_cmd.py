@@ -1249,6 +1249,22 @@ def addons_install(config: Any, region: Any, all_regions: bool) -> None:
         sys.exit(1)
 
 
+def _decode_addon_replay_input(stored_value: str) -> str:
+    """Reverse the helm orchestrator's zlib+base64 replay-input encoding.
+
+    The orchestrator stores the execution input encoded because SSM rejects
+    raw ``{{PLACEHOLDER}}`` tokens (see lambda/helm-orchestrator/handler.py).
+    A leading ``{`` means a raw legacy JSON value; pass it through unchanged.
+    """
+    import base64
+    import zlib
+
+    if stored_value.lstrip().startswith("{"):
+        return stored_value
+    compressed = base64.b64decode(stored_value.encode("ascii"), validate=True)
+    return zlib.decompress(compressed).decode("utf-8")
+
+
 def _addons_install_one(formatter: Any, project: str, region: str) -> bool:
     """Start an add-on install for a single region. Returns True on success."""
     import boto3
@@ -1269,7 +1285,8 @@ def _addons_install_one(formatter: Any, project: str, region: str) -> bool:
                 f"[{region}] Add-on teardown is active ({fence_param}); refusing to start."
             )
             return False
-        execution_input = ssm.get_parameter(Name=input_param)["Parameter"]["Value"]
+        stored_input = ssm.get_parameter(Name=input_param)["Parameter"]["Value"]
+        execution_input = _decode_addon_replay_input(stored_input)
     except Exception as e:
         formatter.print_error(
             f"[{region}] Could not read {input_param}: {e}. "

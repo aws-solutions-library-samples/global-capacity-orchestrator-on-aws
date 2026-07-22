@@ -38,11 +38,13 @@ Environment Variables:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
 import os
 import time
+import zlib
 from typing import Any
 
 import boto3
@@ -55,6 +57,7 @@ _SSM_PARAMETER_MAX_BYTES = 8 * 1024
 _MAX_EXECUTION_NAME_GENERATIONS = 100
 _STOP_CONFIRMATION_SECONDS = 10
 _STOP_CONFIRMATION_POLL_SECONDS = 0.2
+_BOUNDED_ERROR_CHARS = 512
 
 
 def _sfn() -> Any:
@@ -68,6 +71,33 @@ def _ssm() -> Any:
 def _canonical_json(value: Any) -> str:
     """Serialize *value* deterministically for execution and persistence."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _encode_replay_input(execution_input_json: str) -> str:
+    """Encode the replay input as zlib+base64 for SSM Parameter Store.
+
+    The raw execution input embeds ``{{PLACEHOLDER}}`` image-replacement keys,
+    and SSM rejects any String value containing ``{{}}`` ("Parameter value
+    can't nest another parameter"). Base64 is brace-free by construction and
+    zlib keeps the highly repetitive JSON inside the 8 KiB Advanced-tier bound.
+    Consumers (``gco stacks addons install`` and live release validation)
+    reverse this exact encoding before use.
+    """
+    compressed = zlib.compress(execution_input_json.encode("utf-8"), 9)
+    return base64.b64encode(compressed).decode("ascii")
+
+
+def _bounded_error_text(exc: BaseException) -> str:
+    """Render an exception for a CloudFormation response without overflowing it.
+
+    Botocore validation errors echo the full offending parameter value, and a
+    custom-resource response larger than 4 KiB is rejected wholesale with the
+    unhelpful "Response object is too long" — masking the real failure.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    if len(text) > _BOUNDED_ERROR_CHARS:
+        text = text[:_BOUNDED_ERROR_CHARS] + " ...[truncated; see provider logs]"
+    return text
 
 
 def _execution_name(request_id: Any, generation: int = 0) -> str:
@@ -94,18 +124,22 @@ def _start_or_adopt_execution(
 ) -> dict[str, Any]:
     """Start one retry-safe execution or adopt an identical running attempt."""
     if request_id is None:
-        return sfn_client.start_execution(
-            stateMachineArn=state_machine_arn,
-            input=execution_input_json,
+        return dict(
+            sfn_client.start_execution(
+                stateMachineArn=state_machine_arn,
+                input=execution_input_json,
+            )
         )
 
     for generation in range(_MAX_EXECUTION_NAME_GENERATIONS):
         execution_name = _execution_name(request_id, generation)
         try:
-            return sfn_client.start_execution(
-                stateMachineArn=state_machine_arn,
-                input=execution_input_json,
-                name=execution_name,
+            return dict(
+                sfn_client.start_execution(
+                    stateMachineArn=state_machine_arn,
+                    input=execution_input_json,
+                    name=execution_name,
+                )
             )
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") != "ExecutionAlreadyExists":
@@ -231,16 +265,30 @@ def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
     )
 
     # Persist the exact replay input before convergence can mutate the cluster.
+    # The value is zlib+base64 encoded because SSM rejects raw ``{{}}`` tokens;
+    # ``input_sha256`` below is always computed over the raw canonical JSON.
     # Intelligent-Tiering selects an Advanced parameter only when the payload
     # exceeds the Standard tier's 4 KiB limit, while retaining the 8 KiB bound
     # enforced above.
-    ssm.put_parameter(
-        Name=f"{parameter_root}/_input",
-        Value=execution_input_json,
-        Type="String",
-        Tier="Intelligent-Tiering",
-        Overwrite=True,
-    )
+    encoded_input = _encode_replay_input(execution_input_json)
+    if len(encoded_input) > _SSM_PARAMETER_MAX_BYTES:
+        raise ValueError(
+            f"Encoded convergence replay input is {len(encoded_input)} bytes; "
+            f"SSM Parameter Store supports at most {_SSM_PARAMETER_MAX_BYTES} bytes"
+        )
+    try:
+        ssm.put_parameter(
+            Name=f"{parameter_root}/_input",
+            Value=encoded_input,
+            Type="String",
+            Tier="Intelligent-Tiering",
+            Overwrite=True,
+        )
+    except Exception as exc:
+        logger.error("Replay-input persistence failed", exc_info=True)
+        raise RuntimeError(
+            "Could not persist the convergence replay input: " + _bounded_error_text(exc)
+        ) from exc
 
     request_id = event.get("RequestId")
     sfn_client = _sfn()
@@ -268,17 +316,20 @@ def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
             Type="String",
             Overwrite=True,
         )
-    except Exception:
+    except Exception as exc:
         # Do not leave an untracked execution mutating a stack whose provider
         # is about to fail and potentially roll back. The replay input remains
         # available for an explicit retry.
+        logger.error("Execution-metadata persistence failed", exc_info=True)
         try:
             _stop_execution_and_wait(sfn_client, execution_arn)
         except Exception as stop_exc:  # noqa: BLE001 - surface unsafe rollback state
             raise RuntimeError(
                 f"Could not confirm untracked execution {execution_arn} stopped"
             ) from stop_exc
-        raise
+        raise RuntimeError(
+            "Could not persist the convergence execution identity: " + _bounded_error_text(exc)
+        ) from exc
 
     logger.info("Started and recorded execution %s (fire-and-forget)", execution_arn)
 

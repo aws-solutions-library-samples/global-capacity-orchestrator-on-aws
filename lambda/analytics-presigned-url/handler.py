@@ -200,7 +200,8 @@ def _resolve_domain_id(domain_name: str) -> str | None:
         response = sagemaker.list_domains(**kwargs)
         for domain in response.get("Domains", []):
             if domain.get("DomainName") == domain_name:
-                return domain.get("DomainId")
+                domain_id = domain.get("DomainId")
+                return str(domain_id) if domain_id is not None else None
         next_token = response.get("NextToken")
         if not next_token:
             return None
@@ -312,7 +313,7 @@ def _ensure_access_point(username: str, efs_id: str) -> str:
         for ap in response.get("AccessPoints", []):
             root_dir = ap.get("RootDirectory", {})
             if root_dir.get("Path") == target_path:
-                return ap.get("AccessPointArn", "")
+                return str(ap.get("AccessPointArn", ""))
         next_token = response.get("NextToken")
         if not next_token:
             break
@@ -333,7 +334,7 @@ def _ensure_access_point(username: str, efs_id: str) -> str:
             {"Key": "gco:analytics:managed", "Value": "true"},
         ],
     )
-    return created.get("AccessPointArn", "")
+    return str(created.get("AccessPointArn", ""))
 
 
 # ==========================================================================

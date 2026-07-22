@@ -6,12 +6,14 @@ never create, mutate, or delete live infrastructure.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import stat
 import threading
 import uuid
+import zlib
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -1066,7 +1068,11 @@ class TestDeterministicTopologyReadiness:
             inputs[region] = execution_input
             metadata[region] = execution_metadata
             parameter_root = f"/gco-live/addons/{region}"
-            parameter_values[f"{parameter_root}/_input"] = input_json
+            # Stored in the orchestrator's zlib+base64 encoding; input_sha256
+            # above stays defined over the decoded canonical JSON.
+            parameter_values[f"{parameter_root}/_input"] = base64.b64encode(
+                zlib.compress(input_json.encode("utf-8"), 9)
+            ).decode("ascii")
             parameter_values[f"{parameter_root}/_execution"] = self._canonical(execution_metadata)
 
             ssm = MagicMock()

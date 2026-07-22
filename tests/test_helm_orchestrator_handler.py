@@ -7,9 +7,11 @@ keeps Delete as a no-op.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
+import zlib
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
@@ -166,11 +168,16 @@ class TestOnEvent:
         input_write = ssm.put_parameter.call_args_list[0].kwargs
         assert input_write == {
             "Name": "/gco/addons/us-east-1/_input",
-            "Value": execution_input_text,
+            "Value": handler._encode_replay_input(execution_input_text),
             "Type": "String",
             "Tier": "Intelligent-Tiering",
             "Overwrite": True,
         }
+        # SSM rejects any value containing "{{"; the stored form must be
+        # brace-free while decoding back to the exact execution input.
+        assert "{{" not in input_write["Value"]
+        decoded = zlib.decompress(base64.b64decode(input_write["Value"])).decode("utf-8")
+        assert decoded == execution_input_text
 
         expected_metadata = {
             "execution_arn": _EXECUTION_ARN,
@@ -189,6 +196,56 @@ class TestOnEvent:
             "Overwrite": True,
         }
         assert json.loads(execution_write["Value"]) == expected_metadata
+
+    def test_placeholder_image_replacements_produce_a_brace_free_ssm_value(self, orchestrator):
+        """Regression: raw ``{{PLACEHOLDER}}`` tokens made SSM reject the write.
+
+        SSM String parameters refuse any value containing ``{{}}`` ("Parameter
+        value can't nest another parameter"), which failed every deploy whose
+        replay input carried image replacements.
+        """
+        handler, sfn = orchestrator
+        ssm = MagicMock()
+        sfn.start_execution.return_value = {
+            "executionArn": _EXECUTION_ARN,
+            "startDate": _START_DATE,
+        }
+        props = self._props(
+            ImageReplacements={
+                "{{HEALTH_MONITOR_IMAGE}}": "123456789012.dkr.ecr.us-east-1.amazonaws.com/x:1",
+                "{{VPC_ENDPOINT_CIDR_BLOCKS}}": '- ipBlock:\n    cidr: "10.0.0.0/16"',
+            }
+        )
+
+        with patch.object(handler, "_ssm", return_value=ssm):
+            handler.on_event({"RequestType": "Create", "ResourceProperties": props})
+
+        stored = ssm.put_parameter.call_args_list[0].kwargs["Value"]
+        assert "{{" not in stored and "}}" not in stored
+        decoded = zlib.decompress(base64.b64decode(stored)).decode("utf-8")
+        assert decoded == sfn.start_execution.call_args.kwargs["input"]
+        assert json.loads(decoded)["ImageReplacements"] == props["ImageReplacements"]
+
+    def test_persistence_failure_reasons_are_bounded_for_cloudformation(self, orchestrator):
+        """A parameter-echoing SSM error must not overflow the 4 KiB response."""
+        handler, sfn = orchestrator
+        ssm = MagicMock()
+        ssm.put_parameter.side_effect = RuntimeError("boom " + "x" * 10_000)
+
+        with (
+            patch.object(handler, "_ssm", return_value=ssm),
+            pytest.raises(RuntimeError) as excinfo,
+        ):
+            handler.on_event(
+                {
+                    "RequestType": "Update",
+                    "ResourceProperties": self._props(ProjectName="gco"),
+                }
+            )
+
+        assert len(str(excinfo.value)) < 1024
+        assert "truncated" in str(excinfo.value)
+        sfn.start_execution.assert_not_called()
 
     def test_request_id_produces_retry_stable_safe_execution_name(self, orchestrator):
         handler, sfn = orchestrator
