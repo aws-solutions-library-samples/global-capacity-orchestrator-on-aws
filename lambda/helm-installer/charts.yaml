@@ -580,6 +580,20 @@ charts:
             searchNamespace: monitoring
         podAnnotations:
           karpenter.sh/do-not-disrupt: "true"
+      # EKS manages the control plane: etcd, the scheduler, and the controller
+      # manager are not reachable as pods, and EKS Auto Mode runs no kube-proxy
+      # DaemonSet. Their exporters would render kube-system Services whose
+      # selectors can never have ready endpoints, so release validation (and
+      # scraping) disables them; CoreDNS pods do run in kube-system and stay
+      # monitored.
+      kubeEtcd:
+        enabled: false
+      kubeScheduler:
+        enabled: false
+      kubeControllerManager:
+        enabled: false
+      kubeProxy:
+        enabled: false
       # Prometheus: discover ServiceMonitors/PodMonitors cluster-wide (not just
       # ones labeled with this release) so GCO component monitors are scraped.
       prometheus:

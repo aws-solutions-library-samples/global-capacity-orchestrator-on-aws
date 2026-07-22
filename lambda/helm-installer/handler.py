@@ -1540,25 +1540,38 @@ def _validate_enabled_release(
     if not rendered:
         raise RuntimeError("helm get manifest yielded no Kubernetes objects")
 
-    with _secure_manifest_file(manifest) as manifest_path:
-        code, live_output, stderr = run_kubectl(
-            ["get", "-f", manifest_path, "-n", namespace, "-o", "json"],
-            kubeconfig,
-            command_timeout_seconds=_validation_command_timeout(
-                deadline, KUBECTL_VALIDATION_COMMAND_TIMEOUT_SECONDS
-            ),
-            log_output=False,
-        )
-        if code == -1:
-            raise _ValidationTimeout(f"kubectl get timed out for release {release!r}")
-        if code != 0:
-            raise RuntimeError(
-                "kubectl could not retrieve every rendered object: "
-                f"{_bounded_diagnostic(stderr or live_output)}"
+    # Charts legitimately render objects into other namespaces (kube-system
+    # auth-reader RoleBindings from KEDA/cert-manager/kueue, control-plane
+    # metric Services from kube-prometheus-stack). kubectl refuses a single
+    # ``-n`` covering mixed namespaces, so retrieval is grouped by each
+    # object's effective namespace; objects without an explicit namespace
+    # resolve to the release namespace, and kubectl ignores ``-n`` for
+    # cluster-scoped kinds.
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for resource in rendered:
+        grouped.setdefault(_resource_namespace(resource) or namespace, []).append(resource)
+    live_resources: list[dict[str, Any]] = []
+    for group_namespace in sorted(grouped):
+        group_manifest = yaml.safe_dump_all(grouped[group_namespace], sort_keys=False)
+        with _secure_manifest_file(group_manifest) as manifest_path:
+            code, live_output, stderr = run_kubectl(
+                ["get", "-f", manifest_path, "-n", group_namespace, "-o", "json"],
+                kubeconfig,
+                command_timeout_seconds=_validation_command_timeout(
+                    deadline, KUBECTL_VALIDATION_COMMAND_TIMEOUT_SECONDS
+                ),
+                log_output=False,
             )
-        live_payload = _parse_json_object(live_output, f"kubectl get for {release}")
-        live_resources = _flatten_resources(live_payload, f"kubectl output for {release}")
-        _compare_resource_identities(rendered, live_resources, release, namespace)
+            if code == -1:
+                raise _ValidationTimeout(f"kubectl get timed out for release {release!r}")
+            if code != 0:
+                raise RuntimeError(
+                    "kubectl could not retrieve every rendered object: "
+                    f"{_bounded_diagnostic(stderr or live_output)}"
+                )
+            live_payload = _parse_json_object(live_output, f"kubectl get for {release}")
+            live_resources.extend(_flatten_resources(live_payload, f"kubectl output for {release}"))
+    _compare_resource_identities(rendered, live_resources, release, namespace)
 
     for resource in live_resources:
         _validate_resource_readiness(resource)

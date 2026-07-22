@@ -24,6 +24,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1454,6 +1455,52 @@ class TestReleaseConvergenceValidation:
         helm_handler._compare_resource_identities(
             [cluster_object], [cluster_object], self.RELEASE, self.NAMESPACE
         )
+
+    def test_cross_namespace_rendered_objects_are_retrieved_per_namespace(self):
+        """Regression: one ``-n`` for a mixed-namespace manifest broke live runs.
+
+        KEDA, cert-manager, and kueue render kube-system auth-reader
+        RoleBindings and kube-prometheus-stack renders kube-system metric
+        Services; kubectl refuses ``get -f`` when an object's namespace does
+        not match the single requested namespace, which failed validation for
+        every such chart on a real cluster.
+        """
+        expected_deployment = self._expected_deployment()
+        auth_reader = {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "RoleBinding",
+            "metadata": {"name": "demo-auth-reader", "namespace": "kube-system"},
+        }
+        manifest = self._manifest(expected_deployment, auth_reader)
+        kubectl_calls = []
+
+        def _kubectl(args, _kubeconfig, **_kwargs):
+            requested_namespace = args[args.index("-n") + 1]
+            with open(args[args.index("-f") + 1], encoding="utf-8") as manifest_file:
+                group = list(helm_handler.yaml.safe_load_all(manifest_file))
+            kubectl_calls.append((requested_namespace, [doc["kind"] for doc in group]))
+            if requested_namespace == "kube-system":
+                assert group == [auth_reader]
+                return 0, self._live_list(auth_reader), ""
+            assert requested_namespace == self.NAMESPACE
+            assert group == [expected_deployment]
+            return 0, self._live_list(self._live_deployment()), ""
+
+        with (
+            patch.object(helm_handler, "run_helm", side_effect=self._helm_success(manifest)),
+            patch.object(helm_handler, "run_kubectl", side_effect=_kubectl),
+        ):
+            count = helm_handler._validate_enabled_release(
+                self.RELEASE,
+                self.CHART,
+                self.VERSION,
+                self.NAMESPACE,
+                "/tmp/kubeconfig",
+                deadline=time.monotonic() + 60,
+            )
+
+        assert count == 2
+        assert sorted(call[0] for call in kubectl_calls) == [self.NAMESPACE, "kube-system"]
 
     def test_systemic_timeout_stops_further_release_checks(self):
         charts = self._charts(include_disabled=True)
