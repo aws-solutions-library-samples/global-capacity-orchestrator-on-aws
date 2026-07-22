@@ -35,8 +35,11 @@ charts:
     wait: true
     wait_timeout: "8m"
     values:
-      # The cluster, region, VPC, and IRSA annotation are injected by the
-      # regional stack because they contain deployment-specific tokens.
+      # Required by the upstream chart during static validation. The regional
+      # stack always overrides this placeholder with the real EKS cluster name.
+      clusterName: gco-runtime-injected
+      # The real cluster name, region, VPC, and IRSA annotation are injected by
+      # the regional stack because they contain deployment-specific tokens.
       serviceAccount:
         create: true
         name: aws-load-balancer-controller
