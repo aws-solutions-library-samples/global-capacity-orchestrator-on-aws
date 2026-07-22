@@ -362,8 +362,8 @@ def test_split_endpoint_materializes_roles_proxy_service_and_role_keyed_status()
     assert apps.deployments["chat-decode"].spec.replicas == 3
 
     # The proxy front is internal: the shared authenticated platform route
-    # reaches this ClusterIP Service. No endpoint-specific Ingress is created,
-    # and both historical names are cleaned up during an upgrade.
+    # reaches this ClusterIP Service. No endpoint-specific Ingress is created
+    # or deleted; the shared Gateway API route is never touched per endpoint.
     assert "chat-proxy" in apps.deployments
     assert "chat-proxy" in core.services
     proxy_service = core.services["chat-proxy"]
@@ -373,7 +373,7 @@ def test_split_endpoint_materializes_roles_proxy_service_and_role_keyed_status()
         "gco.io/role": "proxy",
     }
     assert networking.ingresses == {}
-    assert networking.deleted_ingresses == ["inference-chat", "inference-chat-proxy"]
+    assert networking.deleted_ingresses == []
 
     # The shared transport ConfigMap landed before the roles.
     assert "chat-mooncake" in core.config_maps

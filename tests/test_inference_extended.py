@@ -755,7 +755,6 @@ class TestDeleteResourcesExtended:
         monitor = _make_monitor()
         monitor.apps_v1.delete_namespaced_deployment.side_effect = ApiException(status=500)
         monitor.core_v1.delete_namespaced_service.side_effect = ApiException(status=500)
-        monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=500)
 
         with (
             patch("gco.services.inference_monitor.client.AutoscalingV2Api") as mock_hpa,

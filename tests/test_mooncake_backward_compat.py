@@ -136,9 +136,8 @@ def test_plain_spec_reconciles_to_one_deployment_and_service(bundle: dict) -> No
     """A plain endpoint creates one Deployment and one internal Service.
 
     On a first reconcile the single-instance path creates exactly those two
-    workload objects, removes the historical endpoint Ingress if present, and
-    adds none of the distributed extras: no role-split Deployments, proxy,
-    per-role autoscaler, or shared master StatefulSet.
+    workload objects and adds none of the distributed extras: no role-split
+    Deployments, proxy, per-role autoscaler, or shared master StatefulSet.
     """
     monitor = _make_monitor()
 
@@ -155,13 +154,12 @@ def test_plain_spec_reconciles_to_one_deployment_and_service(bundle: dict) -> No
     assert result["endpoint"] == bundle["name"]
 
     # Exactly one Deployment and one ClusterIP Service are materialized. The
-    # old direct Ingress is removed rather than recreated.
+    # shared Gateway API route is never touched per endpoint.
     assert monitor.apps_v1.create_namespaced_deployment.call_count == 1
     assert monitor.core_v1.create_namespaced_service.call_count == 1
     monitor.networking_v1.create_namespaced_ingress.assert_not_called()
     monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
-    delete_args = monitor.networking_v1.delete_namespaced_ingress.call_args.args
-    assert delete_args[:2] == (f"inference-{bundle['name']}", NAMESPACE)
+    monitor.networking_v1.delete_namespaced_ingress.assert_not_called()
 
     # The single created Deployment carries the endpoint's configured replicas.
     _, created = monitor.apps_v1.create_namespaced_deployment.call_args[0][:2]

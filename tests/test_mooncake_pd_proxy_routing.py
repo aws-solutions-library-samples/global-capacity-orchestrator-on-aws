@@ -148,18 +148,11 @@ def test_full_proxy_materialization_keeps_internal_service_scoped(monitor):
         "gco.io/role": PD_PROXY_ROLE_LABEL,
     }
 
-    # Reconciliation cannot create a bypass route and removes both names used
-    # by older releases.
+    # Reconciliation cannot create a bypass route.
     monitor.networking_v1.create_namespaced_ingress.assert_not_called()
     monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
     custom_api.return_value.create_namespaced_custom_object.assert_not_called()
-    deleted = [
-        call.args[:2] for call in monitor.networking_v1.delete_namespaced_ingress.call_args_list
-    ]
-    assert deleted == [
-        ("inference-my-endpoint", "gco-inference"),
-        ("inference-my-endpoint-proxy", "gco-inference"),
-    ]
+    monitor.networking_v1.delete_namespaced_ingress.assert_not_called()
 
 
 def test_role_service_resolves_only_that_role(monitor):

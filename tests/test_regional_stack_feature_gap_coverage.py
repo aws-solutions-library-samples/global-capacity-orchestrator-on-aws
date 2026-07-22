@@ -842,9 +842,10 @@ def test_helm_providers_are_observable_and_iam_scoped(feature_stack):
     teardown_dependencies = _depends_on(teardown_resource)
     assert any(item.startswith("HelmInstallerLambdaAccessEntry") for item in teardown_dependencies)
     assert any(item.startswith("HelmInstallStateMachine") for item in teardown_dependencies)
-    assert any(item.startswith("HelmInstallCharts") for item in teardown_dependencies)
     assert any(item.startswith("AwsLoadBalancerControllerPolicy") for item in teardown_dependencies)
-    assert not any(item.startswith("GaDeregistration") for item in teardown_dependencies)
+    # Delete order is HelmTeardown -> GaDeregistration -> HelmInstallCharts, so
+    # the teardown depends on deregistration, which depends on convergence.
+    assert any(item.startswith("GaDeregistration") for item in teardown_dependencies)
     assert teardown_resource["Properties"]["RegistryRegion"] == "us-east-2"
     assert teardown_resource["Properties"]["ProjectName"] == "gco-test"
     assert "EndpointGroupArn" in teardown_resource["Properties"]
@@ -859,7 +860,7 @@ def test_helm_providers_are_observable_and_iam_scoped(feature_stack):
         "AWS::CloudFormation::CustomResource",
         "GaDeregistration",
     )
-    assert any(item.startswith("HelmTeardown") for item in _depends_on(ga_deregistration))
+    assert any(item.startswith("HelmInstallCharts") for item in _depends_on(ga_deregistration))
     convergence_dependencies = _depends_on(convergence)
     assert any(
         item.startswith("AwsLoadBalancerControllerPolicy") for item in convergence_dependencies
@@ -980,7 +981,8 @@ def test_non_ga_partition_omits_registration_and_tears_down_directly(ga_disabled
         "AWS::CloudFormation::CustomResource",
         "HelmTeardown",
     )
+    # The registry-only deregistration keeps its place in the delete order:
+    # HelmTeardown -> GaDeregistration -> HelmInstallCharts.
     dependencies = _depends_on(teardown)
-    assert any(item.startswith("HelmInstallCharts") for item in dependencies)
-    assert not any(item.startswith("GaDeregistration") for item in dependencies)
-    assert any(item.startswith("HelmTeardown") for item in _depends_on(deregistration))
+    assert any(item.startswith("GaDeregistration") for item in dependencies)
+    assert any(item.startswith("HelmInstallCharts") for item in _depends_on(deregistration))
