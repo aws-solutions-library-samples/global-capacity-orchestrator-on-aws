@@ -769,7 +769,7 @@ class TestDeletePaths:
             handler.deregister_alb_from_ga(ga, ENDPOINT_GROUP_ARN)
 
         remove.assert_called_once_with(ga, ENDPOINT_GROUP_ARN)
-        wait.assert_called_once_with(ga, ENDPOINT_GROUP_ARN)
+        wait.assert_called_once_with(ga, ENDPOINT_GROUP_ARN, strict=False)
 
     def test_strict_deregister_rejects_failed_deployment_wait(self, ga_module):
         handler, _, _ = ga_module
@@ -794,6 +794,25 @@ class TestDeletePaths:
         handler.remove_ga_endpoints(ga, ENDPOINT_GROUP_ARN, strict=True)
 
         ga.remove_endpoints.assert_not_called()
+
+    def test_strict_wait_raises_describe_failures_instead_of_timeout(self, ga_module):
+        """Regression: an AccessDenied describe was mislabeled as a GA timeout.
+
+        The teardown-time strict wait must surface the real error; reporting a
+        permissions gap as "did not reach DEPLOYED" sent operators debugging
+        Global Accelerator propagation instead of IAM.
+        """
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        ga.describe_accelerator.side_effect = _client_error(
+            "AccessDeniedException", "DescribeAccelerator"
+        )
+
+        with pytest.raises(ClientError, match="AccessDeniedException"):
+            handler.deregister_alb_from_ga(ga, ENDPOINT_GROUP_ARN, strict=True)
+
+        # The lenient path retains its best-effort behavior.
+        assert handler.wait_for_accelerator_deployed(ga, ENDPOINT_GROUP_ARN) is False
 
     def test_wait_for_accelerator_uses_derived_arn(self, ga_module):
         handler, _, _ = ga_module

@@ -518,8 +518,14 @@ def wait_for_accelerator_deployed(
     ga_client: Any,
     endpoint_group_arn: str,
     timeout_seconds: int = GA_DEPLOYED_WAIT_SECONDS,
+    *,
+    strict: bool = False,
 ) -> bool:
-    """Wait until GA finishes redeploying and releases its managed ENIs."""
+    """Wait until GA finishes redeploying and releases its managed ENIs.
+
+    In strict mode a describe failure raises immediately instead of being
+    reported as a timeout; a permissions gap must surface as itself.
+    """
     accelerator_arn = _accelerator_arn_from_endpoint_group(endpoint_group_arn)
     start_time = time.time()
     while time.time() - start_time < timeout_seconds:
@@ -529,6 +535,8 @@ def wait_for_accelerator_deployed(
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") == "AcceleratorNotFoundException":
                 return True
+            if strict:
+                raise
             logger.warning("Failed to describe accelerator status: %s", exc)
             return False
         if status == "DEPLOYED":
@@ -551,7 +559,7 @@ def deregister_alb_from_ga(
         remove_ga_endpoints(ga_client, endpoint_group_arn, strict=True)
     else:
         remove_ga_endpoints(ga_client, endpoint_group_arn)
-    deployed = wait_for_accelerator_deployed(ga_client, endpoint_group_arn)
+    deployed = wait_for_accelerator_deployed(ga_client, endpoint_group_arn, strict=strict)
     if strict and not deployed:
         raise TimeoutError("Global Accelerator did not reach DEPLOYED after endpoint removal")
 

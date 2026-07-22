@@ -2046,6 +2046,40 @@ class TestManifestReadinessValidation:
                 endpoint_slice_items=endpoint_slices,
             )
 
+    def test_allow_empty_endpoints_annotation_accepts_an_endpointless_service(
+        self, handler_module, tmp_path
+    ):
+        """Accelerator-backed Services are ready by existence on GPU-less clusters.
+
+        Regression: the DCGM exporter Service selects a DaemonSet that only
+        schedules onto GPU nodes, so a fresh deployment failed readiness with
+        zero endpoints until the first GPU node existed.
+        """
+        (tmp_path / "10-service.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "apiVersion": "v1",
+                    "kind": "Service",
+                    "metadata": {
+                        "name": "dcgm-exporter",
+                        "namespace": "kube-system",
+                        "annotations": {"gco.io/allow-empty-endpoints": "true"},
+                    },
+                    "spec": {"selector": {"app": "dcgm-exporter"}},
+                }
+            )
+        )
+        live_objects = {("v1", "Service", "kube-system", "dcgm-exporter"): {"metadata": {}}}
+
+        result, _ = _validate_with_fake_dynamic(
+            handler_module,
+            tmp_path,
+            live_objects,
+            endpoint_slice_items=[],
+        )
+
+        assert result["ExpectedCount"] == result["ValidatedCount"] == 1
+
     def test_unresolved_optional_resources_are_not_expected(self, handler_module, tmp_path):
         (tmp_path / "10-required.yaml").write_text(
             "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: required\n  namespace: demo\n"

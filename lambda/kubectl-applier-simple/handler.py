@@ -108,6 +108,12 @@ _GATEWAY_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
     ),
 }
 
+# Services annotated with this marker are validated for exact existence only;
+# a ready EndpointSlice endpoint is not required. Reserved for Services whose
+# backends schedule exclusively onto accelerator nodes that a fresh cluster
+# does not have yet (for example the DCGM exporter DaemonSet).
+_ALLOW_EMPTY_ENDPOINTS_ANNOTATION = "gco.io/allow-empty-endpoints"
+
 # This is the authoritative set of kinds the applier knows how to create or
 # patch. Planning rejects anything else before the first Kubernetes mutation,
 # which prevents a newly added raw manifest from being silently ignored.
@@ -1867,6 +1873,15 @@ def _service_endpoint_failure(
 ) -> str | None:
     document_value = planned_resource["document"]
     document: dict[str, Any] = document_value if isinstance(document_value, dict) else {}
+    metadata_value = document.get("metadata")
+    document_metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
+    annotations_value = document_metadata.get("annotations")
+    annotations: dict[str, Any] = annotations_value if isinstance(annotations_value, dict) else {}
+    if str(annotations.get(_ALLOW_EMPTY_ENDPOINTS_ANNOTATION)).lower() == "true":
+        # Services backing accelerator-scheduled DaemonSets (for example the
+        # DCGM exporter) legitimately have zero endpoints until the first GPU
+        # node is provisioned; existence is their readiness contract.
+        return None
     spec_value = document.get("spec")
     spec: dict[str, Any] = spec_value if isinstance(spec_value, dict) else {}
     selector = spec.get("selector")

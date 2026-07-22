@@ -3167,6 +3167,10 @@ class GCORegionalStack(Stack):
                         "globalaccelerator:RemoveEndpoints",
                         "globalaccelerator:UpdateEndpointGroup",
                         "globalaccelerator:DescribeEndpointGroup",
+                        # The teardown-time cleanup_gateway_endpoint task runs
+                        # on this Lambda and strictly waits for the accelerator
+                        # to reach DEPLOYED after endpoint removal.
+                        "globalaccelerator:DescribeAccelerator",
                     ],
                     resources=["*"],
                 )

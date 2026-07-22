@@ -191,6 +191,10 @@ metadata:
     project: gco
   annotations:
     gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+    # The exporter DaemonSet schedules only onto GPU nodes, so this Service
+    # legitimately has zero endpoints until the first GPU workload provisions
+    # one; deployment readiness must not require a ready endpoint.
+    gco.io/allow-empty-endpoints: "true"
 spec:
   type: ClusterIP
   selector:

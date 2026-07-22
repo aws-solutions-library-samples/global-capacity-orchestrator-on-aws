@@ -61,6 +61,7 @@ _LOG_CLEANUP_SESSION_SECONDS = 900
 _LOG_CLEANUP_STACK_POLL_ATTEMPTS = 120
 _LOG_CLEANUP_STACK_POLL_SECONDS = 5
 _LOG_GROUP_OBSERVATION_ATTEMPTS = 6
+_LOG_GROUP_CLEANUP_MAX_PASSES = 3
 _LOG_GROUP_CHECKPOINT_STABLE_OBSERVATIONS = 2
 _LOG_GROUP_CLEANUP_STABLE_OBSERVATIONS = 2
 _LOG_GROUP_ABSENCE_OBSERVATIONS = 3
@@ -5663,12 +5664,107 @@ def _cleanup_new_ecr_repositories(ctx: RunContext) -> dict[str, Any]:
     return {"repositories": results, "automatic_deletion": False}
 
 
+def _log_group_adoption_blockers(
+    identity: Mapping[str, Any],
+    *,
+    run_id: str,
+    cleanup_token: str,
+) -> list[str]:
+    """Explain why a regenerated same-name log group cannot be adopted.
+
+    Teardown-time Lambda invocations flush their final events after their log
+    groups were tagged or deleted, recreating untagged generations that belong
+    to this run. Adoption is refused for any generation carrying another
+    owner's markers: a foreign validation run/cleanup token, or CloudFormation
+    stack tags (a real deployment's explicit LogGroup resources are always
+    stack-tagged, while Lambda-recreated groups start with no tags at all).
+    """
+    tags_value = identity.get("tags")
+    tags: dict[str, str] = dict(tags_value) if isinstance(tags_value, Mapping) else {}
+    blockers = []
+    if tags.get(_RUN_STACK_TAG) not in (None, run_id):
+        blockers.append(f"foreign {_RUN_STACK_TAG}={tags.get(_RUN_STACK_TAG)!r}")
+    if tags.get(_LOG_CLEANUP_TOKEN_TAG) not in (None, cleanup_token):
+        blockers.append(f"foreign {_LOG_CLEANUP_TOKEN_TAG}")
+    stack_tags = sorted(key for key in tags if key.startswith("aws:cloudformation:"))
+    if stack_tags:
+        blockers.append("cloudformation-owned generation: " + ", ".join(stack_tags))
+    return blockers
+
+
+def _adopt_regenerated_log_group(
+    ctx: RunContext,
+    record: dict[str, Any],
+    logs_client: Any,
+    *,
+    region: str,
+    name: str,
+    observed_generation: Mapping[str, Any],
+    authority_tags: Mapping[str, str],
+) -> dict[str, Any] | None:
+    """Tag and take ownership of a self-regenerated log-group generation.
+
+    Callers must already hold the invocation-level proof that every exact
+    target stack is absent, so no live deployment can own this name. Returns
+    the stabilized post-tag identity, or ``None`` when the generation did not
+    stabilize under this run's authority tags.
+    """
+    stack_absence = _verify_target_stack_absence(ctx)
+    if not stack_absence["all_absent"]:
+        raise RuntimeError("Log-group adoption requires every exact target stack to be absent")
+    arn = str(observed_generation.get("arn") or "")
+    if not arn:
+        raise RuntimeError(f"Regenerated log group omitted its ARN: {region}:{name}")
+    logs_client.tag_resource(resourceArn=arn, tags=dict(authority_tags))
+    post_tag = _observe_log_group_stability(
+        logs_client,
+        region,
+        name,
+        expected_identity={**observed_generation, "tags": dict(authority_tags)},
+        expected_tags=authority_tags,
+        required_present=_LOG_GROUP_CLEANUP_STABLE_OBSERVATIONS,
+        required_absent=_LOG_GROUP_ABSENCE_OBSERVATIONS,
+    )
+    _record_log_group_observation(
+        ctx,
+        record,
+        phase="cleanup-adoption-post-tag",
+        outcome=post_tag,
+    )
+    if post_tag["status"] != "present":
+        return None
+    identity = post_tag.get("identity")
+    if not isinstance(identity, dict):
+        raise RuntimeError(f"Adopted log group omitted its identity: {region}:{name}")
+    with ctx.state_lock:
+        record["observed_identity"] = copy.deepcopy(identity)
+        adoptions = record.setdefault("adopted_generations", [])
+        if not isinstance(adoptions, list):
+            raise RuntimeError("Log-group adopted_generations must be a list")
+        adoptions.append(
+            {
+                "adopted_at": utc_now(),
+                "generation": _log_group_generation(identity),
+                "stack_absence_proof_at": stack_absence.get("verified_at") or utc_now(),
+            }
+        )
+        ctx.persist_callback(ctx.checkpoint)
+    return identity
+
+
 def _cleanup_owned_log_groups(ctx: RunContext) -> dict[str, Any]:
-    """Delete only a stable checkpointed generation, then prove stable absence."""
+    """Converge every checkpointed log group to stable absence.
+
+    Each record is processed independently: one blocked generation never
+    strands the rest. Teardown-time Lambda invocations recreate their own
+    groups after tagging, so untagged same-name regenerations are adopted
+    (re-tagged under this run's proven stack-absence authority) and deleted;
+    generations carrying another owner's markers stay strictly preserved.
+    Bounded extra passes absorb log deliveries that land mid-sweep.
+    """
     records = ctx.checkpoint.state.get("owned_log_groups", [])
     if not isinstance(records, list):
         raise RuntimeError("Checkpoint owned_log_groups must be a list")
-
     results: list[dict[str, Any]] = []
     authorization: dict[str, Any] = {"needed": False}
     helper_cleanup: dict[str, Any] = {"needed": False, "deleted": True}
@@ -5679,7 +5775,6 @@ def _cleanup_owned_log_groups(ctx: RunContext) -> dict[str, Any]:
         _RUN_STACK_TAG: ctx.settings.run_id,
         _LOG_CLEANUP_TOKEN_TAG: cleanup_token,
     }
-
     try:
         if records:
             stack_absence = _verify_target_stack_absence(ctx)
@@ -5690,43 +5785,145 @@ def _cleanup_owned_log_groups(ctx: RunContext) -> dict[str, Any]:
         if records and not re.fullmatch(r"[0-9a-f]{32}", cleanup_token):
             raise RuntimeError("Checkpoint log-group cleanup token is malformed")
 
-        pending: list[tuple[dict[str, Any], str, str, dict[str, Any]]] = []
+        validated: list[tuple[dict[str, Any], str, str]] = []
         for raw_record in records:
             if not isinstance(raw_record, dict):
                 raise RuntimeError("Checkpoint owned_log_groups must contain objects")
-            record = raw_record
-            region, name = _validated_owned_log_group_identity(ctx, record)
-            observed = record.get("observed_identity")
-            if not isinstance(observed, dict):
-                raise RuntimeError(f"Log-group checkpoint identity is malformed: {region}:{name}")
-            _log_group_generation(observed)
-            logs = ctx.session.client("logs", region_name=region)
-            initial = _observe_log_group_stability(
-                logs,
-                region,
-                name,
-                expected_identity=observed,
-                expected_tags=authority_tags,
-                required_present=_LOG_GROUP_CLEANUP_STABLE_OBSERVATIONS,
-                required_absent=_LOG_GROUP_ABSENCE_OBSERVATIONS,
-            )
-            _record_log_group_observation(
+            region, name = _validated_owned_log_group_identity(ctx, raw_record)
+            validated.append((raw_record, region, name))
+
+        restricted_clients: dict[str, Any] = {}
+        session_credentials: dict[str, Any] | None = None
+
+        def _restricted_logs(region: str) -> Any:
+            """Create the tag-conditioned deletion session lazily, once."""
+            nonlocal session_credentials, authorization
+            if session_credentials is None:
+                helper = _ensure_log_cleanup_helper(ctx)
+                if not helper.get("needed"):
+                    raise RuntimeError("Log cleanup role was not created for pending groups")
+                session_name = (
+                    "live-validation-logs-"
+                    + uuid.uuid5(_LOG_CLEANUP_HELPER_NAMESPACE, ctx.settings.run_id).hex[:16]
+                )
+                assumption = ctx.session.client("sts", region_name=helper["region"]).assume_role(
+                    RoleArn=helper["role_arn"],
+                    RoleSessionName=session_name,
+                    DurationSeconds=_LOG_CLEANUP_SESSION_SECONDS,
+                    ExternalId=helper["external_id"],
+                    Policy=_canonical_json(helper["session_policy"]),
+                )
+                credentials = assumption.get("Credentials") or {}
+                if any(
+                    not credentials.get(field)
+                    for field in ("AccessKeyId", "SecretAccessKey", "SessionToken")
+                ):
+                    raise RuntimeError("AssumeRole omitted cleanup session credentials")
+                assumed_user_arn = str((assumption.get("AssumedRoleUser") or {}).get("Arn") or "")
+                expected_assumed_arn = (
+                    f"arn:{helper['partition']}:sts::{ctx.settings.expected_account}:assumed-role/"
+                    f"{helper['role_arn'].rsplit('/', 1)[-1]}/{session_name}"
+                )
+                if assumed_user_arn != expected_assumed_arn:
+                    raise RuntimeError("AssumeRole returned an unexpected cleanup principal")
+                expiration = credentials.get("Expiration")
+                session_credentials = credentials
+                authorization = {
+                    "needed": True,
+                    "mode": "sts-assume-role-session-policy",
+                    "role_arn": helper["role_arn"],
+                    "helper_stack_id": helper["stack_id"],
+                    "atomic_resource_tag_condition": True,
+                    "condition_tag_keys": [_RUN_STACK_TAG, _LOG_CLEANUP_TOKEN_TAG],
+                    "session_expiration": (
+                        expiration.isoformat() if expiration is not None else None
+                    ),
+                }
+            if region not in restricted_clients:
+                assert session_credentials is not None
+                restricted_clients[region] = ctx.session.client(
+                    "logs",
+                    region_name=region,
+                    aws_access_key_id=session_credentials["AccessKeyId"],
+                    aws_secret_access_key=session_credentials["SecretAccessKey"],
+                    aws_session_token=session_credentials["SessionToken"],
+                )
+            return restricted_clients[region]
+
+        def _blocked_entry(
+            record: dict[str, Any],
+            region: str,
+            name: str,
+            *,
+            status: str,
+            phase: str,
+            outcome: dict[str, Any],
+            retryable: bool,
+            delete_requested: bool = False,
+        ) -> dict[str, Any]:
+            disposition = _set_log_group_disposition(
                 ctx,
                 record,
-                phase="cleanup-pending-stability",
-                outcome=initial,
+                status=status,
+                phase=phase,
+                outcome=outcome,
             )
-            if initial["status"] == "absent":
-                record["deleted"] = True
-                disposition = _set_log_group_disposition(
+            return {
+                "region": region,
+                "name": name,
+                "original_identity": copy.deepcopy(record.get("observed_identity")),
+                "deleted": False,
+                "blocked": True,
+                "retryable": retryable,
+                "delete_requested": delete_requested,
+                "observation": copy.deepcopy(outcome),
+                "replacement_evidence": copy.deepcopy(record.get("replacement_evidence", [])),
+                "original_generation_disposition": disposition,
+            }
+
+        completed: dict[tuple[str, str], dict[str, Any]] = {}
+        blocked: dict[tuple[str, str], dict[str, Any]] = {}
+        for sweep in range(1, _LOG_GROUP_CLEANUP_MAX_PASSES + 1):
+            if sweep > 1:
+                # Absorb straggling teardown log deliveries before re-observing.
+                time.sleep(_LOG_GROUP_OBSERVATION_POLL_SECONDS * sweep)
+            blocked.clear()
+            for record, region, name in validated:
+                key = (region, name)
+                if key in completed:
+                    continue
+                observed = record.get("observed_identity")
+                if not isinstance(observed, dict):
+                    raise RuntimeError(
+                        f"Log-group checkpoint identity is malformed: {region}:{name}"
+                    )
+                _log_group_generation(observed)
+                normal_logs = ctx.session.client("logs", region_name=region)
+                initial = _observe_log_group_stability(
+                    normal_logs,
+                    region,
+                    name,
+                    expected_identity=observed,
+                    expected_tags=authority_tags,
+                    required_present=_LOG_GROUP_CLEANUP_STABLE_OBSERVATIONS,
+                    required_absent=_LOG_GROUP_ABSENCE_OBSERVATIONS,
+                )
+                _record_log_group_observation(
                     ctx,
                     record,
-                    status="already-absent-confirmed",
                     phase="cleanup-pending-stability",
                     outcome=initial,
                 )
-                results.append(
-                    {
+                if initial["status"] == "absent":
+                    record["deleted"] = True
+                    disposition = _set_log_group_disposition(
+                        ctx,
+                        record,
+                        status="already-absent-confirmed",
+                        phase="cleanup-pending-stability",
+                        outcome=initial,
+                    )
+                    completed[key] = {
                         "region": region,
                         "name": name,
                         "original_identity": copy.deepcopy(observed),
@@ -5734,100 +5931,87 @@ def _cleanup_owned_log_groups(ctx: RunContext) -> dict[str, Any]:
                         "absence_observations": initial["attempt_count"],
                         "original_generation_disposition": disposition,
                     }
-                )
-                continue
-            if initial["status"] != "present":
-                if initial["status"] == "replacement":
-                    disposition_status = "replacement-observed-before-delete"
-                elif initial["status"] == "tag-drift":
-                    disposition_status = "authority-tag-drift-before-delete"
-                else:
-                    disposition_status = "identity-not-stable-before-delete"
-                disposition = _set_log_group_disposition(
-                    ctx,
-                    record,
-                    status=disposition_status,
-                    phase="cleanup-pending-stability",
-                    outcome=initial,
-                )
-                results.append(
-                    {
-                        "region": region,
-                        "name": name,
-                        "original_identity": copy.deepcopy(observed),
-                        "deleted": False,
-                        "blocked": True,
-                        "observation": copy.deepcopy(initial),
-                        "replacement_evidence": copy.deepcopy(
-                            record.get("replacement_evidence", [])
-                        ),
-                        "original_generation_disposition": disposition,
-                    }
-                )
-                raise RuntimeError(
-                    f"Log-group cleanup was fenced before deletion for "
-                    f"{region}:{name}: {initial['status']}"
-                )
-            identity = initial.get("identity")
-            if not isinstance(identity, dict):
-                raise RuntimeError(
-                    f"Stable log-group observation omitted identity: {region}:{name}"
-                )
-            pending.append((record, region, name, identity))
+                    continue
 
-        authorization = {"needed": bool(pending)}
-        if pending:
-            helper = _ensure_log_cleanup_helper(ctx)
-            if not helper.get("needed"):
-                raise RuntimeError("Log cleanup role was not created for pending groups")
-            session_name = (
-                "live-validation-logs-"
-                + uuid.uuid5(_LOG_CLEANUP_HELPER_NAMESPACE, ctx.settings.run_id).hex[:16]
-            )
-            assumption = ctx.session.client("sts", region_name=helper["region"]).assume_role(
-                RoleArn=helper["role_arn"],
-                RoleSessionName=session_name,
-                DurationSeconds=_LOG_CLEANUP_SESSION_SECONDS,
-                ExternalId=helper["external_id"],
-                Policy=_canonical_json(helper["session_policy"]),
-            )
-            credentials = assumption.get("Credentials") or {}
-            if any(
-                not credentials.get(field)
-                for field in ("AccessKeyId", "SecretAccessKey", "SessionToken")
-            ):
-                raise RuntimeError("AssumeRole omitted cleanup session credentials")
-            assumed_user_arn = str((assumption.get("AssumedRoleUser") or {}).get("Arn") or "")
-            expected_assumed_arn = (
-                f"arn:{helper['partition']}:sts::{ctx.settings.expected_account}:assumed-role/"
-                f"{helper['role_arn'].rsplit('/', 1)[-1]}/{session_name}"
-            )
-            if assumed_user_arn != expected_assumed_arn:
-                raise RuntimeError("AssumeRole returned an unexpected cleanup principal")
-
-            expiration = credentials.get("Expiration")
-            authorization = {
-                "needed": True,
-                "mode": "sts-assume-role-session-policy",
-                "role_arn": helper["role_arn"],
-                "helper_stack_id": helper["stack_id"],
-                "atomic_resource_tag_condition": True,
-                "condition_tag_keys": [_RUN_STACK_TAG, _LOG_CLEANUP_TOKEN_TAG],
-                "session_expiration": (expiration.isoformat() if expiration is not None else None),
-            }
-            restricted_clients: dict[str, Any] = {}
-            for record, region, name, identity in pending:
-                if region not in restricted_clients:
-                    restricted_clients[region] = ctx.session.client(
-                        "logs",
-                        region_name=region,
-                        aws_access_key_id=credentials["AccessKeyId"],
-                        aws_secret_access_key=credentials["SecretAccessKey"],
-                        aws_session_token=credentials["SessionToken"],
+                identity: dict[str, Any] | None = None
+                if initial["status"] == "present":
+                    candidate = initial.get("identity")
+                    if not isinstance(candidate, dict):
+                        raise RuntimeError(
+                            f"Stable log-group observation omitted identity: {region}:{name}"
+                        )
+                    identity = candidate
+                elif initial["status"] == "replacement":
+                    replacement_identity = initial.get("identity")
+                    if not isinstance(replacement_identity, dict):
+                        # The regeneration vanished mid-observation; the next
+                        # pass will see stable absence.
+                        blocked[key] = _blocked_entry(
+                            record,
+                            region,
+                            name,
+                            status="replacement-without-identity",
+                            phase="cleanup-pending-stability",
+                            outcome=initial,
+                            retryable=True,
+                        )
+                        continue
+                    blockers = _log_group_adoption_blockers(
+                        replacement_identity,
+                        run_id=ctx.settings.run_id,
+                        cleanup_token=cleanup_token,
                     )
-                restricted_logs = restricted_clients[region]
-                normal_logs = ctx.session.client("logs", region_name=region)
+                    if blockers:
+                        blocked[key] = _blocked_entry(
+                            record,
+                            region,
+                            name,
+                            status="replacement-observed-before-delete",
+                            phase="cleanup-pending-stability",
+                            outcome={**initial, "adoption_blockers": blockers},
+                            retryable=False,
+                        )
+                        continue
+                    adopted = _adopt_regenerated_log_group(
+                        ctx,
+                        record,
+                        normal_logs,
+                        region=region,
+                        name=name,
+                        observed_generation=replacement_identity,
+                        authority_tags=authority_tags,
+                    )
+                    if adopted is None:
+                        blocked[key] = _blocked_entry(
+                            record,
+                            region,
+                            name,
+                            status="adoption-did-not-stabilize",
+                            phase="cleanup-adoption-post-tag",
+                            outcome=initial,
+                            retryable=True,
+                        )
+                        continue
+                    identity = adopted
+                else:
+                    if initial["status"] == "tag-drift":
+                        disposition_status = "authority-tag-drift-before-delete"
+                        retryable = False
+                    else:
+                        disposition_status = "identity-not-stable-before-delete"
+                        retryable = True
+                    blocked[key] = _blocked_entry(
+                        record,
+                        region,
+                        name,
+                        status=disposition_status,
+                        phase="cleanup-pending-stability",
+                        outcome=initial,
+                        retryable=retryable,
+                    )
+                    continue
 
+                restricted_logs = _restricted_logs(region)
                 # No persistence, sleep, or unrelated API call is permitted between
                 # this single exact read and the tag-conditioned delete request.
                 pre_delete = _observe_log_group_stability(
@@ -5871,35 +6055,27 @@ def _cleanup_owned_log_groups(ctx: RunContext) -> dict[str, Any]:
                 if pre_delete["status"] not in {"present", "absent"}:
                     if pre_delete["status"] == "replacement":
                         disposition_status = "replacement-observed-immediately-before-delete"
+                        retryable = not _log_group_adoption_blockers(
+                            pre_delete.get("identity") or {},
+                            run_id=ctx.settings.run_id,
+                            cleanup_token=cleanup_token,
+                        )
                     elif pre_delete["status"] == "tag-drift":
                         disposition_status = "authority-tag-drift-immediately-before-delete"
+                        retryable = False
                     else:
                         disposition_status = "identity-not-stable-immediately-before-delete"
-                    disposition = _set_log_group_disposition(
-                        ctx,
+                        retryable = True
+                    blocked[key] = _blocked_entry(
                         record,
+                        region,
+                        name,
                         status=disposition_status,
                         phase="cleanup-immediate-pre-delete",
                         outcome=pre_delete,
+                        retryable=retryable,
                     )
-                    results.append(
-                        {
-                            "region": region,
-                            "name": name,
-                            "original_identity": copy.deepcopy(identity),
-                            "deleted": False,
-                            "blocked": True,
-                            "observation": copy.deepcopy(pre_delete),
-                            "replacement_evidence": copy.deepcopy(
-                                record.get("replacement_evidence", [])
-                            ),
-                            "original_generation_disposition": disposition,
-                        }
-                    )
-                    raise RuntimeError(
-                        f"Log-group cleanup was fenced immediately before deletion for "
-                        f"{region}:{name}: {pre_delete['status']}"
-                    )
+                    continue
 
                 absence = _observe_log_group_stability(
                     normal_logs,
@@ -5919,36 +6095,28 @@ def _cleanup_owned_log_groups(ctx: RunContext) -> dict[str, Any]:
                 if absence["status"] != "absent":
                     if absence["status"] == "replacement":
                         disposition_status = "replacement-observed-before-confirmed-absence"
+                        retryable = not _log_group_adoption_blockers(
+                            absence.get("identity") or {},
+                            run_id=ctx.settings.run_id,
+                            cleanup_token=cleanup_token,
+                        )
                     elif absence["status"] == "tag-drift":
                         disposition_status = "authority-tag-drift-after-delete-request"
+                        retryable = False
                     else:
                         disposition_status = "absence-not-stable-after-delete-request"
-                    disposition = _set_log_group_disposition(
-                        ctx,
+                        retryable = True
+                    blocked[key] = _blocked_entry(
                         record,
+                        region,
+                        name,
                         status=disposition_status,
                         phase="cleanup-post-delete-absence",
                         outcome=absence,
+                        retryable=retryable,
+                        delete_requested=pre_delete["status"] == "present",
                     )
-                    results.append(
-                        {
-                            "region": region,
-                            "name": name,
-                            "original_identity": copy.deepcopy(identity),
-                            "delete_requested": pre_delete["status"] == "present",
-                            "deleted": False,
-                            "blocked": True,
-                            "observation": copy.deepcopy(absence),
-                            "replacement_evidence": copy.deepcopy(
-                                record.get("replacement_evidence", [])
-                            ),
-                            "original_generation_disposition": disposition,
-                        }
-                    )
-                    raise RuntimeError(
-                        f"Log-group absence was not stable after deletion for "
-                        f"{region}:{name}: {absence['status']}"
-                    )
+                    continue
 
                 record["deleted"] = True
                 disposition = _set_log_group_disposition(
@@ -5958,23 +6126,33 @@ def _cleanup_owned_log_groups(ctx: RunContext) -> dict[str, Any]:
                     phase="cleanup-post-delete-absence",
                     outcome=absence,
                 )
-                results.append(
-                    {
-                        "region": region,
-                        "name": name,
-                        "arn": identity["arn"],
-                        "creation_time": identity["creation_time"],
-                        "stack_id": record["stack_id"],
-                        "source_logical_id": record["source_logical_id"],
-                        "source_resource_type": record["source_resource_type"],
-                        "authority_phase": record["authority_phase"],
-                        "atomic_resource_tag_condition": True,
-                        "absence_observations": absence["attempt_count"],
-                        "deleted": True,
-                        "original_generation_disposition": disposition,
-                    }
-                )
+                completed[key] = {
+                    "region": region,
+                    "name": name,
+                    "arn": identity["arn"],
+                    "creation_time": identity["creation_time"],
+                    "stack_id": record["stack_id"],
+                    "source_logical_id": record["source_logical_id"],
+                    "source_resource_type": record["source_resource_type"],
+                    "authority_phase": record["authority_phase"],
+                    "atomic_resource_tag_condition": True,
+                    "absence_observations": absence["attempt_count"],
+                    "deleted": True,
+                    "adopted": bool(record.get("adopted_generations")),
+                    "original_generation_disposition": disposition,
+                }
                 ctx.persist()
+
+            if not blocked or not any(entry["retryable"] for entry in blocked.values()):
+                break
+
+        results = [*completed.values(), *blocked.values()]
+        if blocked:
+            summary = ", ".join(
+                f"{region}:{name} ({entry['original_generation_disposition']['status']})"
+                for (region, name), entry in sorted(blocked.items())
+            )
+            raise RuntimeError(f"Log-group cleanup could not converge for: {summary}")
     except Exception as exc:  # noqa: BLE001 - attach helper cleanup and partial evidence
         cleanup_error = exc
     finally:

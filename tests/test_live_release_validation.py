@@ -1672,6 +1672,75 @@ class TestRetainedLogCleanupGenerationFencing:
         )
         assert raised.value.details["log_groups"][0]["observation"]["tag_drift"]
 
+    def test_untagged_regeneration_is_adopted_and_deleted(self) -> None:
+        """Teardown-time Lambda log delivery recreates groups this run owns.
+
+        Regression: a single regenerated group used to fence the whole sweep,
+        stranding every other tagged group and failing final inventory on all
+        of them. An untagged same-name generation observed under proven stack
+        absence is adopted (re-tagged) and deleted instead.
+        """
+        regenerated = {
+            "arn": self._ARN,
+            "creation_time": 1_750_000_000_999,
+            "tags": {},
+        }
+        adopted = self._identity(1_750_000_000_999)
+        environment = self._environment(
+            [
+                regenerated,
+                regenerated,
+                adopted,
+                adopted,
+                adopted,
+                None,
+                None,
+                None,
+            ]
+        )
+
+        result = self._invoke(environment)
+
+        assert result["errors"] == []
+        entry = result["log_groups"][0]
+        assert entry["deleted"] is True
+        assert entry["adopted"] is True
+        environment.normal_logs.tag_resource.assert_called_once_with(
+            resourceArn=self._ARN,
+            tags={
+                actions._RUN_STACK_TAG: "run-123",
+                actions._LOG_CLEANUP_TOKEN_TAG: self._TOKEN,
+            },
+        )
+        environment.restricted_logs.delete_log_group.assert_called_once_with(
+            logGroupName=self._NAME
+        )
+        adoptions = environment.record["adopted_generations"]
+        assert len(adoptions) == 1
+        assert adoptions[0]["generation"]["creation_time"] == 1_750_000_000_999
+        assert environment.record["original_generation_disposition"]["status"] == (
+            "deleted-confirmed-absent"
+        )
+
+    def test_foreign_cloudformation_generation_is_never_adopted(self) -> None:
+        """A stack-tagged same-name generation belongs to a real deployment."""
+        foreign = {
+            "arn": self._ARN,
+            "creation_time": 1_750_000_000_999,
+            "tags": {"aws:cloudformation:stack-name": "gco-us-east-1"},
+        }
+        environment = self._environment([foreign, foreign])
+
+        with pytest.raises(actions._LogGroupCleanupError) as raised:
+            self._invoke(environment)
+
+        environment.normal_logs.tag_resource.assert_not_called()
+        environment.restricted_logs.delete_log_group.assert_not_called()
+        blocked = raised.value.details["log_groups"][0]
+        assert blocked["blocked"] is True
+        assert blocked["retryable"] is False
+        assert "cloudformation-owned" in json.dumps(blocked["observation"]["adoption_blockers"])
+
     def test_retryable_observation_error_resets_stability_without_failing_cleanup(self) -> None:
         original = self._identity(1_750_000_000_000)
         environment = self._environment(
