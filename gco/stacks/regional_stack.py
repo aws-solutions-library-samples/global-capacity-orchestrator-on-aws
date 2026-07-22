@@ -1836,12 +1836,41 @@ class GCORegionalStack(Stack):
                     "id": "AwsSolutions-IAM5",
                     "reason": (
                         "This is the exact upstream AWS Load Balancer Controller v3.4.2 "
-                        "IAM policy. Its wildcard resources are required for AWS APIs that "
-                        "cannot be resource-scoped and its wildcard ARN segments are "
-                        "constrained by the upstream cluster ownership tag conditions. The "
+                        "IAM policy. Its Resource::* entries cover AWS APIs that cannot "
+                        "be resource-scoped, while its wildcard ARN segments are limited "
+                        "to the controller's supported EC2 and ELB resource types and "
+                        "constrained by upstream cluster ownership tag conditions. The "
                         "role trust is restricted to kube-system/aws-load-balancer-controller."
                     ),
-                    "appliesTo": ["Resource::*"],
+                    "appliesTo": [
+                        "Resource::*",
+                        "Resource::arn:<AWS::Partition>:ec2:*:*:security-group/*",
+                        (
+                            "Resource::arn:<AWS::Partition>:elasticloadbalancing:*:*:"
+                            "loadbalancer/app/*/*"
+                        ),
+                        (
+                            "Resource::arn:<AWS::Partition>:elasticloadbalancing:*:*:"
+                            "loadbalancer/net/*/*"
+                        ),
+                        ("Resource::arn:<AWS::Partition>:elasticloadbalancing:*:*:targetgroup/*/*"),
+                        (
+                            "Resource::arn:<AWS::Partition>:elasticloadbalancing:*:*:"
+                            "listener-rule/app/*/*/*"
+                        ),
+                        (
+                            "Resource::arn:<AWS::Partition>:elasticloadbalancing:*:*:"
+                            "listener-rule/net/*/*/*"
+                        ),
+                        (
+                            "Resource::arn:<AWS::Partition>:elasticloadbalancing:*:*:"
+                            "listener/app/*/*/*"
+                        ),
+                        (
+                            "Resource::arn:<AWS::Partition>:elasticloadbalancing:*:*:"
+                            "listener/net/*/*/*"
+                        ),
+                    ],
                 }
             ],
         )
@@ -2156,27 +2185,26 @@ class GCORegionalStack(Stack):
             )
         )
 
-        # The S3 bucket-ARN resource uses a ``<arn>/*`` object-key wildcard
-        # which cdk-nag flags as a wildcard resource. The ARN itself is the
-        # literal Cluster_Shared_Bucket ARN resolved from SSM — the ``/*``
-        # covers all object keys inside that single bucket, which is the
-        # intended semantic for the RW grant.
+        # The grants contain two necessary wildcard shapes. The S3 bucket ARN
+        # uses ``/*`` for object keys within the single resolved shared bucket.
+        # KMS uses ``Resource::*`` because the global key ARN is not exported to
+        # this stack; ``kms:ViaService`` confines its use to S3 in the bucket's
+        # region, while the S3 statements separately scope accessible objects.
         acknowledge_nag_findings(
             self.service_account_role,
             [
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The Cluster_Shared_Bucket RW grant uses an <arn>/* "
-                        "object-key wildcard on the literal cluster-shared "
-                        "bucket ARN resolved from SSM. The wildcard covers "
-                        "object keys within a single bucket (the always-on "
-                        "gco-cluster-shared-<account>-<region> bucket) — "
-                        "this is the standard shape for a bucket-scoped "
-                        "RW grant and is what the allow-list assertion "
-                        "is written against."
+                        "The Cluster_Shared_Bucket grants require two wildcard shapes: "
+                        "an <arn>/* object-key suffix on the single shared bucket resolved "
+                        "from SSM, and KMS Resource::* because the global key ARN is not "
+                        "exported. KMS use is constrained by kms:ViaService to S3 in the "
+                        "bucket's region, and S3 access is separately limited to the "
+                        "allowed bucket ARNs."
                     ),
                     "appliesTo": [
+                        "Resource::*",
                         "Resource::<ReadClusterSharedBucketArn4B0BD291.Parameter.Value>/*",
                     ],
                 },
@@ -4407,10 +4435,15 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The teardown state machine invokes versioned Helm worker "
-                        "Lambda ARNs using CDK's required :* qualifier."
+                        "The teardown state machine's X-Ray integration requires "
+                        "Resource::*, and its Lambda task grants use CDK's required :* "
+                        "version qualifier. The drain-checker detail names the single "
+                        "dedicated function created by this stack."
                     ),
-                    "appliesTo": ["Resource::*"],
+                    "appliesTo": [
+                        "Resource::*",
+                        "Resource::<HelmTeardownDrainCheckerCCF8D9D1.Arn>:*",
+                    ],
                 },
             ],
         )

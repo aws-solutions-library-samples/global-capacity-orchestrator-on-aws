@@ -1905,12 +1905,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> Any:
     """
     if event.get("Action"):
         logger.info(
-            "Task event: action=%s chart=%s cluster=%s region=%s deployment_token=%s",
+            "Task event: action=%s chart=%s cluster=%s region=%s",
             event.get("Action"),
             event.get("Chart"),
             event.get("ClusterName"),
             event.get("Region"),
-            event.get("DeploymentToken"),
         )
         return handle_task(event)
 
