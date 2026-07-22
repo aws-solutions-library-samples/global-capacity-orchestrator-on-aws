@@ -26,13 +26,16 @@ _START_DATE = datetime(2026, 7, 18, 1, 2, 4, tzinfo=UTC)
 
 @pytest.fixture
 def orchestrator():
-    """Load the handler with a mocked Step Functions client and env set."""
+    """Load the handler with mocked Step Functions/SSM clients and env set."""
     handler = load_lambda_module("helm-orchestrator")
     mock_client = MagicMock()
     real_prepare_teardown_fence = handler._prepare_teardown_fence
     with (
         patch.dict("os.environ", {"STATE_MACHINE_ARN": _STATE_MACHINE_ARN}),
         patch.object(handler, "_sfn", return_value=mock_client),
+        # Tests that assert on SSM behavior override this with their own mock;
+        # the fixture-level mock guarantees no test ever reaches real AWS.
+        patch.object(handler, "_ssm", return_value=MagicMock()),
         patch.object(handler, "_prepare_teardown_fence") as fence_mock,
     ):
         fence_mock.real_implementation = real_prepare_teardown_fence
