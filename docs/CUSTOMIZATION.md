@@ -39,7 +39,7 @@ This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) 
 - [Helm Chart Configuration](#helm-chart-configuration)
   - [Enable EKS Logging](#enable-eks-logging)
   - [Add CloudWatch Container Insights](#add-cloudwatch-container-insights)
-  - [Enable AWS Load Balancer Controller](#enable-aws-load-balancer-controller)
+  - [Load Balancer Configuration](#load-balancer-configuration)
   - [Add Prometheus Monitoring](#add-prometheus-monitoring)
 - [FSx for Lustre Configuration](#fsx-for-lustre-configuration)
   - [Enable FSx](#enable-fsx)
@@ -616,7 +616,7 @@ The value is validated at synth time — anything other than `NONE` or `SOURCE_I
 
 #### Inference Health Watchdog
 
-The inference monitor tracks how long each endpoint has zero ready replicas. Inference traffic uses the shared Ingress but terminates at the dedicated authenticated inference-proxy service, so an individual model does not own an ALB target group and the watchdog never changes shared ALB rules.
+The inference monitor tracks how long each endpoint has zero ready replicas. Inference traffic uses the shared Gateway API route but terminates at the dedicated authenticated inference-proxy service, so an individual model does not own an ALB target group and the watchdog never changes shared ALB rules.
 
 Configure in `cdk.json`:
 
@@ -632,13 +632,13 @@ Configure in `cdk.json`:
 | `reconcile_interval` | `15` | Seconds between reconciliation cycles |
 | `unhealthy_threshold_seconds` | `300` | Seconds at zero ready replicas before the monitor emits an explicit degraded-state warning |
 
-Before the threshold, the monitor records the start of the outage. After the threshold, it logs that the authenticated inference proxy will return 503 until the model recovers. When a replica becomes ready, the timer is cleared. Reconciliation also deletes any historical `inference-<endpoint>` direct Ingress left by an older deployment; it never creates a replacement.
+Before the threshold, the monitor records the start of the outage. After the threshold, it logs that the authenticated inference proxy will return 503 until the model recovers. When a replica becomes ready, the timer is cleared. Reconciliation never creates endpoint-specific public routes.
 
 #### ALB Architecture
 
-GCO uses one internal application ALB per region. A shared platform Ingress routes health and control-plane traffic to their platform services and `/inference/*` to the dedicated inference proxy. The proxy authenticates and validates an inference route before streaming from the selected endpoint's ClusterIP Service, so endpoint Deployments and Services do not create public or endpoint-specific Ingresses.
+GCO uses one internal application ALB per region, created by the AWS Load Balancer Controller from the `gco-system/gco-gateway` Gateway API resources. The shared `HTTPRoute` sends health and control-plane traffic to their platform services and `/inference/*` to the dedicated inference proxy. The proxy authenticates and validates an inference route before streaming from the selected endpoint's ClusterIP Service, so endpoint Deployments and Services do not create public or endpoint-specific routes.
 
-The GA registration Lambda verifies the load balancer's account, region, EKS-cluster tags, platform-Ingress tags, type (`application`), and scheme (`internal`) before publishing its hostname and registering it. It also removes stale Global Accelerator endpoint attachments so only the current verified platform ALB remains registered.
+The GA registration Lambda resolves the ALB from the Gateway status address (with an exact `gco.aws/gateway` + cluster ownership-tag fallback) and verifies its type (`application`) and scheme (`internal`) before publishing its hostname and registering it. It also removes stale Global Accelerator endpoint attachments so only the current verified platform ALB remains registered.
 
 ### Manifest Processor
 
@@ -791,13 +791,12 @@ post-helm-name.yaml     # Post-Helm pass (applied after Helm installs CRDs)
 
 **Number ranges:**
 
-- `00-09` — Foundation (namespaces, service accounts, RBAC, network policies)
-- `10-19` — Networking (IngressClass, Ingress)
+- `00-19` — Foundation & networking (namespaces, service accounts, RBAC, network policies)
 - `20-29` — Storage (EFS, FSx, Valkey)
 - `30-39` — System services (health-monitor, manifest-processor, inference-monitor)
 - `40-49` — NodePools (GPU, EFA, Neuron, CPU)
 - `50-59` — Device plugins (NVIDIA)
-- `post-helm-*` — Resources requiring Helm CRDs (KEDA ScaledJob, etc.)
+- `post-helm-*` — Resources requiring Helm CRDs (Gateway API entrypoint, KEDA ScaledJob, etc.)
 
 **Optional features:** Files with unresolved uppercase `{{PLACEHOLDER}}` feature gates are skipped. For shipped optional features, the applier also prunes an exact, audited list of resources previously owned by that feature. It does not use broad label deletion, so unrelated resources are left untouched. When adding a new optional platform feature, add its exact owned-resource inventory to the applier so disable-time convergence is explicit.
 
@@ -938,7 +937,7 @@ self.vpc.add_interface_endpoint(
 
 ### Modify Security Groups
 
-The platform ALB and its security group are created from the Kubernetes Ingress by EKS Auto Mode; there is no `alb_security_group` CDK construct to edit in `regional_stack.py`. Keep the platform Ingress internal and make network changes through supported EKS Auto Mode Ingress/LoadBalancer configuration, VPC routing, and Kubernetes NetworkPolicies. After any change, verify that Global Accelerator health checks can still reach `/api/v1/health` and that direct unsigned backend requests remain rejected.
+The platform ALB and its security group are created by the AWS Load Balancer Controller from the `gco-system/gco-gateway` Gateway API resources; there is no `alb_security_group` CDK construct to edit in `regional_stack.py`. Keep the platform Gateway internal (`LoadBalancerConfiguration.spec.scheme: internal`) and make network changes through the Gateway API configuration in `post-helm-gateway.yaml`, VPC routing, and Kubernetes NetworkPolicies. After any change, verify that Global Accelerator health checks can still reach `/api/v1/health` and that direct unsigned backend requests remain rejected.
 
 ## Adjusting Resource Limits
 
@@ -1126,17 +1125,18 @@ self.cluster = eks.Cluster(
 kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/quickstart/cwagent-fluentd-quickstart.yaml
 ```
 
-### Enable AWS Load Balancer Controller
+### Load Balancer Configuration
 
-Load-balancer reconciliation is included in EKS Auto Mode. GCO's shared platform Ingress intentionally creates an internal ALB. If you add another operator-owned Ingress, keep its exposure explicit and do not create endpoint-specific inference Ingresses that bypass the authenticated proxy:
+GCO installs the AWS Load Balancer Controller with Gateway API support and intentionally creates one internal ALB from the `gco-system/gco-gateway` Gateway (see `lambda/kubectl-applier-simple/manifests/post-helm-gateway.yaml`). If you add another operator-owned Gateway, keep its exposure explicit and do not create endpoint-specific inference routes that bypass the authenticated proxy:
 
 ```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: gateway.k8s.aws/v1beta1
+kind: LoadBalancerConfiguration
 metadata:
-  annotations:
-    alb.ingress.kubernetes.io/scheme: internal
-    alb.ingress.kubernetes.io/target-type: ip
+  name: my-gateway-load-balancer
+  namespace: my-namespace
+spec:
+  scheme: internal
 ```
 
 ### Add Prometheus Monitoring
@@ -1931,7 +1931,7 @@ Aggregator or authorized direct user
 The Lambda resolves the current ALB from
 `/<project>/alb-hostname-<region>` in the global-region SSM registry and verifies
 that it is this account and region's internal application ALB for the exact GCO
-EKS cluster and platform Ingress. It reads the public root bundle from SSM,
+EKS cluster and platform Gateway. It reads the public root bundle from SSM,
 connects with explicit `backend.<project>.gco.internal` SNI/hostname assertion,
 and never receives the root private key. This path bypasses Global Accelerator,
 not a public ALB.

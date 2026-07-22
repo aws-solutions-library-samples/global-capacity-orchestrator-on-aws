@@ -27,7 +27,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
-from kubernetes.client.rest import ApiException
 
 from cli.inference import InferenceManager
 from cli.main import cli
@@ -98,48 +97,6 @@ def mock_config():
     mock_cfg.project_name = "gco"
     with patch("cli.main.get_config", return_value=mock_cfg):
         yield mock_cfg
-
-
-def _deleted_ingress_names(monitor) -> list[str]:
-    """Return historical Ingress names targeted by the cleanup pass."""
-    return [call.args[0] for call in monitor.networking_v1.delete_namespaced_ingress.call_args_list]
-
-
-# ===========================================================================
-# Routing boundary: legacy direct Ingresses are removed, never recreated
-# ===========================================================================
-
-
-class TestLegacyProxyIngressCleanup:
-    def test_removes_both_historical_ingress_names(self):
-        monitor = _make_monitor()
-        monitor._cleanup_legacy_proxy_ingresses("llama", "llama-proxy", "gco-inference")
-
-        assert _deleted_ingress_names(monitor) == ["inference-llama", "inference-llama-proxy"]
-        monitor.networking_v1.create_namespaced_ingress.assert_not_called()
-        monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
-
-    def test_custom_legacy_ingress_path_cannot_recreate_a_bypass(self):
-        monitor = _make_monitor()
-        monitor._cleanup_legacy_proxy_ingresses("llama", "llama-proxy", "gco-inference")
-
-        assert _deleted_ingress_names(monitor) == ["inference-llama", "inference-llama-proxy"]
-        monitor.networking_v1.create_namespaced_ingress.assert_not_called()
-
-    def test_missing_historical_ingresses_are_idempotent(self):
-        monitor = _make_monitor()
-        monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=404)
-
-        monitor._cleanup_legacy_proxy_ingresses("llama", "llama-proxy", "gco-inference")
-
-        assert _deleted_ingress_names(monitor) == ["inference-llama", "inference-llama-proxy"]
-
-    def test_non_404_cleanup_error_propagates(self):
-        monitor = _make_monitor()
-        monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=500)
-
-        with pytest.raises(ApiException):
-            monitor._cleanup_legacy_proxy_ingresses("llama", "llama-proxy", "gco-inference")
 
 
 # ===========================================================================

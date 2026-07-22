@@ -84,13 +84,13 @@ Each region contains:
 
 **Application Load Balancer**
 
-- One internal application ALB per region, selected through the platform IngressClass
+- One internal application ALB per region, provisioned by the AWS Load Balancer Controller from the `gco-system/gco-gateway` Gateway API resources (`GatewayClass`, `LoadBalancerConfiguration`, `TargetGroupConfiguration`, `Gateway`, `HTTPRoute`)
 - HTTPS/443 listener with a short-lived regional ACM leaf issued by the deployment-local private root
 - Leaf identity is `backend.<project>.gco.internal`; backend clients send and verify it through explicit SNI while connecting to dynamic accelerator or ALB DNS names
 - Registered with Global Accelerator when the deployment partition is `aws`, and recorded in the global-region SSM registry in every partition
-- Routes `/api/v1/*` and `/inference/*` through authenticated platform services
-- Ownership is verified by account, region, load-balancer type/scheme, EKS cluster tags, and platform-Ingress tags before a regional proxy forwards traffic
-- Terminates private-root TLS; the final ALB-to-Kubernetes-pod target-group hop remains HTTP
+- Routes `/api/v1/*` and `/inference/*` through authenticated platform services via the shared `HTTPRoute`
+- Ownership is verified by account, region, load-balancer type/scheme, EKS cluster tags, and the exact `gco.aws/gateway` ownership tag before a regional proxy forwards traffic
+- Terminates private-root TLS; the final ALB-to-Kubernetes-pod target-group hop remains HTTP with `/healthz` target-group health checks
 
 **Regional API Gateway Bridge** (separate stack)
 
@@ -234,7 +234,7 @@ Each region contains:
 ```text
 User → API Gateway (IAM Auth, AWS-managed TLS) → Lambda Proxy
   → Global Accelerator (TCP/443 pass-through) → Internal Regional ALB (private-root TLS)
-  → Kubernetes Ingress → Manifest Processor Pod (HTTP target group)
+  → Gateway API HTTPRoute → Manifest Processor Pod (HTTP target group)
   → Kubernetes API → Workload Scheduled → Node Provisioned
 ```
 
@@ -243,7 +243,7 @@ User → API Gateway (IAM Auth, AWS-managed TLS) → Lambda Proxy
 ```text
 User → API Gateway (IAM Auth, AWS-managed TLS) → Streaming Inference Lambda
   → Global Accelerator (TCP/443 pass-through) → Internal Regional ALB (private-root TLS)
-  → Kubernetes Ingress → Dedicated Inference Proxy Pod (HTTP target group)
+  → Gateway API HTTPRoute → Dedicated Inference Proxy Pod (HTTP target group)
   → Endpoint ClusterIP Service → Model Pod → streamed response
 ```
 

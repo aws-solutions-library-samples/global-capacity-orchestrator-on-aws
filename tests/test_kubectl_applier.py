@@ -1837,7 +1837,6 @@ class TestManifestReadinessValidation:
             document("v1", "Pod", "pod", "demo"),
             document("v1", "PersistentVolumeClaim", "claim", "demo"),
             document("v1", "PersistentVolume", "volume"),
-            document("networking.k8s.io/v1", "Ingress", "ingress", "demo"),
             document(
                 "apiextensions.k8s.io/v1",
                 "CustomResourceDefinition",
@@ -1913,10 +1912,6 @@ class TestManifestReadinessValidation:
                 "metadata": {},
                 "status": {"phase": "Available"},
             },
-            ("networking.k8s.io/v1", "Ingress", "demo", "ingress"): {
-                "metadata": {},
-                "status": {"loadBalancer": {"ingress": [{"hostname": "internal.example"}]}},
-            },
             (
                 "apiextensions.k8s.io/v1",
                 "CustomResourceDefinition",
@@ -1984,9 +1979,9 @@ class TestManifestReadinessValidation:
         )
 
         assert result["DeploymentToken"] == "deploy-123"
-        assert result["ExpectedCount"] == result["ValidatedCount"] == 18
+        assert result["ExpectedCount"] == result["ValidatedCount"] == 17
         assert result["PhaseCounts"] == {
-            "base": {"ExpectedCount": 17, "ValidatedCount": 17},
+            "base": {"ExpectedCount": 16, "ValidatedCount": 16},
             "post-helm": {"ExpectedCount": 1, "ValidatedCount": 1},
         }
         assert result["ExpectedResources"] == result["ValidatedResources"]

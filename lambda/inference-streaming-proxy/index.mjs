@@ -449,12 +449,9 @@ async function validateRegionalEndpointOwnership(
     throw new Error("Registered backend is not owned by the GCO cluster");
   }
 
-  const platformMatch =
-    tags["gco.aws/gateway"] === "gco-system/gco-gateway" ||
-    tags["ingress.eks.amazonaws.com/stack"] === "gco" ||
-    tags["ingress.k8s.aws/stack"] === "gco-system/gco-ingress";
+  const platformMatch = tags["gco.aws/gateway"] === "gco-system/gco-gateway";
   if (!platformMatch) {
-    throw new Error("Registered backend is not the GCO Gateway or legacy Ingress");
+    throw new Error("Registered backend is not the GCO Gateway");
   }
 }
 

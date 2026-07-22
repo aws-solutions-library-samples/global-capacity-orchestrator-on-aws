@@ -476,45 +476,6 @@ class TestCreateService:
 
 
 # =============================================================================
-# Legacy Ingress Cleanup Tests
-# =============================================================================
-
-
-class TestLegacyEndpointIngressCleanup:
-    """Tests for removal of the historical direct endpoint Ingress."""
-
-    def test_removes_legacy_endpoint_ingress_without_creating_a_replacement(self):
-        monitor = _make_monitor()
-        monitor._cleanup_legacy_endpoint_ingress("ep", "ns")
-
-        monitor.networking_v1.delete_namespaced_ingress.assert_called_once_with(
-            "inference-ep", "ns", _request_timeout=30
-        )
-        monitor.networking_v1.create_namespaced_ingress.assert_not_called()
-        monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
-
-    def test_missing_legacy_ingress_is_idempotent(self):
-        from kubernetes.client.rest import ApiException
-
-        monitor = _make_monitor()
-        monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=404)
-
-        monitor._cleanup_legacy_endpoint_ingress("ep", "ns")
-
-        monitor.networking_v1.create_namespaced_ingress.assert_not_called()
-        monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
-
-    def test_legacy_ingress_cleanup_error_propagates(self):
-        from kubernetes.client.rest import ApiException
-
-        monitor = _make_monitor()
-        monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=500)
-
-        with pytest.raises(ApiException):
-            monitor._cleanup_legacy_endpoint_ingress("ep", "ns")
-
-
-# =============================================================================
 # Reconcile Running — autoscaling, in-sync, promote to running
 # =============================================================================
 

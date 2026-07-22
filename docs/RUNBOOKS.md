@@ -635,10 +635,11 @@ gco inference models <ENDPOINT_NAME>
 
 2. **If pods are running but not ready:** The readiness probe may be failing. Check if the model finished loading (large models can take 5-10 minutes).
 
-3. **If the service is unreachable:** Check the Kubernetes Service and Ingress:
+3. **If the service is unreachable:** Check the endpoint Service and the shared Gateway route:
 
    ```bash
-   kubectl get svc,ingress -n gco-inference
+   kubectl get svc -n gco-inference
+   kubectl get gateway,httproute -n gco-system
    ```
 
 ---

@@ -9,11 +9,9 @@ have been applied:
 3. When a Global Accelerator endpoint group is configured, register only that
    ALB, remove stale endpoints, and enforce the HTTPS health-check contract.
 4. Always publish the selected ALB hostname to the SSM endpoint registry.
-5. Remove the three exact legacy Ingress resources and wait only for legacy ALB
-   ARNs captured before their deletion.
 
 ``EndpointGroupArn`` is optional. Deployments without Global Accelerator still
-publish the Gateway hostname and complete the legacy Ingress migration.
+publish the Gateway hostname.
 
 Entrypoints:
     - ``handle_task`` is the final Step Functions convergence task.
@@ -53,8 +51,6 @@ logger.setLevel(logging.INFO)
 
 MAX_WAIT_SECONDS = 840
 ALB_POLL_INTERVAL = 5
-ALB_DELETION_POLL_INTERVAL = 10
-ALB_DELETION_WAIT_SECONDS = 180
 GA_DEPLOYED_WAIT_SECONDS = 720
 GA_DEPLOYED_POLL_INTERVAL = 15
 DEFAULT_REGISTRY_REGION = "us-east-2"
@@ -66,24 +62,6 @@ GATEWAY_TAG = "gco.aws/gateway"
 CLUSTER_TAG = "elbv2.k8s.aws/cluster"
 GATEWAY_API_PATH = (
     f"/apis/gateway.networking.k8s.io/v1/namespaces/{GATEWAY_NAMESPACE}/gateways/{GATEWAY_NAME}"
-)
-
-LEGACY_INGRESS_NAME = "gco-ingress"
-LEGACY_INGRESS_CLASS_NAME = "alb"
-LEGACY_INGRESS_REFERENCE = f"{GATEWAY_NAMESPACE}/{LEGACY_INGRESS_NAME}"
-LEGACY_INGRESS_API_PATH = (
-    f"/apis/networking.k8s.io/v1/namespaces/{GATEWAY_NAMESPACE}/ingresses/{LEGACY_INGRESS_NAME}"
-)
-LEGACY_INGRESS_CLASS_API_PATH = (
-    f"/apis/networking.k8s.io/v1/ingressclasses/{LEGACY_INGRESS_CLASS_NAME}"
-)
-LEGACY_INGRESS_CLASS_PARAMS_API_PATH = (
-    f"/apis/eks.amazonaws.com/v1/ingressclassparams/{LEGACY_INGRESS_CLASS_NAME}"
-)
-LEGACY_RESOURCE_PATHS = (
-    ("Ingress", LEGACY_INGRESS_API_PATH),
-    ("IngressClass", LEGACY_INGRESS_CLASS_API_PATH),
-    ("IngressClassParams", LEGACY_INGRESS_CLASS_PARAMS_API_PATH),
 )
 
 
@@ -266,8 +244,8 @@ def find_platform_alb_by_tags(
     """Find the Gateway ALB only when both exact ownership tags match.
 
     This fallback is used only while the exact Gateway status has no address.
-    Cluster-only matches, legacy Ingress tags, alternative cluster tags, NLBs,
-    and internet-facing ALBs are deliberately rejected.
+    Cluster-only matches, alternative cluster tags, NLBs, and internet-facing
+    ALBs are deliberately rejected.
     """
     try:
         load_balancers = [
@@ -329,162 +307,6 @@ def find_active_alb(
     if arn:
         logger.info("Gateway ALB found by tags but state is %r; waiting for 'active'", state)
     return None, None
-
-
-def _legacy_ingress_hostname(
-    http: urllib3.PoolManager,
-    endpoint: str,
-    headers: dict[str, str],
-) -> str | None:
-    """Return the hostname on the exact legacy Ingress, when it still exists."""
-    try:
-        response = http.request(
-            "GET",
-            f"{endpoint}{LEGACY_INGRESS_API_PATH}",
-            headers=headers,
-            timeout=10.0,
-        )
-        if response.status != 200:
-            return None
-        ingress = _response_json(response)
-        addresses = ingress.get("status", {}).get("loadBalancer", {}).get("ingress", [])
-        for address in addresses:
-            if not isinstance(address, dict):
-                continue
-            hostname = address.get("hostname")
-            if isinstance(hostname, str) and hostname.strip():
-                return hostname.strip()
-    except Exception as exc:  # noqa: BLE001 - exact legacy tags remain available
-        logger.warning("Failed to read exact legacy Ingress status: %s", exc)
-    return None
-
-
-def capture_legacy_alb_arns(
-    elb_client: Any,
-    http: urllib3.PoolManager,
-    endpoint: str,
-    headers: dict[str, str],
-    cluster_name: str,
-) -> set[str]:
-    """Capture exact legacy Ingress ALB ARNs before deleting its resources.
-
-    The exact Ingress status hostname is authoritative. Exact legacy ownership
-    tag pairs are also accepted to cover an empty status during migration. No
-    load-balancer name or namespace-prefix matching is used.
-    """
-    ingress_hostname = _legacy_ingress_hostname(http, endpoint, headers)
-    load_balancers = [
-        load_balancer
-        for load_balancer in elb_client.describe_load_balancers().get("LoadBalancers", [])
-        if load_balancer.get("Type") == "application" and load_balancer.get("Scheme") == "internal"
-    ]
-    captured = {
-        str(load_balancer["LoadBalancerArn"])
-        for load_balancer in load_balancers
-        if ingress_hostname and load_balancer.get("DNSName") == ingress_hostname
-    }
-
-    try:
-        tags_by_arn = _describe_tags(
-            elb_client,
-            [str(load_balancer["LoadBalancerArn"]) for load_balancer in load_balancers],
-        )
-    except Exception as exc:  # noqa: BLE001 - status capture is still exact
-        logger.warning("Could not inspect legacy ALB tags: %s", exc)
-        return captured
-
-    for load_balancer in load_balancers:
-        arn = str(load_balancer["LoadBalancerArn"])
-        tags = tags_by_arn.get(arn, {})
-        controller_owned = (
-            tags.get(CLUSTER_TAG) == cluster_name
-            and tags.get("ingress.k8s.aws/stack") == LEGACY_INGRESS_REFERENCE
-        )
-        auto_mode_owned = (
-            tags.get("eks:eks-cluster-name") == cluster_name
-            and tags.get("ingress.eks.amazonaws.com/stack") == "gco"
-        )
-        if controller_owned or auto_mode_owned:
-            captured.add(arn)
-
-    if captured:
-        logger.info("Captured exact legacy ALB ARNs before cleanup: %s", sorted(captured))
-    return captured
-
-
-def wait_for_legacy_albs_deleted(
-    elb_client: Any,
-    legacy_alb_arns: set[str],
-    timeout_seconds: int = ALB_DELETION_WAIT_SECONDS,
-) -> bool:
-    """Wait only for captured legacy ALB ARNs to disappear."""
-    remaining = set(legacy_alb_arns)
-    if not remaining:
-        return True
-
-    start_time = time.time()
-    while remaining and time.time() - start_time < timeout_seconds:
-        for arn in tuple(remaining):
-            try:
-                response = elb_client.describe_load_balancers(LoadBalancerArns=[arn])
-            except ClientError as exc:
-                error_code = exc.response.get("Error", {}).get("Code", "")
-                if error_code in {"LoadBalancerNotFound", "LoadBalancerNotFoundException"}:
-                    remaining.remove(arn)
-                    continue
-                logger.warning("Failed to check legacy ALB %s: %s", arn, exc)
-                continue
-            returned_arns = {
-                str(load_balancer.get("LoadBalancerArn", ""))
-                for load_balancer in response.get("LoadBalancers", [])
-            }
-            if arn not in returned_arns:
-                remaining.remove(arn)
-
-        if remaining:
-            logger.info("Waiting for exact legacy ALBs to disappear: %s", sorted(remaining))
-            # nosemgrep: arbitrary-sleep - intentional exact-ARN deletion polling
-            time.sleep(ALB_DELETION_POLL_INTERVAL)
-
-    if remaining:
-        logger.warning("Timed out waiting for exact legacy ALBs: %s", sorted(remaining))
-        return False
-    logger.info("All captured legacy ALBs were deleted")
-    return True
-
-
-def delete_legacy_ingress_resources(
-    elb_client: Any,
-    http: urllib3.PoolManager,
-    endpoint: str,
-    headers: dict[str, str],
-    cluster_name: str,
-) -> None:
-    """Delete the exact legacy Ingress resources and await captured ALBs."""
-    legacy_alb_arns = capture_legacy_alb_arns(elb_client, http, endpoint, headers, cluster_name)
-    failures: list[str] = []
-    for kind, path in LEGACY_RESOURCE_PATHS:
-        try:
-            response = http.request(
-                "DELETE",
-                f"{endpoint}{path}",
-                headers=headers,
-                timeout=30.0,
-            )
-            if response.status == 404:
-                logger.info("Legacy %s already absent", kind)
-            elif 200 <= response.status < 300:
-                logger.info("Deleted legacy %s", kind)
-            else:
-                failures.append(f"{kind}: HTTP {response.status}")
-        except Exception as exc:  # noqa: BLE001 - attempt every exact deletion
-            failures.append(f"{kind}: {exc}")
-
-    deleted = wait_for_legacy_albs_deleted(elb_client, legacy_alb_arns)
-    if failures:
-        raise RuntimeError("Legacy Kubernetes cleanup failed: " + "; ".join(failures))
-    if not deleted:
-        raise TimeoutError("Timed out waiting for captured legacy ALBs to be deleted")
 
 
 def check_existing_ga_endpoint(ga_client: Any, endpoint_group_arn: str, alb_arn: str) -> bool:
@@ -807,16 +629,6 @@ def register_ga_endpoint(
             alb_hostname,
             registry_region,
             project_name,
-        )
-
-        # Switch/publication succeeded. It is now safe to remove the exact
-        # legacy entrypoint and wait only for ALBs captured from that entrypoint.
-        delete_legacy_ingress_resources(
-            elb_client,
-            http,
-            k8s_endpoint,
-            k8s_headers,
-            cluster_name,
         )
         return {"AlbArn": alb_arn, "AlbHostname": alb_hostname}
     finally:

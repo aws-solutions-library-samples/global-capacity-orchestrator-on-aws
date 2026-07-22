@@ -71,8 +71,8 @@ gco inference deploy vllm-spot \
 ## Step 3: Monitor Deployment
 
 The inference_monitor in each region picks up the DynamoDB record and creates
-the Kubernetes Deployment and ClusterIP Service. The existing shared platform
-Ingress sends `/inference/*` through the dedicated authenticated inference
+the Kubernetes Deployment and ClusterIP Service. The shared Gateway API
+`HTTPRoute` sends `/inference/*` through the dedicated authenticated inference
 proxy; the endpoint never receives a direct ALB rule.
 
 Watch status until all regions show "running", then list every endpoint:
@@ -375,7 +375,7 @@ Authenticated request plane
                                            internal regional ALB
                                                     |
                                                     v
-                                      shared gco-system/gco-ingress
+                                 shared gco-system/gco-gateway HTTPRoute
                                                     |
                                                     v
                                   authenticated inference proxy
@@ -385,15 +385,14 @@ Authenticated request plane
 ```
 
 Each region has one shared internal ALB registered with Global Accelerator.
-The shared Ingress owns `/inference/*`; the dedicated inference proxy validates
-the request-bound HMAC envelope and allowlisted serving path before it derives
-and contacts the endpoint Service. There are no endpoint-specific Ingresses or
-public model Services.
+The shared `HTTPRoute` owns `/inference/*`; the dedicated inference proxy
+validates the request-bound HMAC envelope and allowlisted serving path before
+it derives and contacts the endpoint Service. There are no endpoint-specific
+routes or public model Services.
 
 The inference_monitor continuously reconciles DynamoDB desired state with the
 Deployment, Service, and optional autoscaler. If a workload resource is
-missing, it is recreated; historical direct Ingresses are deleted rather than
-recreated.
+missing, it is recreated.
 
 ## Quick Reference
 

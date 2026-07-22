@@ -122,7 +122,7 @@ jobs:
         # template tokens to schema-shaped stubs, then runs kubeconform -strict
         # against lambda/kubectl-applier-simple/manifests/ and examples/ with
         # the community CRD catalog as a schema-location fallback for Karpenter
-        # NodePool, EKS Auto Mode IngressClassParams, Kueue, and KEDA CRDs.
+        # NodePool, AWS Load Balancer Controller Gateway API, Kueue, and KEDA CRDs.
         # See .github/scripts/validate_k8s_manifests.py for the full rationale
         # (including the two CRDs — KubeRay RayCluster, Volcano Job — that
         # catalog doesn't cover yet, and are intentionally -skip'd by GVK).

@@ -38,7 +38,7 @@ Production wiring omits `ALB_ENDPOINT`. At request time the Lambda reads `/<proj
 - an internal application load balancer;
 - owned by `AWS_ACCOUNT_ID` in `TARGET_REGION`;
 - tagged for the exact `<project>-<region>` EKS cluster; and
-- tagged for the GCO platform Ingress.
+- tagged with the exact `gco.aws/gateway: gco-system/gco-gateway` ownership marker.
 
 Verified endpoints are cached for 60 seconds by default. `REGIONAL_ENDPOINT_CACHE_TTL_SECONDS=0` disables the cache; accepted values are 0–300 seconds. Resolution or ownership failures are never cached.
 

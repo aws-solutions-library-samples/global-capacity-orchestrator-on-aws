@@ -569,7 +569,6 @@ class TestInferenceMonitor:
         monitor.apps_v1.delete_namespaced_deployment.side_effect = ApiException(status=404)
         monitor.core_v1.delete_namespaced_service.side_effect = ApiException(status=404)
         monitor.core_v1.delete_namespaced_config_map.side_effect = ApiException(status=404)
-        monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=404)
         with (
             patch("gco.services.inference_monitor.client.AutoscalingV2Api") as mock_hpa_api,
             patch("gco.services.inference_monitor.client.CustomObjectsApi") as mock_custom_api,
@@ -594,11 +593,9 @@ class TestInferenceMonitor:
             "ep", "ns", _request_timeout=30
         )
         monitor.core_v1.delete_namespaced_service.assert_any_call("ep", "ns", _request_timeout=30)
-        # The historical single-instance and proxy Ingress names are both
-        # attempted so upgrades cannot leave either direct route behind.
-        monitor.networking_v1.delete_namespaced_ingress.assert_any_call(
-            "inference-ep", "ns", _request_timeout=30
-        )
+        # The shared Gateway API route is never touched by endpoint deletion.
+        monitor.networking_v1.delete_namespaced_ingress.assert_not_called()
+        monitor.networking_v1.create_namespaced_ingress.assert_not_called()
 
     def test_delete_resources_tears_down_mooncake_topology(self, monitor):
         """A disaggregated endpoint's role/proxy resources are all torn down.
@@ -606,9 +603,9 @@ class TestInferenceMonitor:
         Regression: _reconcile_deleted/_delete_resources originally only deleted
         part of the split topology. Deletion must remove the prefill/decode/proxy
         Deployments and Services, the proxy program and transport ConfigMaps,
-        historical direct Ingresses, native or KEDA per-role autoscalers, and an
-        auto-managed admin Secret. The shared regional mooncake-master and a
-        user-named admin Secret must NOT be deleted.
+        native or KEDA per-role autoscalers, and an auto-managed admin Secret.
+        The shared regional mooncake-master and a user-named admin Secret must
+        NOT be deleted.
         """
         with (
             patch("gco.services.inference_monitor.client.AutoscalingV2Api") as mock_hpa_api,
@@ -631,11 +628,6 @@ class TestInferenceMonitor:
 
         deleted_svcs = {c.args[0] for c in monitor.core_v1.delete_namespaced_service.call_args_list}
         assert {"ep", "ep-prefill", "ep-decode", "ep-proxy"}.issubset(deleted_svcs)
-
-        deleted_ingresses = {
-            c.args[0] for c in monitor.networking_v1.delete_namespaced_ingress.call_args_list
-        }
-        assert {"inference-ep", "inference-ep-proxy"}.issubset(deleted_ingresses)
 
         deleted_cms = {
             c.args[0] for c in monitor.core_v1.delete_namespaced_config_map.call_args_list

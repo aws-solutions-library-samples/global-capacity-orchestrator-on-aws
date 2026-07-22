@@ -255,14 +255,14 @@ The generated reference architecture shows the commercial `aws` workload path. O
 4. In commercial `aws`, **Amazon API Gateway** is edge-optimized and is the global workload and aggregate entry point. In other partitions it is regional and aggregate-only. Every exposed method enforces **IAM (SigV4) authentication** before integration.
 5. In `aws`, route-specific **AWS Lambda proxies** sign workload requests with a short-lived HMAC envelope derived from a rotating **AWS Secrets Manager** key; `/api/v1/*` stays buffered while `/inference/*` streams. Other partitions omit these global workload proxies and use equivalent VPC proxies behind the regional APIs.
 6. In `aws`, **AWS Global Accelerator** routes workload requests over the AWS backbone to a healthy registered Region. Other partitions create no accelerator resources.
-7. A regional internal **AWS Application Load Balancer** terminates deployment-local private-root TLS from either Global Accelerator (`aws`) or the regional VPC proxy, then sends HTTP to shared platform Ingress targets.
+7. A regional internal **AWS Application Load Balancer** terminates deployment-local private-root TLS from either Global Accelerator (`aws`) or the regional VPC proxy, then sends HTTP to the platform services behind the shared Gateway API `HTTPRoute`.
 8. Each region runs an **Amazon EKS Auto Mode cluster** with built-in `system` and `general-purpose` NodePools plus project-managed GPU, inference, EFA, Mooncake EFA, Neuron, and CPU NodePools. Platform services include the Health Monitor, Manifest Processor, Queue Processor, Inference Monitor, and dedicated Inference Proxy.
 
 Below is the per-region workflow for a single regional stack.
 
 ### Regional Architecture workflow
 
-1. An internal **Application Load Balancer** created from the shared platform Ingress accepts only HTTPS/443 with a rotating regional ACM leaf, then forwards HTTP to cluster services after TLS termination.
+1. An internal **Application Load Balancer** created from the shared `gco-system/gco-gateway` Gateway API resources accepts only HTTPS/443 with a rotating regional ACM leaf, then forwards HTTP to cluster services after TLS termination.
 2. The **Amazon EKS Auto Mode cluster** is the heart of the regional stack, hosting platform services and user workloads with a private API endpoint by default.
 3. **NodePools** provision capacity on demand: built-in `system` and `general-purpose`, plus `gpu-x86-pool`, `gpu-arm-pool`, `gpu-inference-pool`, `gpu-efa-pool`, `mooncake-efa-pool`, `neuron-pool`, and `cpu-general-pool`.
 4. **Workloads and platform services** run across namespaces: `gco-system` (Health Monitor, Manifest Processor, Queue Processor, Inference Monitor, Inference Proxy) and `gco-jobs` / `gco-inference` (training and batch jobs, inference endpoints, and job DAG pipelines).

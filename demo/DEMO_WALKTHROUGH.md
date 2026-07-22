@@ -265,7 +265,7 @@ gco inference deploy vllm-demo \
   --extra-args '--model' --extra-args 'facebook/opt-125m'
 ```
 
-Omitting `-r` deploys to every configured Region, keeping endpoint availability consistent. In this commercial `aws` demo that also makes Global Accelerator routing safe. The inference_monitor in each Region picks up the DynamoDB record and creates the Kubernetes Deployment and internal ClusterIP Service. The existing shared Ingress routes `/inference/*` through the dedicated authenticated inference proxy before it reaches that Service; no endpoint-specific Ingress is created.
+Omitting `-r` deploys to every configured Region, keeping endpoint availability consistent. In this commercial `aws` demo that also makes Global Accelerator routing safe. The inference_monitor in each Region picks up the DynamoDB record and creates the Kubernetes Deployment and internal ClusterIP Service. The shared Gateway API `HTTPRoute` sends `/inference/*` through the dedicated authenticated inference proxy before it reaches that Service; no endpoint-specific route is created.
 
 **Check status and invoke:**
 

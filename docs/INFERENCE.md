@@ -76,9 +76,9 @@ global inference-streaming Lambda (request-bound HMAC) → Global Accelerator (T
 3. For a plain endpoint, the monitor creates or updates a Deployment and
    ClusterIP Service, plus an HPA or KEDA ScaledObject when requested. Mooncake
    endpoints add role workloads, internal Services, and a PD proxy.
-4. The monitor removes historical `inference-{name}` Ingresses rather than
-   recreating them. The shared `gco-system/gco-ingress` is the only ALB route
-   for inference traffic.
+4. The shared `/inference` rule on the `gco-system/gco-gateway` HTTPRoute is
+   the only ALB route for inference traffic; the monitor never creates
+   endpoint-specific routes.
 5. API Gateway authenticates the client with IAM over AWS-managed TLS. The
    inference-only Node.js Lambda binds the method, target, body digest,
    timestamp, and nonce into a short-lived HMAC envelope, then uses strict
@@ -92,13 +92,14 @@ global inference-streaming Lambda (request-bound HMAC) → Global Accelerator (T
 
 ### Shared Internal ALB
 
-Each region has one internal ALB managed from the shared platform Ingress,
-registered with Global Accelerator, and configured with a short-lived regional
-ACM leaf for `backend.<project>.gco.internal`. The proxy sends and verifies that
-identity through explicit SNI while connecting to the accelerator DNS name.
-This keeps the public boundary narrow:
+Each region has one internal ALB managed by the AWS Load Balancer Controller
+from the shared `gco-system/gco-gateway` Gateway API resources, registered with
+Global Accelerator, and configured with a short-lived regional ACM leaf for
+`backend.<project>.gco.internal`. The proxy sends and verifies that identity
+through explicit SNI while connecting to the accelerator DNS name. This keeps
+the public boundary narrow:
 
-- The ALB exposes the platform `gco-ingress`, not one Ingress per model.
+- The ALB exposes the shared platform Gateway, not one route per model.
 - `/inference/*` first reaches the dedicated authenticated inference proxy.
 - Plain endpoints resolve to `<name>.gco-inference.svc.cluster.local`; split
   Mooncake endpoints resolve to `<name>-proxy` in the same namespace.
@@ -113,9 +114,9 @@ errors to DynamoDB. When `model_source` is set, the Deployment includes an init
 container that syncs model weights from S3 to regional EFS.
 
 Separately, the health monitor verifies that the ALB hostname stored in SSM
-matches the shared Kubernetes Ingress status. If cluster recreation changes the
-ALB, SSM is refreshed so the regional VPC proxy and Global Accelerator
-registration use the current internal endpoint. The global aggregator discovers
+matches the `gco-system/gco-gateway` Gateway status address. If cluster
+recreation changes the ALB, SSM is refreshed so the regional VPC proxy and
+Global Accelerator registration use the current internal endpoint. The global aggregator discovers
 regional API Gateway outputs through CloudFormation and never reads this ALB
 registry. Endpoint state transitions
 (`deploying` → `running` → `stopped` → `deleted`) remain driven by the CLI and
@@ -250,9 +251,8 @@ seconds before forcing termination. The kind CI job installs pinned Metrics
 Server and requires the HPA to report `ScalingActive=True`, rather than merely
 checking that the API server admitted the object.
 
-The shared platform Ingress already owns `/inference/*`; no endpoint-specific
-Ingress, public Service, or ALB target group is created. On upgrades, the
-monitor deletes historical direct Ingresses if they still exist.
+The shared `gco-system/gco-gateway` HTTPRoute already owns `/inference/*`; no
+endpoint-specific route, public Service, or ALB target group is created.
 
 ## Supported Frameworks
 
@@ -333,8 +333,8 @@ When `--mooncake-mode disaggregated` is set:
 - `--prefill-replicas` and `--decode-replicas` set the initial replica count for each role (both default to 1)
 - The shared authenticated `/inference/{name}/...` route forwards allowlisted
   serving requests to the proxy's ClusterIP Service. No endpoint-specific
-  Ingress is created, and the proxy's `/instances/add` admin path is blocked by
-  the platform inference proxy.
+  public route is created, and the proxy's `/instances/add` admin path is
+  blocked by the platform inference proxy.
 
 #### EFA protocol and device overrides
 

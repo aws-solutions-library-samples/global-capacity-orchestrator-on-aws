@@ -158,7 +158,7 @@ Inference serving uses a reconciliation pattern similar to Kubernetes controller
 2. The CLI writes the endpoint spec to a DynamoDB table (desired state)
 3. An `inference_monitor` service running in each target region polls the table
 4. The monitor creates Kubernetes Deployments, Services, scaling objects, and supporting configuration to match the desired state
-5. The shared platform Ingress sends authenticated `/inference/*` traffic to the dedicated inference proxy, which validates the route and streams from the endpoint Service; per-endpoint public Ingresses are not created
+5. The shared Gateway API `HTTPRoute` sends authenticated `/inference/*` traffic to the dedicated inference proxy, which validates the route and streams from the endpoint Service; per-endpoint public routes are not created
 6. If anything drifts (pod deleted, resource missing), the monitor self-heals by recreating it
 7. In `aws`, Global Accelerator routes proxy-signed requests to a healthy Region; elsewhere, callers invoke the selected regional API
 

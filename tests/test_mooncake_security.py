@@ -293,19 +293,11 @@ def test_admin_key_injected_only_by_secret_reference(monitor):
         assert key_material not in token
 
     # The Service is ClusterIP-only, and reconciliation cannot create a direct
-    # endpoint Ingress that would expose the proxy's admin API. Both historical
-    # names are removed so upgrades close the old bypass as well.
+    # endpoint Ingress that would expose the proxy's admin API.
     svc_args, _ = monitor.core_v1.create_namespaced_service.call_args
     assert svc_args[1].spec.type == "ClusterIP"
     monitor.networking_v1.create_namespaced_ingress.assert_not_called()
     monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
-    deleted = [
-        call.args[:2] for call in monitor.networking_v1.delete_namespaced_ingress.call_args_list
-    ]
-    assert deleted == [
-        ("inference-endpoint", "gco-inference"),
-        ("inference-endpoint-proxy", "gco-inference"),
-    ]
 
 
 # =============================================================================

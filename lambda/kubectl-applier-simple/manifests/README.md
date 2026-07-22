@@ -58,17 +58,16 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 
 | Range | Group | Description |
 |-------|-------|-------------|
-| `00-09` | Foundation | Namespaces, service accounts, RBAC, network policies, resource quotas |
-| `10-19` | Networking | IngressClass, Ingress |
+| `00-19` | Foundation & networking | Namespaces, service accounts, RBAC, network policies, resource quotas |
 | `20-29` | Storage | EFS, FSx Lustre, cluster-shared bucket, Valkey, Aurora pgvector, observability gp3 |
 | `30-39` | System services | health-monitor, manifest-processor, inference-monitor |
 | `40-49` | NodePools | GPU (x86, ARM), inference, EFA (training + mooncake), Neuron, CPU |
 | `50-59` | Device plugins & GPU observability | NVIDIA device plugin, DCGM exporter |
-| `post-helm-*` | Post-Helm | Resources needing Helm CRDs: KEDA ScaledJob, Prometheus monitors, Grafana dashboards/rotation, Kueue metrics RBAC |
+| `post-helm-*` | Post-Helm | Resources needing Helm CRDs: Gateway API entrypoint, KEDA ScaledJob, Prometheus monitors, Grafana dashboards/rotation, Kueue metrics RBAC |
 
 ## Files
 
-### Foundation (00–09)
+### Foundation & Networking (00–19)
 
 | File | Contents |
 |------|----------|
@@ -77,13 +76,6 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `02-rbac.yaml` | Per-service `ClusterRole`/`Role` + platform-service `ServiceAccount`s + bindings (least-privilege) |
 | `03-network-policies.yaml` | Default-deny ingress + allow rules for ALB, DNS, HTTPS egress |
 | `04-resource-quotas.yaml` | `ResourceQuota` + `LimitRange` for `gco-jobs` (namespace CPU/memory/GPU/pod caps + per-container defaults) |
-
-### Networking (10–19)
-
-| File | Contents |
-|------|----------|
-| `10-ingressclass.yaml` | `IngressClassParams` (ALB group) + `IngressClass` |
-| `11-ingress.yaml` | `gco-ingress` routing control traffic to manifest-processor and `/inference` traffic to inference-proxy, with a 900-second target deregistration drain |
 
 ### Storage (20–29)
 
@@ -128,6 +120,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 
 | File | Contents |
 |------|----------|
+| `post-helm-gateway.yaml` | Gateway API entrypoint: `GatewayClass`, `TargetGroupConfiguration` (`/healthz` target-group health checks + 900-second deregistration drain), `LoadBalancerConfiguration` (internal HTTPS ALB, `gco.aws/gateway` ownership tag, TLS certificate), `Gateway` `gco-system/gco-gateway`, and the shared `HTTPRoute` sending control traffic to manifest-processor and `/inference` to inference-proxy — applied after the AWS Load Balancer Controller chart installs the Gateway API CRDs |
 | `post-helm-sqs-consumer.yaml` | KEDA `ScaledJob` for the SQS queue processor — **skipped when queue_processor disabled** |
 | `post-helm-monitoring-servicemonitors.yaml` | `ServiceMonitor`s (schedulers/operators + DCGM) and `PodMonitor`s (GCO services, including inference-proxy) — **skipped when observability disabled** |
 | `post-helm-monitoring-kueue-rbac.yaml` | `ClusterRoleBinding` letting Prometheus scrape Kueue's authenticated metrics endpoint — **skipped when observability disabled** |

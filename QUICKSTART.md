@@ -343,7 +343,7 @@ gco inference list
 gco inference delete my-llm -y
 ```
 
-The `inference_monitor` in each target region automatically creates the Kubernetes Deployment, Service, autoscaling objects, and supporting configuration. Inference requests remain behind the shared authenticated platform Ingress; the monitor does not create a direct per-endpoint Ingress. See [docs/INFERENCE.md](docs/INFERENCE.md) for the full inference guide including model weight management, multi-region deployment, and supported frameworks.
+The `inference_monitor` in each target region automatically creates the Kubernetes Deployment, Service, autoscaling objects, and supporting configuration. Inference requests remain behind the shared authenticated Gateway API route; the monitor does not create a direct per-endpoint route. See [docs/INFERENCE.md](docs/INFERENCE.md) for the full inference guide including model weight management, multi-region deployment, and supported frameworks.
 
 ## Next Steps
 

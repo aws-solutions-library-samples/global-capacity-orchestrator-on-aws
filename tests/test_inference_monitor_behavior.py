@@ -506,7 +506,6 @@ async def test_reconcile_mooncake_store_mode_uses_direct_service_front_end() -> 
     monitor._create_role_service = MagicMock()  # type: ignore[method-assign]
     monitor._create_pd_proxy = MagicMock()  # type: ignore[method-assign]
     monitor._create_service = MagicMock()  # type: ignore[method-assign]
-    monitor._ensure_legacy_endpoint_ingress_absent = MagicMock()  # type: ignore[method-assign]
     monitor._report_role_status = MagicMock(return_value="running")  # type: ignore[method-assign]
     spec = {
         "image": "vllm/vllm-openai:pinned",
@@ -519,7 +518,6 @@ async def test_reconcile_mooncake_store_mode_uses_direct_service_front_end() -> 
     assert action == {"action": "reconcile_mooncake", "endpoint": "chat", "state": "running"}
     monitor._ensure_role_deployment.assert_called_once_with("chat", NAMESPACE, spec, "single")
     monitor._create_service.assert_called_once_with("chat", NAMESPACE, spec)
-    monitor._ensure_legacy_endpoint_ingress_absent.assert_called_once_with("chat", NAMESPACE)
     monitor._create_role_service.assert_not_called()
     monitor._create_pd_proxy.assert_not_called()
 

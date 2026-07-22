@@ -217,7 +217,7 @@ The global output is `ApiEndpoint`; the optional regional output is `RegionalApi
 1. Inspect API Gateway access logs and the proxy Lambda log group listed in the stack resources; generated Lambda log-group names are not fixed.
 2. For the global path, check Global Accelerator endpoint health.
 3. For either path, verify `/<project>/alb-hostname-<region>` in the global-region SSM registry.
-4. Confirm the registered load balancer is an **internal application ALB** in the expected account/region and carries the GCO EKS cluster and platform-Ingress ownership tags.
+4. Confirm the registered load balancer is an **internal application ALB** in the expected account/region and carries the GCO EKS cluster and `gco.aws/gateway` ownership tags.
 5. Check the manifest-processor service, pods, and `/api/v1/health` response in the target cluster.
 
 There is no VPC Link or internal NLB in either API path.

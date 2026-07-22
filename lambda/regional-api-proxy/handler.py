@@ -142,18 +142,11 @@ def _validate_regional_endpoint_ownership(endpoint: str, region: str) -> None:
     if not cluster_match:
         raise RuntimeError(f"The registered backend for {region} is not owned by the GCO cluster")
 
-    # During an in-place migration the SSM registry can briefly reference
-    # either generation. Accept only the exact legacy Ingress ownership marker
-    # or the explicit Gateway marker; a cluster tag alone is never sufficient.
-    platform_match = (
-        tags.get("gco.aws/gateway") == "gco-system/gco-gateway"
-        or tags.get("ingress.eks.amazonaws.com/stack") == "gco"
-        or tags.get("ingress.k8s.aws/stack") == "gco-system/gco-ingress"
-    )
+    # Accept only the explicit Gateway ownership marker; a cluster tag alone
+    # is never sufficient.
+    platform_match = tags.get("gco.aws/gateway") == "gco-system/gco-gateway"
     if not platform_match:
-        raise RuntimeError(
-            f"The registered backend for {region} is not the GCO Gateway or legacy Ingress"
-        )
+        raise RuntimeError(f"The registered backend for {region} is not the GCO Gateway")
 
 
 def _resolve_registered_endpoint() -> str:

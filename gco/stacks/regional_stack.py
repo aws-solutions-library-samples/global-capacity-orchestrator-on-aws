@@ -5544,8 +5544,9 @@ class GCORegionalStack(Stack):
             export_name=f"{project_name}-public-subnets-{self.deployment_region}",
         )
 
-        # Note: ALB is created by AWS Load Balancer Controller via Ingress
-        # The ALB ARN is registered with Global Accelerator by the GA registration Lambda
+        # Note: the ALB is created by the AWS Load Balancer Controller from the
+        # gco-system/gco-gateway Gateway API resources; the GA registration
+        # Lambda registers its ARN with Global Accelerator
 
     def get_cluster(self) -> eks.Cluster:
         """Get the EKS cluster"""

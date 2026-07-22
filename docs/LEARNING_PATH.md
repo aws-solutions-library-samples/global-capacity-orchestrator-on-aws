@@ -45,7 +45,7 @@ The goal here is narrow: understand the handful of Kubernetes objects GCO actual
 | `resources.limits.nvidia.com/gpu: 1` | The line that makes GCO provision a GPU node for you |
 | Namespace | `gco-system` (platform services), `gco-jobs` (your jobs), `gco-inference` (endpoints) |
 | PersistentVolumeClaim | `gco-shared-storage` (EFS) or `gco-fsx-storage` (FSx) for outputs that survive pod termination |
-| Deployment + Service | Created for you by the inference monitor when you deploy an endpoint; requests stay behind the shared authenticated platform Ingress |
+| Deployment + Service | Created for you by the inference monitor when you deploy an endpoint; requests stay behind the shared authenticated Gateway API route |
 | Nodepool / autoscaling | Abstracted by EKS Auto Mode and Karpenter — you never hand-edit node groups |
 
 **Checkpoint.** You can read the sample Job manifest in [Core Concepts](CONCEPTS.md#manifest-submission), explain what each field does, and say which namespace it runs in and how it gets a GPU.

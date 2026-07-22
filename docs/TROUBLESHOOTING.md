@@ -657,7 +657,7 @@ aws elbv2 describe-target-groups \
 aws elbv2 describe-target-health \
   --target-group-arn TARGET-GROUP-ARN --region REGION
 
-# 4. Verify the ALB's EKS cluster and platform-Ingress ownership tags
+# 4. Verify the ALB's EKS cluster and gco.aws/gateway ownership tags
 aws elbv2 describe-tags --resource-arns ALB-ARN --region REGION
 
 # 5. Check listeners

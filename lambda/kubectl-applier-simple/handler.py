@@ -127,9 +127,6 @@ _SUPPORTED_MANIFEST_KINDS = frozenset(
         "GatewayClass",
         "HTTPRoute",
         "HorizontalPodAutoscaler",
-        "Ingress",
-        "IngressClass",
-        "IngressClassParams",
         "Job",
         "Lease",
         "LimitRange",
@@ -165,8 +162,6 @@ _CLUSTER_SCOPED_KINDS = frozenset(
         "DeviceClass",
         "EC2NodeClass",
         "GatewayClass",
-        "IngressClass",
-        "IngressClassParams",
         "Namespace",
         "NodePool",
         "PersistentVolume",
@@ -1068,32 +1063,6 @@ def apply_manifests(
                                     group, version, namespace, plural, name, body=doc
                                 )
 
-                    elif kind == "IngressClassParams":
-                        # EKS Auto Mode IngressClassParams CRD
-                        group = "eks.amazonaws.com"
-                        version = api_version.split("/")[-1] if "/" in api_version else "v1"
-                        plural = "ingressclassparams"
-                        try:
-                            custom_api.create_cluster_custom_object(
-                                group, version, plural, body=doc
-                            )
-                        except ApiException as e:
-                            if e.status == 409:
-                                custom_api.patch_cluster_custom_object(
-                                    group, version, plural, name, body=doc
-                                )
-                            else:
-                                raise
-
-                    elif kind == "IngressClass":
-                        try:
-                            networking_v1.create_ingress_class(body=doc)
-                        except ApiException as e:
-                            if e.status == 409:
-                                networking_v1.patch_ingress_class(name, body=doc)
-                            else:
-                                raise
-
                     elif kind == "StorageClass":
                         storage_v1 = client.StorageV1Api()
                         try:
@@ -1194,15 +1163,6 @@ def apply_manifests(
                                     v1.patch_namespaced_persistent_volume_claim(
                                         name, namespace, body=doc
                                     )
-                            else:
-                                raise
-
-                    elif kind == "Ingress":
-                        try:
-                            networking_v1.create_namespaced_ingress(namespace, body=doc)
-                        except ApiException as e:
-                            if e.status == 409:
-                                networking_v1.patch_namespaced_ingress(name, namespace, body=doc)
                             else:
                                 raise
 
@@ -1842,16 +1802,6 @@ def _resource_readiness_failure(kind: str, resource: dict[str, Any]) -> str | No
             if phase in {"Bound", "Available"}
             else f"PV phase is {phase!r}, expected 'Bound' or 'Available'"
         )
-
-    if kind == "Ingress":
-        load_balancer = status.get("loadBalancer")
-        addresses = load_balancer.get("ingress", []) if isinstance(load_balancer, dict) else []
-        if not isinstance(addresses, list) or not any(
-            isinstance(address, dict) and (address.get("hostname") or address.get("ip"))
-            for address in addresses
-        ):
-            return "Ingress has no load-balancer hostname or IP address"
-        return None
 
     if kind == "CustomResourceDefinition":
         return _required_condition_failure(status, "Established")

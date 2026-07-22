@@ -23,9 +23,9 @@ own:
     scanned, and `pipeline-dag.yaml` is skipped by name).
 
 Schema resolution: kubeconform's bundled catalog only covers upstream
-Kubernetes. CRDs this repo depends on (Karpenter `NodePool`, EKS Auto Mode
-`IngressClassParams`, Kueue, KEDA) are resolved via the community
-datreeio/CRDs-catalog as a second `-schema-location`. Two CRDs used in
+Kubernetes. CRDs this repo depends on (Karpenter `NodePool`, the AWS Load
+Balancer Controller Gateway API configuration CRDs, Kueue, KEDA) are resolved
+via the community datreeio/CRDs-catalog as a second `-schema-location`. Two CRDs used in
 `examples/` aren't in that catalog yet (KubeRay's `RayCluster`, Volcano's
 `Job`) — those are validated for YAML-shape only (via the structural check)
 and explicitly `-skip`ped in the schema pass so kubeconform doesn't report a

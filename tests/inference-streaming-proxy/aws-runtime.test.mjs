@@ -437,7 +437,7 @@ test("regional discovery validates SSM, paginated ALB ownership, tags, and cache
   assert.equal(__test.regionalEndpointCache.size, 1);
 });
 
-test("regional ownership accepts temporary legacy Ingress tags", async () => {
+test("regional ownership rejects legacy Ingress ownership tags", async () => {
   const region = "us-west-2";
   const endpoint = "internal-gco.us-west-2.elb.amazonaws.com";
   const account = "123456789012";
@@ -455,13 +455,14 @@ test("regional ownership accepts temporary legacy Ingress tags", async () => {
 
   for (const tags of legacyTagSets) {
     __test.elbClients.set(region, ownershipClient([loadBalancer()], tags));
-    await assert.doesNotReject(
+    await assert.rejects(
       __test.validateRegionalEndpointOwnership(
         endpoint,
         region,
         account,
         project,
       ),
+      /not the GCO Gateway/,
     );
   }
 });
@@ -545,7 +546,7 @@ test("regional ownership rejects missing, public, foreign, and untagged ALBs", a
     "wrong platform tag",
     [loadBalancer()],
     [{ Key: "eks:eks-cluster-name", Value: "gco-test-us-west-2" }],
-    /not the GCO Gateway or legacy Ingress/,
+    /not the GCO Gateway/,
   );
 });
 

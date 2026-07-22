@@ -54,7 +54,6 @@ class TestReconcileCanary:
             patch.object(monitor, "_get_deployment", return_value=None),
             patch.object(monitor, "_create_deployment") as mock_create,
             patch.object(monitor, "_create_service") as mock_svc,
-            patch.object(monitor, "_cleanup_legacy_canary_ingress") as mock_cleanup,
         ):
             status = monitor._reconcile_canary("ep", "ns", original_spec, canary, endpoint)
 
@@ -67,7 +66,6 @@ class TestReconcileCanary:
         assert "region_image_uris" not in submitted_spec
         assert "canary" in original_spec
         assert "region_image_uris" in original_spec
-        mock_cleanup.assert_called_once_with("ep", "ns")
         assert status == {
             "state": "creating",
             "image": "new:v2",
@@ -86,7 +84,6 @@ class TestReconcileCanary:
             patch.object(monitor, "_get_deployment_image", return_value="old:v1"),
             patch.object(monitor, "_update_deployment_image") as mock_update,
             patch.object(monitor, "_scale_deployment"),
-            patch.object(monitor, "_cleanup_legacy_canary_ingress"),
         ):
             status = monitor._reconcile_canary(
                 "ep",
@@ -110,7 +107,6 @@ class TestReconcileCanary:
             patch.object(monitor, "_get_deployment", return_value=mock_deployment),
             patch.object(monitor, "_get_deployment_image", return_value="new:v2"),
             patch.object(monitor, "_scale_deployment") as mock_scale,
-            patch.object(monitor, "_cleanup_legacy_canary_ingress"),
         ):
             status = monitor._reconcile_canary(
                 "ep",
@@ -133,7 +129,6 @@ class TestReconcileCanary:
         with (
             patch.object(monitor, "_get_deployment", return_value=mock_deployment),
             patch.object(monitor, "_get_deployment_image", return_value="new:v2"),
-            patch.object(monitor, "_cleanup_legacy_canary_ingress"),
         ):
             status = monitor._reconcile_canary(
                 "ep",
@@ -220,29 +215,6 @@ class TestCleanupCanary:
 
         # Should not raise, just log
         monitor._cleanup_canary("ep", "ns")
-
-
-class TestLegacyCanaryIngressCleanup:
-    """Canary reconciliation removes the historical unauthenticated rule."""
-
-    def test_deletes_only_the_legacy_primary_ingress(self, monitor):
-        with patch.object(monitor, "_delete_legacy_inference_ingress") as mock_delete:
-            monitor._cleanup_legacy_canary_ingress("ep", "ns")
-
-        mock_delete.assert_called_once_with("inference-ep", "ns")
-        monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
-        monitor.networking_v1.create_namespaced_ingress.assert_not_called()
-
-    def test_propagates_legacy_ingress_cleanup_errors(self, monitor):
-        with (
-            patch.object(
-                monitor,
-                "_delete_legacy_inference_ingress",
-                side_effect=ApiException(status=500),
-            ),
-            pytest.raises(ApiException),
-        ):
-            monitor._cleanup_legacy_canary_ingress("ep", "ns")
 
 
 class TestCapacityTypeNodeSelector:
