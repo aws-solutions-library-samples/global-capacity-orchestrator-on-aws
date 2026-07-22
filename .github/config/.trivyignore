@@ -123,3 +123,23 @@ CVE-2026-34040 exp:2026-09-22
 # (and KUBECTL_VERSION in Dockerfile.dev), re-pull the base image, then drop
 # this entry. Advisory: https://avd.aquasec.com/nvd/cve-2026-39822
 CVE-2026-39822 exp:2026-09-22
+
+# GHSA-hrxh-6v49-42gf — gRPC-Go xDS RBAC authorization bypass and HTTP/2
+# transport-server denial of service, statically linked into the docker-buildx
+# CLI plugin installed by Dockerfile.dev (ARG BUILDX_VERSION). Surfaced only by
+# security:trivy:container-scan on the contributor/CI dev image.
+#
+# Not yet clearable by a pin bump: v0.35.0 remains the latest Buildx release,
+# and Buildx master still pins google.golang.org/grpc v1.81.1. The advisory was
+# published on 2026-07-21 and fixes all affected versions in gRPC-Go 1.82.1,
+# but no Buildx release containing that version exists yet.
+#
+# Low runtime risk: Buildx runs as a local build-time CLI against a trusted
+# BuildKit daemon; it is not deployed as a service and does not expose the
+# affected xDS RBAC or HTTP/2 server paths. The dev image is never deployed to
+# a cluster.
+#
+# Clears when a Buildx release ships with google.golang.org/grpc >= 1.82.1:
+# bump BUILDX_VERSION in Dockerfile.dev and remove this entry.
+# Advisory: https://github.com/advisories/GHSA-hrxh-6v49-42gf
+GHSA-hrxh-6v49-42gf exp:2026-09-22
