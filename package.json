@@ -14,6 +14,6 @@
   "devDependencies": {
     "aws-cdk": "2.1128.1",
     "cdk-dia": "0.12.3",
-    "markdownlint-cli2": "0.23.0"
+    "markdownlint-cli2": "0.23.1"
   }
 }
