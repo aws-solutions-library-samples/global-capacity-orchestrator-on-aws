@@ -628,6 +628,27 @@ def register_ga_endpoint(
                 normalized_endpoint_group,
                 expected_alb_arn=alb_arn,
             )
+            # AddEndpoints/RemoveEndpoints/UpdateEndpointGroup only submit a
+            # configuration change; the accelerator serves it from its edge
+            # locations only after returning to DEPLOYED. Returning success
+            # earlier reports the deployment as complete while brand-new
+            # connections to the global endpoint still black-hole for several
+            # minutes, which a live release run proved by timing out on the
+            # first health probe after deploy. Wait strictly, within whatever
+            # remains of this handler's wall-clock budget.
+            remaining_budget = min(
+                GA_DEPLOYED_WAIT_SECONDS,
+                int(MAX_WAIT_SECONDS - (time.time() - start_time)),
+            )
+            if remaining_budget <= 0 or not wait_for_accelerator_deployed(
+                ga_client,
+                normalized_endpoint_group,
+                timeout_seconds=remaining_budget,
+                strict=True,
+            ):
+                raise TimeoutError(
+                    "Global Accelerator did not reach DEPLOYED after endpoint registration"
+                )
         else:
             logger.info("EndpointGroupArn is not configured; skipping Global Accelerator")
 

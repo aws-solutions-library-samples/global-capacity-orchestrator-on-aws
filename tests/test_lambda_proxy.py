@@ -202,6 +202,41 @@ class TestForwardRequest:
         assert body["message"] == "Upstream failed after 1 attempt(s)"
         assert mock_pool.request.call_count == 1
 
+    def test_trust_bundle_refresh_consumes_the_forward_budget(self, proxy_utils_module):
+        """Regression: a cold-start trust refresh must not extend the deadline.
+
+        The caller derives ``timeout`` from the Lambda's remaining time.
+        Anchoring the deadline after ``get_backend_http_pool()`` let a slow
+        SSM trust-bundle fetch push the total wall clock past the Lambda
+        timeout, so a black-holed backend killed the function at 29s instead
+        of returning its bounded 504.
+        """
+        proxy_utils, _, mock_pool = proxy_utils_module
+        ok_response = MagicMock()
+        ok_response.status = 200
+        ok_response.headers = {"Content-Type": "text/plain"}
+        ok_response.data = b"OK"
+        mock_pool.request.return_value = ok_response
+
+        clock = {"now": 100.0}
+
+        def slow_pool_fetch():
+            clock["now"] += 3.0
+            return mock_pool
+
+        proxy_utils._http = None
+        with (
+            patch.object(proxy_utils, "get_backend_http_pool", side_effect=slow_pool_fetch),
+            patch.object(proxy_utils.time, "monotonic", side_effect=lambda: clock["now"]),
+        ):
+            result = proxy_utils.forward_request(
+                "https://example.com/api", "GET", {}, "", timeout=10.0
+            )
+
+        assert result["statusCode"] == 200
+        request_timeout = mock_pool.request.call_args.kwargs["timeout"]
+        assert request_timeout.total == pytest.approx(7.0)
+
 
 # ============================================================================
 # api-gateway-proxy handler

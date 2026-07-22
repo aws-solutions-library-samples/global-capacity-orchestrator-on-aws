@@ -253,6 +253,13 @@ def forward_request(
     ):
         raise ValueError("Backend proxy targets must use HTTPS on port 443")
 
+    # Anchor the deadline before acquiring transport: the caller computed the
+    # budget from the Lambda's remaining time, so a cold-start trust-bundle
+    # refresh must consume this budget. Anchoring after it extended the wall
+    # clock past the Lambda timeout, killing the function mid-flight instead
+    # of returning its bounded 504 when the backend black-holed.
+    deadline = time.monotonic() + max(timeout, 0.0)
+
     try:
         transport = _http or get_backend_http_pool()
     except RuntimeError:
@@ -266,7 +273,6 @@ def forward_request(
     method = http_method.upper()
     encoded_body = body.encode("utf-8") if body else None
     max_attempts = _MAX_RETRIES if method in _RETRYABLE_METHODS else 1
-    deadline = time.monotonic() + max(timeout, 0.0)
     last_exception: Exception | None = None
     last_response: urllib3.BaseHTTPResponse | None = None
     attempts_made = 0

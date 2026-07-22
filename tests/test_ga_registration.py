@@ -566,6 +566,11 @@ class TestRegisterGatewayEndpoint:
             patch.object(handler, "register_alb_with_ga") as register,
             patch.object(handler, "scrub_stale_ga_endpoints") as scrub,
             patch.object(handler, "ensure_https_health_check") as health,
+            patch.object(
+                handler,
+                "wait_for_accelerator_deployed",
+                side_effect=lambda *_args, **_kwargs: order.append("deployed") or True,
+            ) as wait,
         ):
             handler.register_ga_endpoint(
                 "test-cluster",
@@ -580,7 +585,78 @@ class TestRegisterGatewayEndpoint:
             ENDPOINT_GROUP_ARN,
             expected_alb_arn=PLATFORM_ALB_ARN,
         )
-        assert order == ["publish"]
+        # AddEndpoints only submits a configuration change: publication (and
+        # therefore deploy success) must wait for the accelerator to serve the
+        # endpoint from its edge locations, strictly and within a bounded wait.
+        wait.assert_called_once_with(ga, ENDPOINT_GROUP_ARN, timeout_seconds=ANY, strict=True)
+        budget = wait.call_args.kwargs["timeout_seconds"]
+        assert 0 < budget <= handler.GA_DEPLOYED_WAIT_SECONDS
+        assert order == ["deployed", "publish"]
+
+    def test_registration_never_deployed_blocks_publication(self, ga_module):
+        # Regression: a live run's first health probe black-holed because
+        # registration returned success while Global Accelerator was still
+        # propagating the new endpoint. A wait that ends without DEPLOYED must
+        # fail the registration instead of publishing a dead endpoint.
+        handler, mock_boto_client, _ = ga_module
+        elb = MagicMock()
+        ga = MagicMock()
+        mock_boto_client.side_effect = lambda service, **_kwargs: (
+            ga if service == "globalaccelerator" else elb
+        )
+        get_k8s, find_alb, publish, remove_ca = self._core_patches(handler)
+        with (
+            get_k8s,
+            find_alb,
+            publish as publish_mock,
+            remove_ca as remove_ca_mock,
+            patch.object(handler, "register_alb_with_ga"),
+            patch.object(handler, "scrub_stale_ga_endpoints"),
+            patch.object(handler, "ensure_https_health_check"),
+            patch.object(handler, "wait_for_accelerator_deployed", return_value=False),
+            pytest.raises(TimeoutError, match="did not reach DEPLOYED"),
+        ):
+            handler.register_ga_endpoint(
+                "test-cluster",
+                "us-east-1",
+                endpoint_group_arn=ENDPOINT_GROUP_ARN,
+            )
+
+        publish_mock.assert_not_called()
+        remove_ca_mock.assert_called_once_with("/tmp/gco-ca.crt")
+
+    def test_registration_with_exhausted_budget_fails_without_waiting(self, ga_module):
+        # When no wall-clock budget remains for the DEPLOYED wait (for example
+        # after a pathologically slow ALB wait), the handler must fail
+        # honestly and immediately rather than wait past its own budget.
+        # Zeroing the wait constant drives remaining_budget to the <= 0 branch.
+        handler, mock_boto_client, _ = ga_module
+        elb = MagicMock()
+        ga = MagicMock()
+        mock_boto_client.side_effect = lambda service, **_kwargs: (
+            ga if service == "globalaccelerator" else elb
+        )
+        get_k8s, find_alb, publish, remove_ca = self._core_patches(handler)
+        with (
+            get_k8s,
+            find_alb,
+            publish as publish_mock,
+            remove_ca,
+            patch.object(handler, "register_alb_with_ga"),
+            patch.object(handler, "scrub_stale_ga_endpoints"),
+            patch.object(handler, "ensure_https_health_check"),
+            patch.object(handler, "wait_for_accelerator_deployed") as wait,
+            patch.object(handler, "GA_DEPLOYED_WAIT_SECONDS", 0),
+            pytest.raises(TimeoutError, match="did not reach DEPLOYED"),
+        ):
+            handler.register_ga_endpoint(
+                "test-cluster",
+                "us-east-1",
+                endpoint_group_arn=ENDPOINT_GROUP_ARN,
+            )
+
+        wait.assert_not_called()
+        publish_mock.assert_not_called()
 
     def test_ga_convergence_failure_blocks_publication(self, ga_module):
         handler, mock_boto_client, _ = ga_module
