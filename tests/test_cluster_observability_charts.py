@@ -61,10 +61,10 @@ class _MockApp:
 def _stub(context: dict[str, Any], *, enabled: bool, observability: dict[str, Any] | None = None):
     """Build a lightweight stand-in for a GCORegionalStack instance.
 
-    Only the attributes the methods under test touch are populated: ``config``
-    (a real ConfigLoader), ``node`` (for the helm block), and
-    ``volcano_mirror_registry``. ``_observability_chart_values`` is bound so
-    ``_helm_chart_value_overrides`` can call it through the stub.
+    The stub carries the real ``ConfigLoader`` and node plus the mandatory LBC
+    runtime identities consumed by ``_helm_chart_value_overrides``. The
+    observability helper is bound so the override builder can call it through
+    the stub.
     """
     ctx = copy.deepcopy(context)
     obs: dict[str, Any] = {"enabled": enabled}
@@ -73,7 +73,17 @@ def _stub(context: dict[str, Any], *, enabled: bool, observability: dict[str, An
     ctx["cluster_observability"] = obs
     app = _MockApp(ctx)
     config = ConfigLoader(app)
-    stub = SimpleNamespace(config=config, node=app.node, volcano_mirror_registry=None)
+    stub = SimpleNamespace(
+        config=config,
+        node=app.node,
+        volcano_mirror_registry=None,
+        cluster=SimpleNamespace(cluster_name="test-cluster"),
+        deployment_region="us-east-1",
+        vpc=SimpleNamespace(vpc_id="vpc-0123456789abcdef0"),
+        aws_load_balancer_controller_role=SimpleNamespace(
+            role_arn="arn:aws:iam::123456789012:role/test-lbc-controller"
+        ),
+    )
     stub._observability_chart_values = lambda: RS._observability_chart_values(stub)
     return stub
 

@@ -3095,16 +3095,20 @@ class GCORegionalStack(Stack):
         for assoc in self._pod_identity_associations:
             converge_trigger.node.add_dependency(assoc)
 
-        # Deletion must run in the opposite safety order: endpoint guard first,
-        # then synchronous Kubernetes/Helm teardown, then the convergence trigger
-        # and its EKS access entries. Build the create-time dependency chain as
-        # trigger -> teardown guard -> endpoint guard so CloudFormation reverses it.
+        # Deletion must run in the opposite safety order: synchronous Helm
+        # teardown first (quiescing endpoint writers and removing Gateway
+        # resources), then the unconditional endpoint deregistration guard,
+        # then the convergence trigger and its EKS access entries. Build the
+        # create-time chain as trigger -> endpoint guard -> Helm teardown so
+        # CloudFormation reverses it during stack deletion.
         helm_teardown = getattr(self, "helm_teardown_resource", None)
         ga_deregistration = getattr(self, "ga_deregistration_resource", None)
         if helm_teardown is not None:
-            helm_teardown.node.add_dependency(converge_trigger)
             if ga_deregistration is not None:
-                ga_deregistration.node.add_dependency(helm_teardown)
+                helm_teardown.node.add_dependency(ga_deregistration)
+                ga_deregistration.node.add_dependency(converge_trigger)
+            else:
+                helm_teardown.node.add_dependency(converge_trigger)
         elif ga_deregistration is not None:
             ga_deregistration.node.add_dependency(converge_trigger)
 
