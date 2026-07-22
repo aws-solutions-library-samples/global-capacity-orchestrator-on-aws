@@ -1456,6 +1456,48 @@ class TestReleaseConvergenceValidation:
             [cluster_object], [cluster_object], self.RELEASE, self.NAMESPACE
         )
 
+    def test_templated_namespace_on_cluster_scoped_object_accepts_cluster_return(self):
+        """Regression: kueue failed live validation on a real cluster.
+
+        The kueue chart templates ``metadata.namespace: kueue-system`` onto its
+        cluster-scoped MutatingWebhookConfiguration. The API server discards
+        the field, so kubectl returns the object without a namespace and the
+        exact ``(identity, namespace)`` match rejected a healthy release.
+        """
+        rendered = {
+            "apiVersion": "admissionregistration.k8s.io/v1",
+            "kind": "MutatingWebhookConfiguration",
+            "metadata": {
+                "name": "kueue-mutating-webhook-configuration",
+                "namespace": "kueue-system",
+            },
+        }
+        live = {
+            "apiVersion": "admissionregistration.k8s.io/v1",
+            "kind": "MutatingWebhookConfiguration",
+            "metadata": {"name": "kueue-mutating-webhook-configuration"},
+        }
+        helm_handler._compare_resource_identities([rendered], [live], "kueue", "kueue-system")
+
+    def test_explicit_namespace_still_rejects_wrong_namespace_return(self):
+        # The cluster-scope fallback must not weaken the namespaced check: a
+        # live object in a different namespace is still a validation failure.
+        rendered = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "demo-config", "namespace": "demo-system"},
+        }
+        live = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "demo-config", "namespace": "other-system"},
+        }
+        with pytest.raises(RuntimeError, match="wrong namespace") as excinfo:
+            helm_handler._compare_resource_identities(
+                [rendered], [live], self.RELEASE, self.NAMESPACE
+            )
+        assert "other-system" in str(excinfo.value)
+
     def test_cross_namespace_rendered_objects_are_retrieved_per_namespace(self):
         """Regression: one ``-n`` for a mixed-namespace manifest broke live runs.
 

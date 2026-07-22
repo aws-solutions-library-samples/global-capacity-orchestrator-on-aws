@@ -998,10 +998,15 @@ def _compare_resource_identities(
             f"{len(actual)} ({detail})"
         )
 
-    # Explicit manifest namespaces must match exactly. A namespace omitted by
-    # a namespaced Helm object is defaulted by ``kubectl -n`` and must return
-    # from the release namespace; a cluster-scoped object legitimately returns
-    # no namespace. Consume counters so duplicate identities are also exact.
+    # Explicit manifest namespaces must match exactly for namespaced kinds. A
+    # namespace omitted by a namespaced Helm object is defaulted by
+    # ``kubectl -n`` and must return from the release namespace; a
+    # cluster-scoped object legitimately returns no namespace even when the
+    # chart templates ``metadata.namespace`` onto it (for example kueue's
+    # MutatingWebhookConfiguration) because the API server discards the field
+    # on cluster-scoped kinds. Namespaced kinds always return with their
+    # namespace, so accepting a cluster-scoped return never weakens the check
+    # for them. Consume counters so duplicate identities are also exact.
     actual_namespaced = Counter(
         (_resource_core_identity(resource, "kubectl output"), _resource_namespace(resource))
         for resource in actual
@@ -1012,12 +1017,22 @@ def _compare_resource_identities(
             continue
         identity = _resource_core_identity(resource, "manifest")
         key = (identity, namespace)
-        if actual_namespaced[key] <= 0:
+        cluster_scoped_key = (identity, None)
+        if actual_namespaced[key] > 0:
+            actual_namespaced[key] -= 1
+        elif actual_namespaced[cluster_scoped_key] > 0:
+            actual_namespaced[cluster_scoped_key] -= 1
+        else:
+            wrong_namespaces = sorted(
+                actual_namespace or "<cluster-scoped>"
+                for (actual_identity, actual_namespace), count in actual_namespaced.items()
+                if actual_identity == identity and count > 0
+            )
             raise RuntimeError(
                 f"release {release!r} returned the wrong namespace for "
-                f"{_display_identity(identity, namespace)}"
+                f"{_display_identity(identity, namespace)}: expected {namespace!r} or "
+                f"cluster scope, got {wrong_namespaces}"
             )
-        actual_namespaced[key] -= 1
 
     for resource in expected:
         if _resource_namespace(resource) is not None:

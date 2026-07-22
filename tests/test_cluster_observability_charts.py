@@ -322,6 +322,16 @@ def test_chart_entry_defaults(kps_entry) -> None:
     assert kps_entry["wait"] is False
 
 
+def test_unscrapable_control_plane_monitors_disabled(kps_entry) -> None:
+    # EKS owns etcd/scheduler/controller-manager, and Auto Mode runs no
+    # kube-proxy DaemonSet and no CoreDNS pods (DNS is a built-in capability).
+    # Each enabled monitor renders a kube-system Service whose selector can
+    # never have ready endpoints, which fails live release validation.
+    values = kps_entry["values"]
+    for component in ("kubeEtcd", "kubeScheduler", "kubeControllerManager", "kubeProxy", "coreDns"):
+        assert values[component]["enabled"] is False, component
+
+
 def test_grafana_is_private_and_native_auth(kps_entry) -> None:
     grafana = kps_entry["values"]["grafana"]
     assert grafana["service"]["type"] == "ClusterIP"
