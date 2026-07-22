@@ -12,7 +12,7 @@
     "lint:markdown": "markdownlint-cli2 --config .github/config/.markdownlint-cli2.yaml"
   },
   "devDependencies": {
-    "aws-cdk": "2.1128.1",
+    "aws-cdk": "2.1131.0",
     "cdk-dia": "0.12.3",
     "markdownlint-cli2": "0.23.0"
   }
