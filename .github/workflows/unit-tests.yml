@@ -106,7 +106,7 @@ jobs:
       # then raises "database or disk is full", which xdist reports as an
       # INTERNALERROR / KeyError: <WorkerController gwN> — a false failure.
       - uses: ./.github/actions/free-disk-space
-      - uses: actions/setup-node@v6.4.0
+      - uses: actions/setup-node@v7.0.0
         with:
           node-version-file: ".nvmrc"
       - uses: actions/setup-python@v6
@@ -273,7 +273,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6.4.0
+      - uses: actions/setup-node@v7.0.0
         with:
           node-version-file: ".nvmrc"
           cache: "npm"
@@ -314,7 +314,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/free-disk-space
-      - uses: actions/setup-node@v6.4.0
+      - uses: actions/setup-node@v7.0.0
         with:
           node-version-file: ".nvmrc"
       - uses: actions/setup-python@v6
@@ -367,7 +367,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/free-disk-space
-      - uses: actions/setup-node@v6.4.0
+      - uses: actions/setup-node@v7.0.0
         with:
           node-version-file: ".nvmrc"
       - uses: actions/setup-python@v6
@@ -445,7 +445,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/free-disk-space
-      - uses: actions/setup-node@v6.4.0
+      - uses: actions/setup-node@v7.0.0
         with:
           node-version-file: ".nvmrc"
       - uses: actions/setup-python@v6
@@ -553,7 +553,7 @@ jobs:
       )
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6.4.0
+      - uses: actions/setup-node@v7.0.0
         with:
           node-version-file: ".nvmrc"
       - uses: actions/setup-python@v6

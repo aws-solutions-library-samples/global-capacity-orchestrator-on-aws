@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@v7
       # The ~9GB vLLM image needs headroom on the runner's ~14GB root volume.
       - uses: ./.github/actions/free-disk-space
-      - uses: actions/setup-node@v6.4.0
+      - uses: actions/setup-node@v7.0.0
         with:
           node-version-file: ".nvmrc"
       - name: Install and verify the declared npm version
