@@ -109,7 +109,7 @@ subjects:
 
 # ─── Health Monitor: exact self-healing resources ───────────────────
 # Pre-create the election Lease so the service account needs no broad
-# `create leases` permission. Only the named Lease and main Ingress are mutable/
+# `create leases` permission. Only the named Lease and platform Gateway are
 # readable by the self-healing path; all replicas keep serving health endpoints.
 ---
 apiVersion: coordination.k8s.io/v1
@@ -132,9 +132,9 @@ metadata:
     app: health-monitor
     project: gco
 rules:
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses"]
-    resourceNames: ["gco-ingress"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways"]
+    resourceNames: ["gco-gateway"]
     verbs: ["get"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
@@ -300,10 +300,12 @@ rules:
     resources: ["secrets"]
     verbs: ["get", "create", "delete"]
 
-  # Networking resources — Ingress for inference endpoints
+  # Temporary upgrade cleanup only: endpoint-specific Ingresses are no longer
+  # created or read. Keep exact delete capability until all supported upgrade
+  # paths have removed historical inference-{name} Ingress objects.
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
-    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+    verbs: ["delete"]
 
   # Networking resources — NetworkPolicy allow rules that let inference pods
   # reach the shared Mooncake master RPC/metadata ports and each other on the

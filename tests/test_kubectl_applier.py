@@ -13,7 +13,7 @@ against a fresh import.
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import yaml
@@ -1249,6 +1249,129 @@ class TestHandleTask:
         assert status == "failed"
 
 
+class TestGatewayResourceDeletion:
+    """Gateway teardown is ordered, bounded, idempotent, and task-dispatched."""
+
+    @staticmethod
+    def _not_found(handler_module):
+        return handler_module.ApiException(status=404, reason="Not Found")
+
+    def test_deletes_routes_first_and_gateway_class_last_waiting_for_absence(self, handler_module):
+        custom_api = MagicMock()
+        custom_api.get_namespaced_custom_object.side_effect = [
+            self._not_found(handler_module) for _ in range(4)
+        ]
+        custom_api.get_cluster_custom_object.side_effect = self._not_found(handler_module)
+        delete_options = MagicMock()
+
+        with (
+            patch.object(handler_module, "configure_k8s_client") as configure,
+            patch.object(handler_module.client, "CustomObjectsApi", return_value=custom_api),
+            patch.object(handler_module.client, "V1DeleteOptions", return_value=delete_options),
+        ):
+            result = handler_module._delete_gateway_resources("gco-us-east-1", "us-east-1")
+
+        configure.assert_called_once_with("gco-us-east-1", "us-east-1")
+        assert result == {
+            "status": "deleted",
+            "DeletedCount": 5,
+            "Deleted": [
+                "HTTPRoute/gco-system/gco-routes",
+                "Gateway/gco-system/gco-gateway",
+                "LoadBalancerConfiguration/gco-system/gco-gateway-load-balancer",
+                "TargetGroupConfiguration/gco-system/gco-default-target-group",
+                "GatewayClass/gco-aws-alb",
+            ],
+        }
+        assert [entry[0] for entry in custom_api.mock_calls] == [
+            "delete_namespaced_custom_object",
+            "get_namespaced_custom_object",
+            "delete_namespaced_custom_object",
+            "get_namespaced_custom_object",
+            "delete_namespaced_custom_object",
+            "get_namespaced_custom_object",
+            "delete_namespaced_custom_object",
+            "get_namespaced_custom_object",
+            "delete_cluster_custom_object",
+            "get_cluster_custom_object",
+        ]
+        assert custom_api.delete_namespaced_custom_object.call_args_list[0] == call(
+            "gateway.networking.k8s.io",
+            "v1",
+            "gco-system",
+            "httproutes",
+            "gco-routes",
+            body=delete_options,
+        )
+        assert custom_api.delete_cluster_custom_object.call_args == call(
+            "gateway.networking.k8s.io",
+            "v1",
+            "gatewayclasses",
+            "gco-aws-alb",
+            body=delete_options,
+        )
+
+    def test_already_absent_resources_are_idempotent(self, handler_module):
+        custom_api = MagicMock()
+        custom_api.delete_namespaced_custom_object.side_effect = [
+            self._not_found(handler_module) for _ in range(4)
+        ]
+        custom_api.delete_cluster_custom_object.side_effect = self._not_found(handler_module)
+
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch.object(handler_module.client, "CustomObjectsApi", return_value=custom_api),
+            patch.object(handler_module.client, "V1DeleteOptions"),
+        ):
+            result = handler_module._delete_gateway_resources("cluster", "us-east-1")
+
+        assert result["DeletedCount"] == 5
+        assert all(item.endswith(":already-absent") for item in result["Deleted"])
+        custom_api.get_namespaced_custom_object.assert_not_called()
+        custom_api.get_cluster_custom_object.assert_not_called()
+
+    def test_one_deadline_bounds_the_complete_resource_set(self, handler_module):
+        custom_api = MagicMock()
+        custom_api.get_namespaced_custom_object.return_value = {"metadata": {}}
+
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch.object(handler_module.client, "CustomObjectsApi", return_value=custom_api),
+            patch.object(handler_module.client, "V1DeleteOptions"),
+            patch.object(
+                handler_module.time,
+                "monotonic",
+                side_effect=[100.0, 100.0 + handler_module._GATEWAY_DELETE_WAIT_SECONDS],
+            ),
+            patch.object(handler_module.time, "sleep") as sleep,
+            pytest.raises(RuntimeError, match="complete Gateway resource set"),
+        ):
+            handler_module._delete_gateway_resources("cluster", "us-east-1")
+
+        assert custom_api.delete_namespaced_custom_object.call_count == 1
+        sleep.assert_not_called()
+
+    def test_task_action_dispatches_and_records_gateway_teardown(self, handler_module):
+        deleted = {"status": "deleted", "DeletedCount": 5, "Deleted": ["five objects"]}
+        with (
+            patch.object(
+                handler_module, "_delete_gateway_resources", return_value=deleted
+            ) as delete_gateway,
+            patch.object(handler_module, "_record_phase_status") as record,
+        ):
+            result = handler_module.handle_task(
+                {
+                    "Action": "delete_gateway_resources",
+                    "ClusterName": "gco-us-east-1",
+                    "Region": "us-east-1",
+                }
+            )
+
+        assert result is deleted
+        delete_gateway.assert_called_once_with("gco-us-east-1", "us-east-1")
+        record.assert_called_once_with("gateway-teardown", "deleted", "deleted=5")
+
+
 class TestHorizontalPodAutoscalerApply:
     """autoscaling/v2 HPAs are created and patched idempotently."""
 
@@ -1480,20 +1603,26 @@ class TestInferenceProxyAutoscalingManifest:
         assert pdb["spec"]["minAvailable"] == 2
         assert pdb["spec"]["selector"]["matchLabels"] == {"app": "inference-proxy"}
 
-    def test_ingress_deregistration_covers_stream_drain(self):
+    def test_gateway_target_group_deregistration_covers_stream_drain(self):
         """ALB draining lasts at least as long as Uvicorn's maximum stream drain."""
-        ingress_path = (
+        gateway_path = (
             Path(__file__).parent.parent
             / "lambda"
             / "kubectl-applier-simple"
             / "manifests"
-            / "11-ingress.yaml"
+            / "post-helm-gateway.yaml"
         )
-        ingress = yaml.safe_load(ingress_path.read_text())
-        annotations = ingress["metadata"]["annotations"]
-        assert annotations["alb.ingress.kubernetes.io/target-group-attributes"] == (
-            "deregistration_delay.timeout_seconds=900"
+        documents = list(yaml.safe_load_all(gateway_path.read_text()))
+        target_group = next(
+            document
+            for document in documents
+            if document and document.get("kind") == "TargetGroupConfiguration"
         )
+        attributes = {
+            item["key"]: item["value"]
+            for item in target_group["spec"]["defaultConfiguration"]["targetGroupAttributes"]
+        }
+        assert attributes["deregistration_delay.timeout_seconds"] == "900"
 
     def test_uvicorn_runtime_honors_graceful_shutdown_budget(self):
         """The container entrypoint forwards its configured drain window to Uvicorn."""
@@ -1510,3 +1639,545 @@ class TestInferenceProxyAutoscalingManifest:
             inference_api._run_server()
 
         assert mock_run.call_args.kwargs["timeout_graceful_shutdown"] == 901
+
+
+class TestAuthoritativeManifestPlanner:
+    """The raw-manifest planner is the only source of expected inventory."""
+
+    def test_automatically_includes_sorted_yaml_and_yml_and_partitions_phases(
+        self, handler_module, tmp_path
+    ):
+        (tmp_path / "20-second.yml").write_text(
+            yaml.safe_dump(
+                {
+                    "apiVersion": "v1",
+                    "kind": "Secret",
+                    "metadata": {"name": "second"},
+                }
+            )
+        )
+        (tmp_path / "10-first.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {"name": "first", "namespace": "demo"},
+                }
+            )
+        )
+        (tmp_path / "post-helm-third.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {"name": "third", "namespace": "monitoring"},
+                }
+            )
+        )
+        (tmp_path / "ignored.txt").write_text("not a manifest")
+
+        plan = handler_module.plan_manifests(str(tmp_path), {})
+
+        assert [item["name"] for item in plan["phases"]["base"]] == ["first", "second"]
+        assert [item["sourceFile"] for item in plan["phases"]["post-helm"]] == [
+            "post-helm-third.yaml"
+        ]
+        assert plan["phases"]["base"][0]["namespace"] == "demo"
+        assert plan["phases"]["base"][1]["namespace"] == "default"
+        assert plan["skipped"]["base"] == ["post-helm-third.yaml:deferred-to-post-helm"]
+
+    def test_excludes_complete_file_for_unresolved_upper_snake_gate(self, handler_module, tmp_path):
+        (tmp_path / "10-required.yaml").write_text(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: required\n"
+        )
+        (tmp_path / "20-optional.yaml").write_text(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: optional\n"
+            "data:\n  enabled: '{{OPTIONAL_FEATURE_ENABLED}}'\n"
+            "  dashboard-token: '{{gpu}}'\n"
+        )
+
+        plan = handler_module.plan_manifests(str(tmp_path), {})
+
+        assert [item["name"] for item in plan["phases"]["base"]] == ["required"]
+        assert plan["featureGates"]["base"] == ["{{OPTIONAL_FEATURE_ENABLED}}"]
+        assert plan["skipped"]["base"] == ["20-optional.yaml:unreplaced-placeholders"]
+
+    def test_rejects_duplicate_identity_across_phases(self, handler_module, tmp_path):
+        manifest = yaml.safe_dump(
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": "duplicate", "namespace": "demo"},
+            }
+        )
+        (tmp_path / "10-base.yaml").write_text(manifest)
+        (tmp_path / "post-helm-duplicate.yaml").write_text(manifest)
+
+        with pytest.raises(ValueError, match="duplicate.*first declared"):
+            handler_module.plan_manifests(str(tmp_path), {})
+
+    @pytest.mark.parametrize(
+        ("content", "message"),
+        [
+            (
+                "apiVersion: example.io/v1\nkind: Mystery\nmetadata:\n  name: mystery\n",
+                "unsupported kind 'Mystery'",
+            ),
+            ("apiVersion: v1\nkind: ConfigMap\nmetadata: {}\n", "metadata.name"),
+            ("- apiVersion: v1\n  kind: ConfigMap\n", "document must be a mapping"),
+            ("apiVersion: v1\nkind: [broken\n", "invalid YAML"),
+        ],
+    )
+    def test_rejects_unsupported_or_malformed_documents(
+        self, handler_module, tmp_path, content, message
+    ):
+        (tmp_path / "10-invalid.yaml").write_text(content)
+
+        with pytest.raises(ValueError, match=message):
+            handler_module.plan_manifests(str(tmp_path), {})
+
+    def test_apply_returns_exact_planned_count_and_inventory(self, handler_module, tmp_path):
+        documents = [
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": name, "namespace": "monitoring"},
+            }
+            for name in ("one", "two")
+        ]
+        (tmp_path / "post-helm-auto.yaml").write_text(yaml.safe_dump_all(documents))
+
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch("handler.client") as mock_client,
+        ):
+            mock_client.CoreV1Api.return_value = MagicMock()
+            mock_client.AppsV1Api.return_value = MagicMock()
+            mock_client.RbacAuthorizationV1Api.return_value = MagicMock()
+            mock_client.NetworkingV1Api.return_value = MagicMock()
+            mock_client.CustomObjectsApi.return_value = MagicMock()
+            result = handler_module.apply_manifests(
+                "cluster", "us-east-1", str(tmp_path), {}, post_helm=True
+            )
+
+        assert result["AppliedCount"] == result["ExpectedCount"] == 2
+        assert [item["name"] for item in result["ExpectedResources"]] == ["one", "two"]
+        assert all(item["phase"] == "post-helm" for item in result["ExpectedResources"])
+
+
+def _validate_with_fake_dynamic(
+    handler_module,
+    manifests_dir,
+    live_objects,
+    *,
+    endpoint_slice_items=None,
+    deployment_token="deployment-token",
+):
+    """Run validation against an in-memory DynamicClient object inventory."""
+    dynamic_client = MagicMock()
+    discovered = {}
+
+    def discover(*, api_version, kind):
+        key = (api_version, kind)
+        if key in discovered:
+            return discovered[key]
+        resource = MagicMock()
+
+        def get_object(**kwargs):
+            if kind == "EndpointSlice":
+                return {"items": endpoint_slice_items or []}
+            identity = (
+                api_version,
+                kind,
+                kwargs.get("namespace", handler_module._CLUSTER_SCOPE),
+                kwargs["name"],
+            )
+            if identity not in live_objects:
+                raise handler_module.ApiException(status=404, reason="Not Found")
+            return live_objects[identity]
+
+        resource.get.side_effect = get_object
+        discovered[key] = resource
+        return resource
+
+    dynamic_client.resources.get.side_effect = discover
+    with (
+        patch.object(handler_module, "configure_k8s_client"),
+        patch.object(handler_module.dynamic, "DynamicClient", return_value=dynamic_client),
+        patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+    ):
+        result = handler_module.validate_manifests(
+            "cluster",
+            "us-east-1",
+            str(manifests_dir),
+            {},
+            deployment_token,
+        )
+    return result, dynamic_client
+
+
+class TestManifestReadinessValidation:
+    """Exact DynamicClient retrieval and per-kind readiness contracts."""
+
+    def test_all_readiness_kinds_and_service_endpoint_are_ready(self, handler_module, tmp_path):
+        def document(api_version, kind, name, namespace=None, spec=None):
+            metadata = {"name": name}
+            if namespace:
+                metadata["namespace"] = namespace
+            result = {"apiVersion": api_version, "kind": kind, "metadata": metadata}
+            if spec is not None:
+                result["spec"] = spec
+            return result
+
+        base_documents = [
+            document("apps/v1", "Deployment", "deployment", "demo", {"replicas": 2}),
+            document("apps/v1", "StatefulSet", "stateful", "demo", {"replicas": 1}),
+            document("apps/v1", "DaemonSet", "daemon", "demo"),
+            document("batch/v1", "Job", "job", "demo"),
+            document("v1", "Pod", "pod", "demo"),
+            document("v1", "PersistentVolumeClaim", "claim", "demo"),
+            document("v1", "PersistentVolume", "volume"),
+            document("networking.k8s.io/v1", "Ingress", "ingress", "demo"),
+            document(
+                "apiextensions.k8s.io/v1",
+                "CustomResourceDefinition",
+                "widgets.example.io",
+            ),
+            document("apiregistration.k8s.io/v1", "APIService", "v1.example.io"),
+            document("autoscaling/v2", "HorizontalPodAutoscaler", "hpa", "demo"),
+            document("policy/v1", "PodDisruptionBudget", "pdb", "demo"),
+            document("karpenter.sh/v1", "NodePool", "node-pool"),
+            document("karpenter.k8s.aws/v1", "EC2NodeClass", "node-class"),
+            document("keda.sh/v1alpha1", "ScaledJob", "scaled-job", "demo"),
+            document("keda.sh/v1alpha1", "ScaledObject", "scaled-object", "demo"),
+            document(
+                "v1",
+                "Service",
+                "service",
+                "demo",
+                {"selector": {"app": "ready"}},
+            ),
+        ]
+        post_document = document("v1", "ConfigMap", "post-static", "monitoring")
+        (tmp_path / "10-all-ready.yaml").write_text(yaml.safe_dump_all(base_documents))
+        (tmp_path / "post-helm-static.yml").write_text(yaml.safe_dump(post_document))
+
+        cluster = handler_module._CLUSTER_SCOPE
+        live_objects = {
+            ("apps/v1", "Deployment", "demo", "deployment"): {
+                "metadata": {"generation": 3},
+                "spec": {"replicas": 2},
+                "status": {
+                    "observedGeneration": 3,
+                    "replicas": 2,
+                    "updatedReplicas": 2,
+                    "readyReplicas": 2,
+                    "availableReplicas": 2,
+                },
+            },
+            ("apps/v1", "StatefulSet", "demo", "stateful"): {
+                "metadata": {"generation": 2},
+                "spec": {"replicas": 1},
+                "status": {
+                    "observedGeneration": 2,
+                    "currentReplicas": 1,
+                    "updatedReplicas": 1,
+                    "readyReplicas": 1,
+                },
+            },
+            ("apps/v1", "DaemonSet", "demo", "daemon"): {
+                "metadata": {"generation": 1},
+                "status": {
+                    "observedGeneration": 1,
+                    "desiredNumberScheduled": 0,
+                    "currentNumberScheduled": 0,
+                    "updatedNumberScheduled": 0,
+                    "numberReady": 0,
+                    "numberAvailable": 0,
+                    "numberMisscheduled": 0,
+                },
+            },
+            ("batch/v1", "Job", "demo", "job"): {
+                "metadata": {},
+                "status": {"conditions": [{"type": "Complete", "status": "True"}]},
+            },
+            ("v1", "Pod", "demo", "pod"): {
+                "metadata": {},
+                "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+            },
+            ("v1", "PersistentVolumeClaim", "demo", "claim"): {
+                "metadata": {},
+                "status": {"phase": "Bound"},
+            },
+            ("v1", "PersistentVolume", cluster, "volume"): {
+                "metadata": {},
+                "status": {"phase": "Available"},
+            },
+            ("networking.k8s.io/v1", "Ingress", "demo", "ingress"): {
+                "metadata": {},
+                "status": {"loadBalancer": {"ingress": [{"hostname": "internal.example"}]}},
+            },
+            (
+                "apiextensions.k8s.io/v1",
+                "CustomResourceDefinition",
+                cluster,
+                "widgets.example.io",
+            ): {
+                "metadata": {},
+                "status": {"conditions": [{"type": "Established", "status": "True"}]},
+            },
+            ("apiregistration.k8s.io/v1", "APIService", cluster, "v1.example.io"): {
+                "metadata": {},
+                "status": {"conditions": [{"type": "Available", "status": "True"}]},
+            },
+            ("autoscaling/v2", "HorizontalPodAutoscaler", "demo", "hpa"): {
+                "metadata": {},
+                "status": {
+                    "conditions": [
+                        {"type": "AbleToScale", "status": "True"},
+                        {"type": "ScalingActive", "status": "True"},
+                    ]
+                },
+            },
+            ("policy/v1", "PodDisruptionBudget", "demo", "pdb"): {
+                "metadata": {"generation": 1},
+                "status": {
+                    "observedGeneration": 1,
+                    "currentHealthy": 2,
+                    "desiredHealthy": 2,
+                },
+            },
+            ("karpenter.sh/v1", "NodePool", cluster, "node-pool"): {
+                "metadata": {},
+                "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+            },
+            ("karpenter.k8s.aws/v1", "EC2NodeClass", cluster, "node-class"): {
+                "metadata": {},
+                "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+            },
+            ("keda.sh/v1alpha1", "ScaledJob", "demo", "scaled-job"): {
+                "metadata": {},
+                "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+            },
+            ("keda.sh/v1alpha1", "ScaledObject", "demo", "scaled-object"): {
+                "metadata": {},
+                "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+            },
+            ("v1", "Service", "demo", "service"): {"metadata": {}},
+            ("v1", "ConfigMap", "monitoring", "post-static"): {"metadata": {}},
+        }
+        endpoint_slices = [
+            {
+                "endpoints": [
+                    {"conditions": {"ready": False, "terminating": False}},
+                    {"conditions": {"ready": True, "terminating": False}},
+                ]
+            }
+        ]
+
+        result, _ = _validate_with_fake_dynamic(
+            handler_module,
+            tmp_path,
+            live_objects,
+            endpoint_slice_items=endpoint_slices,
+            deployment_token="deploy-123",
+        )
+
+        assert result["DeploymentToken"] == "deploy-123"
+        assert result["ExpectedCount"] == result["ValidatedCount"] == 18
+        assert result["PhaseCounts"] == {
+            "base": {"ExpectedCount": 17, "ValidatedCount": 17},
+            "post-helm": {"ExpectedCount": 1, "ValidatedCount": 1},
+        }
+        assert result["ExpectedResources"] == result["ValidatedResources"]
+
+    def test_missing_exact_object_fails_with_identity(self, handler_module, tmp_path):
+        (tmp_path / "10-required.yaml").write_text(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: absent\n  namespace: demo\n"
+        )
+
+        with pytest.raises(RuntimeError, match=r"ConfigMap/demo/absent.*API error 404"):
+            _validate_with_fake_dynamic(handler_module, tmp_path, {})
+
+    def test_unready_controller_reports_replica_evidence(self, handler_module, tmp_path):
+        (tmp_path / "10-deployment.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "apiVersion": "apps/v1",
+                    "kind": "Deployment",
+                    "metadata": {"name": "api", "namespace": "demo"},
+                    "spec": {"replicas": 2},
+                }
+            )
+        )
+        live_objects = {
+            ("apps/v1", "Deployment", "demo", "api"): {
+                "metadata": {"generation": 4},
+                "spec": {"replicas": 2},
+                "status": {
+                    "observedGeneration": 4,
+                    "replicas": 2,
+                    "updatedReplicas": 2,
+                    "readyReplicas": 1,
+                    "availableReplicas": 1,
+                },
+            }
+        }
+
+        with pytest.raises(RuntimeError, match=r"replicas not converged.*readyReplicas=1"):
+            _validate_with_fake_dynamic(handler_module, tmp_path, live_objects)
+
+    def test_selector_service_requires_ready_nonterminating_endpoint(
+        self, handler_module, tmp_path
+    ):
+        (tmp_path / "10-service.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "apiVersion": "v1",
+                    "kind": "Service",
+                    "metadata": {"name": "api", "namespace": "demo"},
+                    "spec": {"selector": {"app": "api"}},
+                }
+            )
+        )
+        live_objects = {("v1", "Service", "demo", "api"): {"metadata": {}}}
+        endpoint_slices = [{"endpoints": [{"conditions": {"ready": True, "terminating": True}}]}]
+
+        with pytest.raises(RuntimeError, match="no ready, nonterminating EndpointSlice endpoint"):
+            _validate_with_fake_dynamic(
+                handler_module,
+                tmp_path,
+                live_objects,
+                endpoint_slice_items=endpoint_slices,
+            )
+
+    def test_unresolved_optional_resources_are_not_expected(self, handler_module, tmp_path):
+        (tmp_path / "10-required.yaml").write_text(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: required\n  namespace: demo\n"
+        )
+        (tmp_path / "20-optional.yaml").write_text(
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n"
+            "  name: optional\n  namespace: demo\nspec:\n"
+            "  template:\n    metadata:\n      annotations:\n"
+            "        enabled: '{{OPTIONAL_CONTROLLER_ENABLED}}'\n"
+        )
+        live_objects = {("v1", "ConfigMap", "demo", "required"): {"metadata": {}}}
+
+        result, dynamic_client = _validate_with_fake_dynamic(handler_module, tmp_path, live_objects)
+
+        assert result["ExpectedCount"] == result["ValidatedCount"] == 1
+        assert [item["name"] for item in result["ExpectedResources"]] == ["required"]
+        discovered_kinds = {
+            call.kwargs["kind"] for call in dynamic_client.resources.get.call_args_list
+        }
+        assert "Deployment" not in discovered_kinds
+
+    @pytest.mark.parametrize(
+        "resource",
+        [
+            {
+                "metadata": {"generation": 1},
+                "spec": {"replicas": 0},
+                "status": {"observedGeneration": 1},
+            },
+            {
+                "metadata": {"generation": 1},
+                "spec": {"replicas": 0},
+                "status": {"observedGeneration": 1},
+            },
+            {
+                "metadata": {"generation": 1},
+                "status": {"observedGeneration": 1, "desiredNumberScheduled": 0},
+            },
+        ],
+        ids=["deployment", "statefulset", "daemonset"],
+    )
+    def test_zero_desired_controllers_accept_omitted_zero_counters(
+        self, handler_module, resource, request
+    ):
+        kind = {
+            "deployment": "Deployment",
+            "statefulset": "StatefulSet",
+            "daemonset": "DaemonSet",
+        }[request.node.callspec.id]
+        assert handler_module._resource_readiness_failure(kind, resource) is None
+
+    def test_daemonset_rejects_misscheduled_pods(self, handler_module):
+        resource = {
+            "metadata": {"generation": 1},
+            "status": {
+                "observedGeneration": 1,
+                "desiredNumberScheduled": 1,
+                "currentNumberScheduled": 1,
+                "updatedNumberScheduled": 1,
+                "numberReady": 1,
+                "numberAvailable": 1,
+                "numberMisscheduled": 1,
+            },
+        }
+
+        failure = handler_module._resource_readiness_failure("DaemonSet", resource)
+
+        assert failure == "pods are misscheduled (numberMisscheduled=1)"
+
+
+class TestManifestValidationTaskEvidence:
+    """The task action preserves deployment-token and phase-status evidence."""
+
+    def test_records_validated_status_and_returns_deployment_token(self, handler_module):
+        event = {
+            "Action": "validate_manifests",
+            "ClusterName": "cluster",
+            "Region": "us-east-1",
+            "ImageReplacements": {"{{IMAGE}}": "image"},
+            "DeploymentToken": "deploy-token-456",
+        }
+        validation_result = {
+            "DeploymentToken": "deploy-token-456",
+            "ExpectedCount": 3,
+            "ValidatedCount": 3,
+            "PhaseCounts": {},
+            "ExpectedResources": [],
+            "ValidatedResources": [],
+        }
+        with (
+            patch.object(
+                handler_module,
+                "validate_manifests",
+                return_value=validation_result,
+            ) as mock_validate,
+            patch.object(handler_module, "_record_phase_status") as mock_status,
+        ):
+            result = handler_module.handle_task(event)
+
+        assert result["DeploymentToken"] == "deploy-token-456"
+        assert mock_validate.call_args.args[3] == {"{{IMAGE}}": "image"}
+        assert mock_validate.call_args.args[4] == "deploy-token-456"
+        phase, status, message = mock_status.call_args.args
+        assert (phase, status) == ("manifest-validation", "validated")
+        assert "deploy-token-456" in message
+        assert "validated=3 expected=3" in message
+
+    def test_records_failed_status_before_validation_error_escapes(self, handler_module):
+        event = {
+            "Action": "validate_manifests",
+            "ClusterName": "cluster",
+            "Region": "us-east-1",
+            "DeploymentToken": "failed-token",
+        }
+        with (
+            patch.object(
+                handler_module,
+                "validate_manifests",
+                side_effect=RuntimeError("Deployment/demo/api is not ready"),
+            ),
+            patch.object(handler_module, "_record_phase_status") as mock_status,
+            pytest.raises(RuntimeError, match="not ready"),
+        ):
+            handler_module.handle_task(event)
+
+        assert mock_status.call_args.args == (
+            "manifest-validation",
+            "failed",
+            "token=failed-token Deployment/demo/api is not ready",
+        )

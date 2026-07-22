@@ -113,7 +113,7 @@ class TestHealthMonitorRole:
         assert expected.issubset(resource_names), f"Missing resources: {expected - resource_names}"
 
     def test_health_monitor_self_healing_is_exactly_scoped(self, rbac_docs):
-        """Ingress repair and election access stay in gco-system and named resources."""
+        """Gateway repair and election access stay in gco-system and named resources."""
         role = _find_doc(rbac_docs, "Role", "gco-health-monitor-self-healing")
         assert role is not None
         assert role["metadata"]["namespace"] == "gco-system"
@@ -121,9 +121,9 @@ class TestHealthMonitorRole:
         rules = {
             (tuple(rule["apiGroups"]), tuple(rule["resources"])): rule for rule in role["rules"]
         }
-        ingress_rule = rules[(("networking.k8s.io",), ("ingresses",))]
-        assert ingress_rule["verbs"] == ["get"]
-        assert ingress_rule["resourceNames"] == ["gco-ingress"]
+        gateway_rule = rules[(("gateway.networking.k8s.io",), ("gateways",))]
+        assert gateway_rule["verbs"] == ["get"]
+        assert gateway_rule["resourceNames"] == ["gco-gateway"]
 
         lease_rule = rules[(("coordination.k8s.io",), ("leases",))]
         assert set(lease_rule["verbs"]) == {"get", "update"}
@@ -274,7 +274,7 @@ class TestInferenceMonitorRole:
         assert role["metadata"]["namespace"] == "gco-inference"
 
     def test_inference_monitor_covers_expected_resources(self, rbac_docs):
-        """Inference monitor should manage deployments, services, ingresses, HPAs, leases."""
+        """Inference monitor manages workloads and retains legacy Ingress cleanup."""
         role = _find_doc(rbac_docs, "Role", "gco-inference-monitor-role")
         resources = _get_all_resources(role)
         resource_names = {r[1] for r in resources}
@@ -282,20 +282,23 @@ class TestInferenceMonitorRole:
         assert expected.issubset(resource_names), f"Missing resources: {expected - resource_names}"
 
     def test_inference_monitor_has_patch_verb(self, rbac_docs):
-        """patch must be granted on every resource inference-monitor updates.
-
-        Regression: inference_monitor calls apps_v1.patch_namespaced_deployment,
-        networking_v1.patch_namespaced_ingress, and autoscaling_v2.
-        patch_namespaced_horizontal_pod_autoscaler. Without patch these 403.
-        """
+        """patch must be granted on every active resource inference-monitor updates."""
         role = _find_doc(rbac_docs, "Role", "gco-inference-monitor-role")
-        patched_resources = {"deployments", "ingresses", "horizontalpodautoscalers"}
+        patched_resources = {"deployments", "horizontalpodautoscalers"}
         for rule in role.get("rules", []):
             rule_resources = set(rule.get("resources", []))
             if rule_resources & patched_resources:
                 assert "patch" in rule.get("verbs", []), (
                     f"inference-monitor rule for {rule_resources} must include patch"
                 )
+
+    def test_inference_monitor_ingress_access_is_delete_only(self, rbac_docs):
+        """Historical endpoint Ingresses may only be removed during upgrades."""
+        role = _find_doc(rbac_docs, "Role", "gco-inference-monitor-role")
+        ingress_rules = [rule for rule in role["rules"] if "ingresses" in rule.get("resources", [])]
+        assert len(ingress_rules) == 1
+        assert ingress_rules[0]["apiGroups"] == ["networking.k8s.io"]
+        assert ingress_rules[0]["verbs"] == ["delete"]
 
     def test_inference_monitor_covers_mooncake_resources(self, rbac_docs):
         """Mooncake disaggregated/store endpoints need statefulsets, configmaps, secrets.

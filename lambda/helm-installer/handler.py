@@ -22,11 +22,18 @@ CloudFormation Properties:
 """
 
 import base64
+import contextlib
+import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
+import time
+from collections import Counter
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -67,20 +74,97 @@ HELM_INSTALL_MAX_RETRIES = 3
 HELM_INSTALL_RETRY_DELAY_SECONDS = 30
 
 # Delete is a synchronous CloudFormation custom-resource operation with a
-# one-hour ceiling. The regional stack can contain eleven releases, so each
-# serialized uninstall gets a two-minute Helm deadline and a 150-second process
-# cap. This leaves room for the mandatory 16-minute convergence drain and
-# health-monitor quiescence while still failing closed on slow/stuck releases.
-HELM_UNINSTALL_TIMEOUT = "2m"
-HELM_UNINSTALL_COMMAND_TIMEOUT_SECONDS = 150
+# one-hour ceiling. Ordinary releases get a 60-second Helm deadline and a
+# 75-second process cap so each state-machine task fits its two-minute slot.
+# LBC receives a dedicated four-minute Helm deadline because it must remove
+# controller webhooks and finalizers after every Gateway-owned ALB is gone.
+HELM_UNINSTALL_TIMEOUT = "60s"
+HELM_UNINSTALL_COMMAND_TIMEOUT_SECONDS = 75
+LBC_CHART_NAME = "aws-load-balancer-controller"
+LBC_UNINSTALL_TIMEOUT = "4m"
+LBC_UNINSTALL_COMMAND_TIMEOUT_SECONDS = 270
 
 # KEDA's Helm release owns CRDs whose instances carry operator-managed
-# finalizers. Delete and wait for every KEDA custom resource while the operator
-# is still running; otherwise Helm can remove the controller first and leave a
-# CRD permanently Terminating during CloudFormation stack deletion.
+# finalizers. Four bounded discovery calls plus two ordered deletion calls and
+# the final Helm uninstall fit inside the dedicated four-minute KEDA task.
 KEDA_API_GROUPS = ("keda.sh", "eventing.keda.sh")
-KEDA_CUSTOM_RESOURCE_DELETE_TIMEOUT = "90s"
-KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS = 120
+KEDA_CUSTOM_RESOURCE_DELETE_TIMEOUT = "45s"
+KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS = 55
+KEDA_CUSTOM_RESOURCE_DISCOVERY_TIMEOUT_SECONDS = 10
+
+# Validation intentionally has tighter command caps than chart installation:
+# these are read-only convergence checks and should never consume an entire
+# Lambda invocation when the API server or a Helm storage backend is wedged.
+HELM_VALIDATION_COMMAND_TIMEOUT_SECONDS = 120
+HELM_VALIDATION_TOTAL_TIMEOUT_SECONDS = 780
+KUBECTL_VALIDATION_COMMAND_TIMEOUT_SECONDS = 120
+KUBECTL_VALIDATION_REQUEST_TIMEOUT = "30s"
+MAX_VALIDATION_DIAGNOSTIC_CHARS = 2048
+_HELM_RELEASE_NOT_FOUND = "Error: release: not found"
+
+
+@dataclass(frozen=True)
+class _PinnedManifestBundle:
+    """One remotely hosted manifest whose bytes and inventory are immutable."""
+
+    name: str
+    url: str
+    size: int
+    sha256: str
+    object_count: int
+    crd_count: int
+
+
+PINNED_GATEWAY_CRD_BUNDLES = (
+    _PinnedManifestBundle(
+        name="gateway-api-standard-v1.5.0",
+        url=(
+            "https://github.com/kubernetes-sigs/gateway-api/releases/download/"
+            "v1.5.0/standard-install.yaml"
+        ),
+        size=1_023_753,
+        sha256="510338cf6709f84410efcce5269268f4c7c5067efdc5d04c75aa2fd2f8380c96",
+        object_count=10,
+        crd_count=8,
+    ),
+    _PinnedManifestBundle(
+        name="aws-lbc-gateway-v3.4.2",
+        url=(
+            "https://raw.githubusercontent.com/kubernetes-sigs/"
+            "aws-load-balancer-controller/v3.4.2/config/crd/gateway/gateway-crds.yaml"
+        ),
+        size=65_111,
+        sha256="89983f8b43b1b85c3d065d6f0007ee1fa2bffe8790282b9a57ccc9a355f65bd7",
+        object_count=3,
+        crd_count=3,
+    ),
+)
+GATEWAY_CRD_HTTP_CONNECT_TIMEOUT_SECONDS = 5
+GATEWAY_CRD_HTTP_READ_TIMEOUT_SECONDS = 45
+GATEWAY_CRD_HTTP_MAX_REDIRECTS = 3
+GATEWAY_CRD_APPLY_COMMAND_TIMEOUT_SECONDS = 180
+
+
+class _ValidationTimeout(RuntimeError):
+    """A systemic command/budget timeout that should stop further release checks."""
+
+
+def _validation_command_timeout(deadline: float, cap: int) -> int:
+    """Cap one command to both its normal limit and the invocation-wide budget."""
+    remaining = deadline - time.monotonic()
+    if remaining < 1:
+        raise _ValidationTimeout("Helm validation exhausted its invocation-wide time budget")
+    return min(cap, max(1, int(remaining)))
+
+
+def _bounded_diagnostic(value: Any, limit: int = MAX_VALIDATION_DIAGNOSTIC_CHARS) -> str:
+    """Return useful subprocess/error text without emitting unbounded payloads."""
+    text = str(value).strip()
+    if not text:
+        return "<empty>"
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}... [truncated {len(text) - limit} chars]"
 
 
 def _record_addon_status(chart_name: str, status: str, message: str) -> None:
@@ -235,7 +319,13 @@ def configure_kubeconfig(cluster_name: str, region: str) -> str:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             yaml.dump(kubeconfig, f)
     except Exception:
-        os.close(fd)
+        # ``fdopen`` owns and normally closes the descriptor. Suppress a
+        # possible EBADF here, but always remove a partially-written credential
+        # file before propagating the original error.
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            os.remove(kubeconfig_path)
         raise
 
     return kubeconfig_path
@@ -246,6 +336,7 @@ def run_helm(
     kubeconfig: str,
     env: dict[str, str] | None = None,
     command_timeout_seconds: int | None = None,
+    log_output: bool = True,
 ) -> tuple[int, str, str]:
     """Run helm command with kubeconfig.
 
@@ -299,10 +390,10 @@ def run_helm(
         logger.warning(f"helm subprocess timed out after {exc.timeout}s: {' '.join(cmd)}")
         return -1, "", f"timeout: helm command exceeded {exc.timeout}s"
 
-    if result.stdout:
-        logger.info(f"stdout: {result.stdout}")
-    if result.stderr:
-        logger.warning(f"stderr: {result.stderr}")
+    if log_output and result.stdout:
+        logger.info(f"stdout: {_bounded_diagnostic(result.stdout, 4096)}")
+    if log_output and result.stderr:
+        logger.warning(f"stderr: {_bounded_diagnostic(result.stderr, 4096)}")
 
     return result.returncode, result.stdout, result.stderr
 
@@ -553,7 +644,7 @@ def _delete_keda_custom_resources(kubeconfig: str) -> tuple[bool, str]:
                     capture_output=True,
                     text=True,
                     env=env,
-                    timeout=30,
+                    timeout=KEDA_CUSTOM_RESOURCE_DISCOVERY_TIMEOUT_SECONDS,
                 )
             except subprocess.TimeoutExpired:
                 return False, f"Timed out discovering {api_group} custom resources"
@@ -610,6 +701,12 @@ def uninstall_chart(chart_name: str, namespace: str, kubeconfig: str) -> tuple[b
             return False, f"KEDA pre-uninstall cleanup failed: {cleanup_message}"
         logger.info(cleanup_message)
 
+    helm_timeout = LBC_UNINSTALL_TIMEOUT if chart_name == LBC_CHART_NAME else HELM_UNINSTALL_TIMEOUT
+    command_timeout = (
+        LBC_UNINSTALL_COMMAND_TIMEOUT_SECONDS
+        if chart_name == LBC_CHART_NAME
+        else HELM_UNINSTALL_COMMAND_TIMEOUT_SECONDS
+    )
     args = [
         "uninstall",
         chart_name,
@@ -617,12 +714,12 @@ def uninstall_chart(chart_name: str, namespace: str, kubeconfig: str) -> tuple[b
         namespace,
         "--wait",
         "--timeout",
-        HELM_UNINSTALL_TIMEOUT,
+        helm_timeout,
     ]
     code, _, stderr = run_helm(
         args,
         kubeconfig,
-        command_timeout_seconds=HELM_UNINSTALL_COMMAND_TIMEOUT_SECONDS,
+        command_timeout_seconds=command_timeout,
     )
 
     if code == 0:
@@ -661,7 +758,7 @@ def quiesce_health_monitor(kubeconfig: str, namespace: str = "gco-system") -> tu
             capture_output=True,
             text=True,
             env=env,
-            timeout=60,
+            timeout=30,
         )
     except subprocess.TimeoutExpired:
         return False, "Timed out scaling health-monitor deployment to zero"
@@ -687,12 +784,12 @@ def quiesce_health_monitor(kubeconfig: str, namespace: str = "gco-system") -> tu
                 "--selector=app=health-monitor",
                 "--namespace",
                 namespace,
-                "--timeout=180s",
+                "--timeout=120s",
             ],
             capture_output=True,
             text=True,
             env=env,
-            timeout=210,
+            timeout=135,
         )
     except subprocess.TimeoutExpired:
         return False, "Timed out waiting for health-monitor pods to terminate"
@@ -714,6 +811,863 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
         else:
             result[key] = value
     return result
+
+
+def run_kubectl(
+    args: list[str],
+    kubeconfig: str,
+    command_timeout_seconds: int = KUBECTL_VALIDATION_COMMAND_TIMEOUT_SECONDS,
+    log_output: bool = True,
+) -> tuple[int, str, str]:
+    """Run a bounded, argument-vector-only kubectl command for validation."""
+    cmd = [
+        "kubectl",
+        "--kubeconfig",
+        kubeconfig,
+        f"--request-timeout={KUBECTL_VALIDATION_REQUEST_TIMEOUT}",
+        *args,
+    ]
+    env = os.environ.copy()
+    env["KUBECONFIG"] = kubeconfig
+    logger.info(f"Running: {' '.join(cmd)}")
+
+    try:
+        result = (
+            subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - argv only, no shell=True
+                cmd,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=command_timeout_seconds,
+            )
+        )
+    except subprocess.TimeoutExpired as exc:
+        logger.warning(f"kubectl subprocess timed out after {exc.timeout}s")
+        return -1, "", f"timeout: kubectl command exceeded {exc.timeout}s"
+
+    if log_output and result.stdout:
+        logger.info(f"stdout: {_bounded_diagnostic(result.stdout, 4096)}")
+    if log_output and result.stderr:
+        logger.warning(f"stderr: {_bounded_diagnostic(result.stderr, 4096)}")
+    return result.returncode, result.stdout, result.stderr
+
+
+def _release_configurations(
+    event: dict[str, Any],
+) -> tuple[list[tuple[str, dict[str, Any]]], set[str]]:
+    """Return ordered, deeply-merged release configs and the enabled set."""
+    defaults = load_charts_config().get("charts", {})
+    overrides = event.get("Charts", {})
+    enabled_charts = event.get("EnabledCharts", [])
+    if overrides is None:
+        overrides = {}
+    if enabled_charts is None:
+        enabled_charts = []
+
+    if not isinstance(defaults, dict):
+        raise RuntimeError("charts.yaml field 'charts' must be a mapping")
+    if not isinstance(overrides, dict):
+        raise RuntimeError("Charts must be a mapping")
+    if not isinstance(enabled_charts, list) or not all(
+        isinstance(name, str) and name for name in enabled_charts
+    ):
+        raise RuntimeError("EnabledCharts must be a list of non-empty release names")
+
+    merged: dict[str, dict[str, Any]] = {}
+    for release, config in defaults.items():
+        if not isinstance(release, str) or not release or not isinstance(config, dict):
+            raise RuntimeError("charts.yaml contains an invalid release configuration")
+        merged[release] = deep_merge({}, config)
+
+    # Existing releases retain charts.yaml order. Runtime-only releases append
+    # in the JSON mapping's insertion order, while known releases receive the
+    # exact same recursive override semantics used by installation.
+    for release, override in overrides.items():
+        if not isinstance(release, str) or not release or not isinstance(override, dict):
+            raise RuntimeError("Charts contains an invalid release override")
+        merged[release] = deep_merge(merged.get(release, {}), override)
+
+    unknown_enabled = [name for name in enabled_charts if name not in merged]
+    if unknown_enabled:
+        names = ", ".join(unknown_enabled[:5])
+        raise RuntimeError(f"EnabledCharts has no chart configuration for: {names}")
+
+    return list(merged.items()), set(enabled_charts)
+
+
+def _release_metadata(release: str, config: dict[str, Any]) -> tuple[str, str, str]:
+    """Extract the chart, version, and namespace needed for exact validation."""
+    chart = config.get("chart")
+    version = config.get("version")
+    namespace = config.get("namespace", "default")
+    if not isinstance(chart, str) or not chart:
+        raise RuntimeError(f"release {release!r} has no valid chart name")
+    if version is None or not str(version):
+        raise RuntimeError(f"release {release!r} has no configured chart version")
+    if not isinstance(namespace, str) or not namespace:
+        raise RuntimeError(f"release {release!r} has no valid namespace")
+    return chart, str(version), namespace
+
+
+def _parse_json_object(output: str, description: str) -> dict[str, Any]:
+    """Parse command output as a JSON object with a bounded failure message."""
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{description} returned invalid JSON: {exc.msg}") from exc
+    except TypeError as exc:
+        raise RuntimeError(f"{description} returned invalid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"{description} returned {type(parsed).__name__}, expected object")
+    return parsed
+
+
+def _flatten_resources(value: Any, description: str) -> list[dict[str, Any]]:
+    """Flatten Kubernetes ``kind: List`` documents into individual objects."""
+    documents = value if isinstance(value, list) else [value]
+
+    resources: list[dict[str, Any]] = []
+    for document in documents:
+        if document is None:
+            continue
+        if not isinstance(document, dict):
+            raise RuntimeError(f"{description} contains a non-object document")
+        if document.get("kind") == "List":
+            items = document.get("items")
+            if not isinstance(items, list):
+                raise RuntimeError(f"{description} contains kind List without an items list")
+            resources.extend(_flatten_resources(items, description))
+        else:
+            resources.append(document)
+    return resources
+
+
+def _resource_core_identity(resource: dict[str, Any], description: str) -> tuple[str, str, str]:
+    """Return the immutable API-version/kind/name portion of an identity."""
+    api_version = resource.get("apiVersion")
+    kind = resource.get("kind")
+    metadata = resource.get("metadata")
+    name = metadata.get("name") if isinstance(metadata, dict) else None
+    if not isinstance(api_version, str) or not api_version:
+        raise RuntimeError(f"{description} contains an object without apiVersion/kind/name")
+    if not isinstance(kind, str) or not kind:
+        raise RuntimeError(f"{description} contains an object without apiVersion/kind/name")
+    if not isinstance(name, str) or not name:
+        raise RuntimeError(f"{description} contains an object without apiVersion/kind/name")
+    return api_version, kind, name
+
+
+def _resource_namespace(resource: dict[str, Any]) -> str | None:
+    metadata = resource.get("metadata")
+    namespace = metadata.get("namespace") if isinstance(metadata, dict) else None
+    return namespace if isinstance(namespace, str) and namespace else None
+
+
+def _display_identity(identity: tuple[str, str, str], namespace: str | None = None) -> str:
+    api_version, kind, name = identity
+    object_name = f"{namespace}/{name}" if namespace else name
+    return f"{api_version}/{kind} {object_name}"
+
+
+def _compare_resource_identities(
+    expected: list[dict[str, Any]],
+    actual: list[dict[str, Any]],
+    release: str,
+    release_namespace: str,
+) -> None:
+    """Require exact counts and API/kind/name/namespace identities."""
+    expected_core = Counter(
+        _resource_core_identity(resource, f"manifest for {release}") for resource in expected
+    )
+    actual_core = Counter(
+        _resource_core_identity(resource, f"kubectl output for {release}") for resource in actual
+    )
+    if len(expected) != len(actual) or expected_core != actual_core:
+        missing = list((expected_core - actual_core).elements())[:5]
+        unexpected = list((actual_core - expected_core).elements())[:5]
+        details = []
+        if missing:
+            details.append("missing=" + ", ".join(_display_identity(item) for item in missing))
+        if unexpected:
+            details.append(
+                "unexpected=" + ", ".join(_display_identity(item) for item in unexpected)
+            )
+        detail = "; ".join(details) or "duplicate resource identities differ"
+        raise RuntimeError(
+            f"release {release!r} rendered {len(expected)} resources but kubectl returned "
+            f"{len(actual)} ({detail})"
+        )
+
+    # Explicit manifest namespaces must match exactly. A namespace omitted by
+    # a namespaced Helm object is defaulted by ``kubectl -n`` and must return
+    # from the release namespace; a cluster-scoped object legitimately returns
+    # no namespace. Consume counters so duplicate identities are also exact.
+    actual_namespaced = Counter(
+        (_resource_core_identity(resource, "kubectl output"), _resource_namespace(resource))
+        for resource in actual
+    )
+    for resource in expected:
+        namespace = _resource_namespace(resource)
+        if namespace is None:
+            continue
+        identity = _resource_core_identity(resource, "manifest")
+        key = (identity, namespace)
+        if actual_namespaced[key] <= 0:
+            raise RuntimeError(
+                f"release {release!r} returned the wrong namespace for "
+                f"{_display_identity(identity, namespace)}"
+            )
+        actual_namespaced[key] -= 1
+
+    for resource in expected:
+        if _resource_namespace(resource) is not None:
+            continue
+        identity = _resource_core_identity(resource, "manifest")
+        namespaced_key = (identity, release_namespace)
+        cluster_scoped_key = (identity, None)
+        if actual_namespaced[namespaced_key] > 0:
+            actual_namespaced[namespaced_key] -= 1
+        elif actual_namespaced[cluster_scoped_key] > 0:
+            actual_namespaced[cluster_scoped_key] -= 1
+        else:
+            wrong_namespaces = sorted(
+                namespace or "<cluster-scoped>"
+                for (actual_identity, namespace), count in actual_namespaced.items()
+                if actual_identity == identity and count > 0
+            )
+            raise RuntimeError(
+                f"release {release!r} returned the wrong namespace for "
+                f"{_display_identity(identity)}: expected {release_namespace!r} or "
+                f"cluster scope, got {wrong_namespaces}"
+            )
+
+
+def _condition_status(resource: dict[str, Any], condition_type: str) -> Any:
+    status = resource.get("status")
+    conditions = status.get("conditions", []) if isinstance(status, dict) else []
+    if not isinstance(conditions, list):
+        return None
+    for condition in conditions:
+        if isinstance(condition, dict) and condition.get("type") == condition_type:
+            return condition.get("status")
+    return None
+
+
+def _is_true(value: Any) -> bool:
+    return value is True or value == "True"
+
+
+def _is_false(value: Any) -> bool:
+    return value is False or value == "False" or value == "false"
+
+
+def _replica_value(status: dict[str, Any], field: str) -> int | None:
+    # Kubernetes omits optional integer counters when their value is zero.
+    value = status.get(field, 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _require_observed_generation(resource: dict[str, Any], identity: str) -> None:
+    metadata = resource.get("metadata", {})
+    status = resource.get("status", {})
+    generation = metadata.get("generation") if isinstance(metadata, dict) else None
+    observed = status.get("observedGeneration") if isinstance(status, dict) else None
+    if not isinstance(generation, int) or observed != generation:
+        raise RuntimeError(
+            f"{identity} has stale generation: observed={observed!r}, expected={generation!r}"
+        )
+
+
+def _require_replica_convergence(
+    resource: dict[str, Any], identity: str, fields: tuple[str, ...]
+) -> None:
+    spec = resource.get("spec", {})
+    status = resource.get("status", {})
+    desired = spec.get("replicas", 1) if isinstance(spec, dict) else None
+    if not isinstance(desired, int) or isinstance(desired, bool) or not isinstance(status, dict):
+        raise RuntimeError(f"{identity} has invalid desired/status replica data")
+    mismatches = {
+        field: _replica_value(status, field)
+        for field in fields
+        if _replica_value(status, field) != desired
+    }
+    if mismatches:
+        raise RuntimeError(f"{identity} is not converged: desired={desired}, replicas={mismatches}")
+
+
+def _validate_resource_readiness(resource: dict[str, Any]) -> None:
+    """Apply kind-specific readiness gates plus generic custom conditions."""
+    core = _resource_core_identity(resource, "kubectl output")
+    namespace = _resource_namespace(resource)
+    identity = _display_identity(core, namespace)
+    _, kind, _ = core
+    metadata = resource.get("metadata", {})
+    if isinstance(metadata, dict) and metadata.get("deletionTimestamp") is not None:
+        raise RuntimeError(f"{identity} is terminating")
+    status = resource.get("status", {})
+    if not isinstance(status, dict):
+        status = {}
+
+    if kind == "Deployment":
+        _require_observed_generation(resource, identity)
+        _require_replica_convergence(
+            resource,
+            identity,
+            ("replicas", "updatedReplicas", "readyReplicas", "availableReplicas"),
+        )
+        if not _is_true(_condition_status(resource, "Available")):
+            raise RuntimeError(f"{identity} does not report Available=True")
+    elif kind == "StatefulSet":
+        _require_observed_generation(resource, identity)
+        _require_replica_convergence(
+            resource, identity, ("currentReplicas", "updatedReplicas", "readyReplicas")
+        )
+    elif kind == "DaemonSet":
+        _require_observed_generation(resource, identity)
+        if "desiredNumberScheduled" not in status:
+            raise RuntimeError(f"{identity} has no desiredNumberScheduled")
+        desired = _replica_value(status, "desiredNumberScheduled")
+        if desired is None:
+            raise RuntimeError(f"{identity} has invalid desiredNumberScheduled")
+        mismatches = {
+            field: _replica_value(status, field)
+            for field in (
+                "currentNumberScheduled",
+                "updatedNumberScheduled",
+                "numberReady",
+                "numberAvailable",
+            )
+            if _replica_value(status, field) != desired
+        }
+        misscheduled = _replica_value(status, "numberMisscheduled")
+        if misscheduled != 0:
+            mismatches["numberMisscheduled"] = misscheduled
+        if mismatches:
+            raise RuntimeError(
+                f"{identity} is not converged: desired={desired}, replicas={mismatches}"
+            )
+    elif kind == "Job":
+        if not _is_true(_condition_status(resource, "Complete")):
+            raise RuntimeError(f"{identity} does not report Complete=True")
+    elif kind == "Pod":
+        if not _is_true(_condition_status(resource, "Ready")):
+            raise RuntimeError(f"{identity} does not report Ready=True")
+    elif kind == "PersistentVolumeClaim":
+        if status.get("phase") != "Bound":
+            raise RuntimeError(f"{identity} is not Bound (phase={status.get('phase')!r})")
+    elif kind == "PersistentVolume":
+        if status.get("phase") not in ("Bound", "Available"):
+            raise RuntimeError(
+                f"{identity} is neither Bound nor Available (phase={status.get('phase')!r})"
+            )
+    elif kind == "Ingress":
+        load_balancer = status.get("loadBalancer", {})
+        ingress = load_balancer.get("ingress", []) if isinstance(load_balancer, dict) else []
+        has_address = isinstance(ingress, list) and any(
+            isinstance(item, dict) and (item.get("ip") or item.get("hostname")) for item in ingress
+        )
+        if not has_address:
+            raise RuntimeError(f"{identity} has no load-balancer address")
+    elif kind == "CustomResourceDefinition":
+        if not _is_true(_condition_status(resource, "Established")):
+            raise RuntimeError(f"{identity} does not report Established=True")
+    elif kind == "APIService":
+        if not _is_true(_condition_status(resource, "Available")):
+            raise RuntimeError(f"{identity} does not report Available=True")
+    elif kind == "HorizontalPodAutoscaler":
+        _require_observed_generation(resource, identity)
+        if not _is_true(_condition_status(resource, "AbleToScale")):
+            raise RuntimeError(f"{identity} does not report AbleToScale=True")
+        if not _is_true(_condition_status(resource, "ScalingActive")):
+            raise RuntimeError(f"{identity} does not report ScalingActive=True")
+    elif kind == "PodDisruptionBudget":
+        _require_observed_generation(resource, identity)
+        current = status.get("currentHealthy")
+        desired = status.get("desiredHealthy")
+        if (
+            not isinstance(current, int)
+            or isinstance(current, bool)
+            or not isinstance(desired, int)
+            or isinstance(desired, bool)
+            or current < desired
+        ):
+            raise RuntimeError(
+                f"{identity} is unhealthy: currentHealthy={current!r}, desiredHealthy={desired!r}"
+            )
+
+    conditions = status.get("conditions", [])
+    if isinstance(conditions, list):
+        for condition in conditions:
+            if (
+                isinstance(condition, dict)
+                and condition.get("type") in ("Ready", "Available")
+                and _is_false(condition.get("status"))
+            ):
+                raise RuntimeError(
+                    f"{identity} reports {condition.get('type')}=False: "
+                    f"{_bounded_diagnostic(condition.get('message', 'no message'), 300)}"
+                )
+
+
+def _validate_service_endpoints(
+    resource: dict[str, Any],
+    kubeconfig: str,
+    release_namespace: str,
+    deadline: float,
+) -> None:
+    spec = resource.get("spec", {})
+    selector = spec.get("selector") if isinstance(spec, dict) else None
+    if resource.get("kind") != "Service" or not isinstance(selector, dict) or not selector:
+        return
+
+    identity = _resource_core_identity(resource, "kubectl output")
+    name = identity[2]
+    namespace = _resource_namespace(resource) or release_namespace
+    code, stdout, stderr = run_kubectl(
+        [
+            "get",
+            "endpointslices.discovery.k8s.io",
+            "-n",
+            namespace,
+            "-l",
+            f"kubernetes.io/service-name={name}",
+            "-o",
+            "json",
+        ],
+        kubeconfig,
+        command_timeout_seconds=_validation_command_timeout(
+            deadline, KUBECTL_VALIDATION_COMMAND_TIMEOUT_SECONDS
+        ),
+        log_output=False,
+    )
+    display = _display_identity(identity, namespace)
+    if code == -1:
+        raise _ValidationTimeout(f"{display} EndpointSlice query timed out")
+    if code != 0:
+        raise RuntimeError(
+            f"{display} EndpointSlice query failed: {_bounded_diagnostic(stderr or stdout)}"
+        )
+
+    payload = _parse_json_object(stdout, f"EndpointSlice query for {display}")
+    items = payload.get("items")
+    slices = items if isinstance(items, list) else [payload]
+    if not isinstance(slices, list):
+        raise RuntimeError(f"EndpointSlice query for {display} returned invalid items")
+    for endpoint_slice in slices:
+        if not isinstance(endpoint_slice, dict):
+            continue
+        metadata = endpoint_slice.get("metadata", {})
+        if isinstance(metadata, dict) and metadata.get("deletionTimestamp") is not None:
+            continue
+        endpoints = endpoint_slice.get("endpoints", [])
+        if not isinstance(endpoints, list):
+            continue
+        for endpoint in endpoints:
+            if not isinstance(endpoint, dict):
+                continue
+            conditions = endpoint.get("conditions", {})
+            if not isinstance(conditions, dict):
+                continue
+            if _is_true(conditions.get("ready")) and not _is_true(conditions.get("terminating")):
+                return
+    raise RuntimeError(f"{display} has no ready, non-terminating EndpointSlice endpoint")
+
+
+def _remove_validation_file(path: str) -> None:
+    """Remove validation material, ignoring only an already-absent path."""
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return
+
+
+@contextlib.contextmanager
+def _secure_manifest_file(manifest: str) -> Iterator[str]:
+    """Write a mode-0600 manifest in the system temporary directory and always remove it."""
+    fd, path = tempfile.mkstemp(
+        prefix="helm-validation-",
+        suffix=".yaml",
+        dir=tempfile.gettempdir(),
+    )
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as manifest_file:
+            manifest_file.write(manifest)
+        yield path
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        _remove_validation_file(path)
+
+
+@contextlib.contextmanager
+def _verified_gateway_crd_bundle(
+    bundle: _PinnedManifestBundle,
+) -> Iterator[tuple[str, list[dict[str, Any]]]]:
+    """Download one pinned bundle, verify exact bytes, and expose a mode-0600 file."""
+    response: Any | None = None
+    body = b""
+    try:
+        response = urllib3.PoolManager().request(
+            "GET",
+            bundle.url,
+            headers={"User-Agent": "gco-helm-installer/1"},
+            timeout=urllib3.Timeout(
+                connect=GATEWAY_CRD_HTTP_CONNECT_TIMEOUT_SECONDS,
+                read=GATEWAY_CRD_HTTP_READ_TIMEOUT_SECONDS,
+            ),
+            retries=urllib3.Retry(
+                total=GATEWAY_CRD_HTTP_MAX_REDIRECTS,
+                connect=0,
+                read=0,
+                redirect=GATEWAY_CRD_HTTP_MAX_REDIRECTS,
+                status=0,
+                other=0,
+                raise_on_redirect=True,
+                raise_on_status=True,
+            ),
+            redirect=True,
+        )
+        if response.status != 200:
+            raise RuntimeError(
+                f"{bundle.name} download returned HTTP {response.status}, expected 200"
+            )
+        body = response.data
+        if not isinstance(body, bytes):
+            raise RuntimeError(f"{bundle.name} download returned a non-byte body")
+    finally:
+        if response is not None:
+            response.release_conn()
+
+    if len(body) != bundle.size:
+        raise RuntimeError(f"{bundle.name} size mismatch: got {len(body)}, expected {bundle.size}")
+    actual_sha256 = hashlib.sha256(body).hexdigest()
+    if actual_sha256 != bundle.sha256:
+        raise RuntimeError(
+            f"{bundle.name} SHA-256 mismatch: got {actual_sha256}, expected {bundle.sha256}"
+        )
+
+    try:
+        documents = list(yaml.safe_load_all(body.decode("utf-8")))
+        resources = _flatten_resources(documents, bundle.name)
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise RuntimeError(f"{bundle.name} is not valid UTF-8 YAML: {exc}") from exc
+
+    identities = [_resource_core_identity(resource, bundle.name) for resource in resources]
+    crd_count = sum(kind == "CustomResourceDefinition" for _, kind, _ in identities)
+    if len(resources) != bundle.object_count or crd_count != bundle.crd_count:
+        raise RuntimeError(
+            f"{bundle.name} inventory mismatch: objects={len(resources)}/"
+            f"{bundle.object_count}, CRDs={crd_count}/{bundle.crd_count}"
+        )
+    if len(identities) != len(set(identities)):
+        raise RuntimeError(f"{bundle.name} contains duplicate object identities")
+
+    fd, path = tempfile.mkstemp(
+        prefix=f"{bundle.name}-",
+        suffix=".yaml",
+        dir=tempfile.gettempdir(),
+    )
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as manifest_file:
+            manifest_file.write(body)
+        yield path, resources
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        _remove_validation_file(path)
+
+
+def _apply_gateway_crds(kubeconfig: str) -> list[dict[str, Any]]:
+    """Server-side apply both verified Gateway API bundles before LBC install."""
+    evidence: list[dict[str, Any]] = []
+    for bundle in PINNED_GATEWAY_CRD_BUNDLES:
+        with _verified_gateway_crd_bundle(bundle) as (manifest_path, resources):
+            code, stdout, stderr = run_kubectl(
+                [
+                    "apply",
+                    "--server-side=true",
+                    "--force-conflicts",
+                    "--field-manager=gco-helm-installer",
+                    "-f",
+                    manifest_path,
+                ],
+                kubeconfig,
+                command_timeout_seconds=GATEWAY_CRD_APPLY_COMMAND_TIMEOUT_SECONDS,
+            )
+            if code != 0:
+                raise RuntimeError(
+                    f"failed to apply {bundle.name}: {_bounded_diagnostic(stderr or stdout)}"
+                )
+            evidence.append(
+                {
+                    "bundle": bundle.name,
+                    "object_count": len(resources),
+                    "crd_count": bundle.crd_count,
+                    "sha256": bundle.sha256,
+                }
+            )
+    return evidence
+
+
+def _validate_gateway_crds(kubeconfig: str, deadline: float) -> list[dict[str, Any]]:
+    """Redownload and prove exact live identities plus Established=True CRDs."""
+    evidence: list[dict[str, Any]] = []
+    for bundle in PINNED_GATEWAY_CRD_BUNDLES:
+        with _verified_gateway_crd_bundle(bundle) as (manifest_path, expected):
+            code, stdout, stderr = run_kubectl(
+                ["get", "-f", manifest_path, "-o", "json"],
+                kubeconfig,
+                command_timeout_seconds=_validation_command_timeout(
+                    deadline, KUBECTL_VALIDATION_COMMAND_TIMEOUT_SECONDS
+                ),
+                log_output=False,
+            )
+            if code == -1:
+                raise _ValidationTimeout(f"kubectl get timed out for {bundle.name}")
+            if code != 0:
+                raise RuntimeError(
+                    f"kubectl could not retrieve {bundle.name}: "
+                    f"{_bounded_diagnostic(stderr or stdout)}"
+                )
+            live_payload = _parse_json_object(stdout, f"kubectl get for {bundle.name}")
+            live_resources = _flatten_resources(live_payload, f"kubectl output for {bundle.name}")
+            _compare_resource_identities(
+                expected,
+                live_resources,
+                bundle.name,
+                "default",
+            )
+            for resource in live_resources:
+                _validate_resource_readiness(resource)
+            evidence.append(
+                {
+                    "bundle": bundle.name,
+                    "object_count": len(live_resources),
+                    "crd_count": bundle.crd_count,
+                    "sha256": bundle.sha256,
+                }
+            )
+    return evidence
+
+
+def _validate_enabled_release(
+    release: str,
+    chart: str,
+    version: str,
+    namespace: str,
+    kubeconfig: str,
+    deadline: float,
+) -> int:
+    code, stdout, stderr = run_helm(
+        ["status", release, "-n", namespace, "-o", "json"],
+        kubeconfig,
+        command_timeout_seconds=_validation_command_timeout(
+            deadline, HELM_VALIDATION_COMMAND_TIMEOUT_SECONDS
+        ),
+        log_output=False,
+    )
+    if code == -1:
+        raise _ValidationTimeout(f"helm status timed out for release {release!r}")
+    if code != 0:
+        raise RuntimeError(f"helm status failed: {_bounded_diagnostic(stderr or stdout)}")
+    status_payload = _parse_json_object(stdout, f"helm status for {release}")
+    release_status = status_payload.get("info", {}).get("status")
+    if release_status != "deployed":
+        raise RuntimeError(f"helm status is {release_status!r}, expected exactly 'deployed'")
+
+    # Release names are DNS labels, so '-' is literal outside a character
+    # class. ``re.escape`` handles all regex metacharacters; undoing its
+    # unnecessary hyphen escape keeps the expression valid for Helm's Go regex.
+    escaped_release = re.escape(release).replace(r"\-", "-")
+    code, stdout, stderr = run_helm(
+        ["list", "-n", namespace, "--filter", f"^{escaped_release}$", "-o", "json"],
+        kubeconfig,
+        command_timeout_seconds=_validation_command_timeout(
+            deadline, HELM_VALIDATION_COMMAND_TIMEOUT_SECONDS
+        ),
+        log_output=False,
+    )
+    if code == -1:
+        raise _ValidationTimeout(f"helm list timed out for release {release!r}")
+    if code != 0:
+        raise RuntimeError(f"helm list failed: {_bounded_diagnostic(stderr or stdout)}")
+    try:
+        listed = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"helm list for {release} returned invalid JSON: {exc.msg}") from exc
+    except TypeError as exc:
+        raise RuntimeError(f"helm list for {release} returned invalid JSON: {exc}") from exc
+    if not isinstance(listed, list) or len(listed) != 1 or not isinstance(listed[0], dict):
+        count = len(listed) if isinstance(listed, list) else "non-list"
+        raise RuntimeError(f"helm list returned {count} entries, expected exactly one")
+    entry = listed[0]
+    expected_chart = f"{chart}-{version}"
+    mismatches = {
+        field: (entry.get(field), expected)
+        for field, expected in (
+            ("name", release),
+            ("namespace", namespace),
+            ("status", "deployed"),
+            ("chart", expected_chart),
+        )
+        if entry.get(field) != expected
+    }
+    if mismatches:
+        raise RuntimeError(f"helm list metadata mismatch: {mismatches}")
+
+    code, manifest, stderr = run_helm(
+        ["get", "manifest", release, "-n", namespace],
+        kubeconfig,
+        command_timeout_seconds=_validation_command_timeout(
+            deadline, HELM_VALIDATION_COMMAND_TIMEOUT_SECONDS
+        ),
+        log_output=False,
+    )
+    if code == -1:
+        raise _ValidationTimeout(f"helm get manifest timed out for release {release!r}")
+    if code != 0:
+        raise RuntimeError(f"helm get manifest failed: {_bounded_diagnostic(stderr or manifest)}")
+    if not manifest.strip():
+        raise RuntimeError("helm get manifest returned empty output")
+    try:
+        rendered = _flatten_resources(list(yaml.safe_load_all(manifest)), f"manifest for {release}")
+    except yaml.YAMLError as exc:
+        raise RuntimeError(
+            f"helm manifest is invalid YAML: {_bounded_diagnostic(exc, 400)}"
+        ) from exc
+    if not rendered:
+        raise RuntimeError("helm get manifest yielded no Kubernetes objects")
+
+    with _secure_manifest_file(manifest) as manifest_path:
+        code, live_output, stderr = run_kubectl(
+            ["get", "-f", manifest_path, "-n", namespace, "-o", "json"],
+            kubeconfig,
+            command_timeout_seconds=_validation_command_timeout(
+                deadline, KUBECTL_VALIDATION_COMMAND_TIMEOUT_SECONDS
+            ),
+            log_output=False,
+        )
+        if code == -1:
+            raise _ValidationTimeout(f"kubectl get timed out for release {release!r}")
+        if code != 0:
+            raise RuntimeError(
+                "kubectl could not retrieve every rendered object: "
+                f"{_bounded_diagnostic(stderr or live_output)}"
+            )
+        live_payload = _parse_json_object(live_output, f"kubectl get for {release}")
+        live_resources = _flatten_resources(live_payload, f"kubectl output for {release}")
+        _compare_resource_identities(rendered, live_resources, release, namespace)
+
+    for resource in live_resources:
+        _validate_resource_readiness(resource)
+        _validate_service_endpoints(resource, kubeconfig, namespace, deadline)
+    return len(live_resources)
+
+
+def _validate_disabled_release(
+    release: str, namespace: str, kubeconfig: str, deadline: float
+) -> None:
+    code, stdout, stderr = run_helm(
+        ["status", release, "-n", namespace, "-o", "json"],
+        kubeconfig,
+        command_timeout_seconds=_validation_command_timeout(
+            deadline, HELM_VALIDATION_COMMAND_TIMEOUT_SECONDS
+        ),
+        log_output=False,
+    )
+    if code == -1:
+        raise _ValidationTimeout(f"helm status timed out for disabled release {release!r}")
+    if code == 0:
+        raise RuntimeError("disabled release is still present")
+    if stdout.strip() or stderr.strip() != _HELM_RELEASE_NOT_FOUND:
+        raise RuntimeError(
+            "disabled release absence is ambiguous; expected exact "
+            f"{_HELM_RELEASE_NOT_FOUND!r}, got {_bounded_diagnostic(stderr or stdout)!r}"
+        )
+
+
+def validate_releases(event: dict[str, Any], kubeconfig: str) -> dict[str, Any]:
+    """Validate exact Helm state and Kubernetes convergence for every release."""
+    configurations, enabled_releases = _release_configurations(event)
+    release_evidence: list[dict[str, Any]] = []
+    failures: list[str] = []
+    expected_resources = 0
+    validated_resources = 0
+    validated_releases = 0
+    deadline = time.monotonic() + HELM_VALIDATION_TOTAL_TIMEOUT_SECONDS
+    gateway_crd_evidence: list[dict[str, Any]] = []
+    if LBC_CHART_NAME in enabled_releases:
+        try:
+            gateway_crd_evidence = _validate_gateway_crds(kubeconfig, deadline)
+        except _ValidationTimeout:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"pinned Gateway CRD validation failed: {_bounded_diagnostic(exc, 800)}"
+            ) from exc
+        gateway_resource_count = sum(item["object_count"] for item in gateway_crd_evidence)
+        expected_resources += gateway_resource_count
+        validated_resources += gateway_resource_count
+
+    for release, config in configurations:
+        enabled = release in enabled_releases
+        try:
+            chart, version, namespace = _release_metadata(release, config)
+            if enabled:
+                resource_count = _validate_enabled_release(
+                    release, chart, version, namespace, kubeconfig, deadline
+                )
+                state = "deployed"
+                expected_resources += resource_count
+                validated_resources += resource_count
+            else:
+                _validate_disabled_release(release, namespace, kubeconfig, deadline)
+                resource_count = 0
+                state = "absent"
+            release_evidence.append(
+                {
+                    "release": release,
+                    "namespace": namespace,
+                    "chart": chart,
+                    "version": version,
+                    "enabled": enabled,
+                    "status": state,
+                    "resource_count": resource_count,
+                }
+            )
+            validated_releases += 1
+        except _ValidationTimeout as exc:
+            failures.append(f"{release}: {_bounded_diagnostic(exc, 600)}")
+            # A timed-out control plane/storage backend is systemic. Continuing
+            # would only consume the remaining Lambda budget and risk skipping
+            # status recording and secure-file cleanup at the hard deadline.
+            break
+        except Exception as exc:
+            failures.append(f"{release}: {_bounded_diagnostic(exc, 600)}")
+
+    if failures:
+        shown = failures[:8]
+        if len(failures) > len(shown):
+            shown.append(f"... and {len(failures) - len(shown)} more failure(s)")
+        summary = f"validated {validated_releases}/{len(configurations)} releases; " + "; ".join(
+            shown
+        )
+        raise RuntimeError(_bounded_diagnostic(summary))
+
+    return {
+        "status": "validated",
+        "DeploymentToken": event.get("DeploymentToken"),
+        "expected_release_count": len(configurations),
+        "validated_release_count": validated_releases,
+        "expected_resource_count": expected_resources,
+        "validated_resource_count": validated_resources,
+        "enabled_release_count": len(enabled_releases),
+        "disabled_release_count": len(configurations) - len(enabled_releases),
+        "gateway_crd_bundles": gateway_crd_evidence,
+        "releases": release_evidence,
+    }
 
 
 def _cleanup_stale_webhooks(kubeconfig: str) -> None:
@@ -825,8 +1779,9 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
     Event shape (from the state machine task payload)::
 
         {
-          "Action": "install_chart" | "uninstall_chart" | "quiesce_health_monitor",
-          "Chart": "<chart name as keyed in charts.yaml>",  # omitted for quiesce
+          "Action": "install_chart" | "uninstall_chart" |
+                    "quiesce_health_monitor" | "validate_releases",
+          "Chart": "<chart name as keyed in charts.yaml>",  # omitted for quiesce/validate
           "ClusterName": "...", "Region": "...",
           "EnabledCharts": ["keda", ...],
           "KedaOperatorRoleArn": "arn:...",   # optional
@@ -848,10 +1803,32 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError(f"health-monitor quiesce failed: {message}")
             return {"status": "quiesced", "message": message}
         finally:
-            import contextlib
-
             with contextlib.suppress(Exception):
                 os.remove(kubeconfig)
+
+    if action == "validate_releases":
+        try:
+            kubeconfig = configure_kubeconfig(cluster_name, region)
+            try:
+                evidence = validate_releases(event, kubeconfig)
+            finally:
+                # Validation must not report success while credentials remain
+                # in a reusable warm Lambda filesystem. An unlink failure is a
+                # validation failure and is recorded by the outer handler.
+                _remove_validation_file(kubeconfig)
+        except Exception as exc:
+            diagnostic = _bounded_diagnostic(exc)
+            _record_addon_status("helm-validation", "failed", diagnostic)
+            raise RuntimeError(f"helm release validation failed: {diagnostic}") from exc
+
+        message = (
+            f"validated {evidence['validated_release_count']}/"
+            f"{evidence['expected_release_count']} releases and "
+            f"{evidence['validated_resource_count']}/"
+            f"{evidence['expected_resource_count']} resources"
+        )
+        _record_addon_status("helm-validation", "validated", message)
+        return evidence
 
     chart_name = event["Chart"]
     enabled_charts = event.get("EnabledCharts") or []
@@ -878,6 +1855,8 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
     kubeconfig = configure_kubeconfig(cluster_name, region)
     try:
         disabled_install = action == "install_chart" and not is_enabled
+        if action == "install_chart" and is_enabled and chart_name == LBC_CHART_NAME:
+            _apply_gateway_crds(kubeconfig)
         if action == "uninstall_chart" or disabled_install:
             # Disabled chart on an install pass: ensure it's gone (idempotent).
             # Helm's explicit "release: not found" is already reported as
@@ -909,8 +1888,6 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
 
         raise ValueError(f"Unknown Action: {action!r}")
     finally:
-        import contextlib
-
         with contextlib.suppress(Exception):
             os.remove(kubeconfig)
 
@@ -927,7 +1904,14 @@ def lambda_handler(event: dict[str, Any], context: Any) -> Any:
       ``RequestType`` and the whole-chart-set loop below runs.
     """
     if event.get("Action"):
-        logger.info(f"Task event: {json.dumps(event)}")
+        logger.info(
+            "Task event: action=%s chart=%s cluster=%s region=%s deployment_token=%s",
+            event.get("Action"),
+            event.get("Chart"),
+            event.get("ClusterName"),
+            event.get("Region"),
+            event.get("DeploymentToken"),
+        )
         return handle_task(event)
 
     logger.info(f"Received event: {json.dumps(event)}")
@@ -1001,6 +1985,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> Any:
                 if not config.get("enabled", False):
                     continue
 
+                if chart_name == LBC_CHART_NAME:
+                    _apply_gateway_crds(kubeconfig)
                 value_overrides = chart_overrides.get(chart_name, {}).get("values", {})
                 success, message = install_chart(chart_name, config, kubeconfig, value_overrides)
                 results[chart_name] = message

@@ -58,6 +58,24 @@ _LOG_CLEANUP_ROLE_POLICY_NAME = "DeleteTaggedLogGroups"
 _LOG_CLEANUP_SESSION_SECONDS = 900
 _LOG_CLEANUP_STACK_POLL_ATTEMPTS = 120
 _LOG_CLEANUP_STACK_POLL_SECONDS = 5
+_LOG_GROUP_OBSERVATION_ATTEMPTS = 6
+_LOG_GROUP_CHECKPOINT_STABLE_OBSERVATIONS = 2
+_LOG_GROUP_CLEANUP_STABLE_OBSERVATIONS = 2
+_LOG_GROUP_ABSENCE_OBSERVATIONS = 3
+_LOG_GROUP_OBSERVATION_POLL_SECONDS = 1
+_LOG_GROUP_OBSERVATION_HISTORY_LIMIT = 40
+_LOG_GROUP_RETRYABLE_OBSERVATION_CODES = frozenset(
+    {
+        "InternalFailure",
+        "InternalServerError",
+        "OperationAbortedException",
+        "RequestLimitExceeded",
+        "ServiceUnavailableException",
+        "Throttling",
+        "ThrottlingException",
+        "TooManyRequestsException",
+    }
+)
 _LOG_GROUP_SOURCE_TYPES = {
     "AWS::EKS::Cluster",
     "AWS::Lambda::Function",
@@ -76,6 +94,14 @@ class ActionDefinition:
     description: str
     dependencies: tuple[str, ...]
     handler: ActionHandler
+
+
+class _LogGroupCleanupError(RuntimeError):
+    """Retain structured cleanup evidence while propagating a failed phase."""
+
+    def __init__(self, message: str, details: dict[str, Any]):
+        super().__init__(message)
+        self.details = copy.deepcopy(details)
 
 
 def _run_git(repo_root: Path, *arguments: str, check: bool = True) -> str:
@@ -1742,6 +1768,254 @@ def _log_group_identity(client: Any, region: str, name: str) -> dict[str, Any] |
     }
 
 
+def _log_group_generation(identity: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the immutable fields that distinguish same-name log generations."""
+    arn = str(identity.get("arn") or "")
+    creation_time = identity.get("creation_time")
+    if not arn or not isinstance(creation_time, int):
+        raise RuntimeError("Checkpointed CloudWatch log-group identity is malformed")
+    return {"arn": arn, "creation_time": creation_time}
+
+
+def _observe_log_group_stability(
+    client: Any,
+    region: str,
+    name: str,
+    *,
+    expected_identity: Mapping[str, Any] | None = None,
+    expected_tags: Mapping[str, str] | None = None,
+    required_present: int | None,
+    required_absent: int | None,
+    attempts: int = _LOG_GROUP_OBSERVATION_ATTEMPTS,
+    poll_seconds: float = _LOG_GROUP_OBSERVATION_POLL_SECONDS,
+) -> dict[str, Any]:
+    """Bound identity reads until presence/absence is stable or a fence is crossed."""
+    for label, value in (
+        ("attempts", attempts),
+        ("required_present", required_present),
+        ("required_absent", required_absent),
+    ):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        ):
+            raise ValueError(f"{label} must be a positive integer or None")
+    if required_present is None and required_absent is None:
+        raise ValueError("At least one stable log-group outcome must be requested")
+    if poll_seconds < 0:
+        raise ValueError("poll_seconds must be non-negative")
+
+    expected_generation = (
+        _log_group_generation(expected_identity) if expected_identity is not None else None
+    )
+    expected_authority_tags = {str(key): str(value) for key, value in (expected_tags or {}).items()}
+    observations: list[dict[str, Any]] = []
+    seen_generations: list[dict[str, Any]] = []
+    present_streak = 0
+    absent_streak = 0
+    replacement_streak = 0
+    replacement_generation: dict[str, Any] | None = None
+    last_identity: dict[str, Any] | None = None
+
+    def result(status: str, **extra: Any) -> dict[str, Any]:
+        return {
+            "status": status,
+            "region": region,
+            "name": name,
+            "attempt_count": len(observations),
+            "observations": observations,
+            "identity": copy.deepcopy(last_identity),
+            **extra,
+        }
+
+    for attempt in range(1, attempts + 1):
+        observed_at = utc_now()
+        try:
+            identity = _log_group_identity(client, region, name)
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code") or "")
+            if code not in _LOG_GROUP_RETRYABLE_OBSERVATION_CODES:
+                raise
+            observations.append(
+                {
+                    "attempt": attempt,
+                    "observed_at": observed_at,
+                    "status": "retryable-error",
+                    "error_code": code,
+                    "error": str(exc),
+                }
+            )
+            present_streak = 0
+            absent_streak = 0
+            replacement_streak = 0
+            replacement_generation = None
+        else:
+            last_identity = copy.deepcopy(identity)
+            if identity is None:
+                if expected_generation is None and seen_generations:
+                    observations.append(
+                        {
+                            "attempt": attempt,
+                            "observed_at": observed_at,
+                            "status": "replacement",
+                            "observed_generation": None,
+                        }
+                    )
+                    return result(
+                        "replacement",
+                        expected_generation=seen_generations[-1],
+                        observed_generation=None,
+                    )
+                replacement_streak = 0
+                replacement_generation = None
+                absent_streak += 1
+                present_streak = 0
+                observations.append(
+                    {
+                        "attempt": attempt,
+                        "observed_at": observed_at,
+                        "status": "absent",
+                        "consecutive": absent_streak,
+                    }
+                )
+                if required_absent is not None and absent_streak >= required_absent:
+                    return result("absent", consecutive=absent_streak)
+            else:
+                generation = _log_group_generation(identity)
+                if generation not in seen_generations:
+                    seen_generations.append(generation)
+                observations.append(
+                    {
+                        "attempt": attempt,
+                        "observed_at": observed_at,
+                        "status": "present",
+                        "generation": copy.deepcopy(generation),
+                    }
+                )
+                if expected_generation is not None and generation != expected_generation:
+                    if generation == replacement_generation:
+                        replacement_streak += 1
+                    else:
+                        replacement_generation = generation
+                        replacement_streak = 1
+                    observations[-1]["status"] = "replacement-candidate"
+                    observations[-1]["consecutive"] = replacement_streak
+                    present_streak = 0
+                    absent_streak = 0
+                    if replacement_streak >= _LOG_GROUP_CLEANUP_STABLE_OBSERVATIONS:
+                        observations[-1]["status"] = "replacement"
+                        return result(
+                            "replacement",
+                            expected_generation=expected_generation,
+                            observed_generation=generation,
+                            consecutive=replacement_streak,
+                        )
+                    if attempt < attempts:
+                        time.sleep(poll_seconds)
+                    continue
+                replacement_streak = 0
+                replacement_generation = None
+                if expected_generation is None and len(seen_generations) > 1:
+                    observations[-1]["status"] = "replacement"
+                    return result(
+                        "replacement",
+                        expected_generation=seen_generations[0],
+                        observed_generation=generation,
+                    )
+                tags = identity.get("tags") or {}
+                tag_drift = {
+                    key: {"expected": value, "observed": tags.get(key)}
+                    for key, value in expected_authority_tags.items()
+                    if tags.get(key) != value
+                }
+                if tag_drift:
+                    observations[-1]["status"] = "tag-drift"
+                    observations[-1]["tag_drift"] = copy.deepcopy(tag_drift)
+                    return result("tag-drift", tag_drift=tag_drift)
+                present_streak += 1
+                absent_streak = 0
+                observations[-1]["consecutive"] = present_streak
+                if required_present is not None and present_streak >= required_present:
+                    return result("present", consecutive=present_streak)
+        if attempt < attempts:
+            time.sleep(poll_seconds)
+
+    return result(
+        "unsettled",
+        required_present=required_present,
+        required_absent=required_absent,
+        present_streak=present_streak,
+        absent_streak=absent_streak,
+    )
+
+
+def _record_log_group_observation(
+    ctx: RunContext,
+    record: dict[str, Any],
+    *,
+    phase: str,
+    outcome: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist bounded identity evidence and any confirmed replacement generation."""
+    entry = {"phase": phase, "recorded_at": utc_now(), **copy.deepcopy(dict(outcome))}
+    with ctx.state_lock:
+        history = record.setdefault("identity_observation_history", [])
+        if not isinstance(history, list):
+            raise RuntimeError("Log-group identity_observation_history must be a list")
+        history.append(entry)
+        del history[:-_LOG_GROUP_OBSERVATION_HISTORY_LIMIT]
+        if outcome.get("status") == "replacement":
+            replacements = record.setdefault("replacement_evidence", [])
+            if not isinstance(replacements, list):
+                raise RuntimeError("Log-group replacement_evidence must be a list")
+            replacements.append(copy.deepcopy(entry))
+        ctx.persist_callback(ctx.checkpoint)
+    return entry
+
+
+def _record_log_group_checkpoint_incident(
+    ctx: RunContext,
+    candidate: Mapping[str, Any],
+    *,
+    phase: str,
+    outcome: Mapping[str, Any],
+) -> None:
+    """Preserve failed pre-authority observations without adopting the generation."""
+    with ctx.state_lock:
+        incidents = ctx.checkpoint.state.setdefault("log_group_checkpoint_incidents", [])
+        if not isinstance(incidents, list):
+            raise RuntimeError("Checkpoint log_group_checkpoint_incidents must be a list")
+        incidents.append(
+            {
+                "phase": phase,
+                "recorded_at": utc_now(),
+                "candidate": copy.deepcopy(dict(candidate)),
+                "outcome": copy.deepcopy(dict(outcome)),
+            }
+        )
+        ctx.persist_callback(ctx.checkpoint)
+
+
+def _set_log_group_disposition(
+    ctx: RunContext,
+    record: dict[str, Any],
+    *,
+    status: str,
+    phase: str,
+    outcome: Mapping[str, Any],
+) -> dict[str, Any]:
+    disposition = {
+        "status": status,
+        "phase": phase,
+        "recorded_at": utc_now(),
+        "original_identity": copy.deepcopy(record.get("observed_identity")),
+        "last_observation_status": str(outcome.get("status") or ""),
+    }
+    with ctx.state_lock:
+        record["original_generation_disposition"] = disposition
+        ctx.persist_callback(ctx.checkpoint)
+    return disposition
+
+
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
 
@@ -2348,7 +2622,7 @@ def _delete_log_cleanup_helper(ctx: RunContext) -> dict[str, Any]:
 
 
 def _checkpoint_owned_log_groups(ctx: RunContext) -> list[dict[str, Any]]:
-    """Tag and checkpoint exact log groups while their source stacks are still live."""
+    """Fence, tag, and checkpoint exact generations while source stacks are live."""
     target_regions = ctx.checkpoint.state.get("target_stack_regions")
     if not isinstance(target_regions, dict):
         raise RuntimeError("Checkpoint target_stack_regions must be an object")
@@ -2371,6 +2645,10 @@ def _checkpoint_owned_log_groups(ctx: RunContext) -> list[dict[str, Any]]:
             (str(item.get("region") or ""), str(item.get("name") or "")): item
             for item in records
             if isinstance(item, dict)
+        }
+        authority_tags = {
+            _RUN_STACK_TAG: ctx.settings.run_id,
+            _LOG_CLEANUP_TOKEN_TAG: cleanup_token,
         }
         for stack_name, raw_region in sorted(target_regions.items()):
             region = str(raw_region)
@@ -2433,72 +2711,206 @@ def _checkpoint_owned_log_groups(ctx: RunContext) -> list[dict[str, Any]]:
                     if source_service_identity is not None:
                         candidate["source_service_identity"] = source_service_identity
                     _validated_owned_log_group_identity(ctx, candidate)
-                    identity = _log_group_identity(logs, region, name)
-                    if identity is None:
-                        if resource_type == "AWS::Logs::LogGroup":
+
+                    previous = by_identity.get(key)
+                    immutable = tuple(candidate)
+                    expected_identity: Mapping[str, Any] | None = None
+                    if previous is not None:
+                        if any(previous.get(field) != candidate[field] for field in immutable):
+                            raise RuntimeError(f"Log-group ownership changed for {region}:{name}")
+                        observed = previous.get("observed_identity")
+                        if not isinstance(observed, dict):
                             raise RuntimeError(
-                                f"CloudFormation log group is absent before teardown: {region}:{name}"
+                                f"Log-group checkpoint identity is malformed for {region}:{name}"
+                            )
+                        expected_identity = observed
+
+                    initial = _observe_log_group_stability(
+                        logs,
+                        region,
+                        name,
+                        expected_identity=expected_identity,
+                        expected_tags=authority_tags if previous is not None else None,
+                        required_present=_LOG_GROUP_CHECKPOINT_STABLE_OBSERVATIONS,
+                        required_absent=_LOG_GROUP_CHECKPOINT_STABLE_OBSERVATIONS,
+                    )
+                    if previous is not None:
+                        _record_log_group_observation(
+                            ctx,
+                            previous,
+                            phase="checkpoint-revalidation",
+                            outcome=initial,
+                        )
+                        if initial["status"] != "present":
+                            status = (
+                                "replacement-observed-during-checkpoint"
+                                if initial["status"] == "replacement"
+                                else "checkpoint-generation-not-stable"
+                            )
+                            _set_log_group_disposition(
+                                ctx,
+                                previous,
+                                status=status,
+                                phase="checkpoint-revalidation",
+                                outcome=initial,
+                            )
+                            raise RuntimeError(
+                                f"Log-group checkpoint generation is not stable for "
+                                f"{region}:{name}: {initial['status']}"
+                            )
+                        continue
+
+                    if initial["status"] == "absent":
+                        if resource_type == "AWS::Logs::LogGroup":
+                            _record_log_group_checkpoint_incident(
+                                ctx,
+                                candidate,
+                                phase="checkpoint-explicit-group-absence",
+                                outcome=initial,
+                            )
+                            raise RuntimeError(
+                                f"CloudFormation log group is absent before teardown: "
+                                f"{region}:{name}"
                             )
                         try:
-                            logs.create_log_group(
-                                logGroupName=name,
-                                tags={
-                                    _RUN_STACK_TAG: ctx.settings.run_id,
-                                    _LOG_CLEANUP_TOKEN_TAG: cleanup_token,
-                                },
-                            )
+                            logs.create_log_group(logGroupName=name, tags=authority_tags)
                         except ClientError as exc:
                             if (
                                 exc.response.get("Error", {}).get("Code")
                                 != "ResourceAlreadyExistsException"
                             ):
                                 raise
-                        identity = _log_group_identity(logs, region, name)
-                    if identity is None:
-                        raise RuntimeError(f"Log group could not be checkpointed: {region}:{name}")
+                            raced = _observe_log_group_stability(
+                                logs,
+                                region,
+                                name,
+                                expected_identity=None,
+                                expected_tags=None,
+                                required_present=_LOG_GROUP_CHECKPOINT_STABLE_OBSERVATIONS,
+                                required_absent=_LOG_GROUP_CHECKPOINT_STABLE_OBSERVATIONS,
+                            )
+                            _record_log_group_checkpoint_incident(
+                                ctx,
+                                candidate,
+                                phase="checkpoint-create-race",
+                                outcome=raced,
+                            )
+                            raise RuntimeError(
+                                f"Log group appeared during checkpoint creation; refusing to "
+                                f"adopt or tag it: {region}:{name}"
+                            ) from exc
+                        initial = _observe_log_group_stability(
+                            logs,
+                            region,
+                            name,
+                            expected_identity=None,
+                            expected_tags=authority_tags,
+                            required_present=_LOG_GROUP_CHECKPOINT_STABLE_OBSERVATIONS,
+                            required_absent=_LOG_GROUP_CHECKPOINT_STABLE_OBSERVATIONS,
+                        )
+                    if initial["status"] != "present":
+                        _record_log_group_checkpoint_incident(
+                            ctx,
+                            candidate,
+                            phase="checkpoint-initial-stability",
+                            outcome=initial,
+                        )
+                        raise RuntimeError(
+                            f"Log group could not be stably checkpointed: "
+                            f"{region}:{name}: {initial['status']}"
+                        )
+
+                    identity = initial.get("identity")
+                    if not isinstance(identity, dict):
+                        raise RuntimeError(f"Log group omitted identity: {region}:{name}")
                     if identity["creation_time"] < run_started_ms:
                         raise RuntimeError(
                             f"Log group predates this validation run: {region}:{name}"
                         )
                     tags = identity.get("tags") or {}
-                    for tag_key, expected_value in (
-                        (_RUN_STACK_TAG, ctx.settings.run_id),
-                        (_LOG_CLEANUP_TOKEN_TAG, cleanup_token),
-                    ):
-                        if tag_key in tags and tags[tag_key] != expected_value:
-                            raise RuntimeError(
-                                f"Log-group authority tag changed for {region}:{name}:{tag_key}"
-                            )
-                    logs.tag_resource(
-                        resourceArn=identity["arn"],
-                        tags={
-                            _RUN_STACK_TAG: ctx.settings.run_id,
-                            _LOG_CLEANUP_TOKEN_TAG: cleanup_token,
-                        },
+                    conflicting_tags = {
+                        key: {"expected": value, "observed": tags.get(key)}
+                        for key, value in authority_tags.items()
+                        if key in tags and tags.get(key) != value
+                    }
+                    if conflicting_tags:
+                        conflict = {
+                            **copy.deepcopy(initial),
+                            "status": "tag-drift",
+                            "tag_drift": conflicting_tags,
+                        }
+                        _record_log_group_checkpoint_incident(
+                            ctx,
+                            candidate,
+                            phase="checkpoint-authority-tag-conflict",
+                            outcome=conflict,
+                        )
+                        raise RuntimeError(f"Log-group authority tags conflict for {region}:{name}")
+
+                    # This read is intentionally adjacent to tag_resource. A generation
+                    # change after the stable reads is fenced before any authority tags
+                    # can be applied. The post-tag stable reads catch the unavoidable
+                    # service-side TOCTOU without ever adopting that replacement.
+                    pre_tag = _observe_log_group_stability(
+                        logs,
+                        region,
+                        name,
+                        expected_identity=identity,
+                        expected_tags=None,
+                        required_present=1,
+                        required_absent=1,
                     )
-                    identity = _log_group_identity(logs, region, name)
-                    if identity is None:
-                        raise RuntimeError(
-                            f"Log group vanished while checkpointing: {region}:{name}"
+                    if pre_tag["status"] != "present":
+                        _record_log_group_checkpoint_incident(
+                            ctx,
+                            candidate,
+                            phase="checkpoint-immediate-pre-tag",
+                            outcome=pre_tag,
                         )
-                    expected_tags = identity.get("tags") or {}
-                    if (
-                        expected_tags.get(_RUN_STACK_TAG) != ctx.settings.run_id
-                        or expected_tags.get(_LOG_CLEANUP_TOKEN_TAG) != cleanup_token
-                    ):
                         raise RuntimeError(
-                            f"Log-group authority tags were not applied: {region}:{name}"
+                            f"Log-group generation changed immediately before tagging: "
+                            f"{region}:{name}: {pre_tag['status']}"
                         )
-                    previous = by_identity.get(key)
-                    immutable = tuple(candidate)
-                    if previous is not None:
-                        if any(previous.get(field) != candidate[field] for field in immutable):
-                            raise RuntimeError(f"Log-group ownership changed for {region}:{name}")
-                        observed = previous.get("observed_identity")
-                        if not isinstance(observed, dict) or observed != identity:
-                            raise RuntimeError(f"Log-group identity changed for {region}:{name}")
-                        continue
-                    candidate["observed_identity"] = identity
+                    if any(tags.get(key) != value for key, value in authority_tags.items()):
+                        logs.tag_resource(resourceArn=identity["arn"], tags=authority_tags)
+
+                    post_tag = _observe_log_group_stability(
+                        logs,
+                        region,
+                        name,
+                        expected_identity=identity,
+                        expected_tags=authority_tags,
+                        required_present=_LOG_GROUP_CHECKPOINT_STABLE_OBSERVATIONS,
+                        required_absent=_LOG_GROUP_CHECKPOINT_STABLE_OBSERVATIONS,
+                    )
+                    if post_tag["status"] != "present":
+                        _record_log_group_checkpoint_incident(
+                            ctx,
+                            candidate,
+                            phase="checkpoint-post-tag-stability",
+                            outcome=post_tag,
+                        )
+                        raise RuntimeError(
+                            f"Log-group generation or authority changed while checkpointing: "
+                            f"{region}:{name}: {post_tag['status']}"
+                        )
+                    final_identity = post_tag.get("identity")
+                    if not isinstance(final_identity, dict):
+                        raise RuntimeError(
+                            f"Log group omitted its post-tag identity: {region}:{name}"
+                        )
+                    candidate["observed_identity"] = final_identity
+                    candidate["checkpoint_observations"] = {
+                        "initial": initial,
+                        "immediate_pre_tag": pre_tag,
+                        "post_tag": post_tag,
+                    }
+                    candidate["original_generation_disposition"] = {
+                        "status": "checkpointed-present",
+                        "phase": "pre-destroy",
+                        "recorded_at": utc_now(),
+                        "original_identity": copy.deepcopy(final_identity),
+                    }
                     records.append(candidate)
                     by_identity[key] = candidate
         ctx.persist_callback(ctx.checkpoint)
@@ -2980,11 +3392,594 @@ def _queue_counts(status: dict[str, Any]) -> dict[str, int]:
     }
 
 
+_ADDON_EXECUTION_FIELDS = frozenset(
+    {
+        "execution_arn",
+        "state_machine_arn",
+        "deployment_token",
+        "cluster_name",
+        "region",
+        "input_sha256",
+        "started_at",
+    }
+)
+_ADDON_REQUIRED_INPUT_FIELDS = frozenset(
+    {
+        "ClusterName",
+        "Region",
+        "RegistryRegion",
+        "ProjectName",
+        "EnabledCharts",
+        "Charts",
+        "KedaOperatorRoleArn",
+        "ImageReplacements",
+        "DeploymentToken",
+    }
+)
+_ADDON_OPTIONAL_INPUT_FIELDS = frozenset({"EndpointGroupArn"})
+_ADDON_TERMINAL_STATUSES = frozenset({"SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED"})
+_ADDON_FAILURE_STATUSES = _ADDON_TERMINAL_STATUSES - {"SUCCEEDED"}
+_ADDON_CONVERGENCE_TIMEOUT_SECONDS = 2 * 60 * 60
+_HEALTH_STABILITY_ROUNDS = 3
+_MAX_TOPOLOGY_EVIDENCE_CHARS = 2048
+
+
+def _bounded_topology_evidence(
+    value: Any,
+    limit: int = _MAX_TOPOLOGY_EVIDENCE_CHARS,
+) -> str:
+    """Serialize diagnostic evidence without allowing an unbounded checkpoint."""
+    if value is None:
+        text = "<absent>"
+    elif isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(to_jsonable(value), sort_keys=True)
+        except TypeError, ValueError:
+            text = str(value)
+    suffix = "... [truncated]"
+    if len(text) <= limit:
+        return text
+    return text[: limit - len(suffix)] + suffix
+
+
+def _topology_json_object(
+    value: Any,
+    description: str,
+    *,
+    canonical: bool,
+) -> dict[str, Any]:
+    """Decode a JSON object, optionally requiring the provider's exact encoding."""
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"{description} is not a non-empty JSON string")
+
+    def reject_constant(constant: str) -> None:
+        raise ValueError(f"non-standard JSON constant {constant}")
+
+    try:
+        parsed = json.loads(value, parse_constant=reject_constant)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise RuntimeError(f"{description} is invalid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"{description} must be a JSON object")
+    if canonical and json.dumps(parsed, sort_keys=True, separators=(",", ":")) != value:
+        raise RuntimeError(f"{description} is not exact canonical JSON")
+    return parsed
+
+
+def _ssm_string_parameter(client: Any, name: str) -> str:
+    """Read one exact String parameter and reject a malformed SDK response."""
+    response = client.get_parameter(Name=name)
+    parameter = response.get("Parameter") if isinstance(response, dict) else None
+    if not isinstance(parameter, dict):
+        raise RuntimeError(f"SSM parameter response is malformed for {name}")
+    if parameter.get("Name") != name or parameter.get("Type") != "String":
+        raise RuntimeError(f"SSM parameter identity/type is invalid for {name}")
+    value = parameter.get("Value")
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"SSM parameter has no String value: {name}")
+    return value
+
+
+def _epoch_seconds(value: Any, description: str) -> int:
+    """Normalize an SDK timestamp while rejecting booleans and invalid values."""
+    if isinstance(value, datetime):
+        raw_value: Any = value.timestamp()
+    else:
+        raw_value = value
+    if isinstance(raw_value, bool) or not isinstance(raw_value, int | float):
+        raise RuntimeError(f"{description} is not a timestamp")
+    try:
+        result = int(raw_value)
+    except (OverflowError, ValueError) as exc:
+        raise RuntimeError(f"{description} is not a finite timestamp") from exc
+    if result <= 0:
+        raise RuntimeError(f"{description} must be positive")
+    return result
+
+
+def _validate_addon_arns(
+    ctx: RunContext,
+    *,
+    region: str,
+    stack_name: str,
+    stack_id: str,
+    state_machine_arn: str,
+    execution_arn: str,
+) -> None:
+    """Require exact account, partition, Region, and parent state-machine ARNs."""
+    partition = ctx.session.get_partition_for_region(region)
+    if not partition:
+        raise RuntimeError(f"Could not resolve AWS partition for {region}")
+    escaped_partition = re.escape(str(partition))
+    escaped_region = re.escape(region)
+    escaped_account = re.escape(ctx.settings.expected_account)
+    escaped_stack_name = re.escape(stack_name)
+
+    stack_pattern = (
+        rf"arn:{escaped_partition}:cloudformation:{escaped_region}:{escaped_account}:"
+        rf"stack/{escaped_stack_name}/[^/:\s]+"
+    )
+    if re.fullmatch(stack_pattern, stack_id) is None:
+        raise RuntimeError(f"Regional stack ID has the wrong ARN identity: {stack_id}")
+
+    state_machine_pattern = (
+        rf"arn:{escaped_partition}:states:{escaped_region}:{escaped_account}:"
+        r"stateMachine:([^:\s]+)"
+    )
+    state_machine_match = re.fullmatch(state_machine_pattern, state_machine_arn)
+    if state_machine_match is None:
+        raise RuntimeError(
+            f"Add-on state-machine ARN has the wrong account/partition/Region: {state_machine_arn}"
+        )
+    execution_pattern = (
+        rf"arn:{escaped_partition}:states:{escaped_region}:{escaped_account}:"
+        rf"execution:{re.escape(state_machine_match.group(1))}:[^:\s]+"
+    )
+    if re.fullmatch(execution_pattern, execution_arn) is None:
+        raise RuntimeError(
+            f"Add-on execution ARN is not an execution of {state_machine_arn}: {execution_arn}"
+        )
+
+
+def _state_machine_stack_resource(
+    ctx: RunContext,
+    *,
+    region: str,
+    stack_id: str,
+    state_machine_arn: str,
+) -> dict[str, str]:
+    """Prove the physical state machine belongs to the exact regional stack ARN."""
+    cloudformation = ctx.session.client("cloudformation", region_name=region)
+    pages = cloudformation.get_paginator("list_stack_resources").paginate(StackName=stack_id)
+    matches = [
+        resource
+        for page in pages
+        for resource in page.get("StackResourceSummaries", [])
+        if resource.get("ResourceType") == "AWS::StepFunctions::StateMachine"
+        and resource.get("PhysicalResourceId") == state_machine_arn
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"State machine {state_machine_arn} is not exactly one "
+            f"AWS::StepFunctions::StateMachine resource in stack {stack_id}"
+        )
+    resource = matches[0]
+    logical_id = resource.get("LogicalResourceId")
+    resource_status = resource.get("ResourceStatus")
+    if not isinstance(logical_id, str) or not logical_id:
+        raise RuntimeError(f"State-machine stack resource lacks a logical ID in {stack_id}")
+    if resource_status not in _HEALTHY_STACK_STATUSES:
+        raise RuntimeError(
+            f"State-machine stack resource {logical_id} is not complete: {resource_status}"
+        )
+    return {
+        "logical_id": logical_id,
+        "physical_id": state_machine_arn,
+        "resource_type": "AWS::StepFunctions::StateMachine",
+        "status": str(resource_status),
+    }
+
+
+def _validate_terminal_validator(
+    output: dict[str, Any],
+    *,
+    key: str,
+    deployment_token: str,
+    count_pairs: tuple[tuple[str, str], ...],
+) -> dict[str, Any]:
+    """Validate one terminal convergence payload and each expected/actual count pair."""
+    validator = output.get(key)
+    if not isinstance(validator, dict):
+        raise RuntimeError(f"Step Functions output lacks object {key}")
+    if validator.get("status") != "validated":
+        raise RuntimeError(f"Step Functions output {key}.status is not exactly 'validated'")
+    if validator.get("DeploymentToken") != deployment_token:
+        raise RuntimeError(f"Step Functions output {key} has a stale deployment token")
+    for expected_key, validated_key in count_pairs:
+        expected = validator.get(expected_key)
+        validated = validator.get(validated_key)
+        if (
+            isinstance(expected, bool)
+            or isinstance(validated, bool)
+            or not isinstance(expected, int)
+            or not isinstance(validated, int)
+            or expected < 0
+            or validated < 0
+        ):
+            raise RuntimeError(
+                f"Step Functions output {key} has invalid counts {expected_key}/{validated_key}"
+            )
+        if expected != validated:
+            raise RuntimeError(
+                f"Step Functions output {key} did not validate every item: "
+                f"{expected_key}={expected}, {validated_key}={validated}"
+            )
+    return validator
+
+
+def _validate_addon_execution_input(
+    input_value: dict[str, Any],
+    *,
+    cluster_name: str,
+    region: str,
+    registry_region: str,
+    project_name: str,
+    deployment_token: str,
+) -> None:
+    """Require the exact current orchestrator input schema and regional identity."""
+    fields = set(input_value)
+    if not _ADDON_REQUIRED_INPUT_FIELDS.issubset(fields) or not fields.issubset(
+        _ADDON_REQUIRED_INPUT_FIELDS | _ADDON_OPTIONAL_INPUT_FIELDS
+    ):
+        raise RuntimeError("Add-on execution input does not use the exact current schema")
+    if input_value.get("ClusterName") != cluster_name:
+        raise RuntimeError("Add-on execution input has a stale cluster name")
+    if input_value.get("Region") != region:
+        raise RuntimeError("Add-on execution input has a stale Region")
+    if input_value.get("RegistryRegion") != registry_region:
+        raise RuntimeError("Add-on execution input has a stale registry Region")
+    if input_value.get("ProjectName") != project_name:
+        raise RuntimeError("Add-on execution input has a stale project name")
+    if input_value.get("DeploymentToken") != deployment_token:
+        raise RuntimeError("Add-on execution input has a stale deployment token")
+    enabled_charts = input_value.get("EnabledCharts")
+    if not isinstance(enabled_charts, list) or not all(
+        isinstance(item, str) and item for item in enabled_charts
+    ):
+        raise RuntimeError("Add-on execution input EnabledCharts must be a string list")
+    if not isinstance(input_value.get("Charts"), dict):
+        raise RuntimeError("Add-on execution input Charts must be an object")
+    if not isinstance(input_value.get("ImageReplacements"), dict):
+        raise RuntimeError("Add-on execution input ImageReplacements must be an object")
+    keda_role_arn = input_value.get("KedaOperatorRoleArn")
+    if not isinstance(keda_role_arn, str | type(None)):
+        raise RuntimeError("Add-on execution input KedaOperatorRoleArn must be a string or null")
+    if "EndpointGroupArn" in input_value:
+        endpoint_group_arn = input_value["EndpointGroupArn"]
+        if not isinstance(endpoint_group_arn, str) or not endpoint_group_arn:
+            raise RuntimeError("Add-on execution input EndpointGroupArn must be non-empty")
+
+
+def _poll_addon_execution(
+    ctx: RunContext,
+    *,
+    region: str,
+    execution: dict[str, Any],
+    input_json: str,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Poll one exact execution to a bounded terminal result and validate its output."""
+    execution_arn = str(execution["execution_arn"])
+    state_machine_arn = str(execution["state_machine_arn"])
+    deployment_token = str(execution["deployment_token"])
+    poll_interval = max(0.0, float(ctx.settings.poll_interval_seconds))
+    deadline = time.monotonic() + _ADDON_CONVERGENCE_TIMEOUT_SECONDS + poll_interval
+    stepfunctions = ctx.session.client("stepfunctions", region_name=region)
+
+    while True:
+        response = stepfunctions.describe_execution(executionArn=execution_arn)
+        if not isinstance(response, dict):
+            raise RuntimeError(f"DescribeExecution returned a malformed response in {region}")
+        if response.get("executionArn") != execution_arn:
+            raise RuntimeError(f"DescribeExecution returned a different execution in {region}")
+        if response.get("stateMachineArn") != state_machine_arn:
+            raise RuntimeError(f"DescribeExecution returned a different state machine in {region}")
+        if response.get("input") != input_json:
+            raise RuntimeError(f"DescribeExecution returned stale execution input in {region}")
+        if (
+            _epoch_seconds(response.get("startDate"), "DescribeExecution startDate")
+            != execution["started_at"]
+        ):
+            raise RuntimeError(f"DescribeExecution start time changed in {region}")
+
+        status = response.get("status")
+        if not isinstance(status, str):
+            raise RuntimeError(f"DescribeExecution returned no status in {region}")
+        observation = {
+            "observed_at": utc_now(),
+            "status": status,
+            "execution_arn": execution_arn,
+        }
+        for field in ("error", "cause", "output"):
+            if field in response:
+                observation[field] = _bounded_topology_evidence(response.get(field))
+        evidence.setdefault("observations", []).append(observation)
+        ctx.persist()
+
+        if status == "RUNNING":
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"Add-on execution {execution_arn} did not finish within "
+                    f"{_ADDON_CONVERGENCE_TIMEOUT_SECONDS + poll_interval:.1f} seconds"
+                )
+            time.sleep(min(poll_interval if poll_interval > 0 else 0.1, remaining))
+            continue
+        if status not in _ADDON_TERMINAL_STATUSES:
+            raise RuntimeError(f"Add-on execution {execution_arn} has unknown status {status}")
+
+        evidence["execution_status"] = status
+        if status in _ADDON_FAILURE_STATUSES:
+            terminal = {
+                field: _bounded_topology_evidence(response.get(field))
+                for field in ("error", "cause", "output")
+            }
+            evidence["terminal"] = {"status": status, **terminal}
+            ctx.persist()
+            raise RuntimeError(
+                f"Add-on execution {execution_arn} ended {status}; "
+                f"error={terminal['error']}; cause={terminal['cause']}; "
+                f"output={terminal['output']}"
+            )
+
+        output = _topology_json_object(
+            response.get("output"),
+            f"Step Functions output for {region}",
+            canonical=False,
+        )
+        manifest_validation = _validate_terminal_validator(
+            output,
+            key="manifestValidation",
+            deployment_token=deployment_token,
+            count_pairs=(("ExpectedCount", "ValidatedCount"),),
+        )
+        helm_validation = _validate_terminal_validator(
+            output,
+            key="helmValidation",
+            deployment_token=deployment_token,
+            count_pairs=(
+                ("expected_release_count", "validated_release_count"),
+                ("expected_resource_count", "validated_resource_count"),
+            ),
+        )
+        terminal_evidence: dict[str, Any] = {
+            "status": status,
+            "manifestValidation": to_jsonable(manifest_validation),
+            "helmValidation": to_jsonable(helm_validation),
+        }
+        evidence["terminal"] = terminal_evidence
+        ctx.persist()
+        return terminal_evidence
+
+
+def _converge_region_addons(
+    ctx: RunContext,
+    *,
+    region: str,
+    stack_name: str,
+    stack: dict[str, Any],
+    evidence: dict[str, Any],
+) -> None:
+    """Validate persisted identity and wait for exact current add-on convergence."""
+    stack_id = str(stack.get("stack_id") or "")
+    outputs = stack.get("outputs")
+    if not isinstance(outputs, dict):
+        raise RuntimeError(f"Regional stack {stack_name} has malformed outputs")
+    cluster_name = f"{ctx.config.project_name}-{region}"
+    if outputs.get("ClusterName") != cluster_name:
+        raise RuntimeError(f"Regional stack {stack_name} has a stale ClusterName output")
+    deployment_token = outputs.get("AddonDeploymentToken")
+    if not isinstance(deployment_token, str) or not deployment_token:
+        raise RuntimeError(f"Regional stack {stack_name} has no AddonDeploymentToken output")
+
+    parameter_root = f"/{ctx.config.project_name}/addons/{region}"
+    execution_parameter = f"{parameter_root}/_execution"
+    input_parameter = f"{parameter_root}/_input"
+    ssm = ctx.session.client("ssm", region_name=region)
+    execution_json = _ssm_string_parameter(ssm, execution_parameter)
+    input_json = _ssm_string_parameter(ssm, input_parameter)
+    execution = _topology_json_object(
+        execution_json,
+        f"SSM parameter {execution_parameter}",
+        canonical=True,
+    )
+    input_value = _topology_json_object(
+        input_json,
+        f"SSM parameter {input_parameter}",
+        canonical=True,
+    )
+
+    if set(execution) != _ADDON_EXECUTION_FIELDS:
+        raise RuntimeError(f"SSM parameter {execution_parameter} has an unexpected schema")
+    for field in (
+        "execution_arn",
+        "state_machine_arn",
+        "deployment_token",
+        "cluster_name",
+        "region",
+        "input_sha256",
+    ):
+        if not isinstance(execution.get(field), str) or not execution[field]:
+            raise RuntimeError(f"SSM parameter {execution_parameter} has invalid {field}")
+    started_at = execution.get("started_at")
+    if isinstance(started_at, bool) or not isinstance(started_at, int) or started_at <= 0:
+        raise RuntimeError(f"SSM parameter {execution_parameter} has invalid started_at")
+    if execution["deployment_token"] != deployment_token:
+        raise RuntimeError(f"SSM parameter {execution_parameter} has a stale deployment token")
+    if execution["cluster_name"] != cluster_name or execution["region"] != region:
+        raise RuntimeError(f"SSM parameter {execution_parameter} has stale regional identity")
+    input_sha256 = hashlib.sha256(input_json.encode("utf-8")).hexdigest()
+    if execution["input_sha256"] != input_sha256:
+        raise RuntimeError(f"SSM parameter {execution_parameter} has a stale input SHA-256")
+    _validate_addon_execution_input(
+        input_value,
+        cluster_name=cluster_name,
+        region=region,
+        registry_region=ctx.config.global_region,
+        project_name=ctx.config.project_name,
+        deployment_token=deployment_token,
+    )
+    _validate_addon_arns(
+        ctx,
+        region=region,
+        stack_name=stack_name,
+        stack_id=stack_id,
+        state_machine_arn=execution["state_machine_arn"],
+        execution_arn=execution["execution_arn"],
+    )
+    stack_resource = _state_machine_stack_resource(
+        ctx,
+        region=region,
+        stack_id=stack_id,
+        state_machine_arn=execution["state_machine_arn"],
+    )
+
+    evidence.update(
+        {
+            "stack_id": stack_id,
+            "cluster_name": cluster_name,
+            "deployment_token": deployment_token,
+            "execution": to_jsonable(execution),
+            "input": to_jsonable(input_value),
+            "input_sha256": input_sha256,
+            "state_machine_resource": stack_resource,
+        }
+    )
+    ctx.persist()
+    _poll_addon_execution(
+        ctx,
+        region=region,
+        execution=execution,
+        input_json=input_json,
+        evidence=evidence,
+    )
+
+
+def _validate_health_payload(
+    ctx: RunContext,
+    payload: Any,
+    *,
+    endpoint_region: str | None,
+) -> dict[str, Any]:
+    """Require a healthy, well-formed response bound to one deployed cluster."""
+    if not isinstance(payload, dict):
+        raise RuntimeError("health response is not a JSON object")
+    if payload.get("status") != "healthy":
+        raise RuntimeError("health response status is not exactly 'healthy'")
+    timestamp = payload.get("timestamp")
+    if not isinstance(timestamp, str) or "T" not in timestamp:
+        raise RuntimeError("health response timestamp is not an ISO date-time")
+    try:
+        datetime.fromisoformat(timestamp[:-1] + "+00:00" if timestamp.endswith("Z") else timestamp)
+    except ValueError as exc:
+        raise RuntimeError("health response timestamp is not an ISO date-time") from exc
+    payload_region = payload.get("region")
+    if payload_region not in ctx.deployment_regions:
+        raise RuntimeError(f"health response Region is not deployed: {payload_region!r}")
+    if endpoint_region is not None and payload_region != endpoint_region:
+        raise RuntimeError(
+            f"regional health response came from {payload_region!r}, expected {endpoint_region!r}"
+        )
+    expected_cluster_id = f"{ctx.config.project_name}-{payload_region}"
+    if payload.get("cluster_id") != expected_cluster_id:
+        raise RuntimeError(
+            f"health response cluster_id is not {expected_cluster_id!r}: "
+            f"{payload.get('cluster_id')!r}"
+        )
+    return payload
+
+
+def _health_stability_samples(
+    ctx: RunContext,
+    *,
+    global_url: str,
+    regional_urls: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Collect three fail-fast, single-attempt rounds from every enabled endpoint."""
+    probes: list[dict[str, Any]] = [
+        {"scope": "global", "region": None, "endpoint": global_url},
+        *(
+            {"scope": "regional", "region": region, "endpoint": regional_urls[region]}
+            for region in ctx.deployment_regions
+            if region in regional_urls
+        ),
+    ]
+    samples: list[dict[str, Any]] = []
+    ctx.checkpoint.state["topology_health_samples"] = samples
+    ctx.persist()
+    interval = min(max(0.0, float(ctx.settings.poll_interval_seconds)), 5.0)
+
+    for round_number in range(1, _HEALTH_STABILITY_ROUNDS + 1):
+        for probe in probes:
+            started = time.monotonic()
+            payload: Any = None
+            sample: dict[str, Any]
+            try:
+                payload = ctx.aws_client.call_api(
+                    method="GET",
+                    path="/api/v1/health",
+                    region=probe["region"],
+                    max_attempts=1,
+                )
+            except Exception as exc:
+                sample = {
+                    **probe,
+                    "round": round_number,
+                    "timestamp": utc_now(),
+                    "latency_seconds": round(max(0.0, time.monotonic() - started), 6),
+                    "payload": None,
+                    "error": _bounded_topology_evidence(f"{type(exc).__name__}: {exc}"),
+                }
+                samples.append(sample)
+                ctx.persist()
+                raise RuntimeError(
+                    f"Health stability call failed for {probe['endpoint']} in round "
+                    f"{round_number}: {sample['error']}"
+                ) from exc
+
+            error: str | None = None
+            try:
+                _validate_health_payload(ctx, payload, endpoint_region=probe["region"])
+            except RuntimeError as exc:
+                error = _bounded_topology_evidence(str(exc))
+            sample = {
+                **probe,
+                "round": round_number,
+                "timestamp": utc_now(),
+                "latency_seconds": round(max(0.0, time.monotonic() - started), 6),
+                "payload": to_jsonable(payload),
+                "error": error,
+            }
+            samples.append(sample)
+            ctx.persist()
+            if error is not None:
+                raise RuntimeError(
+                    f"Malformed health response from {probe['endpoint']} in round "
+                    f"{round_number}: {error}"
+                )
+        if round_number < _HEALTH_STABILITY_ROUNDS and interval > 0:
+            time.sleep(interval)
+    return samples
+
+
 def action_topology(ctx: RunContext) -> dict[str, Any]:
-    """Verify deployed stacks, EKS, endpoints, table, and empty regional queues."""
+    """Verify deterministic add-on convergence before stable API and data-plane health."""
     _reconcile_stack_ownership(ctx)
     stack_details: dict[str, Any] = {}
-    for stack_name, region in ctx.checkpoint.state["target_stack_regions"].items():
+    target_stack_regions = ctx.checkpoint.state["target_stack_regions"]
+    for stack_name, region in target_stack_regions.items():
         stack = describe_stack(ctx.session, str(region), stack_name)
         if stack is None:
             raise RuntimeError(f"Expected deployed stack is absent: {stack_name} ({region})")
@@ -2995,6 +3990,52 @@ def action_topology(ctx: RunContext) -> dict[str, Any]:
                 f"{sorted(_HEALTHY_STACK_STATUSES)}"
             )
         stack_details[stack_name] = stack
+
+    convergence: dict[str, Any] = {
+        "started_at": utc_now(),
+        "status": "running",
+        "regions": {},
+    }
+    ctx.checkpoint.state["topology_convergence"] = convergence
+    ctx.persist()
+    for region in ctx.deployment_regions:
+        stack_name = f"{ctx.config.project_name}-{region}"
+        evidence: dict[str, Any] = {
+            "region": region,
+            "stack_name": stack_name,
+            "result": "pending",
+            "observations": [],
+        }
+        convergence["regions"][region] = evidence
+        try:
+            if target_stack_regions.get(stack_name) != region:
+                raise RuntimeError(
+                    f"Checkpoint does not bind exact regional stack {stack_name} to {region}"
+                )
+            stack = stack_details.get(stack_name)
+            if not isinstance(stack, dict):
+                raise RuntimeError(f"Exact regional stack was not described: {region}:{stack_name}")
+            _converge_region_addons(
+                ctx,
+                region=region,
+                stack_name=stack_name,
+                stack=stack,
+                evidence=evidence,
+            )
+        except Exception as exc:
+            evidence["result"] = "failed"
+            evidence["completed_at"] = utc_now()
+            evidence["error"] = _bounded_topology_evidence(f"{type(exc).__name__}: {exc}")
+            convergence["status"] = "failed"
+            convergence["completed_at"] = utc_now()
+            ctx.persist()
+            raise
+        evidence["result"] = "succeeded"
+        evidence["completed_at"] = utc_now()
+        ctx.persist()
+    convergence["status"] = "succeeded"
+    convergence["completed_at"] = utc_now()
+    ctx.persist()
 
     clusters: dict[str, Any] = {}
     for region in ctx.deployment_regions:
@@ -3018,26 +4059,49 @@ def action_topology(ctx: RunContext) -> dict[str, Any]:
         }
 
     global_endpoint = ctx.aws_client.get_api_endpoint(force_refresh=True)
-    global_health = ctx.aws_client.call_api(method="GET", path="/api/v1/health")
-    regional_endpoints: dict[str, Any] = {}
-    if _direct_regional_access_enabled(ctx):
+    global_url = str(getattr(global_endpoint, "url", "") or "")
+    if not global_url:
+        raise RuntimeError("Global API endpoint has no URL")
+    direct_regional_access = _direct_regional_access_enabled(ctx)
+    regional_urls: dict[str, str] = {}
+    if direct_regional_access:
         for region in ctx.deployment_regions:
             endpoint = ctx.aws_client.get_regional_api_endpoint(region, force_refresh=True)
-            if endpoint is None:
+            endpoint_url = str(getattr(endpoint, "url", "") or "")
+            if not endpoint_url:
                 raise RuntimeError(f"Direct regional API endpoint is absent in {region}")
-            regional_endpoints[region] = {
-                "url": endpoint.url,
-                "health": ctx.aws_client.call_api(
-                    method="GET",
-                    path="/api/v1/health",
-                    region=region,
+            regional_urls[region] = endpoint_url
+
+    health_samples = _health_stability_samples(
+        ctx,
+        global_url=global_url,
+        regional_urls=regional_urls,
+    )
+    global_samples = [sample for sample in health_samples if sample["scope"] == "global"]
+    global_api = {
+        "url": global_url,
+        "health": global_samples[-1]["payload"],
+        "samples": global_samples,
+    }
+    if direct_regional_access:
+        regional_endpoints = {
+            region: {
+                "url": regional_urls[region],
+                "health": next(
+                    sample["payload"]
+                    for sample in reversed(health_samples)
+                    if sample["region"] == region
                 ),
+                "samples": [sample for sample in health_samples if sample["region"] == region],
             }
+            for region in ctx.deployment_regions
+        }
     else:
         regional_endpoints = {
             region: {
                 "skipped": True,
                 "reason": "direct caller access is disabled by cdk.json",
+                "samples": [],
             }
             for region in ctx.deployment_regions
         }
@@ -3064,7 +4128,9 @@ def action_topology(ctx: RunContext) -> dict[str, Any]:
     return {
         "stacks": stack_details,
         "clusters": clusters,
-        "global_api": {"url": global_endpoint.url, "health": global_health},
+        "convergence": convergence,
+        "health_samples": health_samples,
+        "global_api": global_api,
         "regional_apis": regional_endpoints,
         "queue_baseline": queue_baseline,
         "jobs_table": {
@@ -4517,12 +5583,22 @@ def _cleanup_new_ecr_repositories(ctx: RunContext) -> dict[str, Any]:
 
 
 def _cleanup_owned_log_groups(ctx: RunContext) -> dict[str, Any]:
-    """Delete pre-authorized logs through an assumed role and atomic tag condition."""
+    """Delete only a stable checkpointed generation, then prove stable absence."""
     records = ctx.checkpoint.state.get("owned_log_groups", [])
     if not isinstance(records, list):
         raise RuntimeError("Checkpoint owned_log_groups must be a list")
+
     results: list[dict[str, Any]] = []
     authorization: dict[str, Any] = {"needed": False}
+    helper_cleanup: dict[str, Any] = {"needed": False, "deleted": True}
+    cleanup_error: Exception | None = None
+    helper_error: Exception | None = None
+    cleanup_token = str(ctx.checkpoint.state.get("log_group_cleanup_token") or "")
+    authority_tags = {
+        _RUN_STACK_TAG: ctx.settings.run_id,
+        _LOG_CLEANUP_TOKEN_TAG: cleanup_token,
+    }
+
     try:
         if records:
             stack_absence = _verify_target_stack_absence(ctx)
@@ -4530,32 +5606,91 @@ def _cleanup_owned_log_groups(ctx: RunContext) -> dict[str, Any]:
                 raise RuntimeError(
                     "Log-group cleanup requires every exact target stack to be absent"
                 )
-
-        cleanup_token = str(ctx.checkpoint.state.get("log_group_cleanup_token") or "")
-        pending: list[tuple[dict[str, Any], str, str, dict[str, Any]]] = []
         if records and not re.fullmatch(r"[0-9a-f]{32}", cleanup_token):
             raise RuntimeError("Checkpoint log-group cleanup token is malformed")
-        for record in records:
+
+        pending: list[tuple[dict[str, Any], str, str, dict[str, Any]]] = []
+        for raw_record in records:
+            if not isinstance(raw_record, dict):
+                raise RuntimeError("Checkpoint owned_log_groups must contain objects")
+            record = raw_record
             region, name = _validated_owned_log_group_identity(ctx, record)
-            logs = ctx.session.client("logs", region_name=region)
-            identity = _log_group_identity(logs, region, name)
-            if identity is None:
-                record["deleted"] = True
-                results.append({"region": region, "name": name, "already_absent": True})
-                ctx.persist()
-                continue
             observed = record.get("observed_identity")
-            if not isinstance(observed, dict) or any(
-                identity.get(field) != observed.get(field) for field in ("arn", "creation_time")
-            ):
-                raise RuntimeError(f"Log-group generation changed before deletion: {region}:{name}")
-            tags = identity.get("tags") or {}
-            if (
-                tags.get(_RUN_STACK_TAG) != ctx.settings.run_id
-                or tags.get(_LOG_CLEANUP_TOKEN_TAG) != cleanup_token
-            ):
+            if not isinstance(observed, dict):
+                raise RuntimeError(f"Log-group checkpoint identity is malformed: {region}:{name}")
+            _log_group_generation(observed)
+            logs = ctx.session.client("logs", region_name=region)
+            initial = _observe_log_group_stability(
+                logs,
+                region,
+                name,
+                expected_identity=observed,
+                expected_tags=authority_tags,
+                required_present=_LOG_GROUP_CLEANUP_STABLE_OBSERVATIONS,
+                required_absent=_LOG_GROUP_ABSENCE_OBSERVATIONS,
+            )
+            _record_log_group_observation(
+                ctx,
+                record,
+                phase="cleanup-pending-stability",
+                outcome=initial,
+            )
+            if initial["status"] == "absent":
+                record["deleted"] = True
+                disposition = _set_log_group_disposition(
+                    ctx,
+                    record,
+                    status="already-absent-confirmed",
+                    phase="cleanup-pending-stability",
+                    outcome=initial,
+                )
+                results.append(
+                    {
+                        "region": region,
+                        "name": name,
+                        "original_identity": copy.deepcopy(observed),
+                        "already_absent": True,
+                        "absence_observations": initial["attempt_count"],
+                        "original_generation_disposition": disposition,
+                    }
+                )
+                continue
+            if initial["status"] != "present":
+                if initial["status"] == "replacement":
+                    disposition_status = "replacement-observed-before-delete"
+                elif initial["status"] == "tag-drift":
+                    disposition_status = "authority-tag-drift-before-delete"
+                else:
+                    disposition_status = "identity-not-stable-before-delete"
+                disposition = _set_log_group_disposition(
+                    ctx,
+                    record,
+                    status=disposition_status,
+                    phase="cleanup-pending-stability",
+                    outcome=initial,
+                )
+                results.append(
+                    {
+                        "region": region,
+                        "name": name,
+                        "original_identity": copy.deepcopy(observed),
+                        "deleted": False,
+                        "blocked": True,
+                        "observation": copy.deepcopy(initial),
+                        "replacement_evidence": copy.deepcopy(
+                            record.get("replacement_evidence", [])
+                        ),
+                        "original_generation_disposition": disposition,
+                    }
+                )
                 raise RuntimeError(
-                    f"Log-group authority tags changed before deletion: {region}:{name}"
+                    f"Log-group cleanup was fenced before deletion for "
+                    f"{region}:{name}: {initial['status']}"
+                )
+            identity = initial.get("identity")
+            if not isinstance(identity, dict):
+                raise RuntimeError(
+                    f"Stable log-group observation omitted identity: {region}:{name}"
                 )
             pending.append((record, region, name, identity))
 
@@ -4589,27 +5724,159 @@ def _cleanup_owned_log_groups(ctx: RunContext) -> dict[str, Any]:
             if assumed_user_arn != expected_assumed_arn:
                 raise RuntimeError("AssumeRole returned an unexpected cleanup principal")
 
+            expiration = credentials.get("Expiration")
+            authorization = {
+                "needed": True,
+                "mode": "sts-assume-role-session-policy",
+                "role_arn": helper["role_arn"],
+                "helper_stack_id": helper["stack_id"],
+                "atomic_resource_tag_condition": True,
+                "condition_tag_keys": [_RUN_STACK_TAG, _LOG_CLEANUP_TOKEN_TAG],
+                "session_expiration": (expiration.isoformat() if expiration is not None else None),
+            }
             restricted_clients: dict[str, Any] = {}
             for record, region, name, identity in pending:
-                restricted_logs = restricted_clients.setdefault(
-                    region,
-                    ctx.session.client(
+                if region not in restricted_clients:
+                    restricted_clients[region] = ctx.session.client(
                         "logs",
                         region_name=region,
                         aws_access_key_id=credentials["AccessKeyId"],
                         aws_secret_access_key=credentials["SecretAccessKey"],
                         aws_session_token=credentials["SessionToken"],
-                    ),
-                )
-                restricted_logs.delete_log_group(logGroupName=name)
+                    )
+                restricted_logs = restricted_clients[region]
                 normal_logs = ctx.session.client("logs", region_name=region)
-                for _attempt in range(10):
-                    if _describe_exact_log_group(normal_logs, name) is None:
-                        break
-                    time.sleep(1)
+
+                # No persistence, sleep, or unrelated API call is permitted between
+                # this single exact read and the tag-conditioned delete request.
+                pre_delete = _observe_log_group_stability(
+                    normal_logs,
+                    region,
+                    name,
+                    expected_identity=identity,
+                    expected_tags=authority_tags,
+                    required_present=1,
+                    required_absent=1,
+                )
+                if pre_delete["status"] == "present":
+                    try:
+                        restricted_logs.delete_log_group(logGroupName=name)
+                    except ClientError as exc:
+                        _record_log_group_observation(
+                            ctx,
+                            record,
+                            phase="cleanup-immediate-pre-delete",
+                            outcome=pre_delete,
+                        )
+                        if exc.response.get("Error", {}).get("Code") != "ResourceNotFoundException":
+                            raise
+                    else:
+                        _record_log_group_observation(
+                            ctx,
+                            record,
+                            phase="cleanup-immediate-pre-delete",
+                            outcome=pre_delete,
+                        )
+                    record["delete_requested_at"] = utc_now()
+                    ctx.persist()
                 else:
-                    raise RuntimeError(f"Log group remained after deletion: {region}:{name}")
+                    _record_log_group_observation(
+                        ctx,
+                        record,
+                        phase="cleanup-immediate-pre-delete",
+                        outcome=pre_delete,
+                    )
+
+                if pre_delete["status"] not in {"present", "absent"}:
+                    if pre_delete["status"] == "replacement":
+                        disposition_status = "replacement-observed-immediately-before-delete"
+                    elif pre_delete["status"] == "tag-drift":
+                        disposition_status = "authority-tag-drift-immediately-before-delete"
+                    else:
+                        disposition_status = "identity-not-stable-immediately-before-delete"
+                    disposition = _set_log_group_disposition(
+                        ctx,
+                        record,
+                        status=disposition_status,
+                        phase="cleanup-immediate-pre-delete",
+                        outcome=pre_delete,
+                    )
+                    results.append(
+                        {
+                            "region": region,
+                            "name": name,
+                            "original_identity": copy.deepcopy(identity),
+                            "deleted": False,
+                            "blocked": True,
+                            "observation": copy.deepcopy(pre_delete),
+                            "replacement_evidence": copy.deepcopy(
+                                record.get("replacement_evidence", [])
+                            ),
+                            "original_generation_disposition": disposition,
+                        }
+                    )
+                    raise RuntimeError(
+                        f"Log-group cleanup was fenced immediately before deletion for "
+                        f"{region}:{name}: {pre_delete['status']}"
+                    )
+
+                absence = _observe_log_group_stability(
+                    normal_logs,
+                    region,
+                    name,
+                    expected_identity=identity,
+                    expected_tags=authority_tags,
+                    required_present=None,
+                    required_absent=_LOG_GROUP_ABSENCE_OBSERVATIONS,
+                )
+                _record_log_group_observation(
+                    ctx,
+                    record,
+                    phase="cleanup-post-delete-absence",
+                    outcome=absence,
+                )
+                if absence["status"] != "absent":
+                    if absence["status"] == "replacement":
+                        disposition_status = "replacement-observed-before-confirmed-absence"
+                    elif absence["status"] == "tag-drift":
+                        disposition_status = "authority-tag-drift-after-delete-request"
+                    else:
+                        disposition_status = "absence-not-stable-after-delete-request"
+                    disposition = _set_log_group_disposition(
+                        ctx,
+                        record,
+                        status=disposition_status,
+                        phase="cleanup-post-delete-absence",
+                        outcome=absence,
+                    )
+                    results.append(
+                        {
+                            "region": region,
+                            "name": name,
+                            "original_identity": copy.deepcopy(identity),
+                            "delete_requested": pre_delete["status"] == "present",
+                            "deleted": False,
+                            "blocked": True,
+                            "observation": copy.deepcopy(absence),
+                            "replacement_evidence": copy.deepcopy(
+                                record.get("replacement_evidence", [])
+                            ),
+                            "original_generation_disposition": disposition,
+                        }
+                    )
+                    raise RuntimeError(
+                        f"Log-group absence was not stable after deletion for "
+                        f"{region}:{name}: {absence['status']}"
+                    )
+
                 record["deleted"] = True
+                disposition = _set_log_group_disposition(
+                    ctx,
+                    record,
+                    status="deleted-confirmed-absent",
+                    phase="cleanup-post-delete-absence",
+                    outcome=absence,
+                )
                 results.append(
                     {
                         "region": region,
@@ -4621,39 +5888,45 @@ def _cleanup_owned_log_groups(ctx: RunContext) -> dict[str, Any]:
                         "source_resource_type": record["source_resource_type"],
                         "authority_phase": record["authority_phase"],
                         "atomic_resource_tag_condition": True,
+                        "absence_observations": absence["attempt_count"],
                         "deleted": True,
+                        "original_generation_disposition": disposition,
                     }
                 )
                 ctx.persist()
-            expiration = credentials.get("Expiration")
-            authorization = {
-                "needed": True,
-                "mode": "sts-assume-role-session-policy",
-                "role_arn": helper["role_arn"],
-                "helper_stack_id": helper["stack_id"],
-                "atomic_resource_tag_condition": True,
-                "condition_tag_keys": [_RUN_STACK_TAG, _LOG_CLEANUP_TOKEN_TAG],
-                "session_expiration": (expiration.isoformat() if expiration is not None else None),
-            }
-    except Exception as cleanup_exc:
+    except Exception as exc:  # noqa: BLE001 - attach helper cleanup and partial evidence
+        cleanup_error = exc
+    finally:
         try:
-            _delete_log_cleanup_helper(ctx)
-        except Exception as helper_exc:
-            evidence = {
-                "log_cleanup_error": f"{type(cleanup_exc).__name__}: {cleanup_exc}",
-                "helper_cleanup_error": f"{type(helper_exc).__name__}: {helper_exc}",
+            helper_cleanup = _delete_log_cleanup_helper(ctx)
+        except Exception as exc:  # noqa: BLE001 - preserve both independent failures
+            helper_error = exc
+
+    errors = []
+    if cleanup_error is not None:
+        errors.append(
+            {"phase": "log-groups", "error": f"{type(cleanup_error).__name__}: {cleanup_error}"}
+        )
+    if helper_error is not None:
+        errors.append(
+            {
+                "phase": "cleanup-helper",
+                "error": f"{type(helper_error).__name__}: {helper_error}",
             }
-            raise RuntimeError(
-                "Log-group and cleanup-helper deletion both failed: "
-                + json.dumps(evidence, sort_keys=True)
-            ) from cleanup_exc
-        raise
-    helper_cleanup = _delete_log_cleanup_helper(ctx)
-    return {
+        )
+    details = {
         "log_groups": results,
         "authorization": authorization,
         "helper_stack_cleanup": helper_cleanup,
+        "errors": errors,
     }
+    ctx.checkpoint.state["last_log_group_cleanup"] = copy.deepcopy(details)
+    ctx.persist()
+    if errors:
+        message = "Retained CloudWatch log cleanup failed: " + json.dumps(errors, sort_keys=True)
+        primary_error = cleanup_error if cleanup_error is not None else helper_error
+        raise _LogGroupCleanupError(message, details) from primary_error
+    return details
 
 
 def _schedule_retained_kms_keys(ctx: RunContext) -> dict[str, Any]:
@@ -4734,6 +6007,8 @@ def _retained_resource_cleanup(ctx: RunContext) -> dict[str, Any]:
     try:
         result["cloudwatch_logs"] = _cleanup_owned_log_groups(ctx)
     except Exception as exc:  # noqa: BLE001 - preserve partial evidence
+        if isinstance(exc, _LogGroupCleanupError):
+            result["cloudwatch_logs"] = copy.deepcopy(exc.details)
         result["errors"].append(
             {"phase": "cloudwatch-logs", "error": f"{type(exc).__name__}: {exc}"}
         )

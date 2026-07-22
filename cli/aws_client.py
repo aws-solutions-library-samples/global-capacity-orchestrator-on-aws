@@ -28,6 +28,14 @@ _MAX_RETRIES = 3
 _RETRY_BACKOFF_BASE = 1.0  # seconds
 
 
+def _validate_max_attempts(max_attempts: int | None) -> None:
+    """Validate an explicitly supplied request-attempt limit."""
+    if max_attempts is not None and (
+        isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts <= 0
+    ):
+        raise ValueError("max_attempts must be a positive integer")
+
+
 @dataclass
 class RegionalStack:
     """Information about a regional GCO stack."""
@@ -291,6 +299,8 @@ class GCOAWSClient:
         region: str | None = None,
         body: dict[str, Any] | None = None,
         params: dict[str, str] | None = None,
+        *,
+        max_attempts: int | None = None,
     ) -> dict[str, Any]:
         """
         Make an API call and return the JSON response.
@@ -303,13 +313,19 @@ class GCOAWSClient:
             region: Target region for the request
             body: Request body (will be JSON encoded)
             params: Query parameters
+            max_attempts: Maximum attempts for read-only requests. Mutating
+                requests always make exactly one attempt. Defaults to the
+                existing retry limit.
 
         Returns:
             JSON response as dictionary
 
         Raises:
             RuntimeError: If the request fails with a descriptive error message
+            ValueError: If max_attempts is not a positive integer
         """
+        _validate_max_attempts(max_attempts)
+
         # Add URL-encoded query parameters to path
         if params:
             encoded_pairs = [
@@ -325,6 +341,7 @@ class GCOAWSClient:
             path=path,
             body=body,
             target_region=region,
+            max_attempts=max_attempts,
         )
 
         if not response.ok:
@@ -352,6 +369,8 @@ class GCOAWSClient:
         headers: dict[str, str] | None = None,
         target_region: str | None = None,
         stream: bool = False,
+        *,
+        max_attempts: int | None = None,
     ) -> requests.Response:
         """
         Make an authenticated request to the GCO API.
@@ -371,10 +390,18 @@ class GCOAWSClient:
             target_region: Exact region for the request. When set, the request
                 uses that region's API Gateway directly.
             stream: Leave the response body unbuffered for incremental consumption.
+            max_attempts: Maximum attempts for read-only requests. Mutating
+                requests always make exactly one attempt. Defaults to the
+                existing retry limit.
 
         Returns:
             requests.Response object
+
+        Raises:
+            ValueError: If max_attempts is not a positive integer
         """
+        _validate_max_attempts(max_attempts)
+
         # Global aggregation endpoints exist only on the global API. Regional
         # mode must reject them clearly rather than send a global path to a
         # regional bridge and surface an opaque 404.
@@ -447,8 +474,10 @@ class GCOAWSClient:
         # attempt and return its response unchanged.
         last_response = None
         retried_auth = False
-        max_attempts = _MAX_RETRIES if retryable_method else 1
-        for attempt in range(max_attempts):
+        attempt_limit = (
+            (max_attempts if max_attempts is not None else _MAX_RETRIES) if retryable_method else 1
+        )
+        for attempt in range(attempt_limit):
             response = requests.request(
                 method=method,
                 url=url,
@@ -461,7 +490,12 @@ class GCOAWSClient:
 
             # A read-only 403 may mean an expired SigV4 signature. Refresh and
             # retry once; mutating requests are never replayed automatically.
-            if response.status_code == 403 and retryable_method and not retried_auth:
+            if (
+                response.status_code == 403
+                and retryable_method
+                and not retried_auth
+                and attempt < attempt_limit - 1
+            ):
                 retried_auth = True
                 logger.warning(
                     "Request to %s returned 403, refreshing credentials and retrying",
@@ -483,7 +517,7 @@ class GCOAWSClient:
                 return response
 
             # Retryable read-only error — back off and retry.
-            if attempt < max_attempts - 1:
+            if attempt < attempt_limit - 1:
                 wait_time = _RETRY_BACKOFF_BASE * (2**attempt)
                 logger.warning(
                     "Request to %s returned %d, retrying in %.1fs (attempt %d/%d)",
@@ -491,7 +525,7 @@ class GCOAWSClient:
                     response.status_code,
                     wait_time,
                     attempt + 1,
-                    max_attempts,
+                    attempt_limit,
                 )
                 response.close()
                 time.sleep(wait_time)

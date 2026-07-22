@@ -44,6 +44,10 @@ def _sfn() -> Any:
     return boto3.client("stepfunctions")
 
 
+def _ssm(region: str) -> Any:
+    return boto3.client("ssm", region_name=region)
+
+
 def _execution_name(event: dict[str, Any]) -> str:
     """Return a retry-stable, Step-Functions-safe execution name."""
     identity = "|".join(
@@ -61,14 +65,12 @@ def _execution_arn(state_machine_arn: str, execution_name: str) -> str:
 
 
 def _stop_running_install_executions(sfn_client: Any, state_machine_arn: str) -> int:
-    """Stop every visible convergence execution and return the drain bound.
+    """Stop every visible convergence execution and return the count stopped.
 
-    ``ListExecutions`` is eventually consistent, so callers invoke this both
-    before teardown starts and on every asynchronous completion poll. Stopping
-    a Standard Workflow prevents later states from starting but does not cancel
-    a Lambda invocation already in flight. Teardown therefore always waits the
-    full 16-minute bound, even when the first list appears empty; repeated polls
-    catch recently-started executions while that drain is in progress.
+    ``ListExecutions`` is eventually consistent. The delete provider invokes
+    this once before the teardown state machine starts its unconditional drain;
+    the state machine then invokes ``drain_install_executions`` after each full
+    drain interval and loops whenever a late execution is discovered.
     """
     execution_arns: list[str] = []
     request: dict[str, Any] = {
@@ -109,13 +111,20 @@ def _stop_running_install_executions(sfn_client: Any, state_machine_arn: str) ->
             raise
 
     if execution_arns:
-        logger.info(
-            "Stopped %d install execution(s); draining in-flight Lambda work for %ds",
-            len(execution_arns),
-            _IN_FLIGHT_LAMBDA_DRAIN_SECONDS,
-        )
-        return _IN_FLIGHT_LAMBDA_DRAIN_SECONDS
-    return 0
+        logger.info("Stopped %d install execution(s)", len(execution_arns))
+    return len(execution_arns)
+
+
+def drain_install_executions(
+    _event: dict[str, Any],
+    _context: Any = None,
+) -> dict[str, int]:
+    """State-machine task that stops late work and requests another full drain."""
+    stopped = _stop_running_install_executions(
+        _sfn(),
+        os.environ["INSTALL_STATE_MACHINE_ARN"],
+    )
+    return {"StoppedExecutions": stopped}
 
 
 def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
@@ -131,18 +140,30 @@ def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
     install_state_machine_arn = os.environ["INSTALL_STATE_MACHINE_ARN"]
     execution_name = _execution_name(event)
     sfn_client = _sfn()
+    fence_name = f"/{props['ProjectName']}/addons/{props['Region']}/_teardown"
+    _ssm(str(props["Region"])).put_parameter(
+        Name=fence_name,
+        Value=execution_name,
+        Type="String",
+        Overwrite=True,
+    )
     _stop_running_install_executions(sfn_client, install_state_machine_arn)
     execution_input = {
         "ClusterName": props["ClusterName"],
         "Region": props["Region"],
+        "RegistryRegion": props["RegistryRegion"],
+        "ProjectName": props["ProjectName"],
         "EnabledCharts": props.get("EnabledCharts", []),
         "Charts": props.get("Charts", {}),
         "KedaOperatorRoleArn": props.get("KedaOperatorRoleArn"),
         # ListExecutions is eventually consistent and StopExecution cannot
         # cancel an in-flight Lambda. Always drain the full invocation bound;
-        # is_complete repeats cancellation while this Wait is running.
+        # the workflow checker loops if late-visible work is stopped.
         "WaitForInFlightSeconds": _IN_FLIGHT_LAMBDA_DRAIN_SECONDS,
     }
+    endpoint_group_arn = props.get("EndpointGroupArn")
+    if endpoint_group_arn:
+        execution_input["EndpointGroupArn"] = endpoint_group_arn
 
     try:
         sfn_client.start_execution(
@@ -161,21 +182,15 @@ def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
 
 
 def is_complete(event: dict[str, Any], _context: Any = None) -> dict[str, bool]:
-    """Keep convergence fenced, then surface teardown terminal status."""
+    """Surface teardown terminal status; the workflow owns the drain loop."""
     if event["RequestType"] != "Delete":
         return {"IsComplete": True}
 
     state_machine_arn = os.environ["TEARDOWN_STATE_MACHINE_ARN"]
-    install_state_machine_arn = os.environ["INSTALL_STATE_MACHINE_ARN"]
     execution_name = _execution_name(event)
     execution_arn = _execution_arn(state_machine_arn, execution_name)
     sfn_client = _sfn()
 
-    # The provider polls every 15 seconds. Repeating this eventually observes
-    # executions omitted from the initial best-effort ListExecutions response
-    # and prevents them from advancing to another mutating Lambda while the
-    # state machine's unconditional 16-minute drain is in progress.
-    _stop_running_install_executions(sfn_client, install_state_machine_arn)
     response = sfn_client.describe_execution(executionArn=execution_arn)
     status = response["status"]
 

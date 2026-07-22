@@ -90,7 +90,7 @@ def _validated_dns_name(value: Any, *, region: str) -> str:
 
 
 def _validate_regional_endpoint_ownership(endpoint: str, region: str) -> None:
-    """Verify that the DNS name is this account's internal GCO Ingress ALB."""
+    """Verify that the DNS name is this account's internal GCO platform ALB."""
     expected_account = os.getenv("AWS_ACCOUNT_ID", "").strip()
     project_name = os.getenv("PROJECT_NAME", "").strip()
     if not expected_account or not project_name:
@@ -142,15 +142,18 @@ def _validate_regional_endpoint_ownership(endpoint: str, region: str) -> None:
     if not cluster_match:
         raise RuntimeError(f"The registered backend for {region} is not owned by the GCO cluster")
 
-    # EKS Auto Mode and the self-managed AWS Load Balancer Controller use
-    # different stack tags. Require the exact platform Ingress value for the
-    # controller that created the load balancer.
-    stack_match = (
-        tags.get("ingress.eks.amazonaws.com/stack") == "gco"
+    # During an in-place migration the SSM registry can briefly reference
+    # either generation. Accept only the exact legacy Ingress ownership marker
+    # or the explicit Gateway marker; a cluster tag alone is never sufficient.
+    platform_match = (
+        tags.get("gco.aws/gateway") == "gco-system/gco-gateway"
+        or tags.get("ingress.eks.amazonaws.com/stack") == "gco"
         or tags.get("ingress.k8s.aws/stack") == "gco-system/gco-ingress"
     )
-    if not stack_match:
-        raise RuntimeError(f"The registered backend for {region} is not the GCO Ingress")
+    if not platform_match:
+        raise RuntimeError(
+            f"The registered backend for {region} is not the GCO Gateway or legacy Ingress"
+        )
 
 
 def _resolve_registered_endpoint() -> str:

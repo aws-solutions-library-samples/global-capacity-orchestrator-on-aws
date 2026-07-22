@@ -302,7 +302,8 @@ def _assert_retry(state: dict, *, attempts: int, interval: int, max_delay: int) 
 def test_chart_order_loader_preserves_safety_order_and_fails_closed():
     order = rs._load_helm_chart_order()
 
-    assert order[0] == "keda"
+    assert order[0] == "aws-load-balancer-controller"
+    assert order[1] == "keda"
     assert order[-1] == "kueue"
     assert order.index("cert-manager") < order.index("slinky-slurm-operator")
     assert order.index("slinky-slurm-operator") < order.index("slinky-slurm")
@@ -320,6 +321,60 @@ def test_chart_order_loader_preserves_safety_order_and_fails_closed():
         pytest.raises(RuntimeError, match="non-empty charts object"),
     ):
         rs._load_helm_chart_order()
+
+
+def test_lbc_is_mandatory_and_uses_dedicated_oidc_only_irsa(feature_stack):
+    _stack, template = feature_stack
+
+    role_id, role = _single_resource(
+        template,
+        "AWS::IAM::Role",
+        "AwsLoadBalancerControllerRole",
+    )
+    trust_statements = role["Properties"]["AssumeRolePolicyDocument"]["Statement"]
+    assert len(trust_statements) == 1
+    assert trust_statements[0]["Action"] == "sts:AssumeRoleWithWebIdentity"
+    assert "Federated" in trust_statements[0]["Principal"]
+    assert "pods.eks.amazonaws.com" not in json.dumps(trust_statements)
+
+    _, oidc_conditions = _single_resource(
+        template,
+        "Custom::AWSCDKCfnJson",
+        "AwsLoadBalancerControllerRoleOidcConditions",
+    )
+    assert "system:serviceaccount:kube-system:aws-load-balancer-controller" in json.dumps(
+        oidc_conditions
+    )
+
+    _, controller_policy = _single_resource(
+        template,
+        "AWS::IAM::Policy",
+        "AwsLoadBalancerControllerPolicy",
+    )
+    assert controller_policy["Properties"]["Roles"] == [{"Ref": role_id}]
+    actual_statements = controller_policy["Properties"]["PolicyDocument"]["Statement"]
+    expected_statements = rs.aws_load_balancer_controller_policy_document("aws")["Statement"]
+    assert len(actual_statements) == len(expected_statements)
+    assert {action for statement in actual_statements for action in _actions(statement)} == {
+        action for statement in expected_statements for action in _actions(statement)
+    }
+
+    general_actions = {
+        action
+        for statement in _policy_statements_for_role(template, "ServiceAccountRole")
+        for action in _actions(statement)
+    }
+    controller_namespaces = (
+        "acm:",
+        "cognito-idp:",
+        "ec2:",
+        "elasticloadbalancing:",
+        "iam:",
+        "shield:",
+        "waf-regional:",
+        "wafv2:",
+    )
+    assert not any(action.startswith(controller_namespaces) for action in general_actions)
 
 
 def test_unsupported_az_lookup_maps_ids_and_fails_closed(monkeypatch):
@@ -444,6 +499,7 @@ def test_convergence_payload_carries_enabled_features_and_security_policy(featur
     properties = trigger["Properties"]
 
     enabled = properties["EnabledCharts"]
+    assert enabled[0] == "aws-load-balancer-controller"
     assert "keda" in enabled  # mandatory even though the context says disabled
     assert "aws-efa-device-plugin" in enabled
     assert "aws-neuron-device-plugin" not in enabled
@@ -453,6 +509,13 @@ def test_convergence_payload_carries_enabled_features_and_security_policy(featur
     assert "kube-prometheus-stack" in enabled
 
     chart_overrides = properties["Charts"]
+    lbc_values = chart_overrides["aws-load-balancer-controller"]["values"]
+    assert lbc_values["region"] == _REGION
+    assert "GCOEksCluster" in json.dumps(lbc_values["clusterName"])
+    assert "GCOVpc" in json.dumps(lbc_values["vpcId"])
+    assert "AwsLoadBalancerControllerRole" in json.dumps(
+        lbc_values["serviceAccount"]["annotations"]["eks.amazonaws.com/role-arn"]
+    )
     image_registry = json.dumps(chart_overrides["volcano"]["values"]["basic"]["image_registry"])
     assert f"{_ACCOUNT}.dkr.ecr.{_REGION}." in image_registry
     assert "AWS::URLSuffix" in image_registry
@@ -515,7 +578,11 @@ def test_convergence_payload_carries_enabled_features_and_security_policy(featur
 
     assert properties["ProjectName"] == "gco-test"
     assert properties["Region"] == _REGION
+    assert properties["RegistryRegion"] == "us-east-2"
     assert properties["DeploymentTimestamp"] == "2026-01-02T03:04:05Z"
+    assert template.to_json()["Outputs"]["AddonDeploymentToken"]["Value"] == (
+        "2026-01-02T03:04:05Z"
+    )
     assert "EndpointGroupArn" in properties
 
 
@@ -570,19 +637,45 @@ def test_install_state_machine_retries_and_continues_per_chart(feature_stack):
         assert "$.EnabledCharts" in state_json
 
     post_apply = states["ApplyPostHelmManifests"]
-    assert post_apply["Next"] == "RegisterGlobalAccelerator"
-    assert post_apply["Catch"][0]["Next"] == "RegisterGlobalAccelerator"
-    assert post_apply["Catch"][0]["ResultPath"] == "$.lastApplyError"
+    assert post_apply["Next"] == "ValidateKubernetesManifests"
+    assert "Catch" not in post_apply
     _assert_retry(post_apply, attempts=3, interval=30, max_delay=180)
     assert '"PostHelm": "true"' in json.dumps(post_apply, sort_keys=True)
 
-    registration = states["RegisterGlobalAccelerator"]
-    assert registration["Next"] == "HelmInstallComplete"
-    assert registration["Catch"][0]["Next"] == "HelmInstallComplete"
-    assert registration["Catch"][0]["ResultPath"] == "$.gaError"
-    assert registration["TimeoutSeconds"] == 960
-    assert "register_ga" in json.dumps(registration)
-    assert "$.EndpointGroupArn" in json.dumps(registration)
+    manifest_validation = states["ValidateKubernetesManifests"]
+    assert manifest_validation["Next"] == "ValidateHelmReleases"
+    assert manifest_validation["ResultPath"] == "$.manifestValidation"
+    assert manifest_validation["TimeoutSeconds"] == 900
+    assert "Catch" not in manifest_validation
+    _assert_retry(manifest_validation, attempts=4, interval=60, max_delay=180)
+    manifest_json = json.dumps(manifest_validation, sort_keys=True)
+    assert "validate_manifests" in manifest_json
+    assert "$.ImageReplacements" in manifest_json
+    assert "$.DeploymentToken" in manifest_json
+
+    helm_validation = states["ValidateHelmReleases"]
+    assert helm_validation["Next"] == "PublishGatewayEndpoint"
+    assert helm_validation["ResultPath"] == "$.helmValidation"
+    assert helm_validation["TimeoutSeconds"] == 960
+    assert "Catch" not in helm_validation
+    _assert_retry(helm_validation, attempts=4, interval=60, max_delay=180)
+    helm_json = json.dumps(helm_validation, sort_keys=True)
+    assert "validate_releases" in helm_json
+    assert "$.EnabledCharts" in helm_json
+    assert "$.Charts" in helm_json
+    assert "$.DeploymentToken" in helm_json
+
+    publication = states["PublishGatewayEndpoint"]
+    assert publication["Next"] == "HelmInstallComplete"
+    assert publication["ResultPath"] == "$.endpointPublication"
+    assert publication["TimeoutSeconds"] == 960
+    assert "Catch" not in publication
+    _assert_retry(publication, attempts=3, interval=30, max_delay=180)
+    publication_json = json.dumps(publication, sort_keys=True)
+    assert "publish_gateway_endpoint" in publication_json
+    assert "$.RegistryRegion" in publication_json
+    assert "$.ProjectName" in publication_json
+    assert "$.EndpointGroupArn" in publication_json
     assert states["HelmInstallComplete"] == {"Type": "Succeed"}
 
 
@@ -596,7 +689,9 @@ def test_teardown_waits_then_uninstalls_in_strict_reverse_order(feature_stack):
     properties = state_machine["Properties"]
     definition = _state_machine_definition(state_machine)
     states = definition["States"]
-    reverse_order = list(reversed(rs._load_helm_chart_order()))
+    chart_order = rs._load_helm_chart_order()
+    lbc_chart = "aws-load-balancer-controller"
+    non_lbc_reverse = [name for name in reversed(chart_order) if name != lbc_chart]
 
     assert properties["StateMachineType"] == "STANDARD"
     assert definition["TimeoutSeconds"] == 3360
@@ -606,28 +701,66 @@ def test_teardown_waits_then_uninstalls_in_strict_reverse_order(feature_stack):
     assert states["DrainInFlightConvergence"] == {
         "Type": "Wait",
         "SecondsPath": "$.WaitForInFlightSeconds",
-        "Next": "QuiesceHealthMonitor",
+        "Next": "CheckRunningConvergence",
     }
+    drain_check = states["CheckRunningConvergence"]
+    assert drain_check["Next"] == "LateConvergenceFound"
+    assert drain_check["ResultPath"] == "$.drainCheck"
+    assert drain_check["TimeoutSeconds"] == 60
+    late_work = states["LateConvergenceFound"]
+    assert late_work["Default"] == "QuiesceHealthMonitor"
+    assert late_work["Choices"] == [
+        {
+            "Variable": "$.drainCheck.StoppedExecutions",
+            "NumericGreaterThan": 0,
+            "Next": "DrainInFlightConvergence",
+        }
+    ]
 
     quiesce = states["QuiesceHealthMonitor"]
-    assert quiesce["Next"] == f"HelmUninstallChart-{reverse_order[0]}"
-    assert quiesce["TimeoutSeconds"] == 300
+    assert quiesce["Next"] == "CleanupEndpointAndCharts"
+    assert quiesce["TimeoutSeconds"] == 180
     assert "quiesce_health_monitor" in json.dumps(quiesce)
 
-    for index, chart_name in enumerate(reverse_order):
-        state = states[f"HelmUninstallChart-{chart_name}"]
-        next_state = (
-            f"HelmUninstallChart-{reverse_order[index + 1]}"
-            if index + 1 < len(reverse_order)
-            else "HelmTeardownComplete"
-        )
-        assert state["Next"] == next_state
-        assert state["TimeoutSeconds"] == 180
+    parallel_cleanup = states["CleanupEndpointAndCharts"]
+    assert parallel_cleanup["Type"] == "Parallel"
+    assert parallel_cleanup["Next"] == "DeleteGatewayResources"
+    assert parallel_cleanup["ResultPath"] == "$.preGatewayCleanup"
+    branches = {branch["StartAt"]: branch for branch in parallel_cleanup["Branches"]}
+
+    endpoint_branch = branches["CleanupGatewayEndpoint"]
+    endpoint_cleanup = endpoint_branch["States"]["CleanupGatewayEndpoint"]
+    assert endpoint_cleanup["End"] is True
+    assert endpoint_cleanup["TimeoutSeconds"] == 900
+    endpoint_json = json.dumps(endpoint_cleanup, sort_keys=True)
+    assert "cleanup_gateway_endpoint" in endpoint_json
+    assert "$.RegistryRegion" in endpoint_json
+    assert "$.ProjectName" in endpoint_json
+    assert "$.EndpointGroupArn" in endpoint_json
+
+    chart_states = branches[f"HelmUninstallChart-{non_lbc_reverse[0]}"]["States"]
+    for index, chart_name in enumerate(non_lbc_reverse):
+        state = chart_states[f"HelmUninstallChart-{chart_name}"]
+        if index + 1 < len(non_lbc_reverse):
+            assert state["Next"] == f"HelmUninstallChart-{non_lbc_reverse[index + 1]}"
+        else:
+            assert state["End"] is True
+        assert state["TimeoutSeconds"] == (240 if chart_name == "keda" else 120)
         assert "Catch" not in state
         assert all("States.ALL" not in retry["ErrorEquals"] for retry in state.get("Retry", []))
         state_json = json.dumps(state, sort_keys=True)
         assert "uninstall_chart" in state_json
         assert chart_name in state_json
+
+    gateway_cleanup = states["DeleteGatewayResources"]
+    assert gateway_cleanup["Next"] == f"HelmUninstallChart-{lbc_chart}"
+    assert gateway_cleanup["TimeoutSeconds"] == 300
+    assert "delete_gateway_resources" in json.dumps(gateway_cleanup)
+
+    lbc_uninstall = states[f"HelmUninstallChart-{lbc_chart}"]
+    assert lbc_uninstall["Next"] == "HelmTeardownComplete"
+    assert lbc_uninstall["TimeoutSeconds"] == 300
+    assert "uninstall_chart" in json.dumps(lbc_uninstall)
     assert states["HelmTeardownComplete"] == {"Type": "Succeed"}
 
 
@@ -709,7 +842,12 @@ def test_helm_providers_are_observable_and_iam_scoped(feature_stack):
     teardown_dependencies = _depends_on(teardown_resource)
     assert any(item.startswith("HelmInstallerLambdaAccessEntry") for item in teardown_dependencies)
     assert any(item.startswith("HelmInstallStateMachine") for item in teardown_dependencies)
-    assert any(item.startswith("GaDeregistration") for item in teardown_dependencies)
+    assert any(item.startswith("HelmInstallCharts") for item in teardown_dependencies)
+    assert any(item.startswith("AwsLoadBalancerControllerPolicy") for item in teardown_dependencies)
+    assert not any(item.startswith("GaDeregistration") for item in teardown_dependencies)
+    assert teardown_resource["Properties"]["RegistryRegion"] == "us-east-2"
+    assert teardown_resource["Properties"]["ProjectName"] == "gco-test"
+    assert "EndpointGroupArn" in teardown_resource["Properties"]
 
     _, convergence = _single_resource(
         template,
@@ -721,7 +859,14 @@ def test_helm_providers_are_observable_and_iam_scoped(feature_stack):
         "AWS::CloudFormation::CustomResource",
         "GaDeregistration",
     )
-    assert any(item.startswith("HelmInstallCharts") for item in _depends_on(ga_deregistration))
+    assert any(item.startswith("HelmTeardown") for item in _depends_on(ga_deregistration))
+    convergence_dependencies = _depends_on(convergence)
+    assert any(
+        item.startswith("AwsLoadBalancerControllerPolicy") for item in convergence_dependencies
+    )
+    assert any(
+        item.startswith("GaRegistrationLambdaAccessEntry") for item in convergence_dependencies
+    )
     assert convergence["Properties"]["ServiceToken"]
 
     # Ordinary deploys must not accumulate explicit provider groups. Strict
@@ -770,14 +915,21 @@ def test_non_ga_partition_omits_registration_and_tears_down_directly(ga_disabled
 
     assert "RegisterGlobalAccelerator" not in states
     post_apply = states["ApplyPostHelmManifests"]
-    assert post_apply["Next"] == "HelmInstallComplete"
-    assert post_apply["Catch"] == [
-        {
-            "ErrorEquals": ["States.ALL"],
-            "ResultPath": "$.lastApplyError",
-            "Next": "HelmInstallComplete",
-        }
-    ]
+    assert post_apply["Next"] == "ValidateKubernetesManifests"
+    assert "Catch" not in post_apply
+    manifest_validation = states["ValidateKubernetesManifests"]
+    assert manifest_validation["Next"] == "ValidateHelmReleases"
+    assert "Catch" not in manifest_validation
+    helm_validation = states["ValidateHelmReleases"]
+    assert helm_validation["Next"] == "PublishGatewayEndpoint"
+    assert "Catch" not in helm_validation
+    publication = states["PublishGatewayEndpoint"]
+    assert publication["Next"] == "HelmInstallComplete"
+    publication_json = json.dumps(publication, sort_keys=True)
+    assert "publish_gateway_endpoint" in publication_json
+    assert "$.RegistryRegion" in publication_json
+    assert "$.ProjectName" in publication_json
+    assert "EndpointGroupArn" not in publication_json
 
     _, convergence = _single_resource(
         template,
@@ -793,13 +945,35 @@ def test_non_ga_partition_omits_registration_and_tears_down_directly(ga_disabled
     assert "GCOFsxLustre" in json.dumps(replacements["{{FSX_FILE_SYSTEM_ID}}"])
 
     lambda_ids = template.find_resources("AWS::Lambda::Function")
-    assert not any(logical_id.startswith("GaRegistrationFunction") for logical_id in lambda_ids)
-    assert not any(logical_id.startswith("GaDeregistrationFunction") for logical_id in lambda_ids)
+    assert any(logical_id.startswith("GaRegistrationFunction") for logical_id in lambda_ids)
+    assert any(logical_id.startswith("GaDeregistrationFunction") for logical_id in lambda_ids)
+
+    _, deregistration = _single_resource(
+        template,
+        "AWS::CloudFormation::CustomResource",
+        "GaDeregistration",
+    )
+    assert "EndpointGroupArn" not in deregistration["Properties"]
     assert not [
         logical_id
         for logical_id in template.find_resources("AWS::CloudFormation::CustomResource")
-        if logical_id.startswith("GaDeregistration")
+        if logical_id.startswith("GetEndpointGroupArn")
     ]
+
+    registration_actions = {
+        action
+        for statement in _policy_statements_for_role(template, "GaRegistrationFunctionServiceRole")
+        for action in _actions(statement)
+    }
+    deregistration_actions = {
+        action
+        for statement in _policy_statements_for_role(
+            template, "GaDeregistrationFunctionServiceRole"
+        )
+        for action in _actions(statement)
+    }
+    assert not any(action.startswith("globalaccelerator:") for action in registration_actions)
+    assert not any(action.startswith("globalaccelerator:") for action in deregistration_actions)
 
     _, teardown = _single_resource(
         template,
@@ -809,3 +983,4 @@ def test_non_ga_partition_omits_registration_and_tears_down_directly(ga_disabled
     dependencies = _depends_on(teardown)
     assert any(item.startswith("HelmInstallCharts") for item in dependencies)
     assert not any(item.startswith("GaDeregistration") for item in dependencies)
+    assert any(item.startswith("HelmTeardown") for item in _depends_on(deregistration))

@@ -20,7 +20,8 @@ Resources Created:
         - IRSA roles for service accounts (Secrets Manager, SQS, DynamoDB, CloudWatch, S3, EFS)
 
     Load Balancing:
-        - Internal ALB (created by Ingress via EKS Auto Mode)
+        - Internal ALB created from Gateway API resources by the self-managed
+          AWS Load Balancer Controller
         - Always-deployed regional API bridge reaches the ALB through a VPC Lambda;
           direct caller access is optional in ``aws`` and required elsewhere
         - Global Accelerator endpoint registration in commercial ``aws`` only
@@ -107,6 +108,9 @@ from aws_cdk import custom_resources as cr
 from constructs import Construct
 
 from gco.config.config_loader import ConfigLoader
+from gco.stacks.aws_load_balancer_controller_policy import (
+    aws_load_balancer_controller_policy_document,
+)
 from gco.stacks.constants import (
     AURORA_POSTGRES_VERSION,
     EKS_ADDON_CLOUDWATCH_OBSERVABILITY,
@@ -313,15 +317,16 @@ class GCORegionalStack(Stack):
         oidc_issuer_url: str,
         service_account_names: list[str],
         namespaces: list[str],
+        *,
+        include_pod_identity: bool = True,
     ) -> iam.Role:
-        """Create an IAM role trusted by both IRSA (OIDC) and EKS Pod Identity.
+        """Create an OIDC IRSA role, optionally trusted by EKS Pod Identity.
 
         IRSA is the primary credential mechanism — it works reliably on EKS Auto
         Mode by projecting a service-account token that the AWS SDK exchanges for
-        temporary credentials via the OIDC provider.
-
-        Pod Identity trust is added as a secondary path so the role is ready if/when
-        Pod Identity injection starts working on Auto Mode nodes.
+        temporary credentials via the OIDC provider. General platform roles retain
+        Pod Identity as a secondary path; controller roles can disable it to keep
+        their trust policy bound to one exact Kubernetes service account.
 
         Uses CfnJson to defer OIDC condition key resolution to deploy time,
         because the issuer URL is a CloudFormation token that can't be used
@@ -360,15 +365,17 @@ class GCORegionalStack(Stack):
             ),
         )
 
-        # Also allow Pod Identity (secondary path for future use)
-        assert role.assume_role_policy is not None  # guaranteed by assumed_by parameter above
-        role.assume_role_policy.add_statements(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                principals=[iam.ServicePrincipal("pods.eks.amazonaws.com")],
-                actions=["sts:AssumeRole", "sts:TagSession"],
+        if include_pod_identity:
+            # Secondary credential path for platform workloads. Dedicated
+            # controllers such as LBC deliberately remain OIDC-only.
+            assert role.assume_role_policy is not None
+            role.assume_role_policy.add_statements(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    principals=[iam.ServicePrincipal("pods.eks.amazonaws.com")],
+                    actions=["sts:AssumeRole", "sts:TagSession"],
+                )
             )
-        )
         return role
 
     def __init__(
@@ -456,7 +463,7 @@ class GCORegionalStack(Stack):
         self._create_aws_custom_resource_role()
 
         # Resolve this region's fixed ACM certificate ARN from the global
-        # backend-TLS registry before rendering the HTTPS-only Ingress.
+        # backend-TLS registry before rendering the HTTPS-only Gateway.
         self.backend_tls_certificate_arn = self._resolve_backend_tls_certificate_arn()
 
         # Create EKS cluster
@@ -502,10 +509,10 @@ class GCORegionalStack(Stack):
         # Create Aurora Serverless v2 + pgvector (if enabled) for vector DB
         self._create_aurora_pgvector()
 
-        # Register the Ingress ALB only where Global Accelerator exists. Other
-        # partitions expose this cluster through the regional IAM API bridge.
-        if self.global_accelerator_enabled:
-            self._create_ga_registration_lambda()
+        # Discover and publish the Gateway ALB in every partition. Global
+        # Accelerator registration is an optional extension of this same exact
+        # ownership path where the service is available.
+        self._create_ga_registration_lambda()
 
         # Provider framework Lambdas can emit their final delete-event log after
         # CloudFormation has otherwise finished the custom resource. Strict live
@@ -1520,6 +1527,7 @@ class GCORegionalStack(Stack):
             service_account_names=["gco-health-monitor-sa"],
             namespaces=["gco-system"],
         )
+        self._create_aws_load_balancer_controller_role()
 
         # Grant permission to read the auth secret.
         #
@@ -1579,155 +1587,6 @@ class GCORegionalStack(Stack):
         )
 
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
-
-        # cdk-nag suppression: the ServiceAccountRole grants ec2:Describe*
-        # and elasticloadbalancing:Describe* for the AWS Load Balancer
-        # Controller. These AWS APIs do not support resource-level IAM
-        # scoping — Resource: * is the only valid form.
-        acknowledge_nag_findings(
-            self.service_account_role,
-            [
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "reason": (
-                        "The ServiceAccountRole grants ec2:Describe* and "
-                        "elasticloadbalancing:Describe* for the AWS Load Balancer "
-                        "Controller. These AWS APIs do not support resource-level "
-                        "IAM scoping — Resource: * is the only valid form. See "
-                        "https://docs.aws.amazon.com/service-authorization/latest/"
-                        "reference/list_amazonec2.html"
-                    ),
-                    "appliesTo": ["Resource::*"],
-                },
-            ],
-        )
-
-        # Add permissions for AWS Load Balancer Controller
-        self.service_account_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "ec2:DescribeAccountAttributes",
-                    "ec2:DescribeAddresses",
-                    "ec2:DescribeAvailabilityZones",
-                    "ec2:DescribeInternetGateways",
-                    "ec2:DescribeVpcs",
-                    "ec2:DescribeVpcPeeringConnections",
-                    "ec2:DescribeSubnets",
-                    "ec2:DescribeSecurityGroups",
-                    "ec2:DescribeInstances",
-                    "ec2:DescribeNetworkInterfaces",
-                    "ec2:DescribeTags",
-                    "ec2:GetCoipPoolUsage",
-                    "ec2:DescribeCoipPools",
-                    "elasticloadbalancing:DescribeLoadBalancers",
-                    "elasticloadbalancing:DescribeLoadBalancerAttributes",
-                    "elasticloadbalancing:DescribeListeners",
-                    "elasticloadbalancing:DescribeListenerCertificates",
-                    "elasticloadbalancing:DescribeSSLPolicies",
-                    "elasticloadbalancing:DescribeRules",
-                    "elasticloadbalancing:DescribeTargetGroups",
-                    "elasticloadbalancing:DescribeTargetGroupAttributes",
-                    "elasticloadbalancing:DescribeTargetHealth",
-                    "elasticloadbalancing:DescribeTags",
-                ],
-                resources=["*"],
-            )
-        )
-
-        self.service_account_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "elasticloadbalancing:CreateLoadBalancer",
-                    "elasticloadbalancing:CreateTargetGroup",
-                    "elasticloadbalancing:CreateListener",
-                    "elasticloadbalancing:DeleteLoadBalancer",
-                    "elasticloadbalancing:DeleteTargetGroup",
-                    "elasticloadbalancing:DeleteListener",
-                    "elasticloadbalancing:ModifyLoadBalancerAttributes",
-                    "elasticloadbalancing:ModifyTargetGroup",
-                    "elasticloadbalancing:ModifyTargetGroupAttributes",
-                    "elasticloadbalancing:ModifyListener",
-                    "elasticloadbalancing:RegisterTargets",
-                    "elasticloadbalancing:DeregisterTargets",
-                    "elasticloadbalancing:SetWebAcl",
-                    "elasticloadbalancing:SetSecurityGroups",
-                    "elasticloadbalancing:SetSubnets",
-                    "elasticloadbalancing:AddTags",
-                    "elasticloadbalancing:RemoveTags",
-                ],
-                resources=["*"],
-            )
-        )
-
-        self.service_account_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "ec2:CreateSecurityGroup",
-                    "ec2:CreateTags",
-                    "ec2:DeleteTags",
-                    "ec2:AuthorizeSecurityGroupIngress",
-                    "ec2:RevokeSecurityGroupIngress",
-                    "ec2:DeleteSecurityGroup",
-                ],
-                resources=["*"],
-            )
-        )
-
-        self.service_account_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["iam:CreateServiceLinkedRole"],
-                resources=["*"],
-                conditions={
-                    "StringEquals": {"iam:AWSServiceName": "elasticloadbalancing.amazonaws.com"}
-                },
-            )
-        )
-
-        self.service_account_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "wafv2:GetWebACL",
-                    "wafv2:GetWebACLForResource",
-                    "wafv2:AssociateWebACL",
-                    "wafv2:DisassociateWebACL",
-                ],
-                resources=["*"],
-            )
-        )
-
-        self.service_account_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "shield:GetSubscriptionState",
-                    "shield:DescribeProtection",
-                    "shield:CreateProtection",
-                    "shield:DeleteProtection",
-                ],
-                resources=["*"],
-            )
-        )
-
-        self.service_account_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["acm:ListCertificates", "acm:DescribeCertificate"],
-                resources=["*"],
-            )
-        )
-
-        self.service_account_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["cognito-idp:DescribeUserPoolClient"],
-                resources=["*"],
-            )
-        )
 
         # The SQS queue processor runs as gco-manifest-processor-sa. Keep
         # queue consumption on that dedicated platform identity; KEDA has its
@@ -1945,6 +1804,47 @@ class GCORegionalStack(Stack):
 
         # Create Pod Identity Associations for all service accounts
         self._create_pod_identity_associations()
+
+    def _create_aws_load_balancer_controller_role(self) -> None:
+        """Create the controller's exact OIDC-only IRSA role and v3.4.2 policy."""
+        self.aws_load_balancer_controller_role = GCORegionalStack._create_irsa_role(
+            self,
+            "AwsLoadBalancerControllerRole",
+            oidc_provider_arn=self.oidc_provider.open_id_connect_provider_arn,
+            oidc_issuer_url=self.cluster.cluster_open_id_connect_issuer_url,
+            service_account_names=["aws-load-balancer-controller"],
+            namespaces=["kube-system"],
+            include_pod_identity=False,
+        )
+        self.aws_load_balancer_controller_policy = iam.Policy(
+            self,
+            "AwsLoadBalancerControllerPolicy",
+            document=iam.PolicyDocument.from_json(
+                aws_load_balancer_controller_policy_document(self.partition)
+            ),
+        )
+        self.aws_load_balancer_controller_role.attach_inline_policy(
+            self.aws_load_balancer_controller_policy
+        )
+
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        acknowledge_nag_findings(
+            self.aws_load_balancer_controller_policy,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "This is the exact upstream AWS Load Balancer Controller v3.4.2 "
+                        "IAM policy. Its wildcard resources are required for AWS APIs that "
+                        "cannot be resource-scoped and its wildcard ARN segments are "
+                        "constrained by the upstream cluster ownership tag conditions. The "
+                        "role trust is restricted to kube-system/aws-load-balancer-controller."
+                    ),
+                    "appliesTo": ["Resource::*"],
+                }
+            ],
+        )
 
     def _create_keda_operator_role(self) -> None:
         """Create IAM role for KEDA operator service account using EKS Pod Identity.
@@ -2756,19 +2656,18 @@ class GCORegionalStack(Stack):
         )
 
     def _apply_kubernetes_manifests(self) -> None:
-        """Apply Kubernetes manifests using the kubectl Lambda custom resource.
+        """Build the complete base/Helm/post-Helm convergence pipeline.
 
-        This is called after ALB security group and EFS are created.
-        The Ingress will use the security group ID to create the ALB.
+        This is called after the Gateway certificate and shared storage exist.
+        The post-Helm pass creates the internal ALB through Gateway API only
+        after the mandatory AWS Load Balancer Controller is installed.
         """
 
-        # Get public subnet IDs for Ingress annotation (currently unused but kept for future use)
-        # public_subnet_ids = ",".join([subnet.subnet_id for subnet in self.vpc.public_subnets])
-
-        # Apply manifests using custom resource
         # Build image replacements dict
-        # Include a deployment timestamp to force pod rollouts when code changes
+        # Include one deployment token to force pod rollouts and bind live
+        # validation to this exact asynchronous convergence execution.
         deployment_timestamp = _deployment_timestamp()
+        self.addon_deployment_token = deployment_timestamp
 
         # Get resource thresholds from config
         thresholds = self.config.get_resource_thresholds()
@@ -3085,8 +2984,9 @@ class GCORegionalStack(Stack):
         # ── Trigger the convergence pipeline (fire-and-forget) ───────────────
         # A single custom resource starts the HelmInstallStateMachine, which now
         # owns the WHOLE cluster convergence: apply base manifests -> install
-        # Helm charts -> apply post-Helm (CRD-dependent) manifests -> register
-        # the Ingress-created ALB with Global Accelerator. The resource returns
+        # Helm charts -> apply post-Helm (CRD-dependent) manifests -> publish
+        # the Gateway-created ALB and optionally register it with Global
+        # Accelerator. The resource returns
         # as soon as the execution is *started* (no isComplete waiter), so the
         # cluster's CloudFormation lifecycle is never bound to the multi-minute
         # add-on convergence — a slow chart can't blow CloudFormation's ~1h
@@ -3096,8 +2996,8 @@ class GCORegionalStack(Stack):
         #
         # The execution input carries everything the state-machine tasks need:
         # chart selection/overrides, the manifest ImageReplacements (for the base
-        # and post-Helm kubectl passes), and the Global Accelerator
-        # EndpointGroupArn (for the final GA-registration task).
+        # and post-Helm kubectl passes), the endpoint-registry identity, and the
+        # optional Global Accelerator EndpointGroupArn.
         convergence_properties: dict[str, Any] = {
             "ClusterName": self.cluster.cluster_name,
             "Region": self.deployment_region,
@@ -3112,6 +3012,7 @@ class GCORegionalStack(Stack):
             # to SSM so `gco stacks addons install` can replay the whole
             # pipeline without reconstructing chart/manifest config.
             "ProjectName": self.config.get_project_name(),
+            "RegistryRegion": self.config.get_global_region(),
             # Force re-invocation on every deployment (new charts.yaml,
             # manifest, or image) so convergence re-runs end to end.
             "DeploymentTimestamp": deployment_timestamp,
@@ -3126,6 +3027,7 @@ class GCORegionalStack(Stack):
             properties=convergence_properties,
         )
         converge_trigger.node.add_dependency(self.helm_installer_provider_log_group)
+        converge_trigger.node.add_dependency(self.aws_load_balancer_controller_policy)
 
         # The trigger (and therefore the whole convergence pipeline) must run
         # after the cluster, shared storage, managed-addon IRSA patches, and Pod
@@ -3154,37 +3056,37 @@ class GCORegionalStack(Stack):
         # asynchronous pipeline. Keeping these explicit is essential on delete:
         # the ordered Helm teardown runs while its Kubernetes authentication is
         # still valid, then the trigger/access entries/cluster can disappear.
-        for attr in ("kubectl_lambda_access_entry", "helm_installer_access_entry"):
+        for attr in (
+            "kubectl_lambda_access_entry",
+            "helm_installer_access_entry",
+            "ga_registration_access_entry",
+        ):
             access_entry = getattr(self, attr, None)
             if access_entry is not None:
                 converge_trigger.node.add_dependency(access_entry)
         for assoc in self._pod_identity_associations:
             converge_trigger.node.add_dependency(assoc)
 
-        # CloudFormation reverses dependency edges during deletion. Create-time
-        # ordering is convergence trigger -> GA guard -> Helm teardown guard;
-        # deletion therefore runs the safety-critical reverse sequence:
-        # synchronous Helm teardown/quiescence -> GA deregistration -> remove
-        # convergence trigger -> EKS access entries and cluster.
+        # Deletion must run in the opposite safety order: endpoint guard first,
+        # then synchronous Kubernetes/Helm teardown, then the convergence trigger
+        # and its EKS access entries. Build the create-time dependency chain as
+        # trigger -> teardown guard -> endpoint guard so CloudFormation reverses it.
         helm_teardown = getattr(self, "helm_teardown_resource", None)
         ga_deregistration = getattr(self, "ga_deregistration_resource", None)
-        if ga_deregistration is not None:
-            ga_deregistration.node.add_dependency(converge_trigger)
-            if helm_teardown is not None:
-                helm_teardown.node.add_dependency(ga_deregistration)
-        elif helm_teardown is not None:
+        if helm_teardown is not None:
             helm_teardown.node.add_dependency(converge_trigger)
+            if ga_deregistration is not None:
+                ga_deregistration.node.add_dependency(helm_teardown)
+        elif ga_deregistration is not None:
+            ga_deregistration.node.add_dependency(converge_trigger)
 
     def _create_ga_registration_lambda(self) -> None:
-        """Create Lambda function to register Ingress-created ALB with Global Accelerator.
+        """Create the exact Gateway ALB discovery and endpoint-publication Lambda.
 
-        This Lambda:
-        1. Waits for the Ingress to get an ALB address
-        2. Gets the ALB ARN from the address
-        3. Registers that ALB with Global Accelerator
-
-        This is necessary because the ALB is created by the AWS Load Balancer Controller
-        (not CDK), so we can't directly reference its ARN.
+        Every partition uses this function to discover ``gco-system/gco-gateway``
+        and publish its internal ALB hostname to the regional SSM registry.
+        Commercial partitions additionally pass an endpoint-group ARN so the
+        same exact ALB is registered with Global Accelerator.
         """
         project_name = self.config.get_project_name()
 
@@ -3224,18 +3126,19 @@ class GCORegionalStack(Stack):
                 resources=["*"],
             )
         )
-        ga_registration_lambda.add_to_role_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "globalaccelerator:AddEndpoints",
-                    "globalaccelerator:RemoveEndpoints",
-                    "globalaccelerator:UpdateEndpointGroup",
-                    "globalaccelerator:DescribeEndpointGroup",
-                ],
-                resources=["*"],
+        if self.global_accelerator_enabled:
+            ga_registration_lambda.add_to_role_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=[
+                        "globalaccelerator:AddEndpoints",
+                        "globalaccelerator:RemoveEndpoints",
+                        "globalaccelerator:UpdateEndpointGroup",
+                        "globalaccelerator:DescribeEndpointGroup",
+                    ],
+                    resources=["*"],
+                )
             )
-        )
         ga_registration_lambda.add_to_role_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -3247,9 +3150,11 @@ class GCORegionalStack(Stack):
             )
         )
 
-        # Add EKS access entry for the Lambda role
+        # Retain the access entry so asynchronous convergence cannot start
+        # until the endpoint publisher can read the exact Gateway object.
+        self.ga_registration_access_entry = None
         if ga_registration_lambda.role is not None:
-            eks.AccessEntry(
+            self.ga_registration_access_entry = eks.AccessEntry(
                 self,
                 "GaRegistrationLambdaAccessEntry",
                 cluster=self.cluster,  # type: ignore[arg-type]
@@ -3268,42 +3173,41 @@ class GCORegionalStack(Stack):
             description="Allow GA registration Lambda to access EKS API",
         )
 
-        # Get endpoint group ARN from SSM (stored in global region).
-        # Uses the shared AwsCustomResource execution role (pre-created in
-        # _create_aws_custom_resource_role) — the SSM GetParameter
-        # statement was attached there up-front so the Lambda never hits
-        # an IAM propagation race on cold deploys.
-        global_region = self.config.get_global_region()
-        get_endpoint_group_arn = cr.AwsCustomResource(
-            self,
-            "GetEndpointGroupArn",
-            on_create=cr.AwsSdkCall(
-                service="SSM",
-                action="getParameter",
-                parameters={"Name": f"/{project_name}/endpoint-group-{self.deployment_region}-arn"},
-                region=global_region,
-                physical_resource_id=cr.PhysicalResourceId.of(
-                    f"{project_name}-get-endpoint-group-arn-{self.deployment_region}"
+        # Global Accelerator exists only in supported partitions. Resolve its
+        # endpoint group lazily there; regional endpoint publication itself is
+        # unconditional and needs no GA lookup.
+        self.endpoint_group_arn: str | None = None
+        if self.global_accelerator_enabled:
+            global_region = self.config.get_global_region()
+            get_endpoint_group_arn = cr.AwsCustomResource(
+                self,
+                "GetEndpointGroupArn",
+                on_create=cr.AwsSdkCall(
+                    service="SSM",
+                    action="getParameter",
+                    parameters={
+                        "Name": f"/{project_name}/endpoint-group-{self.deployment_region}-arn"
+                    },
+                    region=global_region,
+                    physical_resource_id=cr.PhysicalResourceId.of(
+                        f"{project_name}-get-endpoint-group-arn-{self.deployment_region}"
+                    ),
                 ),
-            ),
-            on_update=cr.AwsSdkCall(
-                service="SSM",
-                action="getParameter",
-                parameters={"Name": f"/{project_name}/endpoint-group-{self.deployment_region}-arn"},
-                region=global_region,
-            ),
-            role=self.aws_custom_resource_role,
-        )
-        get_endpoint_group_arn.node.add_dependency(self.aws_custom_resource_role)
+                on_update=cr.AwsSdkCall(
+                    service="SSM",
+                    action="getParameter",
+                    parameters={
+                        "Name": f"/{project_name}/endpoint-group-{self.deployment_region}-arn"
+                    },
+                    region=global_region,
+                ),
+                role=self.aws_custom_resource_role,
+            )
+            get_endpoint_group_arn.node.add_dependency(self.aws_custom_resource_role)
+            self.endpoint_group_arn = get_endpoint_group_arn.get_response_field("Parameter.Value")
 
-        endpoint_group_arn = get_endpoint_group_arn.get_response_field("Parameter.Value")
-
-        # No custom-resource provider needed: the GA-registration Lambda is now
-        # invoked directly by the convergence state machine's final task.
-
-        # Store for use by the convergence state machine (the GA-registration task).
+        # Invoked directly by the convergence state machine's final task.
         self.ga_registration_lambda = ga_registration_lambda
-        self.endpoint_group_arn = endpoint_group_arn
 
         # cdk-nag suppression: the GA registration Lambda needs broad
         # Global Accelerator and ELB Describe access with Resource: *.
@@ -3315,10 +3219,10 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The GA registration Lambda needs elasticloadbalancing:Describe* "
-                        "and globalaccelerator:* to discover the Ingress-created ALB and "
-                        "register it with Global Accelerator. These APIs do not support "
-                        "resource-level IAM scoping — Resource: * is the only valid form."
+                        "The endpoint-publication Lambda needs ELB Describe access to "
+                        "resolve the exact Gateway-owned ALB. In partitions with Global "
+                        "Accelerator it also needs the service's endpoint-group mutation "
+                        "APIs. These APIs do not support resource-level scoping."
                     ),
                     "appliesTo": ["Resource::*"],
                 },
@@ -3330,23 +3234,12 @@ class GCORegionalStack(Stack):
         self._create_ga_deregistration_resource()
 
     def _create_ga_deregistration_resource(self) -> None:
-        """Deregister the region's ALB from Global Accelerator during teardown.
+        """Create the unconditional endpoint-registry delete guard.
 
-        Registration is one-directional: the convergence state machine's final
-        task adds the Ingress-created ALB to the shared Global Accelerator
-        endpoint group at deploy time, but nothing removed it at destroy time.
-        When the regional stack is torn down the AWS Load Balancer Controller
-        deletes the ALB, yet the endpoint group still references the now-dangling
-        ALB ARN, so Global Accelerator keeps its ``global_accelerator_managed``
-        ENIs pinned in the VPC's ALB subnets. VPC subnet deletion then fails
-        and the stack is left in ``DELETE_FAILED`` (see issue #130).
-
-        This wires a dedicated, delete-only custom resource: a no-op on
-        create/update (registration stays owned by the state machine), and on
-        delete it removes the endpoint(s) and waits for the accelerator to
-        redeploy so Global Accelerator releases the ENIs. An explicit dependency
-        on the VPC makes CloudFormation run this deregistration BEFORE it deletes
-        the ALB subnets those ENIs occupy.
+        On stack deletion the guard always removes this region's SSM hostname.
+        When an endpoint group exists it first deregisters the ALB and waits for
+        Global Accelerator to release its managed ENIs. The resource therefore
+        exists in every partition even though the GA portion is optional.
         """
         project_name = self.config.get_project_name()
 
@@ -3365,23 +3258,19 @@ class GCORegionalStack(Stack):
             memory_size=256,
             tracing=lambda_.Tracing.ACTIVE,
         )
-        ga_deregistration_lambda.add_to_role_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "globalaccelerator:DescribeAccelerator",
-                    "globalaccelerator:DescribeEndpointGroup",
-                    # RemoveEndpoints is implemented as an endpoint-group update,
-                    # so the caller must ALSO hold globalaccelerator:UpdateEndpointGroup
-                    # — without it RemoveEndpoints fails with AccessDeniedException
-                    # and the ALB is never deregistered (matches the registration
-                    # Lambda's grant).
-                    "globalaccelerator:RemoveEndpoints",
-                    "globalaccelerator:UpdateEndpointGroup",
-                ],
-                resources=["*"],
+        if self.global_accelerator_enabled:
+            ga_deregistration_lambda.add_to_role_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=[
+                        "globalaccelerator:DescribeAccelerator",
+                        "globalaccelerator:DescribeEndpointGroup",
+                        "globalaccelerator:RemoveEndpoints",
+                        "globalaccelerator:UpdateEndpointGroup",
+                    ],
+                    resources=["*"],
+                )
             )
-        )
 
         ga_deregistration_lambda.add_to_role_policy(
             iam.PolicyStatement(
@@ -3410,18 +3299,19 @@ class GCORegionalStack(Stack):
             log_group=ga_deregistration_log_group,
         )
 
+        deregistration_properties: dict[str, Any] = {
+            "Region": self.deployment_region,
+            "RegistryRegion": self.config.get_global_region(),
+            "ProjectName": project_name,
+        }
+        if self.endpoint_group_arn is not None:
+            deregistration_properties["EndpointGroupArn"] = self.endpoint_group_arn
+
         ga_deregistration = CustomResource(
             self,
             "GaDeregistration",
             service_token=ga_deregistration_provider.service_token,
-            properties={
-                # Delete handler reads these from the resource's last-known
-                # properties (CloudFormation replays them on Delete).
-                "EndpointGroupArn": self.endpoint_group_arn,
-                "Region": self.deployment_region,
-                "RegistryRegion": self.config.get_global_region(),
-                "ProjectName": project_name,
-            },
+            properties=deregistration_properties,
         )
 
         # Teardown ordering: this deregistration must run BEFORE the VPC (and its
@@ -3444,11 +3334,10 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The GA deregistration Lambda needs globalaccelerator:Describe*, "
-                        "RemoveEndpoints, and UpdateEndpointGroup (RemoveEndpoints is "
-                        "implemented as an endpoint-group update) to release the "
-                        "accelerator's managed ENIs during teardown. These APIs do not "
-                        "support resource-level IAM scoping — Resource: * is the only valid form."
+                        "Where Global Accelerator is enabled, the delete guard needs its "
+                        "Describe and endpoint-group mutation APIs to release managed ENIs. "
+                        "Those APIs do not support resource-level IAM scoping; non-GA "
+                        "partitions receive no Global Accelerator actions."
                     ),
                     "appliesTo": ["Resource::*"],
                 },
@@ -3546,7 +3435,9 @@ class GCORegionalStack(Stack):
 
         Returned dict is forwarded verbatim as the ``Charts`` property of the
         ``HelmInstallCharts`` custom resource; the installer deep-merges each
-        chart's ``values`` over ``charts.yaml``. Two charts get overrides:
+        chart's ``values`` over ``charts.yaml``. The mandatory
+        ``aws-load-balancer-controller`` chart always receives the cluster,
+        region, VPC, and dedicated IRSA role values. Optional overrides are:
 
         - ``volcano``: point ``basic.image_registry`` at the project's ECR
           image mirror when enabled, so every Volcano image (controller,
@@ -3560,9 +3451,24 @@ class GCORegionalStack(Stack):
           node-exporter tolerations) over the static hardening values in
           ``charts.yaml`` when ``cluster_observability.enabled`` is true.
 
-        Returns ``{}`` when neither override applies, preserving prior behavior.
+        The result is never empty because Gateway API requires the controller.
         """
-        overrides: dict[str, Any] = {}
+        overrides: dict[str, Any] = {
+            "aws-load-balancer-controller": {
+                "values": {
+                    "clusterName": self.cluster.cluster_name,
+                    "region": self.deployment_region,
+                    "vpcId": self.vpc.vpc_id,
+                    "serviceAccount": {
+                        "annotations": {
+                            "eks.amazonaws.com/role-arn": (
+                                self.aws_load_balancer_controller_role.role_arn
+                            )
+                        }
+                    },
+                }
+            }
+        }
 
         if getattr(self, "volcano_mirror_registry", None):
             overrides["volcano"] = {
@@ -3650,6 +3556,7 @@ class GCORegionalStack(Stack):
         # Mapping from cdk.json helm key → Helm chart name(s) in charts.yaml
         # Order matters: dependencies first, Kueue last
         chart_map: list[tuple[str, list[str]]] = [
+            ("aws_load_balancer_controller", ["aws-load-balancer-controller"]),
             ("keda", ["keda"]),
             ("aws_efa_device_plugin", ["aws-efa-device-plugin"]),
             ("aws_neuron_device_plugin", ["aws-neuron-device-plugin"]),
@@ -3667,7 +3574,7 @@ class GCORegionalStack(Stack):
         # autoscalers consume GPU/CloudWatch metrics (the keda-metrics-apiserver
         # serves external.metrics.k8s.io). Disabling it would silently break
         # both, so the cdk.json toggle is ignored for KEDA.
-        mandatory_chart_keys = {"keda"}
+        mandatory_chart_keys = {"aws_load_balancer_controller", "keda"}
 
         enabled_charts = []
         for config_key, chart_names in chart_map:
@@ -3879,30 +3786,82 @@ class GCORegionalStack(Stack):
             )
             return task
 
-        def _ga_task() -> sfn_tasks.LambdaInvoke:
-            """Register the Ingress-created ALB with Global Accelerator (final step).
-
-            The handler polls for the active ALB (up to a 14-minute budget), so
-            this task gets a 16-minute timeout to cover the Lambda's full run.
-            """
+        def _manifest_validation_task() -> sfn_tasks.LambdaInvoke:
+            """Require every effective raw manifest object to exist and be ready."""
             task = sfn_tasks.LambdaInvoke(
                 self,
-                "RegisterGlobalAccelerator",
-                lambda_function=self.ga_registration_lambda,
+                "ValidateKubernetesManifests",
+                lambda_function=self.kubectl_lambda,
                 payload=sfn.TaskInput.from_object(
                     {
-                        "Action": "register_ga",
+                        "Action": "validate_manifests",
                         "ClusterName": sfn.JsonPath.string_at("$.ClusterName"),
                         "Region": sfn.JsonPath.string_at("$.Region"),
-                        "EndpointGroupArn": sfn.JsonPath.string_at("$.EndpointGroupArn"),
-                        "IngressName": "gco-ingress",
-                        "Namespace": "gco-system",
-                        "GlobalRegion": self.config.get_global_region(),
-                        "ProjectName": project_name,
+                        "ImageReplacements": sfn.JsonPath.object_at("$.ImageReplacements"),
+                        "DeploymentToken": sfn.JsonPath.string_at("$.DeploymentToken"),
                     }
                 ),
                 payload_response_only=True,
-                result_path="$.gaRegistration",
+                result_path="$.manifestValidation",
+                task_timeout=sfn.Timeout.duration(Duration.minutes(15)),
+            )
+            task.add_retry(
+                errors=["States.ALL"],
+                max_attempts=4,
+                interval=Duration.minutes(1),
+                backoff_rate=2.0,
+                max_delay=Duration.minutes(3),
+            )
+            return task
+
+        def _helm_validation_task() -> sfn_tasks.LambdaInvoke:
+            """Require every configured Helm release and rendered object to be ready."""
+            task = sfn_tasks.LambdaInvoke(
+                self,
+                "ValidateHelmReleases",
+                lambda_function=self.helm_installer_lambda,
+                payload=sfn.TaskInput.from_object(
+                    {
+                        "Action": "validate_releases",
+                        "ClusterName": sfn.JsonPath.string_at("$.ClusterName"),
+                        "Region": sfn.JsonPath.string_at("$.Region"),
+                        "EnabledCharts": sfn.JsonPath.list_at("$.EnabledCharts"),
+                        "Charts": sfn.JsonPath.object_at("$.Charts"),
+                        "DeploymentToken": sfn.JsonPath.string_at("$.DeploymentToken"),
+                    }
+                ),
+                payload_response_only=True,
+                result_path="$.helmValidation",
+                task_timeout=sfn.Timeout.duration(Duration.minutes(16)),
+            )
+            task.add_retry(
+                errors=["States.ALL"],
+                max_attempts=4,
+                interval=Duration.minutes(1),
+                backoff_rate=2.0,
+                max_delay=Duration.minutes(3),
+            )
+            return task
+
+        def _endpoint_publication_task() -> sfn_tasks.LambdaInvoke:
+            """Publish the exact Gateway ALB and optionally register it with GA."""
+            payload: dict[str, Any] = {
+                "Action": "publish_gateway_endpoint",
+                "ClusterName": sfn.JsonPath.string_at("$.ClusterName"),
+                "Region": sfn.JsonPath.string_at("$.Region"),
+                "RegistryRegion": sfn.JsonPath.string_at("$.RegistryRegion"),
+                "ProjectName": sfn.JsonPath.string_at("$.ProjectName"),
+            }
+            if self.global_accelerator_enabled:
+                payload["EndpointGroupArn"] = sfn.JsonPath.string_at("$.EndpointGroupArn")
+
+            task = sfn_tasks.LambdaInvoke(
+                self,
+                "PublishGatewayEndpoint",
+                lambda_function=self.ga_registration_lambda,
+                payload=sfn.TaskInput.from_object(payload),
+                payload_response_only=True,
+                result_path="$.endpointPublication",
                 task_timeout=sfn.Timeout.duration(Duration.minutes(16)),
             )
             task.add_retry(
@@ -3917,31 +3876,29 @@ class GCORegionalStack(Stack):
         chart_tasks = [_chart_task(name) for name in chart_order]
 
         # The state machine owns the full convergence pipeline:
-        #   base kubectl apply -> Helm charts -> post-Helm kubectl apply
-        #   -> optional Global Accelerator registration.
-        # Failure policy:
-        #   * base apply: retry, then NO catch -> a failed base pass (missing
-        #     namespaces / RBAC / storage / nodepools) FAILS the execution;
-        #     nothing downstream should run against a half-applied base.
-        #   * charts: each chart's success AND its post-retry failure both route
-        #     to the next, so one slow/broken chart never blocks the rest.
-        #   * post-Helm apply + GA: retry, then catch-and-continue, so a single
-        #     CRD-dependent manifest or a GA hiccup can't wedge the rest.
-        # Per-task outcomes are recorded to SSM; the trigger is fire-and-forget,
-        # so a degraded add-on layer never rolls back the cluster.
+        #   base apply -> Helm charts -> post-Helm apply -> exhaustive raw
+        #   manifest validation -> exhaustive Helm/rendered-object validation
+        #   -> unconditional Gateway endpoint publication, with optional Global
+        #      Accelerator registration.
+        #
+        # Individual chart failures still continue so every release gets an
+        # install attempt and diagnostic. The terminal validators then make the
+        # overall execution fail unless every expected object and release is
+        # present and ready. Post-Helm apply, both validators, and endpoint
+        # publication deliberately have no catch-to-success path: topology may
+        # trust only an exact SUCCEEDED execution for the current deployment
+        # token.
         done = sfn.Succeed(self, "HelmInstallComplete")
         base_apply = _kubectl_task("ApplyBaseManifests", post_helm=False)
         post_apply = _kubectl_task("ApplyPostHelmManifests", post_helm=True)
+        manifest_validation = _manifest_validation_task()
+        helm_validation = _helm_validation_task()
 
-        if self.global_accelerator_enabled:
-            ga_task = _ga_task()
-            post_apply.add_catch(ga_task, errors=["States.ALL"], result_path="$.lastApplyError")
-            post_apply.next(ga_task)
-            ga_task.add_catch(done, errors=["States.ALL"], result_path="$.gaError")
-            ga_task.next(done)
-        else:
-            post_apply.add_catch(done, errors=["States.ALL"], result_path="$.lastApplyError")
-            post_apply.next(done)
+        endpoint_publication = _endpoint_publication_task()
+        post_apply.next(manifest_validation)
+        manifest_validation.next(helm_validation)
+        helm_validation.next(endpoint_publication)
+        endpoint_publication.next(done)
 
         if chart_tasks:
             for i, task in enumerate(chart_tasks):
@@ -3997,13 +3954,22 @@ class GCORegionalStack(Stack):
             tracing=lambda_.Tracing.ACTIVE,
         )
         self.helm_install_state_machine.grant_start_execution(helm_orchestrator_on_event)
+        self.helm_install_state_machine.grant_execution(
+            helm_orchestrator_on_event,
+            "states:StopExecution",
+            "states:DescribeExecution",
+        )
 
         # Let on_event persist the execution input to SSM so the add-on install
         # can be replayed out-of-band (gco stacks addons install) without the
         # CLI reconstructing chart config or the KEDA role ARN.
         helm_orchestrator_on_event.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["ssm:PutParameter"],
+                actions=[
+                    "ssm:PutParameter",
+                    "ssm:GetParameter",
+                    "ssm:DeleteParameter",
+                ],
                 resources=[
                     f"arn:{self.partition}:ssm:{self.deployment_region}:{self.account}:"
                     f"parameter/{project_name}/addons/*"
@@ -4076,6 +4042,21 @@ class GCORegionalStack(Stack):
                     ),
                     "appliesTo": ["Resource::*"],
                 },
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "If execution metadata persistence fails, the orchestrator must "
+                        "stop the just-started convergence execution before CloudFormation "
+                        "can roll back. This grant is limited to executions of the single "
+                        "regional Helm install state machine."
+                    ),
+                    "appliesTo": [
+                        "Resource::arn:<AWS::Partition>:states:<AWS::Region>:"
+                        "<AWS::AccountId>:execution:"
+                        '{"Fn::Select":[6,{"Fn::Split":[":",'
+                        '{"Ref":"HelmInstallStateMachine7DB71CDC"}]}]}:*'
+                    ],
+                },
             ],
         )
 
@@ -4140,7 +4121,29 @@ class GCORegionalStack(Stack):
         release blocks deletion before EKS authentication or the API disappears.
         """
 
+        lbc_chart = "aws-load-balancer-controller"
+        if not chart_order or chart_order[0] != lbc_chart:
+            raise RuntimeError(
+                "aws-load-balancer-controller must be the first Helm chart for safe teardown"
+            )
+
+        provider_code = lambda_.Code.from_asset("lambda/helm-installer")
+        drain_checker = lambda_.Function(
+            self,
+            "HelmTeardownDrainChecker",
+            runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
+            handler="teardown_provider.drain_install_executions",
+            code=provider_code,
+            timeout=Duration.minutes(1),
+            memory_size=256,
+            environment={
+                "INSTALL_STATE_MACHINE_ARN": self.helm_install_state_machine.state_machine_arn,
+            },
+            tracing=lambda_.Tracing.ACTIVE,
+        )
+
         def _uninstall_task(chart_name: str) -> sfn_tasks.LambdaInvoke:
+            timeout_minutes = 5 if chart_name == lbc_chart else 4 if chart_name == "keda" else 2
             task = sfn_tasks.LambdaInvoke(
                 self,
                 f"HelmUninstallChart-{chart_name}",
@@ -4158,11 +4161,20 @@ class GCORegionalStack(Stack):
                 ),
                 payload_response_only=True,
                 result_path="$.lastChart",
-                # handler.uninstall_chart has a 150-second subprocess cap;
-                # leave 30 seconds for kubeconfig setup and result handling.
-                task_timeout=sfn.Timeout.duration(Duration.minutes(3)),
+                task_timeout=sfn.Timeout.duration(Duration.minutes(timeout_minutes)),
             )
             return task
+
+        def _drain_check_task() -> sfn_tasks.LambdaInvoke:
+            return sfn_tasks.LambdaInvoke(
+                self,
+                "CheckRunningConvergence",
+                lambda_function=drain_checker,
+                payload=sfn.TaskInput.from_object({}),
+                payload_response_only=True,
+                result_path="$.drainCheck",
+                task_timeout=sfn.Timeout.duration(Duration.minutes(1)),
+            )
 
         def _quiesce_task() -> sfn_tasks.LambdaInvoke:
             task = sfn_tasks.LambdaInvoke(
@@ -4178,34 +4190,91 @@ class GCORegionalStack(Stack):
                 ),
                 payload_response_only=True,
                 result_path="$.healthMonitorQuiesce",
-                task_timeout=sfn.Timeout.duration(Duration.minutes(5)),
+                task_timeout=sfn.Timeout.duration(Duration.minutes(3)),
             )
             return task
 
-        uninstall_tasks = [_uninstall_task(name) for name in reversed(chart_order)]
+        def _endpoint_cleanup_task() -> sfn_tasks.LambdaInvoke:
+            """Fence SSM/GA publication after all endpoint writers are quiesced."""
+            payload: dict[str, Any] = {
+                "Action": "cleanup_gateway_endpoint",
+                "Region": sfn.JsonPath.string_at("$.Region"),
+                "RegistryRegion": sfn.JsonPath.string_at("$.RegistryRegion"),
+                "ProjectName": sfn.JsonPath.string_at("$.ProjectName"),
+            }
+            if self.global_accelerator_enabled:
+                payload["EndpointGroupArn"] = sfn.JsonPath.string_at("$.EndpointGroupArn")
+            return sfn_tasks.LambdaInvoke(
+                self,
+                "CleanupGatewayEndpoint",
+                lambda_function=self.ga_registration_lambda,
+                payload=sfn.TaskInput.from_object(payload),
+                payload_response_only=True,
+                result_path="$.endpointCleanup",
+                task_timeout=sfn.Timeout.duration(Duration.minutes(15)),
+            )
+
+        def _gateway_cleanup_task() -> sfn_tasks.LambdaInvoke:
+            return sfn_tasks.LambdaInvoke(
+                self,
+                "DeleteGatewayResources",
+                lambda_function=self.kubectl_lambda,
+                payload=sfn.TaskInput.from_object(
+                    {
+                        "Action": "delete_gateway_resources",
+                        "ClusterName": sfn.JsonPath.string_at("$.ClusterName"),
+                        "Region": sfn.JsonPath.string_at("$.Region"),
+                    }
+                ),
+                payload_response_only=True,
+                result_path="$.gatewayCleanup",
+                task_timeout=sfn.Timeout.duration(Duration.minutes(5)),
+            )
+
+        non_lbc_tasks = [
+            _uninstall_task(name) for name in reversed(chart_order) if name != lbc_chart
+        ]
+        endpoint_cleanup = _endpoint_cleanup_task()
+        pre_gateway_cleanup = sfn.Parallel(
+            self,
+            "CleanupEndpointAndCharts",
+            result_path="$.preGatewayCleanup",
+        )
+        pre_gateway_cleanup.branch(endpoint_cleanup)
+        if non_lbc_tasks:
+            for index, task in enumerate(non_lbc_tasks[:-1]):
+                task.next(non_lbc_tasks[index + 1])
+            pre_gateway_cleanup.branch(non_lbc_tasks[0])
+
+        lbc_uninstall = _uninstall_task(lbc_chart)
+        gateway_cleanup = _gateway_cleanup_task()
         done = sfn.Succeed(self, "HelmTeardownComplete")
         quiesce = _quiesce_task()
-        if uninstall_tasks:
-            for index, task in enumerate(uninstall_tasks):
-                next_state: sfn.IChainable = (
-                    uninstall_tasks[index + 1] if index + 1 < len(uninstall_tasks) else done
-                )
-                task.next(next_state)
-            quiesce.next(uninstall_tasks[0])
-        else:  # pragma: no cover - charts.yaml is always present in the repo
-            quiesce.next(done)
+
+        quiesce.next(pre_gateway_cleanup)
+        pre_gateway_cleanup.next(gateway_cleanup)
+        gateway_cleanup.next(lbc_uninstall)
+        lbc_uninstall.next(done)
 
         # StopExecution cannot cancel a Lambda invocation already in flight,
-        # and ListExecutions is eventually consistent. The provider always
-        # supplies 16 minutes and repeats cancellation on each completion poll,
-        # draining every 15-minute convergence Lambda before Kubernetes
-        # quiescence begins.
+        # and ListExecutions is eventually consistent. The provider stops the
+        # initially visible executions before this unconditional 16-minute
+        # drain. The checker then stops any late-visible work and loops through
+        # another complete drain interval before quiescence. The SSM teardown
+        # fence blocks supported convergence entrypoints from creating new work.
         drain_in_flight = sfn.Wait(
             self,
             "DrainInFlightConvergence",
             time=sfn.WaitTime.seconds_path("$.WaitForInFlightSeconds"),
         )
-        drain_in_flight.next(quiesce)
+        drain_check = _drain_check_task()
+        late_work = sfn.Choice(self, "LateConvergenceFound")
+        drain_in_flight.next(drain_check)
+        drain_check.next(late_work)
+        late_work.when(
+            sfn.Condition.number_greater_than("$.drainCheck.StoppedExecutions", 0),
+            drain_in_flight,
+        ).otherwise(quiesce)
         start_state: sfn.IChainable = drain_in_flight
 
         teardown_log_group = logs.LogGroup(
@@ -4219,15 +4288,15 @@ class GCORegionalStack(Stack):
             "HelmTeardownStateMachine",
             definition_body=sfn.DefinitionBody.from_chainable(start_state),
             state_machine_type=sfn.StateMachineType.STANDARD,
-            # 16m drain + 5m quiesce + eleven 3m chart task caps = 54m.
-            # Two minutes of workflow margin still leaves three minutes for
-            # the provider's final poll inside CloudFormation's one-hour cap.
+            # 16m drain + 3m quiesce + max(15m endpoint cleanup, 24m ordinary
+            # chart cleanup) + 5m Gateway deletion + 5m LBC uninstall = 53m.
+            # Three minutes of workflow margin leave another three minutes for
+            # the provider's final poll inside CloudFormation's one-hour ceiling.
             timeout=Duration.minutes(56),
             tracing_enabled=True,
             logs=sfn.LogOptions(destination=teardown_log_group, level=sfn.LogLevel.ALL),
         )
 
-        provider_code = lambda_.Code.from_asset("lambda/helm-installer")
         teardown_on_event = lambda_.Function(
             self,
             "HelmTeardownOnEvent",
@@ -4268,7 +4337,7 @@ class GCORegionalStack(Stack):
             '{"Fn::Select":[6,{"Fn::Split":[":",'
             '{"Ref":"HelmTeardownStateMachine1C15895F"}]}]}:*'
         )
-        for handler in (teardown_on_event, teardown_is_complete):
+        for handler in (teardown_on_event, drain_checker):
             self.helm_install_state_machine.grant(
                 handler,
                 "states:ListExecutions",
@@ -4278,6 +4347,16 @@ class GCORegionalStack(Stack):
                 "states:StopExecution",
                 "states:DescribeExecution",
             )
+        teardown_on_event.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ssm:PutParameter"],
+                resources=[
+                    f"arn:{self.partition}:ssm:{self.deployment_region}:{self.account}:"
+                    f"parameter/{self.config.get_project_name()}/addons/"
+                    f"{self.deployment_region}/_teardown"
+                ],
+            )
+        )
 
         # Strict live validation preserves this generation until exact
         # post-stack cleanup. Ordinary deployments retain DESTROY semantics.
@@ -4296,21 +4375,28 @@ class GCORegionalStack(Stack):
             total_timeout=Duration.minutes(59),
             log_group=provider_log_group,
         )
+        teardown_properties: dict[str, Any] = {
+            "ClusterName": self.cluster.cluster_name,
+            "Region": self.deployment_region,
+            "RegistryRegion": self.config.get_global_region(),
+            "ProjectName": self.config.get_project_name(),
+            "EnabledCharts": self._get_enabled_helm_charts(),
+            "Charts": self._helm_chart_value_overrides(),
+            "KedaOperatorRoleArn": self.keda_operator_role.role_arn,
+        }
+        if self.endpoint_group_arn is not None:
+            teardown_properties["EndpointGroupArn"] = self.endpoint_group_arn
         self.helm_teardown_resource = CustomResource(
             self,
             "HelmTeardown",
             service_token=self.helm_teardown_provider.service_token,
-            properties={
-                "ClusterName": self.cluster.cluster_name,
-                "Region": self.deployment_region,
-                "EnabledCharts": self._get_enabled_helm_charts(),
-                "Charts": self._helm_chart_value_overrides(),
-                "KedaOperatorRoleArn": self.keda_operator_role.role_arn,
-            },
+            properties=teardown_properties,
         )
         self.helm_teardown_resource.node.add_dependency(self.cluster)
         self.helm_teardown_resource.node.add_dependency(self.helm_installer_access_entry)
+        self.helm_teardown_resource.node.add_dependency(self.kubectl_lambda_access_entry)
         self.helm_teardown_resource.node.add_dependency(self.helm_install_state_machine)
+        self.helm_teardown_resource.node.add_dependency(self.aws_load_balancer_controller_policy)
         self.helm_teardown_resource.node.add_dependency(provider_log_group)
 
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
@@ -4326,6 +4412,20 @@ class GCORegionalStack(Stack):
                     ),
                     "appliesTo": ["Resource::*"],
                 },
+            ],
+        )
+        acknowledge_nag_findings(
+            drain_checker,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The drain checker uses X-Ray Resource::* APIs and stops only "
+                        "runtime-generated executions of the single regional Helm install "
+                        "state machine before Kubernetes teardown."
+                    ),
+                    "appliesTo": ["Resource::*", install_execution_detail],
+                }
             ],
         )
         for handler in (teardown_on_event, teardown_is_complete):
@@ -5354,6 +5454,15 @@ class GCORegionalStack(Stack):
             value=self.cluster.cluster_name,
             description=f"EKS cluster name for {self.deployment_region}",
             export_name=f"{project_name}-cluster-name-{self.deployment_region}",
+        )
+
+        CfnOutput(
+            self,
+            "AddonDeploymentToken",
+            value=self.addon_deployment_token,
+            description=(
+                "Exact token for the asynchronous Kubernetes and Helm convergence execution"
+            ),
         )
 
         CfnOutput(

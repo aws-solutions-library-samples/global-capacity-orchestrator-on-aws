@@ -1,51 +1,42 @@
-"""Unit tests for the helm-orchestrator custom-resource provider handler.
+"""Unit tests for the Helm orchestrator custom-resource provider.
 
-The handler (``lambda/helm-orchestrator/handler.py``) is a thin fire-and-forget
-CloudFormation provider over the Helm-install Step Functions state machine. It
-does no Helm/Kubernetes work itself, so these tests exercise exactly its one job:
-
-- ``on_event``: start a state-machine execution on Create/Update (passing the
-  chart config through as the execution input) and no-op on Delete. The resource
-  completes as soon as the execution is started — there is no isComplete waiter,
-  so the cluster's CloudFormation lifecycle is never bound to the helm batch.
-
-The state machine itself is mocked — we assert on what the handler asks boto3
-to do and how it interprets the responses, never on real AWS calls.
+The handler starts fire-and-forget Step Functions convergence on Create/Update,
+persists the exact input and execution identity for topology consumers, and
+keeps Delete as a no-op.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 from tests._lambda_imports import load_lambda_module
 
 _STATE_MACHINE_ARN = "arn:aws:states:us-east-1:123456789012:stateMachine:HelmInstall"
 _EXECUTION_ARN = "arn:aws:states:us-east-1:123456789012:execution:HelmInstall:abc-123"
+_DEPLOYMENT_TIMESTAMP = "2026-07-18T01:02:03Z"
+_START_DATE = datetime(2026, 7, 18, 1, 2, 4, tzinfo=UTC)
 
 
 @pytest.fixture
 def orchestrator():
-    """Load the handler with a mocked Step Functions client and env set.
-
-    The handler reads ``STATE_MACHINE_ARN`` from the environment and builds its
-    boto3 client lazily via ``_sfn()``; we patch ``_sfn`` to hand back a mock so
-    no AWS call is ever made. Yields ``(handler, mock_sfn_client)``.
-    """
+    """Load the handler with a mocked Step Functions client and env set."""
     handler = load_lambda_module("helm-orchestrator")
     mock_client = MagicMock()
+    real_prepare_teardown_fence = handler._prepare_teardown_fence
     with (
         patch.dict("os.environ", {"STATE_MACHINE_ARN": _STATE_MACHINE_ARN}),
         patch.object(handler, "_sfn", return_value=mock_client),
+        patch.object(handler, "_prepare_teardown_fence") as fence_mock,
     ):
+        fence_mock.real_implementation = real_prepare_teardown_fence
         yield handler, mock_client
-
-
-# ---------------------------------------------------------------------------
-# on_event
-# ---------------------------------------------------------------------------
 
 
 class TestOnEvent:
@@ -53,9 +44,12 @@ class TestOnEvent:
         props = {
             "ClusterName": "gco-us-east-1",
             "Region": "us-east-1",
+            "RegistryRegion": "us-east-2",
+            "ProjectName": "gco",
             "EnabledCharts": ["keda", "kueue"],
             "Charts": {"keda": {"enabled": True}},
             "KedaOperatorRoleArn": "arn:aws:iam::123456789012:role/keda",
+            "DeploymentTimestamp": _DEPLOYMENT_TIMESTAMP,
         }
         props.update(overrides)
         return props
@@ -63,7 +57,10 @@ class TestOnEvent:
     @pytest.mark.parametrize("request_type", ["Create", "Update"])
     def test_starts_execution_on_create_and_update(self, orchestrator, request_type):
         handler, sfn = orchestrator
-        sfn.start_execution.return_value = {"executionArn": _EXECUTION_ARN}
+        sfn.start_execution.return_value = {
+            "executionArn": _EXECUTION_ARN,
+            "startDate": _START_DATE,
+        }
 
         result = handler.on_event(
             {"RequestType": request_type, "ResourceProperties": self._props()}
@@ -72,21 +69,19 @@ class TestOnEvent:
         sfn.start_execution.assert_called_once()
         kwargs = sfn.start_execution.call_args.kwargs
         assert kwargs["stateMachineArn"] == _STATE_MACHINE_ARN
-        # Execution input carries everything the convergence pipeline's tasks
-        # consume: chart config (chart tasks), ImageReplacements (the base and
-        # post-Helm kubectl tasks), and EndpointGroupArn (the GA task). The last
-        # two default to {}/None when the trigger doesn't supply them.
         sent = json.loads(kwargs["input"])
         assert sent == {
             "ClusterName": "gco-us-east-1",
             "Region": "us-east-1",
+            "RegistryRegion": "us-east-2",
+            "ProjectName": "gco",
             "EnabledCharts": ["keda", "kueue"],
             "Charts": {"keda": {"enabled": True}},
             "KedaOperatorRoleArn": "arn:aws:iam::123456789012:role/keda",
             "ImageReplacements": {},
-            "EndpointGroupArn": None,
+            "DeploymentToken": _DEPLOYMENT_TIMESTAMP,
         }
-        # ExecutionArn is returned as an observability attribute (top level + Data).
+        assert kwargs["input"] == json.dumps(sent, sort_keys=True, separators=(",", ":"))
         assert result["ExecutionArn"] == _EXECUTION_ARN
         assert result["Data"]["ExecutionArn"] == _EXECUTION_ARN
         assert result["PhysicalResourceId"]
@@ -125,6 +120,9 @@ class TestOnEvent:
                 "ResourceProperties": {
                     "ClusterName": "gco-eu-west-1",
                     "Region": "eu-west-1",
+                    "RegistryRegion": "us-east-2",
+                    "ProjectName": "gco",
+                    "DeploymentTimestamp": _DEPLOYMENT_TIMESTAMP,
                 },
             }
         )
@@ -134,4 +132,215 @@ class TestOnEvent:
         assert sent["Charts"] == {}
         assert sent["KedaOperatorRoleArn"] is None
         assert sent["ImageReplacements"] == {}
-        assert sent["EndpointGroupArn"] is None
+        assert "EndpointGroupArn" not in sent
+        assert sent["RegistryRegion"] == "us-east-2"
+        assert sent["ProjectName"] == "gco"
+        assert sent["DeploymentToken"] == _DEPLOYMENT_TIMESTAMP
+
+    def test_persists_exact_input_and_execution_identity(self, orchestrator):
+        handler, sfn = orchestrator
+        ssm = MagicMock()
+        sfn.start_execution.return_value = {
+            "executionArn": _EXECUTION_ARN,
+            "startDate": _START_DATE,
+        }
+
+        with patch.object(handler, "_ssm", return_value=ssm):
+            handler.on_event(
+                {
+                    "RequestType": "Create",
+                    "RequestId": "request-123",
+                    "ResourceProperties": self._props(ProjectName="gco"),
+                }
+            )
+
+        execution_input_text = sfn.start_execution.call_args.kwargs["input"]
+        assert execution_input_text == json.dumps(
+            json.loads(execution_input_text), sort_keys=True, separators=(",", ":")
+        )
+
+        assert ssm.put_parameter.call_count == 2
+        input_write = ssm.put_parameter.call_args_list[0].kwargs
+        assert input_write == {
+            "Name": "/gco/addons/us-east-1/_input",
+            "Value": execution_input_text,
+            "Type": "String",
+            "Tier": "Intelligent-Tiering",
+            "Overwrite": True,
+        }
+
+        expected_metadata = {
+            "execution_arn": _EXECUTION_ARN,
+            "state_machine_arn": _STATE_MACHINE_ARN,
+            "deployment_token": _DEPLOYMENT_TIMESTAMP,
+            "cluster_name": "gco-us-east-1",
+            "region": "us-east-1",
+            "input_sha256": hashlib.sha256(execution_input_text.encode("utf-8")).hexdigest(),
+            "started_at": int(_START_DATE.timestamp()),
+        }
+        execution_write = ssm.put_parameter.call_args_list[1].kwargs
+        assert execution_write == {
+            "Name": "/gco/addons/us-east-1/_execution",
+            "Value": json.dumps(expected_metadata, sort_keys=True, separators=(",", ":")),
+            "Type": "String",
+            "Overwrite": True,
+        }
+        assert json.loads(execution_write["Value"]) == expected_metadata
+
+    def test_request_id_produces_retry_stable_safe_execution_name(self, orchestrator):
+        handler, sfn = orchestrator
+        sfn.start_execution.return_value = {"executionArn": _EXECUTION_ARN}
+        request_id = "request/with unsafe spaces:*?" + ("x" * 100)
+        event = {
+            "RequestType": "Create",
+            "RequestId": request_id,
+            "ResourceProperties": self._props(),
+        }
+
+        handler.on_event(event)
+        handler.on_event(event)
+
+        first_call, second_call = sfn.start_execution.call_args_list
+        first_name = first_call.kwargs["name"]
+        assert first_name == second_call.kwargs["name"] == handler._execution_name(request_id)
+        assert len(first_name) <= 80
+        assert re.fullmatch(r"[A-Za-z0-9_-]+", first_name)
+        assert first_call.kwargs["input"] == second_call.kwargs["input"]
+
+    def test_terminal_name_collision_advances_to_retry_generation(self, orchestrator):
+        handler, sfn = orchestrator
+        already_exists = ClientError(
+            {"Error": {"Code": "ExecutionAlreadyExists", "Message": "exists"}},
+            "StartExecution",
+        )
+        sfn.start_execution.side_effect = [
+            already_exists,
+            {"executionArn": f"{_EXECUTION_ARN}-retry", "startDate": _START_DATE},
+        ]
+        sfn.describe_execution.return_value = {"status": "ABORTED"}
+
+        result = handler._start_or_adopt_execution(
+            sfn,
+            state_machine_arn=_STATE_MACHINE_ARN,
+            execution_input_json="{}",
+            request_id="request-123",
+        )
+
+        assert result["executionArn"].endswith("-retry")
+        assert sfn.start_execution.call_args_list[1].kwargs["name"] == handler._execution_name(
+            "request-123", 1
+        )
+
+    def test_running_identical_retry_is_adopted(self, orchestrator):
+        handler, sfn = orchestrator
+        already_exists = ClientError(
+            {"Error": {"Code": "ExecutionAlreadyExists", "Message": "exists"}},
+            "StartExecution",
+        )
+        sfn.start_execution.side_effect = already_exists
+        sfn.describe_execution.return_value = {
+            "status": "RUNNING",
+            "input": "{}",
+            "startDate": _START_DATE,
+        }
+
+        result = handler._start_or_adopt_execution(
+            sfn,
+            state_machine_arn=_STATE_MACHINE_ARN,
+            execution_input_json="{}",
+            request_id="request-123",
+        )
+
+        assert result["executionArn"] == handler._execution_arn(
+            _STATE_MACHINE_ARN,
+            handler._execution_name("request-123"),
+        )
+        sfn.start_execution.assert_called_once()
+
+    def test_teardown_fence_is_cleared_on_create_and_blocks_update(self, orchestrator):
+        handler, _ = orchestrator
+        prepare_fence = handler._prepare_teardown_fence.real_implementation
+        ssm = MagicMock()
+        prepare_fence(
+            ssm,
+            request_type="Create",
+            fence_name="/gco/addons/us-east-1/_teardown",
+        )
+        ssm.delete_parameter.assert_called_once_with(Name="/gco/addons/us-east-1/_teardown")
+
+        ssm.reset_mock()
+        ssm.get_parameter.return_value = {"Parameter": {"Value": "delete-request"}}
+        with pytest.raises(RuntimeError, match="teardown fence is active"):
+            prepare_fence(
+                ssm,
+                request_type="Update",
+                fence_name="/gco/addons/us-east-1/_teardown",
+            )
+
+    def test_input_persistence_failure_prevents_execution_start(self, orchestrator):
+        handler, sfn = orchestrator
+        ssm = MagicMock()
+        ssm.put_parameter.side_effect = RuntimeError("ssm unavailable")
+
+        with (
+            patch.object(handler, "_ssm", return_value=ssm),
+            pytest.raises(RuntimeError, match="ssm unavailable"),
+        ):
+            handler.on_event(
+                {
+                    "RequestType": "Update",
+                    "ResourceProperties": self._props(ProjectName="gco"),
+                }
+            )
+
+        sfn.start_execution.assert_not_called()
+        sfn.stop_execution.assert_not_called()
+        assert ssm.put_parameter.call_count == 1
+
+    def test_metadata_persistence_failure_stops_started_execution(self, orchestrator):
+        handler, sfn = orchestrator
+        ssm = MagicMock()
+        ssm.put_parameter.side_effect = [{}, RuntimeError("ssm unavailable")]
+        sfn.start_execution.return_value = {
+            "executionArn": _EXECUTION_ARN,
+            "startDate": _START_DATE,
+        }
+
+        with (
+            patch.object(handler, "_ssm", return_value=ssm),
+            pytest.raises(RuntimeError, match="ssm unavailable"),
+        ):
+            handler.on_event(
+                {
+                    "RequestType": "Update",
+                    "ResourceProperties": self._props(ProjectName="gco"),
+                }
+            )
+
+        sfn.start_execution.assert_called_once()
+        sfn.stop_execution.assert_called_once_with(executionArn=_EXECUTION_ARN)
+        assert ssm.put_parameter.call_count == 2
+
+    def test_replay_input_over_advanced_parameter_limit_fails_before_writes(self, orchestrator):
+        handler, sfn = orchestrator
+        ssm = MagicMock()
+        props = self._props(ImageReplacements={"oversized": "x" * (8 * 1024)})
+
+        with (
+            patch.object(handler, "_ssm", return_value=ssm),
+            pytest.raises(ValueError, match="SSM Parameter Store supports at most 8192 bytes"),
+        ):
+            handler.on_event({"RequestType": "Update", "ResourceProperties": props})
+
+        ssm.put_parameter.assert_not_called()
+        sfn.start_execution.assert_not_called()
+
+    def test_missing_deployment_timestamp_fails_before_start(self, orchestrator):
+        handler, sfn = orchestrator
+        props = self._props()
+        del props["DeploymentTimestamp"]
+
+        with pytest.raises(KeyError, match="DeploymentTimestamp"):
+            handler.on_event({"RequestType": "Create", "ResourceProperties": props})
+
+        sfn.start_execution.assert_not_called()

@@ -64,9 +64,11 @@ def _context(*, state: dict[str, object] | None = None) -> SimpleNamespace:
             project_name="gco-live",
             global_region="us-east-1",
         ),
+        cdk_context={"api_gateway": {"regional_api_enabled": True}},
         session=MagicMock(),
         aws_client=MagicMock(),
         stack_manager=MagicMock(),
+        job_manager=MagicMock(),
         report=SimpleNamespace(final_inventory={}),
     )
     context.persist = MagicMock()
@@ -974,6 +976,763 @@ class TestCentralQueueResume:
         assert central_record["cleanup_complete"] is False
         assert central_record["cleanup_result"]["complete"] is False
         ctx.aws_client.make_authenticated_request.assert_not_called()
+
+
+class TestDeterministicTopologyReadiness:
+    @staticmethod
+    def _canonical(value: object) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+    def _environment(
+        self,
+        regions: tuple[str, ...] = ("us-east-1",),
+    ) -> SimpleNamespace:
+        stack_names = {region: f"gco-live-{region}" for region in regions}
+        stack_ids = {
+            region: (
+                f"arn:aws:cloudformation:{region}:123456789012:"
+                f"stack/{stack_names[region]}/00000000-0000-0000-0000-000000000001"
+            )
+            for region in regions
+        }
+        tokens = {region: f"deployment-{region}" for region in regions}
+        state_machine_arns = {
+            region: (f"arn:aws:states:{region}:123456789012:stateMachine:gco-live-{region}-addons")
+            for region in regions
+        }
+        execution_arns = {
+            region: (
+                f"arn:aws:states:{region}:123456789012:execution:"
+                f"gco-live-{region}-addons:execution-1"
+            )
+            for region in regions
+        }
+        started_at = 1_721_260_800
+        target_stack_regions = {stack_names[region]: region for region in regions}
+        ctx = _context(
+            state={
+                "target_stack_regions": target_stack_regions,
+                "enabled_regions": list(regions),
+            }
+        )
+        ctx.deployment_regions = regions
+        ctx.settings.poll_interval_seconds = 0
+        ctx.session.get_partition_for_region.return_value = "aws"
+
+        stacks: dict[str, dict[str, object]] = {}
+        inputs: dict[str, dict[str, object]] = {}
+        metadata: dict[str, dict[str, object]] = {}
+        parameter_values: dict[str, str] = {}
+        clients: dict[tuple[str, str], MagicMock] = {}
+        events: list[str] = []
+
+        for region in regions:
+            stack_name = stack_names[region]
+            stacks[stack_name] = {
+                "name": stack_name,
+                "stack_id": stack_ids[region],
+                "status": "CREATE_COMPLETE",
+                "outputs": {
+                    "ClusterName": stack_name,
+                    "AddonDeploymentToken": tokens[region],
+                },
+                "tags": {actions._RUN_STACK_TAG: "run-123"},
+            }
+            execution_input = {
+                "ClusterName": stack_name,
+                "Region": region,
+                "RegistryRegion": ctx.config.global_region,
+                "ProjectName": "gco-live",
+                "EnabledCharts": ["keda"],
+                "Charts": {"keda": {"version": "2.17.2"}},
+                "KedaOperatorRoleArn": None,
+                "ImageReplacements": {"IMAGE": "example.invalid/image@sha256:abc"},
+                "EndpointGroupArn": (
+                    "arn:aws:globalaccelerator::123456789012:accelerator/a/"
+                    f"listener/b/endpoint-group/{region}"
+                ),
+                "DeploymentToken": tokens[region],
+            }
+            input_json = self._canonical(execution_input)
+            execution_metadata = {
+                "execution_arn": execution_arns[region],
+                "state_machine_arn": state_machine_arns[region],
+                "deployment_token": tokens[region],
+                "cluster_name": stack_name,
+                "region": region,
+                "input_sha256": hashlib.sha256(input_json.encode("utf-8")).hexdigest(),
+                "started_at": started_at,
+            }
+            inputs[region] = execution_input
+            metadata[region] = execution_metadata
+            parameter_root = f"/gco-live/addons/{region}"
+            parameter_values[f"{parameter_root}/_input"] = input_json
+            parameter_values[f"{parameter_root}/_execution"] = self._canonical(execution_metadata)
+
+            ssm = MagicMock()
+
+            def get_parameter(*, Name: str, _region: str = region):
+                events.append(f"ssm:{_region}:{Name.rsplit('/', 1)[-1]}")
+                return {
+                    "Parameter": {
+                        "Name": Name,
+                        "Type": "String",
+                        "Value": parameter_values[Name],
+                    }
+                }
+
+            ssm.get_parameter.side_effect = get_parameter
+            clients[("ssm", region)] = ssm
+
+            paginator = MagicMock()
+
+            def paginate(*, StackName: str, _region: str = region):
+                events.append(f"cfn:{_region}")
+                assert StackName == stack_ids[_region]
+                return [
+                    {
+                        "StackResourceSummaries": [
+                            {
+                                "LogicalResourceId": "HelmInstallStateMachineABC123",
+                                "PhysicalResourceId": state_machine_arns[_region],
+                                "ResourceType": "AWS::StepFunctions::StateMachine",
+                                "ResourceStatus": "CREATE_COMPLETE",
+                            }
+                        ]
+                    }
+                ]
+
+            paginator.paginate.side_effect = paginate
+            cloudformation = MagicMock()
+            cloudformation.get_paginator.return_value = paginator
+            clients[("cloudformation", region)] = cloudformation
+
+            terminal_output = {
+                "manifestValidation": {
+                    "status": "validated",
+                    "DeploymentToken": tokens[region],
+                    "ExpectedCount": 12,
+                    "ValidatedCount": 12,
+                },
+                "helmValidation": {
+                    "status": "validated",
+                    "DeploymentToken": tokens[region],
+                    "expected_release_count": 4,
+                    "validated_release_count": 4,
+                    "expected_resource_count": 18,
+                    "validated_resource_count": 18,
+                },
+            }
+            stepfunctions = MagicMock()
+            terminal_response = {
+                "executionArn": execution_arns[region],
+                "stateMachineArn": state_machine_arns[region],
+                "status": "SUCCEEDED",
+                "startDate": started_at,
+                "input": input_json,
+                "output": self._canonical(terminal_output),
+            }
+
+            def describe_execution(
+                *,
+                executionArn: str,
+                _region: str = region,
+                _response: dict[str, object] = terminal_response,
+            ):
+                events.append(f"sfn:{_region}")
+                assert executionArn == execution_arns[_region]
+                return _response
+
+            stepfunctions.describe_execution.side_effect = describe_execution
+            stepfunctions.describe_execution.return_value = terminal_response
+            clients[("stepfunctions", region)] = stepfunctions
+
+            eks = MagicMock()
+            eks.describe_cluster.return_value = {
+                "cluster": {
+                    "status": "ACTIVE",
+                    "arn": f"arn:aws:eks:{region}:123456789012:cluster/{stack_name}",
+                    "version": "1.33",
+                    "resourcesVpcConfig": {
+                        "endpointPublicAccess": False,
+                        "endpointPrivateAccess": True,
+                    },
+                }
+            }
+            clients[("eks", region)] = eks
+
+        dynamodb = MagicMock()
+        dynamodb.describe_table.return_value = {
+            "Table": {
+                "TableStatus": "ACTIVE",
+                "TableArn": "arn:aws:dynamodb:us-east-1:123456789012:table/gco-live-jobs",
+            }
+        }
+        clients[("dynamodb", "us-east-1")] = dynamodb
+
+        def client(service: str, *, region_name: str):
+            return clients[(service, region_name)]
+
+        ctx.session.client.side_effect = client
+        ctx.job_manager.get_queue_status.return_value = {
+            "messages_available": 0,
+            "messages_in_flight": 0,
+            "messages_delayed": 0,
+            "dlq_messages": 0,
+        }
+        ctx.aws_client.get_api_endpoint.return_value = SimpleNamespace(
+            url="https://global.example.test"
+        )
+        ctx.aws_client.get_regional_api_endpoint.side_effect = lambda region, **_: SimpleNamespace(
+            url=f"https://{region}.example.test"
+        )
+
+        def call_api(*, method: str, path: str, region: str | None, max_attempts: int):
+            assert method == "GET"
+            assert path == "/api/v1/health"
+            assert max_attempts == 1
+            events.append(f"health:{region or 'global'}")
+            payload_region = region or regions[0]
+            return {
+                "status": "healthy",
+                "timestamp": "2026-07-18T00:00:00+00:00",
+                "region": payload_region,
+                "cluster_id": f"gco-live-{payload_region}",
+            }
+
+        ctx.aws_client.call_api.side_effect = call_api
+        sleep = MagicMock()
+        return SimpleNamespace(
+            ctx=ctx,
+            stacks=stacks,
+            clients=clients,
+            events=events,
+            inputs=inputs,
+            metadata=metadata,
+            parameter_values=parameter_values,
+            stack_names=stack_names,
+            stack_ids=stack_ids,
+            state_machine_arns=state_machine_arns,
+            execution_arns=execution_arns,
+            tokens=tokens,
+            sleep=sleep,
+        )
+
+    def _sync_execution_parameter(self, environment: SimpleNamespace, region: str) -> None:
+        name = f"/gco-live/addons/{region}/_execution"
+        environment.parameter_values[name] = self._canonical(environment.metadata[region])
+
+    @staticmethod
+    def _invoke(environment: SimpleNamespace) -> dict[str, object]:
+        def describe(_session, region: str, stack_name: str):
+            assert environment.ctx.checkpoint.state["target_stack_regions"][stack_name] == region
+            return environment.stacks[stack_name]
+
+        with (
+            patch.object(actions, "_reconcile_stack_ownership"),
+            patch.object(actions, "describe_stack", side_effect=describe),
+            patch.object(actions, "_record_stack_identity"),
+            patch.object(actions.time, "sleep", environment.sleep),
+        ):
+            return actions.action_topology(environment.ctx)
+
+    def test_exact_current_execution_succeeds_with_persisted_validator_evidence(self) -> None:
+        environment = self._environment()
+
+        result = self._invoke(environment)
+
+        convergence = result["convergence"]
+        regional = convergence["regions"]["us-east-1"]
+        assert convergence["status"] == "succeeded"
+        assert regional["result"] == "succeeded"
+        assert regional["execution_status"] == "SUCCEEDED"
+        assert regional["deployment_token"] == "deployment-us-east-1"
+        assert regional["terminal"]["manifestValidation"]["ExpectedCount"] == 12
+        assert regional["terminal"]["helmValidation"]["validated_resource_count"] == 18
+        assert environment.ctx.checkpoint.state["topology_convergence"] is convergence
+        cloudformation = environment.clients[("cloudformation", "us-east-1")]
+        cloudformation.get_paginator.assert_called_once_with("list_stack_resources")
+        paginator = cloudformation.get_paginator.return_value
+        assert paginator.paginate.call_args.kwargs == {
+            "StackName": environment.stack_ids["us-east-1"]
+        }
+        environment.clients[
+            ("stepfunctions", "us-east-1")
+        ].describe_execution.assert_called_once_with(
+            executionArn=environment.execution_arns["us-east-1"]
+        )
+
+    def test_health_calls_begin_only_after_every_region_converges(self) -> None:
+        environment = self._environment(("us-east-1", "us-west-2"))
+
+        self._invoke(environment)
+
+        convergence_indexes = [
+            index
+            for index, event in enumerate(environment.events)
+            if event.startswith(("ssm:", "cfn:", "sfn:"))
+        ]
+        health_indexes = [
+            index for index, event in enumerate(environment.events) if event.startswith("health:")
+        ]
+        assert {event for event in environment.events if event.startswith("sfn:")} == {
+            "sfn:us-east-1",
+            "sfn:us-west-2",
+        }
+        assert max(convergence_indexes) < min(health_indexes)
+
+    @pytest.mark.parametrize(
+        ("stale_kind", "message"),
+        [
+            ("token", "stale deployment token"),
+            ("digest", "stale input SHA-256"),
+            ("stack-resource", "not exactly one AWS::StepFunctions::StateMachine resource"),
+        ],
+    )
+    def test_stale_identity_or_stack_resource_is_rejected_before_health(
+        self,
+        stale_kind: str,
+        message: str,
+    ) -> None:
+        environment = self._environment()
+        region = "us-east-1"
+        if stale_kind == "token":
+            environment.metadata[region]["deployment_token"] = "stale-token"
+            self._sync_execution_parameter(environment, region)
+        elif stale_kind == "digest":
+            environment.metadata[region]["input_sha256"] = "0" * 64
+            self._sync_execution_parameter(environment, region)
+        else:
+            paginator = environment.clients[("cloudformation", region)].get_paginator.return_value
+            paginator.paginate.side_effect = None
+            paginator.paginate.return_value = [
+                {
+                    "StackResourceSummaries": [
+                        {
+                            "LogicalResourceId": "DifferentStateMachine",
+                            "PhysicalResourceId": environment.state_machine_arns[region] + "-stale",
+                            "ResourceType": "AWS::StepFunctions::StateMachine",
+                            "ResourceStatus": "CREATE_COMPLETE",
+                        }
+                    ]
+                }
+            ]
+
+        with pytest.raises(RuntimeError, match=message):
+            self._invoke(environment)
+
+        environment.ctx.aws_client.call_api.assert_not_called()
+        evidence = environment.ctx.checkpoint.state["topology_convergence"]
+        assert evidence["status"] == "failed"
+        assert evidence["regions"][region]["result"] == "failed"
+
+    def test_terminal_failure_persists_bounded_error_cause_and_output(self) -> None:
+        environment = self._environment()
+        region = "us-east-1"
+        stepfunctions = environment.clients[("stepfunctions", region)]
+        failed_response = dict(stepfunctions.describe_execution.return_value)
+        failed_response.update(
+            {
+                "status": "FAILED",
+                "error": "E" * 5000,
+                "cause": "C" * 5000,
+                "output": "O" * 5000,
+            }
+        )
+        stepfunctions.describe_execution.side_effect = lambda **_: failed_response
+
+        with pytest.raises(RuntimeError, match="ended FAILED"):
+            self._invoke(environment)
+
+        environment.ctx.aws_client.call_api.assert_not_called()
+        terminal = environment.ctx.checkpoint.state["topology_convergence"]["regions"][region][
+            "terminal"
+        ]
+        assert terminal["status"] == "FAILED"
+        for field in ("error", "cause", "output"):
+            assert len(terminal[field]) <= actions._MAX_TOPOLOGY_EVIDENCE_CHARS
+            assert terminal[field].endswith("... [truncated]")
+
+    def test_first_504_fails_without_consuming_lucky_second_response(self) -> None:
+        environment = self._environment()
+        healthy = {
+            "status": "healthy",
+            "timestamp": "2026-07-18T00:00:00+00:00",
+            "region": "us-east-1",
+            "cluster_id": "gco-live-us-east-1",
+        }
+        environment.ctx.aws_client.call_api.side_effect = [
+            RuntimeError("API request failed: 504 Gateway Timeout"),
+            healthy,
+        ]
+
+        with pytest.raises(RuntimeError, match="504 Gateway Timeout"):
+            self._invoke(environment)
+
+        environment.ctx.aws_client.call_api.assert_called_once_with(
+            method="GET",
+            path="/api/v1/health",
+            region=None,
+            max_attempts=1,
+        )
+        samples = environment.ctx.checkpoint.state["topology_health_samples"]
+        assert len(samples) == 1
+        assert samples[0]["payload"] is None
+        assert "504" in samples[0]["error"]
+
+    def test_malformed_200_fails_immediately_and_is_checkpointed(self) -> None:
+        environment = self._environment()
+        environment.ctx.aws_client.call_api.side_effect = None
+        environment.ctx.aws_client.call_api.return_value = {
+            "status": "healthy",
+            "timestamp": "not-a-timestamp",
+            "region": "us-east-1",
+            "cluster_id": "gco-live-us-east-1",
+        }
+
+        with pytest.raises(RuntimeError, match="Malformed health response"):
+            self._invoke(environment)
+
+        assert environment.ctx.aws_client.call_api.call_count == 1
+        sample = environment.ctx.checkpoint.state["topology_health_samples"][0]
+        assert sample["payload"]["timestamp"] == "not-a-timestamp"
+        assert "timestamp" in sample["error"]
+
+    def test_three_rounds_cover_global_and_every_direct_regional_endpoint_once(self) -> None:
+        environment = self._environment(("us-east-1", "us-west-2"))
+        environment.ctx.settings.poll_interval_seconds = 9
+
+        result = self._invoke(environment)
+
+        calls = environment.ctx.aws_client.call_api.call_args_list
+        assert len(calls) == 9
+        assert [item.kwargs["region"] for item in calls] == [
+            None,
+            "us-east-1",
+            "us-west-2",
+            None,
+            "us-east-1",
+            "us-west-2",
+            None,
+            "us-east-1",
+            "us-west-2",
+        ]
+        assert all(item.kwargs["max_attempts"] == 1 for item in calls)
+        assert [sample["round"] for sample in result["health_samples"]] == [
+            1,
+            1,
+            1,
+            2,
+            2,
+            2,
+            3,
+            3,
+            3,
+        ]
+        assert len(result["global_api"]["samples"]) == 3
+        assert all(
+            len(result["regional_apis"][region]["samples"]) == 3
+            for region in environment.ctx.deployment_regions
+        )
+        assert [item.args for item in environment.sleep.call_args_list] == [(5.0,), (5.0,)]
+
+
+class TestRetainedLogCleanupGenerationFencing:
+    _REGION = "us-east-1"
+    _NAME = "gco-live-provider-log"
+    _TOKEN = "a" * 32
+    _ARN = f"arn:aws:logs:{_REGION}:123456789012:log-group:{_NAME}"
+
+    @classmethod
+    def _identity(
+        cls,
+        creation_time: int,
+        *,
+        run_tag: str = "run-123",
+        cleanup_token: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "arn": cls._ARN,
+            "creation_time": creation_time,
+            "tags": {
+                actions._RUN_STACK_TAG: run_tag,
+                actions._LOG_CLEANUP_TOKEN_TAG: cleanup_token or cls._TOKEN,
+            },
+        }
+
+    @staticmethod
+    def _retryable_error() -> ClientError:
+        return ClientError(
+            {
+                "Error": {
+                    "Code": "ThrottlingException",
+                    "Message": "retry this observation",
+                }
+            },
+            "DescribeLogGroups",
+        )
+
+    def _environment(self, observations: list[object]) -> SimpleNamespace:
+        original = self._identity(1_750_000_000_000)
+        record = {
+            "region": self._REGION,
+            "name": self._NAME,
+            "stack_name": "gco-live-us-east-1",
+            "stack_id": (
+                "arn:aws:cloudformation:us-east-1:123456789012:stack/gco-live-us-east-1/stack-id"
+            ),
+            "source_resource_type": "AWS::Logs::LogGroup",
+            "source_logical_id": "ProviderLogGroup",
+            "source_physical_id": self._NAME,
+            "ownership_authority": "cloudformation-stack-resource-derived",
+            "authority_phase": "pre-destroy",
+            "run_tag": "run-123",
+            "cleanup_token": self._TOKEN,
+            "observed_identity": original,
+        }
+        ctx = _context(
+            state={
+                "owned_log_groups": [record],
+                "log_group_cleanup_token": self._TOKEN,
+            }
+        )
+        normal_logs = MagicMock(name="normal-logs")
+        restricted_logs = MagicMock(name="restricted-logs")
+        sts = MagicMock(name="sts")
+        role_name = "LiveValidationLogCleanup-test"
+        role_arn = f"arn:aws:iam::123456789012:role/{role_name}"
+
+        def assume_role(**kwargs):
+            return {
+                "Credentials": {
+                    "AccessKeyId": "access-key",
+                    "SecretAccessKey": "secret-key",
+                    "SessionToken": "session-token",
+                },
+                "AssumedRoleUser": {
+                    "Arn": (
+                        "arn:aws:sts::123456789012:assumed-role/"
+                        f"{role_name}/{kwargs['RoleSessionName']}"
+                    )
+                },
+            }
+
+        sts.assume_role.side_effect = assume_role
+
+        def client(service: str, *, region_name: str, **kwargs):
+            assert region_name == self._REGION
+            if service == "logs":
+                return restricted_logs if "aws_access_key_id" in kwargs else normal_logs
+            if service == "sts":
+                return sts
+            raise AssertionError(f"Unexpected service client: {service}")
+
+        ctx.session.client.side_effect = client
+        helper = {
+            "needed": True,
+            "region": self._REGION,
+            "stack_id": (
+                "arn:aws:cloudformation:us-east-1:123456789012:"
+                "stack/LiveValidationLogCleanup-test/helper-id"
+            ),
+            "role_arn": role_arn,
+            "partition": "aws",
+            "external_id": self._TOKEN,
+            "session_policy": {"Version": "2012-10-17", "Statement": []},
+        }
+        return SimpleNamespace(
+            ctx=ctx,
+            record=record,
+            original=original,
+            normal_logs=normal_logs,
+            restricted_logs=restricted_logs,
+            sts=sts,
+            helper=helper,
+            identity_mock=MagicMock(side_effect=observations),
+            ensure_mock=MagicMock(return_value=helper),
+            helper_cleanup_mock=MagicMock(
+                return_value={"needed": True, "deleted": True, "stack_id": helper["stack_id"]}
+            ),
+            sleep_mock=MagicMock(),
+        )
+
+    @staticmethod
+    def _invoke(environment: SimpleNamespace) -> dict[str, object]:
+        with (
+            patch.object(
+                actions,
+                "_verify_target_stack_absence",
+                return_value={"all_absent": True, "residual": []},
+            ),
+            patch.object(
+                actions,
+                "_validated_owned_log_group_identity",
+                return_value=(
+                    TestRetainedLogCleanupGenerationFencing._REGION,
+                    TestRetainedLogCleanupGenerationFencing._NAME,
+                ),
+            ),
+            patch.object(actions, "_ensure_log_cleanup_helper", environment.ensure_mock),
+            patch.object(
+                actions,
+                "_delete_log_cleanup_helper",
+                environment.helper_cleanup_mock,
+            ),
+            patch.object(actions, "_log_group_identity", environment.identity_mock),
+            patch.object(actions.time, "sleep", environment.sleep_mock),
+        ):
+            return actions._cleanup_owned_log_groups(environment.ctx)
+
+    def test_stable_generation_is_deleted_after_three_consecutive_absence_reads(self) -> None:
+        environment = self._environment(
+            [
+                self._identity(1_750_000_000_000),
+                self._identity(1_750_000_000_000),
+                self._identity(1_750_000_000_000),
+                None,
+                None,
+                None,
+            ]
+        )
+
+        result = self._invoke(environment)
+
+        assert result["errors"] == []
+        assert result["log_groups"][0]["deleted"] is True
+        assert result["log_groups"][0]["absence_observations"] == 3
+        assert environment.record["deleted"] is True
+        assert environment.record["original_generation_disposition"]["status"] == (
+            "deleted-confirmed-absent"
+        )
+        environment.restricted_logs.delete_log_group.assert_called_once_with(
+            logGroupName=self._NAME
+        )
+        environment.helper_cleanup_mock.assert_called_once_with(environment.ctx)
+        assert [call.args for call in environment.sleep_mock.call_args_list] == [
+            (1,),
+            (1,),
+            (1,),
+        ]
+
+    def test_confirmed_replacement_before_pending_is_preserved_and_reported(self) -> None:
+        replacement = self._identity(1_750_000_000_999, run_tag="replacement")
+        environment = self._environment([replacement, replacement])
+
+        with pytest.raises(actions._LogGroupCleanupError) as raised:
+            self._invoke(environment)
+
+        environment.ensure_mock.assert_not_called()
+        environment.restricted_logs.delete_log_group.assert_not_called()
+        environment.helper_cleanup_mock.assert_called_once_with(environment.ctx)
+        assert environment.record.get("deleted") is not True
+        assert environment.record["original_generation_disposition"]["status"] == (
+            "replacement-observed-before-delete"
+        )
+        assert environment.record["replacement_evidence"]
+        blocked = raised.value.details["log_groups"][0]
+        assert blocked["blocked"] is True
+        assert (
+            blocked["observation"]["observed_generation"]["creation_time"]
+            == (replacement["creation_time"])
+        )
+
+    def test_replacement_immediately_before_delete_is_never_deleted(self) -> None:
+        original = self._identity(1_750_000_000_000)
+        replacement = self._identity(1_750_000_000_999, run_tag="replacement")
+        environment = self._environment([original, original, replacement, replacement])
+
+        with pytest.raises(actions._LogGroupCleanupError):
+            self._invoke(environment)
+
+        environment.ensure_mock.assert_called_once_with(environment.ctx)
+        environment.restricted_logs.delete_log_group.assert_not_called()
+        environment.helper_cleanup_mock.assert_called_once_with(environment.ctx)
+        assert environment.record["original_generation_disposition"]["status"] == (
+            "replacement-observed-immediately-before-delete"
+        )
+
+    def test_authority_tag_drift_blocks_delete_and_cleans_helper(self) -> None:
+        drifted = self._identity(1_750_000_000_000, run_tag="foreign-run")
+        environment = self._environment([drifted])
+
+        with pytest.raises(actions._LogGroupCleanupError) as raised:
+            self._invoke(environment)
+
+        environment.ensure_mock.assert_not_called()
+        environment.restricted_logs.delete_log_group.assert_not_called()
+        environment.helper_cleanup_mock.assert_called_once_with(environment.ctx)
+        assert environment.record["original_generation_disposition"]["status"] == (
+            "authority-tag-drift-before-delete"
+        )
+        assert raised.value.details["log_groups"][0]["observation"]["tag_drift"]
+
+    def test_retryable_observation_error_resets_stability_without_failing_cleanup(self) -> None:
+        original = self._identity(1_750_000_000_000)
+        environment = self._environment(
+            [self._retryable_error(), original, original, original, None, None, None]
+        )
+
+        result = self._invoke(environment)
+
+        assert result["log_groups"][0]["deleted"] is True
+        pending = environment.record["identity_observation_history"][0]
+        assert pending["observations"][0]["status"] == "retryable-error"
+        assert pending["attempt_count"] == 3
+        environment.restricted_logs.delete_log_group.assert_called_once_with(
+            logGroupName=self._NAME
+        )
+
+    def test_delete_then_same_name_recreation_is_preserved_and_reported(self) -> None:
+        original = self._identity(1_750_000_000_000)
+        replacement = self._identity(1_750_000_001_000, run_tag="replacement")
+        environment = self._environment(
+            [original, original, original, None, None, replacement, replacement]
+        )
+
+        with pytest.raises(actions._LogGroupCleanupError) as raised:
+            self._invoke(environment)
+
+        environment.restricted_logs.delete_log_group.assert_called_once_with(
+            logGroupName=self._NAME
+        )
+        environment.helper_cleanup_mock.assert_called_once_with(environment.ctx)
+        assert environment.record.get("deleted") is not True
+        assert environment.record["original_generation_disposition"]["status"] == (
+            "replacement-observed-before-confirmed-absence"
+        )
+        evidence = raised.value.details["log_groups"][0]["replacement_evidence"]
+        assert (
+            evidence[-1]["observed_generation"]["creation_time"] == (replacement["creation_time"])
+        )
+
+    def test_observation_retries_have_deterministic_bounded_timing(self) -> None:
+        errors = [self._retryable_error() for _ in range(6)]
+        identity_mock = MagicMock(side_effect=errors)
+        sleep = MagicMock()
+
+        with (
+            patch.object(actions, "_log_group_identity", identity_mock),
+            patch.object(actions.time, "sleep", sleep),
+        ):
+            outcome = actions._observe_log_group_stability(
+                MagicMock(),
+                self._REGION,
+                self._NAME,
+                expected_identity=self._identity(1_750_000_000_000),
+                expected_tags={
+                    actions._RUN_STACK_TAG: "run-123",
+                    actions._LOG_CLEANUP_TOKEN_TAG: self._TOKEN,
+                },
+                required_present=2,
+                required_absent=3,
+                attempts=6,
+                poll_seconds=0.25,
+            )
+
+        assert outcome["status"] == "unsettled"
+        assert outcome["attempt_count"] == 6
+        assert identity_mock.call_count == 6
+        assert [call.args for call in sleep.call_args_list] == [(0.25,)] * 5
 
 
 class TestStrictStackOwnership:

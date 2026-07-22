@@ -4,9 +4,9 @@ These examples pin the behaviour that makes disaggregated and ``both``-mode
 endpoints usable end to end, and the surface for warming their KV cache:
 
 - Reconciliation removes both historical per-endpoint Ingress names. Public
-  requests always enter through the shared ``/inference`` platform route, where
-  the manifest processor authenticates and validates the serving path before
-  forwarding to the endpoint's internal Service.
+  requests follow the shared ``gco-system/gco-gateway`` ``/inference`` HTTPRoute
+  to ``gco-system/inference-proxy``, which authenticates the request before
+  forwarding to the endpoint's internal ClusterIP Service.
 - A ``store``/``both`` deploy enables the shared KV-cache store by default so
   the store connector is wired to the shared master, and a split deploy
   defaults the prefill-decode proxy image to the endpoint image.
@@ -110,10 +110,10 @@ def _deleted_ingress_names(monitor) -> list[str]:
 # ===========================================================================
 
 
-class TestProxyIngressCleanup:
+class TestLegacyProxyIngressCleanup:
     def test_removes_both_historical_ingress_names(self):
         monitor = _make_monitor()
-        monitor._update_proxy_ingress("llama", "llama-proxy", "gco-inference", {})
+        monitor._cleanup_legacy_proxy_ingresses("llama", "llama-proxy", "gco-inference")
 
         assert _deleted_ingress_names(monitor) == ["inference-llama", "inference-llama-proxy"]
         monitor.networking_v1.create_namespaced_ingress.assert_not_called()
@@ -121,9 +121,7 @@ class TestProxyIngressCleanup:
 
     def test_custom_legacy_ingress_path_cannot_recreate_a_bypass(self):
         monitor = _make_monitor()
-        monitor._update_proxy_ingress(
-            "llama", "llama-proxy", "gco-inference", {"ingress_path": "/custom/llama"}
-        )
+        monitor._cleanup_legacy_proxy_ingresses("llama", "llama-proxy", "gco-inference")
 
         assert _deleted_ingress_names(monitor) == ["inference-llama", "inference-llama-proxy"]
         monitor.networking_v1.create_namespaced_ingress.assert_not_called()
@@ -132,7 +130,7 @@ class TestProxyIngressCleanup:
         monitor = _make_monitor()
         monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=404)
 
-        monitor._update_proxy_ingress("llama", "llama-proxy", "gco-inference", {})
+        monitor._cleanup_legacy_proxy_ingresses("llama", "llama-proxy", "gco-inference")
 
         assert _deleted_ingress_names(monitor) == ["inference-llama", "inference-llama-proxy"]
 
@@ -141,7 +139,7 @@ class TestProxyIngressCleanup:
         monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=500)
 
         with pytest.raises(ApiException):
-            monitor._update_proxy_ingress("llama", "llama-proxy", "gco-inference", {})
+            monitor._cleanup_legacy_proxy_ingresses("llama", "llama-proxy", "gco-inference")
 
 
 # ===========================================================================

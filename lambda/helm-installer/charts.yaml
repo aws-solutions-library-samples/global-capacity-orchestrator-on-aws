@@ -20,6 +20,51 @@
 #   - Apache YuniKorn: https://github.com/apache/yunikorn-release/releases
 
 charts:
+  # AWS Load Balancer Controller - mandatory Gateway API data plane
+  # Installed first so it remains alive until every Gateway-owned ALB and
+  # finalizer has been removed during reverse-order teardown.
+  # https://kubernetes-sigs.github.io/aws-load-balancer-controller/
+  aws-load-balancer-controller:
+    enabled: true
+    repo_name: eks
+    repo_url: https://aws.github.io/eks-charts
+    chart: aws-load-balancer-controller
+    version: "3.4.2"
+    namespace: kube-system
+    create_namespace: false
+    wait: true
+    wait_timeout: "8m"
+    values:
+      # The cluster, region, VPC, and IRSA annotation are injected by the
+      # regional stack because they contain deployment-specific tokens.
+      serviceAccount:
+        create: true
+        name: aws-load-balancer-controller
+      createIngressClassResource: false
+      ingressClassParams:
+        create: false
+      ingressClass: gco-unused-lbc-ingress
+      disableIngressClassAnnotation: true
+      webhookConfig:
+        disableIngressValidation: true
+      enableServiceMutatorWebhook: false
+      defaultTargetType: ip
+      defaultLoadBalancerScheme: internal
+      controllerConfig:
+        featureGates:
+          ALBGatewayAPI: true
+          NLBGatewayAPI: false
+          EnableServiceController: false
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 1000m
+          memory: 512Mi
+      podAnnotations:
+        karpenter.sh/do-not-disrupt: "true"
+
   # KEDA - Kubernetes Event-Driven Autoscaling
   # Enables autoscaling based on external metrics (SQS, Kafka, Prometheus, etc.)
   # https://keda.sh/

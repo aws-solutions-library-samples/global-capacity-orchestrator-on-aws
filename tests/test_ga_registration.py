@@ -1,98 +1,72 @@
-"""
-Tests for the Global Accelerator registration Lambda
-(lambda/ga-registration/handler.py).
+"""Focused tests for the Gateway ALB registration Lambda.
 
-Exercises the full CloudFormation custom-resource lifecycle
-(Create/Update/Delete) that registers per-region platform ALBs with
-the shared Global Accelerator endpoint group. Covers ALB discovery
-via Kubernetes Ingress status and tag-based fallback, filtering of
-inference ALBs and Slurm NLBs, stale endpoint scrubbing, HTTPS/443 health
-check enforcement, and SSM parameter storage of the chosen ALB
-hostname. The ga_module fixture pops and reloads the handler module
-under patched boto3 + urllib3 so each test starts from a clean slate.
+The suite covers exact Gateway API discovery, fail-closed tag fallback,
+optional Global Accelerator registration, mandatory SSM publication, exact
+legacy Ingress cleanup, temporary CA removal, and both CloudFormation and Step
+Functions entrypoints.
 """
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
 
 from tests._lambda_imports import load_lambda_module
 
-# ============================================================================
-# Fixture
-# ============================================================================
-
 
 @pytest.fixture
 def ga_module():
-    """Import the ga-registration handler with mocked boto3 and urllib3.
-
-    Loaded via :func:`load_lambda_module` — see
-    ``tests/_lambda_imports.py`` for why we don't use the
-    ``sys.path.insert + import handler`` pattern.
-    """
+    """Load ga-registration with AWS and HTTP constructors isolated."""
     with (
         patch("boto3.client") as mock_boto_client,
         patch("boto3.Session"),
         patch("urllib3.PoolManager") as mock_pool,
-        patch.dict(
-            "os.environ",
-            {
-                "ClusterName": "test-cluster",
-                "Region": "us-east-1",
-                "EndpointGroupArn": "arn:aws:globalaccelerator::123:accelerator/abc/listener/def/endpoint-group/ghi",
-                "IngressName": "gco-ingress",
-                "Namespace": "gco-system",
-                "GlobalRegion": "us-east-2",
-                "ProjectName": "gco",
-            },
-        ),
     ):
         handler = load_lambda_module("ga-registration")
         yield handler, mock_boto_client, mock_pool
 
 
-# ============================================================================
-# Helpers
-# ============================================================================
-
-PLATFORM_ALB_ARN = "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/k8s-gco/abc"
-PLATFORM_ALB_DNS = "k8s-gco-abc.us-east-1.elb.amazonaws.com"
-INFERENCE_ALB_ARN = "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/k8s-gcoinfer/xyz"
-SLURM_NLB_ARN = "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/net/k8s-gcojobs/nlb1"
+PLATFORM_ALB_ARN = "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/k8s-gcogateway/abc"
+PLATFORM_ALB_DNS = "k8s-gcogateway-abc.us-east-1.elb.amazonaws.com"
+LEGACY_ALB_ARN = "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/k8s-gcosyste/legacy"
+LEGACY_ALB_DNS = "k8s-gcosyste-legacy.us-east-1.elb.amazonaws.com"
+SECOND_LEGACY_ALB_ARN = (
+    "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/k8s-gcosyste/legacy2"
+)
+UNRELATED_ALB_ARN = "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/k8s-gcosyste/other"
+STALE_ALB_ARN = "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/k8s-stale/old"
+SLURM_NLB_ARN = "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/net/k8s-gcojobs/nlb"
 ENDPOINT_GROUP_ARN = (
     "arn:aws:globalaccelerator::123:accelerator/abc/listener/def/endpoint-group/ghi"
 )
+ACCELERATOR_ARN = "arn:aws:globalaccelerator::123:accelerator/abc"
 
 
-def _make_cfn_event(request_type="Create"):
-    return {
-        "RequestType": request_type,
-        "ResponseURL": "https://cloudformation-response.example.com/callback",
-        "StackId": "arn:aws:cloudformation:us-east-1:123:stack/test/guid",
-        "RequestId": "req-123",
-        "LogicalResourceId": "GaRegistration",
-        "ResourceProperties": {
-            "ClusterName": "test-cluster",
-            "Region": "us-east-1",
-            "EndpointGroupArn": ENDPOINT_GROUP_ARN,
-            "IngressName": "gco-ingress",
-            "Namespace": "gco-system",
-            "GlobalRegion": "us-east-2",
-            "ProjectName": "gco",
-        },
-    }
+def _response(status: int, payload: dict | None = None) -> MagicMock:
+    response = MagicMock()
+    response.status = status
+    response.data = json.dumps(payload or {}).encode("utf-8")
+    return response
 
 
-def _make_context():
-    ctx = MagicMock()
-    ctx.log_stream_name = "test-log-stream"
-    return ctx
+def _gateway_payload(*addresses: dict) -> dict:
+    return {"status": {"addresses": list(addresses)}}
 
 
-def _make_alb(arn, name, dns, state="active", lb_type="application", scheme="internal"):
+def _legacy_ingress_payload(hostname: str) -> dict:
+    return {"status": {"loadBalancer": {"ingress": [{"hostname": hostname}]}}}
+
+
+def _make_alb(
+    arn: str,
+    name: str,
+    dns: str,
+    *,
+    state: str = "active",
+    lb_type: str = "application",
+    scheme: str = "internal",
+) -> dict:
     return {
         "LoadBalancerArn": arn,
         "LoadBalancerName": name,
@@ -103,555 +77,491 @@ def _make_alb(arn, name, dns, state="active", lb_type="application", scheme="int
     }
 
 
-def _make_tags(arn, tags_dict):
+def _make_tags(arn: str, tags: dict[str, str]) -> dict:
     return {
         "ResourceArn": arn,
-        "Tags": [{"Key": k, "Value": v} for k, v in tags_dict.items()],
+        "Tags": [{"Key": key, "Value": value} for key, value in tags.items()],
     }
 
 
-# ============================================================================
-# find_alb_by_ingress_hostname Tests
-# ============================================================================
+def _client_error(code: str, operation: str = "Operation") -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": code}}, operation)
 
 
-class TestFindAlbByIngressHostname:
-    """Tests for the most deterministic detection method — hostname lookup."""
-
-    def test_returns_alb_when_hostname_matches(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.return_value = {
-            "LoadBalancers": [
-                _make_alb(PLATFORM_ALB_ARN, "k8s-gco", PLATFORM_ALB_DNS),
-            ]
-        }
-
-        dns, arn, state = handler.find_alb_by_ingress_hostname(elb, PLATFORM_ALB_DNS)
-
-        assert dns == PLATFORM_ALB_DNS
-        assert arn == PLATFORM_ALB_ARN
-        assert state == "active"
-
-    def test_returns_none_when_hostname_not_found(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.return_value = {
-            "LoadBalancers": [
-                _make_alb(PLATFORM_ALB_ARN, "k8s-gco", PLATFORM_ALB_DNS),
-            ]
-        }
-
-        dns, arn, state = handler.find_alb_by_ingress_hostname(elb, "nonexistent.example.com")
-
-        assert dns is None
-        assert arn is None
-        assert state is None
-
-    def test_skips_nlbs_even_if_hostname_matches(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.return_value = {
-            "LoadBalancers": [
-                _make_alb(
-                    SLURM_NLB_ARN,
-                    "k8s-gcojobs",
-                    "k8s-gcojobs.elb.amazonaws.com",
-                    lb_type="network",
-                ),
-            ]
-        }
-
-        dns, arn, state = handler.find_alb_by_ingress_hostname(elb, "k8s-gcojobs.elb.amazonaws.com")
-
-        assert dns is None
-
-    def test_returns_provisioning_state(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.return_value = {
-            "LoadBalancers": [
-                _make_alb(PLATFORM_ALB_ARN, "k8s-gco", PLATFORM_ALB_DNS, state="provisioning"),
-            ]
-        }
-
-        dns, arn, state = handler.find_alb_by_ingress_hostname(elb, PLATFORM_ALB_DNS)
-
-        assert arn == PLATFORM_ALB_ARN
-        assert state == "provisioning"
-
-    def test_handles_api_error_gracefully(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.side_effect = Exception("API error")
-
-        dns, arn, state = handler.find_alb_by_ingress_hostname(elb, PLATFORM_ALB_DNS)
-
-        assert dns is None
+def _make_cfn_event(request_type: str = "Create", *, endpoint_group: bool = True) -> dict:
+    properties = {
+        "ClusterName": "test-cluster",
+        "Region": "us-east-1",
+        "RegistryRegion": "eu-west-1",
+        "ProjectName": "gco",
+    }
+    if endpoint_group:
+        properties["EndpointGroupArn"] = ENDPOINT_GROUP_ARN
+    return {
+        "RequestType": request_type,
+        "ResponseURL": "https://cloudformation-response.example.com/callback",
+        "StackId": "arn:aws:cloudformation:us-east-1:123:stack/test/guid",
+        "RequestId": "req-123",
+        "LogicalResourceId": "GaRegistration",
+        "ResourceProperties": properties,
+    }
 
 
-# ============================================================================
-# find_platform_alb_by_tags Tests
-# ============================================================================
+def _context() -> MagicMock:
+    context = MagicMock()
+    context.log_stream_name = "test-log-stream"
+    return context
 
 
-class TestFindPlatformAlbByTags:
-    """Tests for the tag-based fallback detection method."""
-
-    def test_matches_eks_auto_mode_tags(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.return_value = {
-            "LoadBalancers": [
-                _make_alb(PLATFORM_ALB_ARN, "k8s-gco", PLATFORM_ALB_DNS),
-            ]
-        }
-        elb.describe_tags.return_value = {
-            "TagDescriptions": [
-                _make_tags(
-                    PLATFORM_ALB_ARN,
-                    {
-                        "eks:eks-cluster-name": "test-cluster",
-                        "ingress.eks.amazonaws.com/stack": "gco",
-                    },
-                ),
-            ]
-        }
-
-        dns, arn, state = handler.find_platform_alb_by_tags(elb, "test-cluster")
-
-        assert arn == PLATFORM_ALB_ARN
-        assert state == "active"
-
-    def test_matches_standard_controller_tags(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.return_value = {
-            "LoadBalancers": [
-                _make_alb(PLATFORM_ALB_ARN, "k8s-gco", PLATFORM_ALB_DNS),
-            ]
-        }
-        elb.describe_tags.return_value = {
-            "TagDescriptions": [
-                _make_tags(
-                    PLATFORM_ALB_ARN,
-                    {
-                        "elbv2.k8s.aws/cluster": "test-cluster",
-                        "ingress.k8s.aws/stack": "gco-system/gco-ingress",
-                    },
-                ),
-            ]
-        }
-
-        dns, arn, state = handler.find_platform_alb_by_tags(elb, "test-cluster")
-
-        assert arn == PLATFORM_ALB_ARN
-
-    def test_valid_legacy_tags_are_not_masked_by_unrelated_auto_mode_tags(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.return_value = {
-            "LoadBalancers": [
-                _make_alb(PLATFORM_ALB_ARN, "k8s-gco", PLATFORM_ALB_DNS),
-            ]
-        }
-        elb.describe_tags.return_value = {
-            "TagDescriptions": [
-                _make_tags(
-                    PLATFORM_ALB_ARN,
-                    {
-                        "eks:eks-cluster-name": "other-cluster",
-                        "elbv2.k8s.aws/cluster": "test-cluster",
-                        "ingress.eks.amazonaws.com/stack": "unrelated",
-                        "ingress.k8s.aws/stack": "gco-system/gco-ingress",
-                    },
-                ),
-            ]
-        }
-
-        dns, arn, state = handler.find_platform_alb_by_tags(elb, "test-cluster")
-
-        assert dns == PLATFORM_ALB_DNS
-        assert arn == PLATFORM_ALB_ARN
-        assert state == "active"
-
-    def test_skips_unrecognized_ingress_stack(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.return_value = {
-            "LoadBalancers": [
-                _make_alb(PLATFORM_ALB_ARN, "k8s-other", PLATFORM_ALB_DNS),
-            ]
-        }
-        elb.describe_tags.return_value = {
-            "TagDescriptions": [
-                _make_tags(
-                    PLATFORM_ALB_ARN,
-                    {
-                        "eks:eks-cluster-name": "test-cluster",
-                        "ingress.eks.amazonaws.com/stack": "unrelated",
-                    },
-                ),
-            ]
-        }
-
-        dns, arn, state = handler.find_platform_alb_by_tags(elb, "test-cluster")
-
-        assert dns is None
-        assert arn is None
-        assert state is None
-
-    def test_skips_inference_alb(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.return_value = {
-            "LoadBalancers": [
-                _make_alb(INFERENCE_ALB_ARN, "k8s-gcoinfer", "inf.elb.amazonaws.com"),
-            ]
-        }
-        elb.describe_tags.return_value = {
-            "TagDescriptions": [
-                _make_tags(
-                    INFERENCE_ALB_ARN,
-                    {
-                        "eks:eks-cluster-name": "test-cluster",
-                        "ingress.eks.amazonaws.com/stack": "gco-inference",
-                    },
-                ),
-            ]
-        }
-
-        dns, arn, state = handler.find_platform_alb_by_tags(elb, "test-cluster")
-
-        assert arn is None
-
-    def test_skips_nlbs(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.return_value = {
-            "LoadBalancers": [
-                _make_alb(
-                    SLURM_NLB_ARN,
-                    "k8s-gcojobs-slinky",
-                    "nlb.elb.amazonaws.com",
-                    lb_type="network",
-                ),
-            ]
-        }
-
-        dns, arn, state = handler.find_platform_alb_by_tags(elb, "test-cluster")
-
-        assert arn is None
-        # describe_tags should never be called — NLBs are filtered before tag lookup
-        elb.describe_tags.assert_not_called()
-
-    def test_skips_alb_without_ingress_stack_tag(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.return_value = {
-            "LoadBalancers": [
-                _make_alb(PLATFORM_ALB_ARN, "k8s-gco", PLATFORM_ALB_DNS),
-            ]
-        }
-        elb.describe_tags.return_value = {
-            "TagDescriptions": [
-                _make_tags(
-                    PLATFORM_ALB_ARN,
-                    {
-                        "eks:eks-cluster-name": "test-cluster",
-                        # No ingress stack tag
-                    },
-                ),
-            ]
-        }
-
-        dns, arn, state = handler.find_platform_alb_by_tags(elb, "test-cluster")
-
-        assert arn is None
-
-    def test_skips_alb_from_different_cluster(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.return_value = {
-            "LoadBalancers": [
-                _make_alb(PLATFORM_ALB_ARN, "k8s-gco", PLATFORM_ALB_DNS),
-            ]
-        }
-        elb.describe_tags.return_value = {
-            "TagDescriptions": [
-                _make_tags(
-                    PLATFORM_ALB_ARN,
-                    {
-                        "eks:eks-cluster-name": "other-cluster",
-                        "ingress.eks.amazonaws.com/stack": "gco",
-                    },
-                ),
-            ]
-        }
-
-        dns, arn, state = handler.find_platform_alb_by_tags(elb, "test-cluster")
-
-        assert arn is None
-
-    def test_returns_none_when_no_albs_exist(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.return_value = {"LoadBalancers": []}
-
-        dns, arn, state = handler.find_platform_alb_by_tags(elb, "test-cluster")
-
-        assert arn is None
-
-    def test_picks_platform_alb_when_mixed_with_inference(self, ga_module):
-        """When both platform and inference ALBs exist, only return the platform one."""
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.return_value = {
-            "LoadBalancers": [
-                _make_alb(INFERENCE_ALB_ARN, "k8s-gcoinfer", "inf.elb.amazonaws.com"),
-                _make_alb(PLATFORM_ALB_ARN, "k8s-gco", PLATFORM_ALB_DNS),
-            ]
-        }
-        elb.describe_tags.return_value = {
-            "TagDescriptions": [
-                _make_tags(
-                    INFERENCE_ALB_ARN,
-                    {
-                        "eks:eks-cluster-name": "test-cluster",
-                        "ingress.eks.amazonaws.com/stack": "gco-inference",
-                    },
-                ),
-                _make_tags(
-                    PLATFORM_ALB_ARN,
-                    {
-                        "eks:eks-cluster-name": "test-cluster",
-                        "ingress.eks.amazonaws.com/stack": "gco",
-                    },
-                ),
-            ]
-        }
-
-        dns, arn, state = handler.find_platform_alb_by_tags(elb, "test-cluster")
-
-        assert arn == PLATFORM_ALB_ARN
-
-    def test_handles_api_error_gracefully(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        elb.describe_load_balancers.side_effect = Exception("API error")
-
-        dns, arn, state = handler.find_platform_alb_by_tags(elb, "test-cluster")
-
-        assert arn is None
-
-
-# ============================================================================
-# find_active_alb Tests
-# ============================================================================
-
-
-class TestFindActiveAlb:
-    """Tests for the unified ALB detection orchestrator."""
-
-    def test_prefers_ingress_status_over_tags(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        http = MagicMock()
-
-        with (
-            patch.object(
-                handler,
-                "find_alb_from_ingress_status",
-                return_value=PLATFORM_ALB_DNS,
+class TestEksAuthentication:
+    @pytest.mark.parametrize(
+        "region,sts_endpoint,signed_url",
+        [
+            (
+                "cn-north-1",
+                "https://sts.cn-north-1.amazonaws.com.cn",
+                "https://sts.cn-north-1.amazonaws.com.cn/?X-Amz-Credential=cn-scope",
             ),
-            patch.object(
-                handler,
-                "find_alb_by_ingress_hostname",
-                return_value=(PLATFORM_ALB_DNS, PLATFORM_ALB_ARN, "active"),
+            (
+                "us-west-2",
+                "https://sts.amazonaws.com",
+                "https://sts.amazonaws.com/?X-Amz-Credential=us-east-1-scope",
             ),
-            patch.object(handler, "find_platform_alb_by_tags") as mock_tags,
-        ):
-            dns, arn = handler.find_active_alb(
-                elb, http, "https://k8s", {}, "cluster", "ns", "ingress"
-            )
-
-        assert arn == PLATFORM_ALB_ARN
-        mock_tags.assert_not_called()
-
-    def test_falls_back_to_tags_when_ingress_status_empty(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        http = MagicMock()
-
-        with (
-            patch.object(handler, "find_alb_from_ingress_status", return_value=None),
-            patch.object(
-                handler,
-                "find_platform_alb_by_tags",
-                return_value=(PLATFORM_ALB_DNS, PLATFORM_ALB_ARN, "active"),
-            ),
-        ):
-            dns, arn = handler.find_active_alb(
-                elb, http, "https://k8s", {}, "cluster", "ns", "ingress"
-            )
-
-        assert arn == PLATFORM_ALB_ARN
-
-    def test_returns_none_when_ingress_alb_not_active(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        http = MagicMock()
-
-        with (
-            patch.object(
-                handler,
-                "find_alb_from_ingress_status",
-                return_value=PLATFORM_ALB_DNS,
-            ),
-            patch.object(
-                handler,
-                "find_alb_by_ingress_hostname",
-                return_value=(PLATFORM_ALB_DNS, PLATFORM_ALB_ARN, "provisioning"),
-            ),
-        ):
-            dns, arn = handler.find_active_alb(
-                elb, http, "https://k8s", {}, "cluster", "ns", "ingress"
-            )
-
-        assert dns is None
-        assert arn is None
-
-    def test_returns_none_when_nothing_found(self, ga_module):
-        handler, _, _ = ga_module
-        elb = MagicMock()
-        http = MagicMock()
-
-        with (
-            patch.object(handler, "find_alb_from_ingress_status", return_value=None),
-            patch.object(
-                handler,
-                "find_platform_alb_by_tags",
-                return_value=(None, None, None),
-            ),
-        ):
-            dns, arn = handler.find_active_alb(
-                elb, http, "https://k8s", {}, "cluster", "ns", "ingress"
-            )
-
-        assert dns is None
-        assert arn is None
-
-
-# ============================================================================
-# scrub_stale_ga_endpoints Tests
-# ============================================================================
-
-
-class TestScrubStaleGaEndpoints:
-    """Tests for the safety net that removes wrong endpoints from GA."""
-
-    def test_removes_stale_endpoints(self, ga_module):
-        handler, _, _ = ga_module
-        ga = MagicMock()
-        ga.describe_endpoint_group.return_value = {
-            "EndpointGroup": {
-                "EndpointDescriptions": [
-                    {"EndpointId": PLATFORM_ALB_ARN},
-                    {"EndpointId": SLURM_NLB_ARN},
-                    {"EndpointId": INFERENCE_ALB_ARN},
-                ]
+        ],
+    )
+    def test_uses_resolved_endpoint_and_client_signing_scope(
+        self,
+        ga_module,
+        region,
+        sts_endpoint,
+        signed_url,
+    ):
+        handler, mock_boto_client, _ = ga_module
+        eks = MagicMock()
+        eks.describe_cluster.return_value = {
+            "cluster": {
+                "endpoint": f"https://eks.{region}.example",
+                "certificateAuthority": {"data": "Y2E="},
             }
         }
+        mock_boto_client.return_value = eks
+        sts_client = MagicMock()
+        sts_client.meta.endpoint_url = sts_endpoint
+        sts_client._request_signer.generate_presigned_url.return_value = signed_url
+        session = MagicMock()
+        session.client.return_value = sts_client
 
-        handler.scrub_stale_ga_endpoints(ga, ENDPOINT_GROUP_ARN, PLATFORM_ALB_ARN)
+        with patch.object(handler.boto3, "Session", return_value=session):
+            endpoint, token, ca_path = handler.get_k8s_client(
+                f"gco-{region}",
+                region,
+            )
 
-        assert ga.remove_endpoints.call_count == 2
-        removed_ids = [
-            call.kwargs["EndpointIdentifiers"][0]["EndpointId"]
-            for call in ga.remove_endpoints.call_args_list
-        ]
-        assert SLURM_NLB_ARN in removed_ids
-        assert INFERENCE_ALB_ARN in removed_ids
+        try:
+            session.client.assert_called_once_with("sts", region_name=region)
+            sts_client._request_signer.generate_presigned_url.assert_called_once_with(
+                request_dict={
+                    "method": "GET",
+                    "url": (f"{sts_endpoint}/?Action=GetCallerIdentity&Version=2011-06-15"),
+                    "body": {},
+                    "headers": {"x-k8s-aws-id": f"gco-{region}"},
+                    "context": {},
+                },
+                operation_name="GetCallerIdentity",
+                expires_in=60,
+            )
+            assert endpoint == f"https://eks.{region}.example"
+            assert token.startswith("k8s-aws-v1.")
+        finally:
+            handler._remove_temporary_ca_file(ca_path)
 
-    def test_does_nothing_when_only_correct_alb(self, ga_module):
+
+class TestGatewayStatusDiscovery:
+    def test_reads_only_the_exact_gateway_path_and_nonempty_hostname(self, ga_module):
         handler, _, _ = ga_module
-        ga = MagicMock()
-        ga.describe_endpoint_group.return_value = {
-            "EndpointGroup": {
-                "EndpointDescriptions": [
-                    {"EndpointId": PLATFORM_ALB_ARN},
-                ]
-            }
-        }
-
-        handler.scrub_stale_ga_endpoints(ga, ENDPOINT_GROUP_ARN, PLATFORM_ALB_ARN)
-
-        ga.remove_endpoints.assert_not_called()
-
-    def test_does_nothing_when_no_endpoints(self, ga_module):
-        handler, _, _ = ga_module
-        ga = MagicMock()
-        ga.describe_endpoint_group.return_value = {"EndpointGroup": {"EndpointDescriptions": []}}
-
-        handler.scrub_stale_ga_endpoints(ga, ENDPOINT_GROUP_ARN, PLATFORM_ALB_ARN)
-
-        ga.remove_endpoints.assert_not_called()
-
-    def test_handles_endpoint_not_found_gracefully(self, ga_module):
-        handler, _, _ = ga_module
-        ga = MagicMock()
-        ga.describe_endpoint_group.return_value = {
-            "EndpointGroup": {
-                "EndpointDescriptions": [
-                    {"EndpointId": PLATFORM_ALB_ARN},
-                    {"EndpointId": SLURM_NLB_ARN},
-                ]
-            }
-        }
-        ga.remove_endpoints.side_effect = ClientError(
-            {"Error": {"Code": "EndpointNotFoundException", "Message": "Not found"}},
-            "RemoveEndpoints",
+        http = MagicMock()
+        http.request.return_value = _response(
+            200,
+            _gateway_payload(
+                {"type": "Hostname", "value": "   "},
+                {"type": "IPAddress", "value": "10.0.0.1"},
+                {"type": "Hostname", "value": f" {PLATFORM_ALB_DNS} "},
+            ),
         )
 
-        # Should not raise
-        handler.scrub_stale_ga_endpoints(ga, ENDPOINT_GROUP_ARN, PLATFORM_ALB_ARN)
+        address = handler.find_gateway_address(http, "https://k8s.example", {"Auth": "x"})
 
-    def test_handles_api_error_gracefully(self, ga_module):
+        assert address == PLATFORM_ALB_DNS
+        http.request.assert_called_once_with(
+            "GET",
+            "https://k8s.example/apis/gateway.networking.k8s.io/v1/"
+            "namespaces/gco-system/gateways/gco-gateway",
+            headers={"Auth": "x"},
+            timeout=10.0,
+        )
+
+    @pytest.mark.parametrize(
+        "status,payload",
+        [
+            (404, {}),
+            (200, _gateway_payload()),
+            (200, _gateway_payload({"type": "Hostname", "value": ""})),
+        ],
+    )
+    def test_returns_none_until_exact_gateway_has_an_address(self, ga_module, status, payload):
         handler, _, _ = ga_module
-        ga = MagicMock()
-        ga.describe_endpoint_group.side_effect = Exception("API error")
+        http = MagicMock()
+        http.request.return_value = _response(status, payload)
 
-        # Should not raise
-        handler.scrub_stale_ga_endpoints(ga, ENDPOINT_GROUP_ARN, PLATFORM_ALB_ARN)
+        assert handler.find_gateway_address(http, "https://k8s", {}) is None
 
-
-# ============================================================================
-# GA Registration Tests
-# ============================================================================
-
-
-class TestCheckExistingGaEndpoint:
-    def test_returns_true_when_alb_already_registered(self, ga_module):
+    def test_accepts_default_hostname_type(self, ga_module):
         handler, _, _ = ga_module
-        ga = MagicMock()
-        ga.describe_endpoint_group.return_value = {
-            "EndpointGroup": {"EndpointDescriptions": [{"EndpointId": PLATFORM_ALB_ARN}]}
+        http = MagicMock()
+        http.request.return_value = _response(200, _gateway_payload({"value": PLATFORM_ALB_DNS}))
+
+        assert handler.find_gateway_address(http, "https://k8s", {}) == PLATFORM_ALB_DNS
+
+
+class TestGatewayHostnameLookup:
+    def test_returns_only_matching_internal_application_alb(self, ga_module):
+        handler, _, _ = ga_module
+        elb = MagicMock()
+        elb.describe_load_balancers.return_value = {
+            "LoadBalancers": [
+                _make_alb(
+                    SLURM_NLB_ARN,
+                    "same-dns-nlb",
+                    PLATFORM_ALB_DNS,
+                    lb_type="network",
+                ),
+                _make_alb(
+                    STALE_ALB_ARN,
+                    "same-dns-public",
+                    PLATFORM_ALB_DNS,
+                    scheme="internet-facing",
+                ),
+                _make_alb(
+                    PLATFORM_ALB_ARN,
+                    "gateway",
+                    PLATFORM_ALB_DNS,
+                    state="provisioning",
+                ),
+            ]
         }
 
-        assert handler.check_existing_ga_endpoint(ga, ENDPOINT_GROUP_ARN, PLATFORM_ALB_ARN)
+        assert handler.find_alb_by_gateway_hostname(elb, PLATFORM_ALB_DNS) == (
+            PLATFORM_ALB_DNS,
+            PLATFORM_ALB_ARN,
+            "provisioning",
+        )
 
-    def test_returns_false_when_alb_not_registered(self, ga_module):
+    def test_returns_none_for_an_unrelated_hostname(self, ga_module):
         handler, _, _ = ga_module
-        ga = MagicMock()
-        ga.describe_endpoint_group.return_value = {
-            "EndpointGroup": {"EndpointDescriptions": [{"EndpointId": "arn:other/xyz"}]}
+        elb = MagicMock()
+        elb.describe_load_balancers.return_value = {
+            "LoadBalancers": [_make_alb(PLATFORM_ALB_ARN, "gateway", PLATFORM_ALB_DNS)]
         }
 
-        assert not handler.check_existing_ga_endpoint(ga, ENDPOINT_GROUP_ARN, PLATFORM_ALB_ARN)
+        assert handler.find_alb_by_gateway_hostname(elb, "other.example.com") == (
+            None,
+            None,
+            None,
+        )
 
 
-class TestRegisterAlbWithGa:
-    def test_skips_when_already_registered(self, ga_module):
+class TestExactTagFallback:
+    def _find(self, handler, tags, *, lb_type="application", scheme="internal"):
+        elb = MagicMock()
+        elb.describe_load_balancers.return_value = {
+            "LoadBalancers": [
+                _make_alb(
+                    PLATFORM_ALB_ARN,
+                    "gateway",
+                    PLATFORM_ALB_DNS,
+                    lb_type=lb_type,
+                    scheme=scheme,
+                )
+            ]
+        }
+        elb.describe_tags.return_value = {"TagDescriptions": [_make_tags(PLATFORM_ALB_ARN, tags)]}
+        return handler.find_platform_alb_by_tags(elb, "test-cluster"), elb
+
+    def test_requires_both_exact_gateway_and_cluster_tags(self, ga_module):
+        handler, _, _ = ga_module
+
+        result, _ = self._find(
+            handler,
+            {
+                "gco.aws/gateway": "gco-system/gco-gateway",
+                "elbv2.k8s.aws/cluster": "test-cluster",
+            },
+        )
+
+        assert result == (PLATFORM_ALB_DNS, PLATFORM_ALB_ARN, "active")
+
+    @pytest.mark.parametrize(
+        "tags",
+        [
+            {"elbv2.k8s.aws/cluster": "test-cluster"},
+            {"gco.aws/gateway": "gco-system/gco-gateway"},
+            {
+                "gco.aws/gateway": "gco-system/gco-gateway",
+                "elbv2.k8s.aws/cluster": "other-cluster",
+            },
+            {
+                "gco.aws/gateway": "gco-system/other-gateway",
+                "elbv2.k8s.aws/cluster": "test-cluster",
+            },
+            {
+                "gco.aws/gateway": "gco-system/gco-gateway",
+                "eks:eks-cluster-name": "test-cluster",
+            },
+            {
+                "ingress.k8s.aws/stack": "gco-system/gco-ingress",
+                "elbv2.k8s.aws/cluster": "test-cluster",
+            },
+        ],
+    )
+    def test_rejects_partial_alternative_or_legacy_tag_matches(self, ga_module, tags):
+        handler, _, _ = ga_module
+
+        result, _ = self._find(handler, tags)
+
+        assert result == (None, None, None)
+
+    @pytest.mark.parametrize(
+        "lb_type,scheme",
+        [("network", "internal"), ("application", "internet-facing")],
+    )
+    def test_rejects_non_internal_albs(self, ga_module, lb_type, scheme):
+        handler, _, _ = ga_module
+
+        result, elb = self._find(
+            handler,
+            {
+                "gco.aws/gateway": "gco-system/gco-gateway",
+                "elbv2.k8s.aws/cluster": "test-cluster",
+            },
+            lb_type=lb_type,
+            scheme=scheme,
+        )
+
+        assert result == (None, None, None)
+        elb.describe_tags.assert_not_called()
+
+
+class TestFindActiveGatewayAlb:
+    def test_gateway_status_is_authoritative(self, ga_module):
+        handler, _, _ = ga_module
+        with (
+            patch.object(handler, "find_gateway_address", return_value=PLATFORM_ALB_DNS),
+            patch.object(
+                handler,
+                "find_alb_by_gateway_hostname",
+                return_value=(PLATFORM_ALB_DNS, PLATFORM_ALB_ARN, "active"),
+            ),
+            patch.object(handler, "find_platform_alb_by_tags") as fallback,
+        ):
+            result = handler.find_active_alb(
+                MagicMock(), MagicMock(), "https://k8s", {}, "test-cluster"
+            )
+
+        assert result == (PLATFORM_ALB_DNS, PLATFORM_ALB_ARN)
+        fallback.assert_not_called()
+
+    def test_does_not_fallback_when_status_alb_is_still_provisioning(self, ga_module):
+        handler, _, _ = ga_module
+        with (
+            patch.object(handler, "find_gateway_address", return_value=PLATFORM_ALB_DNS),
+            patch.object(
+                handler,
+                "find_alb_by_gateway_hostname",
+                return_value=(PLATFORM_ALB_DNS, PLATFORM_ALB_ARN, "provisioning"),
+            ),
+            patch.object(handler, "find_platform_alb_by_tags") as fallback,
+        ):
+            result = handler.find_active_alb(
+                MagicMock(), MagicMock(), "https://k8s", {}, "test-cluster"
+            )
+
+        assert result == (None, None)
+        fallback.assert_not_called()
+
+    def test_uses_exact_tags_only_when_gateway_address_is_empty(self, ga_module):
+        handler, _, _ = ga_module
+        with (
+            patch.object(handler, "find_gateway_address", return_value=None),
+            patch.object(
+                handler,
+                "find_platform_alb_by_tags",
+                return_value=(PLATFORM_ALB_DNS, PLATFORM_ALB_ARN, "active"),
+            ) as fallback,
+        ):
+            result = handler.find_active_alb(
+                MagicMock(), MagicMock(), "https://k8s", {}, "test-cluster"
+            )
+
+        assert result == (PLATFORM_ALB_DNS, PLATFORM_ALB_ARN)
+        fallback.assert_called_once()
+
+
+class TestExactLegacyCleanup:
+    def test_captures_status_and_exact_legacy_tag_matches_only(self, ga_module):
+        handler, _, _ = ga_module
+        http = MagicMock()
+        http.request.return_value = _response(200, _legacy_ingress_payload(LEGACY_ALB_DNS))
+        elb = MagicMock()
+        gateway_alb = _make_alb(PLATFORM_ALB_ARN, "gateway", PLATFORM_ALB_DNS)
+        status_legacy = _make_alb(LEGACY_ALB_ARN, "legacy", LEGACY_ALB_DNS)
+        tagged_legacy = _make_alb(
+            SECOND_LEGACY_ALB_ARN,
+            "legacy2",
+            "legacy2.elb.amazonaws.com",
+        )
+        unrelated_same_prefix = _make_alb(
+            UNRELATED_ALB_ARN,
+            "k8s-gcosyste-unrelated",
+            "unrelated.elb.amazonaws.com",
+        )
+        elb.describe_load_balancers.return_value = {
+            "LoadBalancers": [gateway_alb, status_legacy, tagged_legacy, unrelated_same_prefix]
+        }
+        elb.describe_tags.return_value = {
+            "TagDescriptions": [
+                _make_tags(
+                    PLATFORM_ALB_ARN,
+                    {
+                        "gco.aws/gateway": "gco-system/gco-gateway",
+                        "elbv2.k8s.aws/cluster": "test-cluster",
+                    },
+                ),
+                _make_tags(LEGACY_ALB_ARN, {}),
+                _make_tags(
+                    SECOND_LEGACY_ALB_ARN,
+                    {
+                        "ingress.k8s.aws/stack": "gco-system/gco-ingress",
+                        "elbv2.k8s.aws/cluster": "test-cluster",
+                    },
+                ),
+                _make_tags(
+                    UNRELATED_ALB_ARN,
+                    {
+                        "ingress.k8s.aws/stack": "gco-system/unrelated",
+                        "elbv2.k8s.aws/cluster": "test-cluster",
+                    },
+                ),
+            ]
+        }
+
+        captured = handler.capture_legacy_alb_arns(elb, http, "https://k8s", {}, "test-cluster")
+
+        assert captured == {LEGACY_ALB_ARN, SECOND_LEGACY_ALB_ARN}
+        http.request.assert_called_once_with(
+            "GET",
+            "https://k8s/apis/networking.k8s.io/v1/namespaces/gco-system/ingresses/gco-ingress",
+            headers={},
+            timeout=10.0,
+        )
+
+    def test_captures_exact_legacy_auto_mode_tags(self, ga_module):
+        handler, _, _ = ga_module
+        http = MagicMock()
+        http.request.return_value = _response(404)
+        elb = MagicMock()
+        elb.describe_load_balancers.return_value = {
+            "LoadBalancers": [_make_alb(LEGACY_ALB_ARN, "legacy", LEGACY_ALB_DNS)]
+        }
+        elb.describe_tags.return_value = {
+            "TagDescriptions": [
+                _make_tags(
+                    LEGACY_ALB_ARN,
+                    {
+                        "eks:eks-cluster-name": "test-cluster",
+                        "ingress.eks.amazonaws.com/stack": "gco",
+                    },
+                )
+            ]
+        }
+
+        captured = handler.capture_legacy_alb_arns(elb, http, "https://k8s", {}, "test-cluster")
+
+        assert captured == {LEGACY_ALB_ARN}
+
+    def test_deletes_only_three_exact_legacy_resources_then_waits(self, ga_module):
+        handler, _, _ = ga_module
+        http = MagicMock()
+        http.request.side_effect = [_response(200), _response(202), _response(404)]
+        elb = MagicMock()
+        captured = {LEGACY_ALB_ARN, SECOND_LEGACY_ALB_ARN}
+        with (
+            patch.object(handler, "capture_legacy_alb_arns", return_value=captured),
+            patch.object(handler, "wait_for_legacy_albs_deleted", return_value=True) as wait,
+        ):
+            handler.delete_legacy_ingress_resources(
+                elb, http, "https://k8s", {"Authorization": "token"}, "test-cluster"
+            )
+
+        assert [request.args[:2] for request in http.request.call_args_list] == [
+            (
+                "DELETE",
+                "https://k8s/apis/networking.k8s.io/v1/namespaces/gco-system/ingresses/gco-ingress",
+            ),
+            ("DELETE", "https://k8s/apis/networking.k8s.io/v1/ingressclasses/alb"),
+            ("DELETE", "https://k8s/apis/eks.amazonaws.com/v1/ingressclassparams/alb"),
+        ]
+        wait.assert_called_once_with(elb, captured)
+
+    def test_attempts_all_exact_deletes_and_wait_before_reporting_failure(self, ga_module):
+        handler, _, _ = ga_module
+        http = MagicMock()
+        http.request.side_effect = [_response(500), RuntimeError("network"), _response(200)]
+        with (
+            patch.object(handler, "capture_legacy_alb_arns", return_value={LEGACY_ALB_ARN}),
+            patch.object(handler, "wait_for_legacy_albs_deleted", return_value=True) as wait,
+            pytest.raises(RuntimeError, match="Legacy Kubernetes cleanup failed"),
+        ):
+            handler.delete_legacy_ingress_resources(
+                MagicMock(), http, "https://k8s", {}, "test-cluster"
+            )
+
+        assert http.request.call_count == 3
+        wait.assert_called_once()
+
+    def test_wait_polls_each_captured_arn_directly_never_by_prefix(self, ga_module):
+        handler, _, _ = ga_module
+        elb = MagicMock()
+        legacy_checks = 0
+
+        def describe_load_balancers(*, LoadBalancerArns):
+            nonlocal legacy_checks
+            arn = LoadBalancerArns[0]
+            if arn == LEGACY_ALB_ARN and legacy_checks == 0:
+                legacy_checks += 1
+                return {"LoadBalancers": [_make_alb(LEGACY_ALB_ARN, "legacy", LEGACY_ALB_DNS)]}
+            raise _client_error("LoadBalancerNotFound", "DescribeLoadBalancers")
+
+        elb.describe_load_balancers.side_effect = describe_load_balancers
+
+        with patch.object(handler.time, "sleep"):
+            deleted = handler.wait_for_legacy_albs_deleted(
+                elb,
+                {LEGACY_ALB_ARN, SECOND_LEGACY_ALB_ARN},
+            )
+
+        assert deleted is True
+        assert elb.describe_load_balancers.call_count == 3
+        for request in elb.describe_load_balancers.call_args_list:
+            assert set(request.kwargs) == {"LoadBalancerArns"}
+            assert len(request.kwargs["LoadBalancerArns"]) == 1
+            assert request.kwargs["LoadBalancerArns"][0] in {
+                LEGACY_ALB_ARN,
+                SECOND_LEGACY_ALB_ARN,
+            }
+
+
+class TestGlobalAcceleratorConvergence:
+    def test_register_is_idempotent(self, ga_module):
         handler, _, _ = ga_module
         ga = MagicMock()
         ga.describe_endpoint_group.return_value = {
@@ -662,53 +572,79 @@ class TestRegisterAlbWithGa:
 
         ga.add_endpoints.assert_not_called()
 
-    def test_handles_endpoint_already_exists_race(self, ga_module):
+    def test_scrubs_every_endpoint_except_exact_gateway_alb(self, ga_module):
         handler, _, _ = ga_module
         ga = MagicMock()
-        ga.describe_endpoint_group.return_value = {"EndpointGroup": {"EndpointDescriptions": []}}
-        ga.add_endpoints.side_effect = ClientError(
-            {"Error": {"Code": "EndpointAlreadyExists", "Message": "exists"}},
-            "AddEndpoints",
-        )
+        ga.describe_endpoint_group.return_value = {
+            "EndpointGroup": {
+                "EndpointDescriptions": [
+                    {"EndpointId": PLATFORM_ALB_ARN},
+                    {"EndpointId": LEGACY_ALB_ARN},
+                    {"EndpointId": STALE_ALB_ARN},
+                ]
+            }
+        }
 
-        # Should not raise
-        handler.register_alb_with_ga(ga, ENDPOINT_GROUP_ARN, PLATFORM_ALB_ARN)
+        handler.scrub_stale_ga_endpoints(ga, ENDPOINT_GROUP_ARN, PLATFORM_ALB_ARN)
 
+        assert {
+            request.kwargs["EndpointIdentifiers"][0]["EndpointId"]
+            for request in ga.remove_endpoints.call_args_list
+        } == {LEGACY_ALB_ARN, STALE_ALB_ARN}
 
-# ============================================================================
-# Health Check Configuration Tests
-# ============================================================================
+    def test_stale_endpoint_removal_failure_is_not_treated_as_success(self, ga_module):
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        ga.describe_endpoint_group.return_value = {
+            "EndpointGroup": {
+                "EndpointDescriptions": [
+                    {"EndpointId": PLATFORM_ALB_ARN},
+                    {"EndpointId": STALE_ALB_ARN},
+                ]
+            }
+        }
+        ga.remove_endpoints.side_effect = _client_error("AccessDeniedException", "RemoveEndpoints")
 
+        with pytest.raises(ClientError):
+            handler.scrub_stale_ga_endpoints(ga, ENDPOINT_GROUP_ARN, PLATFORM_ALB_ARN)
 
-class TestEnsureHttpsHealthCheck:
-    def test_updates_tcp_to_https(self, ga_module):
+    def test_enforces_https_and_preserves_only_expected_alb(self, ga_module):
         handler, _, _ = ga_module
         ga = MagicMock()
         ga.describe_endpoint_group.return_value = {
             "EndpointGroup": {
                 "HealthCheckProtocol": "TCP",
-                "HealthCheckPath": "",
+                "HealthCheckPort": 80,
                 "EndpointDescriptions": [
-                    {
-                        "EndpointId": PLATFORM_ALB_ARN,
-                        "Weight": 100,
-                        "ClientIPPreservationEnabled": True,
-                    },
+                    {"EndpointId": PLATFORM_ALB_ARN, "Weight": 100},
+                    {"EndpointId": STALE_ALB_ARN, "Weight": 50},
                 ],
             }
         }
 
-        handler.ensure_https_health_check(ga, ENDPOINT_GROUP_ARN)
+        handler.ensure_https_health_check(
+            ga,
+            ENDPOINT_GROUP_ARN,
+            expected_alb_arn=PLATFORM_ALB_ARN,
+        )
 
-        ga.update_endpoint_group.assert_called_once()
-        kw = ga.update_endpoint_group.call_args.kwargs
-        assert kw["HealthCheckProtocol"] == "HTTPS"
-        assert kw["HealthCheckPath"] == "/api/v1/health"
-        assert kw["HealthCheckPort"] == 443
-        assert kw["HealthCheckIntervalSeconds"] == 30
-        assert kw["ThresholdCount"] == 3
+        ga.update_endpoint_group.assert_called_once_with(
+            EndpointGroupArn=ENDPOINT_GROUP_ARN,
+            HealthCheckPort=443,
+            HealthCheckProtocol="HTTPS",
+            HealthCheckPath="/api/v1/health",
+            HealthCheckIntervalSeconds=30,
+            ThresholdCount=3,
+            EndpointConfigurations=[
+                {
+                    "EndpointId": PLATFORM_ALB_ARN,
+                    "Weight": 100,
+                    "ClientIPPreservationEnabled": True,
+                }
+            ],
+        )
 
-    def test_skips_when_already_https(self, ga_module):
+    def test_skips_health_update_when_contract_already_matches(self, ga_module):
         handler, _, _ = ga_module
         ga = MagicMock()
         ga.describe_endpoint_group.return_value = {
@@ -716,7 +652,6 @@ class TestEnsureHttpsHealthCheck:
                 "HealthCheckProtocol": "HTTPS",
                 "HealthCheckPort": 443,
                 "HealthCheckPath": "/api/v1/health",
-                "EndpointDescriptions": [],
             }
         }
 
@@ -724,61 +659,198 @@ class TestEnsureHttpsHealthCheck:
 
         ga.update_endpoint_group.assert_not_called()
 
-    def test_updates_when_path_differs(self, ga_module):
+    def test_https_enforcement_failure_is_not_treated_as_success(self, ga_module):
         handler, _, _ = ga_module
         ga = MagicMock()
-        ga.describe_endpoint_group.return_value = {
-            "EndpointGroup": {
-                "HealthCheckProtocol": "HTTPS",
-                "HealthCheckPort": 443,
-                "HealthCheckPath": "/healthz",
-                "EndpointDescriptions": [],
-            }
-        }
-
-        handler.ensure_https_health_check(ga, ENDPOINT_GROUP_ARN)
-
-        ga.update_endpoint_group.assert_called_once()
-
-    def test_preserves_existing_endpoints(self, ga_module):
-        handler, _, _ = ga_module
-        ga = MagicMock()
-        ga.describe_endpoint_group.return_value = {
-            "EndpointGroup": {
-                "HealthCheckProtocol": "TCP",
-                "HealthCheckPath": "",
-                "EndpointDescriptions": [
-                    {"EndpointId": "arn:alb/1", "Weight": 100, "ClientIPPreservationEnabled": True},
-                    {"EndpointId": "arn:alb/2", "Weight": 50, "ClientIPPreservationEnabled": False},
-                ],
-            }
-        }
-
-        handler.ensure_https_health_check(ga, ENDPOINT_GROUP_ARN)
-
-        endpoints = ga.update_endpoint_group.call_args.kwargs["EndpointConfigurations"]
-        assert len(endpoints) == 2
-
-    def test_handles_api_error_gracefully(self, ga_module):
-        handler, _, _ = ga_module
-        ga = MagicMock()
-        ga.describe_endpoint_group.side_effect = ClientError(
-            {"Error": {"Code": "EndpointGroupNotFoundException", "Message": "nope"}},
-            "DescribeEndpointGroup",
+        ga.describe_endpoint_group.return_value = {"EndpointGroup": {"HealthCheckProtocol": "TCP"}}
+        ga.update_endpoint_group.side_effect = _client_error(
+            "AccessDeniedException", "UpdateEndpointGroup"
         )
 
-        # Should not raise
-        handler.ensure_https_health_check(ga, ENDPOINT_GROUP_ARN)
+        with pytest.raises(ClientError):
+            handler.ensure_https_health_check(ga, ENDPOINT_GROUP_ARN)
 
 
-# ============================================================================
-# SSM Storage Tests
-# ============================================================================
+class TestRegisterGatewayEndpoint:
+    def _core_patches(self, handler, *, order=None):
+        call_order = order if order is not None else []
+        return (
+            patch.object(
+                handler,
+                "get_k8s_client",
+                return_value=("https://k8s", "token", "/tmp/gco-ca.crt"),
+            ),
+            patch.object(
+                handler,
+                "find_active_alb",
+                return_value=(PLATFORM_ALB_DNS, PLATFORM_ALB_ARN),
+            ),
+            patch.object(
+                handler,
+                "store_alb_hostname_in_ssm",
+                side_effect=lambda *_args: call_order.append("publish"),
+            ),
+            patch.object(
+                handler,
+                "delete_legacy_ingress_resources",
+                side_effect=lambda *_args: call_order.append("cleanup"),
+            ),
+            patch.object(handler, "_remove_temporary_ca_file"),
+        )
+
+    def test_without_ga_always_publishes_then_cleans_legacy(self, ga_module):
+        handler, mock_boto_client, _ = ga_module
+        elb = MagicMock()
+        mock_boto_client.return_value = elb
+        order = []
+        get_k8s, find_alb, publish, cleanup, remove_ca = self._core_patches(handler, order=order)
+        with get_k8s, find_alb, publish as publish_mock, cleanup as cleanup_mock, remove_ca:
+            result = handler.register_ga_endpoint(
+                "test-cluster",
+                "us-east-1",
+                endpoint_group_arn=None,
+                registry_region="eu-west-1",
+                project_name="project",
+            )
+
+        assert result == {"AlbArn": PLATFORM_ALB_ARN, "AlbHostname": PLATFORM_ALB_DNS}
+        assert [request.args[0] for request in mock_boto_client.call_args_list] == ["elbv2"]
+        publish_mock.assert_called_once_with("us-east-1", PLATFORM_ALB_DNS, "eu-west-1", "project")
+        cleanup_mock.assert_called_once()
+        assert order == ["publish", "cleanup"]
+
+    def test_with_ga_registers_scrubs_enforces_then_publishes(self, ga_module):
+        handler, mock_boto_client, _ = ga_module
+        elb = MagicMock()
+        ga = MagicMock()
+        mock_boto_client.side_effect = lambda service, **_kwargs: (
+            ga if service == "globalaccelerator" else elb
+        )
+        order = []
+        get_k8s, find_alb, publish, cleanup, remove_ca = self._core_patches(handler, order=order)
+        with (
+            get_k8s,
+            find_alb,
+            publish,
+            cleanup,
+            remove_ca,
+            patch.object(handler, "register_alb_with_ga") as register,
+            patch.object(handler, "scrub_stale_ga_endpoints") as scrub,
+            patch.object(handler, "ensure_https_health_check") as health,
+        ):
+            handler.register_ga_endpoint(
+                "test-cluster",
+                "us-east-1",
+                endpoint_group_arn=ENDPOINT_GROUP_ARN,
+            )
+
+        register.assert_called_once_with(ga, ENDPOINT_GROUP_ARN, PLATFORM_ALB_ARN)
+        scrub.assert_called_once_with(ga, ENDPOINT_GROUP_ARN, PLATFORM_ALB_ARN)
+        health.assert_called_once_with(
+            ga,
+            ENDPOINT_GROUP_ARN,
+            expected_alb_arn=PLATFORM_ALB_ARN,
+        )
+        assert order == ["publish", "cleanup"]
+
+    def test_ga_convergence_failure_blocks_publication_and_legacy_cleanup(self, ga_module):
+        handler, mock_boto_client, _ = ga_module
+        elb = MagicMock()
+        ga = MagicMock()
+        mock_boto_client.side_effect = lambda service, **_kwargs: (
+            ga if service == "globalaccelerator" else elb
+        )
+        get_k8s, find_alb, publish, cleanup, remove_ca = self._core_patches(handler)
+        with (
+            get_k8s,
+            find_alb,
+            publish as publish_mock,
+            cleanup as cleanup_mock,
+            remove_ca as remove_ca_mock,
+            patch.object(handler, "register_alb_with_ga"),
+            patch.object(
+                handler,
+                "scrub_stale_ga_endpoints",
+                side_effect=RuntimeError("scrub failed"),
+            ),
+            pytest.raises(RuntimeError, match="scrub failed"),
+        ):
+            handler.register_ga_endpoint(
+                "test-cluster",
+                "us-east-1",
+                endpoint_group_arn=ENDPOINT_GROUP_ARN,
+            )
+
+        publish_mock.assert_not_called()
+        cleanup_mock.assert_not_called()
+        remove_ca_mock.assert_called_once_with("/tmp/gco-ca.crt")
+
+    def test_does_not_delete_legacy_if_publication_fails_and_always_unlinks_ca(self, ga_module):
+        handler, mock_boto_client, _ = ga_module
+        mock_boto_client.return_value = MagicMock()
+        with (
+            patch.object(
+                handler,
+                "get_k8s_client",
+                return_value=("https://k8s", "token", "/tmp/gco-ca.crt"),
+            ),
+            patch.object(
+                handler,
+                "find_active_alb",
+                return_value=(PLATFORM_ALB_DNS, PLATFORM_ALB_ARN),
+            ),
+            patch.object(
+                handler,
+                "store_alb_hostname_in_ssm",
+                side_effect=RuntimeError("SSM failed"),
+            ),
+            patch.object(handler, "delete_legacy_ingress_resources") as cleanup,
+            patch.object(handler, "_remove_temporary_ca_file") as remove_ca,
+            pytest.raises(RuntimeError, match="SSM failed"),
+        ):
+            handler.register_ga_endpoint("test-cluster", "us-east-1")
+
+        cleanup.assert_not_called()
+        remove_ca.assert_called_once_with("/tmp/gco-ca.crt")
+
+    def test_unlinks_ca_when_gateway_discovery_times_out(self, ga_module):
+        handler, mock_boto_client, _ = ga_module
+        mock_boto_client.return_value = MagicMock()
+        with (
+            patch.object(
+                handler,
+                "get_k8s_client",
+                return_value=("https://k8s", "token", "/tmp/gco-ca.crt"),
+            ),
+            patch.object(handler, "MAX_WAIT_SECONDS", 0),
+            patch.object(handler, "_remove_temporary_ca_file") as remove_ca,
+            pytest.raises(TimeoutError, match="gco-system/gco-gateway"),
+        ):
+            handler.register_ga_endpoint("test-cluster", "us-east-1")
+
+        remove_ca.assert_called_once_with("/tmp/gco-ca.crt")
 
 
-class TestRegistryRegion:
-    def test_prefers_explicit_registry_region(self, ga_module):
+class TestRegistryPublication:
+    def test_stores_exact_parameter_in_registry_region(self, ga_module):
+        handler, mock_boto_client, _ = ga_module
+        ssm = MagicMock()
+        mock_boto_client.return_value = ssm
+
+        handler.store_alb_hostname_in_ssm("us-east-1", PLATFORM_ALB_DNS, "eu-west-1", "project")
+
+        mock_boto_client.assert_called_once_with("ssm", region_name="eu-west-1")
+        ssm.put_parameter.assert_called_once_with(
+            Name="/project/alb-hostname-us-east-1",
+            Value=PLATFORM_ALB_DNS,
+            Type="String",
+            Overwrite=True,
+            Description="ALB hostname for us-east-1 regional cluster",
+        )
+
+    def test_registry_region_precedes_legacy_alias(self, ga_module):
         handler, _, _ = ga_module
+
         assert (
             handler._get_registry_region(
                 {"RegistryRegion": "eu-west-1", "GlobalRegion": "us-east-2"}
@@ -786,155 +858,119 @@ class TestRegistryRegion:
             == "eu-west-1"
         )
 
-    def test_accepts_legacy_global_region(self, ga_module):
+    def test_temporary_ca_removal_uses_unlink(self, ga_module):
         handler, _, _ = ga_module
-        assert handler._get_registry_region({"GlobalRegion": "ap-southeast-2"}) == (
-            "ap-southeast-2"
-        )
+        with patch.object(handler.os, "unlink") as unlink:
+            handler._remove_temporary_ca_file("/tmp/ca.crt")
+
+        unlink.assert_called_once_with("/tmp/ca.crt")
 
 
-class TestStoreAlbHostnameInSsm:
-    def test_stores_parameter_correctly(self, ga_module):
+class TestDeletePaths:
+    def test_raw_delete_without_ga_still_removes_ssm(self, ga_module):
         handler, mock_boto_client, _ = ga_module
-        mock_ssm = MagicMock()
-        mock_boto_client.return_value = mock_ssm
-
-        handler.store_alb_hostname_in_ssm("us-east-1", PLATFORM_ALB_DNS, "us-east-2", "gco")
-
-        mock_ssm.put_parameter.assert_called_once_with(
-            Name="/gco/alb-hostname-us-east-1",
-            Value=PLATFORM_ALB_DNS,
-            Type="String",
-            Overwrite=True,
-            Description="ALB hostname for us-east-1 regional cluster",
-        )
-
-
-class TestDeleteAlbHostnameFromSsm:
-    def test_handles_parameter_not_found_gracefully(self, ga_module):
-        handler, mock_boto_client, _ = ga_module
-        mock_ssm = MagicMock()
-        mock_ssm.delete_parameter.side_effect = ClientError(
-            {"Error": {"Code": "ParameterNotFound", "Message": "nope"}},
-            "DeleteParameter",
-        )
-        mock_boto_client.return_value = mock_ssm
-
-        # Should not raise
-        handler.delete_alb_hostname_from_ssm("us-east-1", "us-east-2", "gco")
-
-
-# ============================================================================
-# Lambda Handler Tests
-# ============================================================================
-
-
-class TestLambdaHandler:
-    def test_delete_always_succeeds_even_on_error(self, ga_module):
-        handler, _, mock_pool = ga_module
-        event = _make_cfn_event("Delete")
-        context = _make_context()
-
-        with patch.object(handler, "handle_delete", side_effect=Exception("boom")):
-            handler.lambda_handler(event, context)
-
-            pool_instance = mock_pool.return_value
-            pool_instance.request.assert_called_once()
-            call_args = pool_instance.request.call_args
-            body = json.loads(call_args[1]["body"] if "body" in call_args[1] else call_args[0][2])
-            assert body["Status"] == "SUCCESS"
-
-    def test_calls_handle_create_update_on_create(self, ga_module):
-        handler, _, _ = ga_module
-        event = _make_cfn_event("Create")
-        context = _make_context()
-
-        with patch.object(handler, "handle_create_update") as mock_create:
-            handler.lambda_handler(event, context)
-
-            mock_create.assert_called_once_with(
+        event = _make_cfn_event("Delete", endpoint_group=False)
+        with (
+            patch.object(handler, "delete_alb_hostname_from_ssm") as delete_ssm,
+            patch.object(handler, "send_response") as send_response,
+        ):
+            handler.handle_delete(
                 event,
-                context,
+                _context(),
                 event["ResourceProperties"],
-                "ga-reg-test-cluster",
+                "physical-id",
             )
 
-    def test_calls_handle_create_update_on_update(self, ga_module):
-        handler, _, _ = ga_module
-        event = _make_cfn_event("Update")
-        context = _make_context()
+        mock_boto_client.assert_not_called()
+        delete_ssm.assert_called_once_with("us-east-1", "eu-west-1", "gco")
+        send_response.assert_called_once_with(event, ANY, "SUCCESS", {}, "physical-id")
 
-        with patch.object(handler, "handle_create_update") as mock_update:
-            handler.lambda_handler(event, context)
-
-            mock_update.assert_called_once()
-
-
-# ============================================================================
-# Delete-time GA Deregistration Guard Tests (issue #130)
-# ============================================================================
-
-ACCELERATOR_ARN = "arn:aws:globalaccelerator::123:accelerator/abc"
-
-
-class TestAcceleratorArnFromEndpointGroup:
-    """The accelerator ARN is derived from the endpoint-group ARN so the delete
-    guard can poll the accelerator's status without a separate lookup."""
-
-    def test_derives_accelerator_arn(self, ga_module):
-        handler, _, _ = ga_module
-        assert handler._accelerator_arn_from_endpoint_group(ENDPOINT_GROUP_ARN) == ACCELERATOR_ARN
-
-
-class TestRemoveGaEndpoints:
-    """The delete guard must clear every endpoint from the group so Global
-    Accelerator releases its managed ENIs."""
-
-    def test_removes_all_endpoints(self, ga_module):
-        handler, _, _ = ga_module
+    def test_raw_delete_attempts_ssm_even_when_ga_deregistration_fails(self, ga_module):
+        handler, mock_boto_client, _ = ga_module
+        event = _make_cfn_event("Delete")
         ga = MagicMock()
-        ga.describe_endpoint_group.return_value = {
-            "EndpointGroup": {
-                "EndpointDescriptions": [
-                    {"EndpointId": PLATFORM_ALB_ARN},
-                    {"EndpointId": INFERENCE_ALB_ARN},
-                ]
-            }
+        mock_boto_client.return_value = ga
+        with (
+            patch.object(
+                handler,
+                "deregister_alb_from_ga",
+                side_effect=RuntimeError("GA failed"),
+            ) as deregister,
+            patch.object(handler, "delete_alb_hostname_from_ssm") as delete_ssm,
+            patch.object(handler, "send_response"),
+        ):
+            handler.handle_delete(
+                event,
+                _context(),
+                event["ResourceProperties"],
+                "physical-id",
+            )
+
+        deregister.assert_called_once_with(ga, ENDPOINT_GROUP_ARN)
+        delete_ssm.assert_called_once_with("us-east-1", "eu-west-1", "gco")
+
+    def test_provider_delete_without_ga_uses_default_registry_region(self, ga_module):
+        handler, mock_boto_client, _ = ga_module
+        event = {
+            "RequestType": "Delete",
+            "ResourceProperties": {"Region": "us-east-1", "ProjectName": "gco"},
         }
+        with patch.object(handler, "delete_alb_hostname_from_ssm") as delete_ssm:
+            result = handler.on_delete_event(event)
 
-        handler.remove_ga_endpoints(ga, ENDPOINT_GROUP_ARN)
+        mock_boto_client.assert_not_called()
+        delete_ssm.assert_called_once_with("us-east-1", "us-east-2", "gco")
+        assert result["PhysicalResourceId"] == "ga-dereg-us-east-1"
 
-        assert ga.remove_endpoints.call_count == 2
+    def test_provider_create_and_update_remain_noops(self, ga_module):
+        handler, _, _ = ga_module
+        for request_type in ("Create", "Update"):
+            event = {
+                "RequestType": request_type,
+                "PhysicalResourceId": "stable-id",
+                "ResourceProperties": {"Region": "us-east-1"},
+            }
+            with patch.object(handler, "delete_alb_hostname_from_ssm") as delete_ssm:
+                assert handler.on_delete_event(event) == {"PhysicalResourceId": "stable-id"}
+            delete_ssm.assert_not_called()
 
-    def test_no_endpoints_is_a_noop(self, ga_module):
+    def test_deregister_removes_endpoints_then_waits(self, ga_module):
         handler, _, _ = ga_module
         ga = MagicMock()
-        ga.describe_endpoint_group.return_value = {"EndpointGroup": {"EndpointDescriptions": []}}
+        with (
+            patch.object(handler, "remove_ga_endpoints") as remove,
+            patch.object(handler, "wait_for_accelerator_deployed") as wait,
+        ):
+            handler.deregister_alb_from_ga(ga, ENDPOINT_GROUP_ARN)
 
-        handler.remove_ga_endpoints(ga, ENDPOINT_GROUP_ARN)
+        remove.assert_called_once_with(ga, ENDPOINT_GROUP_ARN)
+        wait.assert_called_once_with(ga, ENDPOINT_GROUP_ARN)
+
+    def test_strict_deregister_rejects_failed_deployment_wait(self, ga_module):
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        with (
+            patch.object(handler, "remove_ga_endpoints") as remove,
+            patch.object(handler, "wait_for_accelerator_deployed", return_value=False),
+            pytest.raises(TimeoutError, match="did not reach DEPLOYED"),
+        ):
+            handler.deregister_alb_from_ga(ga, ENDPOINT_GROUP_ARN, strict=True)
+
+        remove.assert_called_once_with(ga, ENDPOINT_GROUP_ARN, strict=True)
+
+    def test_strict_endpoint_cleanup_accepts_absent_endpoint_group(self, ga_module):
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        ga.describe_endpoint_group.side_effect = _client_error(
+            "EndpointGroupNotFoundException",
+            "DescribeEndpointGroup",
+        )
+
+        handler.remove_ga_endpoints(ga, ENDPOINT_GROUP_ARN, strict=True)
 
         ga.remove_endpoints.assert_not_called()
 
-    def test_endpoint_not_found_is_swallowed(self, ga_module):
-        handler, _, _ = ga_module
-        ga = MagicMock()
-        ga.describe_endpoint_group.return_value = {
-            "EndpointGroup": {"EndpointDescriptions": [{"EndpointId": PLATFORM_ALB_ARN}]}
-        }
-        ga.remove_endpoints.side_effect = ClientError(
-            {"Error": {"Code": "EndpointNotFoundException", "Message": "gone"}},
-            "RemoveEndpoints",
-        )
-
-        # Should not raise — the endpoint is already gone, which is success.
-        handler.remove_ga_endpoints(ga, ENDPOINT_GROUP_ARN)
-
-
-class TestWaitForAcceleratorDeployed:
-    """Global Accelerator only releases its managed ENIs once the accelerator
-    redeploys to DEPLOYED; teardown blocks on that so subnet deletion succeeds."""
-
-    def test_returns_true_when_already_deployed(self, ga_module):
+    def test_wait_for_accelerator_uses_derived_arn(self, ga_module):
         handler, _, _ = ga_module
         ga = MagicMock()
         ga.describe_accelerator.return_value = {"Accelerator": {"Status": "DEPLOYED"}}
@@ -942,158 +978,89 @@ class TestWaitForAcceleratorDeployed:
         assert handler.wait_for_accelerator_deployed(ga, ENDPOINT_GROUP_ARN) is True
         ga.describe_accelerator.assert_called_once_with(AcceleratorArn=ACCELERATOR_ARN)
 
-    def test_polls_until_deployed(self, ga_module):
-        handler, _, _ = ga_module
-        ga = MagicMock()
-        ga.describe_accelerator.side_effect = [
-            {"Accelerator": {"Status": "IN_PROGRESS"}},
-            {"Accelerator": {"Status": "DEPLOYED"}},
-        ]
 
-        with patch.object(handler.time, "sleep"):
-            assert handler.wait_for_accelerator_deployed(ga, ENDPOINT_GROUP_ARN) is True
-
-        assert ga.describe_accelerator.call_count == 2
-
-    def test_returns_true_when_accelerator_gone(self, ga_module):
-        handler, _, _ = ga_module
-        ga = MagicMock()
-        ga.describe_accelerator.side_effect = ClientError(
-            {"Error": {"Code": "AcceleratorNotFoundException", "Message": "gone"}},
-            "DescribeAccelerator",
-        )
-
-        # A missing accelerator means there are no ENIs left to release.
-        assert handler.wait_for_accelerator_deployed(ga, ENDPOINT_GROUP_ARN) is True
-
-    def test_returns_false_on_other_client_error(self, ga_module):
-        handler, _, _ = ga_module
-        ga = MagicMock()
-        ga.describe_accelerator.side_effect = ClientError(
-            {"Error": {"Code": "AccessDeniedException", "Message": "no"}},
-            "DescribeAccelerator",
-        )
-
-        assert handler.wait_for_accelerator_deployed(ga, ENDPOINT_GROUP_ARN) is False
-
-    def test_returns_false_on_timeout(self, ga_module):
-        handler, _, _ = ga_module
-        ga = MagicMock()
-        ga.describe_accelerator.return_value = {"Accelerator": {"Status": "IN_PROGRESS"}}
-
-        # A zero budget exits before the first poll — exercises the timeout path
-        # without sleeping.
-        assert handler.wait_for_accelerator_deployed(ga, ENDPOINT_GROUP_ARN, timeout_seconds=0) is (
-            False
-        )
-
-
-class TestDeregisterAlbFromGa:
-    """The deregistration helper removes endpoints and then waits for the ENIs
-    to be released, in that order."""
-
-    def test_removes_then_waits(self, ga_module):
-        handler, _, _ = ga_module
-        ga = MagicMock()
-
-        with (
-            patch.object(handler, "remove_ga_endpoints") as mock_remove,
-            patch.object(handler, "wait_for_accelerator_deployed") as mock_wait,
-        ):
-            handler.deregister_alb_from_ga(ga, ENDPOINT_GROUP_ARN)
-
-        mock_remove.assert_called_once_with(ga, ENDPOINT_GROUP_ARN)
-        mock_wait.assert_called_once_with(ga, ENDPOINT_GROUP_ARN)
-
-
-class TestOnDeleteEvent:
-    """The cr.Provider entrypoint for the delete-time teardown guard."""
-
-    def _delete_event(self):
-        return {
-            "RequestType": "Delete",
-            "PhysicalResourceId": "ga-dereg-us-east-1",
-            "ResourceProperties": {
-                "EndpointGroupArn": ENDPOINT_GROUP_ARN,
-                "Region": "us-east-1",
-                "RegistryRegion": "eu-west-1",
-                "ProjectName": "gco",
-            },
-        }
-
-    def test_delete_deregisters_alb_and_cleans_registry(self, ga_module):
-        handler, _, _ = ga_module
-
-        with (
-            patch.object(handler, "deregister_alb_from_ga") as mock_dereg,
-            patch.object(handler, "delete_alb_hostname_from_ssm") as mock_delete_ssm,
-        ):
-            result = handler.on_delete_event(self._delete_event(), None)
-
-        mock_dereg.assert_called_once()
-        # Called with (ga_client, endpoint_group_arn).
-        assert mock_dereg.call_args[0][1] == ENDPOINT_GROUP_ARN
-        mock_delete_ssm.assert_called_once_with("us-east-1", "eu-west-1", "gco")
-        assert result["PhysicalResourceId"] == "ga-dereg-us-east-1"
-
-    def test_create_is_noop(self, ga_module):
+class TestInvocationContracts:
+    def test_step_functions_task_allows_missing_endpoint_group(self, ga_module):
         handler, _, _ = ga_module
         event = {
-            "RequestType": "Create",
-            "ResourceProperties": {"EndpointGroupArn": ENDPOINT_GROUP_ARN, "Region": "us-east-1"},
+            "Action": "Register",
+            "ClusterName": "test-cluster",
+            "Region": "us-east-1",
+            "RegistryRegion": "eu-west-1",
+            "ProjectName": "project",
         }
+        expected = {"AlbArn": PLATFORM_ALB_ARN, "AlbHostname": PLATFORM_ALB_DNS}
+        with patch.object(handler, "register_ga_endpoint", return_value=expected) as register:
+            assert handler.handle_task(event) == expected
 
-        with patch.object(handler, "deregister_alb_from_ga") as mock_dereg:
-            result = handler.on_delete_event(event, None)
+        register.assert_called_once_with(
+            cluster_name="test-cluster",
+            region="us-east-1",
+            endpoint_group_arn=None,
+            registry_region="eu-west-1",
+            project_name="project",
+        )
 
-        mock_dereg.assert_not_called()
-        assert "PhysicalResourceId" in result
-
-    def test_update_is_noop(self, ga_module):
-        handler, _, _ = ga_module
+    def test_step_functions_cleanup_strictly_fences_registry_and_ga(self, ga_module):
+        handler, mock_boto_client, _ = ga_module
+        ga = MagicMock()
+        mock_boto_client.return_value = ga
         event = {
-            "RequestType": "Update",
-            "PhysicalResourceId": "pid",
-            "ResourceProperties": {"EndpointGroupArn": ENDPOINT_GROUP_ARN},
+            "Action": "cleanup_gateway_endpoint",
+            "Region": "us-east-1",
+            "RegistryRegion": "eu-west-1",
+            "ProjectName": "project",
+            "EndpointGroupArn": ENDPOINT_GROUP_ARN,
+        }
+        with (
+            patch.object(handler, "delete_alb_hostname_from_ssm") as delete_ssm,
+            patch.object(handler, "deregister_alb_from_ga") as deregister,
+        ):
+            result = handler.handle_task(event)
+
+        delete_ssm.assert_called_once_with(
+            "us-east-1",
+            "eu-west-1",
+            "project",
+            strict=True,
+        )
+        mock_boto_client.assert_called_once_with(
+            "globalaccelerator",
+            region_name="us-west-2",
+        )
+        deregister.assert_called_once_with(ga, ENDPOINT_GROUP_ARN, strict=True)
+        assert result == {
+            "RegistryParameterDeleted": True,
+            "GlobalAcceleratorDeregistered": True,
         }
 
-        with patch.object(handler, "deregister_alb_from_ga") as mock_dereg:
-            result = handler.on_delete_event(event, None)
-
-        mock_dereg.assert_not_called()
-        assert result["PhysicalResourceId"] == "pid"
-
-    def test_delete_without_endpoint_group_still_cleans_registry(self, ga_module):
+    def test_lambda_dispatches_step_functions_action(self, ga_module):
         handler, _, _ = ga_module
-        event = {
-            "RequestType": "Delete",
-            "ResourceProperties": {
-                "Region": "us-east-1",
-                "RegistryRegion": "eu-west-1",
-                "ProjectName": "gco",
-            },
-        }
+        event = {"Action": "Register"}
+        with patch.object(handler, "handle_task", return_value={"ok": True}) as task:
+            assert handler.lambda_handler(event, MagicMock()) == {"ok": True}
 
-        with (
-            patch.object(handler, "deregister_alb_from_ga") as mock_dereg,
-            patch.object(handler, "delete_alb_hostname_from_ssm") as mock_delete_ssm,
-        ):
-            result = handler.on_delete_event(event, None)
+        task.assert_called_once_with(event)
 
-        mock_dereg.assert_not_called()
-        mock_delete_ssm.assert_called_once_with("us-east-1", "eu-west-1", "gco")
-        assert result["PhysicalResourceId"].startswith("ga-dereg")
-
-    def test_delete_never_raises_on_error(self, ga_module):
+    def test_cloudformation_create_preserves_stable_physical_id(self, ga_module):
         handler, _, _ = ga_module
+        event = _make_cfn_event("Create", endpoint_group=False)
+        with patch.object(handler, "handle_create_update") as create:
+            handler.lambda_handler(event, _context())
 
-        # Even if deregistration blows up, the guard must return success so the
-        # stack delete is never wedged in DELETE_FAILED by the guard itself.
-        with (
-            patch.object(handler, "deregister_alb_from_ga", side_effect=Exception("boom")),
-            patch.object(handler, "delete_alb_hostname_from_ssm") as mock_delete_ssm,
-        ):
-            result = handler.on_delete_event(self._delete_event(), None)
+        create.assert_called_once_with(
+            event,
+            ANY,
+            event["ResourceProperties"],
+            "ga-reg-test-cluster",
+        )
 
-        mock_delete_ssm.assert_called_once_with("us-east-1", "eu-west-1", "gco")
-        assert result["PhysicalResourceId"] == "ga-dereg-us-east-1"
+    def test_cloudformation_delete_always_responds_success_on_unhandled_error(self, ga_module):
+        handler, _, mock_pool = ga_module
+        event = _make_cfn_event("Delete", endpoint_group=False)
+        with patch.object(handler, "handle_delete", side_effect=RuntimeError("boom")):
+            handler.lambda_handler(event, _context())
+
+        request = mock_pool.return_value.request.call_args
+        response_body = json.loads(request.kwargs["body"])
+        assert response_body["Status"] == "SUCCESS"

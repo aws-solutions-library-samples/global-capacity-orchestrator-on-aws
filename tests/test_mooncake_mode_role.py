@@ -117,7 +117,7 @@ def _reconcile_workers(mode: str, prefill: int, decode: int, protocol: str):
     monitor._ensure_mooncake_configmap = lambda *_a, **_k: None
     monitor._create_pd_proxy = lambda *_a, **_k: None
     monitor._create_service = lambda *_a, **_k: None
-    monitor._ensure_ingress = lambda *_a, **_k: None
+    monitor._ensure_legacy_endpoint_ingress_absent = lambda *_a, **_k: None
     monitor._create_role_hpa = lambda *_a, **_k: None
     monitor._report_role_status = lambda *_a, **_k: "creating"
 
@@ -226,7 +226,7 @@ def test_role_pods_use_spec_bootstrap_base_port_override() -> None:
     monitor._ensure_mooncake_configmap = lambda *_a, **_k: None
     monitor._create_pd_proxy = lambda *_a, **_k: None
     monitor._create_service = lambda *_a, **_k: None
-    monitor._ensure_ingress = lambda *_a, **_k: None
+    monitor._ensure_legacy_endpoint_ingress_absent = lambda *_a, **_k: None
     monitor._create_role_hpa = lambda *_a, **_k: None
     monitor._report_role_status = lambda *_a, **_k: "creating"
 

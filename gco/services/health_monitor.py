@@ -631,7 +631,7 @@ class HealthMonitor:
         await asyncio.to_thread(self._sync_alb_registration)
 
     def _sync_alb_registration(self) -> None:
-        """Ensure the SSM ALB hostname parameter matches the actual ALB.
+        """Ensure the SSM hostname matches the platform Gateway address.
 
         Every replica renews or checks the leader Lease on each health loop;
         only the leader performs reconciliation, at most once every 5 minutes.
@@ -652,16 +652,25 @@ class HealthMonitor:
         self._last_alb_sync = now
 
         try:
-            ingress = self.networking_v1.read_namespaced_ingress(
-                "gco-ingress",
-                "gco-system",
+            gateway = self.metrics_v1beta1.get_namespaced_custom_object(
+                group="gateway.networking.k8s.io",
+                version="v1",
+                namespace="gco-system",
+                plural="gateways",
+                name="gco-gateway",
                 _request_timeout=self._k8s_timeout,
             )
-            lb_ingress = ingress.status.load_balancer.ingress
-            if not lb_ingress:
-                return
-
-            current_hostname = lb_ingress[0].hostname
+            addresses = gateway.get("status", {}).get("addresses", [])
+            current_hostname = next(
+                (
+                    str(address.get("value", "")).strip()
+                    for address in addresses
+                    if isinstance(address, dict)
+                    and address.get("type", "Hostname") == "Hostname"
+                    and str(address.get("value", "")).strip()
+                ),
+                None,
+            )
             if not current_hostname:
                 return
 
@@ -683,7 +692,7 @@ class HealthMonitor:
 
             if stored_hostname != current_hostname:
                 logger.warning(
-                    "ALB hostname mismatch: SSM=%s, actual=%s. Updating SSM.",
+                    "ALB hostname mismatch: SSM=%s, Gateway=%s. Updating SSM.",
                     stored_hostname,
                     current_hostname,
                 )
@@ -702,7 +711,7 @@ class HealthMonitor:
                 logger.info("Updated SSM parameter %s to %s", param_name, current_hostname)
 
         except Exception as exc:
-            logger.warning("ALB sync check failed (non-fatal): %s", exc)
+            logger.warning("Gateway ALB sync check failed (non-fatal): %s", exc)
 
 
 def create_health_monitor_from_env() -> HealthMonitor:

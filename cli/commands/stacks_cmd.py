@@ -1252,11 +1252,23 @@ def addons_install(config: Any, region: Any, all_regions: bool) -> None:
 def _addons_install_one(formatter: Any, project: str, region: str) -> bool:
     """Start an add-on install for a single region. Returns True on success."""
     import boto3
+    from botocore.exceptions import ClientError
 
     input_param = f"/{project}/addons/{region}/_input"
+    fence_param = f"/{project}/addons/{region}/_teardown"
 
     try:
         ssm = boto3.client("ssm", region_name=region)
+        try:
+            ssm.get_parameter(Name=fence_param)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ParameterNotFound":
+                raise
+        else:
+            formatter.print_error(
+                f"[{region}] Add-on teardown is active ({fence_param}); refusing to start."
+            )
+            return False
         execution_input = ssm.get_parameter(Name=input_param)["Parameter"]["Value"]
     except Exception as e:
         formatter.print_error(

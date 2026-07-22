@@ -700,12 +700,22 @@ class TestInferenceMonitor:
             "spec": {"image": "img:v1", "replicas": 2},
             "namespace": "gco-inference",
         }
-        result = await monitor._reconcile_endpoint(endpoint)
+        with patch("gco.services.inference_monitor.client.CustomObjectsApi") as custom_api:
+            result = await monitor._reconcile_endpoint(endpoint)
         assert result is not None
         assert result["action"] == "create"
         monitor.apps_v1.create_namespaced_deployment.assert_called_once()
-        # Service created in inference namespace
+
+        # Endpoint reconciliation creates only an internal ClusterIP Service.
         monitor.core_v1.create_namespaced_service.assert_called_once()
+        service = monitor.core_v1.create_namespaced_service.call_args.args[1]
+        assert service.spec.type == "ClusterIP"
+
+        # The shared gco-system/gco-gateway HTTPRoute owns /inference; the
+        # endpoint controller creates no Ingress, Gateway, or HTTPRoute.
+        monitor.networking_v1.create_namespaced_ingress.assert_not_called()
+        monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
+        custom_api.return_value.create_namespaced_custom_object.assert_not_called()
         mock_store.update_region_status.assert_called()
 
     @pytest.mark.asyncio

@@ -1746,6 +1746,130 @@ class TestGCOAWSClientGetHealth:
 class TestGCOAWSClientRetryLogic:
     """Tests for retry logic in make_authenticated_request."""
 
+    def test_default_retries_504_and_succeeds(self):
+        """The default read-only retry budget handles a transient 504."""
+        from cli.aws_client import ApiEndpoint, GCOAWSClient
+
+        with patch("cli.aws_client.get_config") as mock_config:
+            mock_config.return_value = MagicMock(cache_ttl_seconds=300)
+
+            with (
+                patch("boto3.Session") as mock_session,
+                patch("requests.request") as mock_request,
+                patch("cli.aws_client.SigV4Auth"),
+                patch("time.sleep"),
+            ):
+                mock_session.return_value.get_credentials.return_value = MagicMock()
+                mock_504 = MagicMock(status_code=504)
+                mock_200 = MagicMock(status_code=200)
+                mock_request.side_effect = [mock_504, mock_200]
+
+                client = GCOAWSClient()
+                client._api_endpoint_cache = ApiEndpoint(
+                    url="https://api.example.com/prod",
+                    region="us-east-1",
+                    api_id="test",
+                )
+                client._cache_timestamp = time.time()
+
+                response = client.make_authenticated_request("GET", "/api/v1/health")
+
+                assert response is mock_200
+                assert mock_request.call_count == 2
+
+    @pytest.mark.parametrize("max_attempts", [True, False, 0, -1, 1.5, "3"])
+    @pytest.mark.parametrize("entrypoint", ["call_api", "make_authenticated_request"])
+    def test_invalid_max_attempts_rejected(self, entrypoint, max_attempts):
+        """Both public request entry points reject invalid attempt limits."""
+        from cli.aws_client import GCOAWSClient
+
+        with (
+            patch("cli.aws_client.get_config") as mock_config,
+            patch("boto3.Session"),
+            patch("requests.request") as mock_request,
+        ):
+            mock_config.return_value = MagicMock(cache_ttl_seconds=300)
+            client = GCOAWSClient()
+
+            with pytest.raises(ValueError, match="max_attempts must be a positive integer"):
+                getattr(client, entrypoint)(
+                    "GET",
+                    "/api/v1/health",
+                    max_attempts=max_attempts,
+                )
+
+            mock_request.assert_not_called()
+
+    @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+    def test_mutating_methods_never_replay(self, method):
+        """An explicit read retry budget cannot enable mutating replay."""
+        from cli.aws_client import ApiEndpoint, GCOAWSClient
+
+        with patch("cli.aws_client.get_config") as mock_config:
+            mock_config.return_value = MagicMock(cache_ttl_seconds=300)
+
+            with (
+                patch("boto3.Session") as mock_session,
+                patch("requests.request") as mock_request,
+                patch("cli.aws_client.SigV4Auth"),
+            ):
+                mock_session.return_value.get_credentials.return_value = MagicMock()
+                mock_504 = MagicMock(status_code=504)
+                mock_200 = MagicMock(status_code=200)
+                mock_request.side_effect = [mock_504, mock_200]
+
+                client = GCOAWSClient()
+                client._api_endpoint_cache = ApiEndpoint(
+                    url="https://api.example.com/prod",
+                    region="us-east-1",
+                    api_id="test",
+                )
+                client._cache_timestamp = time.time()
+
+                response = client.make_authenticated_request(
+                    method,
+                    "/api/v1/manifests",
+                    max_attempts=3,
+                )
+
+                assert response is mock_504
+                assert mock_request.call_count == 1
+
+    def test_403_refresh_respects_max_attempts(self):
+        """Credential refresh never adds a request beyond the selected budget."""
+        from cli.aws_client import ApiEndpoint, GCOAWSClient
+
+        with patch("cli.aws_client.get_config") as mock_config:
+            mock_config.return_value = MagicMock(cache_ttl_seconds=300)
+
+            with (
+                patch("boto3.Session") as mock_session,
+                patch("requests.request") as mock_request,
+                patch("cli.aws_client.SigV4Auth"),
+            ):
+                mock_session.return_value.get_credentials.return_value = MagicMock()
+                mock_403 = MagicMock(status_code=403)
+                mock_200 = MagicMock(status_code=200)
+                mock_request.side_effect = [mock_403, mock_200]
+
+                client = GCOAWSClient()
+                client._api_endpoint_cache = ApiEndpoint(
+                    url="https://api.example.com/prod",
+                    region="us-east-1",
+                    api_id="test",
+                )
+                client._cache_timestamp = time.time()
+
+                response = client.make_authenticated_request(
+                    "GET",
+                    "/api/v1/health",
+                    max_attempts=1,
+                )
+
+                assert response is mock_403
+                assert mock_request.call_count == 1
+                assert mock_session.call_count == 1
+
     def test_retry_on_503(self):
         """Test that 503 responses trigger retries."""
         from cli.aws_client import ApiEndpoint, GCOAWSClient
@@ -1931,6 +2055,47 @@ class TestGCOAWSClientRetryLogic:
 
 class TestGCOAWSClientCallApi:
     """Tests for call_api method with improved error handling."""
+
+    def test_max_attempts_one_surfaces_first_504(self):
+        """call_api forwards a one-attempt budget and surfaces the first 504."""
+        from cli.aws_client import ApiEndpoint, GCOAWSClient
+
+        with patch("cli.aws_client.get_config") as mock_config:
+            mock_config.return_value = MagicMock(cache_ttl_seconds=300)
+
+            with (
+                patch("boto3.Session") as mock_session,
+                patch("requests.request") as mock_request,
+                patch("cli.aws_client.SigV4Auth"),
+            ):
+                mock_session.return_value.get_credentials.return_value = MagicMock()
+                mock_504 = MagicMock(
+                    status_code=504,
+                    ok=False,
+                    reason="Gateway Timeout",
+                    text="",
+                )
+                mock_504.json.return_value = {}
+                mock_200 = MagicMock(status_code=200, ok=True)
+                mock_200.json.return_value = {"data": "test"}
+                mock_request.side_effect = [mock_504, mock_200]
+
+                client = GCOAWSClient()
+                client._api_endpoint_cache = ApiEndpoint(
+                    url="https://api.example.com/prod",
+                    region="us-east-1",
+                    api_id="test",
+                )
+                client._cache_timestamp = time.time()
+
+                with pytest.raises(RuntimeError, match="504 Gateway Timeout"):
+                    client.call_api(
+                        "GET",
+                        "/api/v1/test",
+                        max_attempts=1,
+                    )
+
+                assert mock_request.call_count == 1
 
     def test_call_api_success(self):
         """Test successful call_api."""

@@ -2,28 +2,27 @@
 
 A disaggregated (or ``both``-mode) endpoint is reached through a lightweight
 proxy that runs the residency check and coordinates the prefill and decode
-pods. The front door has two enforced boundaries:
+pods. The shared ``gco-system/gco-gateway`` HTTPRoute sends ``/inference`` to
+``gco-system/inference-proxy``; that authenticated platform proxy then reaches
+the endpoint's internal ClusterIP Service. The endpoint front has two enforced
+boundaries:
 
 - The proxy Service resolves to proxy pods alone. Its selector carries the
   ``{name}-proxy`` app label and proxy role marker, so it never fans traffic out
   to prefill or decode role pods in the same namespace.
-- There is no endpoint-specific Ingress. The shared ``gco-system/gco-ingress``
-  sends every ``/inference`` request to the dedicated authenticated inference
-  proxy, which validates the API proxy envelope before forwarding an allowlisted
-  serving path to the internal ClusterIP Service. Reconciliation removes both
-  historical direct-Ingress names.
+- There is no endpoint-specific Ingress, Gateway, or HTTPRoute. Reconciliation
+  only removes the two historical direct-Ingress names.
 
-These examples inspect the Service and cleanup calls emitted by the monitor and
-the checked-in shared Ingress manifest that defines the authenticated boundary.
+These examples inspect the ClusterIP Services and cleanup calls emitted by the
+monitor; the shared platform Gateway API resources are outside endpoint
+reconciliation.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-import yaml
 
 
 def _make_monitor(region: str = "us-east-1"):
@@ -71,6 +70,7 @@ def test_proxy_service_selects_only_proxy_pods(monitor):
     namespace, service = args[0], args[1]
     assert namespace == "gco-inference"
 
+    assert service.spec.type == "ClusterIP"
     selector = service.spec.selector
     assert selector == {
         "app": "my-endpoint-proxy",
@@ -91,24 +91,27 @@ def test_proxy_service_selects_only_proxy_pods(monitor):
     assert len(service.spec.ports) == 1
 
 
-def test_shared_ingress_routes_inference_through_dedicated_proxy():
-    """The one public inference prefix terminates at the dedicated proxy API."""
-    manifest_path = (
-        Path(__file__).parents[1]
-        / "lambda"
-        / "kubectl-applier-simple"
-        / "manifests"
-        / "11-ingress.yaml"
-    )
-    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-    paths = manifest["spec"]["rules"][0]["http"]["paths"]
-    inference_paths = [path for path in paths if path["path"] == "/inference"]
+def test_endpoint_services_do_not_create_endpoint_routes(monitor):
+    """Endpoint fronts stay ClusterIP-only and leave shared routing untouched."""
+    with patch("gco.services.inference_monitor.client.CustomObjectsApi") as custom_api:
+        monitor._create_service("plain", "gco-inference", {"port": 8000})
+        monitor._create_proxy_service("split-proxy", "gco-inference")
+        monitor._create_role_service("split", "gco-inference", "prefill", 8000)
 
-    assert len(inference_paths) == 1
-    route = inference_paths[0]
-    assert route["pathType"] == "Prefix"
-    assert route["backend"]["service"]["name"] == "inference-proxy"
-    assert route["backend"]["service"]["port"]["number"] == 80
+    services = [call.args[1] for call in monitor.core_v1.create_namespaced_service.call_args_list]
+    assert {service.metadata.name for service in services} == {
+        "plain",
+        "split-proxy",
+        "split-prefill",
+    }
+    assert all(service.spec.type == "ClusterIP" for service in services)
+
+    # ``gco-system/gco-gateway`` and its shared ``/inference`` HTTPRoute are
+    # platform resources; endpoint reconciliation creates neither Gateway API
+    # objects nor a replacement Ingress.
+    monitor.networking_v1.create_namespaced_ingress.assert_not_called()
+    monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
+    custom_api.return_value.create_namespaced_custom_object.assert_not_called()
 
 
 def test_full_proxy_materialization_keeps_internal_service_scoped(monitor):
@@ -133,7 +136,8 @@ def test_full_proxy_materialization_keeps_internal_service_scoped(monitor):
     admin_secret.data = {"ADMIN_API_KEY": "c2VjcmV0"}  # base64 of "secret"
     monitor.core_v1.read_namespaced_secret.return_value = admin_secret
 
-    monitor._create_pd_proxy("my-endpoint", "gco-inference", spec, {})
+    with patch("gco.services.inference_monitor.client.CustomObjectsApi") as custom_api:
+        monitor._create_pd_proxy("my-endpoint", "gco-inference", spec, {})
 
     # The proxy is reachable only as an in-cluster Service.
     svc_args, _ = monitor.core_v1.create_namespaced_service.call_args
@@ -148,6 +152,7 @@ def test_full_proxy_materialization_keeps_internal_service_scoped(monitor):
     # by older releases.
     monitor.networking_v1.create_namespaced_ingress.assert_not_called()
     monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
+    custom_api.return_value.create_namespaced_custom_object.assert_not_called()
     deleted = [
         call.args[:2] for call in monitor.networking_v1.delete_namespaced_ingress.call_args_list
     ]
@@ -168,6 +173,7 @@ def test_role_service_resolves_only_that_role(monitor):
     args, _ = monitor.core_v1.create_namespaced_service.call_args
     svc = args[1]
     assert svc.metadata.name == "ep-prefill"
+    assert svc.spec.type == "ClusterIP"
     assert svc.spec.selector == {"app": "ep-prefill"}
     assert svc.spec.ports[0].port == 8000
     assert svc.spec.ports[0].target_port == 8000

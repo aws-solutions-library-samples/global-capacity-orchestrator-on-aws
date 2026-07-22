@@ -9,7 +9,9 @@ Kubernetes resources. Follows a GitOps-style reconciliation pattern:
 
 The monitor:
 - Creates and reconciles Deployments, ClusterIP Services, and optional autoscalers
-- Removes legacy endpoint-specific Ingresses so traffic stays on the authenticated route
+- Leaves public routing on the shared ``gco-system/gco-gateway`` HTTPRoute:
+  ``/inference`` -> ``gco-system/inference-proxy``
+- Removes legacy endpoint-specific Ingresses so upgrades cannot retain a bypass
 - Updates existing deployments when spec changes
 - Scales deployments up/down
 - Tears down resources when endpoints are deleted
@@ -787,12 +789,13 @@ class InferenceMonitor:
         self._k8s_timeout = int(os.environ.get("K8S_API_TIMEOUT", "30"))
 
         # Health watchdog: tracks when each endpoint first became unready.
-        # Inference traffic uses the shared authenticated proxy, so model
-        # readiness never mutates ALB rules. Once this threshold is exceeded,
-        # reconciliation emits an explicit degraded-state warning while the
-        # proxy continues returning 503 until a replica becomes ready.
+        # Inference traffic enters through the shared ``gco-system/gco-gateway``
+        # HTTPRoute at ``/inference`` and then ``gco-system/inference-proxy``, so
+        # model readiness never mutates shared Gateway API resources. Once this
+        # threshold is exceeded, reconciliation emits an explicit degraded-state
+        # warning while the proxy continues returning 503 until a replica is ready.
         self._unready_since: dict[str, datetime] = {}
-        self._ingress_removal_threshold = int(
+        self._unhealthy_threshold_seconds = int(
             os.environ.get("INFERENCE_UNHEALTHY_THRESHOLD_SECONDS", "300")
         )  # 5 minutes default
 
@@ -1067,7 +1070,7 @@ class InferenceMonitor:
             logger.info("Creating endpoint %s in %s", name, self.region)
             self._create_deployment(name, namespace, spec)
             self._create_service(name, namespace, spec)
-            self._update_ingress_rule(name, namespace, spec, endpoint)
+            self._cleanup_legacy_endpoint_ingress(name, namespace)
             if spec.get("autoscaling", {}).get("enabled"):
                 self._create_or_update_hpa(name, namespace, spec)
             self.store.update_region_status(
@@ -1082,14 +1085,15 @@ class InferenceMonitor:
         # absence of any historical endpoint-specific direct Ingress.
         self._ensure_service(name, namespace, spec)
 
-        # Inference traffic now flows through the authenticated manifest API
-        # proxy. Remove any legacy direct endpoint Ingress on every pass before
-        # evaluating readiness so an upgrade cannot retain an auth bypass.
+        # Public traffic follows ``gco-system/gco-gateway``'s shared
+        # ``/inference`` HTTPRoute to ``gco-system/inference-proxy``, which then
+        # reaches this endpoint's ClusterIP Service. Remove any historical direct
+        # endpoint Ingress before evaluating readiness so upgrades retain no bypass.
         desired_replicas = spec.get("replicas", 1)
         current_replicas = deployment.spec.replicas or 1
         ready_replicas = deployment.status.ready_replicas or 0
 
-        self._ensure_ingress(name, namespace, spec, endpoint)
+        self._ensure_legacy_endpoint_ingress_absent(name, namespace)
         self._check_health_watchdog(
             name, namespace, ready_replicas, desired_replicas, spec, endpoint
         )
@@ -1363,9 +1367,9 @@ class InferenceMonitor:
 
         Returns ``None`` when the spec carries no ``mooncake`` block, signalling
         the caller to take the single-Deployment path: one Deployment at the
-        configured replica count, one Service, and one Ingress, with no role
-        split, proxy, autoscaler, or shared-master dependency. An endpoint that
-        looks exactly as it does today therefore flows through unchanged.
+        configured replica count and one internal ClusterIP Service, with no role
+        split, proxy, autoscaler, shared-master dependency, endpoint Ingress,
+        Gateway, or HTTPRoute. The shared platform route remains unchanged.
 
         With a ``mooncake`` block present, the topology is materialized in
         dependency order, and the shared ConfigMap and master are laid down
@@ -1390,8 +1394,9 @@ class InferenceMonitor:
            store mode.
         6. Materialize each present role's autoscaler when autoscaling is on.
         7. Front disaggregated and both modes with the proxy and its internal
-           Service; give store mode an internal Service. Public traffic always
-           traverses the authenticated manifest API inference proxy.
+           ClusterIP Service; give store mode an internal ClusterIP Service.
+           Public traffic remains on the shared ``gco-system/gco-gateway``
+           HTTPRoute from ``/inference`` to ``gco-system/inference-proxy``.
         8. Write the role-keyed region status.
 
         Returns:
@@ -1480,7 +1485,7 @@ class InferenceMonitor:
                 }
         else:
             self._create_service(name, ns, spec)
-            self._ensure_ingress(name, ns, spec, endpoint)
+            self._ensure_legacy_endpoint_ingress_absent(name, ns)
 
         # Step 8: role-keyed status.
         state = self._report_role_status(name, ns, mooncake, region_services)
@@ -2400,18 +2405,19 @@ class InferenceMonitor:
         container_env = [client.V1EnvVar(name=k, value=str(v)) for k, v in env_vars.items()]
 
         # Inject --root-path for servers that support it (vLLM, TGI).
-        # This tells the server to mount its API at /inference/{name}.
-        # We append to existing args (from --extra-args) rather than replacing them.
-        ingress_prefix = f"/inference/{name}"
+        # This tells the server to mount its API at /inference/{name} behind the
+        # shared platform route. We append to existing args (from --extra-args)
+        # rather than replacing them.
+        serving_prefix = f"/inference/{name}"
         root_path_images = ("vllm", "text-generation-inference", "tgi")
         image_lower = image.lower()
         if not command and any(tag in image_lower for tag in root_path_images):
             if args:
                 # Append --root-path to user-provided args if not already present
                 if "--root-path" not in args:
-                    args = list(args) + ["--root-path", ingress_prefix]
+                    args = list(args) + ["--root-path", serving_prefix]
             else:
-                args = ["--root-path", ingress_prefix]
+                args = ["--root-path", serving_prefix]
 
         # Append caller-supplied arguments (for example the rendered
         # --kv-transfer-config) after any root-path injection so they survive
@@ -2528,7 +2534,7 @@ class InferenceMonitor:
 
         # Probe path depends on whether the server handles the prefix
         uses_root_path = args is not None and "--root-path" in args
-        probe_health = f"{ingress_prefix}{health_path}" if uses_root_path else health_path
+        probe_health = f"{serving_prefix}{health_path}" if uses_root_path else health_path
 
         container = client.V1Container(
             name="inference",
@@ -2849,10 +2855,10 @@ class InferenceMonitor:
         runs the residency check and dispatches each request to the prefill and
         decode pods. It materializes a ConfigMap, a proxy Deployment with at
         least one replica, and a Service whose selector matches only the proxy
-        pods. The shared ``gco-system`` Ingress routes public requests through
-        the authenticated manifest API, which then reaches this internal
-        Service; endpoint-specific Ingresses are removed as an unsafe legacy
-        path.
+        pods. The shared HTTPRoute attached to ``gco-system/gco-gateway`` sends
+        ``/inference`` to ``gco-system/inference-proxy``; that authenticated
+        platform proxy then reaches this internal ClusterIP Service.
+        Endpoint-specific Ingresses are removed as an unsafe legacy path.
 
         Before those resources are created, a user-named
         ``mooncake.proxy.admin_api_key_secret`` is verified to contain a usable
@@ -2863,15 +2869,16 @@ class InferenceMonitor:
         command argument.
 
         Creation is idempotent at the API boundary: an already-present Deployment
-        or Service is left in place, and historical direct Ingresses are deleted
-        if present.
+        or ClusterIP Service is left in place, and historical direct Ingresses are
+        deleted if present. No endpoint Gateway or HTTPRoute is created.
 
         Args:
             name: The endpoint name.
             ns: The namespace to materialize into.
             spec: The endpoint spec; ``spec["mooncake"]`` supplies the proxy
                 image and behavior.
-            endpoint: The endpoint record, used for any ingress overrides.
+            endpoint: The endpoint record. Legacy per-endpoint routing metadata
+                is ignored because the shared platform HTTPRoute owns the prefix.
 
         Raises:
             AdminApiKeySecretError: If the admin key Secret is missing, names no
@@ -2881,6 +2888,7 @@ class InferenceMonitor:
         mooncake = spec.get("mooncake") or {}
         proxy = mooncake.get("proxy") or {}
         proxy_name = f"{name}-proxy"
+        del endpoint  # Per-endpoint routing metadata is legacy and intentionally ignored.
 
         # The proxy fronts a privileged admin path, so it never starts without a
         # usable admin key. When the spec names a Secret it must already exist
@@ -3006,7 +3014,7 @@ class InferenceMonitor:
                 raise
 
         self._create_proxy_service(proxy_name, ns)
-        self._update_proxy_ingress(name, proxy_name, ns, endpoint)
+        self._cleanup_legacy_proxy_ingresses(name, proxy_name, ns)
 
     def _create_role_service(self, name: str, ns: str, role: str, port: int = 8000) -> None:
         """Create the ClusterIP Service that fronts one role's pods.
@@ -3125,23 +3133,19 @@ class InferenceMonitor:
             else:
                 raise
 
-    def _update_proxy_ingress(
-        self, name: str, proxy_name: str, namespace: str, endpoint: dict[str, Any]
-    ) -> None:
-        """Remove legacy direct public Ingresses for a split-topology endpoint.
+    def _cleanup_legacy_proxy_ingresses(self, name: str, proxy_name: str, namespace: str) -> None:
+        """Remove both historical direct Ingresses for a split endpoint.
 
-        The shared ``gco-system/gco-ingress`` sends ``/inference/*`` to the
-        manifest API, where the API Gateway-injected token is validated before
-        this internal proxy Service is reached. Keeping an endpoint-specific
-        Ingress would create a longer ALB path rule and silently bypass that
-        authentication boundary, so upgrades delete both historical names.
+        Active requests follow the shared ``/inference`` HTTPRoute on
+        ``gco-system/gco-gateway`` to ``gco-system/inference-proxy``, then this
+        endpoint's internal proxy ClusterIP Service. Either historical Ingress
+        would bypass that authentication boundary, so upgrades delete both names.
         """
-        del endpoint  # Routing metadata is consumed by the authenticated proxy.
         self._delete_legacy_inference_ingress(f"inference-{name}", namespace)
         self._delete_legacy_inference_ingress(f"inference-{proxy_name}", namespace)
 
     def _create_service(self, name: str, namespace: str, spec: dict[str, Any]) -> None:
-        """Create a Kubernetes Service for an inference endpoint."""
+        """Create the internal ClusterIP Service for an inference endpoint."""
         port = spec.get("port", 8000)
 
         service = client.V1Service(
@@ -3179,7 +3183,7 @@ class InferenceMonitor:
                 raise
 
     def _ensure_service(self, name: str, namespace: str, spec: dict[str, Any]) -> None:
-        """Ensure the Service exists, recreating it if missing."""
+        """Ensure the endpoint's ClusterIP Service exists, recreating it if missing."""
         try:
             self.core_v1.read_namespaced_service(
                 name, namespace, _request_timeout=self._k8s_timeout
@@ -3202,25 +3206,17 @@ class InferenceMonitor:
             if e.status != 404:
                 raise
 
-    def _ensure_ingress(
-        self,
-        name: str,
-        namespace: str,
-        spec: dict[str, Any],
-        endpoint: dict[str, Any],
-    ) -> None:
-        """Enforce the absence of a direct public endpoint Ingress."""
-        self._update_ingress_rule(name, namespace, spec, endpoint)
+    def _ensure_legacy_endpoint_ingress_absent(self, name: str, namespace: str) -> None:
+        """Enforce the absence of a historical direct endpoint Ingress."""
+        self._cleanup_legacy_endpoint_ingress(name, namespace)
 
-    def _update_ingress_rule(
-        self,
-        name: str,
-        namespace: str,
-        spec: dict[str, Any],
-        endpoint: dict[str, Any],
-    ) -> None:
-        """Remove the legacy rule that bypassed API Gateway authentication."""
-        del spec, endpoint
+    def _cleanup_legacy_endpoint_ingress(self, name: str, namespace: str) -> None:
+        """Delete the historical endpoint Ingress that bypassed shared routing.
+
+        The active route is the shared ``/inference`` HTTPRoute on
+        ``gco-system/gco-gateway`` to ``gco-system/inference-proxy``, followed by
+        this endpoint's internal ClusterIP Service.
+        """
         self._delete_legacy_inference_ingress(f"inference-{name}", namespace)
 
     def _check_health_watchdog(
@@ -3232,12 +3228,12 @@ class InferenceMonitor:
         spec: dict[str, Any],
         endpoint: dict[str, Any],
     ) -> bool:
-        """Track prolonged unavailability without changing shared ALB rules.
+        """Track prolonged unavailability without changing shared routing.
 
-        The authenticated inference proxy is the ALB's only inference target,
-        so an unhealthy model no longer creates an unhealthy ALB target group.
-        The historical threshold remains useful for explicit degraded logging
-        and for compatibility with callers that inspect this boolean.
+        ``gco-system/gco-gateway`` owns the shared ``/inference`` HTTPRoute to
+        ``gco-system/inference-proxy``. Individual models are reached through
+        internal ClusterIP Services, so their readiness never changes the shared
+        Gateway or HTTPRoute. The threshold still drives degraded-state logging.
         """
         del namespace, spec, endpoint
         if ready_replicas > 0:
@@ -3257,14 +3253,14 @@ class InferenceMonitor:
             return False
 
         unready_duration = (now - self._unready_since[name]).total_seconds()
-        threshold_exceeded = unready_duration >= self._ingress_removal_threshold
+        threshold_exceeded = unready_duration >= self._unhealthy_threshold_seconds
         if threshold_exceeded:
             logger.warning(
                 "WATCHDOG: Endpoint %s has been unavailable for %ds (threshold %ds); "
                 "the authenticated proxy will return 503 until it recovers",
                 name,
                 int(unready_duration),
-                self._ingress_removal_threshold,
+                self._unhealthy_threshold_seconds,
             )
         return threshold_exceeded
 
@@ -3321,7 +3317,7 @@ class InferenceMonitor:
             raise ValueError("canary.weight must be an integer between 1 and 99")
 
         canary_name = f"{name}-canary"
-        primary_weight = 100 - canary_weight
+        del endpoint  # Per-endpoint routing metadata is legacy and intentionally ignored.
 
         canary_spec = dict(spec)
         canary_spec["image"] = canary_image
@@ -3354,16 +3350,9 @@ class InferenceMonitor:
             elif ready_replicas >= canary_replicas:
                 state = "running"
 
-        # Remove any historical ALB weighted-routing rule. The authenticated
-        # proxy consumes the observed canary status returned here.
-        self._update_canary_ingress(
-            name,
-            namespace,
-            spec,
-            endpoint,
-            primary_weight,
-            canary_weight,
-        )
+        # Remove the historical direct canary route. The shared inference proxy
+        # consumes the observed canary status returned here.
+        self._cleanup_legacy_canary_ingress(name, namespace)
         return {
             "state": state,
             "image": canary_image,
@@ -3372,17 +3361,12 @@ class InferenceMonitor:
             "replicas_desired": canary_replicas,
         }
 
-    def _update_canary_ingress(
-        self,
-        name: str,
-        namespace: str,
-        spec: dict[str, Any],
-        endpoint: dict[str, Any],
-        primary_weight: int,
-        canary_weight: int,
-    ) -> None:
-        """Remove the legacy unauthenticated ALB canary rule."""
-        del spec, endpoint, primary_weight, canary_weight
+    def _cleanup_legacy_canary_ingress(self, name: str, namespace: str) -> None:
+        """Remove the historical unauthenticated canary Ingress.
+
+        Canary selection now happens behind ``gco-system/inference-proxy``; the
+        shared ``gco-system/gco-gateway`` HTTPRoute is never changed per endpoint.
+        """
         self._delete_legacy_inference_ingress(f"inference-{name}", namespace)
 
     def _cleanup_canary(self, name: str, namespace: str) -> None:
@@ -3455,7 +3439,8 @@ class InferenceMonitor:
                     logger.error("Failed to delete service %s: %s", service_name, e)
 
         # Remove both historical endpoint-specific Ingress names. Current
-        # requests use only the shared authenticated platform Ingress.
+        # requests use the shared ``gco-system/gco-gateway`` HTTPRoute at
+        # ``/inference`` to reach ``gco-system/inference-proxy``.
         for ingress_name in (f"inference-{name}", f"inference-{proxy_name}"):
             try:
                 self.networking_v1.delete_namespaced_ingress(

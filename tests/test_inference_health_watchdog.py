@@ -3,10 +3,11 @@ Tests for the inference monitor health watchdog.
 
 Covers `_check_health_watchdog`, which tracks per-endpoint unready timestamps
 and reports when zero ready replicas have persisted beyond the configured
-threshold. Inference uses the shared authenticated proxy, so the watchdog does
-not create, delete, or recreate ALB Ingress rules. The tests verify timer start,
-grace-period behavior, degraded-state reporting, recovery, cleanup, and
-independent tracking across endpoints.
+threshold. Traffic enters through the shared ``gco-system/gco-gateway``
+``/inference`` HTTPRoute to ``gco-system/inference-proxy`` and then an endpoint
+ClusterIP Service, so the watchdog does not create, delete, or recreate routing
+resources. The tests verify timer start, grace-period behavior, degraded-state
+reporting, recovery, cleanup, and independent tracking across endpoints.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -36,7 +37,7 @@ def monitor():
             reconcile_interval=15,
         )
         # Override the threshold for faster testing
-        m._ingress_removal_threshold = 300  # 5 minutes
+        m._unhealthy_threshold_seconds = 300  # 5 minutes
         return m
 
 
@@ -155,7 +156,7 @@ class TestHealthWatchdogConfiguration:
 
     def test_custom_threshold(self, monitor):
         """Custom threshold should be respected."""
-        monitor._ingress_removal_threshold = 60  # 1 minute
+        monitor._unhealthy_threshold_seconds = 60  # 1 minute
         monitor._unready_since["my-llm"] = datetime.now(UTC) - timedelta(seconds=90)
         monitor.networking_v1.delete_namespaced_ingress = MagicMock()
 
@@ -167,7 +168,7 @@ class TestHealthWatchdogConfiguration:
 
     def test_short_threshold_does_not_trigger_early(self, monitor):
         """Threshold should not trigger before the configured time."""
-        monitor._ingress_removal_threshold = 600  # 10 minutes
+        monitor._unhealthy_threshold_seconds = 600  # 10 minutes
         monitor._unready_since["my-llm"] = datetime.now(UTC) - timedelta(minutes=5)
 
         result = monitor._check_health_watchdog(

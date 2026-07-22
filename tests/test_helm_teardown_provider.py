@@ -34,6 +34,9 @@ def _event(request_type: str) -> dict:
         "ResourceProperties": {
             "ClusterName": "gco-us-east-1",
             "Region": "us-east-1",
+            "RegistryRegion": "us-east-2",
+            "ProjectName": "gco",
+            "EndpointGroupArn": "arn:aws:globalaccelerator::123456789012:accelerator/a/listener/b/endpoint-group/c",
             "EnabledCharts": ["keda", "kueue"],
             "Charts": {"keda": {"values": {"watchNamespace": "gco-jobs"}}},
             "KedaOperatorRoleArn": "arn:aws:iam::123456789012:role/keda",
@@ -54,19 +57,30 @@ def test_create_and_update_are_noops(request_type):
 def test_delete_starts_retry_stable_ordered_execution():
     event = _event("Delete")
     sfn = MagicMock()
+    ssm = MagicMock()
     sfn.list_executions.return_value = {"executions": []}
     with (
         patch.dict(os.environ, _provider_env()),
         patch.object(teardown_provider, "_sfn", return_value=sfn),
+        patch.object(teardown_provider, "_ssm", return_value=ssm),
     ):
         result = teardown_provider.on_event(event)
 
     assert result == {"PhysicalResourceId": "helm-teardown"}
+    ssm.put_parameter.assert_called_once_with(
+        Name="/gco/addons/us-east-1/_teardown",
+        Value=teardown_provider._execution_name(event),
+        Type="String",
+        Overwrite=True,
+    )
     kwargs = sfn.start_execution.call_args.kwargs
     assert kwargs["stateMachineArn"] == _STATE_MACHINE_ARN
     assert kwargs["name"] == teardown_provider._execution_name(event)
     execution_input = json.loads(kwargs["input"])
     assert execution_input["EnabledCharts"] == ["keda", "kueue"]
+    assert execution_input["RegistryRegion"] == "us-east-2"
+    assert execution_input["ProjectName"] == "gco"
+    assert execution_input["EndpointGroupArn"].endswith("/endpoint-group/c")
     # Drain is unconditional because ListExecutions is eventually consistent.
     assert execution_input["WaitForInFlightSeconds"] == 16 * 60
     sfn.list_executions.assert_called_once_with(
@@ -85,6 +99,7 @@ def test_delete_stops_and_drains_running_install_execution():
     with (
         patch.dict(os.environ, _provider_env()),
         patch.object(teardown_provider, "_sfn", return_value=sfn),
+        patch.object(teardown_provider, "_ssm", return_value=MagicMock()),
     ):
         teardown_provider.on_event(_event("Delete"))
 
@@ -106,9 +121,9 @@ def test_terminal_stop_race_is_idempotent():
     sfn.stop_execution.side_effect = validation_error
     sfn.describe_execution.return_value = {"status": "SUCCEEDED"}
 
-    delay = teardown_provider._stop_running_install_executions(sfn, _INSTALL_STATE_MACHINE_ARN)
+    stopped = teardown_provider._stop_running_install_executions(sfn, _INSTALL_STATE_MACHINE_ARN)
 
-    assert delay == 16 * 60
+    assert stopped == 1
     sfn.describe_execution.assert_called_once_with(executionArn=running_arn)
 
 
@@ -123,6 +138,7 @@ def test_duplicate_delete_event_is_idempotent():
     with (
         patch.dict(os.environ, _provider_env()),
         patch.object(teardown_provider, "_sfn", return_value=sfn),
+        patch.object(teardown_provider, "_ssm", return_value=MagicMock()),
     ):
         teardown_provider.on_event(_event("Delete"))
 
@@ -139,10 +155,10 @@ def test_is_complete_waits_then_succeeds():
         sfn.describe_execution.return_value = {"status": "SUCCEEDED"}
         assert teardown_provider.is_complete(_event("Delete")) == {"IsComplete": True}
 
-    assert sfn.list_executions.call_count == 2
+    assert sfn.list_executions.call_count == 0
 
 
-def test_is_complete_stops_execution_missed_by_initial_snapshot():
+def test_drain_task_stops_execution_missed_by_initial_snapshot():
     running_arn = "arn:aws:states:us-east-1:123456789012:execution:gco-helm-install:late"
     sfn = MagicMock()
     sfn.list_executions.return_value = {
@@ -154,7 +170,7 @@ def test_is_complete_stops_execution_missed_by_initial_snapshot():
         patch.dict(os.environ, _provider_env()),
         patch.object(teardown_provider, "_sfn", return_value=sfn),
     ):
-        assert teardown_provider.is_complete(_event("Delete")) == {"IsComplete": False}
+        assert teardown_provider.drain_install_executions({}) == {"StoppedExecutions": 1}
 
     sfn.stop_execution.assert_called_once_with(executionArn=running_arn)
 

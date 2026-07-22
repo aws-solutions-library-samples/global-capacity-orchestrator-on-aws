@@ -588,7 +588,7 @@ class TestSyncAlbRegistration:
         with (
             patch("gco.services.health_monitor.config.load_incluster_config"),
             patch("gco.services.health_monitor.client.CoreV1Api"),
-            patch("gco.services.health_monitor.client.NetworkingV1Api") as mock_net,
+            patch("gco.services.health_monitor.client.NetworkingV1Api"),
             patch("gco.services.health_monitor.client.CoordinationV1Api") as mock_coord,
             patch("gco.services.health_monitor.client.CustomObjectsApi"),
         ):
@@ -601,7 +601,6 @@ class TestSyncAlbRegistration:
                     cpu_threshold=80, memory_threshold=85, gpu_threshold=-1
                 ),
             )
-            m.networking_v1 = mock_net.return_value
             m.coordination_v1 = mock_coord.return_value
             lease = MagicMock()
             lease.spec.holder_identity = m._alb_sync_holder
@@ -627,7 +626,7 @@ class TestSyncAlbRegistration:
 
     @pytest.mark.asyncio
     async def test_follower_keeps_serving_but_does_not_self_heal(self, monitor):
-        """A replica that does not hold the Lease must not touch Ingress or SSM."""
+        """A replica that does not hold the Lease must not touch Gateway or SSM."""
         lease = monitor.coordination_v1.read_namespaced_lease.return_value
         lease.spec.holder_identity = "another-health-monitor-pod"
         lease.spec.renew_time = datetime.now(UTC)
@@ -635,7 +634,7 @@ class TestSyncAlbRegistration:
         with patch("boto3.client") as mock_boto:
             await monitor.sync_alb_registration()
 
-        monitor.networking_v1.read_namespaced_ingress.assert_not_called()
+        monitor.metrics_v1beta1.get_namespaced_custom_object.assert_not_called()
         mock_boto.assert_not_called()
 
     def test_expired_lease_is_claimed_with_optimistic_replace(self, monitor):
@@ -658,7 +657,7 @@ class TestSyncAlbRegistration:
         with patch("boto3.client") as mock_boto:
             await monitor.sync_alb_registration()
 
-        monitor.networking_v1.read_namespaced_ingress.assert_not_called()
+        monitor.metrics_v1beta1.get_namespaced_custom_object.assert_not_called()
         mock_boto.assert_not_called()
 
     @pytest.mark.asyncio
@@ -671,7 +670,7 @@ class TestSyncAlbRegistration:
         with patch("boto3.client") as mock_boto:
             await monitor.sync_alb_registration()
 
-        monitor.networking_v1.read_namespaced_ingress.assert_not_called()
+        monitor.metrics_v1beta1.get_namespaced_custom_object.assert_not_called()
         monitor.coordination_v1.create_namespaced_lease.assert_not_called()
         mock_boto.assert_not_called()
 
@@ -682,15 +681,16 @@ class TestSyncAlbRegistration:
 
         monitor._last_alb_sync = datetime.now()
         await monitor.sync_alb_registration()
-        # networking_v1 should NOT be called
-        monitor.networking_v1.read_namespaced_ingress.assert_not_called()
+        # Gateway should not be read while the rate-limit window is active.
+        monitor.metrics_v1beta1.get_namespaced_custom_object.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_sync_updates_ssm_when_stale(self, monitor):
         """Should update SSM when hostname doesn't match."""
-        ingress = MagicMock()
-        ingress.status.load_balancer.ingress = [MagicMock(hostname="new-alb.elb.amazonaws.com")]
-        monitor.networking_v1.read_namespaced_ingress.return_value = ingress
+        gateway = {
+            "status": {"addresses": [{"type": "Hostname", "value": "new-alb.elb.amazonaws.com"}]}
+        }
+        monitor.metrics_v1beta1.get_namespaced_custom_object.return_value = gateway
 
         mock_ssm = MagicMock()
         mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "old-alb.elb.amazonaws.com"}}
@@ -711,6 +711,14 @@ class TestSyncAlbRegistration:
         # Acquire once before the read and renew optimistically again
         # immediately before the only mutation.
         assert monitor.coordination_v1.replace_namespaced_lease.call_count == 2
+        monitor.metrics_v1beta1.get_namespaced_custom_object.assert_called_once_with(
+            group="gateway.networking.k8s.io",
+            version="v1",
+            namespace="gco-system",
+            plural="gateways",
+            name="gco-gateway",
+            _request_timeout=30,
+        )
         client_config = mock_boto.call_args.kwargs["config"]
         assert client_config.connect_timeout == 3
         assert client_config.read_timeout == 10
@@ -719,9 +727,9 @@ class TestSyncAlbRegistration:
     @pytest.mark.asyncio
     async def test_sync_loses_lease_before_put_and_fails_closed(self, monitor):
         """A former leader must not write after the pre-mutation renewal fails."""
-        ingress = MagicMock()
-        ingress.status.load_balancer.ingress = [MagicMock(hostname="new-alb.elb.amazonaws.com")]
-        monitor.networking_v1.read_namespaced_ingress.return_value = ingress
+        monitor.metrics_v1beta1.get_namespaced_custom_object.return_value = {
+            "status": {"addresses": [{"type": "Hostname", "value": "new-alb.elb.amazonaws.com"}]}
+        }
         monitor._try_acquire_alb_sync_lease = MagicMock(side_effect=[True, False])
 
         mock_ssm = MagicMock()
@@ -735,9 +743,10 @@ class TestSyncAlbRegistration:
     @pytest.mark.asyncio
     async def test_sync_noop_when_hostname_matches(self, monitor):
         """Should not update SSM when hostname already matches."""
-        ingress = MagicMock()
-        ingress.status.load_balancer.ingress = [MagicMock(hostname="same-alb.elb.amazonaws.com")]
-        monitor.networking_v1.read_namespaced_ingress.return_value = ingress
+        gateway = {
+            "status": {"addresses": [{"type": "Hostname", "value": "same-alb.elb.amazonaws.com"}]}
+        }
+        monitor.metrics_v1beta1.get_namespaced_custom_object.return_value = gateway
 
         mock_ssm = MagicMock()
         mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "same-alb.elb.amazonaws.com"}}
@@ -752,11 +761,11 @@ class TestSyncAlbRegistration:
         mock_ssm.put_parameter.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_sync_handles_no_ingress_gracefully(self, monitor):
-        """Should not crash if ingress has no load balancer status."""
-        ingress = MagicMock()
-        ingress.status.load_balancer.ingress = []
-        monitor.networking_v1.read_namespaced_ingress.return_value = ingress
+    async def test_sync_handles_no_gateway_address_gracefully(self, monitor):
+        """Should not crash if the Gateway has no published address."""
+        monitor.metrics_v1beta1.get_namespaced_custom_object.return_value = {
+            "status": {"addresses": []}
+        }
 
         await monitor.sync_alb_registration()
         # Should complete without error
@@ -764,7 +773,7 @@ class TestSyncAlbRegistration:
     @pytest.mark.asyncio
     async def test_sync_handles_exception_gracefully(self, monitor):
         """Should log warning but not crash on errors."""
-        monitor.networking_v1.read_namespaced_ingress.side_effect = Exception("k8s down")
+        monitor.metrics_v1beta1.get_namespaced_custom_object.side_effect = Exception("k8s down")
 
         await monitor.sync_alb_registration()
         # Should complete without raising

@@ -455,8 +455,15 @@ class TestCreateService:
     def test_create_service_success(self):
         monitor = _make_monitor()
         spec = {"port": 8000}
-        monitor._create_service("ep", "ns", spec)
+        with patch("gco.services.inference_monitor.client.CustomObjectsApi") as custom_api:
+            monitor._create_service("ep", "ns", spec)
+
         monitor.core_v1.create_namespaced_service.assert_called_once()
+        service = monitor.core_v1.create_namespaced_service.call_args.args[1]
+        assert service.spec.type == "ClusterIP"
+        monitor.networking_v1.create_namespaced_ingress.assert_not_called()
+        monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
+        custom_api.return_value.create_namespaced_custom_object.assert_not_called()
 
     def test_create_service_already_exists(self):
         from kubernetes.client.rest import ApiException
@@ -473,17 +480,12 @@ class TestCreateService:
 # =============================================================================
 
 
-class TestUpdateIngress:
+class TestLegacyEndpointIngressCleanup:
     """Tests for removal of the historical direct endpoint Ingress."""
 
     def test_removes_legacy_endpoint_ingress_without_creating_a_replacement(self):
         monitor = _make_monitor()
-        monitor._update_ingress_rule(
-            "ep",
-            "ns",
-            {"health_check_path": "/health"},
-            {"ingress_path": "/inference/ep"},
-        )
+        monitor._cleanup_legacy_endpoint_ingress("ep", "ns")
 
         monitor.networking_v1.delete_namespaced_ingress.assert_called_once_with(
             "inference-ep", "ns", _request_timeout=30
@@ -497,7 +499,7 @@ class TestUpdateIngress:
         monitor = _make_monitor()
         monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=404)
 
-        monitor._update_ingress_rule("ep", "ns", {}, {})
+        monitor._cleanup_legacy_endpoint_ingress("ep", "ns")
 
         monitor.networking_v1.create_namespaced_ingress.assert_not_called()
         monitor.networking_v1.patch_namespaced_ingress.assert_not_called()
@@ -509,7 +511,7 @@ class TestUpdateIngress:
         monitor.networking_v1.delete_namespaced_ingress.side_effect = ApiException(status=500)
 
         with pytest.raises(ApiException):
-            monitor._update_ingress_rule("ep", "ns", {}, {})
+            monitor._cleanup_legacy_endpoint_ingress("ep", "ns")
 
 
 # =============================================================================

@@ -408,8 +408,8 @@ test("regional discovery validates SSM, paginated ALB ownership, tags, and cache
               Tags: [
                 { Key: "elbv2.k8s.aws/cluster", Value: "gco-test-us-west-2" },
                 {
-                  Key: "ingress.k8s.aws/stack",
-                  Value: "gco-system/gco-ingress",
+                  Key: "gco.aws/gateway",
+                  Value: "gco-system/gco-gateway",
                 },
               ],
             },
@@ -437,6 +437,35 @@ test("regional discovery validates SSM, paginated ALB ownership, tags, and cache
   assert.equal(__test.regionalEndpointCache.size, 1);
 });
 
+test("regional ownership accepts temporary legacy Ingress tags", async () => {
+  const region = "us-west-2";
+  const endpoint = "internal-gco.us-west-2.elb.amazonaws.com";
+  const account = "123456789012";
+  const project = "gco-test";
+  const legacyTagSets = [
+    [
+      { Key: "eks:eks-cluster-name", Value: "gco-test-us-west-2" },
+      { Key: "ingress.eks.amazonaws.com/stack", Value: "gco" },
+    ],
+    [
+      { Key: "elbv2.k8s.aws/cluster", Value: "gco-test-us-west-2" },
+      { Key: "ingress.k8s.aws/stack", Value: "gco-system/gco-ingress" },
+    ],
+  ];
+
+  for (const tags of legacyTagSets) {
+    __test.elbClients.set(region, ownershipClient([loadBalancer()], tags));
+    await assert.doesNotReject(
+      __test.validateRegionalEndpointOwnership(
+        endpoint,
+        region,
+        account,
+        project,
+      ),
+    );
+  }
+});
+
 test("regional ownership rejects missing, public, foreign, and untagged ALBs", async (t) => {
   const region = "us-west-2";
   const endpoint = "internal-gco.us-west-2.elb.amazonaws.com";
@@ -444,7 +473,7 @@ test("regional ownership rejects missing, public, foreign, and untagged ALBs", a
   const project = "gco-test";
   const validTags = [
     { Key: "eks:eks-cluster-name", Value: "gco-test-us-west-2" },
-    { Key: "ingress.eks.amazonaws.com/stack", Value: "gco" },
+    { Key: "gco.aws/gateway", Value: "gco-system/gco-gateway" },
   ];
 
   async function rejected(name, balancers, tags, pattern) {
@@ -508,15 +537,15 @@ test("regional ownership rejects missing, public, foreign, and untagged ALBs", a
     [loadBalancer()],
     [
       { Key: "eks:eks-cluster-name", Value: "someone-else" },
-      { Key: "ingress.eks.amazonaws.com/stack", Value: "gco" },
+      { Key: "gco.aws/gateway", Value: "gco-system/gco-gateway" },
     ],
     /not owned by the GCO cluster/,
   );
   await rejected(
-    "wrong ingress tag",
+    "wrong platform tag",
     [loadBalancer()],
     [{ Key: "eks:eks-cluster-name", Value: "gco-test-us-west-2" }],
-    /not the GCO Ingress/,
+    /not the GCO Gateway or legacy Ingress/,
   );
 });
 

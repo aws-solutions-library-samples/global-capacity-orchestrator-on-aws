@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import UTC
 from typing import Any
 
@@ -79,6 +80,265 @@ FAILED = "FAILED"
 # substitution untouched and be applied verbatim.
 _UNRESOLVED_PLACEHOLDER_RE = re.compile(r"\{\{[A-Z0-9_]+\}\}")
 _HPA_REPLICA_OWNERSHIP_ANNOTATION = "gco.aws/hpa-controls-replicas"
+_POST_HELM_PREFIX = "post-helm-"
+_CLUSTER_SCOPE = "<cluster>"
+_MAX_PLANNING_FAILURES = 20
+_MAX_VALIDATION_FAILURES = 20
+_GATEWAY_DELETE_WAIT_SECONDS = 270
+_GATEWAY_DELETE_POLL_SECONDS = 5
+
+# Gateway API resources are installed after the pinned CRD bootstrap. Keep the
+# exact group/version/plural/scope mapping in one place so apply and teardown
+# cannot drift onto different objects.
+_GATEWAY_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
+    "GatewayClass": ("gateway.networking.k8s.io", "v1", "gatewayclasses", True),
+    "Gateway": ("gateway.networking.k8s.io", "v1", "gateways", False),
+    "HTTPRoute": ("gateway.networking.k8s.io", "v1", "httproutes", False),
+    "LoadBalancerConfiguration": (
+        "gateway.k8s.aws",
+        "v1beta1",
+        "loadbalancerconfigurations",
+        False,
+    ),
+    "TargetGroupConfiguration": (
+        "gateway.k8s.aws",
+        "v1beta1",
+        "targetgroupconfigurations",
+        False,
+    ),
+}
+
+# This is the authoritative set of kinds the applier knows how to create or
+# patch. Planning rejects anything else before the first Kubernetes mutation,
+# which prevents a newly added raw manifest from being silently ignored.
+_SUPPORTED_MANIFEST_KINDS = frozenset(
+    {
+        "APIService",
+        "ClusterRole",
+        "ClusterRoleBinding",
+        "ConfigMap",
+        "CronJob",
+        "CustomResourceDefinition",
+        "DaemonSet",
+        "Deployment",
+        "DeviceClass",
+        "EC2NodeClass",
+        "Gateway",
+        "GatewayClass",
+        "HTTPRoute",
+        "HorizontalPodAutoscaler",
+        "Ingress",
+        "IngressClass",
+        "IngressClassParams",
+        "Job",
+        "Lease",
+        "LimitRange",
+        "LoadBalancerConfiguration",
+        "Namespace",
+        "NetworkPolicy",
+        "NodePool",
+        "PersistentVolume",
+        "PersistentVolumeClaim",
+        "Pod",
+        "PodDisruptionBudget",
+        "PodMonitor",
+        "ResourceQuota",
+        "Role",
+        "RoleBinding",
+        "ScaledJob",
+        "ScaledObject",
+        "Secret",
+        "Service",
+        "ServiceAccount",
+        "ServiceMonitor",
+        "StatefulSet",
+        "StorageClass",
+        "TargetGroupConfiguration",
+    }
+)
+_CLUSTER_SCOPED_KINDS = frozenset(
+    {
+        "APIService",
+        "ClusterRole",
+        "ClusterRoleBinding",
+        "CustomResourceDefinition",
+        "DeviceClass",
+        "EC2NodeClass",
+        "GatewayClass",
+        "IngressClass",
+        "IngressClassParams",
+        "Namespace",
+        "NodePool",
+        "PersistentVolume",
+        "StorageClass",
+    }
+)
+_IDENTITY_FIELDS = ("apiVersion", "kind", "namespace", "name", "sourceFile", "phase")
+
+
+def _public_manifest_identity(resource: dict[str, Any]) -> dict[str, str]:
+    """Return the serializable, normalized identity for a planned resource."""
+    return {field: resource[field] for field in _IDENTITY_FIELDS}
+
+
+def _planning_error_message(errors: list[str], failure_count: int) -> str:
+    """Build a bounded planning failure with enough source context to act on."""
+    hidden = failure_count - len(errors)
+    suffix = f"; ... {hidden} additional error(s)" if hidden else ""
+    return "Manifest planning failed: " + "; ".join(errors) + suffix
+
+
+def plan_manifests(
+    manifests_dir: str,
+    replacements: dict[str, str],
+) -> dict[str, Any]:
+    """Plan the complete raw-manifest inventory without mutating the cluster.
+
+    Files are scanned in lexical order. Replacements are literal string
+    replacements, then an unresolved UPPER_SNAKE placeholder gates the entire
+    file out. Every remaining nonempty YAML document must have an exact,
+    supported identity and be unique across both apply phases.
+    """
+    phases: dict[str, list[dict[str, Any]]] = {"base": [], "post-helm": []}
+    skipped: dict[str, list[str]] = {"base": [], "post-helm": []}
+    feature_gates: dict[str, set[str]] = {"base": set(), "post-helm": set()}
+    errors: list[str] = []
+    failure_count = 0
+    seen: dict[tuple[str, str, str, str], str] = {}
+
+    def add_error(message: str) -> None:
+        nonlocal failure_count
+        failure_count += 1
+        if len(errors) < _MAX_PLANNING_FAILURES:
+            errors.append(message[:500])
+
+    replacement_items: list[tuple[str, str]] = []
+    if not isinstance(replacements, dict):
+        add_error("ImageReplacements must be a string-to-string mapping")
+    else:
+        for key, value in replacements.items():
+            if not isinstance(key, str) or not key:
+                add_error("ImageReplacements contains an empty or non-string key")
+                continue
+            if not isinstance(value, str):
+                add_error(f"ImageReplacements value for {key!r} is not a string")
+                continue
+            replacement_items.append((key, value))
+
+    if failure_count:
+        raise ValueError(_planning_error_message(errors, failure_count))
+
+    for filename in sorted(os.listdir(manifests_dir)):
+        if not filename.endswith((".yaml", ".yml")):
+            continue
+
+        phase = "post-helm" if filename.startswith(_POST_HELM_PREFIX) else "base"
+        if phase == "post-helm":
+            skipped["base"].append(f"{filename}:deferred-to-post-helm")
+
+        filepath = os.path.join(manifests_dir, filename)
+        try:
+            with open(filepath, encoding="utf-8") as manifest_file:
+                content = manifest_file.read()
+        except OSError as exc:
+            add_error(f"{filename}: unable to read manifest: {exc}")
+            continue
+
+        for key, value in replacement_items:
+            content = content.replace(key, value)
+
+        unresolved = sorted(set(_UNRESOLVED_PLACEHOLDER_RE.findall(content)))
+        if unresolved:
+            skipped[phase].append(f"{filename}:unreplaced-placeholders")
+            feature_gates[phase].update(unresolved)
+            logger.info(
+                "Planning excludes %s - unresolved feature placeholder(s): %s",
+                filename,
+                ", ".join(unresolved),
+            )
+            continue
+
+        try:
+            documents = list(yaml.safe_load_all(content))
+        except yaml.YAMLError as exc:
+            add_error(f"{filename}: invalid YAML: {exc}")
+            continue
+
+        for document_index, document in enumerate(documents, start=1):
+            if document is None:
+                continue
+            location = f"{filename} document {document_index}"
+            if not isinstance(document, dict):
+                add_error(f"{location}: document must be a mapping")
+                continue
+
+            api_version = document.get("apiVersion")
+            kind = document.get("kind")
+            metadata = document.get("metadata")
+            if not isinstance(api_version, str) or not api_version.strip():
+                add_error(f"{location}: apiVersion must be a nonempty string")
+                continue
+            if not isinstance(kind, str) or not kind.strip():
+                add_error(f"{location}: kind must be a nonempty string")
+                continue
+            api_version = api_version.strip()
+            kind = kind.strip()
+            if kind not in _SUPPORTED_MANIFEST_KINDS:
+                add_error(f"{location}: unsupported kind {kind!r}")
+                continue
+            if not isinstance(metadata, dict):
+                add_error(f"{location}: metadata must be a mapping")
+                continue
+
+            name = metadata.get("name")
+            if not isinstance(name, str) or not name.strip():
+                add_error(f"{location}: metadata.name must be a nonempty string")
+                continue
+            name = name.strip()
+
+            if kind in _CLUSTER_SCOPED_KINDS:
+                namespace = _CLUSTER_SCOPE
+            else:
+                namespace_value = metadata.get("namespace", "default")
+                if not isinstance(namespace_value, str) or not namespace_value.strip():
+                    add_error(
+                        f"{location}: metadata.namespace must be a nonempty string when present"
+                    )
+                    continue
+                namespace = namespace_value.strip()
+
+            duplicate_key = (api_version, kind, namespace, name)
+            previous = seen.get(duplicate_key)
+            if previous is not None:
+                add_error(
+                    f"{location}: duplicate {api_version}/{kind}/{namespace}/{name}; "
+                    f"first declared in {previous}"
+                )
+                continue
+            seen[duplicate_key] = location
+
+            phases[phase].append(
+                {
+                    "apiVersion": api_version,
+                    "kind": kind,
+                    "namespace": namespace,
+                    "name": name,
+                    "sourceFile": filename,
+                    "phase": phase,
+                    "document": document,
+                }
+            )
+
+    if failure_count:
+        raise ValueError(_planning_error_message(errors, failure_count))
+
+    return {
+        "phases": phases,
+        "skipped": skipped,
+        "featureGates": {
+            phase: sorted(placeholders) for phase, placeholders in feature_gates.items()
+        },
+    }
 
 
 def _deployment_patch_body(document: dict[str, Any]) -> dict[str, Any]:
@@ -565,6 +825,12 @@ def apply_manifests(
         post_helm: If True, apply only post-helm-* files (run after Helm installs CRDs).
                    If False (default), apply all other files and skip post-helm-* ones.
     """
+    plan = plan_manifests(manifests_dir, replacements)
+    phase_name = "post-helm" if post_helm else "base"
+    planned_resources = plan["phases"][phase_name]
+    expected_resources = [_public_manifest_identity(item) for item in planned_resources]
+    expected_count = len(planned_resources)
+
     configure_k8s_client(cluster_name, region)
     v1 = client.CoreV1Api()
     apps_v1 = client.AppsV1Api()
@@ -575,77 +841,28 @@ def apply_manifests(
 
     applied_count = 0
     failed: list[str] = []
-    skipped: list[str] = []
+    skipped: list[str] = list(plan["skipped"][phase_name])
     pruned: list[str] = []
     prune_failures: list[str] = []
-    reconciled_feature_gates: set[tuple[str, bool]] = set()
 
-    # Load and apply manifests
-    # Files prefixed with "post-helm-" require Helm CRDs and are deferred to
-    # the post-Helm pass (AllowedKinds is set). In the main pass they are skipped.
-    # This convention means adding new CRD-dependent manifests never requires
-    # touching the handler — just name the file with the "post-helm-" prefix.
-    POST_HELM_PREFIX = "post-helm-"
-
-    for filename in sorted(os.listdir(manifests_dir)):
-        if not filename.endswith((".yaml", ".yml")):
+    # A gated-out file represents an optional feature that is disabled. Preserve
+    # the existing exact-resource pruning behavior, once per gate and phase.
+    for placeholder in plan["featureGates"][phase_name]:
+        if (placeholder, post_helm) not in _FEATURE_RESOURCE_INVENTORY:
             continue
+        prune_result = _prune_disabled_feature(placeholder, post_helm)
+        pruned.extend(prune_result["pruned"])
+        prune_failures.extend(prune_result["failed"])
+        failed.extend(f"prune:{failure}" for failure in prune_result["failed"])
 
-        filepath = os.path.join(manifests_dir, filename)
-
-        # In the main pass, skip post-helm manifests (they need Helm CRDs).
-        # In the post-helm pass, skip everything else.
-        is_post_helm_file = os.path.basename(filename).startswith(POST_HELM_PREFIX)
-        if post_helm and not is_post_helm_file:
-            continue
-        if not post_helm and is_post_helm_file:
-            skipped.append(f"{filename}:deferred-to-post-helm")
-            continue
-
-        with open(filepath, encoding="utf-8") as f:
-            content = f.read()
-
-        # Replace placeholders
-        for key, value in replacements.items():
-            content = content.replace(key, value)
-
-        # Skip files that still have an unreplaced feature-gate placeholder
-        # (e.g. the FSx manifest when FSx is disabled). Matches only the
-        # UPPER_SNAKE token convention so lower/mixed-case double-brace content
-        # that is meant to be applied verbatim (Grafana dashboard legends) is
-        # left alone. See _UNRESOLVED_PLACEHOLDER_RE.
-        unresolved_placeholders = set(_UNRESOLVED_PLACEHOLDER_RE.findall(content))
-        if unresolved_placeholders:
-            logger.info(
-                "Skipping %s - contains unreplaced feature placeholder(s): %s",
-                filename,
-                ", ".join(sorted(unresolved_placeholders)),
-            )
-            skipped.append(f"{filename}:unreplaced-placeholders")
-
-            # An unresolved canonical feature gate means the feature is disabled.
-            # Reconcile it once per pass by deleting only its exact owned objects.
-            for placeholder in sorted(unresolved_placeholders):
-                gate = (placeholder, post_helm)
-                if gate not in _FEATURE_RESOURCE_INVENTORY or gate in reconciled_feature_gates:
-                    continue
-                reconciled_feature_gates.add(gate)
-                prune_result = _prune_disabled_feature(placeholder, post_helm)
-                pruned.extend(prune_result["pruned"])
-                prune_failures.extend(prune_result["failed"])
-                failed.extend(f"prune:{failure}" for failure in prune_result["failed"])
-            continue
-
-        # Parse and apply
+    for planned_resource in planned_resources:
+        filename = planned_resource["sourceFile"]
         try:
-            for doc in yaml.safe_load_all(content):
-                if not doc:
-                    continue
-
-                kind = doc.get("kind")
-                api_version = doc.get("apiVersion", "")
+            for doc in (planned_resource["document"],):
+                kind = planned_resource["kind"]
+                api_version = planned_resource["apiVersion"]
                 namespace = doc.get("metadata", {}).get("namespace", "default")
-                name = doc.get("metadata", {}).get("name")
+                name = planned_resource["name"]
 
                 logger.info(f"Applying {kind}/{name} in namespace {namespace}")
                 try:
@@ -704,6 +921,16 @@ def apply_manifests(
                             else:
                                 raise
 
+                    elif kind == "Lease":
+                        coordination_v1 = client.CoordinationV1Api()
+                        try:
+                            coordination_v1.create_namespaced_lease(namespace, body=doc)
+                        except ApiException as e:
+                            if e.status == 409:
+                                coordination_v1.patch_namespaced_lease(name, namespace, body=doc)
+                            else:
+                                raise
+
                     elif kind == "Deployment":
                         try:
                             apps_v1.create_namespaced_deployment(namespace, body=doc)
@@ -717,12 +944,31 @@ def apply_manifests(
                             else:
                                 raise
 
+                    elif kind == "StatefulSet":
+                        try:
+                            apps_v1.create_namespaced_stateful_set(namespace, body=doc)
+                        except ApiException as e:
+                            if e.status == 409:
+                                apps_v1.patch_namespaced_stateful_set(name, namespace, body=doc)
+                            else:
+                                raise
+
                     elif kind == "DaemonSet":
                         try:
                             apps_v1.create_namespaced_daemon_set(namespace, body=doc)
                         except ApiException as e:
                             if e.status == 409:
                                 apps_v1.patch_namespaced_daemon_set(name, namespace, body=doc)
+                            else:
+                                raise
+
+                    elif kind == "Job":
+                        batch_v1 = client.BatchV1Api()
+                        try:
+                            batch_v1.create_namespaced_job(namespace, body=doc)
+                        except ApiException as e:
+                            if e.status == 409:
+                                batch_v1.patch_namespaced_job(name, namespace, body=doc)
                             else:
                                 raise
 
@@ -772,6 +1018,15 @@ def apply_manifests(
                             else:
                                 raise
 
+                    elif kind == "Pod":
+                        try:
+                            v1.create_namespaced_pod(namespace, body=doc)
+                        except ApiException as e:
+                            if e.status == 409:
+                                v1.patch_namespaced_pod(name, namespace, body=doc)
+                            else:
+                                raise
+
                     elif kind == "ConfigMap":
                         try:
                             v1.create_namespaced_config_map(namespace, body=doc)
@@ -789,6 +1044,29 @@ def apply_manifests(
                                 v1.patch_namespaced_secret(name, namespace, body=doc)
                             else:
                                 raise
+
+                    elif kind in _GATEWAY_CUSTOM_OBJECTS:
+                        group, version, plural, cluster_scoped = _GATEWAY_CUSTOM_OBJECTS[kind]
+                        try:
+                            if cluster_scoped:
+                                custom_api.create_cluster_custom_object(
+                                    group, version, plural, body=doc
+                                )
+                            else:
+                                custom_api.create_namespaced_custom_object(
+                                    group, version, namespace, plural, body=doc
+                                )
+                        except ApiException as e:
+                            if e.status != 409:
+                                raise
+                            if cluster_scoped:
+                                custom_api.patch_cluster_custom_object(
+                                    group, version, plural, name, body=doc
+                                )
+                            else:
+                                custom_api.patch_namespaced_custom_object(
+                                    group, version, namespace, plural, name, body=doc
+                                )
 
                     elif kind == "IngressClassParams":
                         # EKS Auto Mode IngressClassParams CRD
@@ -973,6 +1251,16 @@ def apply_manifests(
                             else:
                                 raise
 
+                    elif kind == "CustomResourceDefinition":
+                        api_extensions_v1 = client.ApiextensionsV1Api()
+                        try:
+                            api_extensions_v1.create_custom_resource_definition(body=doc)
+                        except ApiException as e:
+                            if e.status == 409:
+                                api_extensions_v1.patch_custom_resource_definition(name, body=doc)
+                            else:
+                                raise
+
                     elif kind == "DeviceClass":
                         # Kubernetes DRA DeviceClass (resource.k8s.io)
                         group = "resource.k8s.io"
@@ -1075,9 +1363,8 @@ def apply_manifests(
                                 raise
 
                     else:
-                        logger.warning(f"Skipping unsupported kind: {kind}")
-                        skipped.append(f"{kind}/{name}")
-                        continue
+                        # Defensive only: plan_manifests rejects unsupported kinds.
+                        raise ValueError(f"Planner admitted unsupported kind: {kind}")
 
                     applied_count += 1
                     logger.info(f"✓ Applied {kind}/{name}")
@@ -1090,11 +1377,18 @@ def apply_manifests(
             logger.error(f"Failed to apply {filename}: {e}")
             failed.append(filename)
 
+    if not failed and applied_count != expected_count:
+        raise RuntimeError(
+            f"Manifest apply count mismatch: expected={expected_count} applied={applied_count}"
+        )
+
     # Restart deployments and verify credentials only on the main (full) pass,
     # not on the post-Helm pass
     if post_helm:
         return {
             "AppliedCount": applied_count,
+            "ExpectedCount": expected_count,
+            "ExpectedResources": expected_resources,
             "FailedCount": len(failed),
             "SkippedCount": len(skipped),
             "Failed": ",".join(failed) if failed else "None",
@@ -1173,6 +1467,8 @@ def apply_manifests(
 
     return {
         "AppliedCount": applied_count,
+        "ExpectedCount": expected_count,
+        "ExpectedResources": expected_resources,
         "FailedCount": len(failed),
         "SkippedCount": len(skipped),
         "Failed": ",".join(failed) if failed else "None",
@@ -1182,6 +1478,579 @@ def apply_manifests(
         "PrunedCount": len(pruned),
         "Pruned": ",".join(pruned) if pruned else "None",
         "PruneFailures": ",".join(prune_failures) if prune_failures else "None",
+    }
+
+
+def _delete_gateway_resources(cluster_name: str, region: str) -> dict[str, Any]:
+    """Delete Gateway objects while the LBC controller is still running.
+
+    The Gateway is deleted only after its routes, and every object is polled to
+    exact absence. Waiting for the Gateway's controller finalizer is what proves
+    the ALB has been removed before the LBC Helm release is uninstalled.
+    """
+    configure_k8s_client(cluster_name, region)
+    custom_api = client.CustomObjectsApi()
+    namespace = "gco-system"
+    delete_options = client.V1DeleteOptions(propagation_policy="Foreground")
+    resources = (
+        ("HTTPRoute", "gco-routes"),
+        ("Gateway", "gco-gateway"),
+        ("LoadBalancerConfiguration", "gco-gateway-load-balancer"),
+        ("TargetGroupConfiguration", "gco-default-target-group"),
+        ("GatewayClass", "gco-aws-alb"),
+    )
+    deleted: list[str] = []
+    deadline = time.monotonic() + _GATEWAY_DELETE_WAIT_SECONDS
+
+    for kind, name in resources:
+        group, version, plural, cluster_scoped = _GATEWAY_CUSTOM_OBJECTS[kind]
+        label = f"{kind}/{name}" if cluster_scoped else f"{kind}/{namespace}/{name}"
+        try:
+            if cluster_scoped:
+                custom_api.delete_cluster_custom_object(
+                    group, version, plural, name, body=delete_options
+                )
+            else:
+                custom_api.delete_namespaced_custom_object(
+                    group, version, namespace, plural, name, body=delete_options
+                )
+        except ApiException as exc:
+            if exc.status != 404:
+                raise RuntimeError(
+                    f"failed to delete {label}: Kubernetes API {exc.status} ({exc.reason})"
+                ) from exc
+            deleted.append(f"{label}:already-absent")
+            continue
+
+        while True:
+            try:
+                if cluster_scoped:
+                    custom_api.get_cluster_custom_object(group, version, plural, name)
+                else:
+                    custom_api.get_namespaced_custom_object(group, version, namespace, plural, name)
+            except ApiException as exc:
+                if exc.status == 404:
+                    deleted.append(label)
+                    break
+                raise RuntimeError(
+                    f"failed while waiting for {label} deletion: "
+                    f"Kubernetes API {exc.status} ({exc.reason})"
+                ) from exc
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "timed out waiting for the complete Gateway resource set to delete "
+                    f"within {_GATEWAY_DELETE_WAIT_SECONDS}s; last resource was {label}"
+                )
+            time.sleep(_GATEWAY_DELETE_POLL_SECONDS)
+
+    return {"status": "deleted", "DeletedCount": len(deleted), "Deleted": deleted}
+
+
+def _as_plain_dict(value: Any) -> dict[str, Any]:
+    """Convert a DynamicClient response to a plain mapping."""
+    if isinstance(value, dict):
+        return value
+    converter = getattr(value, "to_dict", None)
+    if callable(converter):
+        converted = converter()
+        if isinstance(converted, dict):
+            return converted
+    try:
+        converted = dict(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"Kubernetes response is not a mapping: {type(value).__name__}") from exc
+    return converted
+
+
+def _condition_matches(condition: dict[str, Any], expected_status: str) -> bool:
+    value = condition.get("status")
+    if isinstance(value, bool):
+        value = "True" if value else "False"
+    return str(value).lower() == expected_status.lower()
+
+
+def _conditions(status: dict[str, Any]) -> list[dict[str, Any]]:
+    value = status.get("conditions", [])
+    if not isinstance(value, list):
+        return []
+    return [condition for condition in value if isinstance(condition, dict)]
+
+
+def _required_condition_failure(
+    status: dict[str, Any],
+    condition_type: str,
+) -> str | None:
+    matching = [item for item in _conditions(status) if item.get("type") == condition_type]
+    if any(_condition_matches(item, "True") for item in matching):
+        return None
+    if matching:
+        details = matching[-1].get("message") or matching[-1].get("reason") or "status is not True"
+        return f"condition {condition_type} is not True ({details})"
+    return f"condition {condition_type} is missing"
+
+
+def _generation_failure(resource: dict[str, Any]) -> str | None:
+    metadata_value = resource.get("metadata")
+    status_value = resource.get("status")
+    metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
+    status: dict[str, Any] = status_value if isinstance(status_value, dict) else {}
+    generation = metadata.get("generation")
+    observed = status.get("observedGeneration")
+    if (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or not isinstance(observed, int)
+        or isinstance(observed, bool)
+        or observed != generation
+    ):
+        return f"generation not observed (generation={generation}, observedGeneration={observed})"
+    return None
+
+
+def _replica_failure(
+    status: dict[str, Any],
+    desired: int,
+    fields: tuple[str, ...],
+) -> str | None:
+    for field in fields:
+        # Kubernetes omits optional zero-valued counters. Treat omission as
+        # zero while still rejecting malformed non-integer values.
+        value = status.get(field, 0)
+        if not isinstance(value, int) or isinstance(value, bool) or value != desired:
+            return f"replicas not converged ({field}={value}, desired={desired})"
+    unavailable = status.get("unavailableReplicas", status.get("numberUnavailable", 0))
+    if not isinstance(unavailable, int) or isinstance(unavailable, bool) or unavailable != 0:
+        return f"replicas unavailable ({unavailable})"
+    return None
+
+
+def _current_condition_failure(
+    conditions: list[dict[str, Any]],
+    condition_type: str,
+    generation: Any,
+    context: str,
+) -> str | None:
+    """Require a True condition that observed the object's current generation."""
+    current = [
+        condition
+        for condition in conditions
+        if condition.get("type") == condition_type
+        and condition.get("observedGeneration") == generation
+    ]
+    if any(_condition_matches(condition, "True") for condition in current):
+        return None
+    matching = [condition for condition in conditions if condition.get("type") == condition_type]
+    if current:
+        detail = current[-1].get("message") or current[-1].get("reason") or "status is not True"
+        return f"{context} condition {condition_type} is not True ({detail})"
+    if matching:
+        observed = matching[-1].get("observedGeneration")
+        return (
+            f"{context} condition {condition_type} is stale "
+            f"(generation={generation}, observedGeneration={observed})"
+        )
+    return f"{context} condition {condition_type} is missing"
+
+
+def _gateway_api_readiness_failure(kind: str, resource: dict[str, Any]) -> str | None:
+    """Return strict, generation-aware Gateway API readiness evidence."""
+    metadata_value = resource.get("metadata")
+    spec_value = resource.get("spec")
+    status_value = resource.get("status")
+    metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
+    spec: dict[str, Any] = spec_value if isinstance(spec_value, dict) else {}
+    status: dict[str, Any] = status_value if isinstance(status_value, dict) else {}
+    generation = metadata.get("generation")
+    if not isinstance(generation, int) or isinstance(generation, bool):
+        return f"invalid metadata.generation ({generation})"
+
+    if kind == "GatewayClass":
+        return _current_condition_failure(
+            _conditions(status), "Accepted", generation, "GatewayClass"
+        )
+
+    if kind == "Gateway":
+        for condition_type in ("Accepted", "Programmed"):
+            failure = _current_condition_failure(
+                _conditions(status), condition_type, generation, "Gateway"
+            )
+            if failure:
+                return failure
+        addresses = status.get("addresses", [])
+        if not isinstance(addresses, list) or not any(
+            isinstance(address, dict) and str(address.get("value", "")).strip()
+            for address in addresses
+        ):
+            return "Gateway has no address"
+
+        intended_listeners: set[str] = {
+            listener["name"]
+            for listener in spec.get("listeners", [])
+            if isinstance(listener, dict) and isinstance(listener.get("name"), str)
+        }
+        listener_statuses = status.get("listeners", [])
+        if not isinstance(listener_statuses, list):
+            return "Gateway listener status is missing"
+        by_name = {
+            listener.get("name"): listener
+            for listener in listener_statuses
+            if isinstance(listener, dict) and isinstance(listener.get("name"), str)
+        }
+        for listener_name in sorted(intended_listeners):
+            listener = by_name.get(listener_name)
+            if not isinstance(listener, dict):
+                return f"Gateway listener {listener_name!r} status is missing"
+            listener_conditions = listener.get("conditions", [])
+            if not isinstance(listener_conditions, list):
+                return f"Gateway listener {listener_name!r} conditions are missing"
+            plain_conditions = [item for item in listener_conditions if isinstance(item, dict)]
+            for condition_type in ("Accepted", "ResolvedRefs", "Programmed"):
+                failure = _current_condition_failure(
+                    plain_conditions,
+                    condition_type,
+                    generation,
+                    f"Gateway listener {listener_name!r}",
+                )
+                if failure:
+                    return failure
+        return None
+
+    if kind == "HTTPRoute":
+        namespace = str(metadata.get("namespace", "default"))
+
+        def parent_key(reference: dict[str, Any]) -> tuple[str, str, str, str, str]:
+            return (
+                str(reference.get("group", "gateway.networking.k8s.io")),
+                str(reference.get("kind", "Gateway")),
+                str(reference.get("namespace", namespace)),
+                str(reference.get("name", "")),
+                str(reference.get("sectionName", "")),
+            )
+
+        intended: set[tuple[str, str, str, str, str]] = {
+            parent_key(parent) for parent in spec.get("parentRefs", []) if isinstance(parent, dict)
+        }
+        parents = status.get("parents", [])
+        if not isinstance(parents, list):
+            return "HTTPRoute parent status is missing"
+        live_by_ref = {
+            parent_key(parent["parentRef"]): parent
+            for parent in parents
+            if isinstance(parent, dict) and isinstance(parent.get("parentRef"), dict)
+        }
+        for reference in sorted(intended):
+            parent = live_by_ref.get(reference)
+            if not isinstance(parent, dict):
+                return f"HTTPRoute intended parent {reference} status is missing"
+            parent_conditions = parent.get("conditions", [])
+            if not isinstance(parent_conditions, list):
+                return f"HTTPRoute intended parent {reference} conditions are missing"
+            plain_conditions = [item for item in parent_conditions if isinstance(item, dict)]
+            for condition_type in ("Accepted", "ResolvedRefs"):
+                failure = _current_condition_failure(
+                    plain_conditions,
+                    condition_type,
+                    generation,
+                    f"HTTPRoute parent {reference}",
+                )
+                if failure:
+                    return failure
+        return None
+
+    return None
+
+
+def _resource_readiness_failure(kind: str, resource: dict[str, Any]) -> str | None:
+    """Return an actionable readiness reason, or None when the object is ready."""
+    metadata_value = resource.get("metadata")
+    spec_value = resource.get("spec")
+    status_value = resource.get("status")
+    metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
+    spec: dict[str, Any] = spec_value if isinstance(spec_value, dict) else {}
+    status: dict[str, Any] = status_value if isinstance(status_value, dict) else {}
+
+    if metadata.get("deletionTimestamp"):
+        return f"object is terminating since {metadata['deletionTimestamp']}"
+
+    for condition in _conditions(status):
+        if condition.get("type") in {"Ready", "Available"} and _condition_matches(
+            condition, "False"
+        ):
+            detail = condition.get("message") or condition.get("reason") or "no detail"
+            return f"condition {condition.get('type')} is False ({detail})"
+
+    if kind in {"GatewayClass", "Gateway", "HTTPRoute"}:
+        return _gateway_api_readiness_failure(kind, resource)
+
+    if kind in {"Deployment", "StatefulSet"}:
+        generation_failure = _generation_failure(resource)
+        if generation_failure:
+            return generation_failure
+        desired_value = spec.get("replicas", 1)
+        if not isinstance(desired_value, int) or isinstance(desired_value, bool):
+            return f"invalid desired replica count ({desired_value})"
+        desired = desired_value
+        fields = (
+            ("replicas", "updatedReplicas", "readyReplicas", "availableReplicas")
+            if kind == "Deployment"
+            else ("currentReplicas", "updatedReplicas", "readyReplicas")
+        )
+        return _replica_failure(status, desired, fields)
+
+    if kind == "DaemonSet":
+        generation_failure = _generation_failure(resource)
+        if generation_failure:
+            return generation_failure
+        desired_value = status.get("desiredNumberScheduled")
+        if not isinstance(desired_value, int) or isinstance(desired_value, bool):
+            return f"invalid desiredNumberScheduled ({desired_value})"
+        desired = desired_value
+        replica_failure = _replica_failure(
+            status,
+            desired,
+            (
+                "currentNumberScheduled",
+                "updatedNumberScheduled",
+                "numberReady",
+                "numberAvailable",
+            ),
+        )
+        if replica_failure:
+            return replica_failure
+        misscheduled = status.get("numberMisscheduled", 0)
+        if not isinstance(misscheduled, int) or isinstance(misscheduled, bool) or misscheduled != 0:
+            return f"pods are misscheduled (numberMisscheduled={misscheduled})"
+        return None
+
+    if kind == "Job":
+        failed = _required_condition_failure(status, "Failed")
+        if failed is None:
+            return "condition Failed is True"
+        return _required_condition_failure(status, "Complete")
+
+    if kind == "Pod":
+        return _required_condition_failure(status, "Ready")
+
+    if kind == "PersistentVolumeClaim":
+        phase = status.get("phase")
+        return None if phase == "Bound" else f"PVC phase is {phase!r}, expected 'Bound'"
+
+    if kind == "PersistentVolume":
+        phase = status.get("phase")
+        return (
+            None
+            if phase in {"Bound", "Available"}
+            else f"PV phase is {phase!r}, expected 'Bound' or 'Available'"
+        )
+
+    if kind == "Ingress":
+        load_balancer = status.get("loadBalancer")
+        addresses = load_balancer.get("ingress", []) if isinstance(load_balancer, dict) else []
+        if not isinstance(addresses, list) or not any(
+            isinstance(address, dict) and (address.get("hostname") or address.get("ip"))
+            for address in addresses
+        ):
+            return "Ingress has no load-balancer hostname or IP address"
+        return None
+
+    if kind == "CustomResourceDefinition":
+        return _required_condition_failure(status, "Established")
+
+    if kind == "APIService":
+        return _required_condition_failure(status, "Available")
+
+    if kind == "HorizontalPodAutoscaler":
+        for condition_type in ("AbleToScale", "ScalingActive"):
+            failure = _required_condition_failure(status, condition_type)
+            if failure:
+                return failure
+        return None
+
+    if kind == "PodDisruptionBudget":
+        generation_failure = _generation_failure(resource)
+        if generation_failure:
+            return generation_failure
+        current_healthy = status.get("currentHealthy")
+        desired_healthy = status.get("desiredHealthy")
+        if (
+            not isinstance(current_healthy, int)
+            or isinstance(current_healthy, bool)
+            or not isinstance(desired_healthy, int)
+            or isinstance(desired_healthy, bool)
+        ):
+            return (
+                "invalid PDB health "
+                f"(currentHealthy={current_healthy}, desiredHealthy={desired_healthy})"
+            )
+        if current_healthy < desired_healthy:
+            return (
+                "PDB health below target "
+                f"(currentHealthy={current_healthy}, desiredHealthy={desired_healthy})"
+            )
+        return None
+
+    if kind in {"NodePool", "EC2NodeClass", "ScaledJob", "ScaledObject"}:
+        return _required_condition_failure(status, "Ready")
+
+    # Static configuration and RBAC resources have no rollout contract. Their
+    # exact-object existence is sufficient unless a generic Ready/Available
+    # condition explicitly reported False above.
+    return None
+
+
+def _dynamic_resource(
+    dynamic_client: Any,
+    cache: dict[tuple[str, str], Any],
+    api_version: str,
+    kind: str,
+) -> Any:
+    key = (api_version, kind)
+    if key not in cache:
+        cache[key] = dynamic_client.resources.get(api_version=api_version, kind=kind)
+    return cache[key]
+
+
+def _service_endpoint_failure(
+    dynamic_client: Any,
+    cache: dict[tuple[str, str], Any],
+    planned_resource: dict[str, Any],
+) -> str | None:
+    document_value = planned_resource["document"]
+    document: dict[str, Any] = document_value if isinstance(document_value, dict) else {}
+    spec_value = document.get("spec")
+    spec: dict[str, Any] = spec_value if isinstance(spec_value, dict) else {}
+    selector = spec.get("selector")
+    if not isinstance(selector, dict) or not selector:
+        return None
+
+    endpoint_slices = _dynamic_resource(
+        dynamic_client,
+        cache,
+        "discovery.k8s.io/v1",
+        "EndpointSlice",
+    )
+    response = endpoint_slices.get(
+        namespace=planned_resource["namespace"],
+        label_selector=f"kubernetes.io/service-name={planned_resource['name']}",
+    )
+    items = _as_plain_dict(response).get("items", [])
+    if not isinstance(items, list):
+        return "EndpointSlice response does not contain an items list"
+    for item in items:
+        item_mapping = _as_plain_dict(item)
+        metadata_value = item_mapping.get("metadata")
+        metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
+        if metadata.get("deletionTimestamp"):
+            continue
+        endpoints = item_mapping.get("endpoints", [])
+        if not isinstance(endpoints, list):
+            continue
+        for endpoint in endpoints:
+            if not isinstance(endpoint, dict):
+                continue
+            conditions = endpoint.get("conditions", {})
+            if not isinstance(conditions, dict):
+                continue
+            if conditions.get("ready") is True and conditions.get("terminating") is not True:
+                return None
+    return "selector-backed Service has no ready, nonterminating EndpointSlice endpoint"
+
+
+def _manifest_identity_label(resource: dict[str, Any]) -> str:
+    return (
+        f"{resource['apiVersion']}/{resource['kind']}/"
+        f"{resource['namespace']}/{resource['name']}"
+        f" [{resource['phase']}:{resource['sourceFile']}]"
+    )
+
+
+def validate_manifests(
+    cluster_name: str,
+    region: str,
+    manifests_dir: str,
+    replacements: dict[str, str],
+    deployment_token: Any = None,
+) -> dict[str, Any]:
+    """Validate exact existence and readiness for the complete planned inventory."""
+    plan = plan_manifests(manifests_dir, replacements)
+    expected = plan["phases"]["base"] + plan["phases"]["post-helm"]
+    expected_resources = [_public_manifest_identity(item) for item in expected]
+    phase_counts = {
+        phase: {"ExpectedCount": len(plan["phases"][phase]), "ValidatedCount": 0}
+        for phase in ("base", "post-helm")
+    }
+
+    configure_k8s_client(cluster_name, region)
+    dynamic_client = dynamic.DynamicClient(client.ApiClient())
+    resource_cache: dict[tuple[str, str], Any] = {}
+    validated_resources: list[dict[str, str]] = []
+    failures: list[str] = []
+    failure_count = 0
+
+    def add_failure(message: str) -> None:
+        nonlocal failure_count
+        failure_count += 1
+        if len(failures) < _MAX_VALIDATION_FAILURES:
+            failures.append(message[:500])
+
+    for planned_resource in expected:
+        label = _manifest_identity_label(planned_resource)
+        try:
+            resource_api = _dynamic_resource(
+                dynamic_client,
+                resource_cache,
+                planned_resource["apiVersion"],
+                planned_resource["kind"],
+            )
+            get_kwargs: dict[str, Any] = {"name": planned_resource["name"]}
+            if planned_resource["namespace"] != _CLUSTER_SCOPE:
+                get_kwargs["namespace"] = planned_resource["namespace"]
+            live_resource = _as_plain_dict(resource_api.get(**get_kwargs))
+            failure = _resource_readiness_failure(planned_resource["kind"], live_resource)
+            if failure is None and planned_resource["kind"] == "Service":
+                failure = _service_endpoint_failure(
+                    dynamic_client,
+                    resource_cache,
+                    planned_resource,
+                )
+            if failure:
+                add_failure(f"{label}: {failure}")
+                continue
+        except (NotFoundError, ResourceNotFoundError) as exc:
+            add_failure(f"{label}: object or API resource not found ({exc})")
+            continue
+        except ApiException as exc:
+            detail = exc.reason or str(exc)
+            add_failure(f"{label}: Kubernetes API error {exc.status} ({detail})")
+            continue
+        except Exception as exc:
+            add_failure(f"{label}: validation error ({exc})")
+            continue
+
+        identity = _public_manifest_identity(planned_resource)
+        validated_resources.append(identity)
+        phase_counts[planned_resource["phase"]]["ValidatedCount"] += 1
+
+    if failure_count:
+        hidden = failure_count - len(failures)
+        suffix = f"; ... {hidden} additional failure(s)" if hidden else ""
+        raise RuntimeError(
+            f"Manifest validation failed: validated={len(validated_resources)} "
+            f"expected={len(expected)}; " + "; ".join(failures) + suffix
+        )
+
+    return {
+        "status": "validated",
+        "DeploymentToken": deployment_token,
+        "ExpectedCount": len(expected),
+        "ValidatedCount": len(validated_resources),
+        "BaseExpectedCount": phase_counts["base"]["ExpectedCount"],
+        "BaseValidatedCount": phase_counts["base"]["ValidatedCount"],
+        "PostHelmExpectedCount": phase_counts["post-helm"]["ExpectedCount"],
+        "PostHelmValidatedCount": phase_counts["post-helm"]["ValidatedCount"],
+        "PhaseCounts": phase_counts,
+        "ExpectedResources": expected_resources,
+        "ValidatedResources": validated_resources,
     }
 
 
@@ -1219,23 +2088,54 @@ def _record_phase_status(phase: str, status: str, message: str) -> None:
 
 
 def handle_task(event: dict[str, Any]) -> dict[str, Any]:
-    """Apply manifests for a Step Functions task; raise on any failure.
-
-    The convergence state machine drives both passes through here: the base pass
-    (``PostHelm`` falsey) before the Helm charts install, and the post-Helm pass
-    (``PostHelm`` truthy) afterwards. Unlike the CloudFormation custom-resource
-    path below — which reports SUCCESS even when individual manifests fail — this
-    RAISES when any manifest fails, so the state machine's Retry/Catch can react:
-    the base pass fails the execution, while the post-Helm pass is caught so the
-    pipeline still finishes. The outcome is recorded to SSM (``base-manifests`` /
-    ``post-helm-manifests``) so it shows up in ``gco stacks addons status``.
-    """
+    """Run an apply or exhaustive manifest-validation Step Functions task."""
     cluster_name = event["ClusterName"]
     region = event["Region"]
     replacements = event.get("ImageReplacements", {})
+    action = event.get("Action", "apply_manifests")
+    manifests_dir = os.path.join(os.path.dirname(__file__), "manifests")
+
+    if action == "delete_gateway_resources":
+        phase = "gateway-teardown"
+        try:
+            result = _delete_gateway_resources(cluster_name, region)
+        except Exception as exc:
+            _record_phase_status(phase, "failed", str(exc))
+            raise
+        _record_phase_status(
+            phase,
+            "deleted",
+            f"deleted={result['DeletedCount']}",
+        )
+        return result
+
+    if action == "validate_manifests":
+        phase = "manifest-validation"
+        deployment_token = event.get("DeploymentToken")
+        try:
+            result = validate_manifests(
+                cluster_name,
+                region,
+                manifests_dir,
+                replacements,
+                deployment_token,
+            )
+        except Exception as exc:
+            _record_phase_status(phase, "failed", f"token={deployment_token} {exc}")
+            raise
+        _record_phase_status(
+            phase,
+            "validated",
+            f"token={deployment_token} validated={result['ValidatedCount']} "
+            f"expected={result['ExpectedCount']}",
+        )
+        return result
+
+    if action != "apply_manifests":
+        raise ValueError(f"Unsupported task action: {action}")
+
     post_helm = str(event.get("PostHelm", "false")).lower() == "true"
     phase = "post-helm-manifests" if post_helm else "base-manifests"
-    manifests_dir = os.path.join(os.path.dirname(__file__), "manifests")
     try:
         result = apply_manifests(cluster_name, region, manifests_dir, replacements, post_helm)
     except Exception as exc:
@@ -1247,10 +2147,20 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
             f"kubectl apply failed (post_helm={post_helm}, "
             f"failed={result.get('FailedCount')}): {result.get('Failed')}"
         )
+    if result.get("ExpectedCount") is not None and result.get("AppliedCount") != result.get(
+        "ExpectedCount"
+    ):
+        message = (
+            f"apply count mismatch: applied={result.get('AppliedCount')} "
+            f"expected={result.get('ExpectedCount')}"
+        )
+        _record_phase_status(phase, "failed", message)
+        raise RuntimeError(message)
     _record_phase_status(
         phase,
         "applied",
-        f"applied={result.get('AppliedCount')} skipped={result.get('SkippedCount')}",
+        f"applied={result.get('AppliedCount')} expected={result.get('ExpectedCount')} "
+        f"skipped={result.get('SkippedCount')}",
     )
     return result
 

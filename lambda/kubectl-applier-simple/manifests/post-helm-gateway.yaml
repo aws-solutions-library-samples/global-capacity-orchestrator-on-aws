@@ -1,0 +1,151 @@
+# GCO Gateway API entrypoint managed by AWS Load Balancer Controller v3.4.2.
+# The ALB is internal and HTTPS-only. Global Accelerator and the regional VPC
+# proxy remain the only supported callers; all pod targets use HTTP inside the
+# cluster boundary.
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: gco-aws-alb
+  labels:
+    app: gco
+    project: gco
+spec:
+  controllerName: gateway.k8s.aws/alb
+---
+apiVersion: gateway.k8s.aws/v1beta1
+kind: TargetGroupConfiguration
+metadata:
+  name: gco-default-target-group
+  namespace: gco-system
+  labels:
+    app: gco
+    project: gco
+spec:
+  defaultConfiguration:
+    targetType: ip
+    protocol: HTTP
+    healthCheckConfig:
+      healthCheckProtocol: HTTP
+      healthCheckPath: /healthz
+      healthCheckInterval: 15
+      healthCheckTimeout: 5
+      healthyThresholdCount: 2
+      unhealthyThresholdCount: 2
+    targetGroupAttributes:
+      # Keep draining targets alive for the maximum 15-minute inference stream.
+      - key: deregistration_delay.timeout_seconds
+        value: "900"
+---
+apiVersion: gateway.k8s.aws/v1beta1
+kind: LoadBalancerConfiguration
+metadata:
+  name: gco-gateway-load-balancer
+  namespace: gco-system
+  labels:
+    app: gco
+    project: gco
+spec:
+  scheme: internal
+  tags:
+    # Runtime discovery requires this exact tag; cluster ownership alone is
+    # deliberately insufficient to select a Global Accelerator endpoint.
+    gco.aws/gateway: gco-system/gco-gateway
+  loadBalancerAttributes:
+    - key: idle_timeout.timeout_seconds
+      value: "300"
+  defaultTargetGroupConfiguration:
+    name: gco-default-target-group
+  listenerConfigurations:
+    - protocolPort: HTTPS:443
+      defaultCertificate: "{{BACKEND_TLS_CERTIFICATE_ARN}}"
+      sslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gco-gateway
+  namespace: gco-system
+  labels:
+    app: gco
+    project: gco
+spec:
+  gatewayClassName: gco-aws-alb
+  infrastructure:
+    parametersRef:
+      group: gateway.k8s.aws
+      kind: LoadBalancerConfiguration
+      name: gco-gateway-load-balancer
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: gco-routes
+  namespace: gco-system
+  labels:
+    app: gco
+    project: gco
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gco-gateway
+      sectionName: https
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/health
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: health-monitor
+          port: 80
+          weight: 1
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/manifests
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: manifest-processor
+          port: 80
+          weight: 1
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /inference
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: inference-proxy
+          port: 80
+          weight: 1
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /healthz
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: health-monitor
+          port: 80
+          weight: 1
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: manifest-processor
+          port: 80
+          weight: 1
