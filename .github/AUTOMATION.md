@@ -3,6 +3,10 @@
 This directory contains the repository's GitHub governance, CI/CD workflows,
 security configuration, issue templates, and reusable automation.
 
+> **Note:** this file is deliberately *not* named `README.md`. GitHub renders
+> `.github/README.md` as the repository front page in preference to the root
+> `README.md`, which would hide the project README.
+
 ## Table of Contents
 
 - [Directory Map](#directory-map)
