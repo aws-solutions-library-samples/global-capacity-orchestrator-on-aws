@@ -480,7 +480,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.37.0
+        uses: github/codeql-action/init@v4.37.1
         with:
           languages: ${{ matrix.language }}
           # Pins paths, paths-ignore, and query-filters used by the scan.
@@ -491,7 +491,7 @@ jobs:
       # (``NotADirectoryError`` on single-file ``paths:`` entries) so
       # we avoid invoking it.
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v4.37.0
+        uses: github/codeql-action/analyze@v4.37.1
         with:
           category: "/language:${{ matrix.language }}"
 
@@ -510,11 +510,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.37.0
+        uses: github/codeql-action/init@v4.37.1
         with:
           languages: javascript-typescript
           config-file: ./.github/codeql/codeql-config.yml
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v4.37.0
+        uses: github/codeql-action/analyze@v4.37.1
         with:
           category: "/language:javascript-typescript"
