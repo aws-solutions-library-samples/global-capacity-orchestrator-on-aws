@@ -3,7 +3,7 @@
 Live release validation is a local operator process:
 
 1. A developer checks out the exact commit locally.
-2. They run `python -m scripts.live_release_validation` against a dedicated AWS validation account.
+2. They run `python -m scripts.live_release_validation` against a dedicated, disposable AWS validation account. The account is operator-supplied, not fixed: any empty, CDK-bootstrapped account you control qualifies, and `--expected-account` pins the run to it.
 3. The harness deploys, validates, destroys, and writes local JSON and Markdown reports.
 4. The developer reviews the result locally and posts a sanitized summary comment (run ID, exact SHA, overall status, per-action results) on the pull request. The full reports never leave the operator's machine.
 
@@ -34,9 +34,9 @@ The exemptions are risk-based, not filename-based. A CLI change that deploys, de
 
 ## Safety Model
 
-The harness creates and destroys paid AWS infrastructure. Run it only with explicit authorization and only in a dedicated, disposable validation account.
+The harness creates and destroys paid AWS infrastructure. Run it only with explicit authorization for the target account and only in a dedicated, disposable validation account. "Dedicated" describes the account's condition, not its identity: any account you control with no other workloads and no pre-existing project resources qualifies, including a personal development account, and different operators may validate in different accounts.
 
-- Acquire your team's exclusive lock for the validation account. Do not run two local validations concurrently.
+- If the validation account is shared, acquire your team's exclusive lock for it first. Never run two validations concurrently against the same account.
 - Use a clean, committed checkout of the exact branch and SHA under review.
 - Use short-lived local AWS credentials whose account ID is known in advance.
 - Never target a shared development, staging, or production account.

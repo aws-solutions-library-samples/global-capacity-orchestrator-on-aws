@@ -2852,7 +2852,7 @@ gco images uri NAME [OPTIONS]
 
 ```bash
 gco images uri my-app -t v1.2.3
-# Output: 760425982254.dkr.ecr.us-east-2.amazonaws.com/gco/my-app:v1.2.3
+# Output: 123456789012.dkr.ecr.us-east-2.amazonaws.com/gco/my-app:v1.2.3
 ```
 
 #### `gco images build`
