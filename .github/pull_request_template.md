@@ -46,12 +46,12 @@ still require validation. See ../docs/LIVE_RELEASE_VALIDATION.md.
 -->
 
 - [ ] Not required (explain the applicability decision below)
-- [ ] Required and completed locally with `--actions all` for this exact SHA; the `PASSED` Markdown report was manually attached to the pull request
+- [ ] Required and completed locally with `--actions all` for this exact SHA; a sanitized `PASSED` summary comment (run ID, SHA, per-action statuses) was posted on the pull request
 - [ ] Required but pending explicit validation-account and KMS-deletion authorization
 
 **Applicability rationale:**
 
-**Manual report attachment or comment link (never attach `checkpoint.json`):**
+**Sanitized validation summary or comment link (never post the full reports or `checkpoint.json`; they carry account IDs, ARNs, and endpoint URLs):**
 
 ## Checklist
 

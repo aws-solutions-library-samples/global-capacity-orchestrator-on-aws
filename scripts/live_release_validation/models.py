@@ -432,7 +432,7 @@ class RunCheckpoint:
 
 @dataclass
 class ValidationReport:
-    """Attachable JSON/Markdown summary for one run."""
+    """Local JSON/Markdown evidence for one run; contains account-specific identifiers."""
 
     run_id: str
     identity: dict[str, Any]
@@ -454,7 +454,7 @@ class ValidationReport:
         return serialized
 
     def write(self, directory: Path) -> tuple[Path, Path]:
-        """Write both attachable formats and return their paths."""
+        """Write both report formats and return their paths."""
         ensure_private_directory(directory)
         json_path = directory / "live-release-validation.json"
         markdown_path = directory / "live-release-validation.md"

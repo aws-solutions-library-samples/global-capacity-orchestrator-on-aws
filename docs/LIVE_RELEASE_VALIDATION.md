@@ -5,7 +5,7 @@ Live release validation is a local operator process:
 1. A developer checks out the exact commit locally.
 2. They run `python -m scripts.live_release_validation` against a dedicated AWS validation account.
 3. The harness deploys, validates, destroys, and writes local JSON and Markdown reports.
-4. The developer reviews the result and manually uploads the Markdown report as a comment attachment on the pull request.
+4. The developer reviews the result locally and posts a sanitized summary comment (run ID, exact SHA, overall status, per-action results) on the pull request. The full reports never leave the operator's machine.
 
 There is deliberately no GitHub Actions workflow for this process. Ordinary CI runs only mocked/offline contracts and must never invoke the live harness.
 
@@ -16,7 +16,7 @@ There is deliberately no GitHub Actions workflow for this process. Ordinary CI r
 - [What `--actions all` Executes](#what---actions-all-executes)
 - [Local Prerequisites](#local-prerequisites)
 - [Run the Script Locally](#run-the-script-locally)
-- [Reports and Manual Pull Request Upload](#reports-and-manual-pull-request-upload)
+- [Reports and Pull Request Evidence](#reports-and-pull-request-evidence)
 - [KMS Deletion Acknowledgment](#kms-deletion-acknowledgment)
 - [Exact Local Resume](#exact-local-resume)
 - [Cleanup, Retained Resources, and Recovery](#cleanup-retained-resources-and-recovery)
@@ -123,7 +123,7 @@ This command performs real AWS deployment and deletion. Reading this runbook or 
 
 Do not close the terminal merely because a validation action fails. The runner records the failure, then continues through its same-process cleanup path and writes the final report. `SIGTERM`, `SIGHUP`, and keyboard interruption also route through controlled cleanup when the process is still able to run.
 
-## Reports and Manual Pull Request Upload
+## Reports and Pull Request Evidence
 
 Every initialized run writes these local files under `$REPORT_DIR`:
 
@@ -133,7 +133,9 @@ Every initialized run writes these local files under `$REPORT_DIR`:
 
 On POSIX systems, the harness creates the dedicated report/checkpoint directory with mode `0700` and every JSON, Markdown, and temporary output with mode `0600`. It never changes permissions on a pre-existing directory: an existing output directory must already be owner-only, owned by the current operator, contain only this harness's checkpoint/report files, and not contain symlinks or special files. A custom `--checkpoint` must be a direct child of `--report-dir` and must not use either fixed report filename (`live-release-validation.json` or `live-release-validation.md`); use a new empty private directory for a fresh run.
 
-Only the Markdown or JSON report is review evidence. **Never upload `checkpoint.json`** to a pull request, artifact service, shared drive, chat, or issue. Never commit it. Keep it local with restrictive filesystem permissions until cleanup and any recovery work are complete.
+Both reports are account reconnaissance material, not just review evidence. One run's Markdown report names the 12-digit validation account ID hundreds of times and enumerates CloudWatch Logs, CloudFormation, IAM, and KMS ARNs (including keys inside their live seven-day deletion window), API endpoint URLs, and the account's complete resource-naming inventory. Keep both reports local, and share a full report only through a private maintainer channel when one is explicitly requested for debugging.
+
+**Never upload `checkpoint.json`** to a pull request, artifact service, shared drive, chat, or issue. Never commit it. Keep it local with restrictive filesystem permissions until cleanup and any recovery work are complete.
 
 After the process exits:
 
@@ -141,7 +143,7 @@ After the process exits:
 2. Verify the exact account, full commit SHA, branch, profile, action statuses, cleanup result, and final inventory.
 3. Require report status `PASSED` from a complete `--actions all` run. A successful diagnostic subset exits zero with status `PARTIAL` and lists its selected action scope; it is not release-validation evidence. A missing report, identity mismatch, incomplete cleanup, or failed final inventory is a failed validation.
 4. Open the pull request for the same full SHA.
-5. Add a comment stating that live validation was run locally, then manually upload `live-release-validation.md` to that comment. Optionally attach `live-release-validation.json` as additional machine-readable evidence if repository policy permits it.
+5. Add a comment containing a sanitized summary only: state that live validation ran locally, then give the run ID, the full commit SHA, the overall report status, and the per-action status table (action names, pass/fail, durations). Never post the full report, and never include account IDs, ARNs, endpoint URLs, or resource names in the comment.
 6. Submit the comment. There is no bot, workflow, automatic comment, or automatic upload.
 
 The report is tied to the exact commit. If the pull request SHA changes, run the process again for the new SHA before claiming live validation.

@@ -58,7 +58,8 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="python -m scripts.live_release_validation",
         description=(
             "Deploy, validate, and always destroy an exact GCO commit while producing "
-            "attachable JSON and Markdown reports."
+            "local JSON and Markdown reports. Reports enumerate account-specific "
+            "identifiers; post only a sanitized summary publicly."
         ),
     )
     parser.add_argument("--repo-root", help="GCO checkout (default: current Git root)")

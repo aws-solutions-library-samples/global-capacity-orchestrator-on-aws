@@ -3771,7 +3771,7 @@ class TestLocalRunbookContracts:
             ):
                 assert forbidden not in content, f"{workflow} contains {forbidden}"
 
-    def test_runbook_requires_local_execution_and_manual_pr_upload(self) -> None:
+    def test_runbook_requires_local_execution_and_private_reports(self) -> None:
         root = Path(__file__).resolve().parents[1]
         runbook = (root / "docs/LIVE_RELEASE_VALIDATION.md").read_text(encoding="utf-8")
         docs_index = (root / "docs/README.md").read_text(encoding="utf-8")
@@ -3801,10 +3801,25 @@ class TestLocalRunbookContracts:
             "Usually not required",
             "PARTIAL",
             "selected action scope",
-            "manually upload `live-release-validation.md`",
+            "sanitized summary",
+            "Never post the full report",
+            "private maintainer channel",
             "pull request",
         ):
             assert required in runbook
+
+        # Reports enumerate the validation account's ID, ARNs (including KMS
+        # keys inside their deletion window), and endpoint URLs. No document
+        # may instruct operators to publish them.
+        for upload_encouragement in (
+            "manually upload",
+            "manually attach",
+            "attach the generated Markdown report",
+            "upload `live-release-validation",
+        ):
+            assert upload_encouragement not in runbook
+            for document in contributor_docs:
+                assert upload_encouragement not in document
 
         for document in contributor_docs:
             normalized = document.casefold()

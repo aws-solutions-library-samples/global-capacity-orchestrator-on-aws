@@ -455,7 +455,7 @@ Live release validation is a separate, explicitly authorized local operator proc
 
 These are risk categories, not blanket path exemptions. A CLI command that mutates live AWS resources still requires validation, while a dependency bump may require it if it changes a deployed image, AWS SDK behavior, CDK output, or runtime integration. Explain the decision in the pull request; maintainers may require validation when impact is uncertain.
 
-When required, obtain explicit account and KMS-deletion authorization, run `python -m scripts.live_release_validation --actions all` only on a developer's local machine, and manually attach the generated Markdown report to the pull request for the exact SHA. Never invoke the harness from GitHub Actions and never upload `checkpoint.json`. See the [Live Release Validation runbook](docs/LIVE_RELEASE_VALIDATION.md) for the safety gates and complete command.
+When required, obtain explicit account and KMS-deletion authorization, run `python -m scripts.live_release_validation --actions all` only on a developer's local machine, and post a sanitized summary comment (run ID, exact SHA, overall status, per-action statuses) on the pull request. The full reports enumerate the validation account's ID, ARNs, and endpoint URLs: keep them local alongside `checkpoint.json`, and share a full report only through a private maintainer channel. Never invoke the harness from GitHub Actions. See the [Live Release Validation runbook](docs/LIVE_RELEASE_VALIDATION.md) for the safety gates and complete command.
 
 ### CI/CD Pipeline
 

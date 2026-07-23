@@ -31,7 +31,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 | [Troubleshooting](TROUBLESHOOTING.md) | Operators | Common issues and solutions for deployment, networking, pods, and storage |
 | [Operational Runbooks](RUNBOOKS.md) | Operators | Step-by-step incident response procedures for common failure scenarios |
 | [Maintenance](MAINTENANCE.md) | Maintainers | Routine upkeep: adding instance types, EKS version upgrades, base-image and CVE-suppression refreshes, dependency bumps |
-| [Live Release Validation](LIVE_RELEASE_VALIDATION.md) | Maintainers / operators | Run the local deploy-test-destroy harness and manually upload its report in a pull request comment |
+| [Live Release Validation](LIVE_RELEASE_VALIDATION.md) | Maintainers / operators | Run the local deploy-test-destroy harness and post its sanitized summary in a pull request comment; full reports stay local |
 | [Image Mirror](IMAGE_MIRROR.md) | Platform teams | Mirror Docker Hub add-on images into project-scoped ECR repositories with multi-architecture preservation |
 
 ## Schedulers & Orchestrators
