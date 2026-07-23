@@ -718,8 +718,8 @@ class ConfigLoader:
     def get_resource_thresholds(self) -> ResourceThresholds:
         """Get resource thresholds configuration"""
         thresholds_config = self.app.node.try_get_context("resource_thresholds") or {
-            "cpu_threshold": 60,
-            "memory_threshold": 60,
+            "cpu_threshold": 80,
+            "memory_threshold": 80,
             "gpu_threshold": -1,
             "pending_pods_threshold": 10,
             "pending_requested_cpu_vcpus": 100,

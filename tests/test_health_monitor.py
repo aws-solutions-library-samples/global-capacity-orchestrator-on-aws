@@ -348,8 +348,8 @@ class TestCreateFromEnv:
 
                 assert monitor.cluster_id == "unknown-cluster"
                 assert monitor.region == "unknown-region"
-                assert monitor.thresholds.cpu_threshold == 60
-                assert monitor.thresholds.memory_threshold == 60
+                assert monitor.thresholds.cpu_threshold == 80
+                assert monitor.thresholds.memory_threshold == 80
                 assert monitor.thresholds.gpu_threshold == 60
                 assert monitor.thresholds.pending_pods_threshold == 10
                 assert monitor.thresholds.pending_requested_cpu_vcpus == 100

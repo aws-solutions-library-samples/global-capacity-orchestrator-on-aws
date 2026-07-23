@@ -538,8 +538,8 @@ class TestCreateHealthMonitorFromEnv:
 
             assert monitor.cluster_id == "unknown-cluster"
             assert monitor.region == "unknown-region"
-            assert monitor.thresholds.cpu_threshold == 60
-            assert monitor.thresholds.memory_threshold == 60
+            assert monitor.thresholds.cpu_threshold == 80
+            assert monitor.thresholds.memory_threshold == 80
             assert monitor.thresholds.gpu_threshold == 60
 
     def test_create_health_monitor_from_env_custom(self, mock_k8s_config):

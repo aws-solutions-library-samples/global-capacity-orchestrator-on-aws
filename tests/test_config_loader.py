@@ -406,8 +406,10 @@ class TestDefaultValues:
         app = MockApp({})
         config = ConfigLoader(app)
         thresholds = config.get_resource_thresholds()
-        assert thresholds.cpu_threshold == 60
-        assert thresholds.memory_threshold == 60
+        # 80/80 leaves headroom above the idle-cluster platform baseline
+        # (observability stack ~65-70% memory on right-sized Auto Mode nodes).
+        assert thresholds.cpu_threshold == 80
+        assert thresholds.memory_threshold == 80
         assert thresholds.gpu_threshold == -1  # disabled by default for inference workloads
         assert thresholds.pending_pods_threshold == 10
         assert thresholds.pending_requested_cpu_vcpus == 100

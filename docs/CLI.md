@@ -4265,8 +4265,8 @@ Project configuration in `cdk.json`:
       "regional": ["us-east-1", "us-west-2"]
     },
     "resource_thresholds": {
-      "cpu_threshold": 60,
-      "memory_threshold": 60,
+      "cpu_threshold": 80,
+      "memory_threshold": 80,
       "gpu_threshold": -1,
       "pending_pods_threshold": 10,
       "pending_requested_cpu_vcpus": 100,

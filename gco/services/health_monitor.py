@@ -14,8 +14,8 @@ Environment Variables:
     CLUSTER_NAME: Name of the EKS cluster being monitored
     REGION: AWS region of the cluster
     CPU_THRESHOLD: CPU utilization threshold percentage (default: 80, -1 to disable)
-    MEMORY_THRESHOLD: Memory utilization threshold percentage (default: 85, -1 to disable)
-    GPU_THRESHOLD: GPU utilization threshold percentage (default: 90, -1 to disable)
+    MEMORY_THRESHOLD: Memory utilization threshold percentage (default: 80, -1 to disable)
+    GPU_THRESHOLD: GPU utilization threshold percentage (default: 60, -1 to disable)
 
 Usage:
     health_monitor = create_health_monitor_from_env()
@@ -722,8 +722,8 @@ def create_health_monitor_from_env() -> HealthMonitor:
     region = os.getenv("REGION", "unknown-region")
 
     # Load thresholds from environment (defaults match cdk.json)
-    cpu_threshold = int(os.getenv("CPU_THRESHOLD", "60"))
-    memory_threshold = int(os.getenv("MEMORY_THRESHOLD", "60"))
+    cpu_threshold = int(os.getenv("CPU_THRESHOLD", "80"))
+    memory_threshold = int(os.getenv("MEMORY_THRESHOLD", "80"))
     gpu_threshold = int(os.getenv("GPU_THRESHOLD", "60"))
     pending_pods_threshold = int(os.getenv("PENDING_PODS_THRESHOLD", "10"))
     pending_requested_cpu_vcpus = int(os.getenv("PENDING_REQUESTED_CPU_VCPUS", "100"))

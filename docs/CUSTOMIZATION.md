@@ -534,8 +534,8 @@ The health monitor compares cluster utilization against configurable thresholds 
 
 ```json
 "resource_thresholds": {
-  "cpu_threshold": 60,
-  "memory_threshold": 60,
+  "cpu_threshold": 80,
+  "memory_threshold": 80,
   "gpu_threshold": -1,
   "pending_pods_threshold": 10,
   "pending_requested_cpu_vcpus": 100,
@@ -546,8 +546,8 @@ The health monitor compares cluster utilization against configurable thresholds 
 
 | Threshold | Default | Description |
 |-----------|---------|-------------|
-| `cpu_threshold` | 60 | CPU utilization % (0-100, or -1 to disable) |
-| `memory_threshold` | 60 | Memory utilization % (0-100, or -1 to disable) |
+| `cpu_threshold` | 80 | CPU utilization % (0-100, or -1 to disable) |
+| `memory_threshold` | 80 | Memory utilization % (0-100, or -1 to disable) |
 | `gpu_threshold` | -1 | GPU utilization % (0-100, or -1 to disable) |
 | `pending_pods_threshold` | 10 | Max pending pods before unhealthy (-1 to disable) |
 | `pending_requested_cpu_vcpus` | 100 | Max vCPUs requested by pending pods (-1 to disable) |
