@@ -98,6 +98,9 @@ KEDA_CUSTOM_RESOURCE_DISCOVERY_TIMEOUT_SECONDS = 10
 HELM_VALIDATION_COMMAND_TIMEOUT_SECONDS = 120
 HELM_VALIDATION_TOTAL_TIMEOUT_SECONDS = 780
 KUBECTL_VALIDATION_COMMAND_TIMEOUT_SECONDS = 120
+# Service endpoint readiness is polled (it is a convergence condition); every
+# other validation dimension stays single-shot within the shared deadline.
+ENDPOINT_READINESS_POLL_SECONDS = 10.0
 KUBECTL_VALIDATION_REQUEST_TIMEOUT = "30s"
 MAX_VALIDATION_DIAGNOSTIC_CHARS = 2048
 _HELM_RELEASE_NOT_FOUND = "Error: release: not found"
@@ -1224,20 +1227,14 @@ def _validate_resource_readiness(resource: dict[str, Any]) -> None:
                 )
 
 
-def _validate_service_endpoints(
-    resource: dict[str, Any],
+def _service_has_ready_endpoint(
+    name: str,
+    namespace: str,
+    display: str,
     kubeconfig: str,
-    release_namespace: str,
     deadline: float,
-) -> None:
-    spec = resource.get("spec", {})
-    selector = spec.get("selector") if isinstance(spec, dict) else None
-    if resource.get("kind") != "Service" or not isinstance(selector, dict) or not selector:
-        return
-
-    identity = _resource_core_identity(resource, "kubectl output")
-    name = identity[2]
-    namespace = _resource_namespace(resource) or release_namespace
+) -> bool:
+    """Return whether one ready, non-terminating endpoint backs the Service."""
     code, stdout, stderr = run_kubectl(
         [
             "get",
@@ -1255,7 +1252,6 @@ def _validate_service_endpoints(
         ),
         log_output=False,
     )
-    display = _display_identity(identity, namespace)
     if code == -1:
         raise _ValidationTimeout(f"{display} EndpointSlice query timed out")
     if code != 0:
@@ -1284,8 +1280,42 @@ def _validate_service_endpoints(
             if not isinstance(conditions, dict):
                 continue
             if _is_true(conditions.get("ready")) and not _is_true(conditions.get("terminating")):
-                return
-    raise RuntimeError(f"{display} has no ready, non-terminating EndpointSlice endpoint")
+                return True
+    return False
+
+
+def _validate_service_endpoints(
+    resource: dict[str, Any],
+    kubeconfig: str,
+    release_namespace: str,
+    deadline: float,
+) -> None:
+    """Wait, within the validation deadline, for one ready Service endpoint.
+
+    Endpoint readiness is a convergence condition, not an instant contract:
+    slow-starting workloads (for example Grafana running its first-boot
+    database migrations on a fresh PersistentVolume) legitimately publish
+    their ready endpoint minutes after installation. A single-shot check
+    failed a healthy live deployment for exactly that reason, so poll until
+    the shared validation deadline; a Service that never converges still
+    fails with the exact object named. Query and parse failures are not
+    convergence conditions and surface immediately.
+    """
+    spec = resource.get("spec", {})
+    selector = spec.get("selector") if isinstance(spec, dict) else None
+    if resource.get("kind") != "Service" or not isinstance(selector, dict) or not selector:
+        return
+
+    identity = _resource_core_identity(resource, "kubectl output")
+    name = identity[2]
+    namespace = _resource_namespace(resource) or release_namespace
+    display = _display_identity(identity, namespace)
+
+    while not _service_has_ready_endpoint(name, namespace, display, kubeconfig, deadline):
+        if deadline - time.monotonic() <= ENDPOINT_READINESS_POLL_SECONDS:
+            raise RuntimeError(f"{display} has no ready, non-terminating EndpointSlice endpoint")
+        # nosemgrep: arbitrary-sleep - bounded convergence polling within the validation deadline
+        time.sleep(ENDPOINT_READINESS_POLL_SECONDS)
 
 
 def _remove_validation_file(path: str) -> None:

@@ -381,6 +381,23 @@ def test_no_credential_literal_anywhere_in_entry(kps_entry) -> None:
         assert needle not in blob, needle
 
 
+def test_grafana_liveness_tolerates_first_boot_migrations(kps_entry) -> None:
+    # Regression: Grafana's first-boot database migrations on a fresh PVC ran
+    # past the subchart's default liveness budget (~2.5 min) on a live
+    # cluster; kubelet killed it mid-migration and the pod crash-looped.
+    # Liveness must allow >= 10 minutes before the first kill, and readiness
+    # must stay on the subchart default (no override here).
+    grafana = kps_entry["values"]["grafana"]
+    liveness = grafana["livenessProbe"]
+    assert liveness["httpGet"]["path"] == "/api/health"
+    assert liveness["httpGet"]["port"] == 3000
+    tolerance = (
+        liveness["initialDelaySeconds"] + liveness["failureThreshold"] * liveness["periodSeconds"]
+    )
+    assert tolerance >= 600
+    assert "readinessProbe" not in grafana
+
+
 def test_grafana_persistence_enabled(kps_entry) -> None:
     assert kps_entry["values"]["grafana"]["persistence"]["enabled"] is True
 

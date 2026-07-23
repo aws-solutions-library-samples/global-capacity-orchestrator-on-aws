@@ -572,6 +572,22 @@ charts:
           type: pvc
           accessModes:
             - ReadWriteOnce
+        # First-boot tolerance: Grafana runs its full database migration set
+        # (plus the unified-storage search index build) against the fresh PVC
+        # before it listens on 3000. A live deployment measured 7+ minutes,
+        # which the subchart's default liveness budget (60s initial delay +
+        # 10 failures x 10s) cut short: kubelet killed Grafana mid-migration,
+        # every restart redid the work, and the pod crash-looped. Allow ~11
+        # minutes before liveness kills it; readiness stays on the subchart
+        # default so traffic only flows once /api/health actually answers.
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 30
+          failureThreshold: 60
         sidecar:
           dashboards:
             enabled: true

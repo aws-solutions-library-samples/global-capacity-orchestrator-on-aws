@@ -1190,6 +1190,9 @@ class TestReleaseConvergenceValidation:
             patch.object(helm_handler, "load_charts_config", return_value=self._charts()),
             patch.object(helm_handler, "run_helm", side_effect=self._helm_success(manifest)),
             patch.object(helm_handler, "run_kubectl", side_effect=kubectl_results) as mock_kubectl,
+            # An infinite poll interval exceeds any remaining budget, so the
+            # readiness poll degenerates to the single observation under test.
+            patch.object(helm_handler, "ENDPOINT_READINESS_POLL_SECONDS", float("inf")),
             pytest.raises(RuntimeError, match="no ready, non-terminating EndpointSlice endpoint"),
         ):
             helm_handler.validate_releases(self._event(), "/tmp/kubeconfig")
@@ -1197,6 +1200,54 @@ class TestReleaseConvergenceValidation:
         endpoint_args = mock_kubectl.call_args_list[1].args[0]
         assert "endpointslices.discovery.k8s.io" in endpoint_args
         assert f"kubernetes.io/service-name={service['metadata']['name']}" in endpoint_args
+
+    def test_slow_starting_service_endpoint_converges_within_deadline(self):
+        """Regression: Grafana's first-boot migrations outlived a one-shot check.
+
+        A live run crash-looped Grafana because its fresh-PVC migrations ran
+        past the probe budget; even after that was fixed, endpoint readiness
+        arrives minutes after installation. The validator polls until the
+        shared deadline, so a not-ready-then-ready Service must pass.
+        """
+        service = self._service()
+        manifest = self._manifest(service)
+        not_ready = json.dumps(
+            {
+                "apiVersion": "discovery.k8s.io/v1",
+                "kind": "EndpointSliceList",
+                "items": [{"endpoints": [{"conditions": {"ready": False}}]}],
+            }
+        )
+        ready = json.dumps(
+            {
+                "apiVersion": "discovery.k8s.io/v1",
+                "kind": "EndpointSliceList",
+                "items": [{"endpoints": [{"conditions": {"ready": True}}]}],
+            }
+        )
+        kubectl_results = [
+            (0, self._live_list(service), ""),
+            (0, not_ready, ""),
+            (0, not_ready, ""),
+            (0, ready, ""),
+        ]
+        sleeps: list[float] = []
+        with (
+            patch.object(helm_handler, "load_charts_config", return_value=self._charts()),
+            patch.object(helm_handler, "run_helm", side_effect=self._helm_success(manifest)),
+            patch.object(helm_handler, "run_kubectl", side_effect=kubectl_results) as mock_kubectl,
+            patch.object(helm_handler.time, "sleep", side_effect=sleeps.append),
+        ):
+            result = helm_handler.validate_releases(self._event(), "/tmp/kubeconfig")
+
+        assert result["status"] == "validated"
+        assert result["validated_release_count"] == 1
+        assert sleeps == [helm_handler.ENDPOINT_READINESS_POLL_SECONDS] * 2
+        endpoint_queries = sum(
+            "endpointslices.discovery.k8s.io" in call.args[0]
+            for call in mock_kubectl.call_args_list
+        )
+        assert endpoint_queries == 3
 
     @pytest.mark.parametrize(
         "conditions",
@@ -1226,6 +1277,7 @@ class TestReleaseConvergenceValidation:
             patch.object(helm_handler, "load_charts_config", return_value=self._charts()),
             patch.object(helm_handler, "run_helm", side_effect=self._helm_success(manifest)),
             patch.object(helm_handler, "run_kubectl", side_effect=kubectl_results),
+            patch.object(helm_handler, "ENDPOINT_READINESS_POLL_SECONDS", float("inf")),
             pytest.raises(RuntimeError, match="no ready, non-terminating EndpointSlice endpoint"),
         ):
             helm_handler.validate_releases(self._event(), "/tmp/kubeconfig")
