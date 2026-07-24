@@ -27,7 +27,7 @@ The operator watches all namespaces for Ray custom resources.
 
 ### Version Compatibility
 
-KubeRay 1.6.x supports current Ray releases. GCO's examples use Ray 2.56.0; keep
+KubeRay 1.6.x supports current Ray releases. GCO's examples use Ray 2.56.1; keep
 `spec.rayVersion` and every head/worker image tag identical when upgrading.
 
 See the [KubeRay upgrade guide](https://docs.ray.io/en/latest/cluster/kubernetes/user-guides/upgrade-guide.html) for compatibility details and known-bad Ray release ranges.
@@ -45,7 +45,7 @@ metadata:
   name: my-cluster
   namespace: gco-jobs
 spec:
-  rayVersion: '2.56.0'
+  rayVersion: '2.56.1'
   headGroupSpec:
     rayStartParams:
       dashboard-host: '0.0.0.0'
@@ -54,7 +54,7 @@ spec:
       spec:
         containers:
         - name: ray-head
-          image: rayproject/ray:2.56.0
+          image: rayproject/ray:2.56.1
           resources:
             requests:
               cpu: "2"
@@ -73,7 +73,7 @@ spec:
       spec:
         containers:
         - name: ray-worker
-          image: rayproject/ray:2.56.0
+          image: rayproject/ray:2.56.1
           resources:
             requests:
               cpu: "2"
@@ -91,7 +91,7 @@ spec:
       spec:
         containers:
         - name: ray-worker
-          image: rayproject/ray:2.56.0
+          image: rayproject/ray:2.56.1
           resources:
             requests:
               cpu: "4"
@@ -188,7 +188,7 @@ workerGroupSpecs:
     spec:
       containers:
       - name: ray-worker
-        image: rayproject/ray:2.56.0
+        image: rayproject/ray:2.56.1
         resources:
           requests:
             cpu: "4"
@@ -216,6 +216,7 @@ In your training script, use Ray Train's checkpoint API:
 
 ```python
 from ray.train import Checkpoint
+
 # Save checkpoint to shared storage
 checkpoint = Checkpoint.from_directory("/checkpoints/run-001")
 ```

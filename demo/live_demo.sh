@@ -320,7 +320,7 @@ if [ "${SKIP_INFERENCE:-}" != "1" ]; then
     narrate "Pre-deploying inference endpoint (GPU will provision in background)..."
     # Retry deploy in case the previous endpoint hasn't been fully cleaned up yet
     for _ in $(seq 1 5); do
-        DEPLOY_OUTPUT=$(gco inference deploy "$INFERENCE_NAME" -i vllm/vllm-openai:v0.24.0 \
+        DEPLOY_OUTPUT=$(gco inference deploy "$INFERENCE_NAME" -i vllm/vllm-openai:v0.25.1 \
             --gpu-count 1 --replicas 1 -r "$REGION" \
             --extra-args '--model' --extra-args 'facebook/opt-125m' \
             2>&1 || true)

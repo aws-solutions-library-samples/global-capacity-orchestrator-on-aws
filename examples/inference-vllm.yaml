@@ -9,14 +9,14 @@
 #
 # Usage (recommended, multi-region aware):
 #   gco inference deploy vllm-llama3 \
-#     -i vllm/vllm-openai:v0.24.0 \
+#     -i vllm/vllm-openai:v0.25.1 \
 #     --gpu-count 1 --replicas 1 \
 #     -e MODEL=meta-llama/Llama-3.1-8B-Instruct \
 #     -e MAX_MODEL_LEN=4096
 #
 # Usage with autoscaling:
 #   gco inference deploy vllm-llama3 \
-#     -i vllm/vllm-openai:v0.24.0 \
+#     -i vllm/vllm-openai:v0.25.1 \
 #     --gpu-count 1 --replicas 2 \
 #     --min-replicas 1 --max-replicas 8 \
 #     --autoscale-metric cpu:70 --autoscale-metric memory:80 \
@@ -60,7 +60,7 @@ spec:
         runAsGroup: 1000
       containers:
       - name: vllm
-        image: vllm/vllm-openai:v0.24.0
+        image: vllm/vllm-openai:v0.25.1
         securityContext:
           allowPrivilegeEscalation: false
         ports:

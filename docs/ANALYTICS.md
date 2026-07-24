@@ -580,7 +580,7 @@ Deploy an inference endpoint from a notebook:
 
 ```bash
 gco inference deploy exploration-llm \
-  --image vllm/vllm-openai:v0.24.0 \
+  --image vllm/vllm-openai:v0.25.1 \
   --replicas 1 --gpu-count 1 \
   --region us-east-1
 ```
@@ -629,14 +629,18 @@ response = sm.create_training_job(
         "TrainingInputMode": "File",
     },
     RoleArn="arn:aws:iam::123456789012:role/AmazonSageMaker-gco-analytics-exec-us-east-2",
-    InputDataConfig=[{
-        "ChannelName": "training",
-        "DataSource": {"S3DataSource": {
-            "S3DataType": "S3Prefix",
-            "S3Uri": "s3://gco-cluster-shared-123456789012-us-east-2/training-data/",
-            "S3DataDistributionType": "FullyReplicated",
-        }},
-    }],
+    InputDataConfig=[
+        {
+            "ChannelName": "training",
+            "DataSource": {
+                "S3DataSource": {
+                    "S3DataType": "S3Prefix",
+                    "S3Uri": "s3://gco-cluster-shared-123456789012-us-east-2/training-data/",
+                    "S3DataDistributionType": "FullyReplicated",
+                }
+            },
+        }
+    ],
     OutputDataConfig={
         "S3OutputPath": "s3://gco-cluster-shared-123456789012-us-east-2/training-output/",
     },
@@ -752,9 +756,9 @@ End-to-end flow from a Studio notebook:
         TrackingServerName="gco-mlflow",
         ArtifactStoreUri=f"s3://{bucket}/mlflow/",
         TrackingServerSize="Small",
-        RoleArn=sm.describe_domain(
-            DomainId="d-<your-domain-id>"
-        )["DefaultUserSettings"]["ExecutionRole"],
+        RoleArn=sm.describe_domain(DomainId="d-<your-domain-id>")["DefaultUserSettings"][
+            "ExecutionRole"
+        ],
     )
     ```
 
@@ -765,9 +769,9 @@ End-to-end flow from a Studio notebook:
     import time
 
     while True:
-        status = sm.describe_mlflow_tracking_server(
-            TrackingServerName="gco-mlflow"
-        )["TrackingServerStatus"]
+        status = sm.describe_mlflow_tracking_server(TrackingServerName="gco-mlflow")[
+            "TrackingServerStatus"
+        ]
         print(status)
         if status in ("Created", "CreateFailed"):
             break
@@ -780,9 +784,9 @@ End-to-end flow from a Studio notebook:
     ```python
     import mlflow
 
-    tracking_arn = sm.describe_mlflow_tracking_server(
-        TrackingServerName="gco-mlflow"
-    )["TrackingServerArn"]
+    tracking_arn = sm.describe_mlflow_tracking_server(TrackingServerName="gco-mlflow")[
+        "TrackingServerArn"
+    ]
     mlflow.set_tracking_uri(tracking_arn)
     mlflow.set_experiment("my-first-experiment")
 
@@ -988,6 +992,7 @@ per-user export step is required:
 # as an SSM parameter in the global region so the code doesn't
 # have to hardcode the suffix.
 import boto3
+
 ssm = boto3.client("ssm", region_name="us-east-2")  # global region
 bucket = ssm.get_parameter(Name="/gco/cluster-shared-bucket/name")["Parameter"]["Value"]
 s3 = boto3.client("s3")

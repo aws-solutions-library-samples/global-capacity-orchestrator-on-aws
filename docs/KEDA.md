@@ -131,7 +131,7 @@ When you deploy an endpoint with a GPU autoscaling metric:
 
 ```bash
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.24.0 \
+  -i vllm/vllm-openai:v0.25.1 \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric gpu:60

@@ -118,7 +118,7 @@ Train and serve models.
 - **Inference:** read the [Inference Guide](INFERENCE.md), then deploy an endpoint.
 
   ```bash
-  gco inference deploy my-llm -i vllm/vllm-openai:v0.24.0 --gpu-count 1
+  gco inference deploy my-llm -i vllm/vllm-openai:v0.25.1 --gpu-count 1
   gco inference status my-llm
   ```
 
