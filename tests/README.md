@@ -283,6 +283,7 @@ Typical usage in a fixture:
 ```python
 from tests._lambda_imports import load_lambda_module
 
+
 @pytest.fixture
 def rotation_module():
     with patch("boto3.client") as mock_client:
@@ -457,7 +458,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_pip_audit_ignore_validator.py` | Pins the contract of `.github/scripts/check_pip_audit_ignore.py`, which gates the pip-audit job in `.github/workflows/security.yml`. Every entry in `.pip-audit-ignore` must carry an `exp:YYYY-MM-DD` marker; the validator fails the workflow when any entry is on-or-before today (inclusive — no bonus day) or is missing the marker entirely. Tests cover happy paths (single, multi, blank-line / comment skipping, missing-file-is-clean), expired-date detection (past dates, equal-to-today, ±1 day boundary), missing or malformed markers, `main()` exit codes / stdout, and a live-file check that runs the committed suppression file through the validator with today's date. |
 | `test_npm_audit_checker.py` | Pins the exact, expiring npm-audit suppression gate in `.github/scripts/check_npm_audit.py`: suppression-file parsing, inclusive expiration and duplicate rejection, advisory extraction, malformed and operational-error JSON, exact package-directory/package/advisory/node matching, compound-record fail-closed behavior, severity thresholds, stale entries, and `main()` exit codes. Uses synthetic reports and temporary files only; it never contacts npm or the network. |
 | `test_ci_config_paths.py` | Guards CI config against stale path references left by a package rename (the `mcp` to `gco_mcp` move broke the CodeQL autobuilder with FileNotFoundError). Asserts every `paths:` entry in `.github/codeql/codeql-config.yml` is a real directory, every `--cov=<pkg>` target across `.github/workflows/*.yml` and `.github/legacy/.gitlab-ci.yml` resolves to an existing top-level directory, and every `[tool.coverage.run] source` dir in `pyproject.toml` exists. Catches the silent failure mode where a renamed package leaves coverage recording nothing and CodeQL crashing at scan time. |
-| `test_docs_coverage.py` | Documentation-coverage guard with three cases: every `tests/test_*.py` module appears in `tests/README.md`; every `gco` Click command (the full command tree, walked recursively) is documented in `docs/CLI.md` (matched as a `gco <command>` entry); and every registered MCP tool — enumerated in a subprocess with `GCO_ENABLE_ALL_TOOLS` so the full catalog is visible — appears in `gco_mcp/tools/README.md`. Each case fails with the list of undocumented items so the fix is to add the missing described entry. |
+| `test_docs_coverage.py` | Documentation-coverage guard with four cases: every `tests/test_*.py` module appears in `tests/README.md`; every `gco` Click command (the full command tree, walked recursively) is documented in `docs/CLI.md` (matched as a `gco <command>` entry); every registered MCP tool — enumerated in a subprocess with `GCO_ENABLE_ALL_TOOLS` so the full catalog is visible — appears in `gco_mcp/tools/README.md`; and every documented `uvx` / `uv tool install` snippet in `gco_mcp/README.md` pins `--python` to the minimum version from pyproject's `requires-python` (so installs cannot fail resolution on hosts whose default Python is older, and a future Python bump cannot leave the docs requesting a stale interpreter). Each case fails with the list of offending items so the fix is mechanical. |
 | `test_mcp_cli_contract.py` | Contract guard: every MCP tool that shells out to the `gco` CLI must build an invocation the Click command tree actually accepts. A subprocess (with `GCO_ENABLE_ALL_TOOLS`) invokes each tool with dummy args — patching `cli_runner._run_cli` to capture the argv instead of running it, and only invoking tools whose body references `_run_cli` so non-CLI backends aren't executed — and the parent resolves each captured argv against the live tree, flagging unknown subcommands and unknown options. Catches the class of bug where a tool passes a flag/subcommand the CLI rejects (this guard found and drove the fix of ten such pre-existing mismatches, e.g. `nodepools_create_odcr` passing `--count`/`--cluster`, `enable_analytics` calling `stacks analytics enable`, `webhooks_create` passing `--secret-name`). The check is strict — any mismatch fails. |
 | `test_mcp_tool_count_docs.py` | Drift guard for the human-readable MCP tool counts. Enumerates the live registry in two subprocesses (clean env for the default count, `GCO_ENABLE_ALL_TOOLS` for the ceiling) and asserts every "N tools by default (up to M with all flags enabled)" figure quoted in `README.md`, `gco_mcp/README.md`, and `gco_mcp/tools/README.md` matches — the headlines had silently drifted to 98/130 while the server registered 109/144. Includes a sanity floor so a phrasing change that breaks the regexes fails loudly instead of passing on zero comparisons. |
 | `test_trivyignore_validator.py` | Applies the shared `.github/scripts/check_pip_audit_ignore.py` validator (its line format — `<ID> exp:YYYY-MM-DD` — is identical) to `.github/config/.trivyignore`: every suppression must carry a future `exp:` marker, and the committed file must validate clean against today so an expired Trivy suppression can't silently outlive its fix. Covers valid/expired/missing-marker fixtures plus a live-file check and a well-formed-token check. |
@@ -633,8 +634,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 1. **Use descriptive test names**: Test names should describe what is being tested and the expected outcome.
 
    ```python
-   def test_submit_manifest_with_invalid_namespace_returns_403():
-       ...
+   def test_submit_manifest_with_invalid_namespace_returns_403(): ...
    ```
 
 2. **One assertion per test when possible**: Makes failures easier to diagnose.
@@ -657,12 +657,14 @@ Brief description of what this test file covers.
 from unittest.mock import MagicMock, patch, AsyncMock
 import pytest
 
+
 @pytest.fixture
 def mock_dependency():
     """Fixture description."""
     mock = MagicMock()
     mock.some_method.return_value = "expected_value"
     return mock
+
 
 class TestFeatureName:
     """Tests for [feature name]."""
@@ -671,17 +673,17 @@ class TestFeatureName:
         """Test description."""
         # Arrange
         ...
-        
+
         # Act
         result = function_under_test()
-        
+
         # Assert
         assert result == expected
 
     def test_error_case(self, mock_dependency):
         """Test error handling."""
         mock_dependency.some_method.side_effect = Exception("Error")
-        
+
         with pytest.raises(Exception):
             function_under_test()
 ```
@@ -695,6 +697,7 @@ When testing FastAPI endpoints, you need to mock both the factory functions AND 
 ```python
 from unittest.mock import MagicMock, patch, AsyncMock
 from fastapi.testclient import TestClient
+
 
 def test_api_endpoint(mock_manifest_processor):
     """Test an API endpoint with proper mocking."""
@@ -712,6 +715,7 @@ def test_api_endpoint(mock_manifest_processor):
     ):
         # IMPORTANT: Also set the module-level variables directly
         import gco.services.manifest_api as api_module
+
         api_module.manifest_processor = mock_manifest_processor
         api_module.job_store = mock_job_store
 
@@ -756,6 +760,7 @@ def mock_manifest_processor():
 
 ```python
 from unittest.mock import MagicMock, patch
+
 
 @pytest.fixture
 def mock_dynamodb():
@@ -910,6 +915,7 @@ FastAPI apps can be cached between tests. Use fresh imports within test function
 def test_something():
     with patch(...):
         from gco.services.manifest_api import app
+
         with TestClient(app) as client:
             ...
 ```

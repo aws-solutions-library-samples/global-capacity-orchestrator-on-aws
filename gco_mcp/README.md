@@ -153,11 +153,13 @@ If you have [`uv`](https://docs.astral.sh/uv/) installed, you can run the GCO MC
 GCO_REF=v3.2.0
 
 # Run it ad hoc — uvx builds a cached, throwaway environment:
-uvx --from "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@${GCO_REF}" gco-mcp
+uvx --python 3.14 --from "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@${GCO_REF}" gco-mcp
 
 # …or install the gco + gco-mcp console scripts onto your PATH:
-uv tool install "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@${GCO_REF}"
+uv tool install --python 3.14 "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@${GCO_REF}"
 ```
+
+> **Always pass `--python 3.14`.** GCO requires Python >= 3.14, but `uvx` / `uv tool install` resolve against the host's default interpreter unless told otherwise — on a machine whose default Python is older (3.13 or below) the install fails with `No solution found … does not satisfy Python>=3.14`. With `--python 3.14`, uv selects a matching interpreter and [downloads a managed CPython 3.14 automatically](https://docs.astral.sh/uv/concepts/python-versions/) when the host has none, so the same command works everywhere.
 
 Then point any stdio MCP client at that same command. For Kiro (`~/.kiro/settings/mcp.json`):
 
@@ -167,6 +169,8 @@ Then point any stdio MCP client at that same command. For Kiro (`~/.kiro/setting
     "gco": {
       "command": "uvx",
       "args": [
+        "--python",
+        "3.14",
         "--from",
         "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
         "gco-mcp"
@@ -206,6 +210,8 @@ The `deploy_*`, `destroy_*`, `bootstrap_cdk`, and `stack_synth`/`diff`/`list` to
     "gco": {
       "command": "uvx",
       "args": [
+        "--python",
+        "3.14",
         "--from",
         "gco-cli[cdk] @ git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.13.3",
         "gco-mcp"
@@ -233,6 +239,8 @@ Add to your MCP config at `~/.kiro/settings/mcp.json`. The recommended `uvx` for
     "gco": {
       "command": "uvx",
       "args": [
+        "--python",
+        "3.14",
         "--from",
         "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
         "gco-mcp"
@@ -250,6 +258,8 @@ To enable a feature flag, add an `env` block alongside `args`:
     "gco": {
       "command": "uvx",
       "args": [
+        "--python",
+        "3.14",
         "--from",
         "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
         "gco-mcp"
@@ -290,6 +300,8 @@ Add to your MCP config at `~/Library/Application Support/Claude/claude_desktop_c
     "gco": {
       "command": "uvx",
       "args": [
+        "--python",
+        "3.14",
         "--from",
         "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
         "gco-mcp"
@@ -324,13 +336,13 @@ Replace `/path/to/global-capacity-orchestrator-on-aws` with the absolute path to
 [Claude Code](https://code.claude.com/docs/en/mcp) registers stdio servers with the `claude mcp add` CLI. The recommended `uvx` form needs no clone — everything after `--` is the launch command:
 
 ```bash
-claude mcp add gco -- uvx --from "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0" gco-mcp
+claude mcp add gco -- uvx --python 3.14 --from "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0" gco-mcp
 ```
 
 Add a feature flag with `--env`:
 
 ```bash
-claude mcp add --env GCO_ENABLE_INFRASTRUCTURE_DEPLOY=true gco -- uvx --from "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0" gco-mcp
+claude mcp add --env GCO_ENABLE_INFRASTRUCTURE_DEPLOY=true gco -- uvx --python 3.14 --from "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0" gco-mcp
 ```
 
 Pass `--scope project` to write a shareable `.mcp.json` at the project root (checked into version control) instead of your personal config. That file uses the same `mcpServers` schema as the other clients:
@@ -341,6 +353,8 @@ Pass `--scope project` to write a shareable `.mcp.json` at the project root (che
     "gco": {
       "command": "uvx",
       "args": [
+        "--python",
+        "3.14",
         "--from",
         "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
         "gco-mcp"
@@ -365,6 +379,8 @@ Add to your MCP config at `~/.cursor/mcp.json`. The recommended `uvx` form:
     "gco": {
       "command": "uvx",
       "args": [
+        "--python",
+        "3.14",
         "--from",
         "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
         "gco-mcp"
@@ -400,7 +416,7 @@ The server uses stdio transport (the MCP default). Any MCP client that supports 
 
 ```bash
 GCO_REF=v3.2.0 # v3.2.0 or newer — see the releases page
-uvx --from "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@${GCO_REF}" gco-mcp
+uvx --python 3.14 --from "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@${GCO_REF}" gco-mcp
 ```
 
 Any release `>= v3.2.0` works. From a local clone (development), run the entrypoint directly instead:
@@ -443,6 +459,8 @@ Set the flag in the MCP client `env` block. The same `env` block works whether y
     "gco": {
       "command": "uvx",
       "args": [
+        "--python",
+        "3.14",
         "--from",
         "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
         "gco-mcp"
@@ -463,6 +481,8 @@ Set the flag in the MCP client `env` block. The same `env` block works whether y
     "gco": {
       "command": "uvx",
       "args": [
+        "--python",
+        "3.14",
         "--from",
         "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
         "gco-mcp"
@@ -483,6 +503,8 @@ Set the flag in the MCP client `env` block. The same `env` block works whether y
     "gco": {
       "command": "uvx",
       "args": [
+        "--python",
+        "3.14",
         "--from",
         "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
         "gco-mcp"
@@ -539,6 +561,8 @@ If your client relied on uploads, set the model-upload gate and an absolute conf
     "gco": {
       "command": "uvx",
       "args": [
+        "--python",
+        "3.14",
         "--from",
         "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
         "gco-mcp"
@@ -1283,6 +1307,8 @@ Here's a `~/.kiro/settings/mcp.json` that wires up the GCO MCP server alongside 
     "gco": {
       "command": "uvx",
       "args": [
+        "--python",
+        "3.14",
         "--from",
         "git+https://github.com/awslabs/global-capacity-orchestrator-on-aws.git@v3.2.0",
         "gco-mcp"
