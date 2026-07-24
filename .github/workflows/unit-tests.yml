@@ -603,16 +603,31 @@ jobs:
 
 
   # ----------------------------------------------------------------------
-  # unit:mcp:install -- the GCO MCP server installs via uv and launches.
-  # Mirrors the documented uvx / uv tool install path: the gco and gco-mcp
-  # console scripts both ship from the one gco-cli package, the gco_mcp
-  # namespace package keeps the PyPI mcp SDK unshadowed, and the server
-  # resolves its OWN bundled gco CLI (fully self-contained).
+  # unit:mcp:install -- the GCO MCP server installs via the two install
+  # forms gco_mcp/README.md documents, run verbatim against this checkout:
+  #
+  #   1. `uvx --python <min> --from "gco-cli @ <spec>" gco-mcp` — the ad hoc
+  #      form every MCP client config executes on launch.
+  #   2. `uv tool install --python <min> "gco-cli[cdk] @ <spec>"` — the
+  #      deploy-capable PATH-install form (Option 2), including the [cdk]
+  #      extra whose larger dependency graph is where resolver conflicts
+  #      have historically surfaced.
+  #
+  # `<min>` is read from pyproject's requires-python at job runtime, the
+  # same source the docs-coverage guard pins the README snippets to, so
+  # a Python bump cannot leave CI exercising a stale interpreter request.
+  # A PEP 508 `file://` direct reference to the checkout stands in for the
+  # documented `git+https` release-tag URL — a pull request's code is not
+  # on any tag, and the substitution changes only the fetch transport, not
+  # the resolver, build, or console-script path under test. The smoke
+  # script asserts the gco and gco-mcp console scripts ship from the one
+  # gco-cli package, the gco_mcp namespace package keeps the PyPI mcp SDK
+  # unshadowed, and the server resolves its OWN bundled gco CLI.
   # ----------------------------------------------------------------------
   unit-mcp-install:
     name: "unit:mcp:install"
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6.3.0
@@ -620,18 +635,52 @@ jobs:
           python-version: "3.14"
       - name: Install uv
         run: pip install uv
-      - name: Install GCO (gco + gco-mcp) into an isolated environment via uv
+      - name: Derive the documented --python value from requires-python
         run: |
-          uv venv "$RUNNER_TEMP/mcpvenv" --python 3.14
-          uv pip install --python "$RUNNER_TEMP/mcpvenv" .
-      - name: Both gco and gco-mcp console scripts are exposed
+          set -euo pipefail
+          MIN_PY="$(python3 - <<'PY'
+          import re, sys, tomllib
+          with open("pyproject.toml", "rb") as fh:
+              requires = tomllib.load(fh)["project"]["requires-python"]
+          match = re.fullmatch(r">=\s*(\d+\.\d+)", requires.strip())
+          if not match:
+              sys.exit(f"unexpected requires-python shape: {requires!r}")
+          print(match.group(1))
+          PY
+          )"
+          echo "MIN_PY=$MIN_PY" >> "$GITHUB_ENV"
+          echo "Documented --python value: $MIN_PY"
+      - name: "Form 1: ad hoc uvx run launches the MCP server over stdio"
+        # Exactly what an MCP client executes from its JSON config, with the
+        # checkout substituted for the release-tag URL.
         run: |
-          test -x "$RUNNER_TEMP/mcpvenv/bin/gco"
-          test -x "$RUNNER_TEMP/mcpvenv/bin/gco-mcp"
-      - name: Installed package imports and resolves its bundled gco
+          set -euo pipefail
+          timeout 300 uvx --python "$MIN_PY" \
+            --from "gco-cli @ file://$GITHUB_WORKSPACE" gco-mcp \
+            </dev/null >"$RUNNER_TEMP/uvx-mcp.log" 2>&1 || true
+          grep -q "Starting MCP server" "$RUNNER_TEMP/uvx-mcp.log" || {
+            echo "uvx form failed to start the MCP server; log follows:"
+            cat "$RUNNER_TEMP/uvx-mcp.log"
+            exit 1
+          }
+      - name: "Form 2: uv tool install exposes gco + gco-mcp on PATH"
         run: |
-          "$RUNNER_TEMP/mcpvenv/bin/python" "$GITHUB_WORKSPACE/scripts/mcp_install_smoke.py"
-      - name: gco-mcp launches the MCP server over stdio
+          set -euo pipefail
+          uv tool install --python "$MIN_PY" "gco-cli[cdk] @ file://$GITHUB_WORKSPACE"
+          TOOL_BIN="$(uv tool dir --bin)"
+          test -x "$TOOL_BIN/gco"
+          test -x "$TOOL_BIN/gco-mcp"
+      - name: Installed tool imports and resolves its bundled gco
         run: |
-          timeout 30 "$RUNNER_TEMP/mcpvenv/bin/gco-mcp" </dev/null >"$RUNNER_TEMP/mcp.log" 2>&1 || true
-          grep -q "Starting MCP server" "$RUNNER_TEMP/mcp.log"
+          set -euo pipefail
+          "$(uv tool dir)/gco-cli/bin/python" "$GITHUB_WORKSPACE/scripts/mcp_install_smoke.py"
+      - name: Installed gco-mcp launches the MCP server over stdio
+        run: |
+          set -euo pipefail
+          TOOL_BIN="$(uv tool dir --bin)"
+          timeout 30 "$TOOL_BIN/gco-mcp" </dev/null >"$RUNNER_TEMP/tool-mcp.log" 2>&1 || true
+          grep -q "Starting MCP server" "$RUNNER_TEMP/tool-mcp.log" || {
+            echo "uv tool install form failed to start the MCP server; log follows:"
+            cat "$RUNNER_TEMP/tool-mcp.log"
+            exit 1
+          }
