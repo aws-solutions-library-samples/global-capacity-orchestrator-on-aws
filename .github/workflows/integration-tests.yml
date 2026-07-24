@@ -59,12 +59,11 @@ jobs:
     env:
       # Declared as an env pin (not inline in the curl below) so the
       # "version consistency" section of dependency-scan.sh can compare it
-      # against the HELM_VERSION deps-scan.yml installs — a drift that was
-      # previously invisible while this copy was hardcoded. Keep this in
+      # against the HELM_VERSION deps-scan.yml installs. Keep this in
       # lockstep with the helm the installer Lambda ships
-      # (lambda/helm-installer/Dockerfile); that copy is a hardcoded RUN
-      # line and isn't caught by the consistency check.
-      HELM_VERSION: "v4.2.1"
+      # (lambda/helm-installer/Dockerfile); that RUN-line copy is now also
+      # covered by the consistency check via extract_helm_installer_pins.
+      HELM_VERSION: "v4.2.3"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6.3.0
@@ -499,7 +498,7 @@ jobs:
       - name: Verify helm + kubectl binaries
         # This is a Lambda container, not a server. The meaningful check is
         # that the image's helm and kubectl binaries are invocable at the
-        # pinned versions from the Dockerfile (helm v4.2.1, kubectl v1.36.2).
+        # pinned versions from the Dockerfile (helm v4.2.3, kubectl v1.36.3).
         run: |
           docker run --rm --entrypoint helm helm-installer:ci version --short
           docker run --rm --entrypoint kubectl helm-installer:ci version --client=true

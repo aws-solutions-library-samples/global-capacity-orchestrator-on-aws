@@ -19,12 +19,9 @@
 #   package-dir|package|advisory|node-path|exp:YYYY-MM-DD
 # =============================================================================
 
-# GHSA-3jxr-9vmj-r5cp / CVE-2026-13149 — brace-expansion CPU denial of service.
-# cdk-dia resolves aws-cdk-lib 2.261.0, whose immutable npm tarball bundles
-# minimatch -> brace-expansion 5.0.6. npm audit fix and overrides cannot replace
-# bundled dependencies. AWS assessed the affected minimatch calls as synth-time
-# processing of trusted, developer-authored patterns—not untrusted remote input—
-# and is tracking a rebuilt aws-cdk-lib release here:
-# https://github.com/aws/aws-cdk/issues/38257
-# Remove this entry and refresh package-lock.json as soon as that release lands.
-.|brace-expansion|GHSA-3jxr-9vmj-r5cp|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-08-20
+# (no active suppressions)
+#
+# NOTE: The brace-expansion DoS suppression (GHSA-3jxr-9vmj-r5cp) was removed
+# once package-lock.json picked up aws-cdk-lib 2.262.1, whose npm tarball
+# bundles the patched brace-expansion 5.0.7 — npm audit no longer reports the
+# finding on the root graph.

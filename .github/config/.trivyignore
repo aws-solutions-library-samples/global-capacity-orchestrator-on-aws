@@ -25,31 +25,21 @@
 # no longer need suppressing. If a future AL2023 CVE appears before a fix is
 # published, add a dated entry here per the rules above.
 
-# CVE-2026-12151 — undici (Node.js) Denial of Service via unbounded memory
-# growth on the WebSocket client. Surfaced only by security:trivy:container-scan
-# on the GCO dev image (Dockerfile.dev): the npm CLI pinned there
-# (ARG NPM_VERSION) bundles undici in its own node_modules. The Python service
-# and Lambda images ship no Node, and the dev image is a contributor/CI tool
-# that is never deployed to a cluster — nothing uses undici's WebSocket client,
-# so the DoS path is never exercised at runtime.
-#
-# Not yet clearable by a pin bump: npm vendors undici 6.26.0 through at least the
-# current latest (11.17.0), so no released npm carries the fixed undici. Fixed
-# upstream in undici 6.27.0 / 7.28.0 / 8.5.0; clears when npm re-vendors undici
-# >= 6.27.0 — bump ARG NPM_VERSION in Dockerfile.dev and drop this entry then.
-# Advisory: https://avd.aquasec.com/nvd/cve-2026-12151
-CVE-2026-12151 exp:2026-09-21
+# NOTE: The undici DoS suppression (CVE-2026-12151) was removed once
+# Dockerfile.dev's ARG NPM_VERSION reached 11.18.0 — that npm release
+# re-vendors undici 6.27.0, which carries the upstream fix, so the dev-image
+# scan no longer reports the CVE.
 
 # CVE-2026-25680, CVE-2026-25681, CVE-2026-27136, CVE-2026-33814,
 # CVE-2026-39821, CVE-2026-42502, CVE-2026-42506 — golang.org/x/net v0.49.0,
 # statically linked into the pinned kubectl binary (ARG KUBECTL_VERSION in
-# Dockerfile.dev; the identical v1.36.2 is fetched by
+# Dockerfile.dev; the identical v1.36.3 is fetched by
 # lambda/helm-installer/Dockerfile). Surfaced by security:trivy:container-scan
 # on the GCO dev image and the helm-installer Lambda image — the only two
 # scanned images that carry kubectl. Fixed in x/net 0.53.0 (CVE-2026-33814)
 # and 0.55.0 (the other six).
 #
-# Not yet clearable by a pin bump: v1.36.2 is the latest stable kubectl
+# Not yet clearable by a pin bump: v1.36.3 is the latest stable kubectl
 # (https://dl.k8s.io/release/stable-1.36.txt) and the whole release-1.36
 # branch still pins x/net v0.49.0. The bump to x/net >= 0.55.0 currently lives
 # only on kubernetes master, so it lands in a future kubectl patch, not a
@@ -100,29 +90,12 @@ CVE-2026-53489 exp:2026-09-22
 CVE-2026-53492 exp:2026-09-22
 CVE-2026-34040 exp:2026-09-22
 
-# CVE-2026-39822 — Go standard-library os.Root symlink-following / directory
-# traversal, statically linked into every Go binary in the helm-installer
-# Lambda image: kubectl (v1.36.2), helm (v4.2.1), and the aws-lambda-rie shipped
-# in the public.ecr.aws/lambda/python:3.14 base — all compiled with Go 1.26.4.
-# Also present in the dev image's pinned kubectl (ARG KUBECTL_VERSION in
-# Dockerfile.dev, the same v1.36.2). Surfaced by security:trivy:container-scan.
-# Fixed in Go 1.26.5 / 1.25.12 (released ~2026-07).
-#
-# Not yet clearable by a pin bump: the fix requires each upstream to re-release
-# its binary rebuilt with Go >= 1.26.5. v1.36.2 is the latest stable kubectl
-# (https://dl.k8s.io/release/stable-1.36.txt) and is still built with Go 1.26.4;
-# helm 4.2.1 and the current python:3.14 base image likewise predate the Go
-# bump — Go 1.26.5 is only days old, so no rebuilt release exists to pull today.
-#
-# Low runtime risk: these binaries run only during stack deploys against a
-# trusted EKS control plane / build context, not on attacker-controlled
-# filesystems, so the os.Root traversal path is not exercised at runtime.
-#
-# Clears when kubectl (next 1.36 patch), helm, and the Lambda base image ship
-# rebuilt with Go >= 1.26.5: bump the pins in lambda/helm-installer/Dockerfile
-# (and KUBECTL_VERSION in Dockerfile.dev), re-pull the base image, then drop
-# this entry. Advisory: https://avd.aquasec.com/nvd/cve-2026-39822
-CVE-2026-39822 exp:2026-09-22
+# NOTE: The Go-stdlib os.Root traversal suppression (CVE-2026-39822) was
+# removed once every affected binary shipped a rebuild with Go >= 1.26.5:
+# kubectl v1.36.3 and helm v4.2.3 (both pinned in
+# lambda/helm-installer/Dockerfile, kubectl also via ARG KUBECTL_VERSION in
+# Dockerfile.dev) are built with Go 1.26.5, and the aws-lambda-rie in the
+# current public.ecr.aws/lambda/python:3.14 base is likewise go1.26.5.
 
 # GHSA-hrxh-6v49-42gf — gRPC-Go xDS RBAC authorization bypass and HTTP/2
 # transport-server denial of service, statically linked into the docker-buildx

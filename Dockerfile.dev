@@ -141,7 +141,7 @@ RUN npm install -g "aws-cdk@${CDK_VERSION}" \
 # allows ±1 minor, so this pin can lag or lead the cluster by one.
 # kubectl publishes both linux/amd64 and linux/arm64 binaries, so we
 # pass ${TARGETARCH} straight through.
-ARG KUBECTL_VERSION=v1.36.2
+ARG KUBECTL_VERSION=v1.36.3
 ARG TARGETARCH
 RUN curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
     && chmod +x kubectl \

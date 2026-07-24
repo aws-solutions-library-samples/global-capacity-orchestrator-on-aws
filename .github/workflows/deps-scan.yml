@@ -61,8 +61,8 @@ permissions:
   id-token: write  # Required for OIDC authentication to AWS
 
 env:
-  HELM_VERSION: "v4.2.1"
-  KUBECTL_VERSION: "v1.36.2"
+  HELM_VERSION: "v4.2.3"
+  KUBECTL_VERSION: "v1.36.3"
   # All AWS CLI reads are sequential, and adaptive retries absorb transient
   # account-level contention without increasing the monthly request rate.
   AWS_RETRY_MODE: adaptive
