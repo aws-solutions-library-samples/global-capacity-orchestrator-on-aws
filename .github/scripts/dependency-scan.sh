@@ -38,8 +38,9 @@
 #     workflow environment pins
 #   - Base-image security epochs (APT_SECURITY_EPOCH / DNF_SECURITY_EPOCH)
 #     older than SECURITY_EPOCH_STALE_DAYS
-#   - Suppression expiries: .trivyignore / .pip-audit-ignore entries expiring
-#     within SUPPRESSION_EXPIRY_WARN_DAYS (before the CI validator hard-fails)
+#   - Suppression expiries: .trivyignore / .pip-audit-ignore /
+#     .npm-audit-ignore entries expiring within SUPPRESSION_EXPIRY_WARN_DAYS
+#     (before the CI validator hard-fails)
 #   - Lockfile freshness: direct deps in pyproject.toml missing from
 #     requirements-lock.txt
 #
@@ -82,8 +83,9 @@ source "${SCAN_SCRIPT_DIR}/lib_dependency_scan.sh"
 # links to.
 #
 # Thresholds for the recurring-hygiene checks. Tunable in one place:
-#   SUPPRESSION_EXPIRY_WARN_DAYS  surface .trivyignore/.pip-audit-ignore
-#                                 entries expiring within this many days
+#   SUPPRESSION_EXPIRY_WARN_DAYS  surface .trivyignore / .pip-audit-ignore /
+#                                 .npm-audit-ignore entries expiring within
+#                                 this many days
 #                                 (the CI validator still hard-fails on the
 #                                 day itself — this is the early warning).
 #   SECURITY_EPOCH_STALE_DAYS     flag a Dockerfile APT/DNF security epoch
@@ -1185,6 +1187,32 @@ for consistency_var in TRIVY_VERSION HELM_VERSION KUBECTL_VERSION; do
   fi
 done
 
+# helm / kubectl pins hardcoded in lambda/helm-installer/Dockerfile RUN-line
+# URLs must agree with the workflow env pins (and, for kubectl, with the
+# Dockerfile.dev ARG). These URL literals were previously invisible to every
+# check — the integration-tests workflow even carries a comment noting the
+# Lambda copy "isn't caught by the consistency check". Now it is.
+INSTALLER_PINS="$(extract_helm_installer_pins lambda/helm-installer/Dockerfile)"
+if [ -n "$INSTALLER_PINS" ]; then
+  for tool_var in HELM_VERSION KUBECTL_VERSION; do
+    installer_val="$(printf '%s\n' "$INSTALLER_PINS" | awk -F'|' -v v="$tool_var" '$1==v{print $2}')"
+    [ -n "$installer_val" ] || continue
+    all_vals="$installer_val"
+    wf_vals="$(extract_workflow_env_pin "$tool_var")"
+    [ -n "$wf_vals" ] && all_vals="$(printf '%s\n%s' "$all_vals" "$wf_vals")"
+    if [ "$tool_var" = "KUBECTL_VERSION" ]; then
+      dev_val="$(extract_dockerfile_pins Dockerfile.dev | awk -F'|' '$1=="KUBECTL_VERSION"{print $2}')"
+      [ -n "$dev_val" ] && all_vals="$(printf '%s\n%s' "$all_vals" "$dev_val")"
+    fi
+    tool_distinct="$(printf '%s\n' "$all_vals" | sed '/^$/d' | sort -u | grep -c .)"
+    if [ "$tool_distinct" -gt 1 ]; then
+      tool_list="$(printf '%s\n' "$all_vals" | sed '/^$/d' | sort -u | paste -sd',' -)"
+      echo "  - ${tool_var} disagrees between helm-installer Dockerfile, workflows, and Dockerfile.dev: ${tool_list}"
+      echo "${tool_var} (helm-installer Dockerfile / workflows / Dockerfile.dev)|${tool_list}" >> "$CONSISTENCY_RESULTS"
+    fi
+  done
+fi
+
 CONSISTENCY_COUNT="$(wc -l < "$CONSISTENCY_RESULTS" 2>/dev/null | tr -d ' ')"
 [ -z "$CONSISTENCY_COUNT" ] && CONSISTENCY_COUNT=0
 
@@ -1223,16 +1251,17 @@ EPOCH_COUNT="$(wc -l < "$EPOCH_RESULTS" 2>/dev/null | tr -d ' ')"
 # ---------------------------------------------------------------------------
 # Suppression expiries (no network)
 #
-# ``.trivyignore`` / ``.pip-audit-ignore`` entries carry an ``exp:YYYY-MM-DD``
-# marker. The CI validator hard-fails a PR on the day an entry expires; this
-# surfaces entries expiring *soon* so they get re-evaluated (fixed upstream?
-# extend with a new justification?) before they break a build.
+# ``.trivyignore`` / ``.pip-audit-ignore`` / ``.npm-audit-ignore`` entries
+# carry an ``exp:YYYY-MM-DD`` marker. The CI validators hard-fail a PR on the
+# day an entry expires; this surfaces entries expiring *soon* so they get
+# re-evaluated (fixed upstream? extend with a new justification?) before they
+# break a build.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Checking suppression expiries ==="
 
 SUPPRESSION_RESULTS="$(mktemp)"
-for supfile in .github/config/.trivyignore .github/config/.pip-audit-ignore; do
+for supfile in .github/config/.trivyignore .github/config/.pip-audit-ignore .github/config/.npm-audit-ignore; do
   [ -f "$supfile" ] || continue
   supbase="$(basename "$supfile")"
   parse_suppression_expiries "$supfile" | while IFS='|' read -r sup_id sup_date; do
@@ -1781,8 +1810,8 @@ summary_row() {
   if [ "$SUPPRESSION_COUNT" -gt 0 ]; then
     echo "## Suppression Expiries"
     echo ""
-    echo "\`.trivyignore\` / \`.pip-audit-ignore\` entries expiring within"
-    echo "${SUPPRESSION_EXPIRY_WARN_DAYS} days (the CI validator hard-fails a PR on"
+    echo "\`.trivyignore\` / \`.pip-audit-ignore\` / \`.npm-audit-ignore\` entries"
+    echo "expiring within ${SUPPRESSION_EXPIRY_WARN_DAYS} days (the CI validator hard-fails a PR on"
     echo "the expiry date). Re-evaluate each: drop it if the CVE is fixed upstream,"
     echo "or extend with a fresh justification if not."
     echo ""

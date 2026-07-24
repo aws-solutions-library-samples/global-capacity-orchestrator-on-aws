@@ -1259,9 +1259,12 @@ except OSError:
 # parse_suppression_expiries <file>
 #
 # Prints ``ID|YYYY-MM-DD`` for every dated suppression entry in a
-# ``.trivyignore`` / ``.pip-audit-ignore`` file (any non-comment line
-# carrying an ``exp:YYYY-MM-DD`` marker; the ID is the first whitespace-
-# delimited token). The caller computes days-to-expiry and surfaces entries
+# ``.trivyignore`` / ``.pip-audit-ignore`` / ``.npm-audit-ignore`` file (any
+# non-comment line carrying an ``exp:YYYY-MM-DD`` marker). For the
+# whitespace-delimited trivy/pip format the ID is the first token; for the
+# npm-audit pipe format (``package-dir|package|advisory|node-path|exp:…``)
+# the ID is the advisory field, so the report names the GHSA rather than the
+# whole entry line. The caller computes days-to-expiry and surfaces entries
 # expiring soon so they get renewed *before* the CI expiry validator hard-
 # fails a PR — the report is the early warning, the validator is the gate.
 #
@@ -1279,8 +1282,46 @@ with open(sys.argv[1]) as f:
         m = re.search(r'exp:(\d{4}-\d{2}-\d{2})', s)
         if not m:
             continue
-        ident = s.split()[0]
+        fields = s.split('|')
+        if len(fields) == 5:
+            # .npm-audit-ignore pipe format — the advisory is field 3.
+            ident = fields[2]
+        else:
+            ident = s.split()[0]
         print(f'{ident}|{m.group(1)}')
+" "$file" 2>/dev/null
+}
+
+# extract_helm_installer_pins [dockerfile]
+#
+# Prints the tool versions hardcoded in the helm-installer Lambda's
+# Dockerfile RUN lines:
+#   HELM_VERSION|vX.Y.Z     from the get.helm.sh download URL
+#   KUBECTL_VERSION|vX.Y.Z  from the dl.k8s.io download URL
+#
+# These pins are RUN-line URL literals — not ARGs, ``FROM`` lines, or
+# workflow env — so Dependabot, the Dockerfile.dev ARG sweep, and the
+# workflow-env consistency check were all blind to them. The consistency
+# section compares them against the HELM_VERSION / KUBECTL_VERSION workflow
+# env pins (and Dockerfile.dev's KUBECTL_VERSION ARG) so the Lambda image,
+# the CI installs, and the dev container can't silently disagree about
+# which helm/kubectl they ship.
+#
+# Empty output when the file is absent or the URLs aren't found — callers
+# treat that as "skip", matching every other extractor here.
+extract_helm_installer_pins() {
+  local file="${1:-lambda/helm-installer/Dockerfile}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+with open(sys.argv[1]) as f:
+    text = f.read()
+m = re.search(r'get\.helm\.sh/helm-(v\d+\.\d+\.\d+)-', text)
+if m:
+    print(f'HELM_VERSION|{m.group(1)}')
+m = re.search(r'dl\.k8s\.io/release/(v\d+\.\d+\.\d+)/', text)
+if m:
+    print(f'KUBECTL_VERSION|{m.group(1)}')
 " "$file" 2>/dev/null
 }
 
