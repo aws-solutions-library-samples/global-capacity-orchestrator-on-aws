@@ -46,7 +46,7 @@ You'll additionally need:
 # Python 3.14+ (3.14 used in CI)
 python3 --version
 
-# Node.js 24 and npm 11.18.0 (see .nvmrc and package.json)
+# Node.js 24 and npm 12.0.1 (see .nvmrc and package.json)
 node --version
 npm --version
 

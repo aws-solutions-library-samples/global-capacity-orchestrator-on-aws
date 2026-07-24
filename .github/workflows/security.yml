@@ -199,7 +199,7 @@ jobs:
     timeout-minutes: 15
     env:
       # Pin in lockstep with TRIVY_VERSION in cve-scan.yml.
-      TRIVY_VERSION: "v0.70.0"
+      TRIVY_VERSION: "v0.72.0"
     steps:
       - uses: actions/checkout@v7
       - name: Install pinned Trivy
@@ -245,7 +245,7 @@ jobs:
     # We rebuild here rather than passing images between workflows via
     # `workflow_call` — simpler and the build time is modest.
     env:
-      TRIVY_VERSION: "v0.70.0"
+      TRIVY_VERSION: "v0.72.0"
     strategy:
       fail-fast: false
       matrix:
@@ -371,7 +371,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
-      image: semgrep/semgrep:1.168.0
+      image: semgrep/semgrep:1.171.0
     steps:
       - uses: actions/checkout@v7
       - name: Run semgrep

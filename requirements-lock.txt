@@ -28,7 +28,7 @@ anyio==4.13.0
     #   sse-starlette
     #   starlette
     #   watchfiles
-ast-serialize==0.5.0
+ast-serialize==0.6.0
     # via mypy
 attrs==25.4.0
     # via
@@ -245,7 +245,7 @@ kubernetes==36.0.3
     #   gco-cli (pyproject.toml)
 lazy-object-proxy==1.12.0
     # via openapi-spec-validator
-librt==0.11.0
+librt==0.13.0
     # via mypy
 markdown==3.10.2
     # via tensorboard
@@ -269,7 +269,7 @@ multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
-mypy==2.1.0
+mypy==2.3.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -503,7 +503,7 @@ rpds-py==0.30.0
     # via
     #   jsonschema
     #   referencing
-ruff==0.15.21
+ruff==0.16.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)

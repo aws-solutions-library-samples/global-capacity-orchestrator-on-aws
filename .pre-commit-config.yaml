@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.21
+    rev: v0.16.0
     hooks:
       # Formatter. Run before ``ruff`` so the check sees formatter output.
       - id: ruff-format
@@ -11,7 +11,7 @@ repos:
         args: [--fix, --exclude, lambda/kubectl-applier-simple-build, --exclude, lambda/helm-installer-build]
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v2.1.0
+    rev: v2.3.0
     hooks:
       - id: mypy
         additional_dependencies: [types-requests, types-PyYAML]
@@ -41,7 +41,7 @@ repos:
         args: [-c, .github/config/.yamllint.yml]
 
   - repo: https://github.com/DavidAnson/markdownlint-cli2
-    rev: v0.23.0
+    rev: v0.23.1
     hooks:
       # Configuration (rule set, globs, ignores) lives in
       # .github/config/.markdownlint-cli2.yaml. See CONTRIBUTING.md for

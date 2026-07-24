@@ -372,8 +372,7 @@ Violations raise `PredicateRejected` at session-start time, **before** the expre
 len(obs["tool_results"]) > 0
 any(r["score"] > 0.9 for r in obs["tool_results"])
 any(r.get("_status") == "ok" for r in obs["tool_results"])
-all(r.get("_status") == "ok" and r.get("tool_name") == "find_docs"
-    for r in obs["tool_results"])
+all(r.get("_status") == "ok" and r.get("tool_name") == "find_docs" for r in obs["tool_results"])
 len(obs.get("errors", [])) == 0
 any(k == "val_loss" for k in obs["metrics"].keys())
 any(k.startswith("val_") for k in obs["metrics"].keys())
@@ -386,13 +385,13 @@ not obs["errors"]
 #### Rejected predicates
 
 ```python
-__import__("os").system("rm -rf /")             # → call_target_not_allowed
-obs.__class__                                   # → dunder_attribute
-obs.metrics.loss                                # → attribute_target_not_allowed (chained attribute)
-obs["xs"].append(1)                             # → call_target_method_not_allowed
-obs["xs"].count(0)                              # → call_target_method_not_allowed
-[x for x in obs["xs"] for x in [1,2]]           # → comprehension_target_shadows_allowlist
-lambda r: r["score"] > 0.9                      # → forbidden_node
+__import__("os").system("rm -rf /")  # → call_target_not_allowed
+obs.__class__  # → dunder_attribute
+obs.metrics.loss  # → attribute_target_not_allowed (chained attribute)
+obs["xs"].append(1)  # → call_target_method_not_allowed
+obs["xs"].count(0)  # → call_target_method_not_allowed
+[x for x in obs["xs"] for x in [1, 2]]  # → comprehension_target_shadows_allowlist
+lambda r: r["score"] > 0.9  # → forbidden_node
 ```
 
 ### Why the eval is safe

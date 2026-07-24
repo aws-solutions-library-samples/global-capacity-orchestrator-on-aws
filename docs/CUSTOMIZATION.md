@@ -899,23 +899,22 @@ Edit `gco/stacks/regional_stack.py`:
 
 ```python
 self.vpc = ec2.Vpc(
-    self, "GCOVpc",
+    self,
+    "GCOVpc",
     vpc_name=f"{config.get_project_name()}-vpc-{region}",
     max_azs=99,  # span every AZ in the region (lower this to cap AZ count)
     ip_addresses=ec2.IpAddresses.cidr("10.1.0.0/16"),  # Custom CIDR
     nat_gateways=2,
     subnet_configuration=[
         ec2.SubnetConfiguration(
-            name="PublicSubnet",
-            subnet_type=ec2.SubnetType.PUBLIC,
-            cidr_mask=24
+            name="PublicSubnet", subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24
         ),
         ec2.SubnetConfiguration(
             name="PrivateSubnet",
             subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
-            cidr_mask=22  # Larger subnets for more IPs
-        )
-    ]
+            cidr_mask=22,  # Larger subnets for more IPs
+        ),
+    ],
 )
 ```
 
@@ -923,16 +922,10 @@ self.vpc = ec2.Vpc(
 
 ```python
 # Add S3 endpoint
-self.vpc.add_gateway_endpoint(
-    "S3Endpoint",
-    service=ec2.GatewayVpcEndpointAwsService.S3
-)
+self.vpc.add_gateway_endpoint("S3Endpoint", service=ec2.GatewayVpcEndpointAwsService.S3)
 
 # Add ECR endpoints
-self.vpc.add_interface_endpoint(
-    "EcrEndpoint",
-    service=ec2.InterfaceVpcEndpointAwsService.ECR
-)
+self.vpc.add_interface_endpoint("EcrEndpoint", service=ec2.InterfaceVpcEndpointAwsService.ECR)
 ```
 
 ### Modify Security Groups
@@ -1104,17 +1097,16 @@ Edit `gco/stacks/regional_stack.py`:
 
 ```python
 self.cluster = eks.Cluster(
-    self, "GCOEksCluster",
+    self,
+    "GCOEksCluster",
     cluster_name=cluster_config.cluster_name,
     version=eks.KubernetesVersion.V1_35,
     vpc=self.vpc,
-    compute=eks.ComputeConfig(
-        node_pools=["system", "general-purpose"]
-    ),
+    compute=eks.ComputeConfig(node_pools=["system", "general-purpose"]),
     endpoint_access=eks.EndpointAccess.PUBLIC_AND_PRIVATE,
     role=cluster_admin_role,
     vpc_subnets=[ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)],
-    logging=eks.ClusterLoggingTypes.all()  # Enable all logging
+    logging=eks.ClusterLoggingTypes.all(),  # Enable all logging
 )
 ```
 

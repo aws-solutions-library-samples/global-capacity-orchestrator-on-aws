@@ -82,7 +82,7 @@ diagrams = [
     # the CI lint gate).
     "pyflowchart==0.6.0",
     "playwright==1.60.0",
-    "ruff==0.15.21",
+    "ruff==0.16.0",
 ]
 # Direct runtime roots for the five production service images. Their Dockerfiles
 # read exactly one group with Python 3.14's tomllib and use requirements-lock.txt
@@ -160,11 +160,11 @@ mcp = [
     "fastmcp[tasks,code-mode]==3.4.4",
 ]
 lint = [
-    "ruff==0.15.21",
+    "ruff==0.16.0",
     "yamllint==1.38.0",
 ]
 typecheck = [
-    "mypy==2.1.0",
+    "mypy==2.3.0",
     "types-requests==2.33.0.20260518",
     "types-PyYAML==6.0.12.20260518",
 ]

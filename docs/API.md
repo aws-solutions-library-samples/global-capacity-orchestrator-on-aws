@@ -131,8 +131,8 @@ import boto3
 session = boto3.Session()
 credentials = session.get_credentials()
 
-request = AWSRequest(method='GET', url='https://<API_GATEWAY_ENDPOINT>/api/v1/jobs')
-SigV4Auth(credentials, 'execute-api', 'us-east-1').add_auth(request)
+request = AWSRequest(method="GET", url="https://<API_GATEWAY_ENDPOINT>/api/v1/jobs")
+SigV4Auth(credentials, "execute-api", "us-east-1").add_auth(request)
 
 response = requests.get(request.url, headers=dict(request.headers))
 ```
@@ -1174,12 +1174,9 @@ To verify the signature in your webhook handler:
 import hmac
 import hashlib
 
+
 def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
-    expected = hmac.new(
-        secret.encode('utf-8'),
-        payload,
-        hashlib.sha256
-    ).hexdigest()
+    expected = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
     return hmac.compare_digest(f"sha256={expected}", signature)
 ```
 

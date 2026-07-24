@@ -122,11 +122,13 @@ The file reader dispatches on a `format` string through the `_HANDLERS` map in
 ```python
 def _handle_toml(content: bytes, field: str, mode: str) -> float:
     import tomllib  # lazy import keeps the baseline import surface light
+
     try:
         parsed = tomllib.loads(_decode(content, "toml"))
     except tomllib.TOMLDecodeError as exc:
         raise shape.MetricReaderError(shape.ErrorCode.MALFORMED_FILE, {"format": "toml"}) from exc
     return _reduce_resolved(_resolve_dot_path(parsed, field), field, mode)
+
 
 _HANDLERS["toml"] = _handle_toml
 ```
