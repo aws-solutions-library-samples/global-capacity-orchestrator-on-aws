@@ -9,13 +9,55 @@ injection.
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import sys
 from contextlib import suppress
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).parent.parent
+
+def _resolve_project_root() -> Path:
+    """Resolve the directory every ``gco`` subprocess runs from.
+
+    The CLI discovers ``cdk.json`` (and the rest of the checkout) by walking
+    up from its working directory, so this choice decides whether config- and
+    stack-aware tools see the user's project. Resolution order:
+
+    1. ``GCO_PROJECT_ROOT`` environment variable — explicit override for MCP
+       clients that cannot set a server working directory. Ignored (with a
+       stderr warning) when it does not point at an existing directory.
+    2. The package's parent directory, when it is a checkout (has
+       ``cdk.json``) — the clone / editable-install / dev-container layout,
+       where the historical ``Path(__file__).parent.parent`` was correct.
+    3. The nearest ancestor of the process working directory containing
+       ``cdk.json`` — a ``uvx`` / ``uv tool install`` launched with the MCP
+       client's ``cwd`` pointing at (or inside) a checkout. Previously this
+       layout silently pinned subprocesses to uv's site-packages and the
+       client-provided ``cwd`` never reached the CLI.
+    4. The process working directory itself — matches the CLI's own
+       fallback when no ``cdk.json`` is found (AWS-facing tools need none).
+    """
+    env_root = os.environ.get("GCO_PROJECT_ROOT", "").strip()
+    if env_root:
+        candidate = Path(env_root).expanduser()
+        if candidate.is_dir():
+            return candidate.resolve()
+        print(
+            f"gco-mcp: GCO_PROJECT_ROOT={env_root!r} is not a directory; ignoring it.",
+            file=sys.stderr,
+        )
+    package_parent = Path(__file__).resolve().parent.parent
+    if (package_parent / "cdk.json").exists():
+        return package_parent
+    cwd = Path.cwd()
+    for parent in (cwd, *cwd.parents):
+        if (parent / "cdk.json").exists():
+            return parent
+    return cwd
+
+
+PROJECT_ROOT = _resolve_project_root()
 
 
 def _gco_executable() -> str:

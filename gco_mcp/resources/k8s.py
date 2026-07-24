@@ -11,15 +11,14 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 from typing import Any
 
 import cli_runner
+from cli_runner import PROJECT_ROOT  # runtime-resolved checkout root (uvx-safe)
 from server import mcp
 
 from resources._eks import eks_context_for_region, is_valid_region
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent
 MANIFESTS_DIR = PROJECT_ROOT / "lambda" / "kubectl-applier-simple" / "manifests"
 
 # Permissive RFC 1123 label rule for namespace and resource names.

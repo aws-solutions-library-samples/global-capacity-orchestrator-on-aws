@@ -2,9 +2,8 @@
 
 from pathlib import Path
 
+from cli_runner import PROJECT_ROOT  # runtime-resolved checkout root (uvx-safe)
 from server import mcp
-
-PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 _SOURCE_DIRS = {
     "gco": PROJECT_ROOT / "gco",

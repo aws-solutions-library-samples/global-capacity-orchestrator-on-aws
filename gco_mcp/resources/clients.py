@@ -1,10 +1,8 @@
 """API client example resources (clients:// scheme) for the GCO MCP server."""
 
-from pathlib import Path
-
+from cli_runner import PROJECT_ROOT  # runtime-resolved checkout root (uvx-safe)
 from server import mcp
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent
 CLIENT_EXAMPLES_DIR = PROJECT_ROOT / "docs" / "client-examples"
 _CLIENT_EXTENSIONS = {".py", ".sh", ".md"}
 

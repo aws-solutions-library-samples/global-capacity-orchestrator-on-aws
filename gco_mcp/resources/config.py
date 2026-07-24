@@ -1,11 +1,8 @@
 """Current configuration resources for the GCO MCP server."""
 
-from pathlib import Path
-
+from cli_runner import PROJECT_ROOT  # runtime-resolved checkout root (uvx-safe)
 from feature_flags import ALL_FLAGS, FLAG_ALL_TOOLS
 from server import mcp
-
-PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 _FLAG_DESCRIPTIONS = {
     "GCO_ENABLE_CAPACITY_PURCHASE": "Enable cost-incurring capacity reservation tools.",

@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
+from cli_runner import PROJECT_ROOT  # runtime-resolved checkout root (uvx-safe)
 from server import mcp
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent
 GITHUB_DIR = PROJECT_ROOT / ".github"
 GITHUB_WORKFLOWS_DIR = GITHUB_DIR / "workflows"
 GITHUB_ACTIONS_DIR = GITHUB_DIR / "actions"

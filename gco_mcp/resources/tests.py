@@ -4,11 +4,9 @@ Exposes the test README, test configuration, and individual test files
 so the LLM can understand testing patterns, fixtures, and coverage.
 """
 
-from pathlib import Path
-
+from cli_runner import PROJECT_ROOT  # runtime-resolved checkout root (uvx-safe)
 from server import mcp
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent
 TESTS_DIR = PROJECT_ROOT / "tests"
 _TEST_EXTENSIONS = {".py", ".md"}
 

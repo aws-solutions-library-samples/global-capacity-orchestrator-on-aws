@@ -198,7 +198,7 @@ The `deploy_*`, `destroy_*`, `bootstrap_cdk`, and `stack_synth`/`diff`/`list` to
 
 **Option 1 — dev container (turnkey, recommended for infra).** The [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container) bundles everything: the `.[dev,mcp]` Python extras (which include `[cdk]`) plus the Node CDK CLI, `kubectl`, Docker + Buildx, and the AWS CLI. Point your client at `python3 gco_mcp/run_mcp.py` inside the container.
 
-**Option 2 — `uv`, with the `[cdk]` extra, from a clone.** Put the `[cdk]` extra in the `--from` spec so the CDK toolchain lands in the server's environment, and set `cwd` to your checkout so `app.py`/`cdk.json` resolve:
+**Option 2 — `uv`, with the `[cdk]` extra, from a clone.** Put the `[cdk]` extra in the `--from` spec so the CDK toolchain lands in the server's environment, and point the server at your checkout so `app.py`/`cdk.json` resolve — either with the client's `cwd` setting (shown below; the server walks up from its working directory to find `cdk.json`), or, for MCP clients that cannot set a working directory, with the `GCO_PROJECT_ROOT` environment variable in the `env` block (it takes precedence over `cwd` when both are set):
 
 ```json
 {

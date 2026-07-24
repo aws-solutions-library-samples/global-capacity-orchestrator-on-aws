@@ -1,10 +1,8 @@
 """IAM policy resources (iam:// scheme) for the GCO MCP server."""
 
-from pathlib import Path
-
+from cli_runner import PROJECT_ROOT  # runtime-resolved checkout root (uvx-safe)
 from server import mcp
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent
 IAM_POLICIES_DIR = PROJECT_ROOT / "docs" / "iam-policies"
 
 

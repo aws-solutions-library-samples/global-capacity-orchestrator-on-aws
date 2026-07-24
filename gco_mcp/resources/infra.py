@@ -1,10 +1,8 @@
 """Infrastructure config resources (infra:// scheme) for the GCO MCP server."""
 
-from pathlib import Path
-
+from cli_runner import PROJECT_ROOT  # runtime-resolved checkout root (uvx-safe)
 from server import mcp
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent
 DOCKERFILES_DIR = PROJECT_ROOT / "dockerfiles"
 HELM_CHARTS_FILE = PROJECT_ROOT / "lambda" / "helm-installer" / "charts.yaml"
 
