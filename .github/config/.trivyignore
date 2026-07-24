@@ -18,18 +18,6 @@
 #   CVE-XXXX-XXXXX exp:YYYY-MM-DD
 # =============================================================================
 
-# NOTE: The libsolv and OpenSSL AL2023 base-image suppressions that used to
-# live here were removed once lambda/helm-installer/Dockerfile started pulling
-# AL2023 security patches at build time (`dnf upgrade --releasever=latest`).
-# That build-time upgrade pulls the published fixes for those packages, so they
-# no longer need suppressing. If a future AL2023 CVE appears before a fix is
-# published, add a dated entry here per the rules above.
-
-# NOTE: The undici DoS suppression (CVE-2026-12151) was removed once
-# Dockerfile.dev's ARG NPM_VERSION reached 11.18.0 — that npm release
-# re-vendors undici 6.27.0, which carries the upstream fix, so the dev-image
-# scan no longer reports the CVE.
-
 # CVE-2026-25680, CVE-2026-25681, CVE-2026-27136, CVE-2026-33814,
 # CVE-2026-39821, CVE-2026-42502, CVE-2026-42506 — golang.org/x/net v0.49.0,
 # statically linked into the pinned kubectl binary (ARG KUBECTL_VERSION in
@@ -90,12 +78,28 @@ CVE-2026-53489 exp:2026-09-22
 CVE-2026-53492 exp:2026-09-22
 CVE-2026-34040 exp:2026-09-22
 
-# NOTE: The Go-stdlib os.Root traversal suppression (CVE-2026-39822) was
-# removed once every affected binary shipped a rebuild with Go >= 1.26.5:
-# kubectl v1.36.3 and helm v4.2.3 (both pinned in
-# lambda/helm-installer/Dockerfile, kubectl also via ARG KUBECTL_VERSION in
-# Dockerfile.dev) are built with Go 1.26.5, and the aws-lambda-rie in the
-# current public.ecr.aws/lambda/python:3.14 base is likewise go1.26.5.
+# CVE-2026-39822 — Go standard-library os.Root symlink-following / directory
+# traversal, statically linked into the docker-buildx CLI plugin installed by
+# Dockerfile.dev (ARG BUILDX_VERSION, built with Go 1.26.4). Surfaced only by
+# security:trivy:container-scan on the contributor/CI dev image. Fixed in Go
+# 1.26.5 / 1.25.12.
+#
+# Every other binary this CVE used to cover has shipped a Go >= 1.26.5
+# rebuild and is pinned to it: kubectl v1.36.3, helm v4.2.3, the Docker CLI
+# 29.6.2, and the aws-lambda-rie in the current python:3.14 Lambda base.
+#
+# Not yet clearable by a pin bump: v0.35.0 is the latest Buildx release
+# (v0.36.0-rc1 is prerelease-only) and is built with Go 1.26.4, so no
+# released Buildx carries the fixed toolchain yet.
+#
+# Low runtime risk: Buildx is a local build-time CLI against a trusted
+# BuildKit daemon, not deployed to a cluster, and does not traverse
+# attacker-controlled filesystems via os.Root.
+#
+# Clears when a Buildx release ships built with Go >= 1.26.5: bump
+# BUILDX_VERSION in Dockerfile.dev and drop this entry.
+# Advisory: https://avd.aquasec.com/nvd/cve-2026-39822
+CVE-2026-39822 exp:2026-09-22
 
 # GHSA-hrxh-6v49-42gf — gRPC-Go xDS RBAC authorization bypass and HTTP/2
 # transport-server denial of service, statically linked into the docker-buildx

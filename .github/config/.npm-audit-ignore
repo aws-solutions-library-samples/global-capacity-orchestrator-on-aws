@@ -20,8 +20,3 @@
 # =============================================================================
 
 # (no active suppressions)
-#
-# NOTE: The brace-expansion DoS suppression (GHSA-3jxr-9vmj-r5cp) was removed
-# once package-lock.json picked up aws-cdk-lib 2.262.1, whose npm tarball
-# bundles the patched brace-expansion 5.0.7 — npm audit no longer reports the
-# finding on the root graph.
