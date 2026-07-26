@@ -11,13 +11,13 @@ import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .actions import build_action_registry
 from .models import (
     RunSettings,
     ValidationReport,
     ensure_private_run_directory,
     utc_now,
 )
+from .registry import build_action_registry
 from .runner import LiveValidationRunner, require_local_execution
 
 

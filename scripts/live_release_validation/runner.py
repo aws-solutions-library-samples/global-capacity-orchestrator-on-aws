@@ -17,12 +17,7 @@ from cli.config import GCOConfig
 from cli.jobs import JobManager
 from cli.stacks import StackManager
 
-from .actions import (
-    ActionDefinition,
-    action_final_inventory,
-    build_action_registry,
-    destroy_deployment,
-)
+from .actions import action_final_inventory, destroy_deployment
 from .models import (
     ActionResult,
     RunCheckpoint,
@@ -33,6 +28,7 @@ from .models import (
     ensure_private_run_directory,
     utc_now,
 )
+from .registry import ActionDefinition, build_action_registry
 
 
 class _LiveValidationSignal(BaseException):

@@ -9,6 +9,12 @@ Live release validation is a local operator process:
 
 There is deliberately no GitHub Actions workflow for this process. Ordinary CI runs only mocked/offline contracts and must never invoke the live harness.
 
+This document is the operator runbook. If you are changing the harness itself —
+adding a check, adding an action, or teaching it about a new owned resource
+type — read [`scripts/live_release_validation/README.md`](../scripts/live_release_validation/README.md),
+which covers the package layout, the layering rules, and where each kind of
+change belongs.
+
 ## Table of Contents
 
 - [When Live Validation Is Required](#when-live-validation-is-required)

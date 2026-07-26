@@ -22,7 +22,28 @@ from unittest.mock import MagicMock, patch
 import pytest
 from botocore.exceptions import ClientError
 
-from scripts.live_release_validation import actions, inventory
+from scripts.live_release_validation import (
+    constants,
+    context,
+    inventory,
+    protected,
+)
+from scripts.live_release_validation.actions import central_queue as actions_central_queue
+from scripts.live_release_validation.actions import deploy as actions_deploy
+from scripts.live_release_validation.actions import destroy as actions_destroy
+from scripts.live_release_validation.actions import final_inventory as actions_final_inventory
+from scripts.live_release_validation.actions import topology as actions_topology
+from scripts.live_release_validation.checks import central_queue as checks_central_queue
+from scripts.live_release_validation.checks import jobs as checks_jobs
+from scripts.live_release_validation.checks import topology as checks_topology
+from scripts.live_release_validation.cleanup import ecr as cleanup_ecr
+from scripts.live_release_validation.cleanup import log_groups as cleanup_log_groups
+from scripts.live_release_validation.cleanup import workloads as cleanup_workloads_module
+from scripts.live_release_validation.inventory import scanners as inventory_scanners
+from scripts.live_release_validation.ownership import ecr as ownership_ecr
+from scripts.live_release_validation.ownership import log_groups as ownership_log_groups
+from scripts.live_release_validation.ownership import stacks as ownership_stacks
+from tests._live_validation_patching import patch_live_validation_helper
 
 
 def _response(
@@ -140,7 +161,7 @@ def _central_job(job_id: str, *, status: str = "succeeded") -> dict[str, str]:
     if status == "succeeded":
         job.update(
             {
-                "k8s_job_name": actions._central_queue_kubernetes_job_name(
+                "k8s_job_name": checks_central_queue._central_queue_kubernetes_job_name(
                     job["job_name"],
                     job_id,
                 ),
@@ -156,7 +177,9 @@ class TestCentralQueueResume:
         from gco.services.api_routes.queue import _IDEMPOTENCY_NAMESPACE
 
         key = "gco-live-validation:run-123:central"
-        assert actions._central_queue_job_id(key) == str(uuid.uuid5(_IDEMPOTENCY_NAMESPACE, key))
+        assert checks_central_queue._central_queue_job_id(key) == str(
+            uuid.uuid5(_IDEMPOTENCY_NAMESPACE, key)
+        )
 
     def test_actual_identity_binding_preserves_requested_replay_identity_and_deadline(
         self,
@@ -164,13 +187,13 @@ class TestCentralQueueResume:
     ) -> None:
         ctx = _real_context(tmp_path)
         key = "gco-live-validation:run-123:central"
-        job_id = actions._central_queue_job_id(key)
+        job_id = checks_central_queue._central_queue_job_id(key)
         record = ctx.register_job(
             name="gco-live-ddb-run-123",
             namespace="gco-jobs",
             region="us-east-1",
             path="dynamodb",
-            run_label=actions._run_token(ctx.settings.run_id),
+            run_label=checks_jobs._run_token(ctx.settings.run_id),
             transport_region=None,
         )
         envelope = {
@@ -186,7 +209,7 @@ class TestCentralQueueResume:
             record, {"job": _central_job(job_id)}, appearance_timeout_seconds=5
         )
         stale_deadline = record["appearance_deadline"]
-        central_record = actions._register_central_job(
+        central_record = checks_central_queue._register_central_job(
             ctx,
             job_id=job_id,
             idempotency_key=key,
@@ -197,7 +220,7 @@ class TestCentralQueueResume:
         persisted = _central_job(job_id)
 
         with patch("scripts.live_release_validation.models.time.time", return_value=100.0):
-            bound = actions._reconcile_central_workload_identity(
+            bound = checks_central_queue._reconcile_central_workload_identity(
                 ctx,
                 central_record,
                 persisted,
@@ -212,15 +235,15 @@ class TestCentralQueueResume:
         assert record["k8s_job_namespace"] == persisted["k8s_job_namespace"]
         assert record["k8s_job_uid"] == persisted["k8s_job_uid"]
         assert record["uid"] == persisted["k8s_job_uid"]
-        assert record["appearance_deadline"] == 100.0 + actions._job_appearance_timeout(ctx)
+        assert record["appearance_deadline"] == 100.0 + checks_jobs._job_appearance_timeout(ctx)
         assert record["appearance_deadline"] != stale_deadline
-        assert actions._job_api_path(record) == (
+        assert checks_jobs._job_api_path(record) == (
             f"/api/v1/jobs/gco-jobs/{persisted['k8s_job_name']}"
         )
 
         original_deadline = record["appearance_deadline"]
         with patch("scripts.live_release_validation.models.time.time", return_value=200.0):
-            actions._reconcile_central_workload_identity(
+            checks_central_queue._reconcile_central_workload_identity(
                 ctx,
                 central_record,
                 persisted,
@@ -230,7 +253,7 @@ class TestCentralQueueResume:
 
         changed = {**persisted, "k8s_job_uid": "uid-central-replaced"}
         with pytest.raises(RuntimeError, match="identity changed|UID disagrees"):
-            actions._reconcile_central_workload_identity(
+            checks_central_queue._reconcile_central_workload_identity(
                 ctx,
                 central_record,
                 changed,
@@ -240,12 +263,12 @@ class TestCentralQueueResume:
     @pytest.mark.parametrize(
         ("section", "key", "bad_value", "message"),
         [
-            ("labels", actions._CENTRAL_MANAGED_BY_LABEL, "foreign", "managed-by"),
-            ("labels", actions._CENTRAL_QUEUE_KEY_LABEL, "bad-key", "queue-key"),
-            ("annotations", actions._CENTRAL_QUEUE_ID_ANNOTATION, "foreign", "queue ID"),
+            ("labels", constants._CENTRAL_MANAGED_BY_LABEL, "foreign", "managed-by"),
+            ("labels", constants._CENTRAL_QUEUE_KEY_LABEL, "bad-key", "queue-key"),
+            ("annotations", constants._CENTRAL_QUEUE_ID_ANNOTATION, "foreign", "queue ID"),
             (
                 "annotations",
-                actions._CENTRAL_ORIGINAL_NAME_ANNOTATION,
+                constants._CENTRAL_ORIGINAL_NAME_ANNOTATION,
                 "foreign",
                 "original-name",
             ),
@@ -262,14 +285,14 @@ class TestCentralQueueResume:
     ) -> None:
         ctx = _real_context(tmp_path)
         key_value = "gco-live-validation:run-123:central"
-        job_id = actions._central_queue_job_id(key_value)
+        job_id = checks_central_queue._central_queue_job_id(key_value)
         persisted = _central_job(job_id)
         record = ctx.register_job(
             name=persisted["job_name"],
             namespace=persisted["namespace"],
             region=persisted["target_region"],
             path="dynamodb",
-            run_label=actions._run_token(ctx.settings.run_id),
+            run_label=checks_jobs._run_token(ctx.settings.run_id),
             transport_region=None,
         )
         ctx.bind_central_job_identity(
@@ -285,16 +308,16 @@ class TestCentralQueueResume:
             "namespace": persisted["k8s_job_namespace"],
             "uid": persisted["k8s_job_uid"],
             "labels": {
-                actions._RUN_JOB_LABEL: actions._run_token(ctx.settings.run_id),
-                actions._PATH_JOB_LABEL: "dynamodb",
-                actions._CENTRAL_MANAGED_BY_LABEL: "central-queue",
-                actions._CENTRAL_QUEUE_KEY_LABEL: hashlib.sha256(
+                constants._RUN_JOB_LABEL: checks_jobs._run_token(ctx.settings.run_id),
+                constants._PATH_JOB_LABEL: "dynamodb",
+                constants._CENTRAL_MANAGED_BY_LABEL: "central-queue",
+                constants._CENTRAL_QUEUE_KEY_LABEL: hashlib.sha256(
                     job_id.encode("utf-8")
                 ).hexdigest()[:32],
             },
             "annotations": {
-                actions._CENTRAL_QUEUE_ID_ANNOTATION: job_id,
-                actions._CENTRAL_ORIGINAL_NAME_ANNOTATION: record["name"],
+                constants._CENTRAL_QUEUE_ID_ANNOTATION: job_id,
+                constants._CENTRAL_ORIGINAL_NAME_ANNOTATION: record["name"],
             },
         }
         if section == "metadata":
@@ -309,14 +332,14 @@ class TestCentralQueueResume:
         )
 
         with pytest.raises(RuntimeError, match=message):
-            actions._get_owned_job(ctx, record)
+            checks_jobs._get_owned_job(ctx, record)
 
         request = ctx.aws_client.make_authenticated_request.call_args.kwargs
         assert request["path"] == f"/api/v1/jobs/gco-jobs/{persisted['k8s_job_name']}"
 
     def test_persisted_identity_must_match_deterministic_queue_name(self) -> None:
         ctx = _context()
-        job_id = actions._central_queue_job_id("gco-live-validation:run-123:central")
+        job_id = checks_central_queue._central_queue_job_id("gco-live-validation:run-123:central")
         persisted = {**_central_job(job_id), "k8s_job_name": "foreign-job"}
         record = {
             "name": persisted["job_name"],
@@ -335,7 +358,7 @@ class TestCentralQueueResume:
         }
 
         with pytest.raises(RuntimeError, match="unexpected Kubernetes Job name"):
-            actions._reconcile_central_workload_identity(
+            checks_central_queue._reconcile_central_workload_identity(
                 ctx,
                 central_record,
                 persisted,
@@ -346,7 +369,7 @@ class TestCentralQueueResume:
     def test_submitting_checkpoint_reconciles_without_second_post(self) -> None:
         ctx = _context()
         key = "gco-live-validation:run-123:central"
-        job_id = actions._central_queue_job_id(key)
+        job_id = checks_central_queue._central_queue_job_id(key)
         marker = "GCO_LIVE_DDB_run-123"
         queue_job = _central_job(job_id)
         job_record = {
@@ -387,31 +410,27 @@ class TestCentralQueueResume:
         }
 
         with (
-            patch.object(
-                actions,
+            patch_live_validation_helper(
                 "_central_manifest",
                 return_value=({}, queue_job["job_name"], queue_job["namespace"], marker),
             ),
-            patch.object(actions, "_register_job", return_value=job_record),
-            patch.object(actions, "_register_central_job", return_value=central_record),
-            patch.object(
-                actions,
+            patch_live_validation_helper("_register_job", return_value=job_record),
+            patch_live_validation_helper("_register_central_job", return_value=central_record),
+            patch_live_validation_helper(
                 "_get_central_queue_job",
                 return_value=queue_job,
             ) as get_queue_job,
-            patch.object(
-                actions,
+            patch_live_validation_helper(
                 "_wait_for_central_queue_appearance",
                 return_value=queue_job,
             ) as wait_for_appearance,
-            patch.object(
-                actions,
+            patch_live_validation_helper(
                 "_wait_for_central_queue_terminal",
                 return_value=(queue_job, [{"status": "succeeded", "at": 1.0}]),
             ),
-            patch.object(actions, "_read_central_job_item", return_value=queue_job),
+            patch_live_validation_helper("_read_central_job_item", return_value=queue_job),
         ):
-            result = actions.action_central_queue_lifecycle(ctx)
+            result = actions_central_queue.action_central_queue_lifecycle(ctx)
 
         assert result["job_id"] == job_id
         get_queue_job.assert_called_once_with(ctx, central_record)
@@ -430,7 +449,7 @@ class TestCentralQueueResume:
     def test_submitting_checkpoint_replays_only_exact_persisted_envelope(self) -> None:
         ctx = _context()
         key = "gco-live-validation:run-123:central"
-        job_id = actions._central_queue_job_id(key)
+        job_id = checks_central_queue._central_queue_job_id(key)
         marker = "GCO_LIVE_DDB_run-123"
         manifest = {"apiVersion": "batch/v1", "kind": "Job"}
         queue_job = _central_job(job_id)
@@ -440,7 +459,7 @@ class TestCentralQueueResume:
             "namespace": queue_job["namespace"],
             "priority": 100,
             "labels": {
-                actions._RUN_JOB_LABEL: actions._run_token(ctx.settings.run_id),
+                constants._RUN_JOB_LABEL: checks_jobs._run_token(ctx.settings.run_id),
             },
         }
         envelope = {
@@ -493,8 +512,7 @@ class TestCentralQueueResume:
         )
 
         with (
-            patch.object(
-                actions,
+            patch_live_validation_helper(
                 "_central_manifest",
                 return_value=(
                     manifest,
@@ -503,22 +521,20 @@ class TestCentralQueueResume:
                     marker,
                 ),
             ),
-            patch.object(actions, "_register_job", return_value=job_record),
-            patch.object(actions, "_register_central_job", return_value=central_record),
-            patch.object(actions, "_get_central_queue_job", return_value=None),
-            patch.object(
-                actions,
+            patch_live_validation_helper("_register_job", return_value=job_record),
+            patch_live_validation_helper("_register_central_job", return_value=central_record),
+            patch_live_validation_helper("_get_central_queue_job", return_value=None),
+            patch_live_validation_helper(
                 "_wait_for_central_queue_appearance",
                 return_value=queue_job,
             ) as wait_for_appearance,
-            patch.object(
-                actions,
+            patch_live_validation_helper(
                 "_wait_for_central_queue_terminal",
                 return_value=(queue_job, [{"status": "succeeded", "at": 1.0}]),
             ),
-            patch.object(actions, "_read_central_job_item", return_value=queue_job),
+            patch_live_validation_helper("_read_central_job_item", return_value=queue_job),
         ):
-            result = actions.action_central_queue_lifecycle(ctx)
+            result = actions_central_queue.action_central_queue_lifecycle(ctx)
 
         assert result["job_id"] == job_id
         request = ctx.aws_client.make_authenticated_request.call_args.kwargs
@@ -545,7 +561,7 @@ class TestCentralQueueResume:
             "deleted": False,
         }
         ctx = _context(state={"jobs": [workload]})
-        job_id = actions._central_queue_job_id("gco-live-validation:run-123:central")
+        job_id = checks_central_queue._central_queue_job_id("gco-live-validation:run-123:central")
         central_record = {
             "job_id": job_id,
             "idempotency_key": "gco-live-validation:run-123:central",
@@ -563,15 +579,14 @@ class TestCentralQueueResume:
         )
 
         with (
-            patch.object(
-                actions,
+            patch_live_validation_helper(
                 "_get_central_queue_job",
                 side_effect=[None, queued, cancelled],
             ) as get_job,
-            patch.object(actions, "_read_central_job_item", return_value=cancelled),
-            patch.object(actions.time, "sleep"),
+            patch_live_validation_helper("_read_central_job_item", return_value=cancelled),
+            patch("time.sleep"),
         ):
-            result = actions._cleanup_central_job(ctx, central_record)
+            result = cleanup_workloads_module._cleanup_central_job(ctx, central_record)
 
         assert get_job.call_count == 3
         assert result["terminal_status"] == "cancelled"
@@ -591,13 +606,13 @@ class TestCentralQueueResume:
     ) -> None:
         ctx = _real_context(tmp_path)
         key = "gco-live-validation:run-123:central"
-        job_id = actions._central_queue_job_id(key)
+        job_id = checks_central_queue._central_queue_job_id(key)
         record = ctx.register_job(
             name="gco-live-ddb-run-123",
             namespace="gco-jobs",
             region="us-east-1",
             path="dynamodb",
-            run_label=actions._run_token(ctx.settings.run_id),
+            run_label=checks_jobs._run_token(ctx.settings.run_id),
             transport_region=None,
         )
         body = {"manifest": {"kind": "Job"}, "target_region": "us-east-1"}
@@ -613,7 +628,7 @@ class TestCentralQueueResume:
             resumable=True,
         )
         ctx.begin_job_submission(record, reconciliation_timeout_seconds=30)
-        central_record = actions._register_central_job(
+        central_record = checks_central_queue._register_central_job(
             ctx,
             job_id=job_id,
             idempotency_key=key,
@@ -629,22 +644,21 @@ class TestCentralQueueResume:
         )
 
         with (
-            patch.object(actions, "_wait_for_central_queue_appearance", return_value=queued),
-            patch.object(
-                actions,
+            patch_live_validation_helper("_wait_for_central_queue_appearance", return_value=queued),
+            patch_live_validation_helper(
                 "_wait_for_central_queue_terminal",
                 return_value=(cancelled, [{"status": "cancelled", "at": 1.0}]),
             ),
-            patch.object(actions, "_read_central_job_item", return_value=cancelled),
+            patch_live_validation_helper("_read_central_job_item", return_value=cancelled),
         ):
-            result = actions._cleanup_central_job(ctx, central_record)
+            result = cleanup_workloads_module._cleanup_central_job(ctx, central_record)
 
         assert result["workload_not_submitted"] is True
         assert record["submission_state"] == "not_submitted"
         assert record["central_cancelled_before_claim_job_id"] == job_id
 
-        with patch.object(actions, "_get_owned_job", return_value=None):
-            deletion = actions._delete_owned_job(ctx, record)
+        with patch_live_validation_helper("_get_owned_job", return_value=None):
+            deletion = checks_jobs._delete_owned_job(ctx, record)
         assert deletion == {"not_submitted": True, "already_absent": True}
         assert record["deleted"] is True
 
@@ -654,13 +668,13 @@ class TestCentralQueueResume:
     ) -> None:
         ctx = _real_context(tmp_path)
         key = "gco-live-validation:run-123:central"
-        job_id = actions._central_queue_job_id(key)
+        job_id = checks_central_queue._central_queue_job_id(key)
         record = ctx.register_job(
             name="gco-live-ddb-run-123",
             namespace="gco-jobs",
             region="us-east-1",
             path="dynamodb",
-            run_label=actions._run_token(ctx.settings.run_id),
+            run_label=checks_jobs._run_token(ctx.settings.run_id),
             transport_region=None,
         )
         body = {"manifest": {"kind": "Job"}, "target_region": "us-east-1"}
@@ -681,7 +695,7 @@ class TestCentralQueueResume:
             "workload_not_created": True,
         }
         ctx.finish_job_submission(record, {"job": failed}, appearance_timeout_seconds=30)
-        central_record = actions._register_central_job(
+        central_record = checks_central_queue._register_central_job(
             ctx,
             job_id=job_id,
             idempotency_key=key,
@@ -691,23 +705,23 @@ class TestCentralQueueResume:
         )
 
         with (
-            patch.object(actions, "_wait_for_central_queue_appearance", return_value=failed),
-            patch.object(actions, "_read_central_job_item", return_value=failed),
+            patch_live_validation_helper("_wait_for_central_queue_appearance", return_value=failed),
+            patch_live_validation_helper("_read_central_job_item", return_value=failed),
         ):
-            result = actions._cleanup_central_job(ctx, central_record)
+            result = cleanup_workloads_module._cleanup_central_job(ctx, central_record)
 
         assert result["terminal_status"] == "failed"
         assert result["workload_not_submitted"] is True
         assert record["submission_state"] == "not_submitted"
         assert record["central_worker_not_created_job_id"] == job_id
 
-        with patch.object(actions, "_get_owned_job", return_value=None):
-            deletion = actions._delete_owned_job(ctx, record)
+        with patch_live_validation_helper("_get_owned_job", return_value=None):
+            deletion = checks_jobs._delete_owned_job(ctx, record)
         assert deletion == {"not_submitted": True, "already_absent": True}
         assert record["deleted"] is True
 
     def test_failed_central_job_without_worker_proof_remains_unresolved(self) -> None:
-        job_id = actions._central_queue_job_id("gco-live-validation:run-123:central")
+        job_id = checks_central_queue._central_queue_job_id("gco-live-validation:run-123:central")
         workload = {
             "name": "gco-live-ddb-run-123",
             "namespace": "gco-jobs",
@@ -728,7 +742,7 @@ class TestCentralQueueResume:
         }
 
         with pytest.raises(RuntimeError, match="omitted worker Kubernetes identity"):
-            actions._reconcile_central_cleanup_workload(
+            checks_central_queue._reconcile_central_cleanup_workload(
                 ctx,
                 central_record,
                 _central_job(job_id, status="failed"),
@@ -737,7 +751,7 @@ class TestCentralQueueResume:
         ctx.mark_central_job_not_created_by_worker.assert_not_called()
 
     def test_failed_central_job_rejects_conflicting_proof_and_identity(self) -> None:
-        job_id = actions._central_queue_job_id("gco-live-validation:run-123:central")
+        job_id = checks_central_queue._central_queue_job_id("gco-live-validation:run-123:central")
         persisted: dict[str, object] = {
             **_central_job(job_id),
             "status": "failed",
@@ -763,20 +777,20 @@ class TestCentralQueueResume:
         }
 
         with pytest.raises(RuntimeError, match="both no-workload proof and Kubernetes identity"):
-            actions._reconcile_central_cleanup_workload(ctx, central_record, persisted)
+            checks_central_queue._reconcile_central_cleanup_workload(ctx, central_record, persisted)
 
         ctx.mark_central_job_not_created_by_worker.assert_not_called()
 
     def test_cleanup_binds_succeeded_worker_identity(self, tmp_path: Path) -> None:
         ctx = _real_context(tmp_path)
         key = "gco-live-validation:run-123:central"
-        job_id = actions._central_queue_job_id(key)
+        job_id = checks_central_queue._central_queue_job_id(key)
         record = ctx.register_job(
             name="gco-live-ddb-run-123",
             namespace="gco-jobs",
             region="us-east-1",
             path="dynamodb",
-            run_label=actions._run_token(ctx.settings.run_id),
+            run_label=checks_jobs._run_token(ctx.settings.run_id),
             transport_region=None,
         )
         ctx.prepare_job_submission(
@@ -791,7 +805,7 @@ class TestCentralQueueResume:
             resumable=True,
         )
         ctx.begin_job_submission(record, reconciliation_timeout_seconds=30)
-        central_record = actions._register_central_job(
+        central_record = checks_central_queue._register_central_job(
             ctx,
             job_id=job_id,
             idempotency_key=key,
@@ -802,10 +816,12 @@ class TestCentralQueueResume:
         persisted = _central_job(job_id)
 
         with (
-            patch.object(actions, "_wait_for_central_queue_appearance", return_value=persisted),
-            patch.object(actions, "_read_central_job_item", return_value=persisted),
+            patch_live_validation_helper(
+                "_wait_for_central_queue_appearance", return_value=persisted
+            ),
+            patch_live_validation_helper("_read_central_job_item", return_value=persisted),
         ):
-            result = actions._cleanup_central_job(ctx, central_record)
+            result = cleanup_workloads_module._cleanup_central_job(ctx, central_record)
 
         assert result["terminal_status"] == "succeeded"
         assert result["workload_not_submitted"] is False
@@ -820,13 +836,13 @@ class TestCentralQueueResume:
     ) -> None:
         ctx = _real_context(tmp_path)
         key = "gco-live-validation:run-123:central"
-        job_id = actions._central_queue_job_id(key)
+        job_id = checks_central_queue._central_queue_job_id(key)
         record = ctx.register_job(
             name="gco-live-ddb-run-123",
             namespace="gco-jobs",
             region="us-east-1",
             path="dynamodb",
-            run_label=actions._run_token(ctx.settings.run_id),
+            run_label=checks_jobs._run_token(ctx.settings.run_id),
             transport_region=None,
         )
         ctx.prepare_job_submission(
@@ -841,7 +857,7 @@ class TestCentralQueueResume:
             resumable=True,
         )
         ctx.begin_job_submission(record, reconciliation_timeout_seconds=30)
-        central_record = actions._register_central_job(
+        central_record = checks_central_queue._register_central_job(
             ctx,
             job_id=job_id,
             idempotency_key=key,
@@ -865,14 +881,13 @@ class TestCentralQueueResume:
             return {"deleted_after_identity_reconciliation": True}
 
         with (
-            patch.object(actions, "_read_central_job_item", return_value=persisted),
-            patch.object(
-                actions,
+            patch_live_validation_helper("_read_central_job_item", return_value=persisted),
+            patch_live_validation_helper(
                 "_delete_owned_job",
                 side_effect=delete_reopened_workload,
             ) as delete_job,
         ):
-            result = actions.cleanup_workloads(ctx)
+            result = cleanup_workloads_module.cleanup_workloads(ctx)
 
         assert result["complete"] is True
         delete_job.assert_called_once_with(ctx, record)
@@ -890,13 +905,13 @@ class TestCentralQueueResume:
     ) -> None:
         ctx = _real_context(tmp_path)
         key = "gco-live-validation:run-123:central"
-        job_id = actions._central_queue_job_id(key)
+        job_id = checks_central_queue._central_queue_job_id(key)
         record = ctx.register_job(
             name="gco-live-ddb-run-123",
             namespace="gco-jobs",
             region="us-east-1",
             path="dynamodb",
-            run_label=actions._run_token(ctx.settings.run_id),
+            run_label=checks_jobs._run_token(ctx.settings.run_id),
             transport_region=None,
         )
         ctx.prepare_job_submission(
@@ -911,7 +926,7 @@ class TestCentralQueueResume:
             resumable=True,
         )
         ctx.begin_job_submission(record, reconciliation_timeout_seconds=30)
-        central_record = actions._register_central_job(
+        central_record = checks_central_queue._register_central_job(
             ctx,
             job_id=job_id,
             idempotency_key=key,
@@ -941,10 +956,10 @@ class TestCentralQueueResume:
         workload_before = json.loads(json.dumps(record))
 
         with (
-            patch.object(actions, "_read_central_job_item", return_value=persisted),
-            patch.object(actions, "_delete_owned_job") as delete_job,
+            patch_live_validation_helper("_read_central_job_item", return_value=persisted),
+            patch_live_validation_helper("_delete_owned_job") as delete_job,
         ):
-            result = actions.cleanup_workloads(ctx)
+            result = cleanup_workloads_module.cleanup_workloads(ctx)
 
         assert result["complete"] is False
         assert record == workload_before
@@ -958,7 +973,7 @@ class TestCentralQueueResume:
 
     def test_cleanup_non_observation_remains_an_unresolved_barrier(self) -> None:
         ctx = _context()
-        job_id = actions._central_queue_job_id("gco-live-validation:run-123:central")
+        job_id = checks_central_queue._central_queue_job_id("gco-live-validation:run-123:central")
         central_record = {
             "job_id": job_id,
             "idempotency_key": "gco-live-validation:run-123:central",
@@ -970,10 +985,10 @@ class TestCentralQueueResume:
         }
 
         with (
-            patch.object(actions, "_wait_for_central_queue_appearance", return_value=None),
+            patch_live_validation_helper("_wait_for_central_queue_appearance", return_value=None),
             pytest.raises(RuntimeError, match="non-observation is not terminal proof"),
         ):
-            actions._cleanup_central_job(ctx, central_record)
+            cleanup_workloads_module._cleanup_central_job(ctx, central_record)
 
         assert central_record["cleanup_complete"] is False
         assert central_record["cleanup_result"]["complete"] is False
@@ -1038,7 +1053,7 @@ class TestDeterministicTopologyReadiness:
                     "ClusterName": stack_name,
                     "AddonDeploymentToken": tokens[region],
                 },
-                "tags": {actions._RUN_STACK_TAG: "run-123"},
+                "tags": {constants._RUN_STACK_TAG: "run-123"},
             }
             execution_input = {
                 "ClusterName": stack_name,
@@ -1235,12 +1250,12 @@ class TestDeterministicTopologyReadiness:
             return environment.stacks[stack_name]
 
         with (
-            patch.object(actions, "_reconcile_stack_ownership"),
-            patch.object(actions, "describe_stack", side_effect=describe),
-            patch.object(actions, "_record_stack_identity"),
-            patch.object(actions.time, "sleep", environment.sleep),
+            patch_live_validation_helper("_reconcile_stack_ownership"),
+            patch_live_validation_helper("describe_stack", side_effect=describe),
+            patch_live_validation_helper("_record_stack_identity"),
+            patch("time.sleep", environment.sleep),
         ):
-            return actions.action_topology(environment.ctx)
+            return actions_topology.action_topology(environment.ctx)
 
     def test_exact_current_execution_succeeds_with_persisted_validator_evidence(self) -> None:
         environment = self._environment()
@@ -1356,7 +1371,7 @@ class TestDeterministicTopologyReadiness:
         ]
         assert terminal["status"] == "FAILED"
         for field in ("error", "cause", "output"):
-            assert len(terminal[field]) <= actions._MAX_TOPOLOGY_EVIDENCE_CHARS
+            assert len(terminal[field]) <= checks_topology._MAX_TOPOLOGY_EVIDENCE_CHARS
             assert terminal[field].endswith("... [truncated]")
 
     def test_first_504_fails_without_consuming_lucky_second_response(self) -> None:
@@ -1461,8 +1476,8 @@ class TestRetainedLogCleanupGenerationFencing:
             "arn": cls._ARN,
             "creation_time": creation_time,
             "tags": {
-                actions._RUN_STACK_TAG: run_tag,
-                actions._LOG_CLEANUP_TOKEN_TAG: cleanup_token or cls._TOKEN,
+                constants._RUN_STACK_TAG: run_tag,
+                constants._LOG_CLEANUP_TOKEN_TAG: cleanup_token or cls._TOKEN,
             },
         }
 
@@ -1565,29 +1580,26 @@ class TestRetainedLogCleanupGenerationFencing:
     @staticmethod
     def _invoke(environment: SimpleNamespace) -> dict[str, object]:
         with (
-            patch.object(
-                actions,
+            patch_live_validation_helper(
                 "_verify_target_stack_absence",
                 return_value={"all_absent": True, "residual": []},
             ),
-            patch.object(
-                actions,
+            patch_live_validation_helper(
                 "_validated_owned_log_group_identity",
                 return_value=(
                     TestRetainedLogCleanupGenerationFencing._REGION,
                     TestRetainedLogCleanupGenerationFencing._NAME,
                 ),
             ),
-            patch.object(actions, "_ensure_log_cleanup_helper", environment.ensure_mock),
-            patch.object(
-                actions,
+            patch_live_validation_helper("_ensure_log_cleanup_helper", environment.ensure_mock),
+            patch_live_validation_helper(
                 "_delete_log_cleanup_helper",
                 environment.helper_cleanup_mock,
             ),
-            patch.object(actions, "_log_group_identity", environment.identity_mock),
-            patch.object(actions.time, "sleep", environment.sleep_mock),
+            patch_live_validation_helper("_log_group_identity", environment.identity_mock),
+            patch("time.sleep", environment.sleep_mock),
         ):
-            return actions._cleanup_owned_log_groups(environment.ctx)
+            return cleanup_log_groups._cleanup_owned_log_groups(environment.ctx)
 
     def test_stable_generation_is_deleted_after_three_consecutive_absence_reads(self) -> None:
         environment = self._environment(
@@ -1624,7 +1636,7 @@ class TestRetainedLogCleanupGenerationFencing:
         replacement = self._identity(1_750_000_000_999, run_tag="replacement")
         environment = self._environment([replacement, replacement])
 
-        with pytest.raises(actions._LogGroupCleanupError) as raised:
+        with pytest.raises(constants._LogGroupCleanupError) as raised:
             self._invoke(environment)
 
         environment.ensure_mock.assert_not_called()
@@ -1647,7 +1659,7 @@ class TestRetainedLogCleanupGenerationFencing:
         replacement = self._identity(1_750_000_000_999, run_tag="replacement")
         environment = self._environment([original, original, replacement, replacement])
 
-        with pytest.raises(actions._LogGroupCleanupError):
+        with pytest.raises(constants._LogGroupCleanupError):
             self._invoke(environment)
 
         environment.ensure_mock.assert_called_once_with(environment.ctx)
@@ -1661,7 +1673,7 @@ class TestRetainedLogCleanupGenerationFencing:
         drifted = self._identity(1_750_000_000_000, run_tag="foreign-run")
         environment = self._environment([drifted])
 
-        with pytest.raises(actions._LogGroupCleanupError) as raised:
+        with pytest.raises(constants._LogGroupCleanupError) as raised:
             self._invoke(environment)
 
         environment.ensure_mock.assert_not_called()
@@ -1708,8 +1720,8 @@ class TestRetainedLogCleanupGenerationFencing:
         environment.normal_logs.tag_resource.assert_called_once_with(
             resourceArn=self._ARN,
             tags={
-                actions._RUN_STACK_TAG: "run-123",
-                actions._LOG_CLEANUP_TOKEN_TAG: self._TOKEN,
+                constants._RUN_STACK_TAG: "run-123",
+                constants._LOG_CLEANUP_TOKEN_TAG: self._TOKEN,
             },
         )
         environment.restricted_logs.delete_log_group.assert_called_once_with(
@@ -1731,7 +1743,7 @@ class TestRetainedLogCleanupGenerationFencing:
         }
         environment = self._environment([foreign, foreign])
 
-        with pytest.raises(actions._LogGroupCleanupError) as raised:
+        with pytest.raises(constants._LogGroupCleanupError) as raised:
             self._invoke(environment)
 
         environment.normal_logs.tag_resource.assert_not_called()
@@ -1764,7 +1776,7 @@ class TestRetainedLogCleanupGenerationFencing:
             [original, original, original, None, None, replacement, replacement]
         )
 
-        with pytest.raises(actions._LogGroupCleanupError) as raised:
+        with pytest.raises(constants._LogGroupCleanupError) as raised:
             self._invoke(environment)
 
         environment.restricted_logs.delete_log_group.assert_called_once_with(
@@ -1786,17 +1798,17 @@ class TestRetainedLogCleanupGenerationFencing:
         sleep = MagicMock()
 
         with (
-            patch.object(actions, "_log_group_identity", identity_mock),
-            patch.object(actions.time, "sleep", sleep),
+            patch_live_validation_helper("_log_group_identity", identity_mock),
+            patch("time.sleep", sleep),
         ):
-            outcome = actions._observe_log_group_stability(
+            outcome = ownership_log_groups._observe_log_group_stability(
                 MagicMock(),
                 self._REGION,
                 self._NAME,
                 expected_identity=self._identity(1_750_000_000_000),
                 expected_tags={
-                    actions._RUN_STACK_TAG: "run-123",
-                    actions._LOG_CLEANUP_TOKEN_TAG: self._TOKEN,
+                    constants._RUN_STACK_TAG: "run-123",
+                    constants._LOG_CLEANUP_TOKEN_TAG: self._TOKEN,
                 },
                 required_present=2,
                 required_absent=3,
@@ -1818,7 +1830,7 @@ class TestStrictStackOwnership:
             "name": "gco-live-global",
             "stack_id": self._STACK_ID,
             "status": "CREATE_COMPLETE",
-            "tags": {actions._RUN_STACK_TAG: "run-123"},
+            "tags": {constants._RUN_STACK_TAG: "run-123"},
         }
 
     def test_deploy_never_delegates_private_report_path_to_cdk(self) -> None:
@@ -1836,12 +1848,12 @@ class TestStrictStackOwnership:
         )
 
         with (
-            patch.object(actions, "_reconcile_stack_ownership"),
-            patch.object(actions, "_checkpoint_new_ecr_repositories"),
-            patch.object(actions, "_checkpoint_new_ecr_images"),
-            patch.object(actions, "_checkpoint_retained_kms_keys"),
+            patch_live_validation_helper("_reconcile_stack_ownership"),
+            patch_live_validation_helper("_checkpoint_new_ecr_repositories"),
+            patch_live_validation_helper("_checkpoint_new_ecr_images"),
+            patch_live_validation_helper("_checkpoint_retained_kms_keys"),
         ):
-            result = actions.action_deploy(ctx)
+            result = actions_deploy.action_deploy(ctx)
 
         assert result["overall_success"] is True
         call_kwargs = ctx.stack_manager.deploy_orchestrated.call_args.kwargs
@@ -1851,7 +1863,7 @@ class TestStrictStackOwnership:
         ctx = _context(state={"owned_stacks": {}})
 
         with pytest.raises(RuntimeError, match="without prepared-change-set authority"):
-            actions._record_stack_identity(
+            ownership_stacks._record_stack_identity(
                 ctx,
                 "gco-live-global",
                 "us-east-1",
@@ -1870,7 +1882,7 @@ class TestStrictStackOwnership:
         first_change_set_id = (
             "arn:aws:cloudformation:us-east-1:123456789012:changeSet/run-123/change-set-uuid"
         )
-        actions._record_prepared_stack_identity(
+        ownership_stacks._record_prepared_stack_identity(
             ctx,
             "gco-live-global",
             "us-east-1",
@@ -1879,7 +1891,7 @@ class TestStrictStackOwnership:
             "CREATE",
         )
 
-        record = actions._record_stack_identity(
+        record = ownership_stacks._record_stack_identity(
             ctx,
             "gco-live-global",
             "us-east-1",
@@ -1898,7 +1910,7 @@ class TestStrictStackOwnership:
             "arn:aws:cloudformation:us-east-1:123456789012:"
             "changeSet/run-123-analytics-routes/second-uuid"
         )
-        actions._record_prepared_stack_identity(
+        ownership_stacks._record_prepared_stack_identity(
             ctx,
             "gco-live-global",
             "us-east-1",
@@ -1906,7 +1918,7 @@ class TestStrictStackOwnership:
             second_change_set_id,
             "UPDATE",
         )
-        authority = actions._prepared_change_set_authority(ctx)
+        authority = ownership_stacks._prepared_change_set_authority(ctx)
         assert set(authority["gco-live-global"]) == {
             first_change_set_id,
             second_change_set_id,
@@ -1946,7 +1958,7 @@ class TestStrictStackOwnership:
         )
 
         for change_set_id in (second_id, third_id):
-            actions._record_prepared_stack_identity(
+            ownership_stacks._record_prepared_stack_identity(
                 ctx,
                 "gco-live-global",
                 "us-east-1",
@@ -1956,7 +1968,7 @@ class TestStrictStackOwnership:
             )
 
         reloaded = _context(state=json.loads(json.dumps(ctx.checkpoint.state)))
-        authority = actions._prepared_change_set_authority(reloaded)["gco-live-global"]
+        authority = ownership_stacks._prepared_change_set_authority(reloaded)["gco-live-global"]
         assert set(authority) == {legacy_id, second_id, third_id}
         assert authority[legacy_id]["change_set_type"] == "CREATE"
         assert authority[second_id]["change_set_type"] == "UPDATE"
@@ -2002,7 +2014,7 @@ class TestEcrOwnershipCleanup:
             tag="run-tag",
         )
 
-        assert actions._ecr_image_identity(result or {}) == self._IDENTITY
+        assert ownership_ecr._ecr_image_identity(result or {}) == self._IDENTITY
         ecr.describe_images.assert_called_once_with(
             repositoryName="baseline/repository",
             imageIds=[{"imageTag": "run-tag"}],
@@ -2060,12 +2072,11 @@ class TestEcrOwnershipCleanup:
         ctx = _context(state={"retained_ecr_image_deltas": [record]})
         current = {**self._IDENTITY, "tags": ["run-tag"]}
 
-        with patch.object(
-            actions,
+        with patch_live_validation_helper(
             "describe_ecr_image_by_tag",
             return_value=current,
         ) as describe:
-            result = actions._cleanup_new_ecr_images(ctx)
+            result = cleanup_ecr._cleanup_new_ecr_images(ctx)
 
         assert result["automatic_deletion"] is False
         assert result["images"][0]["retained"] is True
@@ -2090,7 +2101,7 @@ class TestEcrOwnershipCleanup:
             "region": "us-east-1",
             "name": repository["name"],
             "arn": repository["arn"],
-            "creation_identity": actions._ecr_creation_identity(repository),
+            "creation_identity": ownership_ecr._ecr_creation_identity(repository),
             "run_tag": "run-123",
             "deleted": False,
         }
@@ -2108,14 +2119,13 @@ class TestEcrOwnershipCleanup:
         )
 
         with (
-            patch.object(
-                actions,
+            patch_live_validation_helper(
                 "collect_ecr_inventory",
                 return_value={"us-east-1": [repository]},
             ),
             pytest.raises(RuntimeError, match="run ownership changed"),
         ):
-            actions._cleanup_new_ecr_repositories(ctx)
+            cleanup_ecr._cleanup_new_ecr_repositories(ctx)
 
         ctx.session.client.return_value.delete_repository.assert_not_called()
 
@@ -2133,7 +2143,7 @@ class TestEcrOwnershipCleanup:
             "arn": "arn:aws:ecr:us-east-1:123456789012:repository/gco-live/new",
             "registry_id": "123456789012",
             "created_at": "2026-07-17T00:00:00+00:00",
-            "tags": {actions._RUN_STACK_TAG: "run-123"},
+            "tags": {constants._RUN_STACK_TAG: "run-123"},
             "images": [{**self._IDENTITY, "tags": ["asset-tag"]}],
         }
         delta_image = {**self._IDENTITY, "tags": ["run-tag"]}
@@ -2152,7 +2162,7 @@ class TestEcrOwnershipCleanup:
                     "region": "us-east-1",
                     "name": created_repository["name"],
                     "arn": created_repository["arn"],
-                    "creation_identity": actions._ecr_creation_identity(created_repository),
+                    "creation_identity": ownership_ecr._ecr_creation_identity(created_repository),
                     "run_tag": "run-123",
                 }
             ],
@@ -2172,7 +2182,7 @@ class TestEcrOwnershipCleanup:
             "ecr_repositories": {"us-east-1": [baseline_repository]},
         }
 
-        comparison, accepted = actions._strip_expected_retained_ecr(ctx, final_baseline)
+        comparison, accepted = ownership_ecr._strip_expected_retained_ecr(ctx, final_baseline)
 
         assert comparison["ecr_repositories"] == ctx.checkpoint.baseline["ecr_repositories"]
         assert accepted["repositories"][0]["retained"] is True
@@ -2188,8 +2198,8 @@ class TestEcrOwnershipCleanup:
                 }
             }
         }
-        residual = actions._strip_baseline_ecr(project_inventory, ctx.checkpoint.baseline)
-        residual = actions._strip_accepted_retained_ecr(residual, accepted)
+        residual = ownership_ecr._strip_baseline_ecr(project_inventory, ctx.checkpoint.baseline)
+        residual = ownership_ecr._strip_accepted_retained_ecr(residual, accepted)
         assert residual["regional"] == {}
 
 
@@ -2333,7 +2343,7 @@ class TestProtectedBaselineIdentity:
             "iam_roles": [exact_role_arn, nearby_role_arn],
         }
 
-        filtered = actions._strip_baseline_ecr(project_inventory, self._baseline())
+        filtered = ownership_ecr._strip_baseline_ecr(project_inventory, self._baseline())
 
         assert filtered["cloudformation_stacks"] == {
             self._REGION: [
@@ -2356,20 +2366,20 @@ class TestProtectedBaselineIdentity:
         del baseline["protected_stacks"][self._REGION][0]["physical_resources"]
 
         with pytest.raises(RuntimeError, match="omitted physical resources"):
-            actions._strip_baseline_ecr({}, baseline)
+            ownership_ecr._strip_baseline_ecr({}, baseline)
 
     @pytest.mark.parametrize("protected_stacks", [[], "", 0, False])
     def test_filter_rejects_falsey_non_object_stack_authority(
         self, protected_stacks: object
     ) -> None:
         with pytest.raises(RuntimeError, match="protected_stacks must be an object"):
-            actions._strip_baseline_ecr({}, {"protected_stacks": protected_stacks})
+            ownership_ecr._strip_baseline_ecr({}, {"protected_stacks": protected_stacks})
 
     @pytest.mark.parametrize("baseline", [{}, {"protected_stacks": None}])
     def test_missing_or_null_protected_stack_authority_is_empty(
         self, baseline: dict[str, object]
     ) -> None:
-        assert actions._baseline_protected_identities(baseline) == ({}, {})
+        assert protected._baseline_protected_identities(baseline) == ({}, {})
 
     def test_backup_inventory_matches_cloudformation_physical_ids(self) -> None:
         plan_id = "plan-123"
@@ -2418,7 +2428,7 @@ class TestProtectedBaselineIdentity:
             }
         }
 
-        filtered = actions._strip_baseline_ecr(project_inventory, baseline)
+        filtered = ownership_ecr._strip_baseline_ecr(project_inventory, baseline)
 
         assert filtered["regional"][self._REGION] == {
             "backup_plans": [f"{plan_arn}-other"],
@@ -2504,7 +2514,7 @@ class TestProtectedBaselineIdentity:
             }
         }
 
-        filtered = actions._strip_baseline_ecr(project_inventory, baseline)
+        filtered = ownership_ecr._strip_baseline_ecr(project_inventory, baseline)
 
         assert filtered["regional"][self._REGION]["tagged_resources"] == [
             *({"arn": arn, "tags": {}} for arn in nearby_arns),
@@ -2523,12 +2533,12 @@ class TestProtectedBaselineIdentity:
         session = MagicMock()
         session.client.return_value = eks
 
-        assert inventory._list_eks_clusters(session, self._REGION, None) == [
+        assert inventory_scanners._list_eks_clusters(session, self._REGION, None) == [
             "gco-live",
             "gco-live-west",
             "unrelated",
         ]
-        assert inventory._list_eks_clusters(session, self._REGION, "gco-live") == [
+        assert inventory_scanners._list_eks_clusters(session, self._REGION, "gco-live") == [
             "gco-live",
             "gco-live-west",
         ]
@@ -2593,7 +2603,7 @@ class TestProtectedBaselineIdentity:
             },
         }
 
-        filtered = actions._strip_baseline_ecr(project_inventory, baseline)
+        filtered = ownership_ecr._strip_baseline_ecr(project_inventory, baseline)
 
         assert filtered["regional"][self._REGION] == {
             "tagged_resources": [
@@ -2634,7 +2644,7 @@ class TestProtectedBaselineIdentity:
             }
         }
 
-        filtered = actions._strip_baseline_ecr(project_inventory, baseline)
+        filtered = ownership_ecr._strip_baseline_ecr(project_inventory, baseline)
 
         assert filtered["regional"][self._REGION]["tagged_resources"] == [
             {"arn": nat_gateway_arn, "tags": {}}
@@ -2663,7 +2673,7 @@ class TestProtectedBaselineIdentity:
         session = MagicMock()
         session.client.return_value = ec2
 
-        project_ids, all_ids = inventory._list_instance_inventory(
+        project_ids, all_ids = inventory_scanners._list_instance_inventory(
             session,
             self._REGION,
             "gco-live",
@@ -2791,11 +2801,13 @@ class TestProtectedBaselineIdentity:
         session = MagicMock()
         session.client.return_value = ec2
 
-        project_resources, authoritative_resources = inventory._list_project_ec2_networking(
-            session,
-            self._REGION,
-            "gco-live",
-            ["i-11111111111111111"],
+        project_resources, authoritative_resources = (
+            inventory_scanners._list_project_ec2_networking(
+                session,
+                self._REGION,
+                "gco-live",
+                ["i-11111111111111111"],
+            )
         )
 
         assert project_resources == {
@@ -2868,7 +2880,7 @@ class TestProtectedBaselineIdentity:
             },
         }
 
-        filtered = actions._strip_baseline_ecr(
+        filtered = ownership_ecr._strip_baseline_ecr(
             project_inventory,
             {"protected_stacks": {}, "ecr_repositories": {}},
         )
@@ -2936,7 +2948,7 @@ class TestProtectedBaselineIdentity:
             },
         }
 
-        filtered = actions._strip_baseline_ecr(
+        filtered = ownership_ecr._strip_baseline_ecr(
             project_inventory,
             {"protected_stacks": {}, "ecr_repositories": {}},
         )
@@ -3015,7 +3027,7 @@ class TestProtectedBaselineIdentity:
         }
         baseline = {"protected_stacks": {}, "ecr_repositories": {}}
 
-        filtered = actions._strip_baseline_ecr(project_inventory, baseline)
+        filtered = ownership_ecr._strip_baseline_ecr(project_inventory, baseline)
 
         east_arns = {
             record["arn"] for record in filtered["regional"][self._REGION]["tagged_resources"]
@@ -3086,7 +3098,7 @@ class TestStrictDestroyCheckpointing:
             {"job_id": "central-job-id", "priority": Decimal("100")}
         ]
 
-        barrier = actions._record_workload_cleanup_barrier(
+        barrier = actions_destroy._record_workload_cleanup_barrier(
             ctx,
             {"complete": True, "errors": [], "unresolved": [], "ended_at": "done"},
         )
@@ -3096,7 +3108,7 @@ class TestStrictDestroyCheckpointing:
 
         reloaded = self._destroy_context()
         reloaded.checkpoint.state = json.loads(json.dumps(to_jsonable(ctx.checkpoint.state)))
-        assert actions._validated_workload_cleanup_barrier(reloaded) == barrier
+        assert actions_destroy._validated_workload_cleanup_barrier(reloaded) == barrier
 
     def test_already_destroyed_workloads_require_a_completed_barrier(self) -> None:
         ctx = self._destroy_context(destroyed=True)
@@ -3108,12 +3120,12 @@ class TestStrictDestroyCheckpointing:
         }
 
         with (
-            patch.object(actions, "_verify_target_stack_absence", return_value=absent),
-            patch.object(actions, "_checkpoint_retained_kms_keys") as checkpoint_kms,
-            patch.object(actions, "_retained_resource_cleanup") as retained_cleanup,
+            patch_live_validation_helper("_verify_target_stack_absence", return_value=absent),
+            patch_live_validation_helper("_checkpoint_retained_kms_keys") as checkpoint_kms,
+            patch_live_validation_helper("_retained_resource_cleanup") as retained_cleanup,
             pytest.raises(RuntimeError, match="no completed workload cleanup barrier"),
         ):
-            actions.destroy_deployment(ctx)
+            actions_destroy.destroy_deployment(ctx)
 
         checkpoint_kms.assert_not_called()
         retained_cleanup.assert_not_called()
@@ -3135,12 +3147,16 @@ class TestStrictDestroyCheckpointing:
         }
 
         with (
-            patch.object(actions, "_verify_target_stack_absence", side_effect=[absent, absent]),
-            patch.object(actions, "cleanup_workloads", return_value=cleanup) as cleanup_workloads,
-            patch.object(actions, "_checkpoint_retained_kms_keys"),
-            patch.object(actions, "_retained_resource_cleanup", return_value={"errors": []}),
+            patch_live_validation_helper(
+                "_verify_target_stack_absence", side_effect=[absent, absent]
+            ),
+            patch_live_validation_helper(
+                "cleanup_workloads", return_value=cleanup
+            ) as cleanup_workloads,
+            patch_live_validation_helper("_checkpoint_retained_kms_keys"),
+            patch_live_validation_helper("_retained_resource_cleanup", return_value={"errors": []}),
         ):
-            result = actions.destroy_deployment(ctx)
+            result = actions_destroy.destroy_deployment(ctx)
 
         assert result["already_destroyed"] is True
         assert result["workload_cleanup"] == cleanup
@@ -3159,21 +3175,20 @@ class TestStrictDestroyCheckpointing:
         absent = {"all_absent": True, "absent": [{"name": "x"}], "residual": []}
 
         with (
-            patch.object(
-                actions, "_verify_target_stack_absence", side_effect=[initial, absent, absent]
+            patch_live_validation_helper(
+                "_verify_target_stack_absence", side_effect=[initial, absent, absent]
             ),
-            patch.object(
-                actions,
+            patch_live_validation_helper(
                 "cleanup_workloads",
                 return_value={"complete": True, "errors": [], "unresolved": []},
             ),
-            patch.object(actions, "_reconcile_stack_ownership"),
-            patch.object(actions, "_checkpoint_new_ecr_repositories"),
-            patch.object(actions, "_checkpoint_new_ecr_images"),
-            patch.object(actions, "_checkpoint_retained_kms_keys"),
-            patch.object(actions, "_retained_resource_cleanup", return_value={"errors": []}),
+            patch_live_validation_helper("_reconcile_stack_ownership"),
+            patch_live_validation_helper("_checkpoint_new_ecr_repositories"),
+            patch_live_validation_helper("_checkpoint_new_ecr_images"),
+            patch_live_validation_helper("_checkpoint_retained_kms_keys"),
+            patch_live_validation_helper("_retained_resource_cleanup", return_value={"errors": []}),
         ):
-            result = actions.destroy_deployment(ctx)
+            result = actions_destroy.destroy_deployment(ctx)
 
         assert result["stack_absence"]["all_absent"] is True
         assert ctx.checkpoint.destroyed is True
@@ -3215,11 +3230,11 @@ class TestStrictDestroyCheckpointing:
         }
 
         with (
-            patch.object(actions, "_verify_target_stack_absence", return_value=initial),
-            patch.object(actions, "cleanup_workloads", return_value=unresolved),
+            patch_live_validation_helper("_verify_target_stack_absence", return_value=initial),
+            patch_live_validation_helper("cleanup_workloads", return_value=unresolved),
             pytest.raises(RuntimeError, match="unresolved teardown barrier"),
         ):
-            actions.destroy_deployment(ctx)
+            actions_destroy.destroy_deployment(ctx)
 
         ctx.stack_manager.destroy_orchestrated.assert_not_called()
 
@@ -3253,7 +3268,7 @@ class TestStrictDestroyCheckpointing:
         }
         ctx.checkpoint.state["jobs"] = [workload]
         ctx.checkpoint.state["central_jobs"] = [central_job]
-        actions._record_workload_cleanup_barrier(
+        actions_destroy._record_workload_cleanup_barrier(
             ctx,
             {"complete": True, "errors": [], "unresolved": [], "ended_at": "done"},
         )
@@ -3265,23 +3280,21 @@ class TestStrictDestroyCheckpointing:
         }
 
         with (
-            patch.object(
-                actions,
+            patch_live_validation_helper(
                 "_verify_target_stack_absence",
                 side_effect=[absent, absent],
             ),
-            patch.object(actions, "cleanup_workloads") as cleanup_workloads,
-            patch.object(actions, "_read_central_job_item") as read_central_job,
-            patch.object(actions, "_checkpoint_new_ecr_repositories"),
-            patch.object(actions, "_checkpoint_new_ecr_images"),
-            patch.object(actions, "_checkpoint_retained_kms_keys"),
-            patch.object(
-                actions,
+            patch_live_validation_helper("cleanup_workloads") as cleanup_workloads,
+            patch_live_validation_helper("_read_central_job_item") as read_central_job,
+            patch_live_validation_helper("_checkpoint_new_ecr_repositories"),
+            patch_live_validation_helper("_checkpoint_new_ecr_images"),
+            patch_live_validation_helper("_checkpoint_retained_kms_keys"),
+            patch_live_validation_helper(
                 "_retained_resource_cleanup",
                 return_value={"errors": []},
             ),
         ):
-            result = actions.destroy_deployment(ctx)
+            result = actions_destroy.destroy_deployment(ctx)
 
         assert result["resumed_after_stack_absence"] is True
         assert result["stack_absence"] == absent
@@ -3303,21 +3316,20 @@ class TestStrictDestroyCheckpointing:
         absent = {"all_absent": True, "absent": [], "residual": []}
 
         with (
-            patch.object(
-                actions, "_verify_target_stack_absence", side_effect=[residual, absent, absent]
+            patch_live_validation_helper(
+                "_verify_target_stack_absence", side_effect=[residual, absent, absent]
             ),
-            patch.object(
-                actions,
+            patch_live_validation_helper(
                 "cleanup_workloads",
                 return_value={"complete": True, "errors": [], "unresolved": []},
             ),
-            patch.object(actions, "_reconcile_stack_ownership"),
-            patch.object(actions, "_checkpoint_new_ecr_repositories"),
-            patch.object(actions, "_checkpoint_new_ecr_images"),
-            patch.object(actions, "_checkpoint_retained_kms_keys"),
-            patch.object(actions, "_retained_resource_cleanup", return_value={"errors": []}),
+            patch_live_validation_helper("_reconcile_stack_ownership"),
+            patch_live_validation_helper("_checkpoint_new_ecr_repositories"),
+            patch_live_validation_helper("_checkpoint_new_ecr_images"),
+            patch_live_validation_helper("_checkpoint_retained_kms_keys"),
+            patch_live_validation_helper("_retained_resource_cleanup", return_value={"errors": []}),
         ):
-            actions.destroy_deployment(ctx)
+            actions_destroy.destroy_deployment(ctx)
 
         assert ctx.stack_manager.destroy_orchestrated.called
         assert ctx.checkpoint.destroyed is True
@@ -3342,33 +3354,29 @@ class TestFinalInventoryReconciliation:
         }
 
         with (
-            patch.object(actions, "_verify_target_stack_absence", return_value=residual),
-            patch.object(
-                actions,
+            patch_live_validation_helper("_verify_target_stack_absence", return_value=residual),
+            patch_live_validation_helper(
                 "capture_baseline",
                 return_value=ctx.checkpoint.baseline,
             ),
-            patch.object(actions, "compare_baseline", return_value=[]),
-            patch.object(
-                actions,
+            patch_live_validation_helper("compare_baseline", return_value=[]),
+            patch_live_validation_helper(
                 "collect_project_resources",
                 return_value=project_inventory,
             ),
-            patch.object(
-                actions,
+            patch_live_validation_helper(
                 "_strip_baseline_ecr",
                 return_value=project_inventory,
             ),
-            patch.object(
-                actions,
+            patch_live_validation_helper(
                 "_strip_expected_pending_kms",
                 return_value=(project_inventory, []),
             ),
-            patch.object(actions, "summarize_project_resources", return_value={}),
-            patch.object(actions, "project_resources_are_absent", return_value=True),
+            patch_live_validation_helper("summarize_project_resources", return_value={}),
+            patch_live_validation_helper("project_resources_are_absent", return_value=True),
             pytest.raises(RuntimeError, match="Target stacks remain after teardown"),
         ):
-            actions.action_final_inventory(ctx)
+            actions_final_inventory.action_final_inventory(ctx)
 
         assert ctx.report.final_inventory["stack_absence"] == residual
         assert ctx.checkpoint.state["final_inventory"]["stack_absence"] == residual
@@ -3651,10 +3659,10 @@ class TestLocalOnlyRuntime:
         monkeypatch.setenv("GITHUB_REF_NAME", "github-ref")
 
         with (
-            patch.object(actions, "_run_git", return_value=""),
+            patch_live_validation_helper("_run_git", return_value=""),
             pytest.raises(RuntimeError, match="requires a checked-out branch"),
         ):
-            actions._resolve_branch(tmp_path)
+            context._resolve_branch(tmp_path)
 
 
 class TestGuaranteedCleanupResume:
