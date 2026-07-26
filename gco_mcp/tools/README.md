@@ -60,9 +60,9 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `get_job_pods` | Get pod details, placement, and container status for a job. |
 | `get_pod_logs` | Get a bounded log tail from one specific pod belonging to a job. |
 | `list_jobs` | List jobs across GCO clusters. |
-| `queue_status` | View SQS queue status (pending, in-flight, DLQ counts). |
+| `queue_status` | View [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) queue status (pending, in-flight, DLQ counts). |
 | `retry_job` | Retry a failed job by creating a new Job while preserving the original. |
-| `submit_job_api` | Submit a job via the authenticated API Gateway (SigV4). |
+| `submit_job_api` | Submit a job via the authenticated [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) ([SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html)). |
 | `submit_job_sqs` | Submit a job via SQS queue (recommended for production). |
 
 ### `capacity.py`
@@ -70,15 +70,15 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | Tool | Description |
 |------|-------------|
 | `ai_recommend` | Get AI-powered capacity recommendation using Amazon Bedrock. |
-| `cancel_reservation` | Cancel an On-Demand Capacity Reservation, releasing its capacity (gated by `GCO_ENABLE_DESTRUCTIVE_OPERATIONS`). |
+| `cancel_reservation` | Cancel an [On-Demand Capacity Reservation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-reservations.html), releasing its capacity (gated by `GCO_ENABLE_DESTRUCTIVE_OPERATIONS`). |
 | `capacity_history_patterns` | Show a day-of-week by hour heatmap of average spot placement scores. |
 | `capacity_history_show` | Show the recorded capacity time-series for an instance type in a region. |
 | `capacity_history_stats` | Show p25/p50/p75/min/max/stddev per capacity metric over a time window. |
-| `capacity_predict` | Predict the best time to acquire capacity from historical patterns (Bedrock). |
+| `capacity_predict` | Predict the best time to acquire capacity from historical patterns ([Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html)). |
 | `capacity_status` | View capacity status across all deployed regions. |
 | `check_capacity` | Check spot and on-demand capacity for a specific instance type. |
 | `create_reservation` | Create a new On-Demand Capacity Reservation (ODCR) (gated by `GCO_ENABLE_CAPACITY_PURCHASE`). |
-| `find_capacity_blocks` | Find EC2 Capacity Blocks across regions x durations x a start-date window in one consolidated, ranked, de-duplicated report. |
+| `find_capacity_blocks` | Find [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) [Capacity Blocks](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html) across regions x durations x a start-date window in one consolidated, ranked, de-duplicated report. |
 | `find_capacity_reservations` | Find existing ODCRs across regions in one parallel, ranked, priced report. |
 | `instance_info` | Get hardware and pricing metadata for an EC2 instance type. |
 | `list_reservations` | List On-Demand Capacity Reservations (ODCRs) across regions. |
@@ -129,22 +129,22 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 |------|-------------|
 | `addons_install` | `gco stacks addons install` — start an idempotent Helm add-on re-convergence (gated by `GCO_ENABLE_INFRASTRUCTURE_DEPLOY`). |
 | `addons_status` | `gco stacks addons status` — show per-chart Helm add-on status from SSM. |
-| `aurora_status` | `gco stacks aurora status` — show Aurora database stack status. |
-| `bootstrap_cdk` | `gco stacks bootstrap` — bootstrap CDK in an AWS account/region. |
+| `aurora_status` | `gco stacks aurora status` — show [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html) database stack status. |
+| `bootstrap_cdk` | `gco stacks bootstrap` — bootstrap [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) in an AWS account/region. |
 | `deploy_all` | `gco stacks deploy-all` — deploy every CDK stack in dependency order. |
 | `deploy_stack` | `gco stacks deploy` — deploy a single CDK stack to AWS. |
 | `destroy_all` | `gco stacks destroy-all` — destroy every CDK stack in reverse dependency order. |
 | `destroy_stack` | `gco stacks destroy` — destroy a single CDK stack. |
 | `disable_aurora` | `gco stacks aurora disable` — flip Aurora pgvector off in cdk.json. |
-| `disable_fsx` | `gco stacks fsx disable` — flip FSx Lustre off in cdk.json. |
+| `disable_fsx` | `gco stacks fsx disable` — flip [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) Lustre off in cdk.json. |
 | `disable_valkey` | `gco stacks valkey disable` — flip Valkey Serverless off in cdk.json. |
 | `enable_aurora` | `gco stacks aurora enable` — flip Aurora pgvector on in cdk.json. |
 | `enable_fsx` | `gco stacks fsx enable` — flip FSx Lustre on in cdk.json. |
 | `enable_valkey` | `gco stacks valkey enable` — flip Valkey Serverless on in cdk.json. |
 | `fsx_status` | Check FSx for Lustre configuration status. |
 | `list_stacks` | List all GCO CDK stacks. |
-| `setup_cluster_access` | Configure kubectl access to a GCO EKS cluster. |
-| `stack_diff` | `gco stacks diff` — show CloudFormation diff for a stack. |
+| `setup_cluster_access` | Configure kubectl access to a GCO [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) cluster. |
+| `stack_diff` | `gco stacks diff` — show [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) diff for a stack. |
 | `stack_outputs` | `gco stacks outputs` — fetch CloudFormation outputs for a stack. |
 | `stack_status` | Get detailed status of a CloudFormation stack. |
 | `stack_synth` | `gco stacks synth` — synthesize CloudFormation templates from CDK. |
@@ -154,10 +154,10 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
-| `files_access_points` | `gco files access-points` — list EFS access points. |
+| `files_access_points` | `gco files access-points` — list [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html) access points. |
 | `files_get` | `gco files get` — get file system details for a region (EFS/FSx). |
 | `list_file_systems` | List EFS and FSx file systems. |
-| `list_storage_buckets` | List deployed GCO S3 buckets and their human-friendly aliases. |
+| `list_storage_buckets` | List deployed GCO [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) buckets and their human-friendly aliases. |
 | `list_storage_contents` | List contents of shared EFS storage. |
 | `sync_storage_bucket` | Sync between a GCO S3 bucket and a confined local path using explicit `download` (default) or `upload` direction; neither direction deletes destination-only data (gated by `GCO_ENABLE_LOCAL_STORAGE_SYNC` and confined to `GCO_STORAGE_LOCAL_ROOT`). |
 | `upload_to_regional_bucket` | `gco models upload-regional` — upload a descriptor-backed snapshot of a source confined beneath `GCO_STORAGE_LOCAL_ROOT` to a regional bucket (gated by `GCO_ENABLE_MODEL_UPLOAD`; links, special files, and filesystem crossings fail closed). |
@@ -187,8 +187,8 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 |------|-------------|
 | `analytics_doctor` | `gco analytics doctor` — run analytics environment health checks. |
 | `analytics_status` | `gco analytics status` — show the analytics environment configuration. |
-| `analytics_login_url` | `gco analytics studio login` — get a SageMaker Studio presigned login URL. |
-| `analytics_user_add` | `gco analytics users add` — create a Cognito user in the analytics pool. |
+| `analytics_login_url` | `gco analytics studio login` — get a [SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/whatis.html) Studio presigned login URL. |
+| `analytics_user_add` | `gco analytics users add` — create a [Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/what-is-amazon-cognito.html) user in the analytics pool. |
 | `analytics_user_remove` | `gco analytics users remove` — delete a Cognito user from the analytics user pool. |
 | `analytics_users_list` | `gco analytics users list` — list Cognito users in the analytics user pool. |
 | `disable_analytics` | `gco analytics disable` — flip the analytics environment off in cdk.json. |
@@ -248,7 +248,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `images_cleanup` | `gco images cleanup` — remove every untagged image across one or all project repos. |
 | `images_delete_repo` | `gco images delete-repo` — delete a whole repository. |
 | `images_delete_tag` | `gco images delete-tag` — delete a single tag from a repository. |
-| `images_describe` | `gco images describe` — full ECR details for a single image tag. |
+| `images_describe` | `gco images describe` — full [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) details for a single image tag. |
 | `images_init` | `gco images init` — create the project ECR repo idempotently with default lifecycle. |
 | `images_lifecycle_get` | `gco images lifecycle get` — print the lifecycle policy on a repository. |
 | `images_lifecycle_set` | `gco images lifecycle set` — replace the lifecycle policy on a repository. |
@@ -282,7 +282,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
-| `metrics_cloudwatch_get` | Read one CloudWatch datapoint as a canonical metric. |
+| `metrics_cloudwatch_get` | Read one [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) datapoint as a canonical metric. |
 | `metrics_from_job_logs` | Extract a scalar from the tail of a job's logs. |
 | `metrics_from_local_file` | Read a named field from a LOCAL metrics file. |
 | `metrics_from_shared_storage_file` | Read a named field from a shared-storage metrics file. |

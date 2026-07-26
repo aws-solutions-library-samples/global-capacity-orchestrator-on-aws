@@ -5,10 +5,10 @@ Surface** - an **optional add-on to the GCO global stack** (not a separate
 stack). It is **enabled by default** (`historical.enabled: true` in `cdk.json`);
 set that flag to `false` to opt out.
 
-On a fixed EventBridge schedule (every 15 minutes by default) it snapshots
+On a fixed [EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-what-is.html) schedule (every 15 minutes by default) it snapshots
 capacity signals for a watched set of instance types across the enabled regions
-and writes them to the `{project}-capacity-history` DynamoDB table, which the
-`gco capacity history` / `gco capacity predict` commands and the Bedrock advisor
+and writes them to the `{project}-capacity-history` [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html) table, which the
+`gco capacity history` / `gco capacity predict` commands and the [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) advisor
 read back.
 
 ## Table of Contents
@@ -22,7 +22,7 @@ read back.
 
 ## How it fits in
 
-This Lambda, its DynamoDB table, the EventBridge schedule, and a dead-letter
+This [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html), its DynamoDB table, the EventBridge schedule, and a dead-letter
 queue are created by `GCOGlobalStack._create_capacity_poller()` (in
 `gco/stacks/global_stack.py`) when `historical.enabled` is true. Folding it into
 the global stack rather than a standalone stack lets it reuse the global stack's
@@ -39,7 +39,7 @@ All knobs live under the `historical` block in `cdk.json`:
 | `enabled` | `true` | Deploy the add-on (table + poller + schedule). |
 | `retention_days` | `90` | DynamoDB TTL window for snapshots. |
 | `poll_interval_minutes` | `15` | EventBridge schedule cadence. |
-| `capacity_block_duration_hours` | `24` | Short Capacity Block probe duration (soonest-available, 1-day block). |
+| `capacity_block_duration_hours` | `24` | Short [Capacity Block](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html) probe duration (soonest-available, 1-day block). |
 | `capacity_block_long_duration_hours` | `1512` | Long Capacity Block probe duration in hours (63 days). Tracks extended-term block availability; set `0` to disable the long probe. |
 | `watch_instance_types` | 78 NVIDIA GPU / AWS Neuron types | Instance types to snapshot. Must exactly match `gco/config/accelerator_catalog.json`; offline validation guards both `cdk.json` and the `ConfigLoader` fallback. |
 | `enabled_regions` | `[]` (all deployed) | Regions to poll. |
@@ -64,8 +64,8 @@ likewise omitted when `capacity_block_long_duration_hours` is `0`.)
 
 ## IAM permissions
 
-A least-privilege role: CloudWatch Logs (basic execution), `dynamodb:PutItem` /
-`dynamodb:BatchWriteItem` on the history table only, and the read-only EC2
+A least-privilege role: [CloudWatch Logs](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/WhatIsCloudWatchLogs.html) (basic execution), `dynamodb:PutItem` /
+`dynamodb:BatchWriteItem` on the history table only, and the read-only [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html)
 capacity APIs `DescribeSpotPriceHistory`, `GetSpotPlacementScores`,
 `DescribeCapacityBlockOfferings`, `DescribeCapacityReservations`, and
 `DescribeAvailabilityZones`.
@@ -88,8 +88,8 @@ pair snapshots:
 | DynamoDB storage | ~150 MB steady state (90-day TTL) + PITR | < $0.05 |
 | EC2 describe/score APIs | DescribeSpotPriceHistory, GetSpotPlacementScores, etc. | $0 (no per-call charge) |
 | EventBridge schedule | scheduled rule on the default bus | $0 |
-| CloudWatch Logs | a few MB/month | < $0.05 (mostly free tier) |
-| SQS DLQ | only on delivery failure | ~$0 |
+| [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) Logs | a few MB/month | < $0.05 (mostly free tier) |
+| [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) DLQ | only on delivery failure | ~$0 |
 
 **Total: effectively $0/month within free-tier allowances, and well under
 $1/month otherwise.** Cost scales roughly linearly with `watch_instance_types`
@@ -98,7 +98,7 @@ x 2 regions = 156 pairs/run, Lambda compute (~182,000 GB-s) stays within the
 free tier and 455,520 DynamoDB writes are about $0.57/month.
 
 Figures use us-east-1 on-demand pricing and are estimates; validate against AWS
-Pricing / Cost Explorer for your account and regions.
+Pricing / [Cost Explorer](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html) for your account and regions.
 
 ## Local testing
 

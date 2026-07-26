@@ -15,8 +15,8 @@ Reusable GitHub Actions composite actions shared across multiple CI workflows. I
 
 ### `build-lambda-package`
 
-Stages all three generated Lambda assets through the build-only
-`prepare_cdk_assets()` entry point. CDK synthesis callers use
+Stages all three generated [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) assets through the build-only
+`prepare_cdk_assets()` entry point. [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) synthesis callers use
 `cdk_asset_consumer()` to retain shared locks through app construction and
 synthesis. Each asset uses an interprocess lock, a unique staging tree, a
 source/full-build completion manifest, and rollback-safe rename publication:

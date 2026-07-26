@@ -1,7 +1,7 @@
 # GCO Kubernetes Manifests
 
-Applied to each regional EKS cluster by the `kubectl-applier` Lambda
-(`../handler.py`) during CDK deployment. The handler globs this directory and
+Applied to each regional [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) cluster by the `kubectl-applier` [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html)
+(`../handler.py`) during [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) deployment. The handler globs this directory and
 applies files in **sorted filename order**, so the numeric prefix controls
 sequencing — there is no hardcoded file list, so adding a manifest never
 requires a handler change.
@@ -31,8 +31,8 @@ Two behaviors are worth knowing:
   at deploy time (see [Template Variables](#template-variables)). If a file still
   contains an `UPPER_SNAKE` placeholder *after* substitution, the handler skips
   applying that file and deletes only the exact resources inventoried for that
-  disabled feature. FSx convergence removes the three managed PVCs, PVs, and
-  StorageClass; Valkey and Aurora convergence removes their namespaced
+  disabled feature. [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) convergence removes the three managed PVCs, PVs, and
+  StorageClass; Valkey and [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html) convergence removes their namespaced
   ConfigMaps; observability convergence removes its managed storage, exporters,
   dashboards, monitors, rotation job, service account, and bindings; queue
   convergence removes its managed `ScaledJob`. Missing resources are no-ops,
@@ -59,9 +59,9 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | Range | Group | Description |
 |-------|-------|-------------|
 | `00-19` | Foundation & networking | Namespaces, service accounts, RBAC, network policies, resource quotas |
-| `20-29` | Storage | EFS, FSx Lustre, cluster-shared bucket, Valkey, Aurora pgvector, observability gp3 |
+| `20-29` | Storage | [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), FSx Lustre, cluster-shared bucket, Valkey, Aurora pgvector, observability gp3 |
 | `30-39` | System services | health-monitor, manifest-processor, inference-monitor |
-| `40-49` | NodePools | GPU (x86, ARM), inference, EFA (training + mooncake), Neuron, CPU |
+| `40-49` | NodePools | GPU (x86, ARM), inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) (training + mooncake), Neuron, CPU |
 | `50-59` | Device plugins & GPU observability | NVIDIA device plugin, DCGM exporter |
 | `post-helm-*` | Post-Helm | Resources needing Helm CRDs: Gateway API entrypoint, KEDA ScaledJob, Prometheus monitors, Grafana dashboards/rotation, Kueue metrics RBAC |
 
@@ -72,9 +72,9 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | File | Contents |
 |------|----------|
 | `00-namespaces.yaml` | `gco-system`, `gco-jobs`, `gco-inference` namespaces |
-| `01-serviceaccounts.yaml` | `gco-service-account` in `gco-jobs` and `gco-inference` (IRSA role-ARN annotation; token automount disabled) |
+| `01-serviceaccounts.yaml` | `gco-service-account` in `gco-jobs` and `gco-inference` ([IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) role-ARN annotation; token automount disabled) |
 | `02-rbac.yaml` | Per-service `ClusterRole`/`Role` + platform-service `ServiceAccount`s + bindings (least-privilege) |
-| `03-network-policies.yaml` | Default-deny ingress + allow rules for ALB, DNS, HTTPS egress |
+| `03-network-policies.yaml` | Default-deny ingress + allow rules for [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html), DNS, HTTPS egress |
 | `04-resource-quotas.yaml` | `ResourceQuota` + `LimitRange` for `gco-jobs` (namespace CPU/memory/GPU/pod caps + per-container defaults) |
 
 ### Storage (20–29)
@@ -121,7 +121,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | File | Contents |
 |------|----------|
 | `post-helm-gateway.yaml` | Gateway API entrypoint: `GatewayClass`, `TargetGroupConfiguration` (`/healthz` target-group health checks + 900-second deregistration drain), `LoadBalancerConfiguration` (internal HTTPS ALB, `gco.aws/gateway` ownership tag, TLS certificate), `Gateway` `gco-system/gco-gateway`, and the shared `HTTPRoute` sending control traffic to manifest-processor and `/inference` to inference-proxy — applied after the AWS Load Balancer Controller chart installs the Gateway API CRDs |
-| `post-helm-sqs-consumer.yaml` | KEDA `ScaledJob` for the SQS queue processor — **skipped when queue_processor disabled** |
+| `post-helm-sqs-consumer.yaml` | KEDA `ScaledJob` for the [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) queue processor — **skipped when queue_processor disabled** |
 | `post-helm-monitoring-servicemonitors.yaml` | `ServiceMonitor`s (schedulers/operators + DCGM) and `PodMonitor`s (GCO services, including inference-proxy) — **skipped when observability disabled** |
 | `post-helm-monitoring-kueue-rbac.yaml` | `ClusterRoleBinding` letting Prometheus scrape Kueue's authenticated metrics endpoint — **skipped when observability disabled** |
 | `post-helm-grafana-dashboards.yaml` | Curated GCO Grafana dashboard `ConfigMap`s (GPU/DCGM, schedulers, KEDA, services) — **skipped when observability disabled** |

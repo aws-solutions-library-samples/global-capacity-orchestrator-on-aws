@@ -23,16 +23,16 @@ This separation keeps the Click wiring thin and the business logic testable with
 |------|----------|-------------|
 | `jobs_cmd.py` | `gco jobs submit`, `submit-sqs`, `submit-direct`, `list`, `get`, `logs`, `events`, `delete`, `health`, `queue-status` | Job submission and lifecycle |
 | `inference_cmd.py` | `gco inference deploy`, `list`, `status`, `scale`, `update-image`, `stop`, `start`, `delete`, `canary`, `promote`, `rollback`, `invoke`, `chat`, `health`, `models` | Inference endpoint management |
-| `stacks_cmd.py` | `gco stacks deploy`, `deploy-all`, `destroy`, `destroy-all`, `list`, `status`, `access`, `bootstrap`, `fsx`, `valkey`, `aurora` | CDK stack deployment and management |
+| `stacks_cmd.py` | `gco stacks deploy`, `deploy-all`, `destroy`, `destroy-all`, `list`, `status`, `access`, `bootstrap`, `fsx`, `valkey`, `aurora` | [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) stack deployment and management |
 | `capacity_cmd.py` | `gco capacity check`, `status`, `recommend-region`, `spot-prices`, `ai-recommend`, `reservations`, `reservation-check`, `reserve` | GPU capacity and recommendations |
-| `queue_cmd.py` | `gco queue submit`, `list`, `get`, `stats` | Global DynamoDB job queue |
-| `costs_cmd.py` | `gco costs summary`, `regions`, `trend`, `workloads`, `forecast` | Cost tracking via Cost Explorer |
+| `queue_cmd.py` | `gco queue submit`, `list`, `get`, `stats` | Global [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html) job queue |
+| `costs_cmd.py` | `gco costs summary`, `regions`, `trend`, `workloads`, `forecast` | Cost tracking via [Cost Explorer](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html) |
 | `templates_cmd.py` | `gco templates list`, `get`, `create`, `delete` | Reusable job template management |
 | `files_cmd.py` | `gco files ls`, `download` | EFS/FSx file operations |
 | `webhooks_cmd.py` | `gco webhooks list`, `create`, `delete`, `test` | Webhook registration |
 | `nodepools_cmd.py` | `gco nodepools list`, `describe` | Nodepool inspection |
 | `models_cmd.py` | `gco models upload`, `list`, `uri`, `delete` | Model weight management |
-| `storage_cmd.py` | `gco storage list`, `sync` | Human-friendly S3 bucket discovery and explicit download/upload sync |
+| `storage_cmd.py` | `gco storage list`, `sync` | Human-friendly [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) bucket discovery and explicit download/upload sync |
 | `dag_cmd.py` | `gco dag run`, `validate`, `status` | DAG pipeline execution |
 | `config_cmd.py` | `gco config show`, `set` | CLI configuration |
 | `__init__.py` | — | Registers all command groups on the root CLI |

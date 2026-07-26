@@ -1,6 +1,6 @@
 # Analytics Cleanup Lambda
 
-CloudFormation custom resource handler that runs during `gco-analytics` stack deletion. Removes resources that CloudFormation can't delete on its own because they were created at runtime (not in the template).
+[CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) custom resource handler that runs during `gco-analytics` stack deletion. Removes resources that CloudFormation can't delete on its own because they were created at runtime (not in the template).
 
 ## Table of Contents
 
@@ -16,14 +16,14 @@ CloudFormation custom resource handler that runs during `gco-analytics` stack de
 
 On stack **Delete**:
 
-1. Lists and deletes all SageMaker user profiles in the Studio domain
-2. Lists and deletes all EFS access points on the Studio file system
+1. Lists and deletes all [SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/whatis.html) user profiles in the Studio domain
+2. Lists and deletes all [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html) access points on the Studio file system
 
 On **Create** or **Update**: no-op (returns SUCCESS immediately).
 
 ## Why it's needed
 
-- **User profiles** are created by the presigned-URL Lambda at first login (not by CloudFormation). CloudFormation can't delete the SageMaker domain while profiles exist.
+- **User profiles** are created by the presigned-URL [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) at first login (not by CloudFormation). CloudFormation can't delete the SageMaker domain while profiles exist.
 - **EFS access points** are created by the presigned-URL Lambda for per-user home directories. CloudFormation can't delete the EFS file system while access points exist.
 
 Without this cleanup, `cdk destroy gco-analytics` would fail with "domain has active user profiles" or "file system has access points".

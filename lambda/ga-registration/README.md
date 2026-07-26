@@ -1,6 +1,6 @@
 # GA Registration
 
-Converges the regional Gateway API ALB after the Gateway manifests are applied: registers the ALB created for `gco-system/gco-gateway` with AWS Global Accelerator (when configured) and always publishes the ALB hostname to SSM Parameter Store for cross-region discovery.
+Converges the regional Gateway API [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) after the Gateway manifests are applied: registers the ALB created for `gco-system/gco-gateway` with AWS [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) (when configured) and always publishes the ALB hostname to [SSM](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html) Parameter Store for cross-region discovery.
 
 ## Table of Contents
 
@@ -11,7 +11,7 @@ Converges the regional Gateway API ALB after the Gateway manifests are applied: 
 
 ## Trigger
 
-Step Functions convergence task (`Action` events) and CloudFormation Custom Resource — runs on stack Create, Update, and Delete.
+[Step Functions](https://docs.aws.amazon.com/step-functions/latest/dg/welcome.html) convergence task (`Action` events) and [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) Custom Resource — runs on stack Create, Update, and Delete.
 
 ## How It Works
 
@@ -41,7 +41,7 @@ CloudFormation response with `AlbArn` and `AlbHostname` on success.
 
 | Property | Required | Description |
 |----------|----------|-------------|
-| `ClusterName` | Yes | EKS cluster name |
+| `ClusterName` | Yes | [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) cluster name |
 | `Region` | Yes | AWS region for this cluster |
 | `EndpointGroupArn` | No | Global Accelerator endpoint group ARN; omitted in partitions without Global Accelerator |
 | `RegistryRegion` | No | Region for SSM endpoint-registry parameters (default: `us-east-2`; the legacy `GlobalRegion` alias remains accepted) |

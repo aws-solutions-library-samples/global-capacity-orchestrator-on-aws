@@ -1,6 +1,6 @@
 # Build Lambda Package Action
 
-This composite action stages the checked-in Lambda build trees required by CDK
+This composite action stages the checked-in [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) build trees required by [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html)
 synthesis and CI validation.
 
 ## Table of Contents

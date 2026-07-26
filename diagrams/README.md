@@ -14,8 +14,8 @@ other's way:
 
 | Catalogue | What it shows | Generator |
 |-----------|---------------|-----------|
-| [`infra_diagrams/`](infra_diagrams/README.md) | Per-stack and whole-architecture CloudFormation topologies synthesised from the CDK app ([cdk-dia](https://github.com/pistazie/cdk-dia)). PNG outputs for embedding in READMEs. | `python diagrams/infra_diagrams/generate.py` |
-| [`code_diagrams/`](code_diagrams/README.md) | Per-function control-flow charts for Lambda handlers, CLI entry points, and CDK stack constructors (pyflowchart + Playwright). Interactive HTML + rasterised PNG. | `python diagrams/code_diagrams/generate.py` |
+| [`infra_diagrams/`](infra_diagrams/README.md) | Per-stack and whole-architecture [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) topologies synthesised from the [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) app ([cdk-dia](https://github.com/pistazie/cdk-dia)). PNG outputs for embedding in READMEs. | `python diagrams/infra_diagrams/generate.py` |
+| [`code_diagrams/`](code_diagrams/README.md) | Per-function control-flow charts for [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) handlers, CLI entry points, and CDK stack constructors (pyflowchart + Playwright). Interactive HTML + rasterised PNG. | `python diagrams/code_diagrams/generate.py` |
 
 Infrastructure diagrams derive from the synthesized source tree. Code diagrams also
 derive from source, but a normal run intentionally refreshes their wall-clock

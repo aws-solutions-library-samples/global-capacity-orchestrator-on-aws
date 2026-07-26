@@ -1,6 +1,6 @@
 # Inference Streaming Proxy Tests
 
-Native Node.js tests for the production response-streaming Lambda in
+Native Node.js tests for the production response-streaming [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) in
 [`lambda/inference-streaming-proxy/`](../../lambda/inference-streaming-proxy/).
 The tests live in the repository-wide `tests/` tree, while dependency
 installation and execution remain anchored to the deployable Lambda package.

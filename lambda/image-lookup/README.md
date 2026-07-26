@@ -1,6 +1,6 @@
 # Image Lookup
 
-Lookup-or-create custom resource handler for ECR repositories under
+Lookup-or-create custom resource handler for [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) repositories under
 `gco/<name>`. Implements the adopt-or-create pattern so a previously
 retained repository (left over from a prior deploy with
 `RemovalPolicy=RETAIN`) is rebound to the new stack rather than failing
@@ -18,7 +18,7 @@ the deploy with `RepositoryAlreadyExistsException`.
 
 ## Trigger
 
-CloudFormation custom resource — invoked by the CDK `Provider`
+[CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) custom resource — invoked by the [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) `Provider`
 framework whenever the global stack creates, updates, or tears down an
 image registry repository.
 
@@ -90,7 +90,7 @@ CloudFormation custom resource response envelope.
 
 ## Environment Variables
 
-None. The handler uses the default boto3 region (the Lambda's own
+None. The handler uses the default boto3 region (the [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html)'s own
 region) and inherits credentials from the execution role.
 
 ## IAM Permissions

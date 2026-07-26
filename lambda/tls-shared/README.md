@@ -1,6 +1,6 @@
 # Backend TLS Shared Transport
 
-Canonical strict-TLS transport used by GCO Lambda callers that connect to Global Accelerator or regional internal Application Load Balancers. This directory is a shared source library, not a standalone Lambda deployment package.
+Canonical strict-TLS transport used by GCO [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) callers that connect to [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) or regional internal Application Load Balancers. This directory is a shared source library, not a standalone Lambda deployment package.
 
 ## Table of Contents
 
@@ -15,7 +15,7 @@ Canonical strict-TLS transport used by GCO Lambda callers that connect to Global
 
 ## Contents
 
-- `backend_tls.py` — Loads the public root bundle from SSM, builds a private-root-only `ssl.SSLContext`, and returns a reusable `urllib3.PoolManager` with explicit SNI and hostname assertion.
+- `backend_tls.py` — Loads the public root bundle from [SSM](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html), builds a private-root-only `ssl.SSLContext`, and returns a reusable `urllib3.PoolManager` with explicit SNI and hostname assertion.
 
 ## Security Guarantees
 
@@ -28,7 +28,7 @@ The transport enforces all of the following:
 - The SSL context trusts only certificates in the project SSM trust bundle.
 - Trust material containing a private-key PEM marker is rejected.
 - Empty or malformed trust bundles fail closed.
-- Clients never receive permission to read the root secret or root KMS key.
+- Clients never receive permission to read the root secret or root [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) key.
 - Native urllib3 retries are disabled so each caller's bounded retry policy remains authoritative.
 
 ## How It Works
@@ -39,7 +39,7 @@ Backend leaves use a stable private identity such as:
 backend.gco.gco.internal
 ```
 
-The network connection still targets a Global Accelerator DNS name or an internal ALB DNS name. `urllib3` receives the private identity through both `server_hostname` and `assert_hostname`, causing the TLS ClientHello to carry the expected SNI name and certificate verification to assert the same name. This allows authenticated TLS without registering a public domain or coupling certificates to dynamic ALB hostnames.
+The network connection still targets a Global Accelerator DNS name or an internal [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) DNS name. `urllib3` receives the private identity through both `server_hostname` and `assert_hostname`, causing the TLS ClientHello to carry the expected SNI name and certificate verification to assert the same name. This allows authenticated TLS without registering a public domain or coupling certificates to dynamic ALB hostnames.
 
 `get_backend_http_pool()` performs these steps:
 
@@ -76,7 +76,7 @@ This bounded stale window maintains availability during short SSM disruptions wi
 - `lambda/api-gateway-proxy/backend_tls.py`
 - `lambda/regional-api-proxy/backend_tls.py`
 
-Checked-in copies keep direct `cdk synth` deterministic, while deploy-time synchronization prevents stale assets. The two API proxy packages also receive the canonical `proxy_utils.py` implementation from `lambda/proxy-shared/`. The aggregator intentionally does not receive this module because it calls regional API Gateway over the AWS-managed TLS chain rather than connecting to an ALB.
+Checked-in copies keep direct `cdk synth` deterministic, while deploy-time synchronization prevents stale assets. The two API proxy packages also receive the canonical `proxy_utils.py` implementation from `lambda/proxy-shared/`. The aggregator intentionally does not receive this module because it calls regional [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) over the AWS-managed TLS chain rather than connecting to an ALB.
 
 ## IAM Permissions
 

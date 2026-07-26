@@ -1,6 +1,6 @@
 # Secret Rotation
 
-Rotates the GCO backend HMAC signing key in AWS Secrets Manager. The key is used to sign exact proxy-to-backend requests and is never sent as a reusable credential. The Lambda follows the standard four-step Secrets Manager rotation protocol.
+Rotates the GCO backend HMAC signing key in AWS Secrets Manager. The key is used to sign exact proxy-to-backend requests and is never sent as a reusable credential. The [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) follows the standard four-step [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html) rotation protocol.
 
 ## Table of Contents
 

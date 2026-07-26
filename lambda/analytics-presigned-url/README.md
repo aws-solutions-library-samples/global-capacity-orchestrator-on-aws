@@ -1,7 +1,7 @@
 # Analytics Presigned URL Lambda
 
-This Lambda exchanges a Cognito-authorized API Gateway request for a short-lived
-SageMaker Studio URL and lazily provisions the caller's Studio profile and EFS
+This [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) exchanges a Cognito-authorized [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) request for a short-lived
+[SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/whatis.html) Studio URL and lazily provisions the caller's Studio profile and [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html)
 home-directory access point.
 
 ## Table of Contents
@@ -14,7 +14,7 @@ home-directory access point.
 
 ## Request Flow
 
-1. Read the Cognito username claim from the API Gateway authorizer context.
+1. Read the [Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/what-is-amazon-cognito.html) username claim from the API Gateway authorizer context.
 2. Resolve the configured SageMaker Studio domain.
 3. describe, create, or recover the user's Studio profile.
 4. Return `202` while profile provisioning is in progress.
@@ -42,7 +42,7 @@ home-directory access point.
 ## Security
 
 The handler trusts only API Gateway authorizer claims, returns no AWS exception
-text, creates `0700` per-user EFS roots, and uses short-lived URLs. Its IAM role
+text, creates `0700` per-user EFS roots, and uses short-lived URLs. Its [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) role
 must remain limited to the specific Studio domain, profiles, and EFS resources.
 
 ## Source and Dependencies

@@ -1,8 +1,8 @@
 # API Gateway Proxy
 
-Proxies IAM-authenticated requests from the global API Gateway through Global
+Proxies IAM-authenticated requests from the global [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) through Global
 Accelerator to regional ALBs. Each exact backend request carries a short-lived
-HMAC envelope; the reusable Secrets Manager signing key is never transmitted.
+HMAC envelope; the reusable [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html) signing key is never transmitted.
 
 ## Table of Contents
 
@@ -18,16 +18,16 @@ API Gateway (proxy integration) — all routes are forwarded through this Lambda
 
 ## How It Works
 
-1. API Gateway validates the caller's IAM credentials (SigV4)
-2. This Lambda retrieves the HMAC signing key from Secrets Manager through a
+1. API Gateway validates the caller's [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) credentials ([SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html))
+2. This [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) retrieves the HMAC signing key from Secrets Manager through a
    bounded TTL/stale cache
 3. It allowlists supported end-to-end request headers, then signs the version,
    timestamp, random nonce, method, exact path/query, and body digest
 4. It obtains a strict private-root connection pool, presenting and verifying
    `backend.<project>.gco.internal` through explicit SNI/hostname assertion
-5. It forwards the signed request over HTTPS/443 through Global Accelerator;
+5. It forwards the signed request over HTTPS/443 through [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html);
    the accelerator is Layer 4 and does not terminate TLS
-6. The regional ALB terminates TLS and forwards HTTP to the Kubernetes target
+6. The regional [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) terminates TLS and forwards HTTP to the Kubernetes target
 7. Backend middleware validates freshness, integrity, and process-local nonce
    replay before serving the request
 8. The Lambda returns the buffered upstream response to the caller
@@ -56,7 +56,7 @@ API Gateway proxy response (statusCode, headers, body).
 | `SECRET_CACHE_MAX_STALE_SECONDS` | No | Maximum bounded stale-key age during refresh failures (default: 900) |
 | `SECRET_CACHE_RETRY_SECONDS` | No | Minimum delay between failed refresh attempts (default: 5) |
 | `BACKEND_TLS_SERVER_NAME` | Yes | Stable private certificate identity sent through SNI and asserted during verification |
-| `BACKEND_TLS_ROOT_CA_PARAMETER` | Yes | SSM parameter containing public CA roots only |
+| `BACKEND_TLS_ROOT_CA_PARAMETER` | Yes | [SSM](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html) parameter containing public CA roots only |
 | `BACKEND_TLS_ROOT_CA_REGION` | Yes | Region containing the public trust parameter |
 | `BACKEND_TLS_CA_CACHE_TTL_SECONDS` | No | Normal public-trust refresh interval |
 | `BACKEND_TLS_CA_MAX_STALE_SECONDS` | No | Maximum bounded stale-trust interval |
@@ -66,7 +66,7 @@ API Gateway proxy response (statusCode, headers, body).
 - `secretsmanager:GetSecretValue` on the HMAC secret ARN
 - `ssm:GetParameter` on the exact public root trust parameter
 
-The role cannot read the root private-key secret or use its KMS key.
+The role cannot read the root private-key secret or use its [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) key.
 
 ## Dependencies
 

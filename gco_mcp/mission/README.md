@@ -71,7 +71,7 @@ structured audit event, so a run is fully reconstructable from its audit trail.
 | Module | Description |
 |--------|-------------|
 | [`types.py`](types.py) | Shared `TypedDict` domain types (session state, iteration and phase records, verdict labels) so the engine, validators, and tool wrappers agree on one shape that round-trips through JSON. |
-| [`state.py`](state.py) | The `MissionStateBackend` persistence protocol plus concrete backends (filesystem, DynamoDB) for loading, saving, listing, and deleting session records. |
+| [`state.py`](state.py) | The `MissionStateBackend` persistence protocol plus concrete backends (filesystem, [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html)) for loading, saving, listing, and deleting session records. |
 
 ### Verdict and Cadence
 

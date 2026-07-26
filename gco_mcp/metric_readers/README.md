@@ -2,7 +2,7 @@
 
 `gco_mcp/metric_readers/` is the dependency-light core behind GCO's read-only
 **metric-reader** MCP tools. Each reader turns one external source — a
-CloudWatch datapoint, a job's log tail, a metrics file on shared storage, or a
+[CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) datapoint, a job's log tail, a metrics file on shared storage, or a
 confined local file — into a single finite number wrapped in the canonical
 `{"metrics": {"<key>": <number>}}` shape the Mission Observe phase merges, so a
 `metric_threshold` or `metric_trend` criterion can read it with zero scripting.

@@ -1,6 +1,6 @@
 # Client Examples for the GCO API Gateway
 
-These examples call GCO through an IAM-authenticated API Gateway endpoint. They target the global API by default and use the AWS Signature Version 4 (SigV4) credential chain; no backend signing key is exposed to clients.
+These examples call GCO through an IAM-authenticated [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) endpoint. They target the global API by default and use the AWS Signature Version 4 ([SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html)) credential chain; no backend signing key is exposed to clients.
 
 ## Table of Contents
 
@@ -20,7 +20,7 @@ These examples call GCO through an IAM-authenticated API Gateway endpoint. They 
 
 | Example | Purpose | Credential behavior |
 |---|---|---|
-| [`python_boto3_example.py`](python_boto3_example.py) | Submit and dry-run one or more manifests with Python | Uses boto3's full provider chain, including profiles, SSO, web identity, and IAM roles |
+| [`python_boto3_example.py`](python_boto3_example.py) | Submit and dry-run one or more manifests with Python | Uses boto3's full provider chain, including profiles, SSO, web identity, and [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) roles |
 | [`aws_cli_examples.sh`](aws_cli_examples.sh) | Call the API with curl's built-in SigV4 support | Resolves active credentials with AWS CLI v2 and preserves the session token |
 | [`curl_sigv4_proxy_example.sh`](curl_sigv4_proxy_example.sh) | Use ordinary curl requests through `aws-sigv4-proxy` | The proxy uses the normal AWS credential chain |
 
@@ -72,7 +72,7 @@ Client → edge-optimized API Gateway (AWS-managed TLS + SigV4)
   → internal regional ALB (private-root TLS) → EKS service (HTTP)
 ```
 
-Global Accelerator chooses a healthy registered backend. The global proxy
+[Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) chooses a healthy registered backend. The global proxy
 rejects `X-GCO-Target-Region`; callers that require an exact Region must use an
 authorized regional API endpoint. Outside `aws`, the global API is regional and
 aggregate-only, so workload control and inference always use a regional bridge.
@@ -106,7 +106,7 @@ Sign requests in the region that owns the selected API Gateway endpoint. The
 bridge always exists for aggregator fan-out. In `aws`, direct invocation
 requires the resource-policy opt-in; outside `aws`, the deployment enables that
 same-account policy automatically. The aggregator itself uses AWS-managed TLS
-and SigV4 to the bridge; it does not read ALB SSM state, the HMAC secret, or
+and SigV4 to the bridge; it does not read [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) [SSM](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html) state, the HMAC secret, or
 private-root trust.
 
 ## Run the examples
@@ -214,13 +214,13 @@ The global output is `ApiEndpoint`; the optional regional output is `RegionalApi
 
 ### Proxy requests time out or return 502/503
 
-1. Inspect API Gateway access logs and the proxy Lambda log group listed in the stack resources; generated Lambda log-group names are not fixed.
+1. Inspect API Gateway access logs and the proxy [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) log group listed in the stack resources; generated Lambda log-group names are not fixed.
 2. For the global path, check Global Accelerator endpoint health.
 3. For either path, verify `/<project>/alb-hostname-<region>` in the global-region SSM registry.
-4. Confirm the registered load balancer is an **internal application ALB** in the expected account/region and carries the GCO EKS cluster and `gco.aws/gateway` ownership tags.
+4. Confirm the registered load balancer is an **internal application ALB** in the expected account/region and carries the GCO [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) cluster and `gco.aws/gateway` ownership tags.
 5. Check the manifest-processor service, pods, and `/api/v1/health` response in the target cluster.
 
-There is no VPC Link or internal NLB in either API path.
+There is no [VPC](https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html) Link or internal [NLB](https://docs.aws.amazon.com/elasticloadbalancing/latest/network/introduction.html) in either API path.
 
 ### Python cannot import `aws_requests_auth`
 
@@ -230,7 +230,7 @@ python3 -m pip install aws-requests-auth
 
 ## Security guidance
 
-- Prefer short-lived credentials from SSO, STS, workload identity, or IAM roles.
+- Prefer short-lived credentials from SSO, [STS](https://docs.aws.amazon.com/STS/latest/APIReference/), workload identity, or IAM roles.
 - Never send the backend HMAC signing key; trusted proxy Lambdas retrieve it and sign each exact backend request with a timestamp and nonce.
 - Retry safe reads with bounded exponential backoff. Do not automatically replay mutating requests unless the operation is explicitly idempotent.
 - Keep request bodies below the configured API limit (1 MiB by default).

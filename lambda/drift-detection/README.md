@@ -1,6 +1,6 @@
 # CloudFormation Drift Detection Lambda
 
-This scheduled Lambda detects CloudFormation stack drift and publishes an SNS
+This scheduled [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) detects [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) stack drift and publishes an [SNS](https://docs.aws.amazon.com/sns/latest/dg/welcome.html)
 alert when detection fails or managed resources differ from the template.
 
 ## Table of Contents
@@ -37,7 +37,7 @@ truncated defensively to the service's 100-character limit.
 ## Operational Notes
 
 The default polling window is ten minutes, below Lambda's maximum runtime.
-EventBridge payload contents are ignored; one deployed function is bound to one
+[EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-what-is.html) payload contents are ignored; one deployed function is bound to one
 stack through environment configuration.
 
 ## Source

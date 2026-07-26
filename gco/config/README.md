@@ -1,7 +1,7 @@
 # CDK Configuration Package
 
 This package loads, validates, and exposes the deployment context consumed by
-GCO's CDK stacks.
+GCO's [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) stacks.
 
 ## Table of Contents
 
@@ -13,8 +13,8 @@ GCO's CDK stacks.
 ## Responsibilities
 
 `ConfigLoader` reads `cdk.json` context, merges documented defaults, validates
-cross-field constraints, and returns typed configuration for regions, EKS,
-API Gateway, private backend TLS, storage, analytics, observability, and
+cross-field constraints, and returns typed configuration for regions, [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html),
+[API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html), private backend TLS, storage, analytics, observability, and
 capacity history.
 
 ## Usage

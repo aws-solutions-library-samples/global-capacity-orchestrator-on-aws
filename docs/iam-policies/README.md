@@ -1,6 +1,6 @@
 # IAM Policy Examples for GCO API Gateway
 
-This directory contains example IAM policies for controlling access to the GCO manifest submission API through AWS API Gateway.
+This directory contains example [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) policies for controlling access to the GCO manifest submission API through AWS API Gateway.
 
 ## Table of Contents
 
@@ -28,7 +28,7 @@ Grants complete access to all manifest operations including:
 **How to use**:
 
 1. Replace `ACCOUNT_ID` with your AWS account ID
-2. Replace `API_ID` with your API Gateway ID (from CloudFormation outputs)
+2. Replace `API_ID` with your [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) ID (from [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) outputs)
 3. Attach to IAM users or roles that need full manifest management access
 
 ### 2. Read-Only Policy ([read-only-policy.json](read-only-policy.json))
@@ -153,11 +153,11 @@ Or use the client examples in `docs/client-examples/` to test with real requests
 - Verify the policy is attached to your user/role
 - Check that ACCOUNT_ID and API_ID are correct
 - Ensure the resource ARN matches the endpoint you're calling
-- Check CloudWatch Logs for detailed authorization failures
+- Check [CloudWatch Logs](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/WhatIsCloudWatchLogs.html) for detailed authorization failures
 
 ### "Missing Authentication Token"
 
-- This means the request is not signed with AWS SigV4
+- This means the request is not signed with AWS [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html)
 - Use AWS SDK or CLI which automatically signs requests
 - See client examples for proper request signing
 
@@ -166,5 +166,5 @@ Or use the client examples in `docs/client-examples/` to test with real requests
 1. **Principle of Least Privilege**: Start with read-only or namespace-restricted policies
 2. **Use Roles for Applications**: Prefer IAM roles over user credentials for applications
 3. **Rotate Credentials**: Regularly rotate IAM user access keys
-4. **Monitor Access**: Enable CloudTrail and review API Gateway access logs
+4. **Monitor Access**: Enable [CloudTrail](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-user-guide.html) and review API Gateway access logs
 5. **Namespace Isolation**: Use namespace-restricted policies for multi-tenant scenarios

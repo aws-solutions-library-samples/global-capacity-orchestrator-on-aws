@@ -1,10 +1,10 @@
 <div align="center">
 
-<h1>Automated Deployment of EKS AutoMode Clusters with Global Capacity Orchestrator (GCO) on AWS</h1>
+<h1>Automated Deployment of [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) AutoMode Clusters with Global Capacity Orchestrator (GCO) on AWS</h1>
 
 <p><b><i>One API. Every Accelerator. Any Region.</i></b></p>
 
-<p>Multi-region accelerated-compute orchestration for AWS — NVIDIA GPUs, AWS Trainium, AWS Inferentia, and CPU (amd64 + arm64 / Graviton) — with capacity-aware placement workflows, spot fallback, and autoscaling inference endpoints. Commercial <code>aws</code> deployments add automatic failover and latency-aware routing through one workload API; other partitions use IAM-authenticated regional workload APIs, all through the same CLI.</p>
+<p>Multi-region accelerated-compute orchestration for AWS — NVIDIA GPUs, AWS [Trainium](https://docs.aws.amazon.com/dlami/latest/devguide/trainium.html), AWS [Inferentia](https://docs.aws.amazon.com/dlami/latest/devguide/inferentia.html), and CPU (amd64 + arm64 / Graviton) — with capacity-aware placement workflows, spot fallback, and autoscaling inference endpoints. Commercial <code>aws</code> deployments add automatic failover and latency-aware routing through one workload API; other partitions use IAM-authenticated regional workload APIs, all through the same CLI.</p>
 
 <!-- BEGIN BADGE TABLE -->
 <p>
@@ -21,7 +21,7 @@
 
 ![GCO Live Demo](demo/live_demo.gif)
 
-*`gco` CLI demo: capacity discovery, cost visibility, 5 schedulers (Volcano, Kueue, YuniKorn, Slurm, KEDA), FSx, Valkey, live LLM inference, and EFS — all against one already-deployed cluster. ([source](demo/live_demo.sh) · [re-record](demo/record_demo.sh))*
+*`gco` CLI demo: capacity discovery, cost visibility, 5 schedulers (Volcano, Kueue, YuniKorn, Slurm, KEDA), [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), Valkey, live LLM inference, and [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html) — all against one already-deployed cluster. ([source](demo/live_demo.sh) · [re-record](demo/record_demo.sh))*
 
 </details>
 
@@ -45,11 +45,11 @@
 
 </div>
 
-**What it does.** Spins up [EKS Auto Mode](docs/CONCEPTS.md#eks-auto-mode) clusters across any number of SDK-known CloudFormation Regions in one AWS partition. In commercial `aws`, [Global Accelerator](docs/CONCEPTS.md#global-routing) provides latency-aware anycast routing and automatic failover behind the global workload API; other partitions use IAM-authenticated regional workload APIs while retaining the aggregate global API. Capacity tools and auto-region queue/CLI workflows can select a target Region, EKS Auto Mode provisions matching nodes, and shared storage can persist workload outputs. Network routing never substitutes for live GPU-capacity placement.
+**What it does.** Spins up [EKS Auto Mode](docs/CONCEPTS.md#eks-auto-mode) clusters across any number of SDK-known [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) Regions in one AWS partition. In commercial `aws`, [Global Accelerator](docs/CONCEPTS.md#global-routing) provides latency-aware anycast routing and automatic failover behind the global workload API; other partitions use IAM-authenticated regional workload APIs while retaining the aggregate global API. Capacity tools and auto-region queue/CLI workflows can select a target Region, [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) provisions matching nodes, and shared storage can persist workload outputs. Network routing never substitutes for live GPU-capacity placement.
 
-**Who it's for.** Teams running accelerated workloads — LLM training and inference, batch ML, HPC, and general CPU jobs — that need multi-region redundancy, capacity discovery, and IAM-based access without per-cluster kubeconfig distribution. GCO includes the EKS Auto Mode `system` and `general-purpose` NodePools plus project-managed GPU x86, GPU ARM, inference, EFA, Mooncake EFA, Neuron, and CPU NodePools.
+**Who it's for.** Teams running accelerated workloads — LLM training and inference, batch ML, HPC, and general CPU jobs — that need multi-region redundancy, capacity discovery, and IAM-based access without per-cluster kubeconfig distribution. GCO includes the EKS Auto Mode `system` and `general-purpose` NodePools plus project-managed GPU x86, GPU ARM, inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html), Mooncake EFA, Neuron, and CPU NodePools.
 
-**Why it's different.** Capacity-aware placement tools and auto-region workflows, partition-aware authenticated routing, full-stack observability (CloudWatch dashboards, alarms, SNS), and a CDK app validated across 20+ config matrix combinations in CI.
+**Why it's different.** Capacity-aware placement tools and auto-region workflows, partition-aware authenticated routing, full-stack observability ([CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) dashboards, alarms, [SNS](https://docs.aws.amazon.com/sns/latest/dg/welcome.html)), and a [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) app validated across 20+ config matrix combinations in CI.
 
 ---
 
@@ -82,7 +82,7 @@ gco stacks destroy-all -y # tear it all down
 
 Re-run the script whenever you switch runtimes, or use `--print` to preview the function, `--runtime <name>` to force one, and `--rc <path>` to target a specific profile.
 
-The function shares your host Docker socket with every `gco` call, and `gco stacks deploy-all` uses it for much more than bundling Lambda assets: through your host Docker daemon it builds and bundles the Lambda function assets (as `linux/amd64`, cross-built via Buildx so this works on Apple Silicon / arm64) and — when the Volcano image mirror is enabled in `cdk.json` — mirrors third-party images such as the Volcano scheduler from Docker Hub into your ECR before the Helm install runs. The same socket also backs `gco images build` / `push`. See [Prerequisites](#prerequisites) for Colima/Finch socket paths and the security note about host-socket pass-through. *Finch users:* Finch runs in its own VM with no host Docker socket to share, so the function omits the socket mount — everyday commands work as-is, while build-heavy ones like `deploy-all` run on the host with Finch as the CDK builder.
+The function shares your host Docker socket with every `gco` call, and `gco stacks deploy-all` uses it for much more than bundling [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) assets: through your host Docker daemon it builds and bundles the Lambda function assets (as `linux/amd64`, cross-built via Buildx so this works on Apple Silicon / arm64) and — when the Volcano image mirror is enabled in `cdk.json` — mirrors third-party images such as the Volcano scheduler from Docker Hub into your [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) before the Helm install runs. The same socket also backs `gco images build` / `push`. See [Prerequisites](#prerequisites) for Colima/Finch socket paths and the security note about host-socket pass-through. *Finch users:* Finch runs in its own VM with no host Docker socket to share, so the function omits the socket mount — everyday commands work as-is, while build-heavy ones like `deploy-all` run on the host with Finch as the CDK builder.
 
 <details>
 <summary>Prefer an interactive container shell instead?</summary>
@@ -158,14 +158,14 @@ Running GPU workloads at scale is hard. You need to find regions with available 
 | Authentication | Configure per-cluster access | IAM-based, uses existing AWS credentials |
 | Job outputs | Lost when pods terminate | Persisted to EFS/FSx storage |
 | Inference serving | Deploy and manage per-region | Deploy once across selected Regions |
-| Failover | Manual intervention required | Automatic via Global Accelerator in `aws`; explicit regional selection elsewhere |
+| Failover | Manual intervention required | Automatic via [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) in `aws`; explicit regional selection elsewhere |
 
 **When to use GCO:**
 
 - You need to run GPU workloads (training, inference, batch processing)
 - You want to deploy inference endpoints across multiple regions with a single command
 - You want multi-region redundancy without managing multiple clusters
-- You prefer IAM authentication over kubeconfig management
+- You prefer [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) authentication over kubeconfig management
 - You need job outputs to persist after completion
 
 ## Quick Start
@@ -193,7 +193,7 @@ Prefer an interactive container shell, or want to install on your host instead? 
 
 <!-- -->
 
-> **Optional:** configure kubectl access (requires `PUBLIC_AND_PRIVATE` endpoint mode). The default endpoint mode is `PRIVATE` — see [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md) for details. Most users don't need this; submit jobs via SQS or API Gateway instead.
+> **Optional:** configure kubectl access (requires `PUBLIC_AND_PRIVATE` endpoint mode). The default endpoint mode is `PRIVATE` — see [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md) for details. Most users don't need this; submit jobs via [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) or [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) instead.
 
 ### Submit Your First Job
 
@@ -203,7 +203,7 @@ Check GPU capacity in a region before you submit:
 gco capacity check --instance-type g4dn.xlarge --region us-east-1
 ```
 
-Submit a job using whichever path fits your setup — via SQS (recommended), via the global DynamoDB queue, via API Gateway, or directly through kubectl:
+Submit a job using whichever path fits your setup — via SQS (recommended), via the global [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html) queue, via API Gateway, or directly through kubectl:
 
 ```bash
 gco jobs submit-sqs examples/simple-job.yaml --region us-east-1
@@ -251,11 +251,11 @@ The generated reference architecture shows the commercial `aws` workload path. O
 
 1. **DevOps / Platform engineers** own the deployment. They configure the platform through `cdk.json` and drive everything from the `gco` CLI.
 2. The **AWS CDK app** synthesises and deploys the GCO stacks with a single `gco stacks deploy-all`, provisioning the global control plane and one regional stack per target region.
-3. **Users** submit jobs and inference requests through the `gco` CLI, which signs every call with **AWS SigV4** credentials.
+3. **Users** submit jobs and inference requests through the `gco` CLI, which signs every call with **AWS [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html)** credentials.
 4. In commercial `aws`, **Amazon API Gateway** is edge-optimized and is the global workload and aggregate entry point. In other partitions it is regional and aggregate-only. Every exposed method enforces **IAM (SigV4) authentication** before integration.
-5. In `aws`, route-specific **AWS Lambda proxies** sign workload requests with a short-lived HMAC envelope derived from a rotating **AWS Secrets Manager** key; `/api/v1/*` stays buffered while `/inference/*` streams. Other partitions omit these global workload proxies and use equivalent VPC proxies behind the regional APIs.
+5. In `aws`, route-specific **AWS Lambda proxies** sign workload requests with a short-lived HMAC envelope derived from a rotating **AWS [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html)** key; `/api/v1/*` stays buffered while `/inference/*` streams. Other partitions omit these global workload proxies and use equivalent [VPC](https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html) proxies behind the regional APIs.
 6. In `aws`, **AWS Global Accelerator** routes workload requests over the AWS backbone to a healthy registered Region. Other partitions create no accelerator resources.
-7. A regional internal **AWS Application Load Balancer** terminates deployment-local private-root TLS from either Global Accelerator (`aws`) or the regional VPC proxy, then sends HTTP to the platform services behind the shared Gateway API `HTTPRoute`.
+7. A regional internal **AWS [Application Load Balancer](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html)** terminates deployment-local private-root TLS from either Global Accelerator (`aws`) or the regional VPC proxy, then sends HTTP to the platform services behind the shared Gateway API `HTTPRoute`.
 8. Each region runs an **Amazon EKS Auto Mode cluster** with built-in `system` and `general-purpose` NodePools plus project-managed GPU, inference, EFA, Mooncake EFA, Neuron, and CPU NodePools. Platform services include the Health Monitor, Manifest Processor, Queue Processor, Inference Monitor, and dedicated Inference Proxy.
 
 Below is the per-region workflow for a single regional stack.
@@ -266,7 +266,7 @@ Below is the per-region workflow for a single regional stack.
 2. The **Amazon EKS Auto Mode cluster** is the heart of the regional stack, hosting platform services and user workloads with a private API endpoint by default.
 3. **NodePools** provision capacity on demand: built-in `system` and `general-purpose`, plus `gpu-x86-pool`, `gpu-arm-pool`, `gpu-inference-pool`, `gpu-efa-pool`, `mooncake-efa-pool`, `neuron-pool`, and `cpu-general-pool`.
 4. **Workloads and platform services** run across namespaces: `gco-system` (Health Monitor, Manifest Processor, Queue Processor, Inference Monitor, Inference Proxy) and `gco-jobs` / `gco-inference` (training and batch jobs, inference endpoints, and job DAG pipelines).
-5. **Storage and data services** back workloads: Amazon EFS, optional FSx for Lustre, optional Valkey, optional Aurora pgvector, and Amazon S3 for KMS-encrypted model weights.
+5. **Storage and data services** back workloads: Amazon EFS, optional FSx for Lustre, optional Valkey, optional [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html) pgvector, and [Amazon S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) for KMS-encrypted model weights.
 6. An always-deployed **Regional API Gateway bridge** gives the aggregator a SigV4-authenticated path to the VPC Lambda and internal ALB. Direct same-account access is optional through `regional_api_enabled` in `aws` and enabled automatically as the required workload ingress elsewhere.
 7. **Regional AWS services** complete the stack: Amazon SQS for job ingestion, DynamoDB-backed state where applicable, and Amazon CloudWatch metrics and logs.
 
@@ -290,7 +290,7 @@ Six complementary controls protect backend requests:
 3. **Request-bound HMAC** — a trusted Lambda signs the version, timestamp, nonce, method, exact target, and body digest with a rotating key that is never transmitted. HMAC provides integrity/freshness/replay defense, not encryption.
 4. **Private backend exposure** — regional ALBs are internal and the EKS API endpoint is private by default.
 5. **Freshness and integrity validation** — backend middleware rejects stale, altered, or replayed envelopes.
-6. **IRSA / EKS Pod Identity** — pods receive scoped AWS permissions without static workload credentials.
+6. **[IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) / EKS Pod Identity** — pods receive scoped AWS permissions without static workload credentials.
 
 ```text
 Commercial `aws` request flow:
@@ -347,7 +347,7 @@ The following estimates are for a single-region deployment with default settings
 | Application Load Balancer | 1 (shared by all services) | ~$22 |
 | Global Accelerator | 1 accelerator + data transfer | ~$18 + transfer |
 | Lambda functions | ~8 functions, minimal invocations | < $1 (often $0 within free tier) |
-| Step Functions | ~10 state transitions per deploy | < $1 |
+| [Step Functions](https://docs.aws.amazon.com/step-functions/latest/dg/welcome.html) | ~10 state transitions per deploy | < $1 |
 | DynamoDB | On-demand, low throughput | ~$5 |
 | SQS | Standard queue, low message volume | < $1 |
 | S3 | Model storage (varies with model size) | ~$2 (10 GB + API requests) |
@@ -415,7 +415,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 
 - **Multi-region inference**: Deploy endpoints (vLLM, TGI, Triton, TorchServe, SGLang) across regions with a single command
 - **Canary deployments**: A/B test new model versions with weighted traffic routing
-- **Model weight management**: Central S3 bucket with KMS encryption, automatic sync to each region
+- **Model weight management**: Central S3 bucket with [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) encryption, automatic sync to each region
 - **Spot instance support**: Run inference on spot GPUs for significant cost savings
 - **Autoscaling**: HPA-based scaling with CPU/memory metrics
 
@@ -436,19 +436,19 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 
 ### Operations
 
-- **Cost visibility**: Track spend by service, region, and workload via Cost Explorer integration
+- **Cost visibility**: Track spend by service, region, and workload via [Cost Explorer](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html) integration
 - **Auto-bootstrap**: CDK bootstrap runs automatically for new regions during deploy
 - **Multi-region monitoring**: CloudWatch dashboards, alarms, and SNS alerts across all regions
 
 ### ML & Analytics Environment
 
-- **ML & Analytics Environment**: Optional SageMaker Studio domain + EMR Serverless + Cognito user pool for interactive notebook analytics, with an always-on `Cluster_Shared_Bucket` that all cluster jobs can read and write. Off by default — enable with `gco analytics enable`. See [Analytics Guide](docs/ANALYTICS.md).
+- **ML & Analytics Environment**: Optional [SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/whatis.html) Studio domain + [EMR Serverless](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/emr-serverless.html) + [Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/what-is-amazon-cognito.html) user pool for interactive notebook analytics, with an always-on `Cluster_Shared_Bucket` that all cluster jobs can read and write. Off by default — enable with `gco analytics enable`. See [Analytics Guide](docs/ANALYTICS.md).
 
 ### Mission
 
 Goal-directed iteration loop for orchestrated workflows. The operator declares a natural-language directive plus machine-checkable success criteria, a tool allowlist, and a budget; Mission runs five-phase iterations (propose → execute → observe → evaluate → decide) until a verdict is reached. Off by default — enable with `GCO_ENABLE_MISSION=true`. See [Mission Guide](docs/MISSION.md).
 
-- **Deterministic verdict cascade** with optional advisory LLM sampling (MCP host or Amazon Bedrock). Sampling shapes only the next strategy; it never moves the verdict.
+- **Deterministic verdict cascade** with optional advisory LLM sampling (MCP host or Amazon [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html)). Sampling shapes only the next strategy; it never moves the verdict.
 - **Budget caps** on iterations and wall clock — the engine terminates cleanly when any cap fires. Cost guardrails live out-of-band via AWS Budgets and Cost Anomaly Detection at the account level.
 - **Scripted strategies** opt-in: an AST-validated Python sandbox with bounded duration and memory limits.
 - **CLI + MCP surface**: ten `gco mission` subcommands (including the chained `gco mission run` that scaffolds criteria and drives a session to completion in one call) and matching MCP tools, plus three `mission://sessions/{id}` resource templates.
@@ -613,7 +613,7 @@ GCO implements defense-in-depth across five layers (see [Security Model](#securi
 
 - Regional platform ALBs are internal; the EKS API endpoint defaults to `PRIVATE`
 - EKS clusters run in private subnets with configurable endpoint access (PRIVATE or PUBLIC_AND_PRIVATE)
-- VPC endpoints eliminate traffic traversal over the public internet for ECR, S3, STS, SSM, and CloudWatch
+- VPC endpoints eliminate traffic traversal over the public internet for ECR, S3, [STS](https://docs.aws.amazon.com/STS/latest/APIReference/), [SSM](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html), and CloudWatch
 - VPC Flow Logs (30-day retention) capture all network traffic for audit
 - Kubernetes Network Policies enforce default-deny with explicit allow rules
 

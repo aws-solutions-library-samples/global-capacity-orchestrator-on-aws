@@ -1,6 +1,6 @@
 # GitHub OIDC Provider for CI/CD
 
-A standalone CDK stack that creates an IAM OIDC identity provider and role for GitHub Actions. This lets CI workflows authenticate to AWS without long-lived access keys.
+A standalone [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) stack that creates an [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) OIDC identity provider and role for GitHub Actions. This lets CI workflows authenticate to AWS without long-lived access keys.
 
 ## Table of Contents
 
@@ -21,7 +21,7 @@ GitHub Actions can assume an AWS IAM role via OpenID Connect (OIDC) instead of s
 
 - No long-lived credentials to rotate or leak
 - Permissions are scoped to the specific repository and branch
-- AWS CloudTrail logs show the GitHub repo and workflow that assumed the role
+- AWS [CloudTrail](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-user-guide.html) logs show the GitHub repo and workflow that assumed the role
 
 This stack is **standalone** — it does not depend on or affect the main GCO infrastructure stacks. You can deploy it independently in any AWS account.
 
@@ -29,7 +29,7 @@ This stack is **standalone** — it does not depend on or affect the main GCO in
 
 1. **IAM OIDC Identity Provider** — trusts `token.actions.githubusercontent.com` (the GitHub OIDC issuer). Skipped if one already exists in the account.
 2. **IAM Role** — assumable only by GitHub Actions workflows from your repository. The trust policy restricts access to a specific GitHub org/repo.
-3. **IAM Policy** — attached to the role. By default grants only the read APIs used by the monthly dependency scan: Bedrock model/profile discovery, EC2 Region and accelerator-catalog discovery, EKS add-on and cluster-version discovery, EMR release labels, RDS engine versions, and STS caller identity. You can expand this for your own needs.
+3. **IAM Policy** — attached to the role. By default grants only the read APIs used by the monthly dependency scan: [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) model/profile discovery, [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) Region and accelerator-catalog discovery, [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) add-on and cluster-version discovery, EMR release labels, RDS engine versions, and [STS](https://docs.aws.amazon.com/STS/latest/APIReference/) caller identity. You can expand this for your own needs.
 
 ## Prerequisites
 
@@ -94,8 +94,8 @@ Common additions:
 | Use Case | Actions to Add |
 |----------|---------------|
 | CDK deploy from CI | `cloudformation:*`, `iam:*`, `eks:*`, `ec2:*`, `s3:*`, `lambda:*`, `logs:*`, `sqs:*`, `dynamodb:*`, `elasticloadbalancing:*`, `globalaccelerator:*`, `secretsmanager:*`, `ssm:*`, `ecr:*`, `efs:*` |
-| ECR image push | `ecr:GetAuthorizationToken`, `ecr:BatchCheckLayerAvailability`, `ecr:PutImage`, `ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload` |
-| S3 artifact upload | `s3:PutObject`, `s3:GetObject`, `s3:ListBucket` |
+| [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) image push | `ecr:GetAuthorizationToken`, `ecr:BatchCheckLayerAvailability`, `ecr:PutImage`, `ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload` |
+| [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) artifact upload | `s3:PutObject`, `s3:GetObject`, `s3:ListBucket` |
 
 ## Using with a Fork or Different Repo
 

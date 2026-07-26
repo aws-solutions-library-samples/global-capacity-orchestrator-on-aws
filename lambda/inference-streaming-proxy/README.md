@@ -1,20 +1,20 @@
 # Inference Streaming Proxy
 
-Node.js 24 Lambda response-streaming proxy for the authenticated `/inference/...` surface. Set `ROUTING_MODE=global` to use Global Accelerator or `ROUTING_MODE=regional` to discover and verify the regional internal ALB. The deployable package owns a separate exact-pinned npm graph containing only the three AWS SDK clients it imports.
+Node.js 24 [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) response-streaming proxy for the authenticated `/inference/...` surface. Set `ROUTING_MODE=global` to use [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) or `ROUTING_MODE=regional` to discover and verify the regional internal ALB. The deployable package owns a separate exact-pinned npm graph containing only the three AWS SDK clients it imports.
 
 ## Environment
 
 | Variable | Mode | Description |
 |---|---|---|
 | `ROUTING_MODE` | Both | Required: `global` or `regional`. |
-| `SECRET_ARN` | Both | Secrets Manager ARN whose JSON `token` signs backend requests. |
+| `SECRET_ARN` | Both | [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html) ARN whose JSON `token` signs backend requests. |
 | `BACKEND_TLS_SERVER_NAME` | Both | Private certificate DNS identity used for both SNI and hostname verification. |
-| `BACKEND_TLS_ROOT_CA_PARAMETER` | Both | SSM parameter containing only the public private-root CA bundle. |
+| `BACKEND_TLS_ROOT_CA_PARAMETER` | Both | [SSM](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html) parameter containing only the public private-root CA bundle. |
 | `BACKEND_TLS_ROOT_CA_REGION` | Both | Region containing the trust parameter. |
 | `GLOBAL_ACCELERATOR_ENDPOINT` | Global | Global Accelerator DNS endpoint; HTTPS/443 only. |
 | `REGISTRY_REGION` | Regional | Region containing `/<project>/alb-hostname-<target-region>`. |
-| `TARGET_REGION` | Regional | Workload region whose ALB is resolved and verified. |
-| `PROJECT_NAME` | Regional | Prefix used by the registry path and expected EKS cluster tag. |
+| `TARGET_REGION` | Regional | Workload region whose [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) is resolved and verified. |
+| `PROJECT_NAME` | Regional | Prefix used by the registry path and expected [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) cluster tag. |
 | `AWS_ACCOUNT_ID` | Regional | Account that must own the resolved internal application ALB. |
 | `AWS_URL_SUFFIX` | Regional | CDK-provided DNS suffix for the active AWS partition; regional ALB validation requires the exact ELB suffix. |
 | `MAX_REQUEST_BODY_BYTES` | Both | UTF-8 request-body cap enforced before authentication, discovery, or TLS work; bounded to 1–10 MiB (default `1048576`). |
@@ -28,7 +28,7 @@ The execution role needs `secretsmanager:GetSecretValue` and trust-parameter `ss
 
 ## Dependencies and CI
 
-`package.json` and `package-lock.json` are the deployment graph and pin Node 24, npm 11.18.0, and each direct AWS SDK client exactly. The root tooling graph is intentionally separate so CDK, diagram, and markdown tooling cannot enter the Lambda bundle. Install this graph with lifecycle scripts disabled:
+`package.json` and `package-lock.json` are the deployment graph and pin Node 24, npm 11.18.0, and each direct AWS SDK client exactly. The root tooling graph is intentionally separate so [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html), diagram, and markdown tooling cannot enter the Lambda bundle. Install this graph with lifecycle scripts disabled:
 
 ```bash
 npm ci --prefix lambda/inference-streaming-proxy --ignore-scripts --no-audit --no-fund

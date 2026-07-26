@@ -1,6 +1,6 @@
 # Helm Installer
 
-Installs and manages Helm charts on EKS clusters during CDK deployment. Supports KEDA, Volcano, KubeRay, Kueue, and more.
+Installs and manages Helm charts on [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) clusters during [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) deployment. Supports KEDA, Volcano, KubeRay, Kueue, and more.
 
 ## Table of Contents
 
@@ -15,7 +15,7 @@ Installs and manages Helm charts on EKS clusters during CDK deployment. Supports
 
 ## Trigger
 
-Create/update convergence and delete teardown use separate CloudFormation custom resources:
+Create/update convergence and delete teardown use separate [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) custom resources:
 
 - Create/update starts the base-manifest → Helm → post-Helm state machine and returns immediately.
 - Delete starts a dedicated reverse-order Helm teardown state machine and waits for it to finish before EKS access entries or the cluster are removed.
@@ -31,11 +31,11 @@ Create/update convergence and delete teardown use separate CloudFormation custom
 
 ### Delete
 
-1. Lists and stops every visible create/update convergence execution, then repeats that cancellation on each 15-second completion poll to catch executions omitted by Step Functions' eventually consistent listing.
-2. Always waits 16 minutes so any Lambda invocation already in flight reaches its hard 15-minute limit.
+1. Lists and stops every visible create/update convergence execution, then repeats that cancellation on each 15-second completion poll to catch executions omitted by [Step Functions](https://docs.aws.amazon.com/step-functions/latest/dg/welcome.html)' eventually consistent listing.
+2. Always waits 16 minutes so any [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) invocation already in flight reaches its hard 15-minute limit.
 3. Scales `gco-system/health-monitor` to zero and waits for all replicas to terminate, preventing endpoint-registry recreation during teardown.
 4. Uninstalls charts in reverse install order while the EKS API and Helm installer access entry still exist. Each serialized uninstall has a two-minute Helm deadline and 150-second subprocess cap so all supported releases fit within CloudFormation's one-hour custom-resource ceiling.
-5. Only after synchronous teardown succeeds does CloudFormation deregister the ALB from Global Accelerator, delete its SSM registry entry, and remove the convergence trigger/EKS access.
+5. Only after synchronous teardown succeeds does CloudFormation deregister the [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) from [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html), delete its [SSM](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html) registry entry, and remove the convergence trigger/EKS access.
 
 Helm's explicit `release: not found` result is idempotent success; generic `not found` output is not. Every other uninstall error is returned as a CloudFormation failure so teardown cannot silently leave live releases or external resources behind. Transient failures can be retried by retrying stack deletion after the underlying Kubernetes condition is resolved.
 
@@ -48,7 +48,7 @@ Runs as a container Lambda (see `Dockerfile`). The image includes `helm` and `ku
 | Chart | Namespace | Default |
 |-------|-----------|---------|
 | KEDA | `keda` | Enabled |
-| AWS EFA Device Plugin | `kube-system` | Enabled |
+| AWS [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) Device Plugin | `kube-system` | Enabled |
 | Volcano | `volcano-system` | Enabled |
 | KubeRay Operator | `ray-system` | Enabled |
 | Kueue | `kueue-system` | Enabled (OCI) |
@@ -61,7 +61,7 @@ Runs as a container Lambda (see `Dockerfile`). The image includes `helm` and `ku
 | `Region` | Yes | AWS region |
 | `Charts` | No | Dict of chart config overrides |
 | `EnabledCharts` | No | List of chart names to enable |
-| `KedaOperatorRoleArn` | No | IAM role ARN for KEDA IRSA |
+| `KedaOperatorRoleArn` | No | [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) role ARN for KEDA [IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) |
 
 ## Environment Variables
 

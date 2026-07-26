@@ -20,13 +20,13 @@ Utility scripts for development, testing, and operations.
 
 | Script | Description |
 |--------|-------------|
-| `setup-cluster-access.sh` | Configures kubectl access to a GCO EKS cluster. Adds your IAM principal to the cluster's access entries and verifies connectivity. |
+| `setup-cluster-access.sh` | Configures kubectl access to a GCO [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) cluster. Adds your [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) principal to the cluster's access entries and verifies connectivity. |
 | `setup-dev-alias.sh` | Builds (or refreshes) the `gco-dev` image from `Dockerfile.dev`, then installs a `gco` shell function (between `# >>> gco >>>` markers) into your shell rc file so the CLI runs inside the dev container against your current directory. Auto-detects the container runtime (Docker/Finch/Podman), picks the matching socket mount, and is safe to re-run (`--no-build` skips the rebuild). |
 | `bump_version.py` | Bumps the project version across all locations (pyproject.toml, CLI, docs). Supports major, minor, and patch increments. |
-| `accelerator_catalog.py` | Validates the checked-in NVIDIA GPU/AWS Neuron catalog against Karpenter NodePools and both capacity-history watch lists; can capture, compare, and safely refresh the catalog from enabled-Region EC2 discovery. Successful refreshes embed a UTC `last_refreshed_at` timestamp. Offline `validate` is deterministic; online commands are sequential, paginated, and use adaptive retries. |
+| `accelerator_catalog.py` | Validates the checked-in NVIDIA GPU/AWS Neuron catalog against Karpenter NodePools and both capacity-history watch lists; can capture, compare, and safely refresh the catalog from enabled-Region [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) discovery. Successful refreshes embed a UTC `last_refreshed_at` timestamp. Offline `validate` is deterministic; online commands are sequential, paginated, and use adaptive retries. |
 | `dump_nag_findings.py` | Dev-only debugging helper: runs the `tests/test_nag_compliance.py` harness and prints every cdk-nag finding grouped by rule + resource path + config. Use this when the compliance test gate fails in CI and you want a compact per-finding view instead of pytest's `AssertionError` repr. |
 | `test_webhook_delivery.py` | Tests the webhook dispatcher by sending sample events and verifying delivery, HMAC signatures, and retry behavior. |
-| `capture_scaffold_fixtures.py` | Captures raw model output for the Mission scaffolder prompt across a curated cross-family Bedrock model set. Writes one JSON file per model under `tests/fixtures/scaffold_responses/` for the replay test (`tests/test_scaffold_fixture_replay.py`) to drive on every CI run. See the [fixture-replay runbook](../tests/fixtures/scaffold_responses/README.md) for the full lifecycle. |
+| `capture_scaffold_fixtures.py` | Captures raw model output for the Mission scaffolder prompt across a curated cross-family [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) model set. Writes one JSON file per model under `tests/fixtures/scaffold_responses/` for the replay test (`tests/test_scaffold_fixture_replay.py`) to drive on every CI run. See the [fixture-replay runbook](../tests/fixtures/scaffold_responses/README.md) for the full lifecycle. |
 | `mcp_install_smoke.py` | Smoke-tests that a packaged GCO install exposes a working, self-contained `gco-mcp` server: the package imports from site-packages (not a checkout), the PyPI `mcp` SDK is not shadowed by the in-tree `gco_mcp` package, `main()` is callable, and the server resolves its own bundled `gco` CLI. Drives the `unit:mcp:install` CI job. |
 
 > CI-only scripts live under [`.github/scripts/`](../.github/scripts/). In particular, [`.github/scripts/dependency-scan.sh`](../.github/scripts/dependency-scan.sh) powers the monthly `deps-scan` workflow and invokes `accelerator_catalog.py` for the offline and online accelerator maintenance tiers — see [`.github/CI.md`](../.github/CI.md#dependency-scan-script) for its full reference.
@@ -70,7 +70,7 @@ python3 scripts/bump_version.py major   # 1.0.0 → 2.0.0
 
 ### Test CDK Synthesis
 
-The CDK configuration matrix is now exercised via pytest (runs in parallel under
+The [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) configuration matrix is now exercised via pytest (runs in parallel under
 `pytest-xdist`). Invoke it the same way CI does:
 
 ```bash
@@ -99,7 +99,7 @@ python3 scripts/test_webhook_delivery.py
 
 ### Capture Mission Scaffolder Fixtures
 
-Captures raw Bedrock model output for the Mission scaffolder prompt across a curated cross-family model set (Anthropic Claude, Amazon Nova, Meta Llama, Mistral, DeepSeek). Each captured response is checked into `tests/fixtures/scaffold_responses/` and replayed by `tests/test_scaffold_fixture_replay.py` on every CI run, so a regression that breaks one model is caught against every captured model on the next push.
+Captures raw Bedrock model output for the Mission scaffolder prompt across a curated cross-family model set (Anthropic Claude, [Amazon Nova](https://docs.aws.amazon.com/nova/latest/userguide/what-is-nova.html), Meta Llama, Mistral, DeepSeek). Each captured response is checked into `tests/fixtures/scaffold_responses/` and replayed by `tests/test_scaffold_fixture_replay.py` on every CI run, so a regression that breaks one model is caught against every captured model on the next push.
 
 ```bash
 # Capture every default model against the canonical directive set

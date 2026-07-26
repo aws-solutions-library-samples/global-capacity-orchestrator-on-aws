@@ -27,7 +27,7 @@ Only hand-authored Python runtime code:
 - `gco/`, `cli/`, `gco_mcp/`, `lambda/`, `scripts/`
 
 Excluded: `cdk.out/`, `lambda/*-build/` staging dirs, caches, tests, demo
-scripts. The top-level `app.py` (CDK composition entry point) is out of
+scripts. The top-level `app.py` ([CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) composition entry point) is out of
 scope — it has no runtime/security surface and the CodeQL Python
 autobuilder raises `NotADirectoryError` on single-file `paths:` entries.
 
@@ -39,8 +39,8 @@ autobuilder raises `NotADirectoryError` on single-file `paths:` entries.
 
 | Rule | Reason |
 |------|--------|
-| `py/clear-text-logging-sensitive-data` | False positives on logging registry names, secret ARNs, and one-shot Cognito temp passwords (not secret values) |
-| `py/incomplete-url-substring-sanitization` | URL access control is handled by API Gateway IAM and ALB allowlists, not substring checks |
+| `py/clear-text-logging-sensitive-data` | False positives on logging registry names, secret ARNs, and one-shot [Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/what-is-amazon-cognito.html) temp passwords (not secret values) |
+| `py/incomplete-url-substring-sanitization` | URL access control is handled by [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) and [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) allowlists, not substring checks |
 | `py/weak-sensitive-data-hashing` | SRP protocol message digest in `cli/analytics_user_mgmt.py::_hash_sha256` — RFC 5054 mandates SHA-256 as the primitive; not a password storage hash (Cognito holds the SRP verifier server-side) |
 
 Each exclusion is documented inline in `codeql-config.yml` with the

@@ -8,7 +8,7 @@ Everything you need to demo **Global Capacity Orchestrator (GCO)** — *One API.
 ![GCO Live Demo](live_demo.gif)
 
 > Automated demo showing costs, capacity-aware placement, 4 schedulers running simultaneously
-> (Volcano, Kueue, YuniKorn, Slurm), high-performance storage (FSx, Valkey, EFS), and live
+> (Volcano, Kueue, YuniKorn, Slurm), high-performance storage ([FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), Valkey, [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html)), and live
 > LLM inference — all on one platform. Re-record with `bash demo/record_demo.sh`.
 
 </details>
@@ -109,7 +109,7 @@ python demo/md_to_pdf.py INFERENCE_WALKTHROUGH
 
 **DEMO_WALKTHROUGH** covers the core platform: deploying stacks, submitting jobs, health monitoring, the authenticated API, and multi-region routing. Good for a general technical audience.
 
-**INFERENCE_WALKTHROUGH** focuses on the inference serving feature: deploying vLLM endpoints, invoking through API Gateway, scaling, autoscaling with HPA, rolling image updates, stop/start, model weight management, and Valkey caching. Best for ML/AI-focused audiences.
+**INFERENCE_WALKTHROUGH** focuses on the inference serving feature: deploying vLLM endpoints, invoking through [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html), scaling, autoscaling with HPA, rolling image updates, stop/start, model weight management, and Valkey caching. Best for ML/AI-focused audiences.
 
 **live_demo.sh** is an automated terminal script for live presentations. It detects which features are enabled in `cdk.json` and runs through costs, schedulers, storage, and caching with narrated output. See [LIVE_DEMO.md](LIVE_DEMO.md) for full docs.
 
@@ -140,7 +140,7 @@ Requirements: `weasyprint` (Python) and `pandoc` (system package).
 ## Pre-Demo Checklist
 
 - [ ] Infrastructure deployed (`gco stacks deploy-all -y`)
-- [ ] EKS endpoint set to `PUBLIC_AND_PRIVATE` for local kubectl access
+- [ ] [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) endpoint set to `PUBLIC_AND_PRIVATE` for local kubectl access
 - [ ] Cluster access configured (`./scripts/setup-cluster-access.sh`)
 - [ ] `kubectl get nodes` works
 - [ ] GPU quota available in your demo region

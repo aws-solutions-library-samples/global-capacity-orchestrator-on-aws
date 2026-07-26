@@ -1,6 +1,6 @@
 # Lambda Functions
 
-AWS Lambda functions that power GCO's infrastructure layer. These are deployed as part of the CDK stacks and handle cluster operations, API routing, security, and cross-region coordination.
+[AWS Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) functions that power GCO's infrastructure layer. These are deployed as part of the [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) stacks and handle cluster operations, API routing, security, and cross-region coordination.
 
 ## Table of Contents
 
@@ -13,15 +13,15 @@ AWS Lambda functions that power GCO's infrastructure layer. These are deployed a
 
 | Directory | Description |
 |-----------|-------------|
-| `kubectl-applier-simple/` | Applies Kubernetes manifests to EKS clusters during CDK deployment. Contains the nodepool, RBAC, service, and storage manifests in `manifests/`. |
+| `kubectl-applier-simple/` | Applies Kubernetes manifests to [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) clusters during CDK deployment. Contains the nodepool, RBAC, service, and storage manifests in `manifests/`. |
 | `helm-installer/` | Installs Helm charts (KEDA, Volcano, KubeRay, Kueue) into EKS clusters during deployment. |
-| `helm-orchestrator/` | CloudFormation custom-resource provider (async `cr.Provider`) that starts and polls the Helm-install Step Functions state machine. Does no Helm/Kubernetes work itself — the per-chart tasks run in `helm-installer`. |
-| `image-lookup/` | CloudFormation custom resource that adopts-or-creates `gco/<name>` ECR repositories so retained repos from a prior deploy are rebound rather than failing the stack with `RepositoryAlreadyExistsException`. Honors `gco:retain=true` on Delete. |
-| `inference-streaming-proxy/` | Node.js 24 response-streaming proxy used by both global and regional `/inference/*` API Gateway integrations. Owns an isolated exact-pinned AWS SDK graph. |
-| `api-gateway-proxy/` | Proxies IAM-authenticated global requests through Global Accelerator to regional ALBs using request-bound HMAC plus strict deployment-local private-root TLS. |
-| `regional-api-proxy/` | VPC proxy behind every regional aggregation bridge; resolves/verifies its internal ALB and uses HMAC plus private-root TLS. Direct user invocation is optional. |
+| `helm-orchestrator/` | [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) custom-resource provider (async `cr.Provider`) that starts and polls the Helm-install [Step Functions](https://docs.aws.amazon.com/step-functions/latest/dg/welcome.html) state machine. Does no Helm/Kubernetes work itself — the per-chart tasks run in `helm-installer`. |
+| `image-lookup/` | CloudFormation custom resource that adopts-or-creates `gco/<name>` [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) repositories so retained repos from a prior deploy are rebound rather than failing the stack with `RepositoryAlreadyExistsException`. Honors `gco:retain=true` on Delete. |
+| `inference-streaming-proxy/` | Node.js 24 response-streaming proxy used by both global and regional `/inference/*` [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) integrations. Owns an isolated exact-pinned AWS SDK graph. |
+| `api-gateway-proxy/` | Proxies IAM-authenticated global requests through [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) to regional ALBs using request-bound HMAC plus strict deployment-local private-root TLS. |
+| `regional-api-proxy/` | [VPC](https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html) proxy behind every regional aggregation bridge; resolves/verifies its internal [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) and uses HMAC plus private-root TLS. Direct user invocation is optional. |
 | `cross-region-aggregator/` | Discovers deterministic regional API Gateway stacks and aggregates their SigV4-authenticated AWS-TLS responses; it never connects directly to ALBs. |
-| `secret-rotation/` | Rotates the backend HMAC key in AWS Secrets Manager on a daily schedule with overlap-safe validation. |
+| `secret-rotation/` | Rotates the backend HMAC key in AWS [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html) on a daily schedule with overlap-safe validation. |
 | `tls-certificate-manager/` | Bootstraps the KMS-encrypted deployment-local root, rotates short-lived regional ACM leaves in place, publishes public trust, and manages staged root rollover. |
 | `tls-shared/` | Canonical strict private-root TLS/SNI client used by backend proxy packages. |
 | `ga-registration/` | Registers regional ALB endpoints with AWS Global Accelerator during stack deployment. |

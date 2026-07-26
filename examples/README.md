@@ -46,7 +46,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 
 | Example | File | Category | GPU | Opt-in |
 |---------|------|----------|-----|--------|
-| [Analytics Database Export](#analytics-database-export-job) | `analytics-database-export-job.yaml` | Analytics | — | Aurora, Analytics |
+| [Analytics Database Export](#analytics-database-export-job) | `analytics-database-export-job.yaml` | Analytics | — | [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html), Analytics |
 | [Analytics S3 Upload](#analytics-s3-upload-job) | `analytics-s3-upload-job.yaml` | Analytics | — | Analytics |
 | [Aurora pgvector](#aurora-pgvector-job) | `aurora-pgvector-job.yaml` | Database | — | Aurora |
 | [Cluster Shared Bucket Upload](#cluster-shared-bucket-upload-job) | `cluster-shared-bucket-upload-job.yaml` | Storage | — | — |
@@ -54,10 +54,10 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 | [DAG Train](#dag-pipeline) | `dag-step-train.yaml` | Pipeline | — | — |
 | [EFA Training](#efa-distributed-training) | `efa-distributed-training.yaml` | Jobs | ✅ | — |
 | [EFS Output](#efs-output-job) | `efs-output-job.yaml` | Storage | — | — |
-| [FSx Lustre](#fsx-for-lustre-job) | `fsx-lustre-job.yaml` | Storage | — | FSx |
+| [FSx Lustre](#fsx-for-lustre-job) | `fsx-lustre-job.yaml` | Storage | — | [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) |
 | [GPU Job](#gpu-job) | `gpu-job.yaml` | Jobs | ✅ | — |
 | [GPU Time-Slicing](#gpu-time-slicing-job) | `gpu-timeslicing-job.yaml` | Jobs | ✅ | ConfigMap |
-| [Inferentia](#inferentia-job) | `inferentia-job.yaml` | Accelerator | Inferentia | — |
+| [Inferentia](#inferentia-job) | `inferentia-job.yaml` | Accelerator | [Inferentia](https://docs.aws.amazon.com/dlami/latest/devguide/inferentia.html) | — |
 | [SGLang](#inference-frameworks) | `inference-sglang.yaml` | Inference | ✅ | — |
 | [TGI](#inference-frameworks) | `inference-tgi.yaml` | Inference | ✅ | — |
 | [TorchServe](#inference-frameworks) | `inference-torchserve.yaml` | Inference | ✅ | — |
@@ -75,7 +75,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 | [Simple Job](#simple-job) | `simple-job.yaml` | Jobs | — | — |
 | [Slurm](#slurm-cluster-job) | `slurm-cluster-job.yaml` | Scheduler | — | Slurm |
 | [SQS Submission](#sqs-job-submission) | `sqs-job-submission.yaml` | Jobs | Optional | — |
-| [Trainium](#trainium-job) | `trainium-job.yaml` | Accelerator | Trainium | — |
+| [Trainium](#trainium-job) | `trainium-job.yaml` | Accelerator | [Trainium](https://docs.aws.amazon.com/dlami/latest/devguide/trainium.html) | — |
 | [Valkey Cache](#valkey-cache-job) | `valkey-cache-job.yaml` | Caching | — | Valkey |
 | [Volcano Gang](#volcano-gang-scheduling) | `volcano-gang-job.yaml` | Scheduler | — | — |
 | [YuniKorn](#yunikorn-hierarchical-queues) | `yunikorn-job.yaml` | Scheduler | — | YuniKorn |
@@ -90,7 +90,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 
 **File:** `analytics-database-export-job.yaml`
 
-Exports rows from the regional Aurora Serverless v2 PostgreSQL cluster (pgvector) to the always-on `Cluster_Shared_Bucket` as CSV, so a SageMaker Studio notebook can analyse the export without direct database credentials. An init container checks for the `gco-aurora-pgvector` ConfigMap and exits 0 when Aurora is not deployed, making the job a safe no-op on clusters without Aurora.
+Exports rows from the regional Aurora Serverless v2 PostgreSQL cluster (pgvector) to the always-on `Cluster_Shared_Bucket` as CSV, so a [SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/whatis.html) Studio notebook can analyse the export without direct database credentials. An init container checks for the `gco-aurora-pgvector` ConfigMap and exits 0 when Aurora is not deployed, making the job a safe no-op on clusters without Aurora.
 
 **Prerequisites:**
 
@@ -103,7 +103,7 @@ Exports rows from the regional Aurora Serverless v2 PostgreSQL cluster (pgvector
 gco jobs submit-direct examples/analytics-database-export-job.yaml -r us-east-1
 ```
 
-**When to use:** Moving database snapshots to S3 for notebook-side analysis, decoupling notebooks from direct database connections, building RAG/pgvector export pipelines.
+**When to use:** Moving database snapshots to [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) for notebook-side analysis, decoupling notebooks from direct database connections, building RAG/pgvector export pipelines.
 
 ---
 
@@ -116,7 +116,7 @@ Publishes a small dataset snapshot (CSV plus a JSON schema manifest) to the alwa
 **Prerequisites:**
 
 - `gco analytics enable` — sets `analytics_environment.enabled = true` in `cdk.json`
-- `gco stacks deploy gco-analytics` — provisions the Studio domain, Cognito user pool, and the execution role that can read the shared bucket
+- `gco stacks deploy gco-analytics` — provisions the Studio domain, [Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/what-is-amazon-cognito.html) user pool, and the execution role that can read the shared bucket
 - `gco analytics users add --username <USERNAME>` — creates a Cognito user and Studio user profile (substitute `<USERNAME>` with the username to create)
 
 **Usage:**
@@ -173,7 +173,7 @@ gco jobs submit-direct examples/cluster-shared-bucket-upload-job.yaml -r us-east
 
 **Files:** `pipeline-dag.yaml`, `dag-step-preprocess.yaml`, `dag-step-train.yaml`
 
-A multi-step pipeline with dependency ordering. The preprocess step generates training data on shared EFS, then the train step reads it and produces model artifacts. Steps only run after their dependencies complete successfully.
+A multi-step pipeline with dependency ordering. The preprocess step generates training data on shared [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), then the train step reads it and produces model artifacts. Steps only run after their dependencies complete successfully.
 
 **Usage:**
 
@@ -196,7 +196,7 @@ gco dag run examples/pipeline-dag.yaml -r us-east-1
 
 **File:** `efa-distributed-training.yaml`
 
-Uses Elastic Fabric Adapter (EFA) for high-bandwidth inter-node communication — up to 3.2 Tbps on P5/Trn2 instances and up to 28.8 Tbps on P6e-GB200 UltraServers. Critical for large-scale distributed training.
+Uses [Elastic Fabric Adapter](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) (EFA) for high-bandwidth inter-node communication — up to 3.2 Tbps on P5/Trn2 instances and up to 28.8 Tbps on P6e-GB200 UltraServers. Critical for large-scale distributed training.
 
 **Usage:**
 
@@ -353,7 +353,7 @@ gco jobs logs inferentia-test -r us-east-1
 
 **File:** `keda-scaled-job.yaml`
 
-A safe, non-consuming SQS scaling demonstration using KEDA. It scales credentialless observer Jobs from a **disposable demo queue's** depth, but the Jobs never call `ReceiveMessage` or `DeleteMessage`. GCO ships a separate built-in consumer for real manifest submissions.
+A safe, non-consuming [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) scaling demonstration using KEDA. It scales credentialless observer Jobs from a **disposable demo queue's** depth, but the Jobs never call `ReceiveMessage` or `DeleteMessage`. GCO ships a separate built-in consumer for real manifest submissions.
 
 **Usage:**
 
@@ -416,13 +416,13 @@ gco jobs logs megatrain-sft -r us-east-1
 
 Drives a [Mission](../docs/MISSION.md) with an **LLM-as-judge** progress signal instead of a metric scraped from a file. The read-only `metrics_semantic_progress` tool scores how close a session is to satisfying its directive against a fixed, versioned rubric, then emits that score in the canonical `{"metrics": {"progress_score": <number>}}` shape Mission's Observe phase merges. A plain `metric_threshold` criterion then reads `metrics.progress_score` by dot-path with no special handling — the comparison is byte-for-byte the same one the engine performs on any numeric metric.
 
-The score is a finite float in the closed range `[0.0, 1.0]` (`0.0` = no progress toward the directive, `1.0` = directive fully satisfied). All non-determinism is confined to the single LLM call inside the tool — exactly like a CloudWatch read varying between calls — while the criterion comparison over the score stays fully deterministic.
+The score is a finite float in the closed range `[0.0, 1.0]` (`0.0` = no progress toward the directive, `1.0` = directive fully satisfied). All non-determinism is confined to the single LLM call inside the tool — exactly like a [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) read varying between calls — while the criterion comparison over the score stays fully deterministic.
 
 - `mission-semantic-progress-criteria.json` is a one-criterion [Criteria File](../docs/MISSION.md#criteria-file-schema) asserting `metrics.progress_score >= 0.8`.
 
 **Prerequisites:**
 
-- `GCO_ENABLE_SEMANTIC_PROGRESS=true` (or the umbrella `GCO_ENABLE_ALL_TOOLS=true`) — the judge tool is **gated default-off** because each invocation incurs an LLM call (a Bedrock cost on the CLI path), so it only appears once an operator deliberately opts in.
+- `GCO_ENABLE_SEMANTIC_PROGRESS=true` (or the umbrella `GCO_ENABLE_ALL_TOOLS=true`) — the judge tool is **gated default-off** because each invocation incurs an LLM call (a [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) cost on the CLI path), so it only appears once an operator deliberately opts in.
 - `GCO_ENABLE_MISSION=true` (or the umbrella `GCO_ENABLE_ALL_TOOLS=true`) to run any Mission CLI subcommand.
 
 **Usage:**
@@ -835,7 +835,7 @@ spec:
 
 ### 6. Prevent Node Consolidation for Long-Running Jobs
 
-EKS Auto Mode (Karpenter) may consolidate underutilized nodes, which evicts running pods. For training jobs or other long-running workloads that should not be interrupted, add the `karpenter.sh/do-not-disrupt` annotation to the pod template:
+[EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) (Karpenter) may consolidate underutilized nodes, which evicts running pods. For training jobs or other long-running workloads that should not be interrupted, add the `karpenter.sh/do-not-disrupt` annotation to the pod template:
 
 ```yaml
 spec:

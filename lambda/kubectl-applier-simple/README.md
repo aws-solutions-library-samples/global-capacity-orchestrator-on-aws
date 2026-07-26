@@ -1,6 +1,6 @@
 # Kubectl Applier Simple
 
-Applies Kubernetes manifests to EKS clusters during CDK deployment. Pure Python implementation using the `kubernetes` client library — no Docker or kubectl binary required.
+Applies Kubernetes manifests to [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) clusters during [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) deployment. Pure Python implementation using the `kubernetes` client library — no Docker or kubectl binary required.
 
 ## Table of Contents
 
@@ -15,7 +15,7 @@ Applies Kubernetes manifests to EKS clusters during CDK deployment. Pure Python 
 
 ## Trigger
 
-CloudFormation Custom Resource — runs on stack Create, Update, and Delete.
+[CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) Custom Resource — runs on stack Create, Update, and Delete.
 
 ## How It Works
 

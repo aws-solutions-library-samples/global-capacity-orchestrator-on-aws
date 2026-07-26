@@ -1,6 +1,6 @@
 # Cross-Region Aggregator
 
-Aggregates jobs, health, and status from every required GCO workload region. The centralized Lambda is not VPC-attached; it reaches each private regional backend through an always-deployed, IAM-authenticated regional API Gateway bridge.
+Aggregates jobs, health, and status from every required GCO workload region. The centralized [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) is not VPC-attached; it reaches each private regional backend through an always-deployed, IAM-authenticated regional [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) bridge.
 
 ## Table of Contents
 
@@ -31,7 +31,7 @@ The global API Gateway invokes this Lambda for `/api/v1/global/*` routes.
 ## How It Works
 
 1. Reads the required workload regions from `TARGET_REGIONS`.
-2. Describes the deterministic `<project>-regional-api-<region>` CloudFormation stack in each region.
+2. Describes the deterministic `<project>-regional-api-<region>` [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) stack in each region.
 3. Extracts and strictly validates the `RegionalApiEndpoint` output as that region's AWS `execute-api` HTTPS `/prod` URL under `AWS_URL_SUFFIX`.
 4. Uses the Lambda execution-role credentials to SigV4-sign each request for `execute-api` in the target region.
 5. Queries regions in parallel with a bounded endpoint-discovery cache.
@@ -49,7 +49,7 @@ Global API Gateway → aggregator Lambda
   → Kubernetes pod (HTTP after ALB termination)
 ```
 
-The aggregator trusts the AWS-managed API Gateway certificate chain. It does **not** read the backend HMAC secret, the ALB-hostname SSM registry, the private-root public trust bundle, the root private-key secret, or the root KMS key. The regional VPC proxy owns ALB resolution, HMAC signing, and the private-root TLS hop.
+The aggregator trusts the AWS-managed API Gateway certificate chain. It does **not** read the backend HMAC secret, the ALB-hostname [SSM](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html) registry, the private-root public trust bundle, the root private-key secret, or the root [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) key. The regional [VPC](https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html) proxy owns [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) resolution, HMAC signing, and the private-root TLS hop.
 
 ## Input
 
@@ -73,7 +73,7 @@ The execution role receives only:
 
 - `cloudformation:DescribeStacks` on the exact project-scoped regional API stack ARN in each configured region;
 - `execute-api:Invoke` in the deployment account, constrained to exactly `GET /api/v1/jobs`, `GET /api/v1/health`, `GET /api/v1/status`, and `DELETE /api/v1/jobs`; and
-- standard Lambda logging and X-Ray permissions.
+- standard Lambda logging and [X-Ray](https://docs.aws.amazon.com/xray/latest/devguide/aws-xray.html) permissions.
 
 ## Failure Behavior
 

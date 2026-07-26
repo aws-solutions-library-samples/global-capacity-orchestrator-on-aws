@@ -1,6 +1,6 @@
 # Regional API Proxy
 
-Proxies IAM-authenticated requests from each always-deployed regional API bridge to the regional internal ALB through a Lambda function in the workload VPC. The centralized aggregator always uses this path. In the commercial `aws` partition, same-account callers may opt in with `api_gateway.regional_api_enabled=true`; in other AWS partitions this is the required supported workload ingress and same-account direct access is enabled automatically because Global Accelerator is omitted.
+Proxies IAM-authenticated requests from each always-deployed regional API bridge to the regional internal [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) through a [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) function in the workload VPC. The centralized aggregator always uses this path. In the commercial `aws` partition, same-account callers may opt in with `api_gateway.regional_api_enabled=true`; in other AWS partitions this is the required supported workload ingress and same-account direct access is enabled automatically because [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) is omitted.
 
 ## Table of Contents
 
@@ -14,12 +14,12 @@ Proxies IAM-authenticated requests from each always-deployed regional API bridge
 
 ## Trigger
 
-Regional API Gateway's buffered `/api/v1/{proxy+}` integration. The bridge also exposes `/inference/{proxy+}` through the separate Node.js response-streaming proxy. Every method requires IAM authorization (SigV4).
+Regional [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html)'s buffered `/api/v1/{proxy+}` integration. The bridge also exposes `/inference/{proxy+}` through the separate Node.js response-streaming proxy. Every method requires [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) authorization ([SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html)).
 
 ## How It Works
 
 1. Regional API Gateway validates the caller's IAM credentials.
-2. The Lambda retrieves the HMAC signing key from Secrets Manager through a bounded TTL/stale cache.
+2. The Lambda retrieves the HMAC signing key from [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html) through a bounded TTL/stale cache.
 3. It resolves and verifies the current regional platform ALB.
 4. It allowlists supported end-to-end request headers, then signs the version, timestamp, random nonce, method, exact path/query, and body digest.
 5. It reads the public root bundle, sends/asserts
@@ -33,11 +33,11 @@ Only safe read-only methods (`GET`, `HEAD`, and `OPTIONS`) use bounded exponenti
 
 ## Backend Discovery and Verification
 
-Production wiring omits `ALB_ENDPOINT`. At request time the Lambda reads `/<project>/alb-hostname-<target-region>` from SSM in `REGISTRY_REGION`, validates that the value is an ELB DNS name under the CDK-provided `AWS_URL_SUFFIX`, and verifies with Elastic Load Balancing APIs that it is:
+Production wiring omits `ALB_ENDPOINT`. At request time the Lambda reads `/<project>/alb-hostname-<target-region>` from [SSM](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html) in `REGISTRY_REGION`, validates that the value is an ELB DNS name under the CDK-provided `AWS_URL_SUFFIX`, and verifies with Elastic Load Balancing APIs that it is:
 
 - an internal application load balancer;
 - owned by `AWS_ACCOUNT_ID` in `TARGET_REGION`;
-- tagged for the exact `<project>-<region>` EKS cluster; and
+- tagged for the exact `<project>-<region>` [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) cluster; and
 - tagged with the exact `gco.aws/gateway: gco-system/gco-gateway` ownership marker.
 
 Verified endpoints are cached for 60 seconds by default. `REGIONAL_ENDPOINT_CACHE_TTL_SECONDS=0` disables the cache; accepted values are 0–300 seconds. Resolution or ownership failures are never cached.
@@ -83,7 +83,7 @@ The regional proxy role needs:
 - `secretsmanager:GetSecretValue` and `secretsmanager:DescribeSecret` on the signing secret;
 - `ssm:GetParameter` on the exact `/<project>/alb-hostname-<region>` endpoint parameter and public backend-root trust parameter;
 - `elasticloadbalancing:DescribeLoadBalancers` and `elasticloadbalancing:DescribeTags` for ownership verification (these Describe APIs do not support resource-level scoping); and
-- Lambda VPC ENI permissions through `AWSLambdaVPCAccessExecutionRole` so it can reach the internal ALB.
+- Lambda [VPC](https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html) ENI permissions through `AWSLambdaVPCAccessExecutionRole` so it can reach the internal ALB.
 
 ## Dependencies
 

@@ -71,7 +71,7 @@ likely fine on the long tail.
 
 ## Adding a new model
 
-When the scaffolder breaks against a new Bedrock model — or when you
+When the scaffolder breaks against a new [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) model — or when you
 just want to add a model to the safety net — run the capture script
 once and commit the resulting JSON:
 

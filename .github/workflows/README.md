@@ -15,8 +15,8 @@ Run on every push to `main` and every pull request.
 
 | File | Badge | Description |
 |------|-------|-------------|
-| `unit-tests.yml` | Unit Tests | pytest with coverage (90% enforced floor; ~92% Python target), explicit offline accelerator catalog/NodePool/watch-list validation, BATS shell tests, CDK synth, config matrix, cdk-nag compliance, lockfile freshness, CLI smoke |
-| `inference-streaming-proxy.yml` | — | Native Node.js 24 tests for the inference streaming Lambda with 93% line/function/branch gates |
+| `unit-tests.yml` | Unit Tests | pytest with coverage (90% enforced floor; ~92% Python target), explicit offline accelerator catalog/NodePool/watch-list validation, BATS shell tests, [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) synth, config matrix, cdk-nag compliance, lockfile freshness, CLI smoke |
+| `inference-streaming-proxy.yml` | — | Native Node.js 24 tests for the inference streaming [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) with 93% line/function/branch gates |
 | `integration-tests.yml` | Integration Tests | Dockerfile builds, kind cluster E2E with Calico and Metrics Server (4 service deployments, inference-proxy HPA `ScalingActive`, RBAC enforcement, NetworkPolicy blocking, ResourceQuota, PDB validation), K8s manifest validation, Lambda import checks, MCP server tests |
 | `security.yml` | Security | bandit, pip-audit, npm audit across every owned graph, trivy (filesystem + container), trufflehog, gitleaks, semgrep, checkov, KICS, CodeQL (Python + JavaScript) |
 | `lint.yml` | Linting | actionlint, hadolint, markdownlint, mypy (strict + stacks + lambda), ruff (format + check, imports included), shellcheck, yamllint |
@@ -28,7 +28,7 @@ Workflows outside the four badged gates above. Most are schedule- or dispatch-dr
 | File | Trigger | Description |
 |------|---------|-------------|
 | `release.yml` | `workflow_dispatch` | Bump version, tag, create GitHub Release with auto-generated notes |
-| `deps-scan.yml` | Monthly cron + manual | Check pinned dependencies, offline accelerator/NodePool policy, and online EC2 accelerator-catalog drift; update one rolling issue when findings exist |
+| `deps-scan.yml` | Monthly cron + manual | Check pinned dependencies, offline accelerator/NodePool policy, and online [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) accelerator-catalog drift; update one rolling issue when findings exist |
 | `cve-scan.yml` | Weekly cron + manual | Re-run trivy against current CVE databases |
 | `pages.yml` | `workflow_run` after Unit Tests on `main` | Publish the HTML coverage report + shields.io badge JSON to GitHub Pages. Split out of Unit Tests so a Pages outage can't fail the test gate |
 | `mooncake-image.yml` | `push`: `main`, PR, manual | Contract-test the real upstream Mooncake vLLM image GCO defaults to — proxy `/healthz`, store-config loader, KV-connector names. Not CVE-scanned (upstream image); version drift is caught by `deps-scan` |

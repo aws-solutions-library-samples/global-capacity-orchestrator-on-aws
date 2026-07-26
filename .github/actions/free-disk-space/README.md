@@ -1,7 +1,7 @@
 # Free Disk Space Action
 
 This composite action reclaims storage on GitHub-hosted Ubuntu runners before
-large dependency installs, coverage collection, and CDK synthesis.
+large dependency installs, coverage collection, and [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) synthesis.
 
 ## Table of Contents
 

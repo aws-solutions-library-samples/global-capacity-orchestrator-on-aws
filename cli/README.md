@@ -18,10 +18,10 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | `output.py` | Output formatting (table, JSON, YAML) |
 | `jobs.py` | Job submission, listing, logs, and lifecycle management |
 | `inference.py` | Inference endpoint deployment, scaling, canary, and invocation |
-| `models.py` | Model weight upload, listing, and S3 URI management |
+| `models.py` | Model weight upload, listing, and [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) URI management |
 | `storage.py` | Human-friendly GCO S3 bucket discovery and incremental download/upload sync |
-| `stacks.py` | CDK stack deployment, destruction, and status |
-| `costs.py` | Cost tracking via AWS Cost Explorer |
+| `stacks.py` | [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) stack deployment, destruction, and status |
+| `costs.py` | Cost tracking via AWS [Cost Explorer](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html) |
 | `dag.py` | DAG pipeline execution with dependency ordering |
 | `files.py` | EFS/FSx file listing and download |
 | `nodepools.py` | Nodepool inspection and management |
@@ -55,7 +55,7 @@ GPU capacity checking, region recommendation, and AI-powered advisory.
 | File | Description |
 |------|-------------|
 | `checker.py` | Spot placement scores, pricing, and availability checks |
-| `advisor.py` | AI-powered capacity recommendations via Amazon Bedrock |
+| `advisor.py` | AI-powered capacity recommendations via Amazon [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) |
 | `models.py` | Data models for capacity responses |
 | `multi_region.py` | Cross-region capacity aggregation and comparison |
 
@@ -79,7 +79,7 @@ under [`diagrams/code_diagrams/cli/`](../diagrams/code_diagrams/README.md).
 |----------|-----------|
 | `JobManager.submit_job` (direct `kubectl apply` path) | [HTML](../diagrams/code_diagrams/cli/jobs.JobManager_submit_job.html) · [PNG](../diagrams/code_diagrams/cli/jobs.JobManager_submit_job.png) |
 | `JobManager.submit_job_sqs` (SQS-backed submission) | [HTML](../diagrams/code_diagrams/cli/jobs.JobManager_submit_job_sqs.html) · [PNG](../diagrams/code_diagrams/cli/jobs.JobManager_submit_job_sqs.png) |
-| `srp_authenticate` (Cognito SRP auth for Studio login) | [HTML](../diagrams/code_diagrams/cli/analytics_user_mgmt.srp_authenticate.html) · [PNG](../diagrams/code_diagrams/cli/analytics_user_mgmt.srp_authenticate.png) |
+| `srp_authenticate` ([Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/what-is-amazon-cognito.html) SRP auth for Studio login) | [HTML](../diagrams/code_diagrams/cli/analytics_user_mgmt.srp_authenticate.html) · [PNG](../diagrams/code_diagrams/cli/analytics_user_mgmt.srp_authenticate.png) |
 | `fetch_studio_url` (`/studio/login` presigned-URL poll) | [HTML](../diagrams/code_diagrams/cli/analytics_user_mgmt.fetch_studio_url.html) · [PNG](../diagrams/code_diagrams/cli/analytics_user_mgmt.fetch_studio_url.png) |
 
 Regenerate with `python diagrams/code_diagrams/generate.py` after

@@ -2,7 +2,7 @@
 
 Some MCP tools are disabled by default and gated behind environment-variable feature flags — see [Feature Flags](#feature-flags) before enabling deploys, destroys, capacity purchases, model uploads, image publishes, local filesystem writes, or destructive operations.
 
-An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestrator (GCO) CLI as tools for LLM interaction. This lets you manage your multi-region EKS infrastructure through natural language in an AI-powered IDE with MCP support like [Kiro](https://kiro.dev).
+An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestrator (GCO) CLI as tools for LLM interaction. This lets you manage your multi-region [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) infrastructure through natural language in an AI-powered IDE with MCP support like [Kiro](https://kiro.dev).
 
 ## Table of Contents
 
@@ -125,13 +125,13 @@ The MCP server exposes 125 tools by default (up to 165 with all flags enabled) a
 
 The quickest way to *run* the server — no clone, no manual dependency install — is [`uv`](https://docs.astral.sh/uv/). Install it once with the [official uv installation guide](https://docs.astral.sh/uv/getting-started/installation/) (`uvx` ships with `uv`), then jump to [Install with `uv` (recommended)](#install-with-uv-recommended) below; `uv` resolves the pinned GCO dependencies into an isolated environment for you.
 
-For **development** — or when you need the local-clone-only resources (`docs://`, `source://`, `k8s://`, `infra://`, …) and CDK/stack lifecycle operations — work from a checkout instead. The GCO [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container) is the smoothest path here: it ships the `gco` CLI and the `.[dev,mcp]` extras (including `fastmcp` **and** the `[cdk]` CDK toolchain, plus the Node CDK CLI, `kubectl`, Docker + Buildx, and the AWS CLI) pre-installed at the right versions, so you only point your MCP client at `python3 gco_mcp/run_mcp.py` running inside the container. This sidesteps the dependency-resolver issues that often hit users layering the many pinned GCO packages onto an existing Python environment.
+For **development** — or when you need the local-clone-only resources (`docs://`, `source://`, `k8s://`, `infra://`, …) and CDK/stack lifecycle operations — work from a checkout instead. The GCO [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container) is the smoothest path here: it ships the `gco` CLI and the `.[dev,mcp]` extras (including `fastmcp` **and** the `[cdk]` [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) toolchain, plus the Node CDK CLI, `kubectl`, Docker + Buildx, and the AWS CLI) pre-installed at the right versions, so you only point your MCP client at `python3 gco_mcp/run_mcp.py` running inside the container. This sidesteps the dependency-resolver issues that often hit users layering the many pinned GCO packages onto an existing Python environment.
 
 To set up that clone on your host instead:
 
 - Python 3.14+
 - GCO CLI installed (`pipx install -e .` from the project root)
-- AWS credentials configured (the CLI handles SigV4 auth)
+- AWS credentials configured (the CLI handles [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html) auth)
 - Dependencies installed from the project root, in a fresh venv if possible:
   - `pip install -e ".[mcp]"` for the base tool surface (jobs, capacity, costs, inference, …).
   - `pip install -e ".[cdk,mcp]"` if you also want the CDK/stack lifecycle tools (`deploy_*`, `destroy_*`, `bootstrap_cdk`, `stack_synth`/`diff`/`list`). The `[cdk]` extra pulls `aws-cdk-lib` + `cdk-nag`; without it those tools fail fast with an actionable error. See [Deploy-capable setup](#deploy-capable-setup-infrastructure-tools).
@@ -225,9 +225,9 @@ The `deploy_*`, `destroy_*`, `bootstrap_cdk`, and `stack_synth`/`diff`/`list` to
 
 **Option 3 — `pip`, from a clone.** In a fresh venv at the repo root run `pip install -e ".[cdk,mcp]"`, then point the client at `python3 gco_mcp/run_mcp.py` (add `cwd` on Kiro).
 
-All three also need the non-Python tooling the CDK drives: **Node.js + the AWS CDK CLI** (`cdk`), **`kubectl`**, a **container runtime** (Docker/Finch/Podman, plus Buildx for image builds and CDK Lambda bundling), and the **AWS CLI** with credentials configured. The dev container ships all of these; on a host, install them yourself.
+All three also need the non-Python tooling the CDK drives: **Node.js + the AWS CDK CLI** (`cdk`), **`kubectl`**, a **container runtime** (Docker/Finch/Podman, plus Buildx for image builds and CDK [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) bundling), and the **AWS CLI** with credentials configured. The dev container ships all of these; on a host, install them yourself.
 
-> **Optional metric-file formats.** Reading Parquet or TensorBoard `tfevents` metric files (via `metrics_from_shared_storage_file` / `metrics_from_local_file`) needs extra libraries, added the same way: `.[metrics-parquet]` (pandas + pyarrow), `.[metrics-tfevents]` (tbparse + tensorboard), or `.[metrics]` for both — e.g. `pip install -e ".[cdk,metrics,mcp]"`, or `gco-cli[cdk,metrics] @ git+…@v3.13.3` for the `uvx` form. Every other metric source (CloudWatch, job logs, and JSON/CSV/JSONL/YAML/HF-Trainer-state files) works without them.
+> **Optional metric-file formats.** Reading Parquet or TensorBoard `tfevents` metric files (via `metrics_from_shared_storage_file` / `metrics_from_local_file`) needs extra libraries, added the same way: `.[metrics-parquet]` (pandas + pyarrow), `.[metrics-tfevents]` (tbparse + tensorboard), or `.[metrics]` for both — e.g. `pip install -e ".[cdk,metrics,mcp]"`, or `gco-cli[cdk,metrics] @ git+…@v3.13.3` for the `uvx` form. Every other metric source ([CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html), job logs, and JSON/CSV/JSONL/YAML/HF-Trainer-state files) works without them.
 
 ### Kiro
 
@@ -436,15 +436,15 @@ A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, de
 | Flag | Default | Tools Gated | Why It's Gated |
 |------|---------|-------------|----------------|
 | `GCO_ENABLE_ALL_TOOLS` | `false` | All flagged tools below | Umbrella switch. Setting this to `true` enables every gated tool at once and overrides any per-flag value (even per-flag values explicitly set to `false`). Use sparingly — prefer per-flag opt-in for production clients. |
-| `GCO_ENABLE_CAPACITY_PURCHASE` | `false` | `reserve_capacity`, `create_reservation` | Reserve capacity that incurs AWS charges — either purchasing a fixed-term Capacity Block (`reserve_capacity`, not cancellable once committed) or creating an On-Demand Capacity Reservation (`create_reservation`, billed until cancelled via `cancel_reservation`). |
+| `GCO_ENABLE_CAPACITY_PURCHASE` | `false` | `reserve_capacity`, `create_reservation` | Reserve capacity that incurs AWS charges — either purchasing a fixed-term [Capacity Block](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html) (`reserve_capacity`, not cancellable once committed) or creating an [On-Demand Capacity Reservation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-reservations.html) (`create_reservation`, billed until cancelled via `cancel_reservation`). |
 | `GCO_ENABLE_MODEL_UPLOAD` | `false` | `models_upload`, `upload_to_regional_bucket` | Uploads local model data to central or regional S3. Both tools require a source confined beneath `GCO_STORAGE_LOCAL_ROOT` and build a private descriptor-backed snapshot that rejects symlinks, special files, cross-filesystem entries, and pre-existing hard links; transfers can be many GB and incur network and storage costs. |
 | `GCO_ENABLE_IMAGE_PUBLISH` | `false` | `images_build`, `images_push`, `images_mirror` | Builds, publishes, and mirrors container images to ECR. `images_build` / `images_push` run a long-running build (FastMCP background task) and push binaries that get replicated across every deployed region; `images_mirror` copies third-party images (Volcano's docker.io images) into the project's `gco/*` ECR. |
-| `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` | `false` | `deploy_stack`, `deploy_all`, `bootstrap_cdk`, `addons_install` | Creates or updates CloudFormation stacks or starts Helm add-on re-convergence. A full `deploy_all` runs 30-60 minutes wall-clock and can provision EKS clusters, NodePools, and storage that incur ongoing charges. |
+| `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` | `false` | `deploy_stack`, `deploy_all`, `bootstrap_cdk`, `addons_install` | Creates or updates [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) stacks or starts Helm add-on re-convergence. A full `deploy_all` runs 30-60 minutes wall-clock and can provision EKS clusters, NodePools, and storage that incur ongoing charges. |
 | `GCO_ENABLE_INFRASTRUCTURE_DESTROY` | `false` | `destroy_stack`, `destroy_all` | Tears down CloudFormation stacks. Cancellation mid-flight can leave partial state behind that has to be cleaned up by hand. |
 | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` | `false` | `delete_job`, `delete_inference`, `delete_template`, `delete_webhook`, `delete_model`, `delete_nodepool`, `analytics_user_remove`, `monitoring_user_remove`, `cancel_queue_job`, `cancel_reservation`, `images_cleanup`, `images_prune`, `images_delete_tag`, `images_delete_repo`, `task_prune` | Delete operations are irreversible — once data, jobs, models, images, capacity reservations, or local task history are removed they can't be recovered without a backup. |
 | `GCO_ENABLE_MISSION` | `false` | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list` | Runs an autonomous goal-directed loop that can call any tool in its allowlist. Gated to prevent unattended autonomous execution. |
 | `GCO_ENABLE_LOCAL_METRICS` | `false` | `metrics_from_local_file` | Reads a metric file from the MCP host beneath `GCO_METRICS_LOCAL_ROOT`; disabled by default to prevent unintended host-file access. |
-| `GCO_ENABLE_LOCAL_STORAGE_SYNC` | `false` | `sync_storage_bucket` | Reads from or writes to the MCP host and can upload objects to S3. A large or unintended sync can consume local disk or S3 storage and network capacity, so the operator must opt in and confine local paths with `GCO_STORAGE_LOCAL_ROOT`. |
+| `GCO_ENABLE_LOCAL_STORAGE_SYNC` | `false` | `sync_storage_bucket` | Reads from or writes to the MCP host and can upload objects to S3. A large or unintended sync can consume local disk or [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) storage and network capacity, so the operator must opt in and confine local paths with `GCO_STORAGE_LOCAL_ROOT`. |
 | `GCO_ENABLE_SEMANTIC_PROGRESS` | `false` | `metrics_semantic_progress` | Invokes an LLM-as-judge progress scorer, which can incur model-call cost and sends the supplied scoring inputs to the configured model. |
 
 ### Enabling a Flag
@@ -590,8 +590,8 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
 | `list_jobs` | List jobs across GCO clusters (all regions or specific) | safe | — |
-| `submit_job_sqs` | Submit a job via SQS queue (recommended for production) | low-risk | — |
-| `submit_job_api` | Submit a job via API Gateway with SigV4 auth | low-risk | — |
+| `submit_job_sqs` | Submit a job via [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) queue (recommended for production) | low-risk | — |
+| `submit_job_api` | Submit a job via [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) with SigV4 auth | low-risk | — |
 | `get_job` | Get details of a specific job | safe | — |
 | `get_job_logs` | Get logs from a job | safe | — |
 | `get_job_events` | Get Kubernetes events for a job (debugging) | safe | — |
@@ -618,12 +618,12 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
 | `check_capacity` | Check spot and on-demand capacity for an instance type | safe | — |
-| `instance_info` | Get hardware and pricing metadata for an EC2 instance type | safe | — |
+| `instance_info` | Get hardware and pricing metadata for an [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) instance type | safe | — |
 | `recommend_capacity` | Recommend spot or on-demand capacity from interruption tolerance | safe | — |
 | `capacity_status` | View capacity across all deployed regions | safe | — |
 | `recommend_region` | Get optimal region recommendation (supports instance-type-aware weighted scoring) | safe | — |
 | `spot_prices` | Get current spot prices for an instance type | safe | — |
-| `ai_recommend` | Get AI-powered capacity recommendation using Amazon Bedrock | safe | — |
+| `ai_recommend` | Get AI-powered capacity recommendation using Amazon [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) | safe | — |
 | `list_reservations` | List On-Demand Capacity Reservations (ODCRs) across regions | safe | — |
 | `reservation_check` | Check reservation availability and Capacity Block offerings | safe | — |
 | `find_capacity_blocks` | Search Capacity Block offerings across regions, durations, and a start-date window | safe | — |
@@ -680,10 +680,10 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `stack_diff` | Show CloudFormation diff for a stack | safe | — |
 | `stack_outputs` | Fetch CloudFormation outputs for a stack | safe | — |
 | `stack_synth` | Synthesize CloudFormation templates from CDK | safe | — |
-| `addons_status` | Show per-chart Helm add-on status from SSM | safe | — |
+| `addons_status` | Show per-chart Helm add-on status from [SSM](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html) | safe | — |
 | `valkey_status` | Show Valkey cache stack status | safe | — |
-| `aurora_status` | Show Aurora database stack status | safe | — |
-| `fsx_status` | Check FSx for Lustre configuration | safe | — |
+| `aurora_status` | Show [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html) database stack status | safe | — |
+| `fsx_status` | Check [FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) configuration | safe | — |
 | `setup_cluster_access` | Configure kubectl access to a GCO EKS cluster | low-risk | — |
 | `enable_fsx` / `disable_fsx` | Toggle FSx Lustre in `cdk.json` (apply with `gco stacks deploy-all`) | low-risk | — |
 | `enable_valkey` / `disable_valkey` | Toggle Valkey Serverless in `cdk.json` | low-risk | — |
@@ -699,7 +699,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
-| `list_storage_contents` | List contents of shared EFS storage | safe | — |
+| `list_storage_contents` | List contents of shared [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html) storage | safe | — |
 | `list_file_systems` | List EFS and FSx file systems | safe | — |
 | `list_storage_buckets` | Discover user-facing GCO S3 buckets and their stable aliases | safe | — |
 | `files_get` | Get EFS or FSx file-system details for a region | safe | — |
@@ -783,7 +783,7 @@ download, allows up to one hour for the CLI subprocess, and sends SIGTERM on
 cancellation. The CLI converts that signal into cooperative transfer
 cancellation and gets a grace period to unwind managed multipart work before
 MCP escalates to a kill. The MCP server's AWS identity needs the SSM,
-CloudFormation, S3, and (for SSE-KMS objects) KMS permissions documented in
+CloudFormation, S3, and (for SSE-KMS objects) [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) permissions documented in
 [`gco storage sync`](../docs/CLI.md#gco-storage-sync). Neither direction
 requires `s3:DeleteObject`, and upload does not require `s3:ListBucket`.
 
@@ -884,7 +884,7 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
-| `images_list` | List every `gco/*` repository in ECR | safe | — |
+| `images_list` | List every `gco/*` repository in [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) | safe | — |
 | `images_tags` | List tags within a repository | safe | — |
 | `images_describe` | Full ECR details for a single image tag | safe | — |
 | `images_uri` | Return the registry URI for an image | safe | — |
@@ -954,7 +954,7 @@ The synthetic `read_resource` tool (added by FastMCP's Resources As Tools transf
 |----------------------|-------------|-----------|----------|
 | `read_resource` (synthetic) | Read any MCP resource by URI — entry point for tool-only clients | safe | — |
 | `gco://jobs/{region}/{job_name}` | Live YAML for a Kubernetes job in an explicit regional EKS cluster | safe | — |
-| `gco://inference/{endpoint_name}` | Inference endpoint record from the DynamoDB store | safe | — |
+| `gco://inference/{endpoint_name}` | Inference endpoint record from the [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html) store | safe | — |
 | `gco://k8s/{region}/{namespace}/{kind}/{name}` | Live YAML for any resource in an explicit regional EKS cluster | safe | — |
 | `gco://cluster/{region}/topology` | NodePools plus pending pods for a region | safe | — |
 | `costs://gco/summary/{days_window}` | Cost summary scoped to the named positive day window | safe | — |
@@ -995,7 +995,7 @@ Beyond tools, the MCP server exposes documentation, source code, examples, and o
 
 | Resource | Description |
 |----------|-------------|
-| `iam://gco/policies/index` | List IAM policy templates |
+| `iam://gco/policies/index` | List [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) policy templates |
 | `iam://gco/policies/{filename}` | Read a policy template (full-access, read-only, namespace-restricted) |
 
 ### Infrastructure (`infra://`)

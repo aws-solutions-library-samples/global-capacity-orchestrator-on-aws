@@ -1,6 +1,6 @@
 # Backend TLS Certificate Manager
 
-Creates and rotates the deployment-local private certificate authority (CA) and the regional AWS Certificate Manager (ACM) certificates used by GCO's HTTPS-only backend path. The function runs as a container-image Lambda and is invoked both by a CloudFormation custom resource and an EventBridge schedule.
+Creates and rotates the deployment-local private certificate authority (CA) and the regional AWS Certificate Manager (ACM) certificates used by GCO's HTTPS-only backend path. The function runs as a container-image [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) and is invoked both by a [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) custom resource and an [EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-what-is.html) schedule.
 
 ## Table of Contents
 
@@ -27,11 +27,11 @@ Creates and rotates the deployment-local private certificate authority (CA) and 
 The manager:
 
 1. Bootstraps an ECDSA P-256 root CA for one GCO deployment.
-2. Stores root state only in a customer-managed-KMS-encrypted Secrets Manager secret.
-3. Publishes a public-only root trust bundle to the project's SSM namespace.
+2. Stores root state only in a customer-managed-KMS-encrypted [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html) secret.
+3. Publishes a public-only root trust bundle to the project's [SSM](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html) namespace.
 4. Issues a unique short-lived ECDSA leaf certificate for every configured workload region.
 5. Imports each leaf into ACM in its target region and records the ARN in global-region SSM.
-6. Reimports renewed leaves into the existing ACM ARN so ALB certificate associations remain stable.
+6. Reimports renewed leaves into the existing ACM ARN so [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) certificate associations remain stable.
 7. Stages root rollover so clients receive the next public root before any leaf starts using it.
 8. Emits root and leaf expiry metrics for operational alarms.
 9. Persists regions removed by an Update until their certificates and public
@@ -44,7 +44,7 @@ The manager:
 
 ### Create and Update
 
-The CDK provider invokes `lambda_handler` with a CloudFormation `Create` or `Update` event. The handler validates every region, namespace, lifetime, and certificate identity before it mutates state. It then creates or loads the root, publishes the trust bundle, and ensures every regional ACM certificate exists and is current.
+The [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) provider invokes `lambda_handler` with a CloudFormation `Create` or `Update` event. The handler validates every region, namespace, lifetime, and certificate identity before it mutates state. It then creates or loads the root, publishes the trust bundle, and ensures every regional ACM certificate exists and is current.
 
 The custom resource uses a stable physical ID. Updating lifecycle policy therefore reconciles the existing PKI rather than replacing it. When `Regions` removes a workload region, the manager records that retirement in the encrypted root state before cleanup. If ACM reports that an ALB listener still uses the leaf, the public ARN parameter remains intact and scheduled reconciliation retries after listener teardown.
 
@@ -67,7 +67,7 @@ This prevents a leaf/root cutover from outrunning cached client trust. The overl
 
 ### Delete
 
-On a CloudFormation `Delete`, the manager deletes certificates and SSM ARN parameters for both the current `Regions` property and every persisted retired region, then deletes the public trust parameter. Regional stacks depend on the owning API stack, so their ALB listeners are removed before certificate cleanup. An unexpected `ResourceInUseException` fails Delete rather than abandoning an ARN with no future scheduler. The root secret and KMS key follow the removal policies defined by the CDK stack rather than being deleted directly by this handler.
+On a CloudFormation `Delete`, the manager deletes certificates and SSM ARN parameters for both the current `Regions` property and every persisted retired region, then deletes the public trust parameter. Regional stacks depend on the owning API stack, so their ALB listeners are removed before certificate cleanup. An unexpected `ResourceInUseException` fails Delete rather than abandoning an ARN with no future scheduler. The root secret and [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) key follow the removal policies defined by the CDK stack rather than being deleted directly by this handler.
 
 ## Security Model
 
@@ -91,7 +91,7 @@ Every regional leaf represents one stable private identity:
 backend.<project>.gco.internal
 ```
 
-Clients connect to dynamic Global Accelerator or internal-ALB DNS names but explicitly send and verify this identity through TLS SNI and hostname assertion. No public domain registration or public CA is required.
+Clients connect to dynamic [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) or internal-ALB DNS names but explicitly send and verify this identity through TLS SNI and hostname assertion. No public domain registration or public CA is required.
 
 ## Configuration
 
@@ -151,7 +151,7 @@ The SSM trust bundle may contain multiple public roots during staged rollover. I
 
 ## Metrics and Alarms
 
-The function publishes to the `GCO/BackendTLS` CloudWatch namespace:
+The function publishes to the `GCO/BackendTLS` [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) namespace:
 
 - `ReconciliationSuccess`, dimensioned by project. A missing heartbeat for two schedule intervals alarms even when EventBridge is disabled or no Lambda error metric is emitted.
 - `RootCertificateDaysToExpiry`, dimensioned by project.
@@ -168,9 +168,9 @@ The execution role is scoped for:
 - Reading, publishing, and deleting the project's backend-TLS SSM parameters.
 - Importing, reading, tagging, and deleting managed ACM certificates in configured regions.
 - Publishing `GCO/BackendTLS` CloudWatch metrics.
-- Writing Lambda logs and X-Ray traces.
+- Writing Lambda logs and [X-Ray](https://docs.aws.amazon.com/xray/latest/devguide/aws-xray.html) traces.
 
-Proxy roles cannot read the root secret or use its KMS key; they can read only the public trust parameter. The aggregator cannot read either root state or public private-root trust because its regional API Gateway hop uses the AWS-managed TLS chain.
+Proxy roles cannot read the root secret or use its KMS key; they can read only the public trust parameter. The aggregator cannot read either root state or public private-root trust because its regional [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) hop uses the AWS-managed TLS chain.
 
 ## Packaging
 

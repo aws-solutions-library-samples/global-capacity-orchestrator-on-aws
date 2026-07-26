@@ -25,7 +25,7 @@ BedrockCapacityAdvisor (AI-powered natural language recommendations)
 
 | File | Description |
 |------|-------------|
-| `checker.py` | Single-region capacity checker. Queries EC2 spot placement scores, spot price history, on-demand availability, instance type specs, and Capacity Block offerings. Also manages reserved capacity end to end: On-Demand Capacity Reservations (list/find/create/cancel, with parallel multi-region search and On-Demand pricing) and Capacity Blocks (search/purchase). |
+| `checker.py` | Single-region capacity checker. Queries [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) spot placement scores, spot price history, on-demand availability, instance type specs, and Capacity Block offerings. Also manages reserved capacity end to end: On-Demand Capacity Reservations (list/find/create/cancel, with parallel multi-region search and On-Demand pricing) and [Capacity Blocks](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html) (search/purchase). |
 | `blocks.py` | Pure primitives shared by the reserved-capacity flows: Capacity Block duration math, instance-type alias normalization, per-hour / per-GPU-hour pricing (offerings and ODCRs), and offering/reservation de-dup, sort, and rank helpers. |
 | `multi_region.py` | Cross-region aggregation. Queries all deployed regions in parallel, computes weighted scores (spot score, price trend, queue depth, GPU utilization), and ranks regions. |
 | `advisor.py` | AI-powered recommendations via Amazon Bedrock. Gathers capacity data from all regions and sends it to an LLM for analysis with workload-specific context. |
@@ -47,4 +47,4 @@ When you run `gco capacity recommend-region -i g5.xlarge`:
 1. Add the data collection to `checker.py` (e.g. a new AWS API call)
 2. Include it in the `CapacityEstimate` model in `models.py`
 3. Add normalization and weighting in `multi_region.py`'s `compute_weighted_score()`
-4. Update the Bedrock prompt in `advisor.py` if the signal should influence AI recommendations
+4. Update the [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) prompt in `advisor.py` if the signal should influence AI recommendations

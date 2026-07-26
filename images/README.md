@@ -23,7 +23,7 @@ Screenshots demonstrating the GCO MCP server integration with Kiro. Tool counts 
 | Image | Description |
 |-------|-------------|
 | [gco_mcp_kiro.png](gco_mcp_kiro.png) | GCO MCP server connected in Kiro |
-| [gco_mcp_list_stacks.png](gco_mcp_list_stacks.png) | Listing deployed CDK stacks via natural language |
+| [gco_mcp_list_stacks.png](gco_mcp_list_stacks.png) | Listing deployed [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) stacks via natural language |
 | [gco_mcp_check_capacity.png](gco_mcp_check_capacity.png) | Checking GPU capacity for g5.xlarge in us-east-1 |
 | [gco_mcp_calculating_pi.png](gco_mcp_calculating_pi.png) | Using the MCP server to write a PI calculation manifest, run it on available capacity, and print the logs |
 | [pi_calculation_manifest.png](pi_calculation_manifest.png) | The PI calculation Kubernetes Job manifest |
@@ -32,7 +32,7 @@ Screenshots demonstrating the GCO MCP server integration with Kiro. Tool counts 
 
 ## SageMaker Studio Screenshots
 
-Screenshots of the GCO analytics environment running in SageMaker Studio.
+Screenshots of the GCO analytics environment running in [SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/whatis.html) Studio.
 
 | Image | Description |
 |-------|-------------|
@@ -40,6 +40,6 @@ Screenshots of the GCO analytics environment running in SageMaker Studio.
 | [sagemaker_studio_jupyterlab_app.png](sagemaker_studio_jupyterlab_app.png) | JupyterLab app running inside a Studio space |
 | [sagemaker_studio_jupyterlab_landing_page.png](sagemaker_studio_jupyterlab_landing_page.png) | JupyterLab landing page with file browser and launcher |
 | [sagemaker_studio_cloning_gco_in_jupyter.png](sagemaker_studio_cloning_gco_in_jupyter.png) | Cloning the GCO repository from a JupyterLab terminal |
-| [sagemaker_studio_emr_serverless.png](sagemaker_studio_emr_serverless.png) | EMR Serverless application visible from the Studio Data panel |
+| [sagemaker_studio_emr_serverless.png](sagemaker_studio_emr_serverless.png) | [EMR Serverless](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/emr-serverless.html) application visible from the Studio Data panel |
 | [sagemaker_studio_canvas_data_wrangler.png](sagemaker_studio_canvas_data_wrangler.png) | SageMaker Canvas Data Wrangler when the `canvas` sub-toggle is enabled |
 | [sagemaker_studio_mlflow.png](sagemaker_studio_mlflow.png) | SageMaker Studio MLflow application visible from the MLflow panel |

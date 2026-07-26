@@ -1,6 +1,6 @@
 # Proxy Shared
 
-Shared utility library used by the `api-gateway-proxy` and `regional-api-proxy` Lambda functions. Not deployed as a standalone Lambda.
+Shared utility library used by the `api-gateway-proxy` and `regional-api-proxy` [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) functions. Not deployed as a standalone Lambda.
 
 ## Table of Contents
 
@@ -19,14 +19,14 @@ Shared utility library used by the `api-gateway-proxy` and `regional-api-proxy` 
 
 ### `get_secret_token()`
 
-Retrieves the backend HMAC signing key from Secrets Manager through a
+Retrieves the backend HMAC signing key from [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html) through a
 thread-safe cache. Normal entries refresh after five minutes; refresh failures
 may use a bounded stale key for at most fifteen minutes, with retry throttling.
 The key is used only to sign requests and is never transmitted.
 
 ### `sanitize_request_headers(headers)`
 
-Applies a case-insensitive allowlist at the API Gateway trust boundary. Caller
+Applies a case-insensitive allowlist at the [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) trust boundary. Caller
 supplied authorization, forwarding, hop-by-hop, and internal signature headers
 are not forwarded.
 
