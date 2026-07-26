@@ -79,7 +79,7 @@ Each Region is independent. In `aws`, Global Accelerator routes new requests awa
 
 ### EKS Auto Mode
 
-EKS Auto Mode is AWS's fully managed Kubernetes compute. Unlike traditional EKS where you manage node groups, Auto Mode:
+[EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) is AWS's fully managed Kubernetes compute. Unlike traditional EKS where you manage node groups, Auto Mode:
 
 - **Automatically provisions nodes** when pods are pending
 - **Scales workload capacity down** when demand disappears, subject to NodePool and system-workload constraints
@@ -137,7 +137,7 @@ spec:
 
 ### Global Routing
 
-AWS Global Accelerator is the backend regional-routing layer behind the global workload API in the commercial `aws` partition:
+[AWS Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) is the backend regional-routing layer behind the global workload API in the commercial `aws` partition:
 
 1. A user sends a SigV4-signed request to the global API Gateway
 2. The proxy Lambda adds a request-bound HMAC envelope
