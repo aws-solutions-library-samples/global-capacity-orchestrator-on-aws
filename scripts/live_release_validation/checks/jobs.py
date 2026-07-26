@@ -6,7 +6,6 @@ import copy
 import hashlib
 import re
 import time
-from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote
 
@@ -15,6 +14,7 @@ from ..constants import (
     _CENTRAL_ORIGINAL_NAME_ANNOTATION,
     _CENTRAL_QUEUE_ID_ANNOTATION,
     _CENTRAL_QUEUE_KEY_LABEL,
+    _MANIFEST_DIR,
     _PATH_JOB_LABEL,
     _RUN_JOB_LABEL,
 )
@@ -43,7 +43,10 @@ def _replace_token(value: Any, token: str) -> Any:
 
 
 def _load_manifest(ctx: RunContext, filename: str) -> tuple[list[dict[str, Any]], str, str]:
-    path = Path(__file__).with_name("manifests") / filename
+    # _MANIFEST_DIR is anchored at the package root by constants.py; never
+    # resolve manifests relative to this module's __file__ (that is exactly
+    # what failed in run retry1-8002d6c80f62 when this helper moved here).
+    path = _MANIFEST_DIR / filename
     manifests = ctx.job_manager.load_manifests(str(path))
     manifests = _replace_token(manifests, _run_token(ctx.settings.run_id))
     job = next(item for item in manifests if item.get("kind") == "Job")

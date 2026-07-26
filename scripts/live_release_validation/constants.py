@@ -4,7 +4,17 @@ from __future__ import annotations
 
 import copy
 import uuid
+from pathlib import Path
 from typing import Any
+
+# Anchored to this module, which lives at the package root, so the directory
+# stays correct no matter where the consuming module sits in the package.
+# Resolving it relative to a consumer's own __file__ is what broke the job
+# actions when _load_manifest moved into checks/ (run retry1-8002d6c80f62);
+# tests/test_live_release_validation.py::TestManifestPathResolution pins this
+# to the real directory.
+_MANIFEST_DIR = Path(__file__).resolve().with_name("manifests")
+
 
 _TERMINAL_QUEUE_STATUSES = {"succeeded", "failed", "cancelled"}
 

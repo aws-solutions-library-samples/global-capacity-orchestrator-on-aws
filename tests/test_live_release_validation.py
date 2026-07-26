@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import stat
 import threading
 import uuid
@@ -22,6 +23,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from botocore.exceptions import ClientError
 
+from cli.jobs import JobManager
 from scripts.live_release_validation import (
     constants,
     context,
@@ -3847,3 +3849,62 @@ class TestLocalRunbookContracts:
             "$RUNNER_TEMP",
         ):
             assert forbidden not in runbook
+
+
+_MANIFEST_REFERENCE = re.compile(r'_load_manifest\(\s*\w+\s*,\s*"([^"]+)"\s*\)')
+
+
+class TestManifestPathResolution:
+    """Regression guards for run ``retry1-8002d6c80f62``'s ``api`` failure.
+
+    ``_load_manifest`` resolved ``manifests/`` relative to its own module file
+    (``Path(__file__).with_name("manifests")``). The modularization moved the
+    helper from the package root into ``checks/``, so byte-identical code
+    silently pointed at ``checks/manifests/`` — which does not exist — and
+    every job-path action died with ``FileNotFoundError`` at runtime, after
+    deploy had already run for ~100 minutes. These tests drive the loader's
+    real path construction offline (no AWS access) so a module move can never
+    ship that failure again.
+    """
+
+    @staticmethod
+    def _offline_context() -> SimpleNamespace:
+        # __init__ builds config + AWS clients, but load_manifests reads no
+        # constructor state, so __new__ yields the real production method
+        # without touching the network.
+        manager = JobManager.__new__(JobManager)
+        return SimpleNamespace(
+            job_manager=manager,
+            settings=SimpleNamespace(run_id="regression-check-1"),
+        )
+
+    def test_load_manifest_resolves_every_manifest_on_disk(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        manifest_dir = root / "scripts/live_release_validation/manifests"
+        manifest_names = sorted(item.name for item in manifest_dir.glob("*.yaml"))
+        assert manifest_names, "manifest fixtures moved; update the harness and this test"
+        ctx = self._offline_context()
+        for filename in manifest_names:
+            manifests, name, namespace = checks_jobs._load_manifest(ctx, filename)
+            job_documents = [item for item in manifests if item.get("kind") == "Job"]
+            assert job_documents, filename
+            assert "regression-check-1" in name, filename
+            assert namespace, filename
+
+    def test_manifest_dir_is_the_package_root_manifests_directory(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        expected = root / "scripts/live_release_validation/manifests"
+        assert expected == constants._MANIFEST_DIR
+        assert constants._MANIFEST_DIR.is_dir()
+
+    def test_every_manifest_referenced_by_the_package_exists(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        package = root / "scripts/live_release_validation"
+        referenced = {
+            match.group(1)
+            for source in sorted(package.rglob("*.py"))
+            for match in _MANIFEST_REFERENCE.finditer(source.read_text(encoding="utf-8"))
+        }
+        assert referenced, "no _load_manifest call sites found; update the scanner regex"
+        for filename in sorted(referenced):
+            assert (package / "manifests" / filename).is_file(), filename
