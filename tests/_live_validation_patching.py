@@ -28,9 +28,25 @@ _UNSET = object()
 
 
 def live_validation_modules() -> list[ModuleType]:
-    """Import and return every module in the live-validation package."""
+    """Import and return every module in the live-validation package.
+
+    Discovery is dynamic on purpose: hard-coding the module list would drift
+    the moment someone adds one, and a missed module means a patch silently
+    fails to cover the binding the code under test actually calls. Every name
+    comes from walking this one package's own ``__path__``, and the prefix
+    assertion below rejects anything that is not a submodule of it, so no
+    caller-supplied value can reach the import.
+    """
+    prefix = f"{_package.__name__}."
     modules: list[ModuleType] = [_package]
-    for info in pkgutil.walk_packages(_package.__path__, f"{_package.__name__}."):
+    for info in pkgutil.walk_packages(_package.__path__, prefix):
+        if not info.name.startswith(prefix):
+            raise AssertionError(
+                f"Refusing to import {info.name!r}: not a submodule of {_package.__name__}"
+            )
+        # The name is produced by walk_packages over this package's own
+        # __path__ and is prefix-asserted above; it is never user input.
+        # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
         modules.append(importlib.import_module(info.name))
     return modules
 

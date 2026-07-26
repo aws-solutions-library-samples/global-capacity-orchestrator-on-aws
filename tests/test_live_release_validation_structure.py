@@ -57,6 +57,13 @@ ALLOWED_LAYER_IMPORTS = {
     "inventory": {"inventory", "root"},
 }
 
+#: One action row of the runbook contract table, e.g.
+#: ``| `preflight` | None | Verify the clean Git checkout, ... |``. Capture 1 is
+#: the action name, capture 2 the dependency cell. Compiled at module level
+#: rather than calling ``re.match`` inline, which Python 3.15 soft-deprecates
+#: (see ``tests/test_no_python_315_deprecation_surface.py``).
+_RUNBOOK_ACTION_ROW = re.compile(r"^\|\s*`([a-z-]+)`\s*\|([^|]*)\|")
+
 #: Root modules that carry no layer of their own.
 ROOT_LAYER_MODULES = {
     "_shared",
@@ -93,7 +100,7 @@ def _runbook_action_rows() -> list[tuple[str, str]]:
     """Return ``(action, dependency-cell)`` rows from the runbook table."""
     rows = []
     for line in RUNBOOK.read_text(encoding="utf-8").splitlines():
-        match = re.match(r"^\|\s*`([a-z-]+)`\s*\|([^|]*)\|", line.strip())
+        match = _RUNBOOK_ACTION_ROW.match(line.strip())
         if match:
             rows.append((match.group(1), match.group(2).strip()))
     return rows

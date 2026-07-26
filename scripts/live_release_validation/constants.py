@@ -117,9 +117,33 @@ _LOG_GROUP_SOURCE_TYPES = {
 _EKS_LOG_GROUP_SUFFIXES = ("application", "dataplane", "host", "performance")
 
 
+# UUID version-5 namespaces. Both are arbitrary constants generated once and
+# then frozen: their only job is to seed `uuid.uuid5`, which hashes
+# (namespace, name) into a deterministic UUID. Using a private namespace rather
+# than hashing the name alone keeps these identifiers from colliding with any
+# other UUID this project or AWS derives from the same input string.
+#
+# Treat both values as immutable. Changing one silently changes every ID derived
+# from it, which for an in-flight or resumed run means the harness would compute
+# a different identifier for the same logical thing and lose the trail back to
+# what it already created.
+
+#: Namespace for central-queue Job IDs. ``_central_queue_job_id`` derives the
+#: DynamoDB queue Job ID as ``uuid5(this, idempotency_key)``, so the same
+#: idempotency key always produces the same Job ID. That is what makes the
+#: central-queue submission safely retryable: a resumed run recomputes the
+#: identical ID, finds its own existing queue record, and reconciles it instead
+#: of enqueueing a duplicate workload.
 _CENTRAL_QUEUE_IDEMPOTENCY_NAMESPACE = uuid.UUID("88284d12-1e04-47d5-8871-607a9e4dac09")
 
-
+#: Namespace for the delegated log-cleanup helper's identifiers, used twice:
+#: ``_log_cleanup_helper_spec`` derives the helper CloudFormation stack and IAM
+#: role name from ``uuid5(this, "<partition>:<account>:<run_id>:<cleanup_token>")``,
+#: and the tag-conditioned deleter derives its STS session name from
+#: ``uuid5(this, run_id)``. Deriving rather than randomizing means a resumed run
+#: recomputes the exact same helper stack, role, and session names, so it can
+#: find and delete the helper it created earlier instead of orphaning it — while
+#: still keeping those names unique per run and account.
 _LOG_CLEANUP_HELPER_NAMESPACE = uuid.UUID("83af5e0b-f987-4ca6-8bb6-aa174c57096c")
 
 

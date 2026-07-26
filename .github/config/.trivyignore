@@ -120,3 +120,30 @@ CVE-2026-39822 exp:2026-09-22
 # bump BUILDX_VERSION in Dockerfile.dev and remove this entry.
 # Advisory: https://github.com/advisories/GHSA-hrxh-6v49-42gf
 GHSA-hrxh-6v49-42gf exp:2026-09-22
+
+# CVE-2026-14257 (GHSA-mh99-v99m-4gvg) — brace-expansion denial of service via
+# unbounded expansion length, causing an out-of-memory process crash. Present in
+# the copy npm vendors inside its own node_modules
+# (usr/lib/node_modules/npm/node_modules/brace-expansion) in the dev image, so
+# it is surfaced only by security:trivy:container-scan on Dockerfile.dev. Fixed
+# upstream in brace-expansion 5.0.8.
+#
+# Not introduced by any change of ours: the advisory was published 2026-07-24
+# and reached the Trivy DB after the last green main run, so it appeared on an
+# unchanged dev image.
+#
+# Not clearable by a pin bump: npm 12.0.1 is the latest release (ARG
+# NPM_VERSION in Dockerfile.dev) and still bundles brace-expansion 5.0.7. The
+# bundled copy lives inside npm's published tarball, where neither
+# `npm audit fix` nor an `overrides` entry can reach it.
+#
+# Low runtime risk: the expansion path is reached through brace globs in npm's
+# own CLI argument handling, driven by the contributor or CI invocation rather
+# than untrusted remote input. The dev image is a contributor/CI tool and is
+# never deployed to a cluster.
+#
+# Clears when npm ships a release that re-vendors brace-expansion >= 5.0.8:
+# bump ARG NPM_VERSION in Dockerfile.dev (plus the packageManager pins the
+# consistency check holds in lockstep) and drop this entry.
+# Advisory: https://avd.aquasec.com/nvd/cve-2026-14257
+CVE-2026-14257 exp:2026-08-26
