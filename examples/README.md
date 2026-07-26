@@ -57,7 +57,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 | [FSx Lustre](#fsx-for-lustre-job) | `fsx-lustre-job.yaml` | Storage | — | [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) |
 | [GPU Job](#gpu-job) | `gpu-job.yaml` | Jobs | ✅ | — |
 | [GPU Time-Slicing](#gpu-time-slicing-job) | `gpu-timeslicing-job.yaml` | Jobs | ✅ | ConfigMap |
-| [Inferentia](#inferentia-job) | `inferentia-job.yaml` | Accelerator | [Inferentia](https://docs.aws.amazon.com/dlami/latest/devguide/inferentia.html) | — |
+| [Inferentia](#inferentia-job) | `inferentia-job.yaml` | Accelerator | [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/) | — |
 | [SGLang](#inference-frameworks) | `inference-sglang.yaml` | Inference | ✅ | — |
 | [TGI](#inference-frameworks) | `inference-tgi.yaml` | Inference | ✅ | — |
 | [TorchServe](#inference-frameworks) | `inference-torchserve.yaml` | Inference | ✅ | — |
@@ -75,7 +75,7 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 | [Simple Job](#simple-job) | `simple-job.yaml` | Jobs | — | — |
 | [Slurm](#slurm-cluster-job) | `slurm-cluster-job.yaml` | Scheduler | — | Slurm |
 | [SQS Submission](#sqs-job-submission) | `sqs-job-submission.yaml` | Jobs | Optional | — |
-| [Trainium](#trainium-job) | `trainium-job.yaml` | Accelerator | [Trainium](https://docs.aws.amazon.com/dlami/latest/devguide/trainium.html) | — |
+| [Trainium](#trainium-job) | `trainium-job.yaml` | Accelerator | [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/) | — |
 | [Valkey Cache](#valkey-cache-job) | `valkey-cache-job.yaml` | Caching | — | Valkey |
 | [Volcano Gang](#volcano-gang-scheduling) | `volcano-gang-job.yaml` | Scheduler | — | — |
 | [YuniKorn](#yunikorn-hierarchical-queues) | `yunikorn-job.yaml` | Scheduler | — | YuniKorn |

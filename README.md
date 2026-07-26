@@ -1,10 +1,10 @@
 <div align="center">
 
-<h1>Automated Deployment of [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) AutoMode Clusters with Global Capacity Orchestrator (GCO) on AWS</h1>
+<h1>Automated Deployment of EKS AutoMode Clusters with Global Capacity Orchestrator (GCO) on AWS</h1>
 
 <p><b><i>One API. Every Accelerator. Any Region.</i></b></p>
 
-<p>Multi-region accelerated-compute orchestration for AWS — NVIDIA GPUs, AWS [Trainium](https://docs.aws.amazon.com/dlami/latest/devguide/trainium.html), AWS [Inferentia](https://docs.aws.amazon.com/dlami/latest/devguide/inferentia.html), and CPU (amd64 + arm64 / Graviton) — with capacity-aware placement workflows, spot fallback, and autoscaling inference endpoints. Commercial <code>aws</code> deployments add automatic failover and latency-aware routing through one workload API; other partitions use IAM-authenticated regional workload APIs, all through the same CLI.</p>
+<p>Multi-region accelerated-compute orchestration for AWS — NVIDIA GPUs, AWS Trainium, AWS Inferentia, and CPU (amd64 + arm64 / Graviton) — with capacity-aware placement workflows, spot fallback, and autoscaling inference endpoints. Commercial <code>aws</code> deployments add automatic failover and latency-aware routing through one workload API; other partitions use IAM-authenticated regional workload APIs, all through the same CLI.</p>
 
 <!-- BEGIN BADGE TABLE -->
 <p>
@@ -47,7 +47,7 @@
 
 **What it does.** Spins up [EKS Auto Mode](docs/CONCEPTS.md#eks-auto-mode) clusters across any number of SDK-known [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) Regions in one AWS partition. In commercial `aws`, [Global Accelerator](docs/CONCEPTS.md#global-routing) provides latency-aware anycast routing and automatic failover behind the global workload API; other partitions use IAM-authenticated regional workload APIs while retaining the aggregate global API. Capacity tools and auto-region queue/CLI workflows can select a target Region, [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) provisions matching nodes, and shared storage can persist workload outputs. Network routing never substitutes for live GPU-capacity placement.
 
-**Who it's for.** Teams running accelerated workloads — LLM training and inference, batch ML, HPC, and general CPU jobs — that need multi-region redundancy, capacity discovery, and IAM-based access without per-cluster kubeconfig distribution. GCO includes the EKS Auto Mode `system` and `general-purpose` NodePools plus project-managed GPU x86, GPU ARM, inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html), Mooncake EFA, Neuron, and CPU NodePools.
+**Who it's for.** Teams running accelerated workloads — LLM training and inference, batch ML, HPC, and general CPU jobs — that need multi-region redundancy, capacity discovery, and IAM-based access without per-cluster kubeconfig distribution. GCO includes the [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) Auto Mode `system` and `general-purpose` NodePools plus project-managed GPU x86, GPU ARM, inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html), Mooncake EFA, Neuron, and CPU NodePools.
 
 **Why it's different.** Capacity-aware placement tools and auto-region workflows, partition-aware authenticated routing, full-stack observability ([CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) dashboards, alarms, [SNS](https://docs.aws.amazon.com/sns/latest/dg/welcome.html)), and a [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) app validated across 20+ config matrix combinations in CI.
 
@@ -314,7 +314,7 @@ See [Architecture Details](docs/ARCHITECTURE.md) for the full deep dive.
 
 | AWS Service | Usage |
 |-------------|-------|
-| [Amazon EKS](https://aws.amazon.com/eks/) | Kubernetes control plane and Auto Mode compute (GPU, Trainium, Inferentia, CPU nodepools) |
+| [Amazon EKS](https://aws.amazon.com/eks/) | Kubernetes control plane and Auto Mode compute (GPU, [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/), [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/), CPU nodepools) |
 | [AWS Global Accelerator](https://aws.amazon.com/global-accelerator/) | Anycast endpoint with health-based cross-region routing and automatic failover |
 | [Amazon API Gateway](https://aws.amazon.com/api-gateway/) | IAM-authenticated (SigV4) REST entry point for job submission and inference |
 | [AWS Lambda](https://aws.amazon.com/lambda/) | HMAC-signing proxy functions, Global Accelerator registration, manifest application, and Helm chart installation orchestration |
