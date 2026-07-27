@@ -22,6 +22,15 @@ ConfigMaps in
 ``lambda/kubectl-applier-simple/manifests/post-helm-grafana-dashboards.yaml`` by
 ``tests/test_cluster_observability_screenshots.py`` — add a dashboard there and
 the test fails until it is added to ``SCREENSHOTS`` below.
+
+The native OpenCost UI (not a Grafana dashboard) is captured too when
+``--opencost-url`` is passed. It rides a second port-forward::
+
+    # third shell: OpenCost UI on localhost:9091
+    gco monitoring open --service opencost --region us-east-1 --via-ssm auto
+    python scripts/capture_monitoring_screenshots.py \
+        --username admin --password "$GCO_GRAFANA_ADMIN_PASSWORD" \
+        --opencost-url http://localhost:9091
 """
 
 from __future__ import annotations
@@ -62,10 +71,40 @@ SCREENSHOTS: tuple[Screenshot, ...] = (
     Screenshot("gco-cost", "grafana-cost.png", "GCO Cost (OpenCost)"),
 )
 
+# The native OpenCost UI is an SPA served by the opencost pod, not a Grafana
+# dashboard, so it sits outside the uid-keyed SCREENSHOTS lockstep. Captured
+# only when --opencost-url is passed (it needs its own port-forward).
+OPENCOST_UI_FILENAME = "opencost-ui.png"
+
 
 def expected_output_paths(images_dir: Path = IMAGES_DIR) -> list[Path]:
     """Return the image paths this script writes, under ``images_dir``."""
     return [images_dir / shot.filename for shot in SCREENSHOTS]
+
+
+def capture_opencost_ui(opencost_url: str, output_dir: Path) -> Path:
+    """Screenshot the native OpenCost UI. Returns the written path.
+
+    The UI is unauthenticated behind the port-forward, so no credentials are
+    involved — just navigate and let the allocation table render. The SPA
+    fires its allocation query on load; the fixed wait mirrors the Grafana
+    panel-render wait above.
+    """
+    from playwright.sync_api import sync_playwright
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / OPENCOST_UI_FILENAME
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            context = browser.new_context(viewport={"width": 1600, "height": 900})
+            page = context.new_page()
+            page.goto(opencost_url.rstrip("/"), wait_until="load")
+            page.wait_for_timeout(_PANEL_RENDER_WAIT_MS)
+            page.screenshot(path=str(out), full_page=True)
+        finally:
+            browser.close()
+    return out
 
 
 def capture(
@@ -151,6 +190,15 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Grafana time-range end (e.g. now). Defaults to each dashboard's saved range.",
     )
+    parser.add_argument(
+        "--opencost-url",
+        default=None,
+        help=(
+            "Also capture the native OpenCost UI from this URL "
+            "(e.g. http://localhost:9091 via 'gco monitoring open --service opencost'). "
+            "Skipped when unset."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -162,6 +210,8 @@ def main(argv: list[str] | None = None) -> int:
             time_from=args.time_from,
             time_to=args.time_to,
         )
+        if args.opencost_url:
+            written.append(capture_opencost_ui(args.opencost_url, args.output_dir))
     except Exception as exc:  # noqa: BLE001 — surface any Playwright/login failure
         print(f"screenshot capture failed: {exc}", file=sys.stderr)
         return 1

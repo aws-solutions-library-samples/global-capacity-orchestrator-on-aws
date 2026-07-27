@@ -220,7 +220,10 @@ With cost monitoring enabled (the default) a fifth dashboard, **GCO Cost
 The four curated dashboards, captured from a live regional cluster. The cluster
 was largely idle with no GPU nodes, so these are intentionally light on data —
 GPU panels honestly show "No data" and the others show modest control-plane
-activity. They demonstrate the panels and layout you get out of the box.
+activity. They demonstrate the panels and layout you get out of the box. The
+cost surfaces — the *GCO Cost (OpenCost)* Grafana dashboard and the native
+OpenCost UI — are shown in
+[COST_MONITORING.md](COST_MONITORING.md#accessing-the-cost-dashboards).
 
 ### GCO GPU (DCGM)
 
@@ -260,5 +263,10 @@ python scripts/capture_monitoring_screenshots.py \
     --username admin --password "$GCO_GRAFANA_ADMIN_PASSWORD"
 ```
 
-The four PNGs above are written to the repo's [`images/`](../images/) directory
-(one per curated dashboard) by the capture script.
+The capture script writes one PNG per curated dashboard (including
+`grafana-cost.png`, embedded in
+[COST_MONITORING.md](COST_MONITORING.md#accessing-the-cost-dashboards)) to the
+repo's [`images/`](../images/) directory; pass
+`--opencost-url http://localhost:9091` (with an
+`gco monitoring open --service opencost` tunnel up) to also capture the native
+OpenCost UI as `opencost-ui.png`.

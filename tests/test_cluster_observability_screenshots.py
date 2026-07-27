@@ -90,6 +90,46 @@ def test_docs_reference_the_capture_script() -> None:
     assert "images/grafana-gpu-dcgm.png" in text
 
 
+def test_opencost_ui_target_is_a_distinct_png(script) -> None:
+    """The native OpenCost UI capture lands beside the Grafana PNGs without
+    colliding with any dashboard filename."""
+    assert script.OPENCOST_UI_FILENAME.endswith(".png")
+    assert script.OPENCOST_UI_FILENAME not in {shot.filename for shot in script.SCREENSHOTS}
+
+
+def test_cost_docs_embed_both_cost_screenshots(script) -> None:
+    """COST_MONITORING.md must embed the Grafana cost dashboard and the native
+    OpenCost UI screenshots — the docs-integration the images exist for."""
+    text = (PROJECT_ROOT / "docs" / "COST_MONITORING.md").read_text()
+    assert "images/grafana-cost.png" in text
+    assert f"images/{script.OPENCOST_UI_FILENAME}" in text
+    assert "scripts/capture_monitoring_screenshots.py" in text
+
+
+def test_main_captures_opencost_ui_when_url_given(script, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+    monkeypatch.setattr(script, "capture", lambda *a, **k: [IMAGES_DIR / "grafana-cost.png"])
+
+    def _fake_opencost(url: str, output_dir: Path) -> Path:
+        calls["url"] = url
+        return IMAGES_DIR / script.OPENCOST_UI_FILENAME
+
+    monkeypatch.setattr(script, "capture_opencost_ui", _fake_opencost)
+    rc = script.main(["--password", "secret", "--opencost-url", "http://localhost:9091"])
+    assert rc == 0
+    assert calls["url"] == "http://localhost:9091"
+
+
+def test_main_skips_opencost_ui_by_default(script, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(script, "capture", lambda *a, **k: [])
+
+    def _boom(url: str, output_dir: Path) -> Path:
+        raise AssertionError("opencost capture must not run without --opencost-url")
+
+    monkeypatch.setattr(script, "capture_opencost_ui", _boom)
+    assert script.main(["--password", "secret"]) == 0
+
+
 def test_main_returns_zero_on_success(script, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(script, "capture", lambda *a, **k: [IMAGES_DIR / "grafana-gpu-dcgm.png"])
     rc = script.main(["--password", "secret", "--grafana-url", "http://localhost:3000"])

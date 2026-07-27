@@ -154,6 +154,13 @@ gco costs dashboard --region us-east-1 --via-ssm auto -y
 # → http://localhost:3000/d/gco-cost/gco-cost-opencost
 ```
 
+![GCO Cost (OpenCost) Grafana dashboard — cluster hourly cost, projected monthly cost, node cost split, and per-namespace cost panels](../images/grafana-cost.png)
+
+The *GCO Cost (OpenCost)* dashboard panels: cluster hourly cost
+(compute + storage), projected monthly cost, node hourly cost split
+(CPU/RAM/GPU), hourly cost by namespace, top-10 namespaces, node cost by
+instance type, and persistent volume cost.
+
 **Native OpenCost UI** (per-workload drill-down):
 
 ```bash
@@ -161,15 +168,22 @@ gco costs dashboard --service opencost --region us-east-1 --via-ssm auto -y
 # → http://localhost:9091
 ```
 
+![Native OpenCost UI — cost allocation table with per-namespace efficiency and totals](../images/opencost-ui.png)
+
+The native UI is where you drill into a single workload: allocation by
+namespace/controller/pod, efficiency (requested vs. used), and cumulative
+vs. rate views over selectable windows.
+
 Equivalent `gco monitoring open` targets exist for scripting: `--service
 opencost` (UI, local `9091`) and `--service opencost-api` (allocation API,
 local `9003`). Local ports deliberately avoid the Prometheus forward's `9090`
 so both tunnels can run side by side.
 
-The *GCO Cost (OpenCost)* dashboard panels: cluster hourly cost
-(compute + storage), projected monthly cost, node hourly cost split
-(CPU/RAM/GPU), hourly cost by namespace, top-10 namespaces, node cost by
-instance type, and persistent volume cost.
+Both screenshots are regenerated on demand by
+[`scripts/capture_monitoring_screenshots.py`](../scripts/capture_monitoring_screenshots.py)
+(the Grafana dashboard rides the standard capture list; the OpenCost UI is
+captured when `--opencost-url http://localhost:9091` is passed) — see
+[MONITORING.md](MONITORING.md#dashboard-screenshots) for the full flow.
 
 ## Cost reports in S3
 
