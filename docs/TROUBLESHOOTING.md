@@ -179,7 +179,7 @@ gco stacks deploy-all -y
 - `No multi-arch image-copy method available. Need one of: 'docker buildx' ... 'docker pull --all-platforms' ... or skopeo on PATH.`
 - `failed to ... build ... --platform linux/amd64 ... image ... does not provide the specified platform (linux/amd64)`
 
-**Cause**: The deploy needs a multi-arch image-copy tool for two steps — the [Volcano](https://volcano.sh/) ECR image mirror (`docker buildx imagetools create`) and the cross-architecture build of the `linux/amd64` Lambda/service asset images. On an arm64 host (Apple Silicon) the legacy Docker builder cannot satisfy either. This happens when the deploy runs from an environment without Docker Buildx (Finch/nerdctl or [skopeo](https://github.com/containers/skopeo) also work).
+**Cause**: The deploy needs a multi-arch image-copy tool for two steps — the [Volcano](https://volcano.sh/) ECR image mirror (`docker buildx imagetools create`) and the cross-architecture build of the `linux/amd64` Lambda/service asset images. On an arm64 host (Apple Silicon) the legacy Docker builder cannot satisfy either. This happens when the deploy runs from an environment without Docker Buildx (Finch/nerdctl or [skopeo](https://github.com/podman-container-tools/skopeo) also work).
 
 **Solution**: Run the deploy from the [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container), which ships Docker Buildx for exactly this. If you built the image before Buildx was added, rebuild it:
 

@@ -66,7 +66,7 @@ Instead, the mirror picks a manifest-list-preserving strategy at runtime based o
 
 1. **Docker Buildx** — `docker buildx imagetools create` (a registry-to-registry copy, no local pull).
 2. **[Finch](https://runfinch.com/) / nerdctl** — `pull --all-platforms` then `push --all-platforms` (containerd preserves the manifest list).
-3. **[skopeo](https://github.com/containers/skopeo)** — `skopeo copy --all` (daemon-less).
+3. **[skopeo](https://github.com/podman-container-tools/skopeo)** — `skopeo copy --all` (daemon-less).
 
 If none is available the mirror fails fast with guidance rather than producing a single-arch image. No new binary dependency is introduced — the mirror reuses whichever of these the environment already provides. The strategy selection lives in `resolve_copy_strategy()` in [`cli/_image_mirror.py`](../cli/_image_mirror.py).
 

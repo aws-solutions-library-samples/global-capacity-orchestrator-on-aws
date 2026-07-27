@@ -520,7 +520,7 @@ spec:
 
 ### GPU Time-Slicing (Fractional GPUs)
 
-You can share a single GPU across multiple pods using NVIDIA time-slicing. The NVIDIA device plugin is already installed (as a standalone DaemonSet, with [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) providing the GPU drivers), but time-slicing is not enabled by default. To enable it, apply a ConfigMap that sets the number of replicas per physical GPU (e.g., `replicas: 4` makes one GPU appear as four schedulable units). The kube-scheduler can then place several lightweight workloads onto one GPU node. Note that [Karpenter](https://karpenter.sh/) does not currently account for time-slicing replicas when provisioning nodes ([kubernetes-sigs/karpenter#2140](https://github.com/kubernetes-sigs/karpenter/issues/2140)), so it may over-provision initially.
+You can share a single GPU across multiple pods using NVIDIA time-slicing. The NVIDIA device plugin is already installed (as a standalone DaemonSet, with [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) providing the GPU drivers), but time-slicing is not enabled by default. To enable it, apply a ConfigMap that sets the number of replicas per physical GPU (e.g., `replicas: 4` makes one GPU appear as four schedulable units). The kube-scheduler can then place several lightweight workloads onto one GPU node. Note that [Karpenter](https://karpenter.sh/) does not currently account for time-slicing replicas when provisioning nodes ([kubernetes-sigs/karpenter#729](https://github.com/kubernetes-sigs/karpenter/issues/729)), so it may over-provision initially.
 
 See `examples/gpu-timeslicing-job.yaml` for a complete example with setup instructions.
 
@@ -1061,7 +1061,7 @@ When enabled, the regional stack injects one Volcano value override — `basic.i
 }
 ```
 
-**2. Deploy.** `gco stacks deploy <stack>` / `deploy-all` **auto-mirrors** the images into ECR (per region) right before the regional stack's Helm install — so a fresh install just works, with no separate step. The copy is idempotent and skips images already present, so repeat deploys cost only a couple of ECR lookups. From a machine with a container runtime (Docker Buildx, [Finch](https://runfinch.com/), or [skopeo](https://github.com/containers/skopeo)) and AWS credentials; the source pull from Docker Hub is anonymous and one-time.
+**2. Deploy.** `gco stacks deploy <stack>` / `deploy-all` **auto-mirrors** the images into ECR (per region) right before the regional stack's Helm install — so a fresh install just works, with no separate step. The copy is idempotent and skips images already present, so repeat deploys cost only a couple of ECR lookups. From a machine with a container runtime (Docker Buildx, [Finch](https://runfinch.com/), or [skopeo](https://github.com/podman-container-tools/skopeo)) and AWS credentials; the source pull from Docker Hub is anonymous and one-time.
 
 **3. Converge / check.** If Volcano had previously failed, re-converge without touching the cluster:
 

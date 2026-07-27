@@ -39,7 +39,7 @@
 #     so a job that allocates too much VRAM can cause OOM errors for others.
 #   - Works on any NVIDIA GPU (g4dn, g5, p3, p4d, p5, etc.).
 #   - Karpenter does not currently account for time-slicing replicas when
-#     provisioning nodes (see github.com/kubernetes-sigs/karpenter/issues/2140).
+#     provisioning nodes (see github.com/kubernetes-sigs/karpenter/issues/729).
 #     It may over-provision initially, but the kube-scheduler will bin-pack
 #     pods onto the replicated GPU slots once the node is ready.
 #   - Good for inference, lightweight training, and dev/test workloads.
