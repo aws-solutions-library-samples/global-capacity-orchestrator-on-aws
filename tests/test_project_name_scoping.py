@@ -78,6 +78,14 @@ _COLLISION_PRONE_NAME_PROPS: dict[str, tuple[str, ...]] = {
     "AWS::StepFunctions::StateMachine": ("StateMachineName",),
     "AWS::Backup::BackupVault": ("BackupVaultName",),
     "AWS::Events::Rule": ("Name",),
+    # Athena workgroup names are unique per account+region; ours is
+    # ``<project>-cost`` (constants.cost_athena_workgroup_name).
+    "AWS::Athena::WorkGroup": ("Name",),
+    # A Glue table's DatabaseName is unique per account+region (one Data
+    # Catalog); ours is ``<project with - folded to _>_cost``
+    # (constants.cost_glue_database_name) because Glue/Athena identifiers
+    # cannot safely carry hyphens.
+    "AWS::Glue::Table": ("DatabaseName",),
 }
 
 # (Type, property) pairs that carry a name-like string but are NOT
@@ -375,7 +383,18 @@ class TestNoCollisionsAcrossProjectNames:
         # hyphen-stripped form too. Uniqueness across projects still holds: the
         # <hash> derives from the full (hyphenated) construct path, which
         # test_hyphen_variant_projects_share_no_names verifies directly.
-        scoped_forms = {project_name, project_name.replace("-", "")}
+        # Glue/Athena identifiers cannot safely carry hyphens, so the cost
+        # analytics database folds them to underscores
+        # (constants.cost_glue_database_name); accept that deterministic form
+        # too. Two hyphen-variant projects still cannot collide on it because
+        # the fold is injective for valid project names (hyphen and underscore
+        # are both illegal *inputs* interchangeably — "a-b" and "a_b" cannot
+        # both be valid project names since underscores are rejected).
+        scoped_forms = {
+            project_name,
+            project_name.replace("-", ""),
+            project_name.replace("-", "_"),
+        }
         offenders = sorted(n for n in names if not any(form in n for form in scoped_forms))
         assert not offenders, (
             f"these collision-prone names are not scoped to project_name={project_name!r} and "

@@ -1344,6 +1344,12 @@ class TestHelmChartConsistency:
         conflicts = {
             ns: names for ns, names in conflicts.items() if not all("slinky" in n for n in names)
         }
+        # OpenCost deliberately co-locates with kube-prometheus-stack in the
+        # monitoring namespace (it reads that Prometheus, and the shared
+        # namespace keeps the ServiceMonitor + tunnel wiring simple). Pin the
+        # exact pair so any third chart landing in `monitoring` still fails.
+        if sorted(conflicts.get("monitoring", [])) == ["kube-prometheus-stack", "opencost"]:
+            del conflicts["monitoring"]
         assert not conflicts, f"Charts sharing unexpected namespaces: {conflicts}"
 
     def test_image_tags_in_values_are_semver(self):
