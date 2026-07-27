@@ -542,9 +542,9 @@ On success the judge returns the **canonical metrics shape** — the very shape 
 {
   "metrics": {"progress_score": 0.72},
   "rationale": "Two of the three regions report healthy nodepools; the third is still scaling.",
-  "source": "bedrock:global.amazon.nova-2-lite-v1:0",
+  "source": "bedrock:global.anthropic.claude-opus-5",
   "backend_name": "bedrock",
-  "model_id": "global.amazon.nova-2-lite-v1:0",
+  "model_id": "global.anthropic.claude-opus-5",
   "rubric_version": "spj-v1",
   "raw_score": 0.72
 }
@@ -807,10 +807,14 @@ Resolution precedence at session start:
 Defaults:
 
 - Model — `cdk.json` `context.bedrock.default_model_id` (stock value:
-  `global.amazon.nova-2-lite-v1:0`, Amazon Nova 2 Lite's global inference
-  profile). The stock `context.bedrock.thinking.effort` is `high`, Nova 2
-  Lite's maximum; it can materially increase billed output tokens and latency.
-  Explicit model overrides do not inherit this Nova-specific reasoning field.
+  `global.anthropic.claude-opus-5`, Anthropic Claude Opus 5's global inference
+  profile). The stock `context.bedrock.thinking.effort` is `high`, Claude's
+  default adaptive-thinking level; it can materially increase billed output
+  tokens and latency. Explicit model overrides do not inherit this reasoning
+  field. Anthropic models need the one-time
+  [first-time-use form](CUSTOMIZATION.md#accepting-the-anthropic-first-time-use-form);
+  until it is submitted, sampling is tagged `bedrock_FTUFormNotFilled` and
+  falls back to deterministic templates.
   Override via `GCO_MISSION_BEDROCK_MODEL_ID` or `--bedrock-model-id`; see
   [Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection).
 - Region — `us-east-1`. Override via `GCO_MISSION_BEDROCK_REGION`.

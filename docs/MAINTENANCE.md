@@ -319,31 +319,47 @@ graphs *are* tracked by Dependabot; see
 
 GCO's two optional, advisory Bedrock features — Mission sampling (`gco mission
 ...`) and the capacity advisor (`gco capacity ai-recommend` / `predict` and the
-`ai_recommend` MCP tool) — default to **Amazon Nova 2 Lite** through its global
-cross-Region inference profile (`global.amazon.nova-2-lite-v1:0`). The model id
-and reasoning preference have one checked-in source: `cdk.json`
-`context.bedrock`, whose stock `thinking.effort` is `high` (Nova 2 Lite's maximum
-supported effort). Mission sampling and the capacity advisor resolve both
+`ai_recommend` MCP tool) — default to **Anthropic Claude Opus 5** through its
+global cross-Region inference profile (`global.anthropic.claude-opus-5`). The
+model id and reasoning preference have one checked-in source: `cdk.json`
+`context.bedrock`, whose stock `thinking.effort` is `high` (Claude's default
+adaptive-thinking level). Mission sampling and the capacity advisor resolve both
 values through the lightweight `gco.bedrock` module; the same file is shipped
 as package data for installed CLI/MCP use. The consistency test guards the
 compatibility aliases, reasoning translation, packaging, inference-profile
 shape, and captured default-model fixture.
 
-High reasoning maps to Converse
-`additionalModelRequestFields.reasoningConfig.maxReasoningEffort=high`. AWS
-requires `maxTokens`, `temperature`, and `topP` to be unset at this effort, so
-GCO omits those controls for the canonical default. Reasoning tokens are billed
-as output tokens and high effort can materially increase cost and latency.
-Explicit model overrides keep their existing inference controls and do not
-inherit Nova-specific reasoning fields.
+Because it is an Anthropic model, the default additionally requires the one-time
+[Anthropic first-time-use form](CUSTOMIZATION.md#accepting-the-anthropic-first-time-use-form)
+on the account. Bedrock answers `FTUFormNotFilled` until it is submitted; the
+capacity CLI detects that code and prints the remediation.
+
+`gco.bedrock` translates the canonical effort into whichever reasoning dialect
+the default model speaks:
+
+| Default model family | Converse fields | Inference controls dropped |
+|----------------------|-----------------|-----------------------------|
+| Claude adaptive thinking (Opus 4.6+, Sonnet 4.6, Mythos/Fable) | `thinking.type=adaptive` + `output_config.effort` | `temperature`, `topP`, `topK` (removed from Opus 4.7 onward) |
+| Nova 2 | `reasoningConfig.maxReasoningEffort` | `maxTokens`, `temperature`, `topP` — at `high` effort only |
+
+The adaptive-thinking model list is enumerated in `gco/bedrock.py` rather than
+pattern-matched, because pre-4.6 Claude models reject `adaptive` and need the
+legacy `enabled` + `budget_tokens` form; an unlisted default therefore receives
+no reasoning fields rather than a guessed request shape. Reasoning tokens are
+billed as output tokens and high effort can materially increase cost and
+latency. Explicit model overrides keep their existing inference controls and do
+not inherit the default's reasoning fields.
 
 Because it is a deployment configuration value — not a `pyproject.toml` entry,
 a Dockerfile `FROM`, or a manifest image — Dependabot never sees it. The monthly
 [`deps-scan`](../.github/CI.md#dependency-scan-script) closes that gap: its
 **Bedrock default model** check reads the `cdk.json` context value, lists the
 system-defined inference profiles in `us-east-1`, and flags a newer release **in
-the same model family** — a future global Nova Lite generation, never a jump to
-a different scope, tier, or provider (that is a choice, not drift). The check needs AWS
+the same model family** — a future global Claude Opus release, never a jump to
+a different scope, tier, or provider (that is a choice, not drift). Family
+derivation tolerates all three revision shapes Bedrock ships
+(`-vMAJOR:MINOR`, a bare `-vMAJOR`, and no suffix at all), so one model line
+stays one family. The check needs AWS
 credentials via OIDC; without them the scan skips it with a noted reason, so a
 credential-less run is not a false "up to date".
 
@@ -355,8 +371,11 @@ deliberately):
    value is a system-defined **global inference profile**; global profiles can
    route worldwide and are unsuitable when a geography boundary is required.
    Use an appropriate geography-scoped profile (`us.` / `eu.` / `jp.` / etc.)
-   where data residency requires it. Update the intentionally independent
-   `_EXPECTED_DEFAULT_MODEL_ID`, `_EXPECTED_FIXTURE_NAME`, and thinking review
+   where data residency requires it. If the new model speaks a reasoning
+   dialect GCO does not yet translate, add it to the dialect dispatch in
+   `gco/bedrock.py` — otherwise the configured effort is silently inert. Update
+   the intentionally independent `_EXPECTED_DEFAULT_MODEL_ID`,
+   `_EXPECTED_FIXTURE_NAME`, and thinking review
    pins in `tests/test_default_bedrock_model_consistency.py`; those assertions
    are not runtime defaults, but they make model, fixture, and reasoning changes
    explicit in review.
@@ -369,7 +388,8 @@ deliberately):
    same `cdk.json` value.
 
 Picking a *different* model — for regulatory, data-residency, model-governance,
-or cost reasons — rather than tracking Nova Lite releases is an operator choice,
+or cost reasons, or to avoid the Anthropic FTU form — rather than tracking
+Claude Opus releases is an operator choice,
 not routine maintenance; the override paths (per-call flag,
 `GCO_MISSION_BEDROCK_MODEL_ID`, or changing the default) live in
 [Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). Both

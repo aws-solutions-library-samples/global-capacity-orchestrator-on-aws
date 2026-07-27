@@ -1511,27 +1511,89 @@ GCO uses an Amazon Bedrock model for two optional, **advisory** features:
 - **Mission sampling** — the goal-directed Mission engine can ask a model for strategy-revision rationales and final-report lessons (`gco mission ...`).
 - **Capacity advisor** — `gco capacity ai-recommend` and `gco capacity predict` send capacity data to a model for a placement/timing recommendation, and the `ai_recommend` MCP tool does the same.
 
-Both default to **Amazon Nova 2 Lite** through its system-defined global
-cross-Region inference profile (`global.amazon.nova-2-lite-v1:0`). It is the
+Both default to **Anthropic Claude Opus 5** through its system-defined global
+cross-Region inference profile (`global.anthropic.claude-opus-5`). It is the
 default because:
 
 - The global profile maximizes throughput by allowing Bedrock to route across
   supported worldwide Regions. Choose a geography-scoped profile instead when
   your workload has data-residency constraints.
-- As a first-party Amazon model it does **not** require the one-time
-  **First-Time-Use (FTU)** form that Anthropic asks each account (or
-  organization) to submit before first invocation.
-- The stock `cdk.json` configuration enables Nova 2 Lite extended thinking at
-  `high`, its maximum supported reasoning effort. GCO translates that setting
-  to Converse `reasoningConfig` and skips the leading `reasoningContent` block
-  when reading the final answer.
+- It is Anthropic's most capable Opus model for long-running agentic work,
+  which is what both features ask of it — placement reasoning over live
+  capacity data, and Mission strategy revision.
+- The stock `cdk.json` configuration runs Claude
+  [adaptive thinking](https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-adaptive-thinking.html)
+  at `high` effort, its default level, where Claude decides per request how
+  much to think. GCO translates that setting to Converse `thinking` +
+  `output_config` fields and skips the leading `reasoningContent` block when
+  reading the final answer.
+
+> **One-time setup:** Anthropic models require a **first-time-use (FTU) case
+> form** per AWS account before the first invocation. See
+> [Accepting the Anthropic first-time-use form](#accepting-the-anthropic-first-time-use-form)
+> below — this is a prerequisite for the stock default.
 
 > **Cost and latency:** reasoning tokens are billed as output tokens. High
-> effort can materially increase latency and token usage. AWS requires
-> `maxTokens`, `temperature`, and `topP` to be unset at high effort, so GCO
-> omits them for the canonical default.
+> effort can materially increase latency and token usage. Claude removed
+> `temperature`, `top_p`, and `top_k` starting with Opus 4.7, so GCO omits
+> those controls for the canonical default and keeps only `maxTokens`.
 >
-> These Bedrock features are advisory and degrade gracefully. When no model is reachable (no credentials, model not enabled, or access denied) the Mission engine falls back to its deterministic templates and the capacity advisor surfaces a clear error. Core orchestration never depends on Bedrock.
+> These Bedrock features are advisory and degrade gracefully. When no model is reachable (no credentials, model not enabled, access denied, or the FTU form not yet submitted) the Mission engine falls back to its deterministic templates and the capacity advisor surfaces a clear error. Core orchestration never depends on Bedrock.
+
+### Accepting the Anthropic first-time-use form
+
+Anthropic asks every AWS account (or organization) to submit a one-time
+**use case details** form before it may invoke any Anthropic model, including
+the stock default. It is required **once per account or organization** across
+all commercial Regions — opt-in Regions require it again — and it does not
+apply to Anthropic models reached through the `bedrock-mantle` endpoint. Until
+it is submitted, Bedrock rejects every Anthropic invocation with error code
+[`FTUFormNotFilled`](https://docs.aws.amazon.com/bedrock/latest/userguide/troubleshooting-api-error-codes.html)
+(HTTP 404).
+
+GCO detects that specific code and prints the remediation instead of a raw
+API error, so `gco capacity ai-recommend` and `gco capacity predict` tell you
+exactly what to do. Mission sampling tags it as
+`bedrock_FTUFormNotFilled` in its audit trail and falls back to deterministic
+templates.
+
+**Option 1 — console (usual route).** In the
+[Amazon Bedrock console](https://console.aws.amazon.com/bedrock/), open
+**Model access**, request access to the Anthropic model, and complete the use
+case details form.
+
+**Option 2 — CLI/API (for automation).** Submit the form with
+[`PutUseCaseForModelAccess`](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_PutUseCaseForModelAccess.html).
+The CLI takes the same JSON, base64-encoded, and needs AWS CLI v2.27.42 or
+later:
+
+```bash
+aws bedrock put-use-case-for-model-access \
+  --form-data "$(printf '%s' '{
+    "companyName": "Example Corp",
+    "companyWebsite": "https://example.com",
+    "intendedUsers": "0",
+    "industryOption": "Software",
+    "otherIndustryOption": "",
+    "useCases": "Internal GPU capacity placement advice and agent evaluation."
+  }' | base64)"
+```
+
+`intendedUsers` is `0` (internal), `1` (external), or `2` (both). Confirm
+access afterwards — `AVAILABLE` means the model is usable:
+
+```bash
+aws bedrock get-foundation-model-availability --model-id anthropic.claude-opus-5
+```
+
+The full field reference (including length limits) is in the AWS guide on
+[model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html).
+
+**Prefer to skip the form entirely?** Point GCO at a first-party Amazon model,
+which needs no FTU form, using any of the override paths below — for example
+`--model global.amazon.nova-2-lite-v1:0`, or by changing
+`context.bedrock.default_model_id` in `cdk.json`. GCO keeps the Nova
+`reasoningConfig` translation, so that default remains fully supported.
 
 ### Choosing a different model
 
@@ -1571,15 +1633,20 @@ compatibility aliases, package-data declaration, inference-profile shape,
 reasoning translation, and captured fixture.
 
 The canonical thinking setting applies only when the selected model id equals
-the configured default. A per-call or environment override for Anthropic or
-another model keeps that caller's normal inference controls and receives no
-Nova-specific `reasoningConfig`.
+the configured default, and it is translated into whichever reasoning dialect
+that model speaks — Claude adaptive `thinking` + `output_config` for Opus 4.6+,
+Sonnet 4.6, and the Mythos/Fable lines, or Nova 2 `reasoningConfig` for Nova 2
+profiles. A per-call or environment override, or a default in neither dialect
+(including pre-4.6 Claude models, which require the legacy
+`thinking.type: "enabled"` form), keeps that caller's normal inference controls
+and receives no reasoning fields.
 
 Resolution order: per-call flag (`--model` / `--bedrock-model-id` / MCP `model=`) → `GCO_MISSION_BEDROCK_MODEL_ID` (Mission path only) → `cdk.json` `context.bedrock.default_model_id`.
 
 ### What to check when choosing a model
 
-- **Access** — the model (or its cross-Region inference profile) must be enabled in your account and reachable from the configured Region. Third-party models may require AWS Marketplace subscription permissions and, for Anthropic, the FTU form. See the AWS guide on [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html).
+- **Access** — the model (or its cross-Region inference profile) must be enabled in your account and reachable from the configured Region. Third-party models may require AWS Marketplace subscription permissions and, for Anthropic, the [FTU form](#accepting-the-anthropic-first-time-use-form). See the AWS guide on [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html).
+- **Reasoning dialect** — GCO translates `context.bedrock.thinking.effort` for Claude adaptive-thinking models and Nova 2 profiles. Another family still works; it simply receives no reasoning fields, so set an effort the model actually supports or accept its default.
 - **Inference profile vs base id** — GCO pins a system-defined **global
   inference profile** id (`global.`) for maximum throughput. Global profiles
   may route worldwide; use a geography-scoped profile (`us.`, `eu.`, `jp.`,
@@ -1591,8 +1658,8 @@ Resolution order: per-call flag (`--model` / `--bedrock-model-id` / MCP `model=`
 
 The monthly **deps-scan** workflow compares the pinned default against the
 newest system-defined inference profile in the *same scope and model family*
-(for example, a newer global Amazon Nova Lite release) and opens a GitHub issue
-when one is available. It will not cross-suggest a geographic profile, another
+(for example, a newer global Anthropic Claude Opus release) and opens a GitHub
+issue when one is available. It will not cross-suggest a geographic profile, another
 tier, or another provider. It uses read-only Bedrock list permissions on the CI
 OIDC role; see [CI documentation](../.github/CI.md#dependency-scan-script) and
 `.github/scripts/dependency-scan.sh`.

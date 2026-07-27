@@ -6,6 +6,8 @@ from typing import Any
 import click
 from botocore.exceptions import ClientError
 
+from gco.bedrock import BEDROCK_FTU_REMEDIATION, is_bedrock_ftu_form_error
+
 from ..capacity import get_capacity_checker
 from ..config import GCOConfig
 from ..output import format_capacity_table, get_output_formatter
@@ -426,6 +428,9 @@ def ai_recommend(
         print()
 
     except Exception as e:
+        if is_bedrock_ftu_form_error(e):
+            formatter.print_error(BEDROCK_FTU_REMEDIATION)
+            sys.exit(1)
         formatter.print_error(f"Failed to get AI recommendation: {e}")
         sys.exit(1)
 
@@ -1490,6 +1495,9 @@ def predict_capacity(
         if _history_disabled(e):
             formatter.print_warning(_HISTORY_DISABLED_HINT)
             return
+        if is_bedrock_ftu_form_error(e):
+            formatter.print_error(BEDROCK_FTU_REMEDIATION)
+            sys.exit(1)
         formatter.print_error(f"Failed to predict capacity window: {e}")
         sys.exit(1)
 

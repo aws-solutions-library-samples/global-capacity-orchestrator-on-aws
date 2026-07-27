@@ -708,6 +708,15 @@ if isinstance(value, str) and value.strip():
 #   us.amazon.nova-pro-v1:0                       -> us.amazon.nova-pro
 #   global.amazon.nova-3-lite-v1:0                -> global.amazon.nova-lite
 #   us.anthropic.claude-sonnet-4-5-20250929-v1:0  -> us.anthropic.claude-sonnet
+#   global.anthropic.claude-opus-4-6-v1           -> global.anthropic.claude-opus
+#   global.anthropic.claude-opus-9                -> global.anthropic.claude-opus
+#
+# The trailing revision appears in three shapes across live profiles:
+# ``-vMAJOR:MINOR``, ``-vMAJOR`` alone (newer Anthropic profiles), and
+# absent entirely. All three are stripped, so one model line stays one
+# family; matching only the ``:MINOR`` form would file
+# ``claude-opus-4-6-v1`` under a phantom ``claude-opus-v1`` family and
+# silently stop reporting drift against ``claude-opus-5``.
 #
 # Folding the numeric generation token into the version key (rather
 # than the family) is deliberate: it keeps "Nova 1 Pro" and a future
@@ -718,7 +727,7 @@ bedrock_model_family() {
   python3 -c "
 import re, sys
 mid = sys.argv[1]
-core = re.sub(r'-v\d+:\d+\Z', '', mid)
+core = re.sub(r'-v\d+(?::\d+)?\Z', '', mid)
 parts = core.split('.')
 if len(parts) >= 3:
     geo, provider, name = parts[0], parts[1], '.'.join(parts[2:])
@@ -786,7 +795,9 @@ get_latest_bedrock_model() {
 import json, re, sys
 current = sys.argv[1]
 def family(mid):
-    core = re.sub(r'-v\d+:\d+\Z', '', mid)
+    # Keep in lockstep with bedrock_model_family above: the revision
+    # suffix is optional and its ``:MINOR`` half is too.
+    core = re.sub(r'-v\d+(?::\d+)?\Z', '', mid)
     parts = core.split('.')
     if len(parts) >= 3:
         geo, provider, name = parts[0], parts[1], '.'.join(parts[2:])

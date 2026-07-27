@@ -976,7 +976,11 @@ class BedrockSamplingBackend:
       surfaces as :class:`SamplingTransportError` with code
       ``"bedrock_<ErrorCode>"`` where ``<ErrorCode>`` is read from the
       error envelope (defaulting to ``"Unknown"`` when the envelope is
-      malformed).
+      malformed). ``"bedrock_FTUFormNotFilled"`` specifically means the
+      account has not submitted Anthropic's one-time first-time-use case
+      form, which every Anthropic model — including the stock default —
+      is gated behind; Mission then falls back to its deterministic
+      templates. See ``docs/CUSTOMIZATION.md`` (Bedrock Model Selection).
     * A response without a non-empty ``text`` block under
       ``output.message.content`` — including reasoning-only and empty
       ``content`` lists — surfaces as :class:`SamplingTransportError`

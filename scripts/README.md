@@ -107,10 +107,10 @@ Captures raw Bedrock model output for the Mission scaffolder prompt across a cur
 # access, transient errors) are reported and never abort the run.
 python3 scripts/capture_scaffold_fixtures.py
 
-# Capture the canonical global Nova 2 Lite fixture. This makes three
+# Capture the canonical global Claude Opus 5 fixture. This makes three
 # sequential paid Converse calls and applies the stock high reasoning effort.
 python3 scripts/capture_scaffold_fixtures.py \
-  --model global.amazon.nova-2-lite-v1:0 \
+  --model global.anthropic.claude-opus-5 \
   --region us-east-1
 
 # Capture a different single model.
@@ -122,10 +122,12 @@ python3 scripts/capture_scaffold_fixtures.py --region us-west-2
 ```
 
 Requires AWS credentials with `bedrock:InvokeModel` access to the listed
-models. The configured default also consumes `cdk.json`
-`context.bedrock.thinking`; the stock Nova 2 Lite `high` effort can materially
-increase billed output tokens and latency, and leaves `maxTokens`,
-`temperature`, and `topP` unset as required by AWS. Schedule capture as a
+models, plus the one-time
+[Anthropic first-time-use form](../docs/CUSTOMIZATION.md#accepting-the-anthropic-first-time-use-form)
+for Anthropic models such as the stock default. The configured default also
+consumes `cdk.json` `context.bedrock.thinking`; the stock `high` effort can
+materially increase billed output tokens and latency, and omits
+`temperature`, `topP`, and `topK`, which Claude no longer supports. Schedule capture as a
 quarterly canary if you want fresh data; otherwise the existing fixtures
 continue to protect the validator surface. The full lifecycle (adding a new
 model, what to do when the replay test fires red) is documented in

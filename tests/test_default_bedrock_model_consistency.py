@@ -42,8 +42,8 @@ from tests._scaffold_replay import (  # noqa: E402
 
 # Pin the intended default independently from the loader so an accidental
 # same-family or lower-tier change is visible in review and CI.
-_EXPECTED_DEFAULT_MODEL_ID = "global.amazon.nova-2-lite-v1:0"
-_EXPECTED_FIXTURE_NAME = "global_amazon_nova_2_lite_v1_0.json"
+_EXPECTED_DEFAULT_MODEL_ID = "global.anthropic.claude-opus-5"
+_EXPECTED_FIXTURE_NAME = "global_anthropic_claude_opus_5.json"
 _EXPECTED_THINKING = {"effort": "high"}
 _RUNTIME_SOURCE_ROOTS = ("cli", "gco", "gco_mcp", "scripts", ".github/scripts")
 _RUNTIME_SOURCE_SUFFIXES = {".py", ".sh"}
@@ -166,11 +166,21 @@ def test_default_model_has_the_exact_complete_replay_fixture() -> None:
 
 
 def test_default_model_is_a_system_defined_inference_profile_id() -> None:
-    """The default shape matches the dependency scanner's family comparator."""
+    """The default shape matches the dependency scanner's family comparator.
+
+    A profile id is ``<geography>.<provider>.<model>``. The trailing
+    ``-vMAJOR:MINOR`` revision is optional — Anthropic ships newer profiles
+    without one (``global.anthropic.claude-opus-5``) — but when it is present it
+    must carry the ``:MINOR`` half, because the scanner strips exactly that
+    form when deriving a model family.
+    """
     model_id = DEFAULT_BEDROCK_MODEL_ID
     assert model_id.startswith(("global.", "us.", "eu.", "apac.", "jp.")), model_id
-    assert "-v" in model_id, model_id
-    assert ":" in model_id.rsplit("-v", 1)[-1], model_id
+    geography, _, remainder = model_id.partition(".")
+    provider, _, model_name = remainder.partition(".")
+    assert geography and provider and model_name, model_id
+    if "-v" in model_name:
+        assert ":" in model_name.rsplit("-v", 1)[-1], model_id
 
 
 def test_cdk_json_contains_only_one_default_model_value() -> None:
@@ -185,10 +195,39 @@ def test_cdk_json_contains_only_one_default_model_value() -> None:
 
 
 def test_default_high_thinking_translates_to_native_converse_fields() -> None:
+    """Claude adaptive thinking carries the effort in its own ``output_config``.
+
+    ``temperature``/``topP`` are dropped (Claude removed sampling controls from
+    Opus 4.7 onward and answers a ValidationException for them) while
+    ``maxTokens`` — which the model still requires — survives.
+    """
     options = build_bedrock_converse_options(
         _EXPECTED_DEFAULT_MODEL_ID,
         inference_config={"maxTokens": 2048, "temperature": 0.2, "topP": 0.9},
         cdk_json_path=PROJECT_ROOT / "cdk.json",
+    )
+
+    assert options == {
+        "inferenceConfig": {"maxTokens": 2048},
+        "additionalModelRequestFields": {
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "high"},
+        },
+    }
+
+
+def test_nova_default_still_translates_to_reasoning_config(tmp_path: Path) -> None:
+    """Moving the default back to Nova 2 keeps its own dialect intact."""
+    config_path = tmp_path / "cdk.json"
+    config_path.write_text(
+        json.dumps(_bedrock_payload("global.amazon.nova-2-lite-v1:0")),
+        encoding="utf-8",
+    )
+
+    options = build_bedrock_converse_options(
+        "global.amazon.nova-2-lite-v1:0",
+        inference_config={"maxTokens": 2048, "temperature": 0.2, "topP": 0.9},
+        cdk_json_path=config_path,
     )
 
     assert "inferenceConfig" not in options
@@ -200,6 +239,57 @@ def test_default_high_thinking_translates_to_native_converse_fields() -> None:
             }
         }
     }
+
+
+def test_legacy_claude_models_never_receive_adaptive_thinking(tmp_path: Path) -> None:
+    """Pre-4.6 Claude requires ``enabled`` + budget_tokens and rejects adaptive."""
+    config_path = tmp_path / "cdk.json"
+    config_path.write_text(
+        json.dumps(_bedrock_payload("us.anthropic.claude-sonnet-4-5-20250929-v1:0")),
+        encoding="utf-8",
+    )
+    inference_config = {"maxTokens": 2048, "temperature": 0.2}
+
+    options = build_bedrock_converse_options(
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        inference_config=inference_config,
+        cdk_json_path=config_path,
+    )
+
+    assert options == {"inferenceConfig": inference_config}
+
+
+def test_ftu_form_error_is_detected_through_the_exception_chain() -> None:
+    """The advisor re-raises as RuntimeError, so detection must walk __cause__."""
+    from botocore.exceptions import ClientError
+
+    from gco.bedrock import (
+        BEDROCK_FTU_FORM_ERROR_CODE,
+        BEDROCK_FTU_REMEDIATION,
+        is_bedrock_ftu_form_error,
+    )
+
+    ftu_error = ClientError(
+        {"Error": {"Code": BEDROCK_FTU_FORM_ERROR_CODE, "Message": "not filled"}},
+        "Converse",
+    )
+    assert is_bedrock_ftu_form_error(ftu_error) is True
+
+    try:
+        raise RuntimeError("wrapped") from ftu_error
+    except RuntimeError as wrapped:
+        assert is_bedrock_ftu_form_error(wrapped) is True
+
+    unrelated = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": "nope"}},
+        "Converse",
+    )
+    assert is_bedrock_ftu_form_error(unrelated) is False
+    assert is_bedrock_ftu_form_error(None) is False
+
+    # The remediation must name the account-scoped form and both fix paths.
+    assert "put-use-case-for-model-access" in BEDROCK_FTU_REMEDIATION
+    assert "model-access.html" in BEDROCK_FTU_REMEDIATION
 
 
 def test_explicit_other_model_keeps_inference_config_without_nova_reasoning(

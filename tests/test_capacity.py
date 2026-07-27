@@ -2329,12 +2329,12 @@ class TestBedrockCapacityAdvisor:
                 assert rec.recommended_capacity_type == "spot"
                 assert rec.confidence == "high"
                 request = mock_bedrock.converse.call_args.kwargs
-                assert "inferenceConfig" not in request
+                # The canonical Claude default keeps maxTokens (still required)
+                # and drops temperature, which Claude no longer supports.
+                assert request["inferenceConfig"] == {"maxTokens": 2048}
                 assert request["additionalModelRequestFields"] == {
-                    "reasoningConfig": {
-                        "type": "enabled",
-                        "maxReasoningEffort": "high",
-                    }
+                    "thinking": {"type": "adaptive"},
+                    "output_config": {"effort": "high"},
                 }
 
     @patch("cli.capacity.advisor.get_config")

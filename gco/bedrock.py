@@ -14,9 +14,44 @@ _BEDROCK_CONTEXT_KEY = "bedrock"
 _DEFAULT_MODEL_ID_KEY = "default_model_id"
 _THINKING_KEY = "thinking"
 _THINKING_EFFORT_KEY = "effort"
+# Effort levels accepted in ``cdk.json``. This is deliberately the
+# *intersection* of what the supported reasoning dialects accept: Nova 2 tops
+# out at ``high``, and while Claude Opus 4.6/5 also accept ``xhigh`` and
+# ``max``, allowing them here would let a config value that is valid for one
+# default model become a hard ValidationException the moment the default moves
+# to another family.
 _SUPPORTED_THINKING_EFFORTS = frozenset({"low", "medium", "high"})
 _NOVA_2_MODEL_ID_RE = re.compile(r"(?:^|/)(?:[a-z0-9-]+\.)?amazon\.nova-2-[a-z0-9-]+-v\d+:\d+$")
-_HIGH_REASONING_INCOMPATIBLE_FIELDS = frozenset({"maxTokens", "temperature", "topP"})
+# Nova 2 rejects these three at ``high`` effort only (lower efforts keep them).
+_NOVA_HIGH_EFFORT_UNSUPPORTED_FIELDS = frozenset({"maxTokens", "temperature", "topP"})
+# Strip the geography scope from a system-defined inference-profile id so the
+# adaptive-thinking allowlist below is written once per model line rather than
+# once per (geography, model) pair.
+_INFERENCE_PROFILE_GEO_PREFIX_RE = re.compile(r"^(?:global|us|us-gov|eu|apac|jp|au|ca|sa|il|mx)\.")
+# Claude model lines that accept ``thinking.type = "adaptive"``. Enumerated
+# rather than pattern-matched because the distinction is not inferable from the
+# id: Opus/Sonnet 4.6+ and the Mythos/Fable lines take adaptive thinking, while
+# older Claude models (Sonnet 4.5, Opus 4.5, ...) require the legacy
+# ``enabled`` + ``budget_tokens`` form and reject ``adaptive`` outright. An
+# unlisted model therefore falls through to "no reasoning translation", which
+# is the safe default rather than a guessed request shape.
+# Source: https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-adaptive-thinking.html
+_CLAUDE_ADAPTIVE_THINKING_MODELS = frozenset(
+    {
+        "anthropic.claude-opus-5",
+        "anthropic.claude-mythos-5",
+        "anthropic.claude-fable-5",
+        "anthropic.claude-opus-4-7",
+        "anthropic.claude-mythos-preview",
+        "anthropic.claude-opus-4-6-v1",
+        "anthropic.claude-sonnet-4-6",
+    }
+)
+# Claude dropped sampling controls starting with Opus 4.7 ("temperature,
+# top_p, and top_k parameters are no longer supported"); verified live against
+# the Opus 5 global profile, which answers a ValidationException for each.
+# ``maxTokens`` is still required and stays.
+_CLAUDE_UNSUPPORTED_SAMPLING_FIELDS = frozenset({"temperature", "topP", "topK"})
 BEDROCK_READ_TIMEOUT_SECONDS = 3600
 _DISTRIBUTION_NAME = "gco-cli"
 _SOURCE_ROOT = Path(__file__).resolve().parent.parent
@@ -185,6 +220,59 @@ def _supports_nova_2_reasoning(model_id: str) -> bool:
     return _NOVA_2_MODEL_ID_RE.search(model_id) is not None
 
 
+def _supports_claude_adaptive_thinking(model_id: str) -> bool:
+    """Return whether the identifier names a Claude line taking adaptive thinking."""
+    base = _INFERENCE_PROFILE_GEO_PREFIX_RE.sub("", model_id.rsplit("/", 1)[-1])
+    return base in _CLAUDE_ADAPTIVE_THINKING_MODELS
+
+
+def _nova_reasoning_options(
+    inference_config: dict[str, Any],
+    effort: str,
+) -> dict[str, Any]:
+    """Translate the canonical effort into Nova 2 ``reasoningConfig`` fields."""
+    resolved = inference_config
+    if effort == "high":
+        resolved = {
+            key: value
+            for key, value in resolved.items()
+            if key not in _NOVA_HIGH_EFFORT_UNSUPPORTED_FIELDS
+        }
+    options: dict[str, Any] = {}
+    if resolved:
+        options["inferenceConfig"] = resolved
+    options["additionalModelRequestFields"] = {
+        "reasoningConfig": {"type": "enabled", "maxReasoningEffort": effort}
+    }
+    return options
+
+
+def _claude_reasoning_options(
+    inference_config: dict[str, Any],
+    effort: str,
+) -> dict[str, Any]:
+    """Translate the canonical effort into Claude adaptive-thinking fields.
+
+    ``effort`` must ride in its own ``output_config`` object; Bedrock answers a
+    ValidationException when it is nested inside ``thinking``. Unsupported
+    sampling controls are dropped at every effort level because their removal
+    is a model-wide change, not an effort-dependent one.
+    """
+    resolved = {
+        key: value
+        for key, value in inference_config.items()
+        if key not in _CLAUDE_UNSUPPORTED_SAMPLING_FIELDS
+    }
+    options: dict[str, Any] = {}
+    if resolved:
+        options["inferenceConfig"] = resolved
+    options["additionalModelRequestFields"] = {
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": effort},
+    }
+    return options
+
+
 def build_bedrock_converse_options(
     model_id: str,
     *,
@@ -196,20 +284,35 @@ def build_bedrock_converse_options(
 
     Canonical reasoning preferences apply only when ``model_id`` is the
     configured default. Explicit third-party or other-model overrides retain
-    their caller-provided inference controls and never receive Nova-specific
-    ``reasoningConfig`` fields. Callers that know whether the model was
-    defaulted should pass ``apply_default_reasoning``; an explicit override
-    then remains independent of canonical configuration even when its model ID
-    happens to match the default. With no provenance flag, model-ID equality
-    preserves the compatibility behavior. Nova 2 high reasoning rejects
-    ``maxTokens``, ``temperature``, and ``topP``, so those fields are omitted in
-    that mode.
+    their caller-provided inference controls and never receive model-specific
+    reasoning fields. Callers that know whether the model was defaulted should
+    pass ``apply_default_reasoning``; an explicit override then remains
+    independent of canonical configuration even when its model ID happens to
+    match the default. With no provenance flag, model-ID equality preserves the
+    compatibility behavior.
+
+    Two reasoning dialects are translated, selected from the model id:
+
+    * Claude adaptive thinking — ``thinking.type = "adaptive"`` plus the effort
+      in its own ``output_config`` object. ``temperature``, ``topP``, and
+      ``topK`` are dropped because Claude removed them from Opus 4.7 onward.
+    * Nova 2 ``reasoningConfig`` — ``maxReasoningEffort``, with ``maxTokens``,
+      ``temperature``, and ``topP`` dropped at ``high`` effort only.
+
+    A default model in neither dialect keeps its caller-supplied inference
+    controls and receives no reasoning fields.
     """
     resolved_inference = dict(inference_config or {})
+    inference_only = {"inferenceConfig": resolved_inference} if resolved_inference else {}
     if apply_default_reasoning is False:
-        return {"inferenceConfig": resolved_inference} if resolved_inference else {}
-    if not _supports_nova_2_reasoning(model_id):
-        return {"inferenceConfig": resolved_inference} if resolved_inference else {}
+        return inference_only
+
+    if _supports_claude_adaptive_thinking(model_id):
+        translate = _claude_reasoning_options
+    elif _supports_nova_2_reasoning(model_id):
+        translate = _nova_reasoning_options
+    else:
+        return inference_only
 
     configuration = get_default_bedrock_configuration(cdk_json_path)
 
@@ -218,25 +321,58 @@ def build_bedrock_converse_options(
             raise BedrockModelConfigurationError(
                 "Default Bedrock model changed while building its Converse request"
             )
-        return {"inferenceConfig": resolved_inference} if resolved_inference else {}
+        return inference_only
 
-    if configuration.thinking_effort == "high":
-        resolved_inference = {
-            key: value
-            for key, value in resolved_inference.items()
-            if key not in _HIGH_REASONING_INCOMPATIBLE_FIELDS
-        }
+    return translate(resolved_inference, configuration.thinking_effort)
 
-    options: dict[str, Any] = {}
-    if resolved_inference:
-        options["inferenceConfig"] = resolved_inference
-    options["additionalModelRequestFields"] = {
-        "reasoningConfig": {
-            "type": "enabled",
-            "maxReasoningEffort": configuration.thinking_effort,
-        }
-    }
-    return options
+
+#: Bedrock error code returned (with HTTP 404) when the account has never
+#: submitted the Anthropic first-time-use case form. Anthropic models are gated
+#: behind it; first-party models are not.
+BEDROCK_FTU_FORM_ERROR_CODE = "FTUFormNotFilled"
+
+#: Remediation shown when an Anthropic model is invoked before the one-time
+#: use-case form has been submitted. Deliberately names both paths: the console
+#: is the usual route, the API is what automation needs.
+BEDROCK_FTU_REMEDIATION = (
+    "Amazon Bedrock rejected the request because this AWS account has not "
+    "submitted Anthropic's one-time first-time-use (FTU) case form, which is "
+    "required before any Anthropic model can be invoked.\n"
+    "Submit it once per account (or organization) either way:\n"
+    "  - Console: Amazon Bedrock > Model access > request access to the "
+    "Anthropic model and complete the use case details form.\n"
+    "  - CLI: aws bedrock put-use-case-for-model-access "
+    "--form-data <base64-encoded-json>\n"
+    "See https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html "
+    "for the form fields. Alternatively, point GCO at a model that needs no FTU "
+    "form (for example an Amazon Nova profile) with --model, "
+    "GCO_MISSION_BEDROCK_MODEL_ID, or cdk.json context.bedrock.default_model_id."
+)
+
+
+def is_bedrock_ftu_form_error(error: BaseException | None) -> bool:
+    """Return whether ``error`` (or anything it was raised from) is the FTU gate.
+
+    The exception chain is walked because the capacity advisor re-raises the
+    underlying ``ClientError`` as a ``RuntimeError``, so the CLI layer only ever
+    sees the original code through ``__cause__``.
+    """
+    seen: set[int] = set()
+    current = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        response = getattr(current, "response", None)
+        if isinstance(response, Mapping):
+            error_block = response.get("Error")
+            if (
+                isinstance(error_block, Mapping)
+                and error_block.get("Code") == BEDROCK_FTU_FORM_ERROR_CODE
+            ):
+                return True
+        if BEDROCK_FTU_FORM_ERROR_CODE in str(current):
+            return True
+        current = current.__cause__
+    return False
 
 
 def extract_bedrock_converse_text(response: Mapping[str, Any]) -> str:
@@ -269,6 +405,8 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "DEFAULT_BEDROCK_MODEL_ID",
+    "BEDROCK_FTU_FORM_ERROR_CODE",
+    "BEDROCK_FTU_REMEDIATION",
     "BEDROCK_READ_TIMEOUT_SECONDS",
     "BedrockDefaultConfiguration",
     "BedrockModelConfigurationError",
@@ -277,4 +415,5 @@ __all__ = [
     "get_default_bedrock_configuration",
     "get_default_bedrock_model_id",
     "get_default_bedrock_thinking_effort",
+    "is_bedrock_ftu_form_error",
 ]

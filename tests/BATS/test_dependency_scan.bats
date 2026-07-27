@@ -1095,10 +1095,12 @@ EOF
 @test "extract_default_bedrock_model: reads the configured id from cdk.json" {
     run extract_default_bedrock_model "cdk.json"
     [ "$status" -eq 0 ]
-    # A system-defined inference-profile id: geography.provider.model-vMAJOR:MINOR.
+    # A system-defined inference-profile id: geography.provider.model, with an
+    # optional trailing -vMAJOR[:MINOR] revision. Newer Anthropic profiles ship
+    # without any revision suffix, so only the dotted scope is universal.
     [ -n "$output" ]
     [[ "$output" == *"."* ]]
-    [[ "$output" == *":"* ]]
+    [[ "$output" == *.*.* ]]
 }
 
 @test "extract_default_bedrock_model: returns the exact cdk context value" {
@@ -1173,6 +1175,36 @@ EOF
     [ "$a" != "$b" ]
 }
 
+@test "bedrock_model_family: a revision-less Anthropic profile keeps its line" {
+    result="$(bedrock_model_family "global.anthropic.claude-opus-5")"
+    [ "$result" = "global.anthropic.claude-opus" ]
+}
+
+@test "bedrock_model_family: a -vMAJOR revision without a minor is stripped" {
+    # Matching only the -vMAJOR:MINOR form would leave 'v1' as a name token and
+    # file this under a phantom claude-opus-v1 family.
+    result="$(bedrock_model_family "global.anthropic.claude-opus-4-6-v1")"
+    [ "$result" = "global.anthropic.claude-opus" ]
+}
+
+@test "bedrock_model_family: every Opus revision shape folds into one family" {
+    # The live catalog carries all three shapes at once: -vMAJOR:MINOR,
+    # -vMAJOR, and no revision. Drift detection only works if they agree.
+    a="$(bedrock_model_family "global.anthropic.claude-opus-4-5-20251101-v1:0")"
+    b="$(bedrock_model_family "global.anthropic.claude-opus-4-6-v1")"
+    c="$(bedrock_model_family "global.anthropic.claude-opus-4-7")"
+    d="$(bedrock_model_family "global.anthropic.claude-opus-5")"
+    [ "$a" = "$b" ]
+    [ "$b" = "$c" ]
+    [ "$c" = "$d" ]
+}
+
+@test "bedrock_model_family: Claude tiers stay separate across revision shapes" {
+    opus="$(bedrock_model_family "global.anthropic.claude-opus-5")"
+    sonnet="$(bedrock_model_family "global.anthropic.claude-sonnet-4-6")"
+    [ "$opus" != "$sonnet" ]
+}
+
 # ── compare_bedrock_model ─────────────────────────────────────────
 
 @test "compare_bedrock_model: v1:0 vs v2:0 is newer" {
@@ -1198,6 +1230,21 @@ EOF
 @test "compare_bedrock_model: a later generation is newer (Nova 1 -> Nova 2)" {
     result="$(compare_bedrock_model "us.amazon.nova-pro-v1:0" "us.amazon.nova-2-pro-v1:0")"
     [ "$result" = "newer" ]
+}
+
+@test "compare_bedrock_model: Opus 4.8 -> Opus 5 is newer across revision shapes" {
+    result="$(compare_bedrock_model "global.anthropic.claude-opus-4-8" "global.anthropic.claude-opus-5")"
+    [ "$result" = "newer" ]
+}
+
+@test "compare_bedrock_model: Opus 5 -> a dated Opus 4.5 profile is older" {
+    result="$(compare_bedrock_model "global.anthropic.claude-opus-5" "global.anthropic.claude-opus-4-5-20251101-v1:0")"
+    [ "$result" = "older" ]
+}
+
+@test "compare_bedrock_model: a revision-less id equals itself" {
+    result="$(compare_bedrock_model "global.anthropic.claude-opus-5" "global.anthropic.claude-opus-5")"
+    [ "$result" = "same" ]
 }
 
 # ── get_latest_bedrock_model ─────────────────────────────────────
@@ -1250,6 +1297,51 @@ SHIM
         "global.amazon.nova-2-lite-v1:0" us-east-1
     [ "$status" -eq 0 ]
     [ "$output" = "global.amazon.nova-3-lite-v1:0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_model: ranks mixed Anthropic revision shapes in one family" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/aws" <<'SHIM'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"inferenceProfileSummaries":[
+  {"inferenceProfileId":"global.anthropic.claude-opus-4-5-20251101-v1:0","status":"ACTIVE"},
+  {"inferenceProfileId":"global.anthropic.claude-opus-4-6-v1","status":"ACTIVE"},
+  {"inferenceProfileId":"global.anthropic.claude-opus-4-7","status":"ACTIVE"},
+  {"inferenceProfileId":"global.anthropic.claude-opus-6","status":"ACTIVE"},
+  {"inferenceProfileId":"global.anthropic.claude-opus-9","status":"LEGACY"},
+  {"inferenceProfileId":"us.anthropic.claude-opus-8","status":"ACTIVE"},
+  {"inferenceProfileId":"global.anthropic.claude-sonnet-9","status":"ACTIVE"}
+]}
+JSON
+SHIM
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_model \
+        "global.anthropic.claude-opus-5" us-east-1
+    [ "$status" -eq 0 ]
+    # Opus 6 is the newest ACTIVE global Opus regardless of revision shape; the
+    # LEGACY entry, the us-scoped profile, and the sonnet tier are excluded.
+    [ "$output" = "global.anthropic.claude-opus-6" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_model: no drift when the pinned revision-less id is newest" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/aws" <<'SHIM'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"inferenceProfileSummaries":[
+  {"inferenceProfileId":"global.anthropic.claude-opus-4-6-v1","status":"ACTIVE"},
+  {"inferenceProfileId":"global.anthropic.claude-opus-5","status":"ACTIVE"}
+]}
+JSON
+SHIM
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_model \
+        "global.anthropic.claude-opus-5" us-east-1
+    [ "$status" -eq 0 ]
+    [ "$output" = "global.anthropic.claude-opus-5" ]
     rm -rf "$tmpdir"
 }
 

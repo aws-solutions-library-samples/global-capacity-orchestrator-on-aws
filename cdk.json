@@ -38,9 +38,9 @@
       "Owner": "platform-team"
     },
 
-    "_comment_bedrock": "Shared defaults for optional advisory Bedrock features. Mission sampling and the capacity advisor both consume this system-defined global cross-Region inference-profile ID and its Nova 2 reasoning preference; explicit command/environment model overrides still take precedence and do not inherit Nova-specific thinking fields.",
+    "_comment_bedrock": "Shared defaults for optional advisory Bedrock features. Mission sampling and the capacity advisor both consume this system-defined global cross-Region inference-profile ID and its reasoning-effort preference; explicit command/environment model overrides still take precedence and do not inherit model-specific thinking fields. The stock Anthropic default requires the one-time Anthropic first-time-use case form per account (https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html); see docs/CUSTOMIZATION.md (Bedrock Model Selection).",
     "bedrock": {
-      "default_model_id": "global.amazon.nova-2-lite-v1:0",
+      "default_model_id": "global.anthropic.claude-opus-5",
       "thinking": {
         "effort": "high"
       }

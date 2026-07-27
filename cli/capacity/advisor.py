@@ -14,10 +14,12 @@ from botocore.exceptions import ClientError
 
 from cli.config import GCOConfig, get_config
 from gco.bedrock import (
+    BEDROCK_FTU_REMEDIATION,
     BEDROCK_READ_TIMEOUT_SECONDS,
     build_bedrock_converse_options,
     extract_bedrock_converse_text,
     get_default_bedrock_model_id,
+    is_bedrock_ftu_form_error,
 )
 
 from .checker import CapacityChecker
@@ -585,6 +587,8 @@ Respond ONLY with the JSON object, no additional text."""
 
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code", "")
+            if is_bedrock_ftu_form_error(e):
+                raise RuntimeError(BEDROCK_FTU_REMEDIATION) from e
             if error_code == "AccessDeniedException":
                 raise RuntimeError(
                     "Access denied to Bedrock. Ensure your IAM role has "

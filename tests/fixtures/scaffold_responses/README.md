@@ -33,7 +33,8 @@ seen continues to round-trip through the validator.
 ```text
 tests/fixtures/scaffold_responses/
 ├── README.md                                   # this file
-├── global_amazon_nova_2_lite_v1_0.json         # canonical default
+├── global_anthropic_claude_opus_5.json          # canonical default
+├── global_amazon_nova_2_lite_v1_0.json         # historical capture
 ├── us_amazon_nova_premier_v1_0.json            # historical capture
 ├── us_anthropic_claude_sonnet_4_5_*.json
 ├── us_anthropic_claude_haiku_4_5_*.json
@@ -76,10 +77,10 @@ just want to add a model to the safety net — run the capture script
 once and commit the resulting JSON:
 
 ```bash
-# Capture the canonical global Nova 2 Lite default. This makes exactly
+# Capture the canonical global Claude Opus 5 default. This makes exactly
 # three sequential paid Converse calls, one per canonical directive.
 python3 scripts/capture_scaffold_fixtures.py \
-  --model global.amazon.nova-2-lite-v1:0 \
+  --model global.anthropic.claude-opus-5 \
   --region us-east-1
 
 # Capture against a different single model.
@@ -92,11 +93,14 @@ python3 scripts/capture_scaffold_fixtures.py
 ```
 
 The script needs AWS credentials with `bedrock:InvokeModel` access
-to the listed models. When the requested id is the configured default, the
-script also applies `cdk.json` `context.bedrock.thinking`; the stock Nova 2 Lite
-`high` effort setting can materially increase billed output tokens and latency.
-AWS requires `maxTokens`, `temperature`, and `topP` to remain unset in that
-mode. Failures (denied access, transient errors) are reported per-model and
+to the listed models. Anthropic models — including the stock default — also
+require the one-time
+[Anthropic first-time-use form](../../../docs/CUSTOMIZATION.md#accepting-the-anthropic-first-time-use-form);
+without it the capture fails with `FTUFormNotFilled`. When the requested id is
+the configured default, the script also applies `cdk.json`
+`context.bedrock.thinking`; the stock `high` effort can materially increase
+billed output tokens and latency, and Claude models from Opus 4.7 onward reject
+`temperature`, `topP`, and `topK`, which GCO omits. Failures (denied access, transient errors) are reported per-model and
 never abort the run — every model that does succeed lands in the fixture
 directory and protects the validator path on every CI run thereafter.
 

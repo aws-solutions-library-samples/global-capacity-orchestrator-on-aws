@@ -965,19 +965,23 @@ def test_bedrock_backend_passes_correct_inference_config() -> None:
 
 
 def test_bedrock_backend_applies_default_high_reasoning_without_sampling_controls() -> None:
-    """The canonical Nova 2 default receives the native maximum-effort fields."""
+    """The canonical Claude default receives adaptive thinking at the set effort.
+
+    ``temperature`` is dropped because Claude removed sampling controls from
+    Opus 4.7 onward, while ``maxTokens`` — still required by the model —
+    survives.
+    """
     fake_client = _FakeBedrockClient(response=_well_shaped_response("ok"))
     with _patch_boto3_session(fake_client):
         backend = BedrockSamplingBackend(region="us-east-1")
         _run(backend.sample(_make_prompt()))
 
     kwargs = fake_client.converse_calls[0]
-    assert "inferenceConfig" not in kwargs
+    assert kwargs["inferenceConfig"] == {"maxTokens": BEDROCK_MAX_TOKENS}
+    assert "temperature" not in kwargs["inferenceConfig"]
     assert kwargs["additionalModelRequestFields"] == {
-        "reasoningConfig": {
-            "type": "enabled",
-            "maxReasoningEffort": "high",
-        }
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "high"},
     }
 
 
