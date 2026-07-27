@@ -186,6 +186,18 @@ class TestAllocationsToRows:
         assert rows[0]["cpu_cost"] == 0.0
         assert rows[0]["gpu_cost"] == 0.0
 
+    def test_infinite_numerics_coerce_to_zero(self):
+        """json.loads accepts Infinity/-Infinity; either would poison Athena SUMs."""
+        rows = allocations_to_rows(
+            {"inf": _allocation(totalCost=float("inf"), cpuCost=float("-inf"), gpuCost="inf")},
+            cluster="c",
+            window_start=WINDOW_START,
+            window_end=WINDOW_END,
+        )
+        assert rows[0]["total_cost"] == 0.0
+        assert rows[0]["cpu_cost"] == 0.0
+        assert rows[0]["gpu_cost"] == 0.0
+
 
 class TestParquetSerialization:
     def test_round_trips_through_real_pyarrow(self):

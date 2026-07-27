@@ -157,6 +157,10 @@ class TestGateEvaluation:
         "record",
         [
             {"spot_max_price": "not-a-price", "spot_instance_type": "g5.xlarge"},
+            # An infinite cap would wave every price through; the stored
+            # field is not an honorable cap, so the gate must stay closed.
+            {"spot_max_price": "inf", "spot_instance_type": "g5.xlarge"},
+            {"spot_max_price": "-inf", "spot_instance_type": "g5.xlarge"},
             {"spot_max_price": "0.50", "spot_instance_type": None},
             {"spot_max_price": "0.50", "spot_instance_type": ""},
         ],

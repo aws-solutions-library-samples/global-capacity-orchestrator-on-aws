@@ -8,9 +8,10 @@
 # to enable Slurm, set "helm": { "slurm": { "enabled": true } } in cdk.json.
 # The cdk.json setting always takes precedence over the value here.
 #
-# Last updated: 2026-07-24
+# Last updated: 2026-07-26
 # Version check sources:
 #   - KEDA: https://artifacthub.io/packages/helm/kedacore/keda
+#   - OpenCost: https://github.com/opencost/opencost-helm-chart/releases
 #   - Volcano: https://github.com/volcano-sh/volcano/releases
 #   - KubeRay: https://github.com/ray-project/kuberay/releases
 #   - Kueue: https://github.com/kubernetes-sigs/kueue/releases

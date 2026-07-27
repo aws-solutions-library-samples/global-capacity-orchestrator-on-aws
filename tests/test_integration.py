@@ -1392,10 +1392,12 @@ class TestHelmChartConsistency:
 
         source_urls = re.findall(r"#\s+-\s+\w.*?:\s+(https?://\S+)", content)
 
-        # Every enabled chart should have a corresponding version check source URL
-        enabled_charts = [name for name, cfg in charts.items() if cfg.get("enabled")]
+        # Every chart should have a corresponding version check source URL.
+        # Disabled-by-default charts (e.g. opencost, slurm) are included: the
+        # monthly dependency scan enumerates charts.yaml without consulting
+        # the enabled flag, so the human-facing header must keep pace.
         missing_sources = []
-        for chart_name in enabled_charts:
+        for chart_name in charts:
             # Check if any source URL is plausibly related to this chart
             chart_words = chart_name.lower().replace("-", " ").replace("_", " ").split()
             found = any(any(word in url.lower() for word in chart_words) for url in source_urls)

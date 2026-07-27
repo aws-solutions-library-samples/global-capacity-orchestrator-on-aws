@@ -18,6 +18,7 @@ dispatching above the cap).
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -165,7 +166,11 @@ class SpotPriceGate:
             max_price = float(str(raw_price))
         except TypeError, ValueError:
             max_price = float("nan")
-        if not isinstance(instance_type, str) or not instance_type or max_price != max_price:
+        # A cap must be a finite number: NaN means the stored field is
+        # unparseable, and an infinite cap would wave every price through —
+        # both gate closed rather than dispatching a job whose cap cannot be
+        # honored.
+        if not isinstance(instance_type, str) or not instance_type or not math.isfinite(max_price):
             return SpotGateDecision(
                 gated=True,
                 instance_type=str(instance_type or ""),

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -84,12 +85,17 @@ def _compact_ts(moment: datetime) -> str:
 
 
 def _as_float(value: Any) -> float:
-    """Coerce OpenCost numeric fields defensively; absent/bad values are 0."""
+    """Coerce OpenCost numeric fields defensively; absent/bad values are 0.
+
+    Non-finite values (NaN and ±infinity — ``json.loads`` accepts both) are
+    coerced to 0 too: one poisoned row would otherwise contaminate every
+    Athena aggregate over the table.
+    """
     try:
         result = float(value)
     except TypeError, ValueError:
         return 0.0
-    return result if result == result else 0.0  # NaN guards Athena aggregates
+    return result if math.isfinite(result) else 0.0
 
 
 @dataclass(frozen=True)
