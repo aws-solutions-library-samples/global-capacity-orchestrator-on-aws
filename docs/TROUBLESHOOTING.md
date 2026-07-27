@@ -142,7 +142,7 @@ If you're using the dev container, the CLI is always available — just exec int
      --query 'Quotas[?QuotaName==`Clusters`]'
    ```
 
-4. **Docker/Finch not running**
+4. **Docker/[Finch](https://runfinch.com/) not running**
 
    ```bash
    # Start Finch
@@ -179,7 +179,7 @@ gco stacks deploy-all -y
 - `No multi-arch image-copy method available. Need one of: 'docker buildx' ... 'docker pull --all-platforms' ... or skopeo on PATH.`
 - `failed to ... build ... --platform linux/amd64 ... image ... does not provide the specified platform (linux/amd64)`
 
-**Cause**: The deploy needs a multi-arch image-copy tool for two steps — the Volcano ECR image mirror (`docker buildx imagetools create`) and the cross-architecture build of the `linux/amd64` Lambda/service asset images. On an arm64 host (Apple Silicon) the legacy Docker builder cannot satisfy either. This happens when the deploy runs from an environment without Docker Buildx (Finch/nerdctl or skopeo also work).
+**Cause**: The deploy needs a multi-arch image-copy tool for two steps — the [Volcano](https://volcano.sh/) ECR image mirror (`docker buildx imagetools create`) and the cross-architecture build of the `linux/amd64` Lambda/service asset images. On an arm64 host (Apple Silicon) the legacy Docker builder cannot satisfy either. This happens when the deploy runs from an environment without Docker Buildx (Finch/nerdctl or [skopeo](https://github.com/containers/skopeo) also work).
 
 **Solution**: Run the deploy from the [dev container](../QUICKSTART.md#step-1-clone-and-build-the-dev-container), which ships Docker Buildx for exactly this. If you built the image before Buildx was added, rebuild it:
 
@@ -595,7 +595,7 @@ kubectl get networkpolicies -n NAMESPACE
 
 **Symptom**: `gco jobs submit` returns a 502/503 or endpoint timeout immediately after a fresh regional deployment.
 
-**Cause**: The AWS load balancer controller creates the internal platform ALB asynchronously. Global Accelerator registration, the SSM hostname registry, ALB target registration, and pod health must all converge before the backend is routable.
+**Cause**: The AWS load balancer controller creates the internal platform ALB asynchronously. [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) registration, the SSM hostname registry, ALB target registration, and pod health must all converge before the backend is routable.
 
 **Solution**:
 

@@ -44,6 +44,7 @@ import click
 # imports below resolve regardless of how this module is loaded.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "gco_mcp"))
 
+from gco.bedrock import BedrockFTUFormNotAcceptedError  # noqa: E402
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
     from mission.types import SessionState
@@ -1179,6 +1180,10 @@ def mission_scaffold_criteria_cmd(
                     )
                 )
                 sampling_path_taken = True
+            except BedrockFTUFormNotAcceptedError as exc:
+                # Not a fallback case: the account cannot invoke any Anthropic
+                # model until the one-time form is submitted, so report it.
+                raise click.ClickException(str(exc)) from exc
             except criteria_scaffold.ScaffoldSamplingError as exc:
                 # The sampling path failed; emit a one-line warning to
                 # stderr so the operator sees what happened, then fall
@@ -1433,6 +1438,10 @@ def mission_run_cmd(
                     )
                 )
                 sampling_path_taken = True
+            except BedrockFTUFormNotAcceptedError as exc:
+                # Not a fallback case: the account cannot invoke any Anthropic
+                # model until the one-time form is submitted, so report it.
+                raise click.ClickException(str(exc)) from exc
             except criteria_scaffold.ScaffoldSamplingError as exc:
                 click.echo(
                     f"sampling path failed ({exc.last_reason}); "

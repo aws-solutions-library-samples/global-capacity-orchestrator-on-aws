@@ -813,8 +813,9 @@ Defaults:
   tokens and latency. Explicit model overrides do not inherit this reasoning
   field. Anthropic models need the one-time
   [first-time-use form](CUSTOMIZATION.md#accepting-the-anthropic-first-time-use-form);
-  until it is submitted, sampling is tagged `bedrock_FTUFormNotFilled` and
-  falls back to deterministic templates.
+  until it is submitted, sampling raises a hard error rather than falling back
+  to deterministic templates, because the gate is permanent and would otherwise
+  silently downgrade the whole run.
   Override via `GCO_MISSION_BEDROCK_MODEL_ID` or `--bedrock-model-id`; see
   [Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection).
 - Region — `us-east-1`. Override via `GCO_MISSION_BEDROCK_REGION`.
@@ -856,7 +857,7 @@ A script that exceeds either cap is terminated; partial observations recorded vi
 
 ## Loop Limits
 
-Two **loop-control** caps gate every session. They limit the controls Mission can directly observe — iteration count and wall-clock seconds — and have nothing to do with money. Cost guardrails live out-of-band: configure AWS Budgets and Cost Anomaly Detection at the account level. Real-time workload cost tracking is structurally inaccurate (Spot vs on-demand drift, EBS / EFA / egress not in the Pricing API, Cost Explorer 24-hour latency) so a Mission cost cap would fire unpredictably.
+Two **loop-control** caps gate every session. They limit the controls Mission can directly observe — iteration count and wall-clock seconds — and have nothing to do with money. Cost guardrails live out-of-band: configure AWS Budgets and Cost Anomaly Detection at the account level. Real-time workload cost tracking is structurally inaccurate (Spot vs on-demand drift, EBS / [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) / egress not in the Pricing API, Cost Explorer 24-hour latency) so a Mission cost cap would fire unpredictably.
 
 Each cap accepts either:
 

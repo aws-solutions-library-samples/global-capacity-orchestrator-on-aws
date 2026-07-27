@@ -2521,3 +2521,172 @@ class TestBedrockSampling:
         assert kwargs["sampling_status"] == "used"
         assert kwargs["sampling_backend"] == "bedrock"
         assert kwargs["sampling_model_id"] == custom_model
+
+
+# ---------------------------------------------------------------------------
+# Anthropic first-time-use (FTU) gate — hard error, never a silent fallback
+# ---------------------------------------------------------------------------
+
+
+class TestFTUFormIsAHardError:
+    """A missing Anthropic FTU form must escalate, not degrade.
+
+    Every other Bedrock failure is potentially transient, so the Mission stack
+    answers it with a deterministic fallback. The FTU gate is a permanent,
+    account-scoped misconfiguration that would fail identically on every
+    remaining iteration, so it propagates instead — otherwise an entire run
+    silently downgrades to templates while hiding a one-line fix.
+    """
+
+    @staticmethod
+    def _ftu_client_error() -> Any:
+        from botocore.exceptions import ClientError
+
+        return ClientError(
+            {"Error": {"Code": "FTUFormNotFilled", "Message": "not filled"}},
+            "Converse",
+        )
+
+    @staticmethod
+    def _raises(expected: type[BaseException]) -> Any:
+        """``pytest.raises`` via a local import.
+
+        This module deliberately keeps its imports inside functions (it drives
+        ``mission.*`` through a path injection), so ``pytest`` is not bound at
+        module scope here.
+        """
+        import pytest
+
+        return pytest.raises(expected)
+
+    def test_backend_raises_hard_error_not_transport_error(self) -> None:
+        from gco.bedrock import BedrockFTUFormNotAcceptedError
+
+        fake_client = _FakeBedrockClient(raises=self._ftu_client_error())
+        with _patch_boto3_session(fake_client):
+            backend = BedrockSamplingBackend(region="us-east-1")
+            with self._raises(BedrockFTUFormNotAcceptedError) as excinfo:
+                _run(backend.sample(_make_prompt()))
+
+        # Subclassing RuntimeError keeps existing advisor callers working.
+        assert isinstance(excinfo.value, RuntimeError)
+        assert not isinstance(excinfo.value, SamplingTransportError)
+        # The message must be actionable on its own.
+        assert "put-use-case-for-model-access" in str(excinfo.value)
+
+    def test_strategy_revision_propagates_instead_of_falling_back(self) -> None:
+        from gco.bedrock import BedrockFTUFormNotAcceptedError
+
+        fake_client = _FakeBedrockClient(raises=self._ftu_client_error())
+        with (
+            _patch_boto3_session(fake_client),
+            mock.patch.object(sampling._mission_audit, "emit_sampling_event"),
+        ):
+            backend = BedrockSamplingBackend()
+            with self._raises(BedrockFTUFormNotAcceptedError):
+                _run(
+                    maybe_sample_strategy_revision(
+                        backend=backend,
+                        session=_make_session(),
+                        iteration=_make_iteration_for_orch(),
+                        allowlist=["submit_job_sqs"],
+                        registered_tools=_REGISTERED,
+                        tool_docstrings={"submit_job_sqs": "submit"},
+                        remaining_iterations=5,
+                        remaining_wall_clock_secs=600.0,
+                        allow_scripts=False,
+                    )
+                )
+
+    def test_transient_transport_error_still_falls_back(self) -> None:
+        """The escalation must be scoped to FTU and nothing else."""
+        from botocore.exceptions import ClientError
+
+        throttled = ClientError(
+            {"Error": {"Code": "ThrottlingException", "Message": "slow down"}},
+            "Converse",
+        )
+        fake_client = _FakeBedrockClient(raises=throttled)
+        with (
+            _patch_boto3_session(fake_client),
+            mock.patch.object(sampling._mission_audit, "emit_sampling_event"),
+        ):
+            backend = BedrockSamplingBackend()
+            result = _run(
+                maybe_sample_strategy_revision(
+                    backend=backend,
+                    session=_make_session(),
+                    iteration=_make_iteration_for_orch(),
+                    allowlist=["submit_job_sqs"],
+                    registered_tools=_REGISTERED,
+                    tool_docstrings={"submit_job_sqs": "submit"},
+                    remaining_iterations=5,
+                    remaining_wall_clock_secs=600.0,
+                    allow_scripts=False,
+                )
+            )
+
+        assert isinstance(result, SamplingFallback)
+        assert result.reason == "transport_error"
+
+    def test_engine_reraises_ftu_but_still_swallows_other_sampler_errors(self) -> None:
+        from mission.engine import MissionEngine
+
+        from gco.bedrock import BedrockFTUFormNotAcceptedError
+
+        engine = MissionEngine.__new__(MissionEngine)
+        record: dict[str, Any] = {"iteration_index": 1}
+
+        async def _ftu_sampler(**_kwargs: Any) -> Any:
+            raise BedrockFTUFormNotAcceptedError()
+
+        engine.sampling_callable = _ftu_sampler
+        with self._raises(BedrockFTUFormNotAcceptedError):
+            _run(engine._try_sample_strategy({}, None, record))
+
+        async def _flaky_sampler(**_kwargs: Any) -> Any:
+            raise RuntimeError("transient sampler failure")
+
+        engine.sampling_callable = _flaky_sampler
+        assert _run(engine._try_sample_strategy({}, None, record)) is None
+
+    def test_criteria_scaffolder_propagates_unwrapped(self) -> None:
+        from mission import criteria_scaffold
+
+        from gco.bedrock import BedrockFTUFormNotAcceptedError
+
+        class _FtuBackend:
+            backend_name = "bedrock"
+            model_id = "m"
+
+            async def sample(self, prompt: Any) -> str:
+                raise BedrockFTUFormNotAcceptedError()
+
+        with self._raises(BedrockFTUFormNotAcceptedError):
+            _run(
+                criteria_scaffold.generate_sampled_criteria(
+                    _FtuBackend(),
+                    "Drive validation loss below 0.1.",
+                    allowlist=["find_examples"],
+                )
+            )
+
+    def test_criteria_scaffolder_still_wraps_transient_failures(self) -> None:
+        from mission import criteria_scaffold
+
+        class _FlakyBackend:
+            backend_name = "bedrock"
+            model_id = "m"
+
+            async def sample(self, prompt: Any) -> str:
+                raise SamplingTransportError("bedrock_ThrottlingException")
+
+        with self._raises(criteria_scaffold.ScaffoldSamplingError) as excinfo:
+            _run(
+                criteria_scaffold.generate_sampled_criteria(
+                    _FlakyBackend(),
+                    "Drive validation loss below 0.1.",
+                    allowlist=["find_examples"],
+                )
+            )
+        assert excinfo.value.last_reason == "transport_error"

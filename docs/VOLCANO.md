@@ -118,7 +118,7 @@ spec:
     nvidia.com/gpu: "8"
 ```
 
-**Important:** Queue `capability` values are hard caps enforced by Volcano. If you set `nvidia.com/gpu: "8"` but only have 4 physical GPUs, jobs requesting more than 4 will pend indefinitely. Coordinate queue capacity values with your actual cluster resources and with Kueue ClusterQueue quotas to avoid overcommitment (see [Coexistence with Kueue](#coexistence-with-kueue-and-slurm)).
+**Important:** Queue `capability` values are hard caps enforced by Volcano. If you set `nvidia.com/gpu: "8"` but only have 4 physical GPUs, jobs requesting more than 4 will pend indefinitely. Coordinate queue capacity values with your actual cluster resources and with [Kueue](https://kueue.sigs.k8s.io/) ClusterQueue quotas to avoid overcommitment (see [Coexistence with Kueue](#coexistence-with-kueue-and-slurm)).
 
 ### Job Policies
 

@@ -79,7 +79,7 @@ aggregator uses it to reach that region's private VPC. In the commercial `aws`
 partition, the bridge's resource policy admits only the aggregator role by
 default, and `api_gateway.regional_api_enabled=true` additionally permits
 IAM-authorized principals from the deployment account. In other partitions,
-same-account direct access is enabled automatically because Global Accelerator
+same-account direct access is enabled automatically because [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html)
 and its global proxy routes are omitted.
 
 When a command supplies an exact target region, the CLI automatically resolves
@@ -92,7 +92,7 @@ direct regional access. Outside `aws`, the deployment enables that same-account
 policy automatically. The global endpoint rejects `X-GCO-Target-Region` rather
 than silently pretending a region pin succeeded.
 
-Both API Gateway hops use AWS-managed TLS and SigV4. The regional VPC Lambda
+Both API Gateway hops use AWS-managed TLS and [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html). The regional VPC Lambda
 then uses HMAC plus deployment-local private-root TLS to the internal ALB.
 
 ```bash
@@ -923,9 +923,9 @@ Manage CDK infrastructure stacks.
 | [`gco stacks destroy-all`](#gco-stacks-destroy-all) | Destroy all stacks in correct order. |
 | [`gco stacks bootstrap`](#gco-stacks-bootstrap) | Bootstrap CDK in a region. |
 | [`gco stacks access`](#gco-stacks-access) | Configure kubectl access to a GCO EKS cluster. |
-| [`gco stacks fsx`](#gco-stacks-fsx) | Manage FSx for Lustre storage. |
-| [`gco stacks valkey`](#gco-stacks-valkey) | Manage Valkey Serverless cache. |
-| [`gco stacks aurora`](#gco-stacks-aurora) | Manage Aurora PostgreSQL (pgvector) database. |
+| [`gco stacks fsx`](#gco-stacks-fsx) | Manage [FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) storage. |
+| [`gco stacks valkey`](#gco-stacks-valkey) | Manage [Valkey](https://valkey.io/) Serverless cache. |
+| [`gco stacks aurora`](#gco-stacks-aurora) | Manage Aurora PostgreSQL ([pgvector](https://github.com/pgvector/pgvector)) database. |
 | [`gco stacks synth`](#gco-stacks-synth) | Synthesize CloudFormation templates without deploying. |
 | [`gco stacks diff`](#gco-stacks-diff) | Show differences between deployed and local stacks. |
 | [`gco stacks outputs`](#gco-stacks-outputs) | Get CloudFormation outputs from a deployed stack (e.g. API URLs, ARNs, secret references that the stack exposes). |
@@ -1353,7 +1353,7 @@ You can also activate the `Environment` and `Owner` tags for more granular filte
 | [`gco costs trend`](#gco-costs-trend) | Show daily cost trend with a visual bar chart. |
 | [`gco costs workloads`](#gco-costs-workloads) | Estimate costs for currently running workloads (jobs and inference endpoints) based on instance pricing and runtime. |
 | [`gco costs forecast`](#gco-costs-forecast) | Forecast GCO costs for the next N days based on historical spending patterns. |
-| [`gco costs k8s`](#gco-costs-k8s) | Query Kubernetes allocation costs across regions via Athena (OpenCost data). |
+| [`gco costs k8s`](#gco-costs-k8s) | Query Kubernetes allocation costs across regions via Athena ([OpenCost](https://opencost.io/) data). |
 | [`gco costs k8s namespaces`](#gco-costs-k8s-namespaces) | Show Kubernetes cost by namespace across all regions. |
 | [`gco costs k8s regions`](#gco-costs-k8s-regions) | Show Kubernetes allocation cost by deployment region. |
 | [`gco costs k8s trend`](#gco-costs-k8s-trend) | Show Kubernetes cost over time (daily or hourly buckets). |
@@ -1362,7 +1362,7 @@ You can also activate the `Environment` and `Owner` tags for more granular filte
 | [`gco costs report generate`](#gco-costs-report-generate) | Generate an ad-hoc cost report now. |
 | [`gco costs report list`](#gco-costs-report-list) | List recent cost report objects in the cost report bucket. |
 | [`gco costs report status`](#gco-costs-report-status) | Show cost monitoring health, including OpenCost status. |
-| [`gco costs dashboard`](#gco-costs-dashboard) | Open a regional cost dashboard (Grafana or the OpenCost UI) over the private EKS endpoint. |
+| [`gco costs dashboard`](#gco-costs-dashboard) | Open a regional cost dashboard ([Grafana](https://grafana.com/docs/grafana/latest/) or the OpenCost UI) over the private EKS endpoint. |
 
 </details>
 
@@ -1490,7 +1490,7 @@ gco costs forecast --days 60
 
 #### `gco costs k8s`
 
-Query Kubernetes allocation costs across regions. These commands run [Amazon Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) aggregations over the Parquet allocation reports the per-region cost-monitor services write to the central cost report bucket. Requires `cost_monitoring.enabled` in `cdk.json` (the default) and a deployed monitoring stack — see [docs/COST_MONITORING.md](COST_MONITORING.md).
+Query Kubernetes allocation costs across regions. These commands run [Amazon Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) aggregations over the [Parquet](https://parquet.apache.org/docs/) allocation reports the per-region cost-monitor services write to the central cost report bucket. Requires `cost_monitoring.enabled` in `cdk.json` (the default) and a deployed monitoring stack — see [docs/COST_MONITORING.md](COST_MONITORING.md).
 
 ```bash
 gco costs k8s COMMAND [OPTIONS]
@@ -2275,15 +2275,15 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | `--label` | `-l` | Label (key=value), repeatable |
 | `--min-replicas` | | Autoscaling: minimum replicas |
 | `--max-replicas` | | Autoscaling: maximum replicas |
-| `--autoscale-metric` | | Autoscaling metric (e.g. `cpu:70`, `memory:80`, `gpu:60`), repeatable. CPU/memory use the native HPA; gpu/gpu_memory scale via KEDA + CloudWatch. |
+| `--autoscale-metric` | | Autoscaling metric (e.g. `cpu:70`, `memory:80`, `gpu:60`), repeatable. CPU/memory use the native HPA; gpu/gpu_memory scale via [KEDA](https://keda.sh/) + CloudWatch. |
 | `--capacity-type` | | Node capacity type: `on-demand` (default) or `spot` |
-| `--accelerator` | `nvidia` | Accelerator type: `nvidia` for GPU instances, `neuron` for Trainium/Inferentia |
+| `--accelerator` | `nvidia` | Accelerator type: `nvidia` for GPU instances, `neuron` for [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/)/Inferentia |
 | `--node-selector` | | Node selector (key=value), repeatable. E.g. `eks.amazonaws.com/instance-family=inf2` |
 | `--extra-args` | | Extra arguments passed to the container (e.g. `--kv-transfer-config {...}`). Repeatable |
 | `--mooncake-mode` | | Mooncake serving mode: `disaggregated` (prefill/decode split), `store` (shared KV-cache), or `both` |
 | `--prefill-replicas` | | Number of prefill replicas (default: 1). Used with `--mooncake-mode disaggregated\|both` |
 | `--decode-replicas` | | Number of decode replicas (default: 1). Used with `--mooncake-mode disaggregated\|both` |
-| `--mooncake-protocol` | | Transfer intent: `rdma` (default, rendered to vLLM's EFA connector protocol and scheduled on EFA) or `tcp` (non-EFA fallback). Requires `--mooncake-mode` |
+| `--mooncake-protocol` | | Transfer intent: `rdma` (default, rendered to [vLLM](https://docs.vllm.ai/en/latest/)'s [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) connector protocol and scheduled on EFA) or `tcp` (non-EFA fallback). Requires `--mooncake-mode` |
 | `--mooncake-device-name` | | Optional provider-visible network device forwarded to Mooncake. Omit for auto-detection. Requires `--mooncake-mode` |
 | `--mooncake-autoscale` | | Per-role autoscaling as `ROLE:MIN:MAX[:METRIC:TARGET...]`. Repeatable. E.g. `prefill:1:8:gpu:70` |
 | `--mooncake-cold-tier` | | Enable the async per-region S3 cold tier for the shared KV-cache store. Requires `--mooncake-mode store\|both`. Pre-warm with `gco inference populate-kv` |
@@ -3082,7 +3082,7 @@ gco images uri my-app -t v1.2.3
 #### `gco images build`
 
 Build a container image and push it to the project's ECR repo. Uses
-the local container runtime (Docker / Finch / Podman), authenticates
+the local container runtime (Docker / [Finch](https://runfinch.com/) / [Podman](https://podman.io/docs)), authenticates
 to ECR via `aws ecr get-login-password`, then pushes the resulting
 image.
 
@@ -3273,7 +3273,7 @@ gco images lifecycle set my-app --file lifecycle.json
 
 #### `gco images mirror`
 
-Mirror third-party images (e.g. the Volcano `docker.io` images) into the project ECR. This is the same multi-arch copy `gco stacks deploy` runs automatically when `volcano_image_mirror.enabled` is set; run it directly to pre-seed a region before enabling the toggle, or to re-mirror after bumping a mirrored image version. Wraps the shared `cli._image_mirror` core (also used by the `images_mirror` MCP tool).
+Mirror third-party images (e.g. the [Volcano](https://volcano.sh/) `docker.io` images) into the project ECR. This is the same multi-arch copy `gco stacks deploy` runs automatically when `volcano_image_mirror.enabled` is set; run it directly to pre-seed a region before enabling the toggle, or to re-mirror after bumping a mirrored image version. Wraps the shared `cli._image_mirror` core (also used by the `images_mirror` MCP tool).
 
 ```bash
 gco images mirror [OPTIONS]
@@ -3453,7 +3453,7 @@ gco files access-points fs-0123456789abcdef0 -r us-east-1
 
 ### Nodepools Commands
 
-Manage Karpenter NodePools.
+Manage [Karpenter](https://karpenter.sh/) NodePools.
 
 <details>
 <summary>All <code>gco nodepools</code> commands (5) — click to expand</summary>
@@ -3584,7 +3584,7 @@ gco nodepools delete gpu-reserved -r us-east-1 -y
 
 ### Monitoring Commands
 
-Manage in-cluster observability (`kube-prometheus-stack`: Prometheus + Grafana +
+Manage in-cluster observability (`kube-prometheus-stack`: [Prometheus](https://prometheus.io/docs/introduction/overview/) + Grafana +
 Alertmanager). Unlike most features this one is **on by default** on every
 regional cluster. See the [Monitoring Guide](MONITORING.md) for the cost model,
 private-endpoint access, and credential rotation.

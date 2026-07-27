@@ -34,6 +34,8 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from gco.bedrock import BedrockFTUFormNotAcceptedError
+
 from . import validation as _validation
 from .predicate import PredicateRejected, parse_predicate
 from .validation import MissionValidationError
@@ -697,7 +699,10 @@ async def generate_sampled_criteria(
     rejection retries up to ``retries`` times with feedback. Returns
     the validated list (with private ``_parsed_ast`` keys stripped so
     the result is JSON-safe). Raises :class:`ScaffoldSamplingError`
-    when every attempt was rejected.
+    when every attempt was rejected, and propagates
+    :class:`gco.bedrock.BedrockFTUFormNotAcceptedError` unwrapped so a
+    missing Anthropic first-time-use form is reported rather than
+    silently downgraded to deterministic criteria.
 
     The backend is duck-typed against the ``SamplingBackend`` protocol
     on purpose — tests can substitute a stub object whose ``sample``
@@ -716,6 +721,12 @@ async def generate_sampled_criteria(
         )
         try:
             raw = await _call_backend(backend, prompt_str)
+        except BedrockFTUFormNotAcceptedError:
+            # A missing Anthropic FTU form is a permanent misconfiguration, not
+            # a transport fault. Let it escape the transport-agnostic catch
+            # below so the caller reports it instead of quietly scaffolding
+            # deterministic criteria.
+            raise
         except Exception as exc:  # noqa: BLE001 - transport-agnostic catch
             # Transport-layer failures are not retriable from the
             # scaffolder's point of view — the backend itself decides

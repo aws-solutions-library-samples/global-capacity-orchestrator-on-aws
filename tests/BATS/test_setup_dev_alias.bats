@@ -244,11 +244,62 @@ teardown() {
 }
 
 @test "a failed image build aborts before writing the rc file" {
-    # info succeeds so the runtime is accepted; build fails.
+    # info succeeds so the runtime is accepted; build fails. Retries are
+    # disabled so the assertion is about the abort, not the backoff.
     make_shim "$SHIMDIR" docker 0 1
-    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime docker --rc "$RCFILE"
+    GCO_DEV_IMAGE_BUILD_ATTEMPTS=1 PATH="$SHIMDIR:$PATH" \
+        run bash "$SCRIPT" --runtime docker --rc "$RCFILE"
     [ "$status" -ne 0 ]
     [[ "$output" == *"failed to build"* ]]
+    [ ! -f "$RCFILE" ]
+}
+
+# -- Build retry (transient registry failures are self-healing) ---------------
+#
+# The build's first act is resolving the Dockerfile.dev base image from Docker
+# Hub. A single i/o timeout there used to fail the whole job, so the build is
+# retried; these tests pin both halves of that contract.
+
+# A runtime shim whose `build` fails the first $1 times and then succeeds,
+# tracking attempts in a counter file so the retry loop is observable.
+make_flaky_build_shim() {
+    local dir="$1" name="$2" failures="$3"
+    cat > "$dir/$name" <<SHIM
+#!/usr/bin/env bash
+if [ -n "\${GCO_SHIM_LOG:-}" ]; then printf '%s\n' "\$*" >> "\$GCO_SHIM_LOG"; fi
+if [ "\$1" = "info" ]; then exit 0; fi
+if [ "\$1" = "build" ]; then
+    count=0
+    [ -f "$dir/build_count" ] && count="\$(cat "$dir/build_count")"
+    count=\$((count + 1))
+    printf '%s' "\$count" > "$dir/build_count"
+    if [ "\$count" -le $failures ]; then exit 1; fi
+    exit 0
+fi
+exit 0
+SHIM
+    chmod +x "$dir/$name"
+}
+
+@test "a transient build failure is retried and then succeeds" {
+    make_flaky_build_shim "$SHIMDIR" docker 1
+    GCO_DEV_IMAGE_BUILD_ATTEMPTS=3 GCO_DEV_IMAGE_BUILD_RETRY_DELAY=0 \
+        PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime docker --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"build attempt 1/3 failed"* ]]
+    [[ "$output" == *"is ready"* ]]
+    # Exactly two build invocations: the failure and the retry that worked.
+    [ "$(cat "$SHIMDIR/build_count")" = "2" ]
+    [ -f "$RCFILE" ]
+}
+
+@test "a persistently failing build stops after exhausting the attempts" {
+    make_flaky_build_shim "$SHIMDIR" docker 99
+    GCO_DEV_IMAGE_BUILD_ATTEMPTS=2 GCO_DEV_IMAGE_BUILD_RETRY_DELAY=0 \
+        PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime docker --rc "$RCFILE"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"failed to build"* ]]
+    [ "$(cat "$SHIMDIR/build_count")" = "2" ]
     [ ! -f "$RCFILE" ]
 }
 

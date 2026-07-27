@@ -21,7 +21,7 @@
 
 ![GCO Live Demo](demo/live_demo.gif)
 
-*`gco` CLI demo: capacity discovery, cost visibility, 5 schedulers (Volcano, Kueue, YuniKorn, Slurm, KEDA), [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), Valkey, live LLM inference, and [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html) — all against one already-deployed cluster. ([source](demo/live_demo.sh) · [re-record](demo/record_demo.sh))*
+*`gco` CLI demo: capacity discovery, cost visibility, 5 schedulers ([Volcano](https://volcano.sh/), [Kueue](https://kueue.sigs.k8s.io/), [YuniKorn](https://yunikorn.apache.org/), Slurm, [KEDA](https://keda.sh/)), [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), [Valkey](https://valkey.io/), live LLM inference, and [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html) — all against one already-deployed cluster. ([source](demo/live_demo.sh) · [re-record](demo/record_demo.sh))*
 
 </details>
 
@@ -72,7 +72,7 @@ cd global-capacity-orchestrator-on-aws
 source ~/.zshrc                # or ~/.bashrc — the script prints which file it updated
 ```
 
-`setup-dev-alias.sh` detects your container runtime (Docker, Finch, or Podman), builds the `gco-dev` image from `Dockerfile.dev` (re-running rebuilds it, so a stale image is refreshed automatically — pass `--no-build` to skip), wires up the correct socket pass-through, and installs an idempotent `gco` shell *function* (not a bare alias, so arguments and pipes forward correctly and a TTY is attached only when one is present) into your profile. From then on, run GCO straight from your repo checkout — each command executes inside the dev container against your current directory:
+`setup-dev-alias.sh` detects your container runtime (Docker, [Finch](https://runfinch.com/), or [Podman](https://podman.io/docs)), builds the `gco-dev` image from `Dockerfile.dev` (re-running rebuilds it, so a stale image is refreshed automatically — pass `--no-build` to skip), wires up the correct socket pass-through, and installs an idempotent `gco` shell *function* (not a bare alias, so arguments and pipes forward correctly and a TTY is attached only when one is present) into your profile. From then on, run GCO straight from your repo checkout — each command executes inside the dev container against your current directory:
 
 ```bash
 gco --help                # explore every command
@@ -82,7 +82,7 @@ gco stacks destroy-all -y # tear it all down
 
 Re-run the script whenever you switch runtimes, or use `--print` to preview the function, `--runtime <name>` to force one, and `--rc <path>` to target a specific profile.
 
-The function shares your host Docker socket with every `gco` call, and `gco stacks deploy-all` uses it for much more than bundling [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) assets: through your host Docker daemon it builds and bundles the Lambda function assets (as `linux/amd64`, cross-built via Buildx so this works on Apple Silicon / arm64) and — when the Volcano image mirror is enabled in `cdk.json` — mirrors third-party images such as the Volcano scheduler from Docker Hub into your [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) before the Helm install runs. The same socket also backs `gco images build` / `push`. See [Prerequisites](#prerequisites) for Colima/Finch socket paths and the security note about host-socket pass-through. *Finch users:* Finch runs in its own VM with no host Docker socket to share, so the function omits the socket mount — everyday commands work as-is, while build-heavy ones like `deploy-all` run on the host with Finch as the CDK builder.
+The function shares your host Docker socket with every `gco` call, and `gco stacks deploy-all` uses it for much more than bundling [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) assets: through your host Docker daemon it builds and bundles the Lambda function assets (as `linux/amd64`, cross-built via Buildx so this works on Apple Silicon / arm64) and — when the Volcano image mirror is enabled in `cdk.json` — mirrors third-party images such as the Volcano scheduler from Docker Hub into your [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) before the Helm install runs. The same socket also backs `gco images build` / `push`. See [Prerequisites](#prerequisites) for [Colima](https://github.com/abiosoft/colima)/Finch socket paths and the security note about host-socket pass-through. *Finch users:* Finch runs in its own VM with no host Docker socket to share, so the function omits the socket mount — everyday commands work as-is, while build-heavy ones like `deploy-all` run on the host with Finch as the CDK builder.
 
 <details>
 <summary>Prefer an interactive container shell instead?</summary>
@@ -266,7 +266,7 @@ Below is the per-region workflow for a single regional stack.
 2. The **Amazon EKS Auto Mode cluster** is the heart of the regional stack, hosting platform services and user workloads with a private API endpoint by default.
 3. **NodePools** provision capacity on demand: built-in `system` and `general-purpose`, plus `gpu-x86-pool`, `gpu-arm-pool`, `gpu-inference-pool`, `gpu-efa-pool`, `mooncake-efa-pool`, `neuron-pool`, and `cpu-general-pool`.
 4. **Workloads and platform services** run across namespaces: `gco-system` (Health Monitor, Manifest Processor, Queue Processor, Inference Monitor, Inference Proxy) and `gco-jobs` / `gco-inference` (training and batch jobs, inference endpoints, and job DAG pipelines).
-5. **Storage and data services** back workloads: Amazon EFS, optional FSx for Lustre, optional Valkey, optional [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html) pgvector, and [Amazon S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) for KMS-encrypted model weights.
+5. **Storage and data services** back workloads: Amazon EFS, optional FSx for Lustre, optional Valkey, optional [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html) [pgvector](https://github.com/pgvector/pgvector), and [Amazon S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) for KMS-encrypted model weights.
 6. An always-deployed **Regional API Gateway bridge** gives the aggregator a SigV4-authenticated path to the VPC Lambda and internal ALB. Direct same-account access is optional through `regional_api_enabled` in `aws` and enabled automatically as the required workload ingress elsewhere.
 7. **Regional AWS services** complete the stack: Amazon SQS for job ingestion, DynamoDB-backed state where applicable, and Amazon CloudWatch metrics and logs.
 
@@ -332,7 +332,7 @@ See [Architecture Details](docs/ARCHITECTURE.md) for the full deep dive.
 | [AWS Secrets Manager](https://aws.amazon.com/secrets-manager/) | Rotating HMAC signing key plus the KMS-encrypted deployment-local TLS root state |
 | [AWS KMS](https://aws.amazon.com/kms/) | Encryption keys for S3 model buckets, EFS, application secrets, and the backend TLS root secret |
 | [AWS IAM](https://aws.amazon.com/iam/) | IRSA roles for pod-level AWS access, service roles, and SigV4 authentication |
-| [AWS CDK](https://aws.amazon.com/cdk/) | Infrastructure as code — synthesizes, validates (cdk-nag), and deploys all stacks |
+| [AWS CDK](https://aws.amazon.com/cdk/) | Infrastructure as code — synthesizes, validates ([cdk-nag](https://github.com/cdklabs/cdk-nag)), and deploys all stacks |
 | [Amazon VPC](https://aws.amazon.com/vpc/) | Network isolation with public/private subnets, NAT Gateways, and VPC endpoints |
 | [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) | Cost tracking by service, region, and workload via the `gco costs` commands |
 
@@ -409,11 +409,11 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 - **GPU and accelerator support** through `gpu-x86-pool`, `gpu-arm-pool`, `gpu-inference-pool`, `gpu-efa-pool`, `mooncake-efa-pool`, and `neuron-pool`, plus built-in and project-scoped CPU pools
 - **Multiple submission methods**: API Gateway, SQS queues, DynamoDB job queue, or direct kubectl
 - **Job pipelines (DAGs)**: Multi-step ML pipelines with dependency ordering and failure handling
-- **Helm-managed ecosystem**: mandatory KEDA; EFA and Neuron device plugins; Volcano, KubeRay, cert-manager, optional kube-prometheus-stack, and Kueue; opt-in Slurm/Slinky and YuniKorn
+- **Helm-managed ecosystem**: mandatory KEDA; EFA and Neuron device plugins; Volcano, [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html), [cert-manager](https://cert-manager.io/docs/), optional kube-prometheus-stack, and Kueue; opt-in Slurm/Slinky and YuniKorn
 
 ### Inference Serving
 
-- **Multi-region inference**: Deploy endpoints (vLLM, TGI, Triton, TorchServe, SGLang) across regions with a single command
+- **Multi-region inference**: Deploy endpoints ([vLLM](https://docs.vllm.ai/en/latest/), TGI, Triton, [TorchServe](https://pytorch.org/serve/), [SGLang](https://docs.sglang.ai/)) across regions with a single command
 - **Canary deployments**: A/B test new model versions with weighted traffic routing
 - **Model weight management**: Central S3 bucket with [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) encryption, automatic sync to each region
 - **Spot instance support**: Run inference on spot GPUs for significant cost savings
@@ -437,7 +437,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 ### Operations
 
 - **Cost visibility**: Track spend by service, region, and workload via [Cost Explorer](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html) integration
-- **Cost monitoring & analytics** (on by default): per-cluster [OpenCost](https://opencost.io/) with a Grafana cost dashboard, scheduled Parquet cost reports to a central S3 bucket, and cross-region [Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) analytics via `gco costs k8s` — see [Cost Monitoring Guide](docs/COST_MONITORING.md)
+- **Cost monitoring & analytics** (on by default): per-cluster [OpenCost](https://opencost.io/) with a [Grafana](https://grafana.com/docs/grafana/latest/) cost dashboard, scheduled [Parquet](https://parquet.apache.org/docs/) cost reports to a central S3 bucket, and cross-region [Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) analytics via `gco costs k8s` — see [Cost Monitoring Guide](docs/COST_MONITORING.md)
 - **Spot price-aware scheduling**: central-queue jobs can set a max spot price per instance type and dispatch only when the market clears it
 - **Auto-bootstrap**: CDK bootstrap runs automatically for new regions during deploy
 - **Multi-region monitoring**: CloudWatch dashboards, alarms, and SNS alerts across all regions
@@ -643,10 +643,10 @@ GCO implements defense-in-depth across five layers (see [Security Model](#securi
 
 **Supply Chain Security:**
 
-- Container images scanned with Trivy on every push (CVE detection)
+- Container images scanned with [Trivy](https://trivy.dev/) on every push (CVE detection)
 - Python dependencies audited with pip-audit (GHSA/CVE detection)
-- Both repository-owned npm graphs are exact-pinned with committed lockfiles, audited on every PR, and updated by Dependabot
-- Production JavaScript is scanned by CodeQL and Semgrep; the inference-streaming Lambda has a separate Node.js 24 test workflow with 93% line/function/branch gates
+- Both repository-owned npm graphs are exact-pinned with committed lockfiles, audited on every PR, and updated by [Dependabot](https://docs.github.com/en/code-security/dependabot)
+- Production JavaScript is scanned by [CodeQL](https://codeql.github.com/docs/) and [Semgrep](https://semgrep.dev/docs/); the inference-streaming Lambda has a separate Node.js 24 test workflow with 93% line/function/branch gates
 - Dependency versions pinned with exact hashes in `requirements-lock.txt`
 - Dependabot and CodeQL enabled for automated vulnerability alerts
 - SBOM generation via Trivy for all container images

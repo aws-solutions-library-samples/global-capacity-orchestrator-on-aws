@@ -126,7 +126,7 @@ Train and serve models.
 - **Distributed training:** work up through [`examples/multi-gpu-training.yaml`](../examples/multi-gpu-training.yaml), [`examples/efa-distributed-training.yaml`](../examples/efa-distributed-training.yaml), and [`examples/megatrain-sft-job.yaml`](../examples/megatrain-sft-job.yaml).
 - **AWS accelerators:** try [`examples/trainium-job.yaml`](../examples/trainium-job.yaml) and [`examples/inferentia-job.yaml`](../examples/inferentia-job.yaml).
 - **Schedulers:** read the [Schedulers Overview](SCHEDULERS.md), then [Volcano](VOLCANO.md) (gang scheduling) and [Kueue](KUEUE.md) (queueing and quotas) — both on by default.
-- **Checkpoint:** you can deploy a vLLM endpoint, send it a prompt, and launch a multi-GPU training job.
+- **Checkpoint:** you can deploy a [vLLM](https://docs.vllm.ai/en/latest/) endpoint, send it a prompt, and launch a multi-GPU training job.
 
 ### Track B: Operator and SRE
 
@@ -148,7 +148,7 @@ Run GCO in production.
 Adapt GCO to your environment.
 
 - **Read:** the [Architecture](ARCHITECTURE.md) deep dive, the [Customization Guide](CUSTOMIZATION.md), and the [Image Mirror](IMAGE_MIRROR.md) guide.
-- **Do:** add a region to `cdk.json`, redeploy, and enable one optional service (FSx, Valkey, or Aurora pgvector).
+- **Do:** add a region to `cdk.json`, redeploy, and enable one optional service (FSx, [Valkey](https://valkey.io/), or Aurora [pgvector](https://github.com/pgvector/pgvector)).
 - **Checkpoint:** you can explain the global-versus-regional stack split and add an instance type to a nodepool.
 
 ### Track D: Maintainer
@@ -165,7 +165,7 @@ Reach for these from any track once the core is solid:
 - **More schedulers:** [KubeRay](KUBERAY.md), [KEDA](KEDA.md), [Slurm](SLURM_OPERATOR.md), and [YuniKorn](YUNIKORN.md).
 - **Pipelines:** multi-step DAGs via [`examples/pipeline-dag.yaml`](../examples/pipeline-dag.yaml).
 - **Databases and caching:** [`examples/aurora-pgvector-job.yaml`](../examples/aurora-pgvector-job.yaml) and [`examples/valkey-cache-job.yaml`](../examples/valkey-cache-job.yaml).
-- **Analytics:** the [Analytics Environment](ANALYTICS.md) (SageMaker Studio and EMR Serverless).
+- **Analytics:** the [Analytics Environment](ANALYTICS.md) (SageMaker Studio and [EMR Serverless](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/emr-serverless.html)).
 - **Shared storage:** the always-on [Cluster Shared Bucket](CLUSTER_SHARED_BUCKET.md).
 - **Direct REST access:** the [API Reference](API.md).
 

@@ -31,7 +31,7 @@ Then deploy: `gco stacks deploy-all -y`
 
 This installs three Helm charts:
 
-1. **cert-manager** (v1.20.1) — TLS certificates (already enabled by default)
+1. **[cert-manager](https://cert-manager.io/docs/)** (v1.20.1) — TLS certificates (already enabled by default)
 2. **slinky-slurm-operator** (v1.1.0) — Kubernetes operator for Slurm cluster CRDs
 3. **slinky-slurm** (v1.1.0) — a Slurm cluster (`gco-slurm`) in `gco-jobs`
 
@@ -162,7 +162,7 @@ Then submit GPU jobs: `sbatch --gres=gpu:1 --wrap="nvidia-smi"`
 
 ## Autoscaling
 
-The Slurm operator supports scaling worker NodeSets based on queue depth. Combined with Karpenter (EKS Auto Mode):
+The Slurm operator supports scaling worker NodeSets based on queue depth. Combined with [Karpenter](https://karpenter.sh/) ([EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html)):
 
 1. Jobs queue up in Slurm → operator scales up worker pods → Karpenter provisions nodes
 2. Queue drains → operator scales down workers → Karpenter consolidates nodes
@@ -182,7 +182,7 @@ For HPA-based autoscaling, expose Slurm metrics via the Slinky metrics exporter 
 
 ## Coexistence with Kueue and YuniKorn
 
-GCO deploys Slurm alongside Kueue, Volcano, and YuniKorn. They operate independently:
+GCO deploys Slurm alongside [Kueue](https://kueue.sigs.k8s.io/), [Volcano](https://volcano.sh/), and [YuniKorn](https://yunikorn.apache.org/). They operate independently:
 
 - **Slurm** manages its own worker pods and job queue. Slurm jobs run inside slurmd pods, not as standalone Kubernetes Jobs.
 - **Kueue** manages Kubernetes-native Jobs via admission control. Kueue does not manage Slurm worker pods.

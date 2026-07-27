@@ -57,6 +57,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
 
+from gco.bedrock import BedrockFTUFormNotAcceptedError
+
 from . import audit, decide, final_report
 from .checkpoints import mark_checkpoint
 from .predicate import PredicateRejected, evaluate_predicate, parse_predicate
@@ -491,6 +493,14 @@ class MissionEngine:
         assert self.sampling_callable is not None  # narrowed by caller
         try:
             result = await self.sampling_callable(session=session, ctx=ctx)
+        except BedrockFTUFormNotAcceptedError:
+            # Deliberate exception to the swallow-and-fall-back policy above.
+            # Every other sampler failure is potentially transient, so the
+            # deterministic strategy is the better answer. A missing Anthropic
+            # first-time-use form is permanent and account-scoped: it would fail
+            # identically on every remaining iteration, so degrading the whole
+            # run in silence hides a one-line fix. Fail the run instead.
+            raise
         except Exception:
             return None
 

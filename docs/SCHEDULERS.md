@@ -1,6 +1,6 @@
 # Supported Schedulers & Orchestrators
 
-GCO ships with six scheduling and orchestration tools, each designed for different workload patterns. KEDA, Volcano, KubeRay, Kueue, and cert-manager are enabled by default. Slurm and YuniKorn are opt-in.
+GCO ships with six scheduling and orchestration tools, each designed for different workload patterns. [KEDA](https://keda.sh/), [Volcano](https://volcano.sh/), [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html), [Kueue](https://kueue.sigs.k8s.io/), and [cert-manager](https://cert-manager.io/docs/) are enabled by default. Slurm and [YuniKorn](https://yunikorn.apache.org/) are opt-in.
 
 ## Quick Comparison
 
@@ -49,7 +49,7 @@ These tools operate at different layers and can be combined:
 - **Volcano** and **YuniKorn** control *pod scheduling* — decide which node a pod runs on
 - **Slurm** is a separate scheduling layer — manages its own job queue and worker allocation
 - **KubeRay** manages Ray clusters — handles distributed computing lifecycle
-- **Karpenter** provisions nodes — all schedulers benefit from automatic node scaling
+- **[Karpenter](https://karpenter.sh/)** provisions nodes — all schedulers benefit from automatic node scaling
 
 ## Choosing the Right Tool
 

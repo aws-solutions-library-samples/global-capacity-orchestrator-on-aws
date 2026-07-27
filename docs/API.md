@@ -55,11 +55,11 @@ https://<API_GATEWAY_ENDPOINT>/api/v1
 
 ## Authentication
 
-All API requests are authenticated using AWS IAM Signature Version 4 (SigV4)
+All API requests are authenticated using AWS IAM Signature Version 4 ([SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html))
 at the API Gateway level. API Gateway validates the caller's AWS credentials;
 the proxy then allowlists supported headers and signs the exact backend request
 with a short-lived HMAC envelope. The envelope binds a timestamp, nonce, method,
-path/query, and body digest, so the reusable Secrets Manager signing key is never
+path/query, and body digest, so the reusable [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html) signing key is never
 sent to the cluster. Backend middleware rejects stale, tampered, or process-local
 replayed envelopes.
 
@@ -81,7 +81,7 @@ GCO has two explicit TLS trust domains:
    Aggregator fan-out additionally uses SigV4 with its execution-role
    credentials to each deterministic regional API bridge.
 2. Trusted proxy Lambdas use the deployment-local private root for the backend
-   ALB hop. In commercial `aws`, the global path is proxy → Global Accelerator
+   ALB hop. In commercial `aws`, the global path is proxy → [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html)
    → ALB; a regional bridge uses VPC proxy → ALB in every partition. Global
    Accelerator forwards TCP/443 at Layer 4 and does not terminate TLS. Outside
    `aws`, accelerator-backed workload routes are omitted and callers use the
@@ -1017,7 +1017,7 @@ gco queue stats
 
 ## Cost Reporting
 
-Region-scoped cost reporting backed by [OpenCost](https://opencost.io/) and the central cost report bucket. Each region's manifest API answers for its own cluster, so pin the request to a region (`gco costs report ... --region REGION` uses the regional API bridge) or accept the nearest healthy region through the global API — the response names the region that answered. Cross-region aggregation lives in Athena via `gco costs k8s`; see [COST_MONITORING.md](COST_MONITORING.md).
+Region-scoped cost reporting backed by [OpenCost](https://opencost.io/) and the central cost report bucket. Each region's manifest API answers for its own cluster, so pin the request to a region (`gco costs report ... --region REGION` uses the regional API bridge) or accept the nearest healthy region through the global API — the response names the region that answered. Cross-region aggregation lives in [Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) via `gco costs k8s`; see [COST_MONITORING.md](COST_MONITORING.md).
 
 ### Cost Monitoring Status
 
@@ -1055,7 +1055,7 @@ gco costs report status -r us-east-1
 }
 ```
 
-`opencost_returning_data` performs a live allocation probe — release validation gates on it, so a healthy-but-empty OpenCost (for example, a broken Prometheus scrape) is surfaced here rather than silently producing empty reports.
+`opencost_returning_data` performs a live allocation probe — release validation gates on it, so a healthy-but-empty OpenCost (for example, a broken [Prometheus](https://prometheus.io/docs/introduction/overview/) scrape) is surfaced here rather than silently producing empty reports.
 
 ### List Cost Reports
 

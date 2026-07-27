@@ -60,6 +60,8 @@ source ~/.zshrc   # or ~/.bashrc — the script prints which file it updated
 
 Builds (or refreshes) the `gco-dev` image from `Dockerfile.dev`, then makes `gco` run inside the dev container against your current directory — no interactive session needed, and no separate build step. Re-running rebuilds the image so a stale one is refreshed automatically (`--no-build` skips it). Auto-detects Docker, Finch, or Podman (override with `--runtime`) and writes an idempotent block to your shell profile (`--rc` to target a specific file). This is the onboarding path recommended in the [main README](../README.md).
 
+The build starts by resolving the `Dockerfile.dev` base image from Docker Hub, so a transient registry timeout there would otherwise fail an otherwise-healthy build. It is retried three times with a 15-second backoff; tune or disable that with `GCO_DEV_IMAGE_BUILD_ATTEMPTS` (set to `1` for no retries) and `GCO_DEV_IMAGE_BUILD_RETRY_DELAY`.
+
 ### Bump Version
 
 ```bash

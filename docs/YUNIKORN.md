@@ -4,7 +4,7 @@ GCO includes [Apache YuniKorn](https://yunikorn.apache.org/) as a scheduler for 
 
 ## Overview
 
-YuniKorn runs as a secondary scheduler alongside the default kube-scheduler. Pods must explicitly set `schedulerName: yunikorn` to be scheduled by YuniKorn — there is no auto-injection. This means YuniKorn coexists cleanly with Volcano, Kueue, and the default scheduler without interfering with system pods or other schedulers.
+YuniKorn runs as a secondary scheduler alongside the default kube-scheduler. Pods must explicitly set `schedulerName: yunikorn` to be scheduled by YuniKorn — there is no auto-injection. This means YuniKorn coexists cleanly with [Volcano](https://volcano.sh/), [Kueue](https://kueue.sigs.k8s.io/), and the default scheduler without interfering with system pods or other schedulers.
 
 **When to use YuniKorn:**
 
@@ -307,7 +307,7 @@ curl http://localhost:9889/ws/v1/apps
 
 ## Coexistence with Other Schedulers
 
-GCO deploys YuniKorn alongside Volcano, Kueue, KEDA, and Slurm. They coexist because they operate at different layers:
+GCO deploys YuniKorn alongside Volcano, Kueue, [KEDA](https://keda.sh/), and Slurm. They coexist because they operate at different layers:
 
 - **YuniKorn** schedules pods that explicitly set `schedulerName: yunikorn`. It manages its own queue hierarchy and resource accounting. The admission controller is disabled, so no auto-injection occurs.
 - **Volcano** schedules pods that have `schedulerName: volcano`. Volcano jobs are not affected by YuniKorn.
@@ -321,7 +321,7 @@ GCO deploys YuniKorn alongside Volcano, Kueue, KEDA, and Slurm. They coexist bec
 - Jobs with `schedulerName: yunikorn` → YuniKorn
 - Volcano Jobs → Volcano (explicit `schedulerName: volcano`)
 - Slurm worker pods → default kube-scheduler (managed by Slinky operator)
-- System pods (KEDA, Kueue, cert-manager) → default kube-scheduler (no interference)
+- System pods (KEDA, Kueue, [cert-manager](https://cert-manager.io/docs/)) → default kube-scheduler (no interference)
 
 **GPU quota coordination:** If you define GPU quotas in both YuniKorn queues and Kueue ClusterQueues, ensure the total doesn't exceed physical GPU count. See [SCHEDULERS.md](SCHEDULERS.md) for the full coexistence guide.
 
@@ -339,7 +339,7 @@ GCO deploys YuniKorn alongside Volcano, Kueue, KEDA, and Slurm. They coexist bec
 
 ### Prometheus metrics
 
-YuniKorn exposes Prometheus metrics at `:9090/ws/v1/metrics`. Key metrics:
+YuniKorn exposes [Prometheus](https://prometheus.io/docs/introduction/overview/) metrics at `:9090/ws/v1/metrics`. Key metrics:
 
 | Metric | Description |
 |--------|-------------|

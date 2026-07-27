@@ -2,11 +2,11 @@
 
 In-cluster observability installs a self-hosted
 [`kube-prometheus-stack`](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack)
-(Prometheus + Alertmanager + Grafana + `kube-state-metrics` + `node-exporter` +
+([Prometheus](https://prometheus.io/docs/introduction/overview/) + Alertmanager + [Grafana](https://grafana.com/docs/grafana/latest/) + `kube-state-metrics` + `node-exporter` +
 the Prometheus Operator) on **every regional EKS cluster**, through the existing
 Helm-installer pipeline. It answers "what is happening **inside** this cluster
 right now" at Prometheus resolution — per-GPU DCGM series, scheduler queue depth,
-KEDA scaler lag, and per-pod GCO service metrics.
+[KEDA](https://keda.sh/) scaler lag, and per-pod GCO service metrics.
 
 Unlike most optional features, cluster observability is **on by default**. A
 stock deployment installs it in each region; operators opt out with
@@ -74,8 +74,8 @@ Per regional cluster, when enabled:
 - The `kube-prometheus-stack` chart in the `monitoring` namespace (Prometheus,
   Alertmanager, Grafana, `kube-state-metrics`, `node-exporter`, operator).
 - A gated `gco-observability-gp3` StorageClass backing the persistent volumes.
-- `ServiceMonitor`s for the schedulers/operators (KEDA, Volcano, Kueue, KubeRay,
-  YuniKorn) and the DCGM GPU exporter, plus `PodMonitor`s for the GCO services
+- `ServiceMonitor`s for the schedulers/operators (KEDA, [Volcano](https://volcano.sh/), [Kueue](https://kueue.sigs.k8s.io/), [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html),
+  [YuniKorn](https://yunikorn.apache.org/)) and the DCGM GPU exporter, plus `PodMonitor`s for the GCO services
   (health-monitor, manifest-processor, inference-monitor), which expose
   Prometheus `/metrics`.
 - A standalone DCGM exporter DaemonSet on GPU nodes for per-GPU metrics.
@@ -253,7 +253,7 @@ reconcile/error counts.
 
 These images are regenerated on demand after a dashboard change. Grafana is
 private, so first port-forward it — `gco monitoring open` can auto-provision a
-self-terminating ephemeral bastion (`--via-ssm auto`) — then run the Playwright
+self-terminating ephemeral bastion (`--via-ssm auto`) — then run the [Playwright](https://playwright.dev/python/docs/intro)
 capture script:
 
 ```bash

@@ -68,7 +68,10 @@ from mission.sampling import (  # noqa: E402
     SamplingTransportError,
 )
 
-from gco.bedrock import get_default_bedrock_model_id  # noqa: E402
+from gco.bedrock import (  # noqa: E402
+    BedrockFTUFormNotAcceptedError,
+    get_default_bedrock_model_id,
+)
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -258,6 +261,11 @@ async def _capture_model(
     for directive in _DIRECTIVES:
         try:
             captures[directive.slug] = await _capture_one(backend, directive)
+        except BedrockFTUFormNotAcceptedError:
+            # Account-wide gate, not a per-model failure: every Anthropic model
+            # in the run would fail identically, so abort with the remediation
+            # instead of repeating it once per model.
+            raise
         except SamplingTransportError as exc:
             print(
                 f"[{model_id}] capture failed for {directive.slug!r}: {exc.code}: {exc}",
@@ -327,7 +335,14 @@ async def _main_async(args: argparse.Namespace) -> int:
     successes = 0
     failures = 0
     for model_id in models:
-        ok = await _capture_model(model_id, args.region, args.output_dir)
+        try:
+            ok = await _capture_model(model_id, args.region, args.output_dir)
+        except BedrockFTUFormNotAcceptedError as exc:
+            # Account-wide prerequisite: stop rather than walking the rest of
+            # the Anthropic models to collect identical failures.
+            print(f"\n{exc}", file=sys.stderr)
+            print(f"Captured {successes} model(s) before aborting.", file=sys.stderr)
+            return 1
         if ok:
             successes += 1
         else:

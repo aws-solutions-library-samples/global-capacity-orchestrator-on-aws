@@ -51,6 +51,7 @@ from gco.bedrock import (
     build_bedrock_converse_options,
     extract_bedrock_converse_text,
     get_default_bedrock_model_id,
+    raise_if_bedrock_ftu_form_error,
 )
 
 from . import validation as _validation
@@ -976,11 +977,11 @@ class BedrockSamplingBackend:
       surfaces as :class:`SamplingTransportError` with code
       ``"bedrock_<ErrorCode>"`` where ``<ErrorCode>`` is read from the
       error envelope (defaulting to ``"Unknown"`` when the envelope is
-      malformed). ``"bedrock_FTUFormNotFilled"`` specifically means the
-      account has not submitted Anthropic's one-time first-time-use case
-      form, which every Anthropic model — including the stock default —
-      is gated behind; Mission then falls back to its deterministic
-      templates. See ``docs/CUSTOMIZATION.md`` (Bedrock Model Selection).
+      malformed). The one exception is the Anthropic first-time-use
+      gate, which raises
+      :class:`gco.bedrock.BedrockFTUFormNotAcceptedError` instead of a
+      transport error so it is never absorbed by a deterministic
+      fallback. See ``docs/CUSTOMIZATION.md`` (Bedrock Model Selection).
     * A response without a non-empty ``text`` block under
       ``output.message.content`` — including reasoning-only and empty
       ``content`` lists — surfaces as :class:`SamplingTransportError`
@@ -1081,6 +1082,11 @@ class BedrockSamplingBackend:
                   code from the envelope.
                 * ``bedrock_malformed_response`` — the response did not
                   contain a non-empty final text content block.
+            gco.bedrock.BedrockFTUFormNotAcceptedError: The account has
+                not submitted Anthropic's one-time first-time-use case
+                form. Raised instead of a transport error so callers
+                cannot silently fall back past a permanent, one-line-fix
+                misconfiguration.
         """
         # Local import — see ``_get_client`` for the rationale.
         from botocore.exceptions import ClientError
@@ -1104,6 +1110,10 @@ class BedrockSamplingBackend:
                 **converse_options,
             )
         except ClientError as err:
+            # A missing Anthropic FTU form is a permanent account-scoped
+            # misconfiguration, not a transport fault: escalate it instead of
+            # letting the deterministic-fallback path absorb it silently.
+            raise_if_bedrock_ftu_form_error(err)
             # ``e.response`` is documented to be present on ClientError
             # but the envelope shape can vary; defend against missing
             # keys so the audit pipeline always sees a tagged code.

@@ -1,6 +1,6 @@
 # KubeRay Integration
 
-GCO includes the [KubeRay Operator](https://ray-project.github.io/kuberay/) for running [Ray](https://www.ray.io/) distributed computing workloads on Kubernetes. KubeRay is enabled by default.
+GCO includes the [KubeRay Operator](https://ray-project.github.io/kuberay/) for running [Ray](https://www.ray.io/) distributed computing workloads on Kubernetes. [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html) is enabled by default.
 
 ## Overview
 
@@ -227,7 +227,7 @@ KubeRay supports Ray's built-in autoscaler. Workers scale up when tasks are queu
 
 - `minReplicas: 0` — scale to zero when no work
 - `maxReplicas: 8` — cap at 8 workers
-- Combined with Karpenter, new nodes are provisioned automatically when workers need to scale up
+- Combined with [Karpenter](https://karpenter.sh/), new nodes are provisioned automatically when workers need to scale up
 
 ## Security
 

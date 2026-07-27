@@ -1,6 +1,6 @@
 # Image Mirror
 
-GCO can mirror third-party container images into the project's own Amazon ECR so the cluster pulls them from same-account ECR instead of a rate-limited public registry. Today the one consumer is **Volcano** (`docker.io/volcanosh/vc-*`), whose images live only on Docker Hub and gate its Helm install — but the mirror is a **general** tool, and this guide explains how to point another chart's image at it down the road.
+GCO can mirror third-party container images into the project's own Amazon ECR so the cluster pulls them from same-account ECR instead of a rate-limited public registry. Today the one consumer is **[Volcano](https://volcano.sh/)** (`docker.io/volcanosh/vc-*`), whose images live only on Docker Hub and gate its Helm install — but the mirror is a **general** tool, and this guide explains how to point another chart's image at it down the road.
 
 This is the reference for the feature. For the quick "enable it in `cdk.json` and deploy" recipe, see [Customization Guide → Get Volcano's docker.io images off the rate-limited path](CUSTOMIZATION.md#get-volcanos-dockerio-images-off-the-rate-limited-path-ecr-mirror). For Volcano itself, see [Volcano Integration](VOLCANO.md).
 
@@ -22,7 +22,7 @@ This is the reference for the feature. For the quick "enable it in `cdk.json` an
 
 A few add-on Helm charts pull their images straight from Docker Hub (`docker.io`). On GCO the most visible one is Volcano — its `vc-controller-manager`, `vc-scheduler`, and `vc-webhook-manager` images are published only to Docker Hub.
 
-Two things make that a problem on a cold, private EKS Auto Mode cluster:
+Two things make that a problem on a cold, private [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) cluster:
 
 - **Docker Hub rate-limits anonymous pulls.** When a fresh cluster scales up and several nodes pull the same Volcano images at once, the anonymous pulls are slow and can be throttled. Volcano's Helm install blocks waiting for its pods to become ready, and a slow pull can push that past the installer's timeout, so the install retries — sometimes in a loop.
 - **EKS Auto Mode nodes pull with a service-managed, pull-only role.** They already have permission to pull from the account's own `gco/*` ECR repositories, but they are not a place to wire in Docker Hub credentials.
@@ -65,8 +65,8 @@ The copy must preserve **every** architecture in the source image's manifest lis
 Instead, the mirror picks a manifest-list-preserving strategy at runtime based on what the machine has, in this order:
 
 1. **Docker Buildx** — `docker buildx imagetools create` (a registry-to-registry copy, no local pull).
-2. **Finch / nerdctl** — `pull --all-platforms` then `push --all-platforms` (containerd preserves the manifest list).
-3. **skopeo** — `skopeo copy --all` (daemon-less).
+2. **[Finch](https://runfinch.com/) / nerdctl** — `pull --all-platforms` then `push --all-platforms` (containerd preserves the manifest list).
+3. **[skopeo](https://github.com/containers/skopeo)** — `skopeo copy --all` (daemon-less).
 
 If none is available the mirror fails fast with guidance rather than producing a single-arch image. No new binary dependency is introduced — the mirror reuses whichever of these the environment already provides. The strategy selection lives in `resolve_copy_strategy()` in [`cli/_image_mirror.py`](../cli/_image_mirror.py).
 

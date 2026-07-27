@@ -6,12 +6,12 @@ durable cross-region cost analytics, and cost-aware job dispatch:
 - **[OpenCost](https://opencost.io/) per region** — installed into each
   regional cluster's `monitoring` namespace alongside `kube-prometheus-stack`,
   allocating node/PV list prices to namespaces, controllers, and pods from
-  Prometheus usage data.
-- **A Grafana cost dashboard** — the curated *GCO Cost (OpenCost)* dashboard
+  [Prometheus](https://prometheus.io/docs/introduction/overview/) usage data.
+- **A [Grafana](https://grafana.com/docs/grafana/latest/) cost dashboard** — the curated *GCO Cost (OpenCost)* dashboard
   renders cluster hourly/monthly cost, per-namespace allocation, top spenders,
   and node cost by instance type from OpenCost's Prometheus metrics.
 - **The `cost-monitor` service** — a singleton Deployment in `gco-system` on
-  each regional cluster that writes scheduled Parquet allocation reports to
+  each regional cluster that writes scheduled [Parquet](https://parquet.apache.org/docs/) allocation reports to
   the central cost report bucket and serves ad-hoc reporting through the GCO
   API (`/api/v1/cost/*`).
 - **Centralized Athena analytics** — the monitoring stack provisions an S3

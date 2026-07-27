@@ -84,7 +84,7 @@ Key points:
 - Regional stacks consume the bucket via the SSM namespace
   (`cr.AwsCustomResource` with `service="SSM"`, `action="getParameter"`,
   `region=<global-region>`). This matches the cross-region SSM pattern
-  already used for the Global Accelerator endpoint-group parameters.
+  already used for the [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) endpoint-group parameters.
 - The analytics stack consumes the same SSM namespace only when
   enabled; the regional plumbing is unaffected by the toggle.
 
@@ -195,7 +195,7 @@ Three worked examples ship with the repo:
 |---------|--------------|
 | [`examples/cluster-shared-bucket-upload-job.yaml`](../examples/cluster-shared-bucket-upload-job.yaml) | Minimal Batch Job that uploads a JSON blob to `s3://$sharedBucketName/uploads/<timestamp>.json`. Works with `analytics_environment.enabled=false`. |
 | [`examples/analytics-s3-upload-job.yaml`](../examples/analytics-s3-upload-job.yaml) | Publishes a CSV snapshot + schema manifest under `analytics-data/` so a SageMaker Studio notebook can read it. Identical ConfigMap wiring — differs only in intent. |
-| [`examples/analytics-database-export-job.yaml`](../examples/analytics-database-export-job.yaml) | Exports Aurora pgvector rows to `s3://$sharedBucketName/analytics-data/vectors-export.csv`. Combines `envFrom` for the shared bucket with `configMapKeyRef` for the optional Aurora ConfigMap. |
+| [`examples/analytics-database-export-job.yaml`](../examples/analytics-database-export-job.yaml) | Exports Aurora [pgvector](https://github.com/pgvector/pgvector) rows to `s3://$sharedBucketName/analytics-data/vectors-export.csv`. Combines `envFrom` for the shared bucket with `configMapKeyRef` for the optional Aurora ConfigMap. |
 
 Submit any of them with:
 
@@ -284,7 +284,7 @@ Recommendations:
   weights staged for training jobs): keep on each region's local
   EFS/FSx. Those are same-region and don't cross the boundary.
 - **Bulk uploads**: batch many small objects into one tarball or
-  Parquet file before uploading — one cross-region `PUT` is cheaper
+  [Parquet](https://parquet.apache.org/docs/) file before uploading — one cross-region `PUT` is cheaper
   than thousands.
 - **Multi-region read patterns**: if every region needs the same
   large dataset, replicate into the regional S3 bucket (owned by the
@@ -352,7 +352,7 @@ Regional stacks:
   ConfigMaps in those namespaces are unaffected.
 - A new inline IAM policy is attached to the regional job-pod role
   with the RW grant described in [IAM grants](#iam-grants). The
-  existing IRSA/pod-identity setup is unchanged.
+  existing [IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html)/pod-identity setup is unchanged.
 - A new cross-region `cr.AwsCustomResource` is created to read the
   three SSM parameters at deploy time; this adds a few seconds to
   `cdk deploy gco-<region>` but no runtime dependency.

@@ -100,8 +100,8 @@ Nodepools define what types of nodes can be provisioned. GCO creates several:
 | `gpu-arm-pool` | NVIDIA ARM64 GPU workloads | g5g |
 | `gpu-inference-pool` | Long-running inference endpoints | conservative disruption/consolidation |
 | `gpu-efa-pool` | Distributed GPU workloads | EFA-capable GPU families |
-| `mooncake-efa-pool` | Disaggregated Mooncake inference | EFA/RDMA placement |
-| `neuron-pool` | Inferentia and Trainium workloads | AWS Neuron devices |
+| `mooncake-efa-pool` | Disaggregated Mooncake inference | [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html)/RDMA placement |
+| `neuron-pool` | [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/) and [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/) workloads | AWS Neuron devices |
 | `cpu-general-pool` | Project-scoped CPU workloads | configured CPU families and limits |
 
 When you submit a job requesting a GPU, EKS Auto Mode finds the right nodepool and provisions an appropriate instance.
@@ -198,11 +198,11 @@ GCO works with any containerized inference server. These have example manifests 
 
 | Framework | Use Case | Example |
 |-----------|----------|---------|
-| vLLM | OpenAI-compatible LLM serving | `examples/inference-vllm.yaml` |
-| SGLang | High-throughput serving with RadixAttention | `examples/inference-sglang.yaml` |
+| [vLLM](https://docs.vllm.ai/en/latest/) | OpenAI-compatible LLM serving | `examples/inference-vllm.yaml` |
+| [SGLang](https://docs.sglang.ai/) | High-throughput serving with RadixAttention | `examples/inference-sglang.yaml` |
 | TGI | HuggingFace optimized inference | `examples/inference-tgi.yaml` |
 | Triton | Multi-framework model serving | `examples/inference-triton.yaml` |
-| TorchServe | PyTorch native serving | `examples/inference-torchserve.yaml` |
+| [TorchServe](https://pytorch.org/serve/) | PyTorch native serving | `examples/inference-torchserve.yaml` |
 
 See [Inference Guide](INFERENCE.md) for the full deep dive including model weight management, canary deployments, and production EFA setup.
 
@@ -232,7 +232,7 @@ volumes:
 
 ### FSx for Lustre
 
-FSx for Lustre is a high-performance parallel file system. Use it for:
+[FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) is a high-performance parallel file system. Use it for:
 
 - Large dataset training (high throughput needed)
 - Distributed training across multiple nodes
@@ -342,7 +342,7 @@ Outside `aws`, this global workload route is not created; the global API is regi
 ### Regional API Bridge and Direct Access
 
 Every region has a regional API Gateway bridge so the centralized aggregator
-can reach its private ALB. Aggregator fan-out uses AWS-managed TLS and SigV4:
+can reach its private ALB. Aggregator fan-out uses AWS-managed TLS and [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html):
 
 ```text
 Aggregator → Regional API Gateway → HMAC-signing VPC Lambda

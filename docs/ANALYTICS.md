@@ -1,7 +1,7 @@
 # Analytics Environment
 
 End-to-end guide to the optional GCO analytics environment — a
-SageMaker Studio domain plus EMR Serverless, Cognito user pool, and
+SageMaker Studio domain plus [EMR Serverless](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/emr-serverless.html), Cognito user pool, and
 presigned-URL API gateway route, bolted onto an existing GCO
 deployment via a single toggle.
 
@@ -174,7 +174,7 @@ deployed, the following resources appear in the API-gateway region
   page](https://aws.amazon.com/emr/serverless/pricing/) for the
   current per-vCPU and per-GB rates.
 
-- **SageMaker-managed MLflow + MLflow Apps** — the SageMaker
+- **SageMaker-managed [MLflow](https://mlflow.org/docs/latest/index.html) + MLflow Apps** — the SageMaker
   execution role is attached to the AWS-managed
   `AmazonSageMakerFullAccess` policy (always on when
   `analytics_environment.enabled=true`), plus an inline
@@ -186,7 +186,7 @@ deployed, the following resources appear in the API-gateway region
   `DescribeMlflowApp`) — along with the SageMaker Model Registry
   (`sagemaker:*ModelPackage*`) that MLflow's `register_model`
   round-trips through. The inline `sagemaker-mlflow:*` statement
-  covers the data-plane namespace the MLflow SDK's SigV4 plug-in
+  covers the data-plane namespace the MLflow SDK's [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html) plug-in
   talks to (`log_metric`, `log_artifact`, `register_model`, etc.)
   — that service prefix is not in the managed policy. Notebook
   users can spin up a tracking server, log experiments, and
@@ -683,7 +683,7 @@ AWS-managed `AmazonSageMakerCanvasFullAccess` policy to
 `SageMaker_Execution_Role`. This is the managed policy that AWS
 publishes specifically for Canvas — it grants the full Canvas
 permission surface (Bedrock for generative AI, Forecast for time
-series, Rekognition for image classification, Athena for SQL
+series, Rekognition for image classification, [Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) for SQL
 sources, S3 writes for datasets, and so on). Using the managed
 policy means we pick up new Canvas capabilities automatically as
 AWS ships them. The corresponding `AwsSolutions-IAM4` nag finding

@@ -72,11 +72,11 @@ GCO deploys multiple stacks to configurable AWS Regions. Every configured Region
 
 | Stack | Default Region | Purpose |
 |-------|---------------|---------|
-| `gco-global` | us-east-2 | Partition-wide state and SSM coordination; Global Accelerator in commercial `aws` only |
+| `gco-global` | us-east-2 | Partition-wide state and SSM coordination; [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) in commercial `aws` only |
 | `gco-api-gateway` | us-east-2 | Edge-optimized workload + aggregate API in `aws`; regional aggregate-only API elsewhere |
 | `gco-regional-api-{region}` | workload Region | Aggregator bridge; optional direct access in `aws`, required workload ingress elsewhere |
 | `gco-monitoring` | us-east-2 | Cross-region CloudWatch dashboards and alarms |
-| `gco-analytics` | API Gateway region | Optional SageMaker Studio and EMR Serverless environment |
+| `gco-analytics` | API Gateway region | Optional SageMaker Studio and [EMR Serverless](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/emr-serverless.html) environment |
 | `gco-{region}` | (configurable) | Regional EKS clusters, internal ALBs, and workload infrastructure |
 
 **Why separate regions?**
@@ -228,7 +228,7 @@ Changing `project_name` re-scopes all of the following (shown for
 | ECR image namespace | repos under `acme/*` (e.g. `acme/dockerhub/…`), ECR replication filter `acme/`, `gco images` / mirror namespace |
 | Global Accelerator (`aws` only) | `acme-accelerator` (defaults to `<project>-accelerator` when `global_accelerator.name` is unset in `cdk.json`) |
 | API Gateway names | REST API `acme-global-api`, Studio Cognito authorizer `acme-studio-cognito-authorizer`, request validator `acme-studio-request-validator` |
-| Valkey cache (opt-in) | ElastiCache serverless cache `acme-<region>` |
+| [Valkey](https://valkey.io/) cache (opt-in) | ElastiCache serverless cache `acme-<region>` |
 | Analytics (opt-in) | Studio bucket `acme-analytics-studio-*`, SageMaker role `AmazonSageMaker-acme-analytics-exec-<region>`, Studio domain `acme-studio-<region>`, EMR app `acme-spark-<region>`, Cognito domain `acme-studio-<account>` |
 
 The only names intentionally **not** re-scoped are in-cluster Kubernetes object
@@ -520,7 +520,7 @@ spec:
 
 ### GPU Time-Slicing (Fractional GPUs)
 
-You can share a single GPU across multiple pods using NVIDIA time-slicing. The NVIDIA device plugin is already installed (as a standalone DaemonSet, with EKS Auto Mode providing the GPU drivers), but time-slicing is not enabled by default. To enable it, apply a ConfigMap that sets the number of replicas per physical GPU (e.g., `replicas: 4` makes one GPU appear as four schedulable units). The kube-scheduler can then place several lightweight workloads onto one GPU node. Note that Karpenter does not currently account for time-slicing replicas when provisioning nodes ([kubernetes-sigs/karpenter#2140](https://github.com/kubernetes-sigs/karpenter/issues/2140)), so it may over-provision initially.
+You can share a single GPU across multiple pods using NVIDIA time-slicing. The NVIDIA device plugin is already installed (as a standalone DaemonSet, with [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) providing the GPU drivers), but time-slicing is not enabled by default. To enable it, apply a ConfigMap that sets the number of replicas per physical GPU (e.g., `replicas: 4` makes one GPU appear as four schedulable units). The kube-scheduler can then place several lightweight workloads onto one GPU node. Note that [Karpenter](https://karpenter.sh/) does not currently account for time-slicing replicas when provisioning nodes ([kubernetes-sigs/karpenter#2140](https://github.com/kubernetes-sigs/karpenter/issues/2140)), so it may over-provision initially.
 
 See `examples/gpu-timeslicing-job.yaml` for a complete example with setup instructions.
 
@@ -794,9 +794,9 @@ post-helm-name.yaml     # Post-Helm pass (applied after Helm installs CRDs)
 - `00-19` — Foundation & networking (namespaces, service accounts, RBAC, network policies)
 - `20-29` — Storage (EFS, FSx, Valkey)
 - `30-39` — System services (health-monitor, manifest-processor, inference-monitor)
-- `40-49` — NodePools (GPU, EFA, Neuron, CPU)
+- `40-49` — NodePools (GPU, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html), Neuron, CPU)
 - `50-59` — Device plugins (NVIDIA)
-- `post-helm-*` — Resources requiring Helm CRDs (Gateway API entrypoint, KEDA ScaledJob, etc.)
+- `post-helm-*` — Resources requiring Helm CRDs (Gateway API entrypoint, [KEDA](https://keda.sh/) ScaledJob, etc.)
 
 **Optional features:** Files with unresolved uppercase `{{PLACEHOLDER}}` feature gates are skipped. For shipped optional features, the applier also prunes an exact, audited list of resources previously owned by that feature. It does not use broad label deletion, so unrelated resources are left untouched. When adding a new optional platform feature, add its exact owned-resource inventory to the applier so disable-time convergence is explicit.
 
@@ -1004,14 +1004,14 @@ GCO installs add-ons in dependency order through the Helm installer. KEDA is a m
 |-------|---------|-------------|
 | KEDA | Mandatory | Event-driven autoscaling and the external-metrics bridge; always installed |
 | AWS EFA device plugin | Enabled | EFA device management for high-performance networking |
-| AWS Neuron device plugin | Enabled | Trainium/Inferentia device management |
-| Volcano | Enabled | Gang scheduling for distributed training |
-| KubeRay | Enabled | Ray distributed computing operator |
-| cert-manager | Enabled | Certificate management for cluster webhooks |
-| kube-prometheus-stack | Enabled | Prometheus, Alertmanager, and Grafana when `cluster_observability.enabled` is true |
+| AWS Neuron device plugin | Enabled | [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/)/Inferentia device management |
+| [Volcano](https://volcano.sh/) | Enabled | Gang scheduling for distributed training |
+| [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html) | Enabled | Ray distributed computing operator |
+| [cert-manager](https://cert-manager.io/docs/) | Enabled | Certificate management for cluster webhooks |
+| kube-prometheus-stack | Enabled | [Prometheus](https://prometheus.io/docs/introduction/overview/), Alertmanager, and [Grafana](https://grafana.com/docs/grafana/latest/) when `cluster_observability.enabled` is true |
 | Slurm/Slinky | Disabled | Slurm operator and cluster |
-| YuniKorn | Disabled | App-aware scheduler with hierarchical queues |
-| Kueue | Enabled | Job queueing with quotas and fair sharing; installed last |
+| [YuniKorn](https://yunikorn.apache.org/) | Disabled | App-aware scheduler with hierarchical queues |
+| [Kueue](https://kueue.sigs.k8s.io/) | Enabled | Job queueing with quotas and fair sharing; installed last |
 
 Disable optional charts you do not use to reduce system-node overhead and deployment time. KEDA cannot be disabled without replacing platform features that depend on it.
 
@@ -1061,7 +1061,7 @@ When enabled, the regional stack injects one Volcano value override — `basic.i
 }
 ```
 
-**2. Deploy.** `gco stacks deploy <stack>` / `deploy-all` **auto-mirrors** the images into ECR (per region) right before the regional stack's Helm install — so a fresh install just works, with no separate step. The copy is idempotent and skips images already present, so repeat deploys cost only a couple of ECR lookups. From a machine with a container runtime (Docker Buildx, Finch, or skopeo) and AWS credentials; the source pull from Docker Hub is anonymous and one-time.
+**2. Deploy.** `gco stacks deploy <stack>` / `deploy-all` **auto-mirrors** the images into ECR (per region) right before the regional stack's Helm install — so a fresh install just works, with no separate step. The copy is idempotent and skips images already present, so repeat deploys cost only a couple of ECR lookups. From a machine with a container runtime (Docker Buildx, [Finch](https://runfinch.com/), or [skopeo](https://github.com/containers/skopeo)) and AWS credentials; the source pull from Docker Hub is anonymous and one-time.
 
 **3. Converge / check.** If Volcano had previously failed, re-converge without touching the cluster:
 
@@ -1182,9 +1182,9 @@ See [CLI Reference](CLI.md#costs-commands) for full details.
 ### Configure Cost Monitoring (OpenCost + Athena)
 
 Separate from Cost Explorer billing data, the cost monitoring pipeline (on by
-default) allocates Kubernetes cost per namespace with OpenCost, writes
-scheduled Parquet reports to a central S3 bucket, and exposes cross-region
-Athena analytics plus the spot price gate on the central queue. Tune it under
+default) allocates Kubernetes cost per namespace with [OpenCost](https://opencost.io/), writes
+scheduled [Parquet](https://parquet.apache.org/docs/) reports to a central S3 bucket, and exposes cross-region
+[Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) analytics plus the spot price gate on the central queue. Tune it under
 `cost_monitoring` in `cdk.json`:
 
 ```json
@@ -1223,7 +1223,7 @@ gco costs dashboard            # Open the Grafana cost dashboard
 
 ## FSx for Lustre Configuration
 
-FSx for Lustre provides high-performance parallel file system storage ideal for ML training workloads that require high throughput and low latency.
+[FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) provides high-performance parallel file system storage ideal for ML training workloads that require high throughput and low latency.
 
 ### Lustre Version Compatibility
 
@@ -1400,7 +1400,7 @@ See `examples/valkey-cache-job.yaml` for a complete working example.
 
 ### Configure Aurora pgvector
 
-GCO can deploy an Aurora Serverless v2 PostgreSQL cluster with the pgvector extension in each regional stack for vector similarity search. Use cases include RAG (retrieval-augmented generation), semantic search, embedding storage, and similarity queries for AI/ML workloads.
+GCO can deploy an Aurora Serverless v2 PostgreSQL cluster with the [pgvector](https://github.com/pgvector/pgvector) extension in each regional stack for vector similarity search. Use cases include RAG (retrieval-augmented generation), semantic search, embedding storage, and similarity queries for AI/ML workloads.
 
 Aurora Serverless v2 supports scaling to 0 ACU — the cluster automatically pauses after a period of inactivity and resumes in ~15 seconds on the first connection. You pay only for storage while paused. This is ideal for dev/test environments and workloads that can tolerate a brief cold start.
 
@@ -1483,7 +1483,7 @@ env:
       key: database
 ```
 
-Credentials are stored in AWS Secrets Manager. Pods retrieve them using the ServiceAccountRole's IRSA permissions — no static credentials needed. The same manifest works in any region because the ConfigMap resolves to the local Aurora endpoint automatically.
+Credentials are stored in AWS [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html). Pods retrieve them using the ServiceAccountRole's [IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) permissions — no static credentials needed. The same manifest works in any region because the ConfigMap resolves to the local Aurora endpoint automatically.
 
 The cluster includes both a writer and a reader instance for high availability. The reader auto-scales with the writer. Use the `reader_endpoint` for read-heavy workloads (similarity searches, embedding lookups) and the `endpoint` for writes (inserts, DDL).
 
@@ -1532,13 +1532,13 @@ default because:
 > form** per AWS account before the first invocation. See
 > [Accepting the Anthropic first-time-use form](#accepting-the-anthropic-first-time-use-form)
 > below — this is a prerequisite for the stock default.
-
+>
 > **Cost and latency:** reasoning tokens are billed as output tokens. High
 > effort can materially increase latency and token usage. Claude removed
 > `temperature`, `top_p`, and `top_k` starting with Opus 4.7, so GCO omits
 > those controls for the canonical default and keeps only `maxTokens`.
 >
-> These Bedrock features are advisory and degrade gracefully. When no model is reachable (no credentials, model not enabled, access denied, or the FTU form not yet submitted) the Mission engine falls back to its deterministic templates and the capacity advisor surfaces a clear error. Core orchestration never depends on Bedrock.
+> These Bedrock features are advisory and degrade gracefully. When no model is reachable (no credentials, model not enabled, or access denied) the Mission engine falls back to its deterministic templates and the capacity advisor surfaces a clear error. Core orchestration never depends on Bedrock. The one exception is the Anthropic FTU form: because it is a permanent account-setup gap rather than a transient fault, it is reported as an error instead of being absorbed by a fallback.
 
 ### Accepting the Anthropic first-time-use form
 
@@ -1551,11 +1551,20 @@ it is submitted, Bedrock rejects every Anthropic invocation with error code
 [`FTUFormNotFilled`](https://docs.aws.amazon.com/bedrock/latest/userguide/troubleshooting-api-error-codes.html)
 (HTTP 404).
 
-GCO detects that specific code and prints the remediation instead of a raw
-API error, so `gco capacity ai-recommend` and `gco capacity predict` tell you
-exactly what to do. Mission sampling tags it as
-`bedrock_FTUFormNotFilled` in its audit trail and falls back to deterministic
-templates.
+GCO treats that specific code as a **hard error, never a silent fallback**.
+Every other Bedrock failure is potentially transient, so the advisory features
+degrade gracefully; a missing FTU form is a permanent, account-scoped
+misconfiguration that would fail identically on every retry, so degrading
+quietly would hide a one-line fix. Instead:
+
+- `gco capacity ai-recommend` and `gco capacity predict` print the remediation
+  and exit non-zero.
+- `gco mission scaffold-criteria --use-sampling` reports it rather than
+  scaffolding deterministic criteria.
+- A Mission run fails on the iteration that first samples, rather than
+  completing on deterministic templates as though sampling had been optional.
+- `scripts/capture_scaffold_fixtures.py` stops on the first occurrence instead
+  of repeating the same failure for every Anthropic model.
 
 **Option 1 — console (usual route).** In the
 [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/), open
@@ -1666,7 +1675,7 @@ OIDC role; see [CI documentation](../.github/CI.md#dependency-scan-script) and
 
 ## CDK-nag Compliance
 
-GCO runs five cdk-nag v3 rule packs through CDK's policy-validation framework. These are automated infrastructure checks, not certifications; passing them does not by itself establish regulatory compliance.
+GCO runs five [cdk-nag](https://github.com/cdklabs/cdk-nag) v3 rule packs through CDK's policy-validation framework. These are automated infrastructure checks, not certifications; passing them does not by itself establish regulatory compliance.
 
 ### Enabled Frameworks
 
@@ -1831,7 +1840,7 @@ Mooncake has two related transport settings that use different vocabularies:
 
 - The endpoint spec and mounted `mooncake.json` use `protocol: rdma|tcp`, as
   required by the Mooncake store configuration.
-- vLLM's point-to-point `MooncakeConnector` separately reads
+- [vLLM](https://docs.vllm.ai/en/latest/)'s point-to-point `MooncakeConnector` separately reads
   `kv_connector_extra_config.mooncake_protocol`. On AWS, GCO translates the
   default `rdma` intent to `mooncake_protocol: efa` and pins the pod to the
   dedicated EFA nodepool. This avoids silently using vLLM's generic `rdma`
@@ -1910,11 +1919,11 @@ See `examples/efa-distributed-training.yaml` for a complete example.
 
 ### NIXL Support
 
-With EFA enabled, GCO supports NVIDIA Inference Xfer Library (NIXL) for high-performance LLM inference. NIXL enables high-throughput, low-latency KV-cache transfer between nodes. It integrates with vLLM, SGLang, and NVIDIA Dynamo. Requires EFA installer v1.47.0+ which is included in EKS-optimized AMIs — EKS Auto Mode automatically uses these AMIs, so no manual AMI configuration is needed.
+With EFA enabled, GCO supports NVIDIA Inference Xfer Library (NIXL) for high-performance LLM inference. NIXL enables high-throughput, low-latency KV-cache transfer between nodes. It integrates with vLLM, [SGLang](https://docs.sglang.ai/), and NVIDIA Dynamo. Requires EFA installer v1.47.0+ which is included in EKS-optimized AMIs — EKS Auto Mode automatically uses these AMIs, so no manual AMI configuration is needed.
 
 ## AWS Trainium and Inferentia Configuration
 
-GCO includes built-in support for AWS Trainium and Inferentia accelerators. These are purpose-built ML chips designed by AWS that use the Neuron SDK instead of CUDA. GCO installs the Neuron device plugin by default and creates a dedicated Neuron nodepool for trn1, trn1n, trn2, and inf2 instances. (Trainium3/Trn3 currently ships only as Trn3 UltraServers — reserved via EC2 Capacity Blocks rather than provisioned as standalone Karpenter nodes — so it is not part of this NodePool.)
+GCO includes built-in support for AWS Trainium and [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/) accelerators. These are purpose-built ML chips designed by AWS that use the Neuron SDK instead of CUDA. GCO installs the Neuron device plugin by default and creates a dedicated Neuron nodepool for trn1, trn1n, trn2, and inf2 instances. (Trainium3/Trn3 currently ships only as Trn3 UltraServers — reserved via EC2 Capacity Blocks rather than provisioned as standalone Karpenter nodes — so it is not part of this NodePool.)
 
 ### How It Works
 
@@ -2019,7 +2028,7 @@ gco stacks deploy-all -y
 ### How It Works
 
 Each bridge uses an IAM-authorized API Gateway and a Lambda in the workload
-VPC. The global aggregator reaches it over AWS-managed TLS with SigV4; an
+VPC. The global aggregator reaches it over AWS-managed TLS with [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html); an
 opted-in user follows the same first hop:
 
 ```text

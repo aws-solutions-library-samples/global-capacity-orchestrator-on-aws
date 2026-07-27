@@ -32,7 +32,7 @@
 
 ## Overview
 
-GCO (Global Capacity Orchestrator on AWS) is a multi-region Kubernetes platform built on AWS EKS Auto Mode, designed for AI/ML workload orchestration with GPU support.
+GCO (Global Capacity Orchestrator on AWS) is a multi-region Kubernetes platform built on AWS [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html), designed for AI/ML workload orchestration with GPU support.
 
 > **Looking for the *why*?** This document describes *what* the architecture is. The reasoning behind significant decisions — the trade-offs, the alternatives, and the context that forced each choice — is recorded in the [Architecture Decision Records](adr/README.md).
 
@@ -40,7 +40,7 @@ GCO (Global Capacity Orchestrator on AWS) is a multi-region Kubernetes platform 
 
 ### 1. Global Layer
 
-**AWS Global Accelerator** (commercial `aws` partition only)
+**AWS [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html)** (commercial `aws` partition only)
 
 - Private acceleration plane behind the IAM-authenticated global API
 - Registers each region's internal platform ALB as an endpoint
@@ -79,7 +79,7 @@ Each region contains:
   - `gpu-inference-pool`: long-running inference workloads
   - `gpu-efa-pool`: EFA-enabled distributed GPU workloads
   - `mooncake-efa-pool`: EFA-enabled disaggregated inference
-  - `neuron-pool`: AWS Inferentia and Trainium workloads
+  - `neuron-pool`: AWS [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/) and [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/) workloads
   - `cpu-general-pool`: general CPU workloads with project-specific limits
 
 **Application Load Balancer**
@@ -95,7 +95,7 @@ Each region contains:
 **Regional API Gateway Bridge** (separate stack)
 
 - Created in every workload region because the centralized aggregator cannot join arbitrary regional VPCs
-- Regional REST API uses AWS-managed TLS and IAM authentication (SigV4)
+- Regional REST API uses AWS-managed TLS and IAM authentication ([SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html))
 - Its resource policy always admits the exact aggregator role
 - In the commercial `aws` partition, `api_gateway.regional_api_enabled=true` additionally admits IAM-authorized principals from the deployment account for direct region-pinned access
 - In other partitions, same-account direct access is enabled automatically because this bridge is the supported workload ingress when Global Accelerator is absent
@@ -109,10 +109,10 @@ Each region contains:
 - Encrypted at rest (AWS KMS) and in transit (TLS)
 - Dynamic provisioning via EFS CSI Driver with `basePath: "/dynamic"`
 - Each PVC automatically gets its own access point (UID/GID: 1000, permissions: 755)
-- EFS CSI Driver add-on with IRSA for secure access
+- EFS CSI Driver add-on with [IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) for secure access
 - PersistentVolumeClaim `gco-shared-storage` available in `default`, `gco-jobs`, and `gco-system` namespaces
 
-**Amazon FSx for Lustre** (Optional)
+**Amazon [FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html)** (Optional)
 
 - High-performance parallel file system for ML training workloads
 - Encrypted at rest by default (AWS-managed keys)
@@ -132,7 +132,7 @@ Each region contains:
 
 **Lambda Proxy**
 
-- Retrieves the backend HMAC signing key from Secrets Manager through a bounded cache
+- Retrieves the backend HMAC signing key from [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html) through a bounded cache
 - Reads only the public private-root trust bundle from project-scoped SSM
 - Allowlists supported end-to-end headers
 - Signs the version, timestamp, nonce, method, exact path/query, and body digest
@@ -186,7 +186,7 @@ Each region contains:
 **Cost Monitor Service** (when cost monitoring is enabled — the default)
 
 - Single-replica `Recreate` Deployment: the scheduled reporter is a singleton writer with deterministic per-window report keys, so restarts and rollouts converge instead of double-counting
-- Queries the in-cluster OpenCost allocation API and writes interval-aligned Parquet reports to the central cost report bucket in the monitoring region
+- Queries the in-cluster [OpenCost](https://opencost.io/) allocation API and writes interval-aligned [Parquet](https://parquet.apache.org/docs/) reports to the central cost report bucket in the monitoring region
 - Serves report listing and ad-hoc generation through the manifest API's authenticated `/api/v1/cost/*` proxy
 - IRSA role scoped to the deterministic cost report bucket ARN plus `kms:ViaService`-conditioned key use; no Kubernetes RBAC binding
 - Default-deny ingress with an explicit allow from the manifest processor only
@@ -220,15 +220,15 @@ Each region contains:
 - Eliminates the old single-Lambda 15-minute ceiling — slow charts
   (cold image pulls) retry independently without failing the deploy
 - Charts installed in dependency order:
-  - KEDA (mandatory)
-  - AWS EFA and Neuron device plugins
-  - Volcano and KubeRay
-  - cert-manager
+  - [KEDA](https://keda.sh/) (mandatory)
+  - AWS [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) and Neuron device plugins
+  - [Volcano](https://volcano.sh/) and KubeRay
+  - [cert-manager](https://cert-manager.io/docs/)
   - kube-prometheus-stack when cluster observability is enabled
   - OpenCost when cost monitoring is enabled (after kube-prometheus-stack,
-    whose Prometheus Operator CRDs its ServiceMonitor needs)
-  - Kueue last, after its dependencies
-  - Slurm/Slinky and YuniKorn only when their opt-in flags are enabled
+    whose [Prometheus](https://prometheus.io/docs/introduction/overview/) Operator CRDs its ServiceMonitor needs)
+  - [Kueue](https://kueue.sigs.k8s.io/) last, after its dependencies
+  - Slurm/Slinky and [YuniKorn](https://yunikorn.apache.org/) only when their opt-in flags are enabled
 
 **Function Flow:**
 
@@ -292,7 +292,7 @@ Pod Pending → Karpenter detects unschedulable pod
 
 ### Compliance Frameworks
 
-GCO synthesizes five cdk-nag policy-validation rule packs:
+GCO synthesizes five [cdk-nag](https://github.com/cdklabs/cdk-nag) policy-validation rule packs:
 
 - **AWS Solutions**: Best practices for AWS architectures
 - **HIPAA Security**: Healthcare compliance requirements
@@ -410,7 +410,7 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 ### Compute Costs
 
 - **EKS Auto Mode**: Pay only for provisioned nodes
-- **Karpenter**: Efficient bin-packing
+- **[Karpenter](https://karpenter.sh/)**: Efficient bin-packing
 - **Spot Instances**: Supported for fault-tolerant workloads
 - **ARM Instances**: 20% cost savings for compatible workloads
 
@@ -431,7 +431,7 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 - **Cluster observability is on by default** — each regional cluster runs
   `kube-prometheus-stack`, whose standing cost is the gp3 EBS volumes backing
-  Prometheus (default `50Gi`), Grafana (`10Gi`), and Alertmanager (`5Gi`).
+  Prometheus (default `50Gi`), [Grafana](https://grafana.com/docs/grafana/latest/) (`10Gi`), and Alertmanager (`5Gi`).
 - **Retention-bounded**: `cluster_observability.prometheus.retention` (default
   `15d`) caps how much of the TSDB volume fills; persistence sizes are
   configurable per component.
@@ -447,7 +447,7 @@ The rule packs run during `cdk synth` and deployment. They are automated control
   *GCO Cost (OpenCost)* Grafana dashboard.
 - **Durable analytics**: the per-region cost-monitor service writes
   interval-aligned Parquet reports to a central, lifecycle-managed S3 bucket;
-  a Glue table with partition projection plus an Athena workgroup make them
+  a Glue table with partition projection plus an [Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) workgroup make them
   queryable across regions (`gco costs k8s …`) with no dashboard server or
   crawler.
 - **Spot price gating**: central-queue jobs may carry a max spot price for an

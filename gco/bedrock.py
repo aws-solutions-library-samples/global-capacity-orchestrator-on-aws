@@ -350,6 +350,39 @@ BEDROCK_FTU_REMEDIATION = (
 )
 
 
+class BedrockFTUFormNotAcceptedError(RuntimeError):
+    """Anthropic's one-time first-time-use case form has not been submitted.
+
+    Deliberately **not** a transport error. Every advisory Bedrock path in GCO
+    degrades gracefully when a model is briefly unreachable — throttling, a
+    dropped connection, a malformed response — because retrying or falling back
+    to deterministic templates is the right answer for a transient fault. A
+    missing FTU form is the opposite: it is a permanent, account-scoped
+    misconfiguration that fails every subsequent call identically, so a silent
+    fallback would quietly downgrade an entire Mission run (or hand back a
+    template-derived answer) while hiding a one-line fix. This type therefore
+    propagates through the fallback handlers and surfaces the remediation.
+
+    It subclasses ``RuntimeError`` so existing callers that catch ``RuntimeError``
+    around the capacity advisor keep working.
+    """
+
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(message or BEDROCK_FTU_REMEDIATION)
+
+
+def raise_if_bedrock_ftu_form_error(error: BaseException) -> None:
+    """Convert an FTU-gated Bedrock failure into a hard, actionable error.
+
+    Call this at the top of a ``ClientError`` handler that would otherwise
+    degrade gracefully, so the FTU case is escalated instead of absorbed.
+    Non-FTU errors return without raising, leaving the caller's own handling
+    untouched.
+    """
+    if is_bedrock_ftu_form_error(error):
+        raise BedrockFTUFormNotAcceptedError() from error
+
+
 def is_bedrock_ftu_form_error(error: BaseException | None) -> bool:
     """Return whether ``error`` (or anything it was raised from) is the FTU gate.
 
@@ -409,6 +442,7 @@ __all__ = [
     "BEDROCK_FTU_REMEDIATION",
     "BEDROCK_READ_TIMEOUT_SECONDS",
     "BedrockDefaultConfiguration",
+    "BedrockFTUFormNotAcceptedError",
     "BedrockModelConfigurationError",
     "build_bedrock_converse_options",
     "extract_bedrock_converse_text",
@@ -416,4 +450,5 @@ __all__ = [
     "get_default_bedrock_model_id",
     "get_default_bedrock_thinking_effort",
     "is_bedrock_ftu_form_error",
+    "raise_if_bedrock_ftu_form_error",
 ]

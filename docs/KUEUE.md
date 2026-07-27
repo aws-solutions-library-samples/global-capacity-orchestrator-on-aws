@@ -11,7 +11,7 @@ Kueue complements the default kube-scheduler by handling job-level admission con
 - Job queueing with resource quotas per team or project
 - Fair sharing of GPU resources across multiple users
 - Priority-based job admission with preemption
-- Workloads using standard Kubernetes Job, or integrations with Volcano, Ray, etc.
+- Workloads using standard Kubernetes Job, or integrations with [Volcano](https://volcano.sh/), Ray, etc.
 - Teams that want quota management without replacing the default scheduler
 
 ## What Gets Deployed
@@ -288,11 +288,11 @@ spec:
   suspend: true  # Let Kueue control when the job starts
 ```
 
-Kueue will hold the RayJob in suspended state until quota is available, then unsuspend it. The KubeRay operator then creates the Ray cluster and runs the job.
+Kueue will hold the RayJob in suspended state until quota is available, then unsuspend it. The [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html) operator then creates the Ray cluster and runs the job.
 
 ## Monitoring
 
-Kueue exposes Prometheus metrics. Key metrics to watch:
+Kueue exposes [Prometheus](https://prometheus.io/docs/introduction/overview/) metrics. Key metrics to watch:
 
 | Metric | Description |
 |--------|-------------|

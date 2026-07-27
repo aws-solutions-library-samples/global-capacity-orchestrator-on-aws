@@ -21,7 +21,7 @@ Step-by-step procedures for common operational scenarios. Each runbook includes 
 
 ## Region Goes Unhealthy
 
-**Symptoms:** `gco capacity status` shows a region as `unhealthy`. Global Accelerator stops routing traffic to the region. Cross-region aggregator returns errors for the affected region.
+**Symptoms:** `gco capacity status` shows a region as `unhealthy`. [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) stops routing traffic to the region. Cross-region aggregator returns errors for the affected region.
 
 **Diagnosis:** Replace `<REGION>` with the affected AWS region (for example `us-east-1`):
 
@@ -45,7 +45,7 @@ kubectl get nodes
 
 **Resolution:**
 
-1. **If EKS API is unreachable:** Check VPC networking, security groups, and EKS control plane status in the AWS console. EKS Auto Mode manages nodes automatically — if the control plane is healthy, nodes should recover.
+1. **If EKS API is unreachable:** Check VPC networking, security groups, and EKS control plane status in the AWS console. [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) manages nodes automatically — if the control plane is healthy, nodes should recover.
 
 2. **If ALB health checks are failing:** Check the health monitor and manifest processor pods:
 
@@ -191,7 +191,7 @@ aws cloudwatch get-metric-data --region "$API_REGION" \
    jq . /tmp/backend-tls-reconcile.json
    ```
 
-2. **If reconciliation fails:** Fix the logged KMS, Secrets Manager, SSM, ACM, quota, or IAM error and invoke the same `Rotate` action again. The operation is idempotent: existing regional ACM ARNs are reimported in place, and an unregistered first import is compensated automatically.
+2. **If reconciliation fails:** Fix the logged KMS, [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html), SSM, ACM, quota, or IAM error and invoke the same `Rotate` action again. The operation is idempotent: existing regional ACM ARNs are reimported in place, and an unregistered first import is compensated automatically.
 
 3. **If a root is pending:** Do not edit the encrypted root state or force promotion. The activation clock starts only after SSM confirms that proxies can fetch the pending public root. Restore SSM access and let the manager complete the configured propagation delay.
 
@@ -446,7 +446,7 @@ kubectl logs -n gco-system -l app=queue-processor --all-containers \
 
 1. **If a message body or manifest is malformed:** The DLQ preserves the original message for inspection. Correct the submission and resubmit it with `gco jobs submit-sqs`; do not manually acknowledge the bad message from the main queue.
 
-2. **If a queue-processor Job is crashing:** Inspect the built-in KEDA `ScaledJob` and its short-lived Job pods, fix the image or deployment configuration, and redeploy the regional stack:
+2. **If a queue-processor Job is crashing:** Inspect the built-in [KEDA](https://keda.sh/) `ScaledJob` and its short-lived Job pods, fix the image or deployment configuration, and redeploy the regional stack:
 
    ```bash
    kubectl describe scaledjob/sqs-queue-processor -n gco-system

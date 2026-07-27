@@ -32,10 +32,10 @@ seen continues to round-trip through the validator.
 
 ```text
 tests/fixtures/scaffold_responses/
-├── README.md                                   # this file
-├── global_anthropic_claude_opus_5.json          # canonical default
-├── global_amazon_nova_2_lite_v1_0.json         # historical capture
-├── us_amazon_nova_premier_v1_0.json            # historical capture
+├── README.md                                # this file
+├── global_anthropic_claude_opus_5.json      # canonical default
+├── global_amazon_nova_2_lite_v1_0.json      # historical capture
+├── us_amazon_nova_premier_v1_0.json         # historical capture
 ├── us_anthropic_claude_sonnet_4_5_*.json
 ├── us_anthropic_claude_haiku_4_5_*.json
 ├── us_amazon_nova_pro_v1_0.json

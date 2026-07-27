@@ -4,7 +4,7 @@ GCO includes [KEDA](https://keda.sh/) (Kubernetes Event-Driven Autoscaling) for 
 
 ## Overview
 
-KEDA extends Kubernetes with event-driven autoscaling. It can scale Deployments, Jobs, and custom resources from zero to N based on metrics from external systems like SQS, Kafka, Prometheus, CloudWatch, and 60+ other sources.
+KEDA extends Kubernetes with event-driven autoscaling. It can scale Deployments, Jobs, and custom resources from zero to N based on metrics from external systems like SQS, Kafka, [Prometheus](https://prometheus.io/docs/introduction/overview/), CloudWatch, and 60+ other sources.
 
 **When to use KEDA:**
 
@@ -24,7 +24,7 @@ KEDA is installed via Helm chart in the `keda` namespace:
 | keda-metrics-apiserver | Exposes external metrics to the Kubernetes metrics API |
 | keda-admission-webhooks | Validates KEDA custom resources |
 
-The KEDA operator has an IRSA role with permissions to read SQS queue metrics for the GCO job queue.
+The KEDA operator has an [IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) role with permissions to read SQS queue metrics for the GCO job queue.
 
 ## How GCO Uses KEDA
 

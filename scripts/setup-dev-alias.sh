@@ -152,12 +152,36 @@ $MARKER_END
 EOF
 }
 
+# Number of times to try the image build, and the backoff between tries.
+# The build's first act is resolving the Dockerfile.dev base image from Docker
+# Hub, which is a public registry the build does not control: a single DNS or
+# TCP timeout there ("failed to resolve source metadata ... i/o timeout") fails
+# an otherwise healthy build. Retrying makes that transient class self-healing
+# while a genuine build error still fails on the last attempt with its own
+# output. Override the count to 1 to disable retries.
+BUILD_ATTEMPTS="${GCO_DEV_IMAGE_BUILD_ATTEMPTS:-3}"
+BUILD_RETRY_DELAY="${GCO_DEV_IMAGE_BUILD_RETRY_DELAY:-15}"
+
 build_image() {
     local rt="$1"
     [ -f "$DOCKERFILE" ] || die "cannot build '$IMAGE': $DOCKERFILE not found."
     log "Building the '$IMAGE' image from Dockerfile.dev with $rt ..."
     log "(the first build can take a few minutes; re-runs reuse cached layers and just refresh what changed)"
-    "$rt" build -f "$DOCKERFILE" -t "$IMAGE" "$REPO_ROOT" || die "$rt failed to build '$IMAGE' from $DOCKERFILE."
+
+    local attempt=1
+    while true; do
+        if "$rt" build -f "$DOCKERFILE" -t "$IMAGE" "$REPO_ROOT"; then
+            break
+        fi
+        if [ "$attempt" -ge "$BUILD_ATTEMPTS" ]; then
+            die "$rt failed to build '$IMAGE' from $DOCKERFILE."
+        fi
+        log "build attempt $attempt/$BUILD_ATTEMPTS failed; retrying in ${BUILD_RETRY_DELAY}s ..."
+        log "(usually a transient registry/network error pulling the base image)"
+        sleep "$BUILD_RETRY_DELAY"
+        attempt=$((attempt + 1))
+    done
+
     log "Image '$IMAGE' is ready."
     log ""
 }

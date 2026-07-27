@@ -18,7 +18,7 @@ Deploy and manage multi-region GPU inference endpoints with GCO (Global Capacity
 
 ## Overview
 
-GCO's inference serving extends the platform beyond batch GPU jobs to support long-running inference endpoints. You define an endpoint once, and GCO deploys it across your target regions with automatic reconciliation, model weight syncing, and Global Accelerator routing.
+GCO's inference serving extends the platform beyond batch GPU jobs to support long-running inference endpoints. You define an endpoint once, and GCO deploys it across your target regions with automatic reconciliation, model weight syncing, and [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) routing.
 
 Key capabilities:
 
@@ -27,7 +27,7 @@ Key capabilities:
 - DynamoDB-backed desired state with continuous reconciliation
 - Rolling updates, scaling, stop/start without losing configuration
 - Global Accelerator routing to the nearest healthy region
-- Support for vLLM, TGI, Triton, TorchServe, and SGLang out of the box
+- Support for [vLLM](https://docs.vllm.ai/en/latest/), TGI, Triton, [TorchServe](https://pytorch.org/serve/), and [SGLang](https://docs.sglang.ai/) out of the box
 
 ## Architecture
 
@@ -74,7 +74,7 @@ global inference-streaming Lambda (request-bound HMAC) → Global Accelerator (T
 2. The `inference_monitor` in each target region polls the table every 15
    seconds and reconciles the local workload.
 3. For a plain endpoint, the monitor creates or updates a Deployment and
-   ClusterIP Service, plus an HPA or KEDA ScaledObject when requested. Mooncake
+   ClusterIP Service, plus an HPA or [KEDA](https://keda.sh/) ScaledObject when requested. Mooncake
    endpoints add role workloads, internal Services, and a PD proxy.
 4. The shared `/inference` rule on the `gco-system/gco-gateway` HTTPRoute is
    the only ALB route for inference traffic; the monitor never creates
@@ -124,7 +124,7 @@ regional reconciliation.
 
 ### Inference-Optimized nodepool
 
-Inference workloads use a Karpenter nodepool with `WhenEmpty` consolidation policy. Unlike batch job nodepools that aggressively consolidate underutilized nodes, inference nodes are only removed when completely empty. This prevents disruption to long-running serving pods.
+Inference workloads use a [Karpenter](https://karpenter.sh/) nodepool with `WhenEmpty` consolidation policy. Unlike batch job nodepools that aggressively consolidate underutilized nodes, inference nodes are only removed when completely empty. This prevents disruption to long-running serving pods.
 
 ## Model Weight Management
 
@@ -327,7 +327,7 @@ gco inference deploy my-llm \
 When `--mooncake-mode disaggregated` is set:
 
 - The inference monitor creates separate Deployments for each role (`{name}-prefill` and `{name}-decode`), fronted by a `{name}-proxy` Deployment and Service
-- A shared Mooncake transfer engine enables zero-copy KV cache transfer between roles. The default `rdma` intent is rendered to vLLM's EFA-specific point-to-point connector protocol and schedules the role pods on EFA; `--mooncake-protocol tcp` selects the non-EFA fallback
+- A shared Mooncake transfer engine enables zero-copy KV cache transfer between roles. The default `rdma` intent is rendered to vLLM's EFA-specific point-to-point connector protocol and schedules the role pods on [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html); `--mooncake-protocol tcp` selects the non-EFA fallback
 - `--mooncake-device-name` optionally binds Mooncake to a specific provider-visible interface; omission leaves device selection to Mooncake/libfabric auto-detection
 - The `--image` flag is optional; when omitted, the upstream `vllm/vllm-openai` image (which bundles the Mooncake transfer engine) is used by default. The PD proxy defaults to that same image — override it with `--mooncake-proxy-image`
 - `--prefill-replicas` and `--decode-replicas` set the initial replica count for each role (both default to 1)
@@ -629,7 +629,7 @@ When to use on-demand (default):
 
 ### Deploy on AWS Trainium or Inferentia
 
-Use `--accelerator neuron` to deploy inference on AWS Trainium or Inferentia instances instead of NVIDIA GPUs. This uses `aws.amazon.com/neuron` resources and schedules on the Neuron nodepool.
+Use `--accelerator neuron` to deploy inference on AWS [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/) or [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/) instances instead of NVIDIA GPUs. This uses `aws.amazon.com/neuron` resources and schedules on the Neuron nodepool.
 
 ```bash
 # Deploy on Trainium or Inferentia
@@ -742,7 +742,7 @@ The underlying API route does support end-to-end response streaming; use
 
 ## Valkey K/V Cache
 
-Each regional stack can include a Valkey Serverless cache for microsecond-latency key-value storage. Common inference use cases:
+Each regional stack can include a [Valkey](https://valkey.io/) Serverless cache for microsecond-latency key-value storage. Common inference use cases:
 
 - Prompt caching (avoid re-computing identical prompts)
 - Session state for multi-turn conversations
@@ -809,7 +809,7 @@ For the retrieval component of RAG, GCO doesn't include a built-in vector databa
 |--------|----------|---------|
 | Amazon OpenSearch Serverless | Production RAG with full-text + vector search | Yes |
 | Amazon Bedrock Knowledge Bases | Fully managed RAG with zero infrastructure | Yes |
-| pgvector on Amazon RDS | Teams already using PostgreSQL | Yes |
+| [pgvector](https://github.com/pgvector/pgvector) on Amazon RDS | Teams already using PostgreSQL | Yes |
 | ElastiCache Valkey 8.2 (node-based) | Microsecond-latency vector search at scale | Yes |
 | ChromaDB / Qdrant on EKS | Self-hosted, full control | No |
 
@@ -854,7 +854,7 @@ Use the API Gateway stack's `ApiEndpoint` output as the endpoint base URL:
 ```
 
 In the commercial `aws` partition, API Gateway is the public workload entry
-point and requires AWS IAM (SigV4) authentication. After authentication, the
+point and requires AWS IAM ([SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html)) authentication. After authentication, the
 global proxy sends a request-bound HMAC envelope through Global Accelerator,
 which selects a healthy regional internal ALB. Global Accelerator and the ALB
 are routing layers behind the API; their addresses are not supported client

@@ -38,7 +38,7 @@ review decisions.
 | Monthly | Review the dependency-scan issue, including accelerator catalog and NodePool findings | Automated `deps-scan` issue |
 | When EC2 accelerator drift appears | Review family policy, refresh the catalog, and update eligible NodePools/watch lists together | `deps-scan` **Accelerator Catalog and NodePools** row or AWS launch announcement |
 | When the scan flags EKS standard-support ending (or ~yearly) | Upgrade the EKS Kubernetes minor | `deps-scan` **EKS Kubernetes Version** row |
-| When the scan flags an epoch older than 45 days (or Trivy finds an OS CVE) | Bump the base-image security epoch | `deps-scan` **Base-image Security Epochs** row |
+| When the scan flags an epoch older than 45 days (or [Trivy](https://trivy.dev/) finds an OS CVE) | Bump the base-image security epoch | `deps-scan` **Base-image Security Epochs** row |
 | ~30 days before a suppression `exp:` date | Renew or drop the CVE suppression | `deps-scan` **Suppression Expiries** row |
 | When the scan flags a newer same-family model | Bump the Bedrock default model pin | `deps-scan` **Bedrock default model** row |
 | Weekly | Check the `cve-scan` result and act on new findings | Monday `cve-scan` run |
@@ -54,7 +54,7 @@ GCO separates three concerns that must not be conflated:
    advertises in any enabled commercial Region.
 2. **Observation** — which types the capacity-history poller watches, including
    types retained for historical visibility.
-3. **Scheduling policy** — which reviewed families each Karpenter NodePool may
+3. **Scheduling policy** — which reviewed families each [Karpenter](https://karpenter.sh/) NodePool may
    select for new workloads.
 
 The checked-in catalog makes the first two concerns complete and deterministic;
@@ -136,7 +136,7 @@ drift, and `2` means the online check itself failed.
    `reason`, and `replacements` when the default active/allowed policy is not
    correct.
 3. Decide which NodePools, if any, should schedule the family. Check CPU
-   architecture, accelerator class, EFA/RDMA requirements, memory and FP8
+   architecture, accelerator class, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html)/RDMA requirements, memory and FP8
    capability, workload fit, and regional support. Deprecated and end-of-life
    families must not enter new scheduling.
 4. Refresh to a review file first. The command refuses unknown families and EC2
@@ -309,7 +309,7 @@ To act on it:
 5. Run the affected checks and open a PR; CI independently audits both npm
    graphs and rejects lock, runtime, or dependency-management drift.
 
-Python dependencies are intentionally not tracked by Dependabot — they are
+Python dependencies are intentionally not tracked by [Dependabot](https://docs.github.com/en/code-security/dependabot) — they are
 pinned through `requirements-lock.txt` with `pip-compile` and reviewed
 deliberately. GitHub Actions, Docker base images, and both repository-owned npm
 graphs *are* tracked by Dependabot; see
@@ -331,8 +331,10 @@ shape, and captured default-model fixture.
 
 Because it is an Anthropic model, the default additionally requires the one-time
 [Anthropic first-time-use form](CUSTOMIZATION.md#accepting-the-anthropic-first-time-use-form)
-on the account. Bedrock answers `FTUFormNotFilled` until it is submitted; the
-capacity CLI detects that code and prints the remediation.
+on the account. Bedrock answers `FTUFormNotFilled` until it is submitted. GCO
+raises `BedrockFTUFormNotAcceptedError` for that code rather than degrading to a
+deterministic fallback, so a missing form surfaces as an actionable error on
+every path that reaches Bedrock.
 
 `gco.bedrock` translates the canonical effort into whichever reasoning dialect
 the default model speaks:
@@ -500,7 +502,7 @@ for acting on a monthly drift report.
 
 | Layer | What runs | Cadence |
 |-------|-----------|---------|
-| `security.yml` | bandit, pip-audit, npm audit (every owned graph), Trivy (filesystem + per-image), semgrep, checkov, KICS, trufflehog, gitleaks, CodeQL (Python + JavaScript) | Every push + PR |
+| `security.yml` | bandit, pip-audit, npm audit (every owned graph), Trivy (filesystem + per-image), semgrep, checkov, KICS, trufflehog, gitleaks, [CodeQL](https://codeql.github.com/docs/) (Python + JavaScript) | Every push + PR |
 | `cve-scan.yml` | Trivy re-run against fresh CVE databases | Weekly (Mon 09:00 UTC) |
 | `deps-scan.yml` | Version drift across every pinned surface | Monthly |
 
@@ -536,7 +538,7 @@ rather than lowering the 90% floor.
   `mooncake_image`, `helm_online`, `asyncio`), and `addopts` includes
   `--strict-markers` so a typo'd marker fails instead of silently skipping.
 - Heavy tests are opt-in via env vars so the default run stays fast:
-  `GCO_MOONCAKE_IMAGE_TEST=1` (pulls the ~9 GB vLLM image) and
+  `GCO_MOONCAKE_IMAGE_TEST=1` (pulls the ~9 GB [vLLM](https://docs.vllm.ai/en/latest/) image) and
   `GCO_HELM_CHART_VALIDATION=1` (needs `helm` + network).
 - `tests/BATS/` — Bash tests for the shell scripts (`dependency-scan.sh`, the
   demo recorders, cluster-access setup), run by the `unit:bats:*` jobs.
@@ -661,7 +663,7 @@ monitoring region resolved in `app.py`) creates the observability surface:
 
 - **Dashboard** — one CloudWatch dashboard with per-region widgets for Global
   Accelerator, API Gateway, Lambda, SQS, DynamoDB, EKS, ALBs, the optional
-  FSx/Valkey/Aurora services, and custom application metrics.
+  FSx/[Valkey](https://valkey.io/)/Aurora services, and custom application metrics.
 - **Alarms** — metric and composite alarms for EKS CPU/memory, ALB unhealthy
   hosts, response time, manifest-processing failures, Lambda errors/throttles,
   SQS message age (stuck jobs), DynamoDB throttling, API Gateway 5XX, and
@@ -680,7 +682,7 @@ Shape is guarded by `tests/test_monitoring_stack.py` and
   `ClusterName`, `Region`) from `health_monitor.py` and `manifest_processor.py`.
 - **Health endpoints:** `gco/services/health_api.py` exposes `/healthz`
   (liveness), `/readyz` (readiness), `/api/v1/health` (detailed, 200/503), and
-  `/metrics` (Prometheus). These four are the only paths the auth middleware
+  `/metrics` ([Prometheus](https://prometheus.io/docs/introduction/overview/)). These four are the only paths the auth middleware
   leaves unauthenticated (`gco/services/auth_middleware.py`), so ALB and Global
   Accelerator health checks reach them without a token.
 
