@@ -310,7 +310,7 @@ extract_k8s_version() {
 #
 # Example output for Dockerfile.dev:
 #
-#     NODE_MAJOR|24
+#     NODE_VERSION|v24.18.0
 #     NPM_VERSION|11.14.1
 #     CDK_VERSION|2.1120.0
 #     KUBECTL_VERSION|v1.36.1
@@ -323,7 +323,7 @@ extract_dockerfile_pins() {
   python3 -c "
 import re, sys
 allowlist = {
-    'NODE_MAJOR',
+    'NODE_VERSION',
     'NPM_VERSION',
     'CDK_VERSION',
     'KUBECTL_VERSION',
@@ -1171,7 +1171,9 @@ except OSError:
     pass
 try:
     text = resolve(sys.argv[4]).read_text(encoding='utf-8')
-    match = re.search(r'^\s*ARG\s+NODE_MAJOR=(\d+)\s*$', text, re.MULTILINE)
+    # NODE_VERSION pins the exact release (e.g. ``v24.18.0``); emit()
+    # reduces it to the leading major for the cross-source comparison.
+    match = re.search(r'^\s*ARG\s+NODE_VERSION=(v?\d+(?:\.\d+)*)\s*$', text, re.MULTILINE)
     if match:
         emit('Dockerfile.dev', match.group(1))
 except OSError:

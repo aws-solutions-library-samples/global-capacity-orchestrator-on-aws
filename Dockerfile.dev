@@ -102,24 +102,49 @@ RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# Install Node.js (for CDK) — pinned to current LTS major. Bump
-# intentionally when a new LTS line is validated against the CDK version
-# pinned below.
-ARG NODE_MAJOR=24
-RUN curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/* \
+# Install Node.js (for CDK) — pinned to an exact release, downloaded as
+# the official nodejs.org dist tarball and verified against the SHA-256
+# published in that release's SHASUMS256.txt.
+#
+# This deliberately does NOT use the NodeSource apt repository. Their
+# setup script was the only third-party-intermediated `curl | bash`
+# install left in this image, it pinned nothing beyond the major, and a
+# NodeSource CDN 403 outage (2026-07-27) broke every dev-container CI
+# job while the official dist endpoint stayed up. The tarball install
+# matches how every other tool below is provisioned: a pinned direct
+# download from the vendor's canonical distribution point — plus a
+# checksum, which the NodeSource path could never offer.
+#
+# Bump procedure (keep the three ARGs in lockstep):
+#   1. Pick the release from https://nodejs.org/dist/index.json
+#      (deps-scan reports drift against the newest active-LTS release).
+#   2. Copy both hashes from
+#      https://nodejs.org/dist/<NODE_VERSION>/SHASUMS256.txt
+#      for node-<NODE_VERSION>-linux-{x64,arm64}.tar.gz.
+# Node's tarballs use x64/arm64 arch tags; amd64 maps to x64 below.
+ARG NODE_VERSION=v24.18.0
+ARG NODE_SHA256_AMD64=783130984963db7ba9cbd01089eaf2c2efb055c7c1693c943174b967b3050cb8
+ARG NODE_SHA256_ARM64=6b4484c2190274175df9aa8f28e2d758a819cb1c1fe6ab481e2f95b463ab8508
+RUN case "${TARGETARCH}" in \
+        amd64)  NODE_ARCH="x64";   NODE_SHA256="${NODE_SHA256_AMD64}" ;; \
+        arm64)  NODE_ARCH="arm64"; NODE_SHA256="${NODE_SHA256_ARM64}" ;; \
+        *)      echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.gz" \
+      -o /tmp/node.tar.gz \
+    && echo "${NODE_SHA256}  /tmp/node.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 --no-same-owner \
+    && rm /tmp/node.tar.gz \
     && node --version
 
 # Pin npm to a specific patch.
 #
-# The npm version that ships bundled inside the nodesource ``nodejs``
-# apt package isn't pinned to a patch — it tracks whatever was current
-# when the apt cache was last refreshed — so without this step the
-# image's tooling drifts every time the build is run. We pin it the
-# same way we pin every other contributor-facing tool below
-# (CDK CLI, kubectl, AWS CLI v2, Docker CLI) so rebuilds are
-# reproducible and Dependency-scan can flag drift cleanly.
+# The npm bundled inside the Node dist tarball is fixed per Node
+# release, but it lags npm's own release line and would silently
+# change whenever NODE_VERSION is bumped. We pin it the same way we
+# pin every other contributor-facing tool below (CDK CLI, kubectl,
+# AWS CLI v2, Docker CLI) so rebuilds are reproducible and
+# Dependency-scan can flag drift cleanly.
 #
 # Bump in lockstep with the deps-scan report; the value flows through
 # as ``NPM_VERSION`` in the Dockerfile.dev pins section.

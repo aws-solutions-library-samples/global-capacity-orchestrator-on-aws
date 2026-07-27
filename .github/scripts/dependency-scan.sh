@@ -644,15 +644,17 @@ BEDROCK_MODEL_COUNT="$(wc -l < "$BEDROCK_MODEL_RESULTS" 2>/dev/null | tr -d ' ')
 # ---------------------------------------------------------------------------
 # Dockerfile.dev ARG pins
 #
-# Checks the tooling versions pinned in ``Dockerfile.dev`` (Node.js LTS
-# major, AWS CDK CLI, kubectl, AWS CLI v2, Docker CLI, Docker Buildx). These ARGs sit
+# Checks the tooling versions pinned in ``Dockerfile.dev`` (Node.js
+# release, AWS CDK CLI, kubectl, AWS CLI v2, Docker CLI, Docker Buildx). These ARGs sit
 # outside the main dependency surfaces above — Dependabot watches the
 # ``FROM python:…`` base image but not the ARG pins — so drift here has
 # historically gone undetected until someone rebuilt the image.
 #
 # Each pin has its own upstream:
 #
-#   NODE_MAJOR     github://nodejs/Release → schedule.json (LTS majors)
+#   NODE_VERSION   github://nodejs/Release → schedule.json (active LTS
+#                  major) + nodejs.org/dist/index.json (newest release
+#                  on that major)
 #   NPM_VERSION    registry.npmjs.org/npm/latest
 #   CDK_VERSION    registry.npmjs.org/aws-cdk/latest
 #   KUBECTL_VERSION https://dl.k8s.io/release/stable-<minor>.txt
@@ -672,10 +674,16 @@ DOCKERFILE_PIN_FILE="Dockerfile.dev"
 check_dockerfile_pin() {
   local name="$1" current="$2" latest=""
   case "$name" in
-    NODE_MAJOR)
-      # Pick the highest major with an active LTS window:
-      #   lts <= today AND (end missing or end > today).
-      latest="$(curl -fsSL --max-time 15 \
+    NODE_VERSION)
+      # Two drift signals folded into one compare. First pick the
+      # highest major with an active LTS window from the release
+      # schedule (lts <= today AND (end missing or end > today)),
+      # then resolve that major's newest release from the official
+      # dist index — the same origin the Dockerfile downloads from.
+      # A new LTS line and a new patch on the current line both
+      # surface as ``newer``.
+      local lts_major
+      lts_major="$(curl -fsSL --max-time 15 \
         "https://raw.githubusercontent.com/nodejs/Release/main/schedule.json" 2>/dev/null \
         | python3 -c '
 import sys, json, datetime
@@ -699,6 +707,13 @@ for k, v in data.items():
 if candidates:
     print(max(candidates))
 ' 2>/dev/null)" || true
+      [ -z "$lts_major" ] && return
+      # index.json is newest-first per line, so the first entry whose
+      # version sits on the LTS major is that major's latest release.
+      latest="$(curl -fsSL --max-time 15 \
+        "https://nodejs.org/dist/index.json" 2>/dev/null \
+        | jq -r --arg prefix "v${lts_major}." \
+          '[.[].version | select(startswith($prefix))][0] // empty' 2>/dev/null)" || true
       ;;
     CDK_VERSION)
       latest="$(curl -fsSL --max-time 15 \
@@ -707,8 +722,8 @@ if candidates:
       ;;
     NPM_VERSION)
       # ``npm`` is part of the dev container's pinned tooling — the
-      # version that ships bundled inside nodesource's nodejs apt
-      # package isn't pinned to a patch, so the Dockerfile installs a
+      # npm bundled inside the Node dist tarball is fixed per Node
+      # release but lags npm's own line, so the Dockerfile installs a
       # specific ``npm@X.Y.Z`` to keep rebuilds reproducible (same
       # rationale as CDK_VERSION above). The canonical "latest" is the
       # ``latest`` dist-tag on npmjs.org, same source CDK uses.
@@ -756,21 +771,11 @@ if candidates:
 
   [ -z "$latest" ] && return
 
-  # NODE_MAJOR is a bare integer (e.g. ``24``) not a semver. Compare as
-  # integers; everything else goes through compare_semver.
+  # Every pin is a semver, NODE_VERSION included. compare_semver strips
+  # a leading ``v`` on both sides, matching the kubectl and buildx pins
+  # that keep the prefix.
   local relation
-  if [ "$name" = "NODE_MAJOR" ]; then
-    if ! [[ "$current" =~ ^[0-9]+$ ]] || ! [[ "$latest" =~ ^[0-9]+$ ]]; then
-      return
-    fi
-    if [ "$latest" -gt "$current" ]; then
-      relation="newer"
-    else
-      relation="same_or_older"
-    fi
-  else
-    relation="$(compare_semver "$current" "$latest")"
-  fi
+  relation="$(compare_semver "$current" "$latest")"
 
   if [ "$relation" = "newer" ]; then
     echo "  - ${name}: ${current} -> ${latest}"

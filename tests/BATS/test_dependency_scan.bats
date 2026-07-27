@@ -462,7 +462,7 @@ EOF
     run extract_dockerfile_pins "Dockerfile.dev"
     [ "$status" -eq 0 ]
     # All seven allowlisted pins should be present.
-    [[ "$output" == *"NODE_MAJOR|"* ]]
+    [[ "$output" == *"NODE_VERSION|"* ]]
     [[ "$output" == *"NPM_VERSION|"* ]]
     [[ "$output" == *"CDK_VERSION|"* ]]
     [[ "$output" == *"KUBECTL_VERSION|"* ]]
@@ -484,12 +484,16 @@ EOF
     done <<< "$output"
 }
 
-@test "extract_dockerfile_pins: NODE_MAJOR value is a bare integer" {
+@test "extract_dockerfile_pins: NODE_VERSION keeps the v prefix" {
+    # The Dockerfile pins Node with the leading 'v' because the
+    # nodejs.org dist URL and tarball name both use it
+    # (node-vX.Y.Z-linux-<arch>.tar.gz). Assert we preserve it so the
+    # download URL and the deps-scan compare line up.
     run extract_dockerfile_pins "Dockerfile.dev"
     [ "$status" -eq 0 ]
-    node_line="$(echo "$output" | grep '^NODE_MAJOR|')"
-    value="${node_line#NODE_MAJOR|}"
-    [[ "$value" =~ ^[0-9]+$ ]]
+    node_line="$(echo "$output" | grep '^NODE_VERSION|')"
+    value="${node_line#NODE_VERSION|}"
+    [[ "$value" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
 @test "extract_dockerfile_pins: KUBECTL_VERSION keeps the v prefix" {
@@ -529,6 +533,7 @@ EOF
     tmpfile="$(mktemp)"
     cat > "$tmpfile" <<'EOF'
 FROM scratch
+ARG NODE_VERSION=v24.18.0
 ARG NODE_MAJOR=24
 ARG BUILD_DATE=20260501
 ARG UNRELATED_KNOB=hello
@@ -537,9 +542,13 @@ EOF
     run extract_dockerfile_pins "$tmpfile"
     [ "$status" -eq 0 ]
     # Allowlisted pins pass through
-    [[ "$output" == *"NODE_MAJOR|24"* ]]
+    [[ "$output" == *"NODE_VERSION|v24.18.0"* ]]
     [[ "$output" == *"CDK_VERSION|2.1120.0"* ]]
-    # Non-allowlisted ARGs are filtered out
+    # Non-allowlisted ARGs are filtered out. NODE_MAJOR left the
+    # allowlist when the Node install moved off the NodeSource apt
+    # repository onto pinned nodejs.org dist tarballs — a stray
+    # reintroduction must not resurface in the drift report.
+    [[ "$output" != *"NODE_MAJOR"* ]]
     [[ "$output" != *"BUILD_DATE"* ]]
     [[ "$output" != *"UNRELATED_KNOB"* ]]
     rm -f "$tmpfile"
@@ -549,15 +558,15 @@ EOF
     tmpfile="$(mktemp)"
     cat > "$tmpfile" <<'EOF'
 FROM scratch
-# ARG NODE_MAJOR=99
-ARG NODE_MAJOR=24
+# ARG NODE_VERSION=v99.0.0
+ARG NODE_VERSION=v24.18.0
 EOF
     run extract_dockerfile_pins "$tmpfile"
     [ "$status" -eq 0 ]
-    # Only one NODE_MAJOR line, and it's the uncommented 24 value.
-    count="$(echo "$output" | grep -c '^NODE_MAJOR|' || true)"
+    # Only one NODE_VERSION line, and it's the uncommented v24.18.0 value.
+    count="$(echo "$output" | grep -c '^NODE_VERSION|' || true)"
     [ "$count" -eq 1 ]
-    [[ "$output" == *"NODE_MAJOR|24"* ]]
+    [[ "$output" == *"NODE_VERSION|v24.18.0"* ]]
     rm -f "$tmpfile"
 }
 

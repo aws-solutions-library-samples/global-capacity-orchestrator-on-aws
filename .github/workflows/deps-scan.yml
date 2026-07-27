@@ -19,7 +19,7 @@
 #     model family (AWS creds via OIDC)
 #   - Accelerator catalog and Karpenter NodePool policy (offline), plus live
 #     NVIDIA GPU / AWS Neuron EC2 catalog drift across enabled Regions (OIDC)
-#   - Dockerfile.dev ARG pins (NODE_MAJOR, NPM_VERSION, CDK_VERSION,
+#   - Dockerfile.dev ARG pins (NODE_VERSION, NPM_VERSION, CDK_VERSION,
 #     KUBECTL_VERSION, AWSCLI_VERSION, DOCKER_VERSION, BUILDX_VERSION) — public endpoints,
 #     no AWS creds needed
 #   - Pre-commit hook revisions in .pre-commit-config.yaml compared against
