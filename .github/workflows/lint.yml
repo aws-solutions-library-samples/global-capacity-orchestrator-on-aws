@@ -145,6 +145,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      - name: Pre-pull hadolint image
+        uses: ./.github/actions/docker-pull-with-retry
+        with:
+          images: hadolint/hadolint:v2.14.0-debian
       - name: Run hadolint on every Dockerfile
         # DL3008 (apt pin) and DL3013 (pip pin) are ignored to match the
         # policy inherited from the GitLab pipeline. Revisit once all base
@@ -180,6 +184,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      - name: Pre-pull shellcheck image
+        uses: ./.github/actions/docker-pull-with-retry
+        with:
+          images: koalaman/shellcheck-alpine:v0.11.0
       - name: Run shellcheck
         # -x follows source directives so sourced files are resolved.
         run: |

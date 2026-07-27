@@ -6,8 +6,10 @@ Reusable GitHub Actions composite actions shared across multiple CI workflows. I
 
 - [Actions](#actions)
   - [`build-lambda-package`](#build-lambda-package)
+  - [`docker-pull-with-retry`](#docker-pull-with-retry)
   - [`free-disk-space`](#free-disk-space)
   - [`install-trivy`](#install-trivy)
+  - [`setup-buildx-with-retry`](#setup-buildx-with-retry)
   - [`upload-artifact-with-retry`](#upload-artifact-with-retry)
 - [Adding a New Action](#adding-a-new-action)
 
@@ -44,6 +46,31 @@ steps:
       python-version: "3.14"
   - run: pip install -e ".[cdk]"
   - uses: ./.github/actions/build-lambda-package
+```
+
+### `docker-pull-with-retry`
+
+Pulls one or more pinned container images with a retry loop, so a following `docker run` finds them in the local cache. Docker Hub's registry and token endpoints intermittently time out on GitHub runners (`auth.docker.io ... Client.Timeout exceeded while awaiting headers`), and because a plain `docker run` pulls implicitly with no retry, a single blip failed a lint job whose checks never ran. Retrying with backoff makes that class self-healing; a genuinely missing or unauthorised image still fails on the final attempt with the real registry error.
+
+**Inputs:**
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `images` | (required) | Whitespace- or newline-separated image references. Always pin a tag or digest. |
+| `attempts` | `3` | Total attempts per image. Set to `1` to disable retries. |
+| `delay` | `15` | Seconds to sleep between attempts. |
+
+**Used by:** `lint.yml` (`lint:hadolint:dockerfile`, `lint:shellcheck:shell`) — the jobs that run a Docker Hub linter image directly.
+
+**Usage:**
+
+```yaml
+- name: Pre-pull shellcheck image
+  uses: ./.github/actions/docker-pull-with-retry
+  with:
+    images: koalaman/shellcheck-alpine:v0.11.0
+- name: Run shellcheck
+  run: docker run --rm -v "$PWD":/repo -w /repo koalaman/shellcheck-alpine:v0.11.0 ...
 ```
 
 ### `free-disk-space`
@@ -100,6 +127,29 @@ Installs a pinned Trivy binary by wrapping the official `aquasecurity/setup-triv
     version: "${{ env.TRIVY_VERSION }}"
     github-token: "${{ github.token }}"
 - run: trivy fs --severity HIGH,CRITICAL .
+```
+
+### `setup-buildx-with-retry`
+
+Wraps `docker/setup-buildx-action@v4.2.0` with retry-on-failure. Creating a `docker-container` builder pulls the BuildKit image from Docker Hub, so the same token-endpoint timeouts described above can fail a job before anything is built — one such blip failed a Trivy container scan before any image existed to scan. The action has no retry of its own. Retrying the whole action rather than pre-pulling a hard-coded BuildKit tag keeps this correct if the pinned buildx version changes the image it resolves.
+
+Behaviour matches `docker/setup-buildx-action@v4.2.0` for every successful path; the only observable difference is on transient failures. Three attempts with a 15 s / 45 s backoff.
+
+**Inputs:**
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `driver-opts` | `""` | Builder driver options, passed straight through. |
+
+**Used by:** `security.yml` (`security:trivy:container-scan`) and every `integration:docker:*` / kind E2E job in `integration-tests.yml`. Drop-in replacement for `docker/setup-buildx-action@v4.2.0`.
+
+**Usage:**
+
+```yaml
+- uses: ./.github/actions/setup-buildx-with-retry
+- uses: docker/build-push-action@v7.3.0
+  with:
+    cache-from: type=gha,scope=my-image
 ```
 
 ### `upload-artifact-with-retry`

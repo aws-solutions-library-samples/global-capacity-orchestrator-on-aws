@@ -1,0 +1,75 @@
+name: "Docker Pull (with retry)"
+description: |
+  Pulls one or more container images with retry-on-failure, so a later
+  `docker run` finds them already in the local cache.
+
+  Docker Hub's registry and token endpoints intermittently time out on GitHub
+  runners. Observed in CI:
+
+      docker: Error response from daemon: Head
+      "https://registry-1.docker.io/v2/koalaman/shellcheck-alpine/manifests/v0.11.0":
+      Get "https://auth.docker.io/token?...": context deadline exceeded
+      (Client.Timeout exceeded while awaiting headers)
+
+  That is a network fault on a public dependency the build does not control,
+  and it failed a lint job whose actual checks never ran. A plain `docker run`
+  pulls implicitly with no retry, so one blip fails the job. Pre-pulling here
+  with backoff makes that class self-healing while a genuinely missing or
+  unauthorised image still fails on the final attempt with the real error.
+
+  Use this immediately before the step that runs the image; the run then hits a
+  warm cache. Non-transient problems (bad tag, denied pull) are not masked —
+  they simply fail after the attempts are exhausted.
+
+inputs:
+  images:
+    description: |
+      Whitespace- or newline-separated image references to pull, e.g.
+      `koalaman/shellcheck-alpine:v0.11.0`. Always pin a tag or digest.
+    required: true
+  attempts:
+    description: "Total attempts per image (default 3). Set to 1 to disable retries."
+    required: false
+    default: "3"
+  delay:
+    description: "Seconds to sleep between attempts (default 15)."
+    required: false
+    default: "15"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Pull images with retry
+      shell: bash
+      env:
+        IMAGES: ${{ inputs.images }}
+        ATTEMPTS: ${{ inputs.attempts }}
+        DELAY: ${{ inputs.delay }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${IMAGES// /}" ]; then
+          echo "::error::docker-pull-with-retry: no images supplied"
+          exit 1
+        fi
+
+        for image in $IMAGES; do
+          attempt=1
+          while true; do
+            echo "::group::docker pull $image (attempt ${attempt}/${ATTEMPTS})"
+            if docker pull "$image"; then
+              echo "::endgroup::"
+              break
+            fi
+            echo "::endgroup::"
+            if [ "$attempt" -ge "$ATTEMPTS" ]; then
+              echo "::error::Failed to pull ${image} after ${ATTEMPTS} attempt(s)."
+              exit 1
+            fi
+            echo "::warning::Pull of ${image} failed" \
+              "(attempt ${attempt}/${ATTEMPTS}); retrying in ${DELAY}s." \
+              "Usually a transient registry/network error."
+            sleep "$DELAY"
+            attempt=$((attempt + 1))
+          done
+        done

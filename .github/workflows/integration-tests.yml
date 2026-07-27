@@ -355,7 +355,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4.2.0
+      - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
         # Shared GHA layer cache (scope: health-monitor). Populated and
         # reused by this job, integration:kind:cluster-e2e, and
@@ -384,7 +384,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4.2.0
+      - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
         uses: docker/build-push-action@v7.3.0
         with:
@@ -409,7 +409,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4.2.0
+      - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
         uses: docker/build-push-action@v7.3.0
         with:
@@ -435,7 +435,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4.2.0
+      - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
         uses: docker/build-push-action@v7.3.0
         with:
@@ -458,7 +458,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4.2.0
+      - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
         uses: docker/build-push-action@v7.3.0
         with:
@@ -485,7 +485,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4.2.0
+      - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
         uses: docker/build-push-action@v7.3.0
         with:
@@ -744,7 +744,7 @@ jobs:
           kubectl -n kube-system rollout status deployment/metrics-server --timeout=3m
           kubectl wait --for=condition=Available apiservice/v1beta1.metrics.k8s.io --timeout=2m
       - name: Set up Buildx (enables shared GHA layer cache)
-        uses: docker/setup-buildx-action@v4.2.0
+        uses: ./.github/actions/setup-buildx-with-retry
       - name: Build health-monitor image
         # Shares the same GHA cache scope as integration:docker:health-monitor
         # and security:trivy:container-scan. All three build the same image
