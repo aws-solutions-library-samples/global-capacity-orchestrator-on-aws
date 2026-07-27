@@ -190,7 +190,7 @@ class CostAnalytics:
             "round(sum(ram_cost), 4) AS ram_cost, "
             "round(sum(gpu_cost), 4) AS gpu_cost, "
             "round(sum(pv_cost), 4) AS pv_cost "
-            f"FROM {table} WHERE {where} "
+            f"FROM {table} WHERE {where} "  # nosec B608 - identifiers regex-validated, values via ExecutionParameters
             "GROUP BY namespace ORDER BY total_cost DESC"
         )
         return self.run_query(sql, parameters or None)
@@ -204,7 +204,7 @@ class CostAnalytics:
             "round(sum(cpu_cost), 4) AS cpu_cost, "
             "round(sum(ram_cost), 4) AS ram_cost, "
             "round(sum(gpu_cost), 4) AS gpu_cost "
-            f"FROM {table} WHERE {self._days_clause(days)} "
+            f"FROM {table} WHERE {self._days_clause(days)} "  # nosec B608 - identifiers regex-validated, days bounded int
             "GROUP BY region ORDER BY total_cost DESC"
         )
         return self.run_query(sql)
@@ -229,7 +229,7 @@ class CostAnalytics:
         sql = (
             f"SELECT {bucket} AS period, "
             "round(sum(total_cost), 4) AS total_cost "
-            f"FROM {table} WHERE {where} "
+            f"FROM {table} WHERE {where} "  # nosec B608 - bucket from a fixed mapping, identifiers regex-validated, values via ExecutionParameters
             "GROUP BY 1 ORDER BY 1"
         )
         return self.run_query(sql, parameters or None)
@@ -244,7 +244,7 @@ class CostAnalytics:
         sql = (
             f"SELECT {grouping}, "
             "round(sum(total_cost), 4) AS total_cost "
-            f"FROM {table} WHERE {self._days_clause(days)} "
+            f"FROM {table} WHERE {self._days_clause(days)} "  # nosec B608 - grouping from a fixed mapping, identifiers regex-validated, n/days bounded ints
             f"GROUP BY {grouping} ORDER BY total_cost DESC LIMIT {bounded_n}"
         )
         return self.run_query(sql)
