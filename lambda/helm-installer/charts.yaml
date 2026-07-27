@@ -747,6 +747,11 @@ charts:
             namespaceName: monitoring
             port: 9090
         ui:
+          # No securityContext override: upstream ships ``{}`` because the UI
+          # image's entrypoint rewrites /var/www assets (BASE_URL sed) and
+          # hands off to nginx itself — forcing runAsUser breaks that startup
+          # rewrite (sed: can't create temp file ... Permission denied) and
+          # crash-loops the container.
           enabled: true
           resources:
             requests:
@@ -754,11 +759,6 @@ charts:
               memory: 55Mi
             limits:
               memory: 256Mi
-          # No securityContext override: upstream ships ``{}`` because the UI
-          # image's entrypoint rewrites /var/www assets (BASE_URL sed) and
-          # hands off to nginx itself — forcing runAsUser breaks that startup
-          # rewrite (sed: can't create temp file ... Permission denied) and
-          # crash-loops the container.
 
   # Kueue - Kubernetes-native job queueing for batch workloads
   # Provides quota management, fair sharing, and priority scheduling
