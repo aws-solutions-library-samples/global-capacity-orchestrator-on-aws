@@ -199,8 +199,16 @@ class TestRegionalChartWiring:
     def test_overrides_inject_the_cluster_identity(self, valid_cdk_context):
         overrides = RS._helm_chart_value_overrides(_stub(valid_cdk_context))
         values = overrides["opencost"]["values"]
-        assert values["clusterName"] == "gco-us-east-1"
         assert values["opencost"]["exporter"]["defaultClusterId"] == "gco-us-east-1"
+
+    def test_overrides_never_touch_the_dns_zone_clustername(self, valid_cdk_context):
+        """The chart's root ``clusterName`` is the Kubernetes DNS zone
+        (``cluster.local``) baked into the Prometheus URL — overriding it with
+        the EKS cluster name resolves to a nonexistent host and crash-loops
+        the cost model (observed live: ``lookup kube-prometheus-stack-
+        prometheus.monitoring.svc.gco-us-east-1 ... no such host``)."""
+        overrides = RS._helm_chart_value_overrides(_stub(valid_cdk_context))
+        assert "clusterName" not in overrides["opencost"]["values"]
 
     def test_overrides_exclude_opencost_when_disabled(self, valid_cdk_context):
         overrides = RS._helm_chart_value_overrides(_stub(valid_cdk_context, cost_enabled=False))

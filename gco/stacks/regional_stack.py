@@ -3698,13 +3698,16 @@ class GCORegionalStack(Stack):
 
         Only the cluster identity is dynamic — every static hardening value
         (Prometheus wiring, ServiceMonitor, resource limits, security
-        contexts) lives in ``charts.yaml``. The cluster name doubles as the
-        ``defaultClusterId`` OpenCost stamps on every allocation row, which is
-        what lets the multi-region Athena data distinguish clusters.
+        contexts) lives in ``charts.yaml``. The identity is
+        ``opencost.exporter.defaultClusterId`` — the value OpenCost stamps on
+        every allocation row, which is what lets the multi-region Athena data
+        distinguish clusters. The chart's root-level ``clusterName`` is NOT
+        set here: that value is the Kubernetes DNS zone (``cluster.local``)
+        used to build the Prometheus URL, and overriding it with the EKS
+        cluster name breaks in-cluster DNS resolution.
         """
         return {
             "values": {
-                "clusterName": self.cluster.cluster_name,
                 "opencost": {
                     "exporter": {
                         "defaultClusterId": self.cluster.cluster_name,

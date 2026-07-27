@@ -689,9 +689,13 @@ charts:
     wait: false
     wait_timeout: "8m"
     values:
-      # The real cluster name/id is injected by the regional stack because it
-      # contains deployment-specific tokens (<project>-<region>).
-      clusterName: gco-runtime-injected
+      # NOTE: the chart's root-level ``clusterName`` is the Kubernetes DNS
+      # zone (default ``cluster.local``) used to build the Prometheus URL —
+      # overriding it with the EKS cluster name breaks DNS resolution and
+      # crash-loops the cost model. The cluster's *identity* is
+      # ``opencost.exporter.defaultClusterId`` below, injected by the
+      # regional stack because it carries deployment tokens
+      # (<project>-<region>).
       # Never voluntarily consolidate the singleton cost model pod.
       podAnnotations:
         karpenter.sh/do-not-disrupt: "true"
@@ -750,13 +754,11 @@ charts:
               memory: 55Mi
             limits:
               memory: 256Mi
-          securityContext:
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            runAsUser: 101
-            capabilities:
-              drop:
-                - ALL
+          # No securityContext override: upstream ships ``{}`` because the UI
+          # image's entrypoint rewrites /var/www assets (BASE_URL sed) and
+          # hands off to nginx itself — forcing runAsUser breaks that startup
+          # rewrite (sed: can't create temp file ... Permission denied) and
+          # crash-loops the container.
 
   # Kueue - Kubernetes-native job queueing for batch workloads
   # Provides quota management, fair sharing, and priority scheduling
