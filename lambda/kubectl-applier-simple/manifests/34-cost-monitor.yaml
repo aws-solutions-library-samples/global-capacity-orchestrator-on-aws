@@ -1,0 +1,236 @@
+# Cost Monitor — writes scheduled OpenCost allocation reports (Parquet) to the
+# central cost report bucket and serves ad-hoc report generation for the
+# /api/v1/cost/* GCO API surface (proxied by the manifest processor).
+# ServiceAccount + Deployment + Service consolidated in one file so the whole
+# feature is gated on {{COST_MONITORING_ENABLED}}: when cost monitoring is
+# disabled the placeholders stay unreplaced, the applier skips this file, and
+# the prune inventory removes any previously-applied resources.
+#
+# Deliberately a single replica: the scheduled reporter is a singleton writer.
+# Report object keys are deterministic per window, so even a rollout overlap
+# cannot double-count in Athena — concurrent writers converge on the same key.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gco-cost-monitor-sa
+  namespace: gco-system
+  labels:
+    app: cost-monitor
+    project: gco
+  annotations:
+    eks.amazonaws.com/role-arn: "{{COST_MONITOR_ROLE_ARN}}"
+    gco.aws/feature-gate: "{{COST_MONITORING_ENABLED}}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cost-monitor
+  namespace: gco-system
+  labels:
+    app: cost-monitor
+    component: api
+    project: gco
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: cost-monitor
+  template:
+    metadata:
+      labels:
+        app: cost-monitor
+        component: api
+        project: gco
+      annotations:
+        gco.aws/deployment-timestamp: "{{DEPLOYMENT_TIMESTAMP}}"
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      serviceAccountName: gco-cost-monitor-sa
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: cost-monitor
+          image: {{COST_MONITOR_IMAGE}}
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: CLUSTER_NAME
+              value: "{{CLUSTER_NAME}}"
+            - name: REGION
+              value: "{{REGION}}"
+            - name: PROJECT_NAME
+              value: "{{PROJECT_NAME}}"
+            - name: COST_REPORT_BUCKET
+              value: "{{COST_REPORT_BUCKET}}"
+            - name: COST_REPORT_INTERVAL_MINUTES
+              value: "{{COST_REPORT_INTERVAL_MINUTES}}"
+            - name: OPENCOST_BASE_URL
+              value: "http://opencost.monitoring.svc.cluster.local:9003"
+            - name: AWS_ROLE_ARN
+              value: "{{COST_MONITOR_ROLE_ARN}}"
+            - name: AWS_WEB_IDENTITY_TOKEN_FILE
+              value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+          volumeMounts:
+            - name: aws-iam-token
+              mountPath: /var/run/secrets/eks.amazonaws.com/serviceaccount
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: aws-iam-token
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  audience: sts.amazonaws.com
+                  expirationSeconds: 86400
+                  path: token
+        - name: tmp
+          emptyDir:
+            sizeLimit: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cost-monitor
+  namespace: gco-system
+  labels:
+    app: cost-monitor
+    project: gco
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: cost-monitor
+---
+# gco-system runs default-deny ingress: admit only the manifest processor
+# (the authenticated /api/v1/cost/* proxy) into the cost monitor.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-manifest-processor-to-cost-monitor-ingress
+  namespace: gco-system
+  labels:
+    project: gco
+  annotations:
+    gco.aws/feature-gate: "{{COST_MONITORING_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      app: cost-monitor
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: manifest-processor
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# The project=gco egress policy limits gco-system platform pods to 443 + DNS.
+# The cost monitor additionally needs the OpenCost API (monitoring ns, 9003).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-cost-monitor-to-opencost
+  namespace: gco-system
+  labels:
+    project: gco
+  annotations:
+    gco.aws/feature-gate: "{{COST_MONITORING_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      app: cost-monitor
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9003
+---
+# ...and the manifest processor needs egress to the cost monitor pod port to
+# serve the /api/v1/cost/* proxy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-manifest-processor-to-cost-monitor-egress
+  namespace: gco-system
+  labels:
+    project: gco
+  annotations:
+    gco.aws/feature-gate: "{{COST_MONITORING_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      app: manifest-processor
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: cost-monitor
+      ports:
+        - protocol: TCP
+          port: 8080

@@ -29,7 +29,10 @@ Each service runs as a container built from a Dockerfile in `dockerfiles/`. The 
 | `webhook_dispatcher.py` | Dispatches webhook notifications (HMAC-signed) on job lifecycle events (submitted, running, completed, failed). |
 | `inference_store.py` | DynamoDB-backed store for inference endpoint specs and per-region status. |
 | `metrics_publisher.py` | Publishes custom [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) metrics (job counts, latency, queue depth). |
-| `central_queue_worker.py` | Fenced, renewable-lease worker that adopts or creates deterministic Kubernetes Jobs from the global DynamoDB queue. |
+| `central_queue_worker.py` | Fenced, renewable-lease worker that adopts or creates deterministic Kubernetes Jobs from the global DynamoDB queue. Consults the spot price gate before claiming price-capped jobs. |
+| `spot_price_gate.py` | Spot price gating for the central queue — TTL-cached minimum-across-AZ [spot price](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-spot-instances.html) lookups plus per-job gate decisions, so price-capped jobs dispatch only when the market clears their cap. |
+| `cost_monitor.py` | Cost-monitor service core — queries the in-cluster [OpenCost](https://opencost.io/) allocation API, normalizes windows into stable report rows, and writes deterministic Parquet reports to the central cost report bucket. |
+| `cost_api.py` | FastAPI app for the cost-monitor Deployment: probes, `/internal/status`, report listing, ad-hoc generation, and the scheduled interval-report loop. |
 | `auth_middleware.py` | Validates short-lived HMAC request envelopes (timestamp, nonce, method, target, and body digest) from trusted [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) proxies. |
 | `structured_logging.py` | JSON structured logging configuration for all services. |
 | `api_shared.py` | Shared Pydantic models and helper functions used by all API routes. |
@@ -42,7 +45,8 @@ The `api_routes/` subdirectory splits the FastAPI routes into focused modules:
 |------|-------------|
 | `inference_proxy.py` | Authenticated, allowlisted reverse proxy for managed inference serving paths (`GET`, `HEAD`, and `POST` only). |
 | `jobs.py` | Job listing, status, logs, events, pods, metrics, retry, and deletion |
-| `queue.py` | Idempotent global queue submission, opaque pagination, bounded stats, queued-only cancellation, and operator polling |
+| `queue.py` | Idempotent global queue submission (including the optional spot price gate fields), opaque pagination, bounded stats, queued-only cancellation, and operator polling |
+| `cost.py` | Authenticated `/api/v1/cost/*` surface — proxies status, report listing, and ad-hoc report generation to the internal cost-monitor service |
 | `manifests.py` | Manifest submission and validation |
 | `templates.py` | Template CRUD |
 | `webhooks.py` | Webhook registration and testing |

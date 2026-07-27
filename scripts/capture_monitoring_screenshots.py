@@ -52,12 +52,14 @@ class Screenshot:
 
 
 # One entry per curated dashboard. The ``dashboard_uid`` values must match the
-# ``uid`` in each dashboard JSON under post-helm-grafana-dashboards.yaml.
+# ``uid`` in each dashboard JSON under post-helm-grafana-dashboards.yaml and
+# post-helm-grafana-cost-dashboard.yaml.
 SCREENSHOTS: tuple[Screenshot, ...] = (
     Screenshot("gco-gpu-dcgm", "grafana-gpu-dcgm.png", "GCO GPU (DCGM)"),
     Screenshot("gco-schedulers", "grafana-schedulers.png", "GCO Schedulers & Queues"),
     Screenshot("gco-keda", "grafana-keda.png", "GCO KEDA Autoscaling"),
     Screenshot("gco-services", "grafana-services.png", "GCO Services"),
+    Screenshot("gco-cost", "grafana-cost.png", "GCO Cost (OpenCost)"),
 )
 
 

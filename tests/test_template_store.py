@@ -2033,7 +2033,9 @@ class TestCentralQueueWorkerOrdering:
         assert (polled, processed) == (0, [])
         assert events == ["migrate", "poll"]
         store.migrate_legacy_records_for_region.assert_called_once_with("us-east-1", 100)
-        store.get_queued_jobs_for_region.assert_called_once_with("us-east-1", 5)
+        # The candidate fetch is wider than the apply limit (limit*4, floor 20)
+        # so price-gated jobs cannot starve dispatchable work behind them.
+        store.get_queued_jobs_for_region.assert_called_once_with("us-east-1", 20)
 
 
 # =============================================================================

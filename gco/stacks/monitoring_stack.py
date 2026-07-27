@@ -49,13 +49,26 @@ from aws_cdk import (
     RemovalPolicy,
     Stack,
 )
+from aws_cdk import aws_athena as athena
 from aws_cdk import aws_cloudwatch as cloudwatch
 from aws_cdk import aws_cloudwatch_actions as cw_actions
+from aws_cdk import aws_glue as glue
+from aws_cdk import aws_iam as iam
+from aws_cdk import aws_kms as kms
 from aws_cdk import aws_logs as logs
+from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sns as sns
 from constructs import Construct
 
 from gco.config.config_loader import ConfigLoader
+from gco.stacks.constants import (
+    COST_ATHENA_RESULTS_PREFIX,
+    COST_GLUE_ALLOCATION_TABLE,
+    COST_REPORT_SCHEDULED_PREFIX,
+    cost_athena_workgroup_name,
+    cost_glue_database_name,
+    cost_report_bucket_name,
+)
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Generated at (UTC): 2026-07-18T01:03:40Z
@@ -119,6 +132,14 @@ class GCOMonitoringStack(Stack):
         # Create SNS topic for alerts
         self.alert_topic = self._create_alert_topic()
 
+        # Cost monitoring pipeline (on by default): the cost report bucket the
+        # regional cost-monitor services write Parquet allocation reports to,
+        # plus the Glue database/table and Athena workgroup that make the
+        # cross-region data queryable from the CLI.
+        if self.config.get_cost_monitoring_enabled():
+            self._create_cost_report_storage()
+            self._create_cost_analytics()
+
         # Create CloudWatch dashboard
         self.dashboard = self._create_dashboard()
 
@@ -158,6 +179,378 @@ class GCOMonitoringStack(Stack):
             enforce_ssl=True,
         )
         return topic
+
+    def _create_cost_report_storage(self) -> None:
+        """Create the central cost report bucket for the cost monitoring pipeline.
+
+        Every regional cost-monitor service writes Hive-partitioned Parquet
+        allocation reports here:
+
+        - ``reports/region=<region>/date=<YYYY-MM-DD>/...`` — scheduled
+          reports; the Glue table's partition projection reads this layout.
+        - ``adhoc/region=<region>/date=<YYYY-MM-DD>/...`` — user-requested
+          reports, kept out of the scheduled table so overlapping windows can
+          never double-count in Athena aggregations.
+        - ``athena-results/`` — Athena query results for the cost workgroup.
+
+        Three constructs mirror the regional-shared bucket pattern:
+
+        1. ``cost_report_kms_key`` — customer-managed KMS key with annual
+           rotation and a 7-day pending window on destroy.
+        2. ``cost_report_access_logs_bucket`` — the dedicated S3 access-logs
+           destination for the primary bucket.
+        3. ``cost_report_bucket`` — the primary bucket named
+           ``<project>-cost-reports-<account>-<monitoring-region>``. The name
+           is fully deterministic (``cost_report_bucket_name``) because the
+           regional stacks — which deploy *before* this stack — grant their
+           cost-monitor roles write access by literal ARN.
+
+        Lifecycle policy comes from ``cdk.json`` (``cost_monitoring.reports``):
+        report objects transition to STANDARD_IA after
+        ``transition_to_infrequent_access_days`` and expire after
+        ``retention_days``; Athena results expire after
+        ``athena.query_results_retention_days``.
+        """
+        cost_config = self.config.get_cost_monitoring_config()
+        reports_config = cost_config["reports"]
+        athena_config = cost_config["athena"]
+
+        # KMS key for the cost report bucket. Annual rotation, 7-day pending
+        # window, destroy-on-teardown — matching the shared-bucket posture.
+        self.cost_report_kms_key = kms.Key(
+            self,
+            "CostReportKmsKey",
+            description=(
+                "Customer-managed KMS key for the GCO cost report bucket in the monitoring stack."
+            ),
+            enable_key_rotation=True,
+            pending_window=Duration.days(7),
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        kms_actions = [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*",
+            "kms:DescribeKey",
+        ]
+        self.cost_report_kms_key.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="AllowS3ServiceEncryptDecrypt",
+                effect=iam.Effect.ALLOW,
+                principals=[iam.ServicePrincipal("s3.amazonaws.com")],
+                actions=kms_actions,
+                resources=["*"],
+            )
+        )
+
+        # Retention for the access-logs bucket honors the same `s3_access_logs`
+        # context field used by the central buckets (default 90 days).
+        s3_access_logs_ctx = self.node.try_get_context("s3_access_logs") or {}
+        access_logs_retention_days = int(s3_access_logs_ctx.get("retention_days", 90))
+
+        self.cost_report_access_logs_bucket = s3.Bucket(
+            self,
+            "CostReportAccessLogsBucket",
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=self.cost_report_kms_key,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            enforce_ssl=True,
+            versioned=True,
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="ExpireAccessLogs",
+                    enabled=True,
+                    expiration=Duration.days(access_logs_retention_days),
+                )
+            ],
+        )
+
+        self.cost_report_bucket = s3.Bucket(
+            self,
+            "CostReportBucket",
+            bucket_name=cost_report_bucket_name(self.project_name, self.account, self.region),
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=self.cost_report_kms_key,
+            bucket_key_enabled=True,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            enforce_ssl=True,
+            versioned=True,
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+            server_access_logs_bucket=self.cost_report_access_logs_bucket,
+            server_access_logs_prefix="cost-reports/",
+            lifecycle_rules=[
+                # Scheduled + ad-hoc reports share one policy: IA after the
+                # configured transition, expiry after the retention window.
+                s3.LifecycleRule(
+                    id="CostReportRetention",
+                    enabled=True,
+                    prefix=f"{COST_REPORT_SCHEDULED_PREFIX}/",
+                    transitions=[
+                        s3.Transition(
+                            storage_class=s3.StorageClass.INFREQUENT_ACCESS,
+                            transition_after=Duration.days(
+                                int(reports_config["transition_to_infrequent_access_days"])
+                            ),
+                        )
+                    ],
+                    expiration=Duration.days(int(reports_config["retention_days"])),
+                ),
+                s3.LifecycleRule(
+                    id="AdhocReportRetention",
+                    enabled=True,
+                    prefix="adhoc/",
+                    transitions=[
+                        s3.Transition(
+                            storage_class=s3.StorageClass.INFREQUENT_ACCESS,
+                            transition_after=Duration.days(
+                                int(reports_config["transition_to_infrequent_access_days"])
+                            ),
+                        )
+                    ],
+                    expiration=Duration.days(int(reports_config["retention_days"])),
+                ),
+                s3.LifecycleRule(
+                    id="ExpireAthenaResults",
+                    enabled=True,
+                    prefix=f"{COST_ATHENA_RESULTS_PREFIX}/",
+                    expiration=Duration.days(int(athena_config["query_results_retention_days"])),
+                ),
+            ],
+        )
+
+        # Explicit Deny for insecure transport with a verifiable SID,
+        # duplicating enforce_ssl=True per the central-bucket pattern.
+        self.cost_report_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="DenyInsecureTransport",
+                effect=iam.Effect.DENY,
+                principals=[iam.AnyPrincipal()],
+                actions=["s3:*"],
+                resources=[
+                    self.cost_report_bucket.bucket_arn,
+                    f"{self.cost_report_bucket.bucket_arn}/*",
+                ],
+                conditions={"Bool": {"aws:SecureTransport": "false"}},
+            )
+        )
+
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        cost_replication_reason = (
+            "Cost reports are derived analytics data regenerated continuously "
+            "by the per-region cost-monitor services; there is no durability "
+            "requirement that warrants cross-region replication. Access logs "
+            "do not require replication for the same reason."
+        )
+        acknowledge_nag_findings(
+            self.cost_report_bucket,
+            [
+                {
+                    "id": "HIPAA.Security-S3BucketReplicationEnabled",
+                    "reason": cost_replication_reason,
+                },
+                {
+                    "id": "NIST.800.53.R5-S3BucketReplicationEnabled",
+                    "reason": cost_replication_reason,
+                },
+                {
+                    "id": "PCI.DSS.321-S3BucketReplicationEnabled",
+                    "reason": cost_replication_reason,
+                },
+            ],
+        )
+
+        access_logs_is_self_target_reason = (
+            "This is the server access logs destination bucket for the cost report bucket."
+        )
+        acknowledge_nag_findings(
+            self.cost_report_access_logs_bucket,
+            [
+                {
+                    "id": "AwsSolutions-S1",
+                    "reason": access_logs_is_self_target_reason,
+                },
+                {
+                    "id": "HIPAA.Security-S3BucketLoggingEnabled",
+                    "reason": access_logs_is_self_target_reason,
+                },
+                {
+                    "id": "NIST.800.53.R5-S3BucketLoggingEnabled",
+                    "reason": access_logs_is_self_target_reason,
+                },
+                {
+                    "id": "PCI.DSS.321-S3BucketLoggingEnabled",
+                    "reason": access_logs_is_self_target_reason,
+                },
+                {
+                    "id": "HIPAA.Security-S3BucketReplicationEnabled",
+                    "reason": cost_replication_reason,
+                },
+                {
+                    "id": "NIST.800.53.R5-S3BucketReplicationEnabled",
+                    "reason": cost_replication_reason,
+                },
+                {
+                    "id": "PCI.DSS.321-S3BucketReplicationEnabled",
+                    "reason": cost_replication_reason,
+                },
+            ],
+        )
+
+        CfnOutput(
+            self,
+            "CostReportBucketName",
+            value=self.cost_report_bucket.bucket_name,
+            description="Central S3 bucket receiving per-region Parquet cost reports",
+        )
+
+    def _create_cost_analytics(self) -> None:
+        """Create the Glue database/table and Athena workgroup for cost queries.
+
+        The Glue table reads the scheduled report layout
+        (``reports/region=<region>/date=<YYYY-MM-DD>/*.parquet``) using
+        **partition projection**, so there is no crawler, no scheduled
+        ``MSCK REPAIR``, and no partition-management Lambda — new partitions
+        are queryable the moment an object lands. The ``region`` partition is
+        projected from the configured deployment regions; ``date`` is a native
+        date projection from 2026-01-01 to NOW.
+
+        The Athena workgroup pins query results to ``athena-results/`` in the
+        cost report bucket (KMS-encrypted, lifecycle-expired) and enforces its
+        configuration so callers cannot redirect results elsewhere.
+
+        The table schema is the write-side contract of
+        ``gco.services.cost_monitor`` — the columns below must stay in
+        lockstep with the Parquet fields the service emits.
+        """
+        database_name = cost_glue_database_name(self.project_name)
+
+        self.cost_glue_database = glue.CfnDatabase(
+            self,
+            "CostGlueDatabase",
+            catalog_id=self.account,
+            database_input=glue.CfnDatabase.DatabaseInputProperty(
+                name=database_name,
+                description=(
+                    "GCO cost analytics: per-region OpenCost allocation "
+                    "reports written by the cost-monitor services."
+                ),
+            ),
+        )
+
+        # Columns mirror gco/services/cost_monitor.py::ALLOCATION_REPORT_FIELDS.
+        columns = [
+            glue.CfnTable.ColumnProperty(name="window_start", type="timestamp"),
+            glue.CfnTable.ColumnProperty(name="window_end", type="timestamp"),
+            glue.CfnTable.ColumnProperty(name="cluster", type="string"),
+            glue.CfnTable.ColumnProperty(name="namespace", type="string"),
+            glue.CfnTable.ColumnProperty(name="cpu_core_hours", type="double"),
+            glue.CfnTable.ColumnProperty(name="cpu_cost", type="double"),
+            glue.CfnTable.ColumnProperty(name="ram_gib_hours", type="double"),
+            glue.CfnTable.ColumnProperty(name="ram_cost", type="double"),
+            glue.CfnTable.ColumnProperty(name="gpu_hours", type="double"),
+            glue.CfnTable.ColumnProperty(name="gpu_cost", type="double"),
+            glue.CfnTable.ColumnProperty(name="pv_cost", type="double"),
+            glue.CfnTable.ColumnProperty(name="network_cost", type="double"),
+            glue.CfnTable.ColumnProperty(name="load_balancer_cost", type="double"),
+            glue.CfnTable.ColumnProperty(name="shared_cost", type="double"),
+            glue.CfnTable.ColumnProperty(name="external_cost", type="double"),
+            glue.CfnTable.ColumnProperty(name="total_cost", type="double"),
+            glue.CfnTable.ColumnProperty(name="total_efficiency", type="double"),
+        ]
+
+        scheduled_location = (
+            f"s3://{self.cost_report_bucket.bucket_name}/{COST_REPORT_SCHEDULED_PREFIX}/"
+        )
+        self.cost_glue_table = glue.CfnTable(
+            self,
+            "CostAllocationTable",
+            catalog_id=self.account,
+            database_name=database_name,
+            table_input=glue.CfnTable.TableInputProperty(
+                name=COST_GLUE_ALLOCATION_TABLE,
+                description="Scheduled OpenCost allocation reports (Parquet)",
+                table_type="EXTERNAL_TABLE",
+                parameters={
+                    "classification": "parquet",
+                    "EXTERNAL": "TRUE",
+                    # Partition projection: no crawler, no MSCK. The region
+                    # projection is pinned to the deployment's configured
+                    # regions; extend deployment_regions.regional and redeploy
+                    # to pick up new regions.
+                    "projection.enabled": "true",
+                    "projection.region.type": "enum",
+                    "projection.region.values": ",".join(self.regions),
+                    "projection.date.type": "date",
+                    "projection.date.range": "2026-01-01,NOW",
+                    "projection.date.format": "yyyy-MM-dd",
+                    "projection.date.interval": "1",
+                    "projection.date.interval.unit": "DAYS",
+                    "storage.location.template": (
+                        f"{scheduled_location}region=${{region}}/date=${{date}}"
+                    ),
+                },
+                partition_keys=[
+                    glue.CfnTable.ColumnProperty(name="region", type="string"),
+                    glue.CfnTable.ColumnProperty(name="date", type="string"),
+                ],
+                storage_descriptor=glue.CfnTable.StorageDescriptorProperty(
+                    location=scheduled_location,
+                    input_format=("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat"),
+                    output_format=(
+                        "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
+                    ),
+                    serde_info=glue.CfnTable.SerdeInfoProperty(
+                        serialization_library=(
+                            "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+                        ),
+                    ),
+                    columns=columns,
+                ),
+            ),
+        )
+        self.cost_glue_table.add_dependency(self.cost_glue_database)
+
+        self.cost_athena_workgroup = athena.CfnWorkGroup(
+            self,
+            "CostAthenaWorkGroup",
+            name=cost_athena_workgroup_name(self.project_name),
+            description="GCO cost analytics queries over the cost report bucket",
+            recursive_delete_option=True,
+            work_group_configuration=athena.CfnWorkGroup.WorkGroupConfigurationProperty(
+                enforce_work_group_configuration=True,
+                publish_cloud_watch_metrics_enabled=True,
+                result_configuration=athena.CfnWorkGroup.ResultConfigurationProperty(
+                    output_location=(
+                        f"s3://{self.cost_report_bucket.bucket_name}/{COST_ATHENA_RESULTS_PREFIX}/"
+                    ),
+                    encryption_configuration=(
+                        athena.CfnWorkGroup.EncryptionConfigurationProperty(
+                            encryption_option="SSE_KMS",
+                            kms_key=self.cost_report_kms_key.key_arn,
+                        )
+                    ),
+                ),
+            ),
+        )
+
+        CfnOutput(
+            self,
+            "CostAthenaWorkGroupName",
+            value=cost_athena_workgroup_name(self.project_name),
+            description="Athena workgroup for GCO cost analytics queries",
+        )
+        CfnOutput(
+            self,
+            "CostGlueDatabaseName",
+            value=cost_glue_database_name(self.project_name),
+            description="Glue database containing the cost allocation table",
+        )
 
     def _create_dashboard(self) -> cloudwatch.Dashboard:
         """Create comprehensive CloudWatch dashboard for monitoring"""

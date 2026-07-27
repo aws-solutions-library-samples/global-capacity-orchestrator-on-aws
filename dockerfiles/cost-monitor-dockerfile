@@ -1,0 +1,72 @@
+# Dockerfile for Cost Monitor Service
+# Queries the in-cluster OpenCost API, writes scheduled/ad-hoc Parquet cost
+# reports to the central cost report bucket, and serves the internal HTTP API
+# the manifest processor proxies as /api/v1/cost/*. Runs as a Deployment in
+# gco-system.
+FROM python:3.14.6-slim
+
+# Set working directory
+WORKDIR /app
+
+# Apply Debian security patches at build time, then install runtime deps.
+# APT_SECURITY_EPOCH busts the CI layer cache so a freshly-published
+# trixie-security patch isn't masked by a stale cached upgrade layer;
+# bump the date when a new fix needs pulling.
+ARG APT_SECURITY_EPOCH=2026-07-12
+RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
+    && apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
+        curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -r gco && useradd -r -g gco -u 1000 gco
+
+# Install only this service's direct runtime roots. The roots live in the
+# image-cost-monitor optional-dependency group; Python 3.14's tomllib emits
+# a temporary requirements file so pyproject.toml remains the sole direct-pin
+# source. requirements-lock.txt constrains the complete transitive graph.
+#
+# pip flags + bash retry loop guard against transient PyPI/CDN drops
+# (see Dockerfile.dev for the rationale; same pattern across every
+# image build in the repo).
+COPY pyproject.toml requirements-lock.txt ./
+RUN python -c 'import pathlib, tomllib; config = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8")); dependencies = config["project"]["optional-dependencies"]["image-cost-monitor"]; pathlib.Path("requirements-runtime.txt").write_text("-c requirements-lock.txt\n" + "\n".join(dependencies) + "\n", encoding="utf-8")' \
+    && for attempt in 1 2 3; do \
+        if pip install --no-cache-dir \
+            --retries 10 --timeout 120 --resume-retries 5 \
+            -r requirements-runtime.txt; then \
+            break; \
+        fi; \
+        if [ "${attempt}" -eq 3 ]; then \
+            echo "pip install failed after ${attempt} attempts" >&2; \
+            exit 1; \
+        fi; \
+        echo "pip install attempt ${attempt} failed; retrying in 10s..."; \
+        sleep 10; \
+    done \
+    && rm requirements-runtime.txt
+
+# Keep source-only edits from invalidating the expensive dependency layer.
+COPY gco/ ./gco/
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Create tmp directory for non-root user
+RUN mkdir -p /tmp && chown gco:gco /tmp
+
+# Switch to non-root user
+USER gco
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8080/healthz || exit 1
+
+# Run the application
+CMD ["python", "-m", "gco.services.cost_api"]

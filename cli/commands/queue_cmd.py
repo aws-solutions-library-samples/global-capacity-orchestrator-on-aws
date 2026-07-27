@@ -30,9 +30,32 @@ def queue(config: Any) -> None:
 @click.option("--namespace", "-n", default="gco-jobs", help="Kubernetes namespace")
 @click.option("--priority", "-p", default=0, help="Job priority (0-100, higher = more important)")
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
+@click.option(
+    "--max-spot-price",
+    type=float,
+    help=(
+        "Spot price cap in USD/hour. The job is held in the queue until the "
+        "current spot price of --spot-instance-type in the target region "
+        "drops to or below this value. Requires --spot-instance-type."
+    ),
+)
+@click.option(
+    "--spot-instance-type",
+    help=(
+        "EC2 instance type whose spot price gates dispatch (e.g. g5.xlarge). "
+        "Requires --max-spot-price."
+    ),
+)
 @pass_config
 def queue_submit(
-    config: Any, manifest_path: Any, region: Any, namespace: Any, priority: Any, label: Any
+    config: Any,
+    manifest_path: Any,
+    region: Any,
+    namespace: Any,
+    priority: Any,
+    label: Any,
+    max_spot_price: Any,
+    spot_instance_type: Any,
 ) -> None:
     """Submit a job to the global queue for regional pickup.
 
@@ -40,15 +63,27 @@ def queue_submit(
     manifest processor. This enables global job submission with
     centralized tracking.
 
+    With --max-spot-price and --spot-instance-type the job is cost-gated:
+    it stays queued until spot pricing for that instance type in the target
+    region drops to or below the cap. Cancel with `gco queue cancel` if the
+    price never clears.
+
     Examples:
         gco queue submit job.yaml --region us-east-1
         gco queue submit job.yaml -r us-west-2 --priority 50
         gco queue submit job.yaml -r us-east-1 -l team=ml -l project=training
+        gco queue submit job.yaml -r us-east-1 --max-spot-price 0.50 --spot-instance-type g5.xlarge
     """
 
     from gco.services.manifest_processor import safe_load_yaml
+    from gco.services.spot_price_gate import validate_spot_gate_fields
 
     formatter = get_output_formatter(config)
+
+    gate_error = validate_spot_gate_fields(max_spot_price, spot_instance_type)
+    if gate_error:
+        formatter.print_error(gate_error)
+        sys.exit(1)
 
     # Parse labels
     labels = {}
@@ -67,20 +102,30 @@ def queue_submit(
 
         aws_client = get_aws_client(config)
 
+        body = {
+            "manifest": manifest,
+            "target_region": region,
+            "namespace": namespace,
+            "priority": priority,
+            "labels": labels if labels else None,
+        }
+        if max_spot_price is not None:
+            body["max_spot_price"] = max_spot_price
+            body["spot_instance_type"] = spot_instance_type
+
         result = aws_client.call_api(
             method="POST",
             path="/api/v1/queue/jobs",
             region=region if config.use_regional_api else None,
-            body={
-                "manifest": manifest,
-                "target_region": region,
-                "namespace": namespace,
-                "priority": priority,
-                "labels": labels if labels else None,
-            },
+            body=body,
         )
 
         formatter.print_success(f"Job queued for {region}")
+        if max_spot_price is not None:
+            formatter.print_info(
+                f"Spot price gate: dispatches when {spot_instance_type} spot "
+                f"price in {region} is <= ${max_spot_price}/hour"
+            )
         formatter.print(result)
 
     except Exception as e:
@@ -195,6 +240,16 @@ def queue_get(config: Any, job_id: Any, region: Any) -> None:
             print(f"  Status:        {job.get('status')}")
             print(f"  Priority:      {job.get('priority')}")
             print(f"  Submitted:     {job.get('submitted_at')}")
+            if job.get("spot_max_price"):
+                print(
+                    f"  Spot Gate:     {job.get('spot_instance_type')} <= "
+                    f"${job.get('spot_max_price')}/hour"
+                )
+                if job.get("spot_gate_observed_price"):
+                    print(
+                        f"  Last Price:    ${job.get('spot_gate_observed_price')} "
+                        f"(checked {job.get('spot_gate_checked_at')})"
+                    )
             if job.get("claimed_by"):
                 print(f"  Claimed By:    {job.get('claimed_by')}")
             if job.get("completed_at"):

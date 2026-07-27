@@ -85,6 +85,10 @@ def _stub(context: dict[str, Any], *, enabled: bool, observability: dict[str, An
         ),
     )
     stub._observability_chart_values = lambda: RS._observability_chart_values(stub)
+    # Cost monitoring helpers ride the same stub: the override builder and the
+    # chart-enable list both consult the cost pipeline's conjunction toggle.
+    stub._cost_monitoring_active = lambda: RS._cost_monitoring_active(stub)
+    stub._opencost_chart_values = lambda: RS._opencost_chart_values(stub)
     return stub
 
 

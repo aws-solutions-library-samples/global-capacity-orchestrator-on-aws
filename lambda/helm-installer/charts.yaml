@@ -661,6 +661,102 @@ charts:
         podAnnotations:
           karpenter.sh/do-not-disrupt: "true"
 
+  # OpenCost - Kubernetes cost allocation and monitoring
+  # Reads usage data from the in-cluster Prometheus (kube-prometheus-stack)
+  # and AWS list prices, and exposes per-namespace/-controller/-pod cost
+  # allocation via its API (9003), UI (9090), and Prometheus metrics that the
+  # Grafana cost dashboard renders. Installed on every regional cluster when
+  # cdk.json cost_monitoring.enabled = true (the default) AND
+  # cluster_observability.enabled = true. Inclusion and the dynamic values
+  # (cluster id, Prometheus service wiring) are driven by GCORegionalStack,
+  # so the default here is enabled: false — mirroring kube-prometheus-stack.
+  # Must install AFTER kube-prometheus-stack: the ServiceMonitor below needs
+  # the Prometheus Operator CRDs that chart applies.
+  # Access is via `gco monitoring open --service opencost` or
+  # `gco costs dashboard` (kubectl port-forward over the PRIVATE EKS
+  # endpoint); there is no public endpoint. See docs/COST_MONITORING.md.
+  # wait: false for the same cold-image-pull rationale as kube-prometheus-stack.
+  # https://github.com/opencost/opencost-helm-chart
+  opencost:
+    enabled: false
+    repo_name: opencost
+    repo_url: https://opencost.github.io/opencost-helm-chart
+    chart: opencost
+    version: "2.5.25"
+    namespace: monitoring
+    create_namespace: false
+    wait: false
+    wait_timeout: "8m"
+    values:
+      # The real cluster name/id is injected by the regional stack because it
+      # contains deployment-specific tokens (<project>-<region>).
+      clusterName: gco-runtime-injected
+      # Never voluntarily consolidate the singleton cost model pod.
+      podAnnotations:
+        karpenter.sh/do-not-disrupt: "true"
+      # NetworkPolicies stay off: the monitoring namespace has no restrictive
+      # default-deny policy, and enabling the chart's policy would require
+      # keeping its Prometheus pod selector in lockstep with
+      # kube-prometheus-stack's labels for no isolation gain today.
+      networkPolicies:
+        enabled: false
+      opencost:
+        # The MCP (Model Context Protocol) server is an additional
+        # unauthenticated HTTP surface aimed at AI-agent integrations. GCO
+        # exposes cost data through the authenticated GCO API and Athena
+        # instead, so the extra listener stays off.
+        mcp:
+          enabled: false
+        exporter:
+          # Injected by the regional stack (<project>-<region>).
+          defaultClusterId: gco-runtime-injected
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+        metrics:
+          serviceMonitor:
+            # kube-prometheus-stack discovers ServiceMonitors cluster-wide
+            # (serviceMonitorSelectorNilUsesHelmValues: false), so the
+            # chart-created monitor is scraped without extra wiring. This is
+            # what feeds the node_*_hourly_cost series the Grafana cost
+            # dashboard renders.
+            enabled: true
+        prometheus:
+          external:
+            enabled: false
+          internal:
+            enabled: true
+            serviceName: kube-prometheus-stack-prometheus
+            namespaceName: monitoring
+            port: 9090
+        ui:
+          enabled: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 55Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 101
+            capabilities:
+              drop:
+                - ALL
+
   # Kueue - Kubernetes-native job queueing for batch workloads
   # Provides quota management, fair sharing, and priority scheduling
   # IMPORTANT: Kueue must be installed LAST because its mutating webhook

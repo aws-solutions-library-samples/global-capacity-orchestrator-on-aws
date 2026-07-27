@@ -27,12 +27,11 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "capture_monitoring_screenshots.py"
-DASHBOARDS_MANIFEST = (
-    PROJECT_ROOT
-    / "lambda"
-    / "kubectl-applier-simple"
-    / "manifests"
-    / "post-helm-grafana-dashboards.yaml"
+_MANIFESTS_DIR = PROJECT_ROOT / "lambda" / "kubectl-applier-simple" / "manifests"
+# Every manifest that ships sidecar-imported Grafana dashboard ConfigMaps.
+DASHBOARD_MANIFESTS = (
+    _MANIFESTS_DIR / "post-helm-grafana-dashboards.yaml",
+    _MANIFESTS_DIR / "post-helm-grafana-cost-dashboard.yaml",
 )
 IMAGES_DIR = PROJECT_ROOT / "images"
 MONITORING_DOC = PROJECT_ROOT / "docs" / "MONITORING.md"
@@ -56,11 +55,12 @@ def script():
 
 def _dashboard_uids_from_manifest() -> set[str]:
     uids: set[str] = set()
-    for doc in yaml.safe_load_all(DASHBOARDS_MANIFEST.read_text()):
-        if not doc:
-            continue
-        for blob in doc.get("data", {}).values():
-            uids.add(json.loads(blob)["uid"])
+    for manifest in DASHBOARD_MANIFESTS:
+        for doc in yaml.safe_load_all(manifest.read_text()):
+            if not doc:
+                continue
+            for blob in doc.get("data", {}).values():
+                uids.add(json.loads(blob)["uid"])
     return uids
 
 

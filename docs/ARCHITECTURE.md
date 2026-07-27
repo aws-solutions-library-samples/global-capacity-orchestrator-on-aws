@@ -153,7 +153,7 @@ Each region contains:
 
 **Namespaces:**
 
-- `gco-system`: Platform services (health monitor, manifest processor, inference monitor, and inference proxy)
+- `gco-system`: Platform services (health monitor, manifest processor, inference monitor, inference proxy, and cost monitor)
 - `gco-jobs`: User batch and training workloads submitted through the control API
 - `gco-inference`: Managed model-serving workloads reconciled by the inference monitor
 
@@ -183,12 +183,21 @@ Each region contains:
 - Reads only the exact endpoint record from DynamoDB and streams model responses
 - Has no Kubernetes RoleBinding and shares no worker lifecycle with the manifest processor
 
+**Cost Monitor Service** (when cost monitoring is enabled — the default)
+
+- Single-replica `Recreate` Deployment: the scheduled reporter is a singleton writer with deterministic per-window report keys, so restarts and rollouts converge instead of double-counting
+- Queries the in-cluster OpenCost allocation API and writes interval-aligned Parquet reports to the central cost report bucket in the monitoring region
+- Serves report listing and ad-hoc generation through the manifest API's authenticated `/api/v1/cost/*` proxy
+- IRSA role scoped to the deterministic cost report bucket ARN plus `kms:ViaService`-conditioned key use; no Kubernetes RBAC binding
+- Default-deny ingress with an explicit allow from the manifest processor only
+
 **Service Accounts & RBAC**
 
 - `gco-health-monitor-sa`: Read-only cluster health plus narrowly named self-healing resources
 - `gco-manifest-processor-sa`: Job-namespace Kubernetes writes and control-plane table access
 - `gco-inference-monitor-sa`: Inference-namespace reconciliation permissions
 - `gco-inference-proxy-sa`: Exact AWS secret/endpoint-read access and no Kubernetes RBAC binding
+- `gco-cost-monitor-sa`: Cost report bucket write access only; no Kubernetes RBAC binding
 - `gco-service-account`: General job and inference workload identity
 
 ### 5. Lambda Layer
@@ -216,6 +225,8 @@ Each region contains:
   - Volcano and KubeRay
   - cert-manager
   - kube-prometheus-stack when cluster observability is enabled
+  - OpenCost when cost monitoring is enabled (after kube-prometheus-stack,
+    whose Prometheus Operator CRDs its ServiceMonitor needs)
   - Kueue last, after its dependencies
   - Slurm/Slinky and YuniKorn only when their opt-in flags are enabled
 
@@ -428,6 +439,22 @@ The rule packs run during `cdk synth` and deployment. They are automated control
   load-balancer hours — access is via `gco monitoring open` port-forward.
 - **Opt out** with `gco monitoring disable` to remove the stack and its volumes.
   See [`docs/MONITORING.md`](MONITORING.md#cost) for the full breakdown.
+
+### Cost Monitoring & Cost-Aware Scheduling
+
+- **Per-cluster allocation**: OpenCost (one pod per region) allocates node and
+  volume list prices to namespaces from Prometheus usage data, rendered in the
+  *GCO Cost (OpenCost)* Grafana dashboard.
+- **Durable analytics**: the per-region cost-monitor service writes
+  interval-aligned Parquet reports to a central, lifecycle-managed S3 bucket;
+  a Glue table with partition projection plus an Athena workgroup make them
+  queryable across regions (`gco costs k8s …`) with no dashboard server or
+  crawler.
+- **Spot price gating**: central-queue jobs may carry a max spot price for an
+  instance type; the regional worker defers dispatch until the market clears
+  the cap — without blocking other queued work.
+- On by default alongside cluster observability; see
+  [`docs/COST_MONITORING.md`](COST_MONITORING.md).
 
 ## Disaster Recovery
 

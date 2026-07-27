@@ -124,6 +124,7 @@ from gco.stacks.constants import (
     api_gateway_auth_secret_name,
     backend_tls_certificate_arn_parameter_name,
     cluster_shared_ssm_parameter_prefix,
+    cost_report_bucket_name,
     regional_shared_bucket_name_prefix,
     regional_shared_ssm_parameter_prefix,
 )
@@ -193,6 +194,7 @@ _SERVICE_IMAGE_BUILD_INPUTS = (
     "dockerfiles/inference-proxy-dockerfile",
     "dockerfiles/inference-monitor-dockerfile",
     "dockerfiles/queue-processor-dockerfile",
+    "dockerfiles/cost-monitor-dockerfile",
 )
 _SERVICE_IMAGE_COMMON_EXCLUDES = (
     "cli/**",
@@ -975,6 +977,29 @@ class GCORegionalStack(Stack):
                 description="Queue Processor Docker image URI",
             )
 
+        # Build and push the cost-monitor image only when the cost monitoring
+        # pipeline deploys to this region — skipping the build keeps opted-out
+        # deployments' synth/deploy time unchanged (same gating rationale as
+        # the queue processor above).
+        if self._cost_monitoring_active():
+            self.cost_monitor_image = ecr_assets.DockerImageAsset(
+                self,
+                "CostMonitorImage",
+                directory=".",
+                file="dockerfiles/cost-monitor-dockerfile",
+                platform=ecr_assets.Platform.LINUX_AMD64,
+                exclude=_service_image_asset_excludes(
+                    "dockerfiles/cost-monitor-dockerfile",
+                ),
+            )
+
+            CfnOutput(
+                self,
+                "CostMonitorImageUri",
+                value=self.cost_monitor_image.image_uri,
+                description="Cost Monitor Docker image URI",
+            )
+
     def _resolve_unsupported_az_names(self) -> list[str]:
         """Resolve this region's EKS-unsupported AZ *IDs* to this account's AZ *names*.
 
@@ -1527,6 +1552,18 @@ class GCORegionalStack(Stack):
             service_account_names=["gco-health-monitor-sa"],
             namespaces=["gco-system"],
         )
+
+        if self._cost_monitoring_active():
+            self.cost_monitor_role = GCORegionalStack._create_irsa_role(
+                self,
+                "CostMonitorRole",
+                oidc_provider_arn=self.oidc_provider.open_id_connect_provider_arn,
+                oidc_issuer_url=self.cluster.cluster_open_id_connect_issuer_url,
+                service_account_names=["gco-cost-monitor-sa"],
+                namespaces=["gco-system"],
+            )
+            self._grant_cost_report_bucket_to_cost_monitor()
+
         self._create_aws_load_balancer_controller_role()
 
         # Grant permission to read the auth secret.
@@ -1611,6 +1648,18 @@ class GCORegionalStack(Stack):
                 actions=["cloudwatch:PutMetricData"],
                 resources=["*"],
                 conditions={"StringEquals": {"cloudwatch:namespace": "GCO/ManifestProcessor"}},
+            )
+        )
+
+        # The central queue worker's spot price gate reads current spot
+        # pricing before dispatching price-capped jobs.
+        # ec2:DescribeSpotPriceHistory is a read-only Describe* action that
+        # does not support resource-level scoping (Resource must be *).
+        self.manifest_processor_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["ec2:DescribeSpotPriceHistory"],
+                resources=["*"],
             )
         )
 
@@ -1760,10 +1809,13 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "ManifestProcessorRole has only three required wildcard shapes: "
+                        "ManifestProcessorRole has only four required wildcard shapes: "
                         "DynamoDB secondary indexes, the Secrets Manager generated ARN "
-                        "suffix, and cloudwatch:PutMetricData Resource:*. DynamoDB table "
-                        "names and the CloudWatch namespace are otherwise exact."
+                        "suffix, cloudwatch:PutMetricData Resource:*, and the read-only "
+                        "ec2:DescribeSpotPriceHistory Resource:* (Describe* actions do "
+                        "not support resource-level scoping; the central queue worker's "
+                        "spot price gate needs current pricing). DynamoDB table names "
+                        "and the CloudWatch namespace are otherwise exact."
                     ),
                     "appliesTo": ["Resource::*"],
                 }
@@ -2546,6 +2598,90 @@ class GCORegionalStack(Stack):
             ],
         )
 
+    def _grant_cost_report_bucket_to_cost_monitor(self) -> None:
+        """Grant the cost-monitor role write access to the cost report bucket.
+
+        The bucket lives in ``GCOMonitoringStack`` in the monitoring region,
+        which deploys *after* every regional stack — so no cross-stack
+        reference or SSM read can resolve it here. Its physical name is fully
+        deterministic (``cost_report_bucket_name``), which lets this grant use
+        a literal ARN:
+
+        1. S3 object + bucket-level actions (``PutObject``, ``GetObject``,
+           ``ListBucket``, ``GetBucketLocation``) scoped to the literal cost
+           report bucket ARN and its object-key space — and no other bucket.
+           The service writes scheduled/ad-hoc Parquet reports and lists
+           recent report objects for the API surface.
+        2. KMS ``GenerateDataKey`` / ``Decrypt`` / ``DescribeKey`` restricted
+           by ``kms:ViaService`` to S3 in the monitoring region. The bucket's
+           customer-managed key ARN is not knowable from this stack, so the
+           via-service condition provides the scoping — the same pattern the
+           analytics stack uses for the cluster-shared bucket key.
+
+        On a fresh ``deploy-all`` the bucket materializes only after the
+        regional stacks; the cost-monitor service retries its next scheduled
+        write, so the pipeline self-heals without ordering hacks.
+        """
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        monitoring_region = self.config.get_monitoring_region()
+        bucket_arn = (
+            f"arn:{self.partition}:s3:::"
+            f"{cost_report_bucket_name(self.config.get_project_name(), self.account, monitoring_region)}"
+        )
+
+        self.cost_monitor_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "s3:PutObject",
+                    "s3:GetObject",
+                    "s3:ListBucket",
+                    "s3:GetBucketLocation",
+                ],
+                resources=[bucket_arn, f"{bucket_arn}/*"],
+            )
+        )
+
+        self.cost_monitor_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "kms:GenerateDataKey",
+                    "kms:Decrypt",
+                    "kms:DescribeKey",
+                ],
+                resources=["*"],
+                conditions={
+                    "StringEquals": {
+                        "kms:ViaService": f"s3.{monitoring_region}.{self.url_suffix}",
+                    }
+                },
+            )
+        )
+
+        acknowledge_nag_findings(
+            self.cost_monitor_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The cost-monitor S3 grant uses an <arn>/* object-key "
+                        "wildcard on the literal deterministic cost report bucket "
+                        "ARN (one bucket). The KMS statement uses Resource::* "
+                        "because the bucket's customer-managed key is created by "
+                        "the monitoring stack, which deploys after this stack; the "
+                        "kms:ViaService condition restricts use to S3 in the "
+                        "monitoring region."
+                    ),
+                    "appliesTo": [
+                        "Resource::*",
+                        f"Resource::arn:<AWS::Partition>:s3:::{cost_report_bucket_name(self.config.get_project_name(), '<AWS::AccountId>', monitoring_region)}/*",
+                    ],
+                },
+            ],
+        )
+
     def _create_kubectl_lambda(self) -> None:
         """Create Lambda function to apply Kubernetes manifests using Python client.
 
@@ -2861,6 +2997,29 @@ class GCORegionalStack(Stack):
                 ),
             )
         )
+
+        # Cost monitoring (on by default): gate the cost-monitor Deployment
+        # and the Grafana cost dashboard on the toggle via the same
+        # unreplaced-placeholder mechanism. The image/role placeholders exist
+        # only when the pipeline is active, so a disabled deployment leaves
+        # 34-cost-monitor.yaml and the cost dashboard unapplied.
+        if self._cost_monitoring_active():
+            _cost_config = self.config.get_cost_monitoring_config()
+            image_replacements.update(
+                {
+                    "{{COST_MONITORING_ENABLED}}": "true",
+                    "{{COST_MONITOR_IMAGE}}": self.cost_monitor_image.image_uri,
+                    "{{COST_MONITOR_ROLE_ARN}}": self.cost_monitor_role.role_arn,
+                    "{{COST_REPORT_BUCKET}}": cost_report_bucket_name(
+                        self.config.get_project_name(),
+                        self.account,
+                        self.config.get_monitoring_region(),
+                    ),
+                    "{{COST_REPORT_INTERVAL_MINUTES}}": str(
+                        _cost_config["reports"]["interval_minutes"]
+                    ),
+                }
+            )
 
         # Add queue processor replacements if enabled
         qp_config = self.node.try_get_context("queue_processor") or {}
@@ -3518,7 +3677,41 @@ class GCORegionalStack(Stack):
         if self.config.get_cluster_observability_enabled():
             overrides["kube-prometheus-stack"] = self._observability_chart_values()
 
+        if self._cost_monitoring_active():
+            overrides["opencost"] = self._opencost_chart_values()
+
         return overrides
+
+    def _cost_monitoring_active(self) -> bool:
+        """Return whether the per-region cost monitoring pipeline deploys here.
+
+        Delegates to ``ConfigLoader.get_cost_monitoring_enabled``, which is
+        already the conjunction of the ``cost_monitoring`` toggle and its
+        ``cluster_observability`` data-source dependency — disabling either
+        switches OpenCost, the cost-monitor service, and the cost dashboard
+        off together.
+        """
+        return self.config.get_cost_monitoring_enabled()
+
+    def _opencost_chart_values(self) -> dict[str, Any]:
+        """Build the OpenCost value overrides that carry deployment tokens.
+
+        Only the cluster identity is dynamic — every static hardening value
+        (Prometheus wiring, ServiceMonitor, resource limits, security
+        contexts) lives in ``charts.yaml``. The cluster name doubles as the
+        ``defaultClusterId`` OpenCost stamps on every allocation row, which is
+        what lets the multi-region Athena data distinguish clusters.
+        """
+        return {
+            "values": {
+                "clusterName": self.cluster.cluster_name,
+                "opencost": {
+                    "exporter": {
+                        "defaultClusterId": self.cluster.cluster_name,
+                    },
+                },
+            }
+        }
 
     def _observability_chart_values(self) -> dict[str, Any]:
         """Build the kube-prometheus-stack value overrides from cdk.json.
@@ -3626,6 +3819,13 @@ class GCORegionalStack(Stack):
         # task whose chart is absent from this enabled set.
         if self.config.get_cluster_observability_enabled():
             enabled_charts.append("kube-prometheus-stack")
+
+        # OpenCost is driven by the on-by-default cost_monitoring toggle and
+        # additionally requires observability (its Prometheus data source).
+        # charts.yaml places it after kube-prometheus-stack so the Prometheus
+        # Operator CRDs exist before its ServiceMonitor renders.
+        if self._cost_monitoring_active():
+            enabled_charts.append("opencost")
 
         return enabled_charts
 

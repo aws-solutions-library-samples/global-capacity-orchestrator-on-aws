@@ -971,8 +971,17 @@ class JobStore:
         *,
         idempotency_key: str | None = None,
         request_hash: str | None = None,
+        spot_max_price: str | None = None,
+        spot_instance_type: str | None = None,
     ) -> dict[str, Any]:
-        """Submit a job exactly once, replaying only identical idempotent requests."""
+        """Submit a job exactly once, replaying only identical idempotent requests.
+
+        ``spot_max_price`` (USD/hour, serialized as a string to avoid float
+        items in DynamoDB) and ``spot_instance_type`` together form the
+        optional spot price gate: the regional queue worker will not dispatch
+        the job until the instance type's current spot price in the target
+        region drops to or below the threshold.
+        """
         now = _utc_now_iso()
         job_name = manifest.get("metadata", {}).get("name", job_id)
         priority_sort = self._priority_sort_key(priority, now, job_id)
@@ -1002,6 +1011,9 @@ class JobStore:
         if idempotency_key:
             item["idempotency_key"] = idempotency_key
             item["request_hash"] = request_hash or ""
+        if spot_max_price and spot_instance_type:
+            item["spot_max_price"] = spot_max_price
+            item["spot_instance_type"] = spot_instance_type
 
         try:
             self._table.put_item(
@@ -1438,6 +1450,43 @@ class JobStore:
             logger.error("Failed to get queued jobs for %s: %s", region, error)
             raise
 
+    def record_spot_gate_observation(
+        self,
+        job_id: str,
+        *,
+        observed_price: str,
+        checked_at: str | None = None,
+    ) -> bool:
+        """Persist a spot gate observation on a still-queued job.
+
+        Deliberately leaves ``updated_at`` untouched: ``claim_job`` fences on
+        ``updated_at``, and a gate observation must never invalidate a
+        concurrent claim attempt or count as queue-state churn. Conditional on
+        the job still being queued so a late observation cannot decorate a
+        claimed/terminal record. Returns whether the write happened.
+        """
+        try:
+            self._table.update_item(
+                Key={"job_id": job_id},
+                UpdateExpression=(
+                    "SET spot_gate_checked_at = :checked_at, "
+                    "spot_gate_observed_price = :observed_price"
+                ),
+                ConditionExpression="attribute_exists(job_id) AND #status = :queued",
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":checked_at": checked_at or _utc_now_iso(),
+                    ":observed_price": observed_price,
+                    ":queued": JobStatus.QUEUED.value,
+                },
+            )
+            return True
+        except ClientError as error:
+            if self._is_conditional_failure(error):
+                return False
+            logger.error("Failed to record spot gate observation for %s: %s", job_id, error)
+            raise
+
     def get_active_jobs_for_region(self, region: str, limit: int = 100) -> list[dict[str, Any]]:
         """Return a total-bounded, fair sample of pending and running jobs."""
         jobs: list[dict[str, Any]] = []
@@ -1674,6 +1723,14 @@ class JobStore:
             "error_message": item.get("error_message"),
             "status_history": self._decode_json(item.get("status_history"), []),
         }
+        # Optional spot price gate fields — present only for price-capped
+        # jobs, so ungated records keep their historical shape.
+        if item.get("spot_max_price") is not None:
+            parsed["spot_max_price"] = str(item.get("spot_max_price"))
+            parsed["spot_instance_type"] = item.get("spot_instance_type")
+            parsed["spot_gate_checked_at"] = item.get("spot_gate_checked_at")
+            observed = item.get("spot_gate_observed_price")
+            parsed["spot_gate_observed_price"] = str(observed) if observed is not None else None
         if include_internal:
             parsed["claim_token"] = item.get("claim_token")
         return parsed

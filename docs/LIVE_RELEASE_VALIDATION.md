@@ -66,6 +66,7 @@ Actions run in registry order. Selecting an individual action automatically incl
 | `api` | `topology` | Run an authenticated API Job through its complete lifecycle |
 | `sqs` | `topology` | Run a direct regional SQS Job through its complete lifecycle |
 | `central-queue` | `topology` | Run the idempotent DynamoDB-backed queue lifecycle, bind the worker-persisted Kubernetes identity, and verify/delete that exact workload |
+| `opencost` | `topology` | Require every Region's OpenCost to be healthy and returning allocation data, then generate an ad-hoc cost report and confirm its Parquet object in the cost report bucket (passes with a note when cost monitoring is disabled in cdk.json) |
 | `convergence` | `topology` | Require stable SQS, DLQ, and DynamoDB convergence |
 | `destroy` | `deploy` | Remove all exactly run-owned infrastructure in dependency order |
 | `final-inventory` | `destroy` | Prove target-stack absence, accepted retained resources, and exact protected-baseline preservation |

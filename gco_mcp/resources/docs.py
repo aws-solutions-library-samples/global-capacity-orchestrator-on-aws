@@ -644,6 +644,33 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "related": ["ARCHITECTURE", "README"],
     },
+    "COST_MONITORING": {
+        "summary": "Cost monitoring and cost-aware scheduling — per-region OpenCost with a Grafana cost dashboard, scheduled Parquet cost reports to S3, cross-region Athena analytics, the /api/v1/cost API, and spot price-gated central-queue dispatch.",
+        "topics": [
+            "cost",
+            "monitoring",
+            "observability",
+            "queue",
+            "customization",
+            "api",
+            "cli",
+        ],
+        "keywords": [
+            "opencost",
+            "cost allocation",
+            "athena",
+            "glue",
+            "parquet",
+            "cost reports",
+            "cost dashboard",
+            "spot price",
+            "max spot price",
+            "cost-aware scheduling",
+            "namespace cost",
+            "finops",
+        ],
+        "related": ["MONITORING", "CUSTOMIZATION", "API"],
+    },
     "CUSTOMIZATION": {
         "summary": "How to customize GCO — deployment regions, EKS configuration, GPU nodepools, and more.",
         "topics": [

@@ -1179,6 +1179,48 @@ gco costs forecast             # 30-day cost forecast
 
 See [CLI Reference](CLI.md#costs-commands) for full details.
 
+### Configure Cost Monitoring (OpenCost + Athena)
+
+Separate from Cost Explorer billing data, the cost monitoring pipeline (on by
+default) allocates Kubernetes cost per namespace with OpenCost, writes
+scheduled Parquet reports to a central S3 bucket, and exposes cross-region
+Athena analytics plus the spot price gate on the central queue. Tune it under
+`cost_monitoring` in `cdk.json`:
+
+```json
+"cost_monitoring": {
+  "enabled": true,
+  "reports": {
+    "interval_minutes": 60,
+    "retention_days": 365,
+    "transition_to_infrequent_access_days": 90
+  },
+  "athena": {
+    "query_results_retention_days": 30
+  }
+}
+```
+
+- `enabled` — master toggle. Requires `cluster_observability.enabled`
+  (OpenCost reads the in-cluster Prometheus); disabling observability turns
+  the cost pipeline off with it.
+- `reports.interval_minutes` — scheduled report cadence (5-1440).
+- `reports.retention_days` / `reports.transition_to_infrequent_access_days` —
+  S3 lifecycle for report objects (transition must be smaller than retention;
+  validated at synth).
+- `athena.query_results_retention_days` — lifecycle for Athena query results.
+
+Redeploy after changing the block (`gco stacks deploy-all`). Full guide:
+[COST_MONITORING.md](COST_MONITORING.md).
+
+```bash
+gco costs k8s namespaces       # Kubernetes cost by namespace (Athena)
+gco costs k8s regions          # Kubernetes cost by region (Athena)
+gco costs k8s top --by cluster # Top spenders
+gco costs report status        # OpenCost + report pipeline health
+gco costs dashboard            # Open the Grafana cost dashboard
+```
+
 ## FSx for Lustre Configuration
 
 FSx for Lustre provides high-performance parallel file system storage ideal for ML training workloads that require high throughput and low latency.

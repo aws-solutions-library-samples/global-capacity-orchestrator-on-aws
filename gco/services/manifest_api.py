@@ -197,6 +197,7 @@ from gco.services.service_metrics import mount_metrics  # noqa: E402
 mount_metrics(app, "manifest-processor")
 
 # Include domain routers
+from gco.services.api_routes.cost import router as cost_router  # noqa: E402
 from gco.services.api_routes.jobs import router as jobs_router  # noqa: E402
 from gco.services.api_routes.manifests import router as manifests_router  # noqa: E402
 from gco.services.api_routes.queue import router as queue_router  # noqa: E402
@@ -208,6 +209,7 @@ app.include_router(jobs_router)
 app.include_router(templates_router)
 app.include_router(webhooks_router)
 app.include_router(queue_router)
+app.include_router(cost_router)
 
 
 # =============================================================================
@@ -253,6 +255,11 @@ async def root() -> dict[str, Any]:
                 "list": "GET /api/v1/webhooks",
                 "create": "POST /api/v1/webhooks",
                 "delete": "DELETE /api/v1/webhooks/{id}",
+            },
+            "cost": {
+                "status": "GET /api/v1/cost/status",
+                "reports": "GET /api/v1/cost/reports",
+                "generate_report": "POST /api/v1/cost/reports",
             },
             "health": "GET /api/v1/health",
             "status": "GET /api/v1/status",

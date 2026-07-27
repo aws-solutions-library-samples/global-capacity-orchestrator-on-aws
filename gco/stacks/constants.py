@@ -455,6 +455,80 @@ keeps a local copy of this value so it needs no CDK imports at runtime, so keep
 the two in lockstep if the prefix ever changes.
 """
 
+# ---------------------------------------------------------------------------
+# Cost Monitoring Constants
+# ---------------------------------------------------------------------------
+# Shared contract between the monitoring stack (which owns the cost report
+# bucket, Glue database/table, and Athena workgroup), the regional stacks
+# (which grant the cost-monitor service write access by deterministic ARN),
+# the cost-monitor service (which writes Parquet reports), and the CLI (which
+# queries Athena). Everything below is derived from ``project_name`` so two
+# deployments in one account never collide.
+
+COST_REPORT_SCHEDULED_PREFIX = "reports"
+"""Object-key prefix for scheduled cost allocation reports.
+
+The cost-monitor service writes Hive-partitioned Parquet objects under
+``reports/region=<region>/date=<YYYY-MM-DD>/...`` and the Glue table's
+partition projection reads the same layout — keep the two in lockstep.
+"""
+
+COST_REPORT_ADHOC_PREFIX = "adhoc"
+"""Object-key prefix for ad-hoc (user-requested) cost reports.
+
+Kept out of the scheduled ``reports/`` prefix so an ad-hoc report whose
+window overlaps a scheduled window can never double-count in Athena
+aggregations over the scheduled table.
+"""
+
+COST_ATHENA_RESULTS_PREFIX = "athena-results"
+"""Object-key prefix for Athena query results inside the cost report bucket."""
+
+
+def cost_report_bucket_name_prefix(project_name: str) -> str:
+    """Name prefix for the cost report bucket in ``GCOMonitoringStack``.
+
+    Derived from ``project_name``. The full bucket name is
+    ``<project_name>-cost-reports-<account>-<monitoring-region>`` — fully
+    deterministic at synth time, which lets every regional stack grant its
+    cost-monitor role write access by literal ARN without a cross-region
+    SSM read (and without inverting the regional-before-monitoring deploy
+    order). The prefix is what IAM policies and cdk-nag allow-list
+    assertions scope against.
+    """
+    return f"{project_name}-cost-reports"
+
+
+def cost_report_bucket_name(project_name: str, account: str, monitoring_region: str) -> str:
+    """Deterministic physical name of the cost report bucket.
+
+    Single source of truth shared by the monitoring stack (which creates the
+    bucket), the regional stacks (which inject the name into the cost-monitor
+    service environment and grant S3 access by literal ARN), and the CLI
+    (which resolves the bucket for Athena result downloads and report
+    listings).
+    """
+    return f"{cost_report_bucket_name_prefix(project_name)}-{account}-{monitoring_region}"
+
+
+def cost_glue_database_name(project_name: str) -> str:
+    """Glue database name for cost analytics.
+
+    Glue database names must not contain hyphens, so the project name's
+    hyphens are folded to underscores (``gco`` renders ``gco_cost``).
+    """
+    return f"{project_name.replace('-', '_')}_cost"
+
+
+COST_GLUE_ALLOCATION_TABLE = "allocation_reports"
+"""Glue table over the scheduled cost allocation reports."""
+
+
+def cost_athena_workgroup_name(project_name: str) -> str:
+    """Athena workgroup name for cost analytics queries."""
+    return f"{project_name}-cost"
+
+
 MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.25.1"
 """Default container image for the shared per-region Mooncake master.
 

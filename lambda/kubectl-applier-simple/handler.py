@@ -427,6 +427,32 @@ _FEATURE_RESOURCE_INVENTORY: dict[
     ("{{QUEUE_PROCESSOR_IMAGE}}", True): (
         ("keda.sh/v1alpha1", "ScaledJob", "gco-system", "sqs-queue-processor"),
     ),
+    ("{{COST_MONITORING_ENABLED}}", False): (
+        ("apps/v1", "Deployment", "gco-system", "cost-monitor"),
+        ("v1", "Service", "gco-system", "cost-monitor"),
+        ("v1", "ServiceAccount", "gco-system", "gco-cost-monitor-sa"),
+        (
+            "networking.k8s.io/v1",
+            "NetworkPolicy",
+            "gco-system",
+            "allow-manifest-processor-to-cost-monitor-ingress",
+        ),
+        (
+            "networking.k8s.io/v1",
+            "NetworkPolicy",
+            "gco-system",
+            "allow-cost-monitor-to-opencost",
+        ),
+        (
+            "networking.k8s.io/v1",
+            "NetworkPolicy",
+            "gco-system",
+            "allow-manifest-processor-to-cost-monitor-egress",
+        ),
+    ),
+    ("{{COST_MONITORING_ENABLED}}", True): (
+        ("v1", "ConfigMap", "monitoring", "gco-dashboard-cost"),
+    ),
 }
 
 

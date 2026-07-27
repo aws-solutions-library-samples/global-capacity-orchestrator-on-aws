@@ -121,6 +121,9 @@ class ConfigLoader:
         # Validate cluster observability config (optional block)
         self._validate_cluster_observability_config()
 
+        # Validate cost monitoring config (optional block)
+        self._validate_cost_monitoring_config()
+
         # Validate historical capacity surface config (optional block)
         self._validate_capacity_history_config()
 
@@ -581,6 +584,71 @@ class ConfigLoader:
                 f"cluster_observability.alertmanager.enabled must be a bool, got "
                 f"{type(alertmanager_ctx['enabled']).__name__}: "
                 f"{alertmanager_ctx['enabled']!r}"
+            )
+
+    def _validate_cost_monitoring_config(self) -> None:
+        """Validate the optional ``cost_monitoring`` block in cdk.json.
+
+        The block is entirely optional; absence means the on-by-default
+        defaults apply and nothing needs validating. When present, we check:
+
+        - ``enabled``: must be a bool if present (defaults to True via merge).
+        - ``reports.interval_minutes``: positive int between 5 and 1440 if
+          present (the cost-monitor service's scheduled report cadence).
+        - ``reports.retention_days`` /
+          ``reports.transition_to_infrequent_access_days`` /
+          ``athena.query_results_retention_days``: positive ints if present.
+        - The IA transition must happen strictly before expiration, otherwise
+          the S3 lifecycle configuration is rejected at deploy time — fail at
+          synth instead.
+
+        There is deliberately no cross-toggle error against
+        ``cluster_observability``: cost monitoring's *effective* enablement is
+        the conjunction of both toggles (see
+        :meth:`get_cost_monitoring_enabled`), so disabling observability
+        simply switches the cost pipeline off with it — ``gco monitoring
+        disable`` must not break synthesis.
+        """
+        cost_ctx = self.app.node.try_get_context("cost_monitoring")
+        if not isinstance(cost_ctx, dict):
+            # Block absent or malformed — defaults apply, nothing to validate.
+            return
+
+        if "enabled" in cost_ctx and not isinstance(cost_ctx["enabled"], bool):
+            raise ConfigValidationError(
+                f"cost_monitoring.enabled must be a bool, got "
+                f"{type(cost_ctx['enabled']).__name__}: {cost_ctx['enabled']!r}"
+            )
+
+        int_fields = (
+            ("reports", "interval_minutes", 5, 1_440),
+            ("reports", "retention_days", 1, 3_650),
+            ("reports", "transition_to_infrequent_access_days", 30, 3_650),
+            ("athena", "query_results_retention_days", 1, 3_650),
+        )
+        for sub_block, field, minimum, maximum in int_fields:
+            sub_ctx = cost_ctx.get(sub_block)
+            if not isinstance(sub_ctx, dict) or field not in sub_ctx:
+                continue
+            value = sub_ctx[field]
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not minimum <= value <= maximum
+            ):
+                raise ConfigValidationError(
+                    f"cost_monitoring.{sub_block}.{field} must be an integer between "
+                    f"{minimum} and {maximum}, got {value!r}"
+                )
+
+        merged = self.get_cost_monitoring_config()
+        reports = merged["reports"]
+        if reports["transition_to_infrequent_access_days"] >= reports["retention_days"]:
+            raise ConfigValidationError(
+                "cost_monitoring.reports.transition_to_infrequent_access_days "
+                f"({reports['transition_to_infrequent_access_days']}) must be smaller than "
+                f"cost_monitoring.reports.retention_days ({reports['retention_days']}); "
+                "S3 rejects lifecycle rules that transition on or after expiration."
             )
 
     def _validate_capacity_history_config(self) -> None:
@@ -1198,6 +1266,79 @@ class ConfigLoader:
         methods, the CLI) do not have to index into the merged dict.
         """
         return bool(self.get_cluster_observability_config()["enabled"])
+
+    def get_cost_monitoring_config(self) -> dict[str, Any]:
+        """Get the cost monitoring configuration.
+
+        Returns the fully-merged ``cost_monitoring`` block from cdk.json
+        layered on top of the defaults below. Sub-blocks (``reports``,
+        ``athena``) are deep-merged so a user who overrides a single nested
+        key does not inadvertently wipe the sub-block's other defaults —
+        mirroring the nested-merge pattern used by
+        ``get_cluster_observability_config``.
+
+        Like cluster observability, cost monitoring is **on by default**: a
+        stock deployment installs OpenCost per region, provisions the cost
+        report bucket + Athena analytics in the monitoring stack, and runs
+        the cost-monitor service on every regional cluster. Operators opt out
+        by setting ``cost_monitoring.enabled = false``.
+
+        Returns:
+            Cost monitoring configuration dictionary with the keys:
+            - enabled: Whether the cost monitoring pipeline is deployed
+              (default: True). Requires ``cluster_observability.enabled``.
+            - reports: Cost report sub-block
+              - interval_minutes: cadence of the cost-monitor service's
+                scheduled Parquet reports (default: 60)
+              - retention_days: S3 lifecycle expiration for report objects
+                (default: 365)
+              - transition_to_infrequent_access_days: S3 lifecycle transition
+                to STANDARD_IA (default: 90; must be < retention_days)
+            - athena: Athena analytics sub-block
+              - query_results_retention_days: S3 lifecycle expiration for
+                Athena query results written under ``athena-results/``
+                (default: 30)
+        """
+        default_config: dict[str, Any] = {
+            "enabled": True,
+            "reports": {
+                "interval_minutes": 60,
+                "retention_days": 365,
+                "transition_to_infrequent_access_days": 90,
+            },
+            "athena": {
+                "query_results_retention_days": 30,
+            },
+        }
+        cost_ctx = self.app.node.try_get_context("cost_monitoring")
+        cost_config: dict[str, Any] = cost_ctx if isinstance(cost_ctx, dict) else {}
+        merged_config: dict[str, Any] = {**default_config, **cost_config}
+
+        # Deep-merge each nested sub-block so a partial override does not
+        # drop the other defaults in the same sub-block.
+        for sub_block in ("reports", "athena"):
+            override = cost_config.get(sub_block)
+            if isinstance(override, dict):
+                default_sub = cast(dict[str, Any], default_config[sub_block])
+                merged_config[sub_block] = {**default_sub, **override}
+
+        return merged_config
+
+    def get_cost_monitoring_enabled(self) -> bool:
+        """Return whether the cost monitoring pipeline is effectively enabled.
+
+        The conjunction of ``cost_monitoring.enabled`` (default True) and
+        ``cluster_observability.enabled`` (default True): OpenCost reads its
+        usage data from the in-cluster Prometheus, so disabling observability
+        switches the whole cost pipeline off with it rather than deploying a
+        pipeline with no data source (or failing synthesis for a user who
+        only ran ``gco monitoring disable``). Call sites — the regional
+        stack's chart-enable and image-build methods, the monitoring stack,
+        the CLI — all gate on this one conjunction.
+        """
+        return bool(self.get_cost_monitoring_config()["enabled"]) and bool(
+            self.get_cluster_observability_config()["enabled"]
+        )
 
     def get_capacity_history_config(self) -> dict[str, Any]:
         """Get the optional historical capacity surface configuration.

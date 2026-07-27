@@ -71,6 +71,20 @@ def _validated_queue_manifest(request: QueuedJobRequest) -> dict[str, Any]:
     return manifest
 
 
+def _validated_spot_gate(request: QueuedJobRequest) -> tuple[str, str] | None:
+    """Validate the optional spot price gate pair on a queue submission."""
+    from gco.services.spot_price_gate import validate_spot_gate_fields
+
+    error = validate_spot_gate_fields(request.max_spot_price, request.spot_instance_type)
+    if error:
+        raise HTTPException(status_code=422, detail=error)
+    if request.max_spot_price is None or request.spot_instance_type is None:
+        return None
+    # Serialize the cap as a plain decimal string — DynamoDB items must not
+    # carry floats, and a stable rendering keeps idempotency hashes exact.
+    return (f"{request.max_spot_price:.6f}", request.spot_instance_type)
+
+
 def _submission_hash(request: QueuedJobRequest, manifest: dict[str, Any]) -> str:
     payload = {
         "manifest": manifest,
@@ -79,6 +93,11 @@ def _submission_hash(request: QueuedJobRequest, manifest: dict[str, Any]) -> str
         "priority": request.priority,
         "labels": request.labels or {},
     }
+    # Only price-capped submissions carry the gate fields, so historical
+    # idempotency keys hash identically to pre-gate deployments.
+    if request.max_spot_price is not None or request.spot_instance_type is not None:
+        payload["max_spot_price"] = request.max_spot_price
+        payload["spot_instance_type"] = request.spot_instance_type
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -105,6 +124,7 @@ async def submit_job_to_queue(
         raise HTTPException(status_code=422, detail="Idempotency-Key is invalid")
 
     manifest = _validated_queue_manifest(request)
+    spot_gate = _validated_spot_gate(request)
     request_hash = _submission_hash(request, manifest)
     job_id = (
         str(uuid.uuid5(_IDEMPOTENCY_NAMESPACE, idempotency_key))
@@ -123,6 +143,8 @@ async def submit_job_to_queue(
             labels=request.labels,
             idempotency_key=idempotency_key,
             request_hash=request_hash,
+            spot_max_price=spot_gate[0] if spot_gate else None,
+            spot_instance_type=spot_gate[1] if spot_gate else None,
         )
     except JobSubmissionConflict as error:
         raise HTTPException(status_code=409, detail=str(error)) from error

@@ -82,6 +82,11 @@ Per regional cluster, when enabled:
 - Curated Grafana dashboards (see [below](#curated-dashboards)).
 - A credential-rotation CronJob (see
   [Admin credential rotation](#admin-credential-rotation)).
+- When cost monitoring is enabled (the default), an
+  [OpenCost](https://opencost.io/) release in the same `monitoring` namespace
+  that reads this Prometheus and powers the *GCO Cost (OpenCost)* dashboard
+  plus the cost report pipeline — see
+  [COST_MONITORING.md](COST_MONITORING.md).
 
 Grafana uses **Grafana-native authentication** (its own user database) with self
 sign-up and anonymous access disabled. All three UIs (Grafana, Prometheus,
@@ -205,6 +210,10 @@ kube-prometheus-stack cluster/node/pod dashboards:
 - **GCO KEDA Autoscaling** — active scalers and scaler errors.
 - **GCO Services** — request rate and p95 latency per GCO service, plus inference
   monitor reconcile/error counts.
+
+With cost monitoring enabled (the default) a fifth dashboard, **GCO Cost
+(OpenCost)**, is imported the same way; open it directly with
+`gco costs dashboard` (see [COST_MONITORING.md](COST_MONITORING.md#accessing-the-cost-dashboards)).
 
 ## Dashboard screenshots
 

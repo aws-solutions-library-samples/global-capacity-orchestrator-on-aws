@@ -26,6 +26,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 | [Customization](CUSTOMIZATION.md) | Platform teams | Add regions, tune nodepools, enable FSx/Valkey/EFA, configure queue processor |
 | [Analytics Environment](ANALYTICS.md) | Data scientists / ML engineers | Optional [SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/whatis.html) Studio + [EMR Serverless](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/emr-serverless.html) environment for interactive analysis of cluster data |
 | [Cluster Observability](MONITORING.md) | Operators | Self-hosted per-cluster Prometheus + Grafana + Alertmanager (on by default), private port-forward access, and the `gco monitoring` CLI |
+| [Cost Monitoring](COST_MONITORING.md) | Operators, FinOps | Per-cluster OpenCost + Grafana cost dashboard (on by default), scheduled Parquet cost reports to S3, cross-region Athena analytics via `gco costs k8s`, ad-hoc reports via `/api/v1/cost/*`, and spot price-aware central-queue scheduling |
 | [Mission](MISSION.md) | Operators | GCO's goal-directed iteration loop that runs five-phase iterations against machine-checkable success criteria until a verdict is reached |
 | [Cluster Shared Bucket](CLUSTER_SHARED_BUCKET.md) | Operators | Always-on cross-region [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) bucket shared across all regional clusters and the analytics environment |
 | [Troubleshooting](TROUBLESHOOTING.md) | Operators | Common issues and solutions for deployment, networking, pods, and storage |

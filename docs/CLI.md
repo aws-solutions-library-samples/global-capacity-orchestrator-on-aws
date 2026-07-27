@@ -564,6 +564,10 @@ gco queue submit MANIFEST_PATH [OPTIONS]
 | `--namespace` | `-n` | Kubernetes namespace |
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
+| `--max-spot-price` | | Spot price cap in USD/hour; the job stays queued until the current spot price of `--spot-instance-type` in the target region drops to or below this value. Requires `--spot-instance-type` |
+| `--spot-instance-type` | | EC2 instance type whose spot price gates dispatch (e.g. `g5.xlarge`). Requires `--max-spot-price` |
+
+With the spot price gate set, the regional queue worker re-evaluates the instance type's lowest current spot price across the region's Availability Zones on every polling pass and only dispatches once it clears the cap. `gco queue get` shows the gate and the last observed price; the job waits indefinitely until the price clears or you cancel it with `gco queue cancel`. Price-gated jobs never block other queued work. See [docs/COST_MONITORING.md](COST_MONITORING.md#spot-price-aware-scheduling).
 
 **Example:**
 
@@ -571,6 +575,9 @@ gco queue submit MANIFEST_PATH [OPTIONS]
 gco queue submit job.yaml --region us-east-1
 gco queue submit job.yaml -r us-west-2 --priority 50
 gco queue submit job.yaml -r us-east-1 -l team=ml -l project=training
+
+# Cost-gated: dispatch only when g5.xlarge spot drops to <= $0.50/hour
+gco queue submit job.yaml -r us-east-1 --max-spot-price 0.50 --spot-instance-type g5.xlarge
 ```
 
 #### `gco queue list`
@@ -1337,7 +1344,7 @@ gco costs summary --all
 You can also activate the `Environment` and `Owner` tags for more granular filtering in the AWS Cost Explorer console.
 
 <details>
-<summary>All <code>gco costs</code> commands (5) — click to expand</summary>
+<summary>All <code>gco costs</code> commands (15) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -1346,6 +1353,16 @@ You can also activate the `Environment` and `Owner` tags for more granular filte
 | [`gco costs trend`](#gco-costs-trend) | Show daily cost trend with a visual bar chart. |
 | [`gco costs workloads`](#gco-costs-workloads) | Estimate costs for currently running workloads (jobs and inference endpoints) based on instance pricing and runtime. |
 | [`gco costs forecast`](#gco-costs-forecast) | Forecast GCO costs for the next N days based on historical spending patterns. |
+| [`gco costs k8s`](#gco-costs-k8s) | Query Kubernetes allocation costs across regions via Athena (OpenCost data). |
+| [`gco costs k8s namespaces`](#gco-costs-k8s-namespaces) | Show Kubernetes cost by namespace across all regions. |
+| [`gco costs k8s regions`](#gco-costs-k8s-regions) | Show Kubernetes allocation cost by deployment region. |
+| [`gco costs k8s trend`](#gco-costs-k8s-trend) | Show Kubernetes cost over time (daily or hourly buckets). |
+| [`gco costs k8s top`](#gco-costs-k8s-top) | Show the top-N spenders by namespace, region, or cluster. |
+| [`gco costs report`](#gco-costs-report) | Generate and list OpenCost allocation reports via the GCO API. |
+| [`gco costs report generate`](#gco-costs-report-generate) | Generate an ad-hoc cost report now. |
+| [`gco costs report list`](#gco-costs-report-list) | List recent cost report objects in the cost report bucket. |
+| [`gco costs report status`](#gco-costs-report-status) | Show cost monitoring health, including OpenCost status. |
+| [`gco costs dashboard`](#gco-costs-dashboard) | Open a regional cost dashboard (Grafana or the OpenCost UI) over the private EKS endpoint. |
 
 </details>
 
@@ -1470,6 +1487,212 @@ gco costs forecast --days 60
 ```
 
 > **Note:** Cost Explorer needs at least 14 days of historical data to generate forecasts.
+
+#### `gco costs k8s`
+
+Query Kubernetes allocation costs across regions. These commands run [Amazon Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) aggregations over the Parquet allocation reports the per-region cost-monitor services write to the central cost report bucket. Requires `cost_monitoring.enabled` in `cdk.json` (the default) and a deployed monitoring stack — see [docs/COST_MONITORING.md](COST_MONITORING.md).
+
+```bash
+gco costs k8s COMMAND [OPTIONS]
+```
+
+#### `gco costs k8s namespaces`
+
+Show Kubernetes cost by namespace across all regions, broken down into CPU, RAM, GPU, and persistent volume cost.
+
+```bash
+gco costs k8s namespaces [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--days` | `-d` | Days to look back (default: 7) |
+| `--region` | `-r` | Restrict to one deployment region |
+
+**Examples:**
+
+```bash
+gco costs k8s namespaces
+gco costs k8s namespaces --days 30
+gco costs k8s namespaces -r us-east-1
+```
+
+#### `gco costs k8s regions`
+
+Show Kubernetes allocation cost by deployment region.
+
+```bash
+gco costs k8s regions [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--days` | `-d` | Days to look back (default: 7) |
+
+**Examples:**
+
+```bash
+gco costs k8s regions
+gco costs k8s regions --days 30
+```
+
+#### `gco costs k8s trend`
+
+Show Kubernetes cost over time.
+
+```bash
+gco costs k8s trend [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--days` | `-d` | Days to look back (default: 14) |
+| `--granularity` | | Trend bucket size: `daily` (default) or `hourly` |
+| `--namespace` | `-n` | Restrict to one namespace |
+
+**Examples:**
+
+```bash
+gco costs k8s trend
+gco costs k8s trend --days 30 --granularity daily
+gco costs k8s trend -n gco-jobs --granularity hourly --days 2
+```
+
+#### `gco costs k8s top`
+
+Show the top-N spenders by namespace, region, or cluster.
+
+```bash
+gco costs k8s top [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--limit` | `-n` | Number of results (default: 10) |
+| `--by` | | Grouping dimension: `namespace` (default), `region`, or `cluster` |
+| `--days` | `-d` | Days to look back (default: 7) |
+
+**Examples:**
+
+```bash
+gco costs k8s top
+gco costs k8s top -n 5 --by region
+gco costs k8s top --by cluster --days 30
+```
+
+#### `gco costs report`
+
+Generate and list OpenCost allocation reports through the authenticated GCO API (`/api/v1/cost/*`).
+
+```bash
+gco costs report COMMAND [OPTIONS]
+```
+
+Passing `--region` pins the request to that region's API bridge (each region's cost monitor owns its own OpenCost data); in the commercial partition direct bridge access requires `api_gateway.regional_api_enabled=true`. Without `--region` the request rides the global API and is served by the nearest healthy region — the response names the region that answered.
+
+#### `gco costs report generate`
+
+Generate an ad-hoc cost report now. The report is written under the `adhoc/` prefix in the cost report bucket (kept out of the scheduled Athena table so overlapping windows never double-count) and its summary is returned.
+
+```bash
+gco costs report generate [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | Region whose cost monitor generates the report |
+| `--window-hours` | | Trailing window the report covers, 1-168 (default: 24) |
+| `--show-rows` | | Print the allocation rows in the response |
+
+**Examples:**
+
+```bash
+gco costs report generate
+gco costs report generate -r us-east-1 --window-hours 48
+gco costs report generate --show-rows
+```
+
+#### `gco costs report list`
+
+List recent cost report objects in the cost report bucket.
+
+```bash
+gco costs report list [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | Region whose reports to list |
+| `--adhoc` | | List ad-hoc instead of scheduled reports |
+| `--limit` | `-l` | Maximum results, 1-1000 (default: 20) |
+
+**Examples:**
+
+```bash
+gco costs report list
+gco costs report list -r us-east-1 --limit 50
+gco costs report list --adhoc
+```
+
+#### `gco costs report status`
+
+Show cost monitoring health for a region: OpenCost liveness, whether it is returning allocation data, the report bucket, cadence, and the last scheduled report.
+
+```bash
+gco costs report status [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--region` | `-r` | Region whose cost monitor to check |
+
+**Examples:**
+
+```bash
+gco costs report status
+gco costs report status -r us-east-1
+```
+
+#### `gco costs dashboard`
+
+Open a regional cost dashboard over the private EKS endpoint. `--service grafana` (the default) port-forwards to the in-cluster Grafana and prints the direct URL of the GCO Cost dashboard; `--service opencost` forwards the native OpenCost UI. Runs in the foreground; press Ctrl-C to stop. Accepts the same `--via-ssm` tunnel options as [`gco monitoring open`](#gco-monitoring-open).
+
+```bash
+gco costs dashboard [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--service` | | `grafana` (default) or `opencost` |
+| `--region` | | Cluster region (defaults to the first cdk.json regional entry) |
+| `--local-port` | | Local port to bind (defaults per-service) |
+| `--via-ssm` | | Tunnel through an SSM-managed instance: an instance id, or `auto` |
+| `--bastion-ttl-minutes` | | Self-terminate backstop for an `auto` bastion (default: 120) |
+| `--yes` | `-y` | Skip the confirmation prompt when provisioning an `auto` bastion |
+
+**Examples:**
+
+```bash
+gco costs dashboard
+gco costs dashboard --service opencost --region us-east-1
+gco costs dashboard --via-ssm auto -y
+```
 
 ---
 
@@ -3378,7 +3601,7 @@ port-forward.
 | [`gco monitoring status`](#gco-monitoring-status) | Show the current `cluster_observability.*` toggle state from `cdk.json`. |
 | [`gco monitoring enable`](#gco-monitoring-enable) | Flip `cluster_observability.enabled` to `true` in `cdk.json`. |
 | [`gco monitoring disable`](#gco-monitoring-disable) | Flip `cluster_observability.enabled` to `false` in `cdk.json`. |
-| [`gco monitoring open`](#gco-monitoring-open) | Port-forward Grafana / Prometheus / Alertmanager over the private endpoint (optionally via an SSM tunnel). |
+| [`gco monitoring open`](#gco-monitoring-open) | Port-forward Grafana / Prometheus / Alertmanager / OpenCost over the private endpoint (optionally via an SSM tunnel). |
 | [`gco monitoring users add`](#gco-monitoring-users) | Create a Grafana user via the admin API. |
 | [`gco monitoring users list`](#gco-monitoring-users) | List Grafana organisation users. |
 | [`gco monitoring users remove`](#gco-monitoring-users) | Delete a Grafana user. |
@@ -3427,7 +3650,7 @@ gco monitoring open [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--service` | `grafana` (default, `localhost:3000`), `prometheus` (`:9090`), or `alertmanager` (`:9093`). |
+| `--service` | `grafana` (default, `localhost:3000`), `prometheus` (`:9090`), `alertmanager` (`:9093`), `opencost` (the OpenCost UI, `:9091`), or `opencost-api` (the OpenCost allocation API, `:9003`). The OpenCost targets exist when `cost_monitoring.enabled` is on — see [docs/COST_MONITORING.md](COST_MONITORING.md). |
 | `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
 | `--local-port` | Override the local bind port. |
 | `--via-ssm INSTANCE_ID` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). |

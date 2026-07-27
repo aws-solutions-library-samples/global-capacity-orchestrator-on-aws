@@ -592,6 +592,12 @@ jobs:
       - name: Import inference-monitor
         run: |
           python -c "from gco.services.inference_monitor import InferenceMonitor; print('inference-monitor OK')"
+      - name: Import cost-monitor
+        # cost_api pulls in cost_monitor; pyarrow is deliberately absent here
+        # (it ships only in the image-cost-monitor group), which proves the
+        # lazy Parquet import keeps the module importable without it.
+        run: |
+          python -c "from gco.services.cost_api import app; print('cost-monitor OK')"
       - name: Detect circular imports via importlib
         # importlib.import_module executes all module-level code including
         # deferred router imports; plain `import` can paper over cycles.
@@ -599,7 +605,8 @@ jobs:
           python -c "import importlib; importlib.import_module('gco.services.manifest_api'); print('manifest-api full import OK')"
           python -c "import importlib; importlib.import_module('gco.services.health_api'); print('health-api full import OK')"
           python -c "import importlib; importlib.import_module('gco.services.inference_monitor'); print('inference-monitor full import OK')"
-          python -c "from gco.services.api_routes import jobs, manifests, queue, templates, webhooks; print('all api_routes OK')"
+          python -c "import importlib; importlib.import_module('gco.services.cost_api'); print('cost-api full import OK')"
+          python -c "from gco.services.api_routes import cost, jobs, manifests, queue, templates, webhooks; print('all api_routes OK')"
 
 
   # ----------------------------------------------------------------------

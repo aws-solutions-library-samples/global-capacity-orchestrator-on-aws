@@ -25,6 +25,7 @@ from .actions import (
     action_deploy,
     action_destroy,
     action_final_inventory,
+    action_opencost,
     action_preflight,
     action_sqs_lifecycle,
     action_topology,
@@ -88,6 +89,12 @@ def build_action_registry() -> dict[str, ActionDefinition]:
             "Run the idempotent DynamoDB-backed queue lifecycle",
             ("topology",),
             action_central_queue_lifecycle,
+        ),
+        ActionDefinition(
+            "opencost",
+            "Require healthy, data-returning OpenCost and a working cost report pipeline",
+            ("topology",),
+            action_opencost,
         ),
         ActionDefinition(
             "convergence",

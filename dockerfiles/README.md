@@ -14,6 +14,7 @@ This directory contains Dockerfiles for the Kubernetes services deployed to the 
 - `inference-monitor-dockerfile` - Inference endpoint reconciliation controller that manages K8s resources from [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html) state
 - `inference-proxy-dockerfile` - In-cluster proxy that routes authenticated inference requests to endpoint backends
 - `queue-processor-dockerfile` - [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) consumer that processes manifests submitted via `gco jobs submit-sqs` (KEDA ScaledJob)
+- `cost-monitor-dockerfile` - Cost reporting service that writes scheduled [OpenCost](https://opencost.io/) allocation reports (Parquet) to the central cost report bucket and serves the `/api/v1/cost/*` surface
 
 ## Usage
 

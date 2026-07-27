@@ -851,6 +851,7 @@ class TestCentralQueueWorker:
             owner_id=OWNER,
             lease_renewal_seconds=5,
             stop_event=worker._stop_event,
+            spot_gate=worker._spot_gate,
         )
         reconcile.assert_awaited_once_with(
             processor,

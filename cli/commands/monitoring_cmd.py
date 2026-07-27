@@ -29,8 +29,11 @@ from ..output import get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
-# kube-prometheus-stack service names (release name = chart key) and their
-# service ports, plus a sensible default local port for each.
+# kube-prometheus-stack + OpenCost service names (release name = chart key)
+# and their service ports, plus a sensible default local port for each.
+# OpenCost's UI container listens on 9090 in-cluster; its local default is
+# 9091 so `gco monitoring open --service opencost` can run alongside a
+# Prometheus forward on 9090 without a port clash.
 _SERVICES: dict[str, dict[str, Any]] = {
     "grafana": {
         "target": "svc/kube-prometheus-stack-grafana",
@@ -46,6 +49,16 @@ _SERVICES: dict[str, dict[str, Any]] = {
         "target": "svc/kube-prometheus-stack-alertmanager",
         "remote_port": 9093,
         "default_local_port": 9093,
+    },
+    "opencost": {
+        "target": "svc/opencost",
+        "remote_port": 9090,
+        "default_local_port": 9091,
+    },
+    "opencost-api": {
+        "target": "svc/opencost",
+        "remote_port": 9003,
+        "default_local_port": 9003,
     },
 }
 

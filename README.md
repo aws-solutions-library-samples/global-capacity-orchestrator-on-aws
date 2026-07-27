@@ -437,6 +437,8 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 ### Operations
 
 - **Cost visibility**: Track spend by service, region, and workload via [Cost Explorer](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html) integration
+- **Cost monitoring & analytics** (on by default): per-cluster [OpenCost](https://opencost.io/) with a Grafana cost dashboard, scheduled Parquet cost reports to a central S3 bucket, and cross-region [Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) analytics via `gco costs k8s` — see [Cost Monitoring Guide](docs/COST_MONITORING.md)
+- **Spot price-aware scheduling**: central-queue jobs can set a max spot price per instance type and dispatch only when the market clears it
 - **Auto-bootstrap**: CDK bootstrap runs automatically for new regions during deploy
 - **Multi-region monitoring**: CloudWatch dashboards, alarms, and SNS alerts across all regions
 

@@ -1,0 +1,148 @@
+# GCO cost monitoring dashboard, powered by OpenCost metrics
+#
+# OpenCost's ServiceMonitor (enabled in charts.yaml) feeds Prometheus the
+# node_*_hourly_cost / container_*_allocation / pv_hourly_cost series this
+# dashboard renders. The ConfigMap carries the grafana_dashboard="1" label the
+# kube-prometheus-stack Grafana sidecar watches, so the dashboard loads
+# automatically. It lives in the monitoring namespace (created by the chart),
+# so it is applied in the post-Helm pass, and is gated on
+# {{COST_MONITORING_ENABLED}} so the file is skipped — and the dashboard
+# pruned — when cost monitoring is disabled. Legend placeholders are lowercase
+# Grafana template fields, which the applier's UPPER_SNAKE feature-gate regex
+# deliberately ignores.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-dashboard-cost
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cost-monitoring-enabled: "{{COST_MONITORING_ENABLED}}"
+data:
+  gco-cost.json: |
+    {
+      "title": "GCO Cost (OpenCost)",
+      "uid": "gco-cost",
+      "tags": ["gco", "cost"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "time": {"from": "now-24h", "to": "now"},
+      "panels": [
+        {
+          "id": 1,
+          "title": "Cluster hourly cost (compute + storage)",
+          "type": "stat",
+          "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0},
+          "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 2}},
+          "targets": [
+            {"expr": "sum(node_total_hourly_cost) + sum(pv_hourly_cost or vector(0))", "legendFormat": "hourly"}
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Projected monthly cost (730h)",
+          "type": "stat",
+          "gridPos": {"h": 6, "w": 6, "x": 6, "y": 0},
+          "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 0}},
+          "targets": [
+            {"expr": "(sum(node_total_hourly_cost) + sum(pv_hourly_cost or vector(0))) * 730", "legendFormat": "monthly"}
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Node hourly cost breakdown",
+          "type": "stat",
+          "gridPos": {"h": 6, "w": 12, "x": 12, "y": 0},
+          "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 2}},
+          "targets": [
+            {"expr": "sum(node_cpu_hourly_cost)", "legendFormat": "cpu"},
+            {"expr": "sum(node_ram_hourly_cost)", "legendFormat": "ram"},
+            {"expr": "sum(node_gpu_hourly_cost or vector(0))", "legendFormat": "gpu"}
+          ]
+        },
+        {
+          "id": 4,
+          "title": "Hourly cost by namespace (allocated, stacked cpu/ram/gpu)",
+          "type": "timeseries",
+          "gridPos": {"h": 9, "w": 12, "x": 0, "y": 6},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "custom": {"stacking": {"mode": "normal", "group": "A"}}
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (namespace) (container_cpu_allocation * on(node) group_left() avg by (node) (node_cpu_hourly_cost))",
+              "legendFormat": "{{namespace}} cpu"
+            },
+            {
+              "expr": "sum by (namespace) (container_memory_allocation_bytes/2^30 * on(node) group_left() avg by (node) (node_ram_hourly_cost))",
+              "legendFormat": "{{namespace}} ram"
+            },
+            {
+              "expr": "sum by (namespace) (container_gpu_allocation * on(node) group_left() avg by (node) (node_gpu_hourly_cost))",
+              "legendFormat": "{{namespace}} gpu"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "title": "Namespace hourly cost now (stacked cpu/ram/gpu)",
+          "type": "barchart",
+          "gridPos": {"h": 9, "w": 12, "x": 12, "y": 6},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 3,
+              "custom": {"stacking": {"mode": "normal", "group": "A"}}
+            }
+          },
+          "options": {"xTickLabelRotation": -45},
+          "targets": [
+            {
+              "expr": "sum by (namespace) (container_cpu_allocation * on(node) group_left() avg by (node) (node_cpu_hourly_cost))",
+              "legendFormat": "cpu",
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "expr": "sum by (namespace) (container_memory_allocation_bytes/2^30 * on(node) group_left() avg by (node) (node_ram_hourly_cost))",
+              "legendFormat": "ram",
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "expr": "sum by (namespace) (container_gpu_allocation * on(node) group_left() avg by (node) (node_gpu_hourly_cost))",
+              "legendFormat": "gpu",
+              "instant": true,
+              "format": "table"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "title": "Node hourly cost by instance type",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
+          "fieldConfig": {"defaults": {"unit": "currencyUSD"}},
+          "targets": [
+            {"expr": "sum by (instance_type) (node_total_hourly_cost)", "legendFormat": "{{instance_type}}"}
+          ]
+        },
+        {
+          "id": 7,
+          "title": "Persistent volume hourly cost",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15},
+          "fieldConfig": {"defaults": {"unit": "currencyUSD"}},
+          "targets": [
+            {"expr": "sum by (persistentvolume) (pv_hourly_cost)", "legendFormat": "{{persistentvolume}}"}
+          ]
+        }
+      ]
+    }

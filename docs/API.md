@@ -259,6 +259,16 @@ The job queue provides centralized job submission with region targeting via Dyna
 | POST | `/api/v1/webhooks` | Register a webhook | `gco webhooks create -u URL -e EVENT` |
 | DELETE | `/api/v1/webhooks/{id}` | Delete a webhook | `gco webhooks delete ID` |
 
+### Cost Reporting (Per Region)
+
+Available when `cost_monitoring.enabled` is on (the default). Each region's manifest API proxies these to its in-cluster cost-monitor service; see [COST_MONITORING.md](COST_MONITORING.md).
+
+| Method | Endpoint | Description | CLI Command |
+|--------|----------|-------------|-------------|
+| GET | `/api/v1/cost/status` | Cost monitoring + OpenCost health | `gco costs report status` |
+| GET | `/api/v1/cost/reports` | List recent report objects | `gco costs report list` |
+| POST | `/api/v1/cost/reports` | Generate an ad-hoc cost report | `gco costs report generate` |
+
 ---
 
 ## Detailed Endpoint Documentation
@@ -788,6 +798,9 @@ gco queue submit job.yaml -r us-west-2 --priority 50
 
 # Submit with labels
 gco queue submit job.yaml -r us-east-1 -l team=ml -l project=training
+
+# Submit with a spot price gate (dispatch only at or below $0.50/hour)
+gco queue submit job.yaml -r us-east-1 --max-spot-price 0.50 --spot-instance-type g5.xlarge
 ```
 
 **Request Body:**
@@ -810,9 +823,13 @@ gco queue submit job.yaml -r us-east-1 -l team=ml -l project=training
   "target_region": "us-east-1",
   "namespace": "gco-jobs",
   "priority": 10,
-  "labels": {"team": "ml"}
+  "labels": {"team": "ml"},
+  "max_spot_price": 0.5,
+  "spot_instance_type": "g5.xlarge"
 }
 ```
+
+`max_spot_price` (USD/hour) and `spot_instance_type` are optional and must be provided together. When set, the target region's queue worker holds the job in `queued` until the instance type's lowest current spot price across the region's Availability Zones drops to or below the cap; the job record then carries `spot_gate_checked_at` / `spot_gate_observed_price` so `GET /api/v1/queue/jobs/{job_id}` shows why a gated job is waiting. Gated jobs wait indefinitely (cancel with `DELETE /api/v1/queue/jobs/{job_id}`) and never block other queued work. See [COST_MONITORING.md](COST_MONITORING.md#spot-price-aware-scheduling).
 
 **Response:**
 
@@ -995,6 +1012,124 @@ gco queue stats
   }
 }
 ```
+
+---
+
+## Cost Reporting
+
+Region-scoped cost reporting backed by [OpenCost](https://opencost.io/) and the central cost report bucket. Each region's manifest API answers for its own cluster, so pin the request to a region (`gco costs report ... --region REGION` uses the regional API bridge) or accept the nearest healthy region through the global API — the response names the region that answered. Cross-region aggregation lives in Athena via `gco costs k8s`; see [COST_MONITORING.md](COST_MONITORING.md).
+
+### Cost Monitoring Status
+
+```http
+GET /api/v1/cost/status
+```
+
+**CLI:**
+
+```bash
+gco costs report status -r us-east-1
+```
+
+**Response:**
+
+```json
+{
+  "service": "cost-monitor",
+  "region": "us-east-1",
+  "cluster": "gco-us-east-1",
+  "bucket": "gco-cost-reports-123456789012-us-east-2",
+  "report_interval_minutes": 60,
+  "opencost_healthy": true,
+  "opencost_returning_data": true,
+  "allocation_names": ["__idle__", "gco-jobs", "gco-system", "monitoring"],
+  "last_scheduled_report": {
+    "s3_key": "reports/region=us-east-1/date=2026-07-26/allocation-20260726T090000Z-20260726T100000Z.parquet",
+    "row_count": 9,
+    "total_cost": 1.4137,
+    "window_start": "2026-07-26T09:00:00+00:00",
+    "window_end": "2026-07-26T10:00:00+00:00"
+  },
+  "last_error": null,
+  "timestamp": "2026-07-26T10:42:00+00:00"
+}
+```
+
+`opencost_returning_data` performs a live allocation probe — release validation gates on it, so a healthy-but-empty OpenCost (for example, a broken Prometheus scrape) is surfaced here rather than silently producing empty reports.
+
+### List Cost Reports
+
+```http
+GET /api/v1/cost/reports?adhoc=false&limit=50
+```
+
+List this region's most recent report objects, newest first. `adhoc=true` lists user-requested reports instead of the scheduled ones.
+
+**CLI:**
+
+```bash
+gco costs report list -r us-east-1 --limit 50
+```
+
+**Response:**
+
+```json
+{
+  "timestamp": "2026-07-26T10:42:00+00:00",
+  "region": "us-east-1",
+  "bucket": "gco-cost-reports-123456789012-us-east-2",
+  "count": 1,
+  "reports": [
+    {
+      "key": "reports/region=us-east-1/date=2026-07-26/allocation-20260726T090000Z-20260726T100000Z.parquet",
+      "size_bytes": 6212,
+      "last_modified": "2026-07-26T10:00:04+00:00"
+    }
+  ]
+}
+```
+
+### Generate Ad-hoc Cost Report
+
+```http
+POST /api/v1/cost/reports
+```
+
+Generate one allocation report for the trailing window now. Ad-hoc reports land under the `adhoc/` prefix — deliberately outside the scheduled `reports/` prefix Athena aggregates, so an overlapping window can never double-count.
+
+**CLI:**
+
+```bash
+gco costs report generate -r us-east-1 --window-hours 48
+```
+
+**Request Body:**
+
+```json
+{
+  "window_hours": 24,
+  "include_rows": false
+}
+```
+
+**Response (201):**
+
+```json
+{
+  "timestamp": "2026-07-26T10:42:05+00:00",
+  "region": "us-east-1",
+  "bucket": "gco-cost-reports-123456789012-us-east-2",
+  "report": {
+    "s3_key": "adhoc/region=us-east-1/date=2026-07-26/allocation-20260725T104200Z-20260726T104200Z-1a2b3c4d.parquet",
+    "row_count": 9,
+    "total_cost": 33.92,
+    "window_start": "2026-07-25T10:42:00+00:00",
+    "window_end": "2026-07-26T10:42:00+00:00"
+  }
+}
+```
+
+With `"include_rows": true` the response also carries the normalized per-namespace allocation rows. Errors map cleanly: `503` when OpenCost is unreachable (or cost monitoring is disabled in this region), `502` when the S3 write fails, `422` for an invalid window.
 
 ---
 

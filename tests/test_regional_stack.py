@@ -157,6 +157,25 @@ class MockConfigLoader:
     def get_cluster_observability_enabled(self):
         return bool(self.get_cluster_observability_config()["enabled"])
 
+    def get_cost_monitoring_config(self):
+        # Mirrors the on-by-default cdk.json cost_monitoring defaults so
+        # regional synth exercises the real (enabled) cost pipeline path.
+        return {
+            "enabled": True,
+            "reports": {
+                "interval_minutes": 60,
+                "retention_days": 365,
+                "transition_to_infrequent_access_days": 90,
+            },
+            "athena": {"query_results_retention_days": 30},
+        }
+
+    def get_cost_monitoring_enabled(self):
+        # The real loader returns the conjunction with cluster observability.
+        return bool(self.get_cost_monitoring_config()["enabled"]) and bool(
+            self.get_cluster_observability_config()["enabled"]
+        )
+
 
 class TestRegionalStackImports:
     """Tests for regional stack imports and class structure."""

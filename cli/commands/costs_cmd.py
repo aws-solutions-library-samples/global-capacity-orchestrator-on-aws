@@ -28,6 +28,37 @@ def costs(config: Any) -> None:
     pass
 
 
+def _print_query_result(config: Any, result: Any, title: str) -> None:
+    """Render an Athena QueryResult as a table or structured output."""
+    formatter = get_output_formatter(config)
+    if config.output_format != "table":
+        formatter.print({"columns": result.columns, "rows": result.rows})
+        return
+    if not result.rows:
+        formatter.print_info("No cost data found for the requested window")
+        formatter.print_info(
+            "Scheduled reports accrue once cost monitoring is deployed; see docs/COST_MONITORING.md"
+        )
+        return
+    widths = {
+        column: max(len(column), *(len(str(row.get(column) or "")) for row in result.rows))
+        for column in result.columns
+    }
+    print(f"\n  {title}")
+    header = "  " + "  ".join(column.upper().ljust(widths[column]) for column in result.columns)
+    print("  " + "-" * (len(header) - 2))
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for row in result.rows:
+        print(
+            "  "
+            + "  ".join(
+                str(row.get(column) or "").ljust(widths[column]) for column in result.columns
+            )
+        )
+    print()
+
+
 @costs.command("summary")
 @click.option(
     "--days", "-d", default=30, type=int, help="Number of days to look back (default: 30)"
@@ -286,4 +317,402 @@ def costs_forecast(config: Any, days: Any) -> None:
 
     except Exception as e:
         formatter.print_error(f"Failed to get forecast: {e}")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# k8s subgroup — Athena queries over the OpenCost allocation reports
+# ---------------------------------------------------------------------------
+
+
+@costs.group("k8s")
+@pass_config
+def costs_k8s(config: Any) -> None:
+    """Query Kubernetes allocation costs across regions (Athena-backed).
+
+    These commands aggregate the Parquet allocation reports the per-region
+    cost-monitor services write to the central cost report bucket. Requires
+    cost_monitoring.enabled in cdk.json and a deployed monitoring stack.
+    """
+    pass
+
+
+@costs_k8s.command("namespaces")
+@click.option("--days", "-d", default=7, type=int, help="Days to look back (default: 7)")
+@click.option("--region", "-r", help="Restrict to one deployment region")
+@pass_config
+def costs_k8s_namespaces(config: Any, days: Any, region: Any) -> None:
+    """Show Kubernetes cost by namespace across all regions.
+
+    Examples:
+        gco costs k8s namespaces
+        gco costs k8s namespaces --days 30
+        gco costs k8s namespaces -r us-east-1
+    """
+    from ..cost_analytics import get_cost_analytics
+
+    formatter = get_output_formatter(config)
+    try:
+        analytics = get_cost_analytics(config)
+        result = analytics.cost_by_namespace(days=days, region=region)
+        scope = f"region {region}" if region else "all regions"
+        _print_query_result(config, result, f"Kubernetes cost by namespace — {scope}, last {days}d")
+    except Exception as e:
+        formatter.print_error(f"Failed to query namespace costs: {e}")
+        sys.exit(1)
+
+
+@costs_k8s.command("regions")
+@click.option("--days", "-d", default=7, type=int, help="Days to look back (default: 7)")
+@pass_config
+def costs_k8s_regions(config: Any, days: Any) -> None:
+    """Show Kubernetes allocation cost by deployment region.
+
+    Examples:
+        gco costs k8s regions
+        gco costs k8s regions --days 30
+    """
+    from ..cost_analytics import get_cost_analytics
+
+    formatter = get_output_formatter(config)
+    try:
+        analytics = get_cost_analytics(config)
+        result = analytics.cost_by_region(days=days)
+        _print_query_result(config, result, f"Kubernetes cost by region — last {days}d")
+    except Exception as e:
+        formatter.print_error(f"Failed to query regional costs: {e}")
+        sys.exit(1)
+
+
+@costs_k8s.command("trend")
+@click.option("--days", "-d", default=14, type=int, help="Days to look back (default: 14)")
+@click.option(
+    "--granularity",
+    type=click.Choice(["daily", "hourly"]),
+    default="daily",
+    show_default=True,
+    help="Trend bucket size",
+)
+@click.option("--namespace", "-n", help="Restrict to one namespace")
+@pass_config
+def costs_k8s_trend(config: Any, days: Any, granularity: Any, namespace: Any) -> None:
+    """Show Kubernetes cost over time.
+
+    Examples:
+        gco costs k8s trend
+        gco costs k8s trend --days 30 --granularity daily
+        gco costs k8s trend -n gco-jobs --granularity hourly --days 2
+    """
+    from ..cost_analytics import get_cost_analytics
+
+    formatter = get_output_formatter(config)
+    try:
+        analytics = get_cost_analytics(config)
+        result = analytics.cost_over_time(days=days, granularity=granularity, namespace=namespace)
+        scope = f"namespace {namespace}" if namespace else "all namespaces"
+        _print_query_result(config, result, f"Kubernetes cost trend — {scope}, last {days}d")
+    except Exception as e:
+        formatter.print_error(f"Failed to query cost trend: {e}")
+        sys.exit(1)
+
+
+@costs_k8s.command("top")
+@click.option(
+    "--limit", "-n", "top_n", default=10, type=int, help="Number of results (default: 10)"
+)
+@click.option(
+    "--by",
+    type=click.Choice(["namespace", "region", "cluster"]),
+    default="namespace",
+    show_default=True,
+    help="Grouping dimension",
+)
+@click.option("--days", "-d", default=7, type=int, help="Days to look back (default: 7)")
+@pass_config
+def costs_k8s_top(config: Any, top_n: Any, by: Any, days: Any) -> None:
+    """Show the top-N spenders by namespace, region, or cluster.
+
+    Examples:
+        gco costs k8s top
+        gco costs k8s top -n 5 --by region
+        gco costs k8s top --by cluster --days 30
+    """
+    from ..cost_analytics import get_cost_analytics
+
+    formatter = get_output_formatter(config)
+    try:
+        analytics = get_cost_analytics(config)
+        result = analytics.top_spenders(n=top_n, by=by, days=days)
+        _print_query_result(config, result, f"Top {top_n} spenders by {by} — last {days}d")
+    except Exception as e:
+        formatter.print_error(f"Failed to query top spenders: {e}")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# report subgroup — ad-hoc reports + report listing via the GCO API
+# ---------------------------------------------------------------------------
+
+
+def _cost_api_region(config: Any, region: Any) -> Any:
+    """Resolve the transport region for /api/v1/cost/* calls.
+
+    An explicit ``--region`` pins the request to that region's API bridge
+    (each region's cost monitor owns its own OpenCost data). Without it the
+    request rides the global API and is served by the nearest healthy region;
+    the response payload names the region that answered.
+    """
+    if region:
+        return region
+    return config.default_region if config.use_regional_api else None
+
+
+@costs.group("report")
+@pass_config
+def costs_report(config: Any) -> None:
+    """Generate and list OpenCost allocation reports via the GCO API."""
+    pass
+
+
+@costs_report.command("generate")
+@click.option("--region", "-r", help="Region whose cost monitor generates the report")
+@click.option(
+    "--window-hours",
+    default=24,
+    type=click.IntRange(1, 168),
+    show_default=True,
+    help="Trailing window the report covers",
+)
+@click.option("--show-rows", is_flag=True, help="Print the allocation rows in the response")
+@pass_config
+def costs_report_generate(config: Any, region: Any, window_hours: Any, show_rows: Any) -> None:
+    """Generate an ad-hoc cost report now (written under adhoc/ in S3).
+
+    Examples:
+        gco costs report generate
+        gco costs report generate -r us-east-1 --window-hours 48
+        gco costs report generate --show-rows
+    """
+    from ..aws_client import get_aws_client
+
+    formatter = get_output_formatter(config)
+    try:
+        aws_client = get_aws_client(config)
+        result = aws_client.call_api(
+            method="POST",
+            path="/api/v1/cost/reports",
+            region=_cost_api_region(config, region),
+            body={"window_hours": window_hours, "include_rows": bool(show_rows)},
+        )
+        report = result.get("report", {})
+        formatter.print_success(
+            f"Report written to s3://{result.get('bucket')}/{report.get('s3_key')}"
+        )
+        formatter.print(result)
+    except Exception as e:
+        formatter.print_error(f"Failed to generate cost report: {e}")
+        sys.exit(1)
+
+
+@costs_report.command("list")
+@click.option("--region", "-r", help="Region whose reports to list")
+@click.option("--adhoc", is_flag=True, help="List ad-hoc instead of scheduled reports")
+@click.option("--limit", "-l", default=20, type=click.IntRange(1, 1000), help="Maximum results")
+@pass_config
+def costs_report_list(config: Any, region: Any, adhoc: Any, limit: Any) -> None:
+    """List recent cost report objects in the cost report bucket.
+
+    Examples:
+        gco costs report list
+        gco costs report list -r us-east-1 --limit 50
+        gco costs report list --adhoc
+    """
+    from ..aws_client import get_aws_client
+
+    formatter = get_output_formatter(config)
+    try:
+        aws_client = get_aws_client(config)
+        result = aws_client.call_api(
+            method="GET",
+            path="/api/v1/cost/reports",
+            region=_cost_api_region(config, region),
+            params={"adhoc": str(bool(adhoc)).lower(), "limit": str(limit)},
+        )
+        if config.output_format != "table":
+            formatter.print(result)
+            return
+        reports = result.get("reports", [])
+        if not reports:
+            formatter.print_info("No reports found yet")
+            return
+        print(f"\n  Cost Reports — {result.get('region')} ({result.get('count', 0)} shown)")
+        print("  " + "-" * 100)
+        print(f"  {'KEY':<75} {'SIZE':>9} {'MODIFIED':<20}")
+        print("  " + "-" * 100)
+        for report in reports:
+            key = str(report.get("key", ""))[:74]
+            size = report.get("size_bytes", 0)
+            modified = str(report.get("last_modified", ""))[:19]
+            print(f"  {key:<75} {size:>9} {modified:<20}")
+        print()
+    except Exception as e:
+        formatter.print_error(f"Failed to list cost reports: {e}")
+        sys.exit(1)
+
+
+@costs_report.command("status")
+@click.option("--region", "-r", help="Region whose cost monitor to check")
+@pass_config
+def costs_report_status(config: Any, region: Any) -> None:
+    """Show cost monitoring health, including OpenCost status.
+
+    Examples:
+        gco costs report status
+        gco costs report status -r us-east-1
+    """
+    from ..aws_client import get_aws_client
+
+    formatter = get_output_formatter(config)
+    try:
+        aws_client = get_aws_client(config)
+        result = aws_client.call_api(
+            method="GET",
+            path="/api/v1/cost/status",
+            region=_cost_api_region(config, region),
+        )
+        if config.output_format != "table":
+            formatter.print(result)
+            return
+        print(f"\n  Cost Monitoring Status — {result.get('region')}")
+        print("  " + "-" * 55)
+        print(f"  OpenCost healthy:        {result.get('opencost_healthy')}")
+        print(f"  OpenCost returning data: {result.get('opencost_returning_data')}")
+        print(f"  Report bucket:           {result.get('bucket')}")
+        print(f"  Report interval:         {result.get('report_interval_minutes')} minutes")
+        last = result.get("last_scheduled_report")
+        if last:
+            print(f"  Last scheduled report:   {last.get('s3_key')}")
+            print(f"    rows={last.get('row_count')} total=${last.get('total_cost')}")
+        if result.get("last_error"):
+            print(f"  Last error:              {result.get('last_error')}")
+        print()
+    except Exception as e:
+        formatter.print_error(f"Failed to get cost monitoring status: {e}")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# dashboard — port-forward to the regional cost dashboards
+# ---------------------------------------------------------------------------
+
+
+@costs.command("dashboard")
+@click.option(
+    "--service",
+    type=click.Choice(["grafana", "opencost"]),
+    default="grafana",
+    show_default=True,
+    help="grafana opens the GCO Cost dashboard; opencost opens the native OpenCost UI",
+)
+@click.option("--region", help="Cluster region (defaults to the first cdk.json regional entry)")
+@click.option("--local-port", type=int, help="Local port to bind (defaults per-service)")
+@click.option(
+    "--via-ssm",
+    "via_ssm",
+    metavar="INSTANCE_ID|auto",
+    help=(
+        "Tunnel to the private API endpoint through an SSM-managed instance. "
+        "Pass an instance id to use an existing one, or 'auto' to provision a "
+        "self-terminating ephemeral bastion and tear it down when the forward stops."
+    ),
+)
+@click.option(
+    "--bastion-ttl-minutes",
+    type=int,
+    default=120,
+    show_default=True,
+    help="Self-terminate backstop (minutes) for an `--via-ssm auto` bastion",
+)
+@click.option(
+    "--yes",
+    "-y",
+    "assume_yes",
+    is_flag=True,
+    help="Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion",
+)
+@pass_config
+def costs_dashboard(
+    config: Any,
+    service: str,
+    region: Any,
+    local_port: Any,
+    via_ssm: Any,
+    bastion_ttl_minutes: int,
+    assume_yes: bool,
+) -> None:
+    """Open a regional cost dashboard over the private EKS endpoint.
+
+    Port-forwards to the in-cluster Grafana (GCO Cost dashboard) or the
+    native OpenCost UI. Runs in the foreground; press Ctrl-C to stop. On a
+    private-endpoint cluster (the default) pass ``--via-ssm <instance-id>``
+    or ``--via-ssm auto`` exactly like ``gco monitoring open``.
+
+    Examples:
+        gco costs dashboard
+        gco costs dashboard --service opencost --region us-east-1
+        gco costs dashboard --via-ssm auto -y
+    """
+    import subprocess
+
+    from ..cluster_tunnel import open_api_server_tunnel, resolve_region
+    from ..kubectl_helpers import build_port_forward_command, update_kubeconfig
+    from .monitoring_cmd import _MONITORING_NAMESPACE, _SERVICES
+
+    formatter = get_output_formatter(config)
+    svc = _SERVICES[service]
+    target_region = resolve_region(config, region)
+    cluster = f"{config.project_name}-{target_region}"
+    bind_port = local_port or svc["default_local_port"]
+
+    try:
+        update_kubeconfig(cluster, target_region)
+    except (RuntimeError, ValueError) as exc:
+        formatter.print_error(str(exc))
+        sys.exit(1)
+
+    try:
+        with open_api_server_tunnel(
+            formatter,
+            cluster=cluster,
+            region=target_region,
+            via_ssm=via_ssm,
+            bastion_ttl_minutes=bastion_ttl_minutes,
+            assume_yes=assume_yes,
+        ) as session:
+            cmd = build_port_forward_command(
+                _MONITORING_NAMESPACE,
+                svc["target"],
+                bind_port,
+                svc["remote_port"],
+                server=session.server,
+                tls_server_name=session.tls_server_name,
+            )
+            if service == "grafana":
+                url = f"http://localhost:{bind_port}/d/gco-cost/gco-cost-opencost"
+                formatter.print_success(f"GCO Cost dashboard → {url} (Ctrl-C to stop)")
+                formatter.print_info(
+                    "Log in with the Grafana admin credential from the "
+                    "kube-prometheus-stack-grafana Secret (monitoring namespace)."
+                )
+            else:
+                url = f"http://localhost:{bind_port}"
+                formatter.print_success(f"OpenCost UI → {url} (Ctrl-C to stop)")
+            try:
+                subprocess.run(
+                    cmd, check=False
+                )  # nosemgrep: dangerous-subprocess-use-audit - argv built by build_port_forward_command; list form, no shell=True
+            except KeyboardInterrupt:  # pragma: no cover - interactive Ctrl-C
+                return
+    except (RuntimeError, ValueError) as exc:
+        formatter.print_error(str(exc))
         sys.exit(1)

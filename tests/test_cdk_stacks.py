@@ -111,6 +111,20 @@ class MockConfigLoader:
     def get_monitoring_region(self):
         return "us-east-2"
 
+    def get_cost_monitoring_config(self):
+        return {
+            "enabled": True,
+            "reports": {
+                "interval_minutes": 60,
+                "retention_days": 365,
+                "transition_to_infrequent_access_days": 90,
+            },
+            "athena": {"query_results_retention_days": 30},
+        }
+
+    def get_cost_monitoring_enabled(self):
+        return bool(self.get_cost_monitoring_config()["enabled"])
+
     def get_kubernetes_version(self):
         return "1.36"
 

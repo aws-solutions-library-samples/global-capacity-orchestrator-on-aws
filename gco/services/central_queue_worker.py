@@ -18,6 +18,7 @@ from gco.services.manifest_processor import (
     QueuedJobNotCreatedError,
     RetryableQueuedJobApplyError,
 )
+from gco.services.spot_price_gate import SpotPriceGate, should_persist_observation
 from gco.services.structured_logging import sanitize_log_value
 from gco.services.template_store import JobStatus, JobStore
 
@@ -108,6 +109,51 @@ async def _stop_heartbeat(task: asyncio.Task[None], done: asyncio.Event) -> None
         await task
 
 
+async def _defer_price_gated_job(
+    store: JobStore,
+    gate: SpotPriceGate,
+    queued_job: dict[str, Any],
+    job_id: str,
+) -> dict[str, Any] | None:
+    """Return a deferral record when the job's spot price gate is closed.
+
+    ``None`` means the job carries no gate or its gate is open — dispatch
+    proceeds. Closed gates optionally persist a throttled observation so
+    ``gco queue get`` can show why the job is waiting.
+    """
+    decision = await asyncio.to_thread(gate.evaluate, queued_job)
+    if decision is None or not decision.gated:
+        return None
+    if should_persist_observation(queued_job):
+        observed = (
+            f"{decision.observed_price:.6f}" if decision.observed_price is not None else "unknown"
+        )
+        try:
+            await asyncio.to_thread(
+                store.record_spot_gate_observation,
+                job_id,
+                observed_price=observed,
+            )
+        except Exception:  # noqa: BLE001 - observations are advisory only
+            logger.exception(
+                "Failed to persist spot gate observation for %s",
+                sanitize_log_value(job_id),
+            )
+    logger.info(
+        "Deferring price-gated central queue job %s: %s",
+        sanitize_log_value(job_id),
+        decision.reason,
+    )
+    return {
+        "job_id": job_id,
+        "status": "price_gated",
+        "instance_type": decision.instance_type,
+        "max_spot_price": decision.max_price,
+        "observed_spot_price": decision.observed_price,
+        "reason": decision.reason,
+    }
+
+
 async def process_queued_jobs_once(
     processor: ManifestProcessor,
     store: JobStore,
@@ -116,13 +162,22 @@ async def process_queued_jobs_once(
     owner_id: str | None = None,
     lease_renewal_seconds: float | None = None,
     stop_event: asyncio.Event | None = None,
+    spot_gate: SpotPriceGate | None = None,
 ) -> tuple[int, list[dict[str, Any]]]:
-    """Claim and apply one bounded batch for the processor's region."""
+    """Claim and apply one bounded batch for the processor's region.
+
+    Price-gated jobs whose spot cap is not currently met are deferred (left
+    queued) without consuming the apply budget. To keep a run of gated
+    high-priority jobs from starving dispatchable work behind them, the
+    candidate fetch is wider than ``limit``; at most ``limit`` jobs are
+    claimed/applied per pass.
+    """
     owner = owner_id or _worker_identity(processor.region)
     renewal_seconds = lease_renewal_seconds or max(
         5.0,
         min(float(store.claim_lease_seconds) / 3.0, 60.0),
     )
+    gate = spot_gate or SpotPriceGate(processor.region)
     migration = await asyncio.to_thread(
         store.migrate_legacy_records_for_region,
         processor.region,
@@ -138,20 +193,30 @@ async def process_queued_jobs_once(
             migration_failed,
             migration.get("complete", False),
         )
+    fetch_limit = min(max(limit * 4, 20), 100)
     queued_jobs = await asyncio.to_thread(
         store.get_queued_jobs_for_region,
         processor.region,
-        limit,
+        fetch_limit,
     )
     processed: list[dict[str, Any]] = []
+    attempted = 0
 
     for queued_job in queued_jobs:
         if stop_event is not None and stop_event.is_set():
+            break
+        if attempted >= limit:
             break
         job_id = str(queued_job.get("job_id", ""))
         if not job_id:
             logger.error("Ignoring central queue record without a job_id")
             continue
+
+        deferral = await _defer_price_gated_job(store, gate, queued_job, job_id)
+        if deferral is not None:
+            processed.append(deferral)
+            continue
+        attempted += 1
 
         claimed: dict[str, Any] | None = None
         try:
@@ -442,6 +507,8 @@ class CentralQueueWorker:
         )
         self.owner_id = self.owner_id or _worker_identity(self.processor.region)
         self._stop_event = asyncio.Event()
+        # One gate per worker so its price cache spans polling passes.
+        self._spot_gate = SpotPriceGate(self.processor.region)
         self.running = False
         self.stopping = False
         self.last_pass_started_at: str | None = None
@@ -492,6 +559,7 @@ class CentralQueueWorker:
                         owner_id=self.owner_id,
                         lease_renewal_seconds=self.lease_renewal_seconds,
                         stop_event=self._stop_event,
+                        spot_gate=self._spot_gate,
                     )
                     transitions = 0
                     if not self._stop_event.is_set():

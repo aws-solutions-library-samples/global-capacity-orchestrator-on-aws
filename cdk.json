@@ -308,6 +308,19 @@
       }
     },
 
+    "_comment_cost_monitoring": "Cost monitoring and cost analytics pipeline. enabled: master toggle, ON BY DEFAULT (requires cluster_observability.enabled — OpenCost reads usage data from the in-cluster Prometheus). When enabled: OpenCost is installed per region via the Helm installer with a Grafana cost dashboard; the monitoring stack provisions the cost report S3 bucket (Hive-partitioned Parquet under reports/region=<region>/date=<date>/), a Glue database/table, and an Athena workgroup for cross-region queries; and the cost-monitor service on each regional cluster writes scheduled allocation reports and serves ad-hoc reports through the GCO API (/api/v1/cost/*). reports.interval_minutes: scheduled report cadence. reports.retention_days: S3 expiration for report objects. reports.transition_to_infrequent_access_days: S3 STANDARD_IA transition (must be < retention_days). athena.query_results_retention_days: S3 expiration for Athena query results. See docs/COST_MONITORING.md.",
+    "cost_monitoring": {
+      "enabled": true,
+      "reports": {
+        "interval_minutes": 60,
+        "retention_days": 365,
+        "transition_to_infrequent_access_days": 90
+      },
+      "athena": {
+        "query_results_retention_days": 30
+      }
+    },
+
     "_comment_helm": "Helm chart installation toggles. Each key maps to one or more charts in lambda/helm-installer/charts.yaml; flip enabled=false to skip a chart. Charts install in dependency order with kueue last (its mutating webhook intercepts every Job/Deployment). Cross-scheduler coexistence is documented in docs/SCHEDULERS.md.",
     "helm": {
       "_comment_keda": "KEDA — Kubernetes Event-Driven Autoscaling. MANDATORY platform component (no toggle): it backs GCO's built-in SQS queue processor and is the metrics bridge (keda-metrics-apiserver serves external.metrics.k8s.io) that lets autoscalers consume GPU/CloudWatch metrics. KEDA is always installed and is intentionally not listed below — see docs/KEDA.md.",

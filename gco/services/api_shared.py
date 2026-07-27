@@ -172,6 +172,22 @@ class QueuedJobRequest(BaseModel):
     namespace: str = Field("gco-jobs", description="Kubernetes namespace")
     priority: int = Field(0, description="Job priority (higher = more important)", ge=0, le=100)
     labels: dict[str, str] | None = Field(None, description="Optional labels for filtering")
+    max_spot_price: float | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Optional spot price cap in USD/hour. The job is not dispatched "
+            "until the current spot price of spot_instance_type in the target "
+            "region drops to or below this value. Requires spot_instance_type."
+        ),
+    )
+    spot_instance_type: str | None = Field(
+        None,
+        description=(
+            "EC2 instance type whose spot price gates dispatch (e.g. "
+            "g5.xlarge). Requires max_spot_price."
+        ),
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -184,6 +200,8 @@ class QueuedJobRequest(BaseModel):
                 "target_region": "us-east-1",
                 "namespace": "gco-jobs",
                 "priority": 10,
+                "max_spot_price": 0.5,
+                "spot_instance_type": "g5.xlarge",
             }
         }
     }

@@ -41,8 +41,10 @@ class MockConfigLoader:
         app=None,
         *,
         valkey_enabled: bool = False,
+        cost_monitoring_enabled: bool = True,
     ):
         self._valkey_enabled = valkey_enabled
+        self._cost_monitoring_enabled = cost_monitoring_enabled
 
     def get_project_name(self):
         return "gco-test"
@@ -62,6 +64,22 @@ class MockConfigLoader:
     # The monitoring stack queries Valkey config through this.
     def get_valkey_config(self):
         return {"enabled": self._valkey_enabled}
+
+    # Cost monitoring defaults to enabled, matching cdk.json, so the
+    # monitoring-stack synth exercises the cost report bucket + Athena path.
+    def get_cost_monitoring_config(self):
+        return {
+            "enabled": self._cost_monitoring_enabled,
+            "reports": {
+                "interval_minutes": 60,
+                "retention_days": 365,
+                "transition_to_infrequent_access_days": 90,
+            },
+            "athena": {"query_results_retention_days": 30},
+        }
+
+    def get_cost_monitoring_enabled(self):
+        return bool(self.get_cost_monitoring_config()["enabled"])
 
 
 def create_mock_global_stack():

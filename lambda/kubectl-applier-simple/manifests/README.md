@@ -96,6 +96,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `31-manifest-processor.yaml` | `Deployment` + `PodDisruptionBudget` + `Service` |
 | `32-inference-monitor.yaml` | `Deployment` + `PodDisruptionBudget` |
 | `33-inference-proxy.yaml` | Dedicated inference `Deployment` (three replicas on create; HPA owns updates) + CPU/memory `HorizontalPodAutoscaler` + two-pod `PodDisruptionBudget` + 15-minute stream-drain lifecycle + `Service` |
+| `34-cost-monitor.yaml` | Cost monitor `ServiceAccount` + single-replica `Recreate` `Deployment` + `Service` + three `NetworkPolicy` rules (manifest-processor ingress/egress, [OpenCost](https://opencost.io/) egress) — **skipped and pruned when cost monitoring is disabled** |
 
 ### NodePools (40–49)
 
@@ -122,6 +123,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 |------|----------|
 | `post-helm-gateway.yaml` | Gateway API entrypoint: `GatewayClass`, `TargetGroupConfiguration` (`/healthz` target-group health checks + 900-second deregistration drain), `LoadBalancerConfiguration` (internal HTTPS ALB, `gco.aws/gateway` ownership tag, TLS certificate), `Gateway` `gco-system/gco-gateway`, and the shared `HTTPRoute` sending control traffic to manifest-processor and `/inference` to inference-proxy — applied after the AWS Load Balancer Controller chart installs the Gateway API CRDs |
 | `post-helm-sqs-consumer.yaml` | KEDA `ScaledJob` for the [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) queue processor — **skipped when queue_processor disabled** |
+| `post-helm-grafana-cost-dashboard.yaml` | The *GCO Cost (OpenCost)* Grafana dashboard `ConfigMap` (sidecar-imported) — **skipped and pruned when cost monitoring is disabled** |
 | `post-helm-monitoring-servicemonitors.yaml` | `ServiceMonitor`s (schedulers/operators + DCGM) and `PodMonitor`s (GCO services, including inference-proxy) — **skipped when observability disabled** |
 | `post-helm-monitoring-kueue-rbac.yaml` | `ClusterRoleBinding` letting Prometheus scrape Kueue's authenticated metrics endpoint — **skipped when observability disabled** |
 | `post-helm-grafana-dashboards.yaml` | Curated GCO Grafana dashboard `ConfigMap`s (GPU/DCGM, schedulers, KEDA, services) — **skipped when observability disabled** |
