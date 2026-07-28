@@ -1,10 +1,10 @@
 <div align="center">
 
-<h1>Automated Deployment of EKS AutoMode Clusters with Global Capacity Orchestrator (GCO) on AWS</h1>
+<h1>Guidance for EKS AutoMode Clusters with<br><em>Global Capacity Orchestrator</em> on AWS</h1>
 
 <p><b><i>One API. Every Accelerator. Any Region.</i></b></p>
 
-<p>Multi-region accelerated-compute orchestration for AWS — NVIDIA GPUs, AWS Trainium, AWS Inferentia, and CPU (amd64 + arm64 / Graviton) — with capacity-aware placement workflows, spot fallback, and autoscaling inference endpoints. Commercial <code>aws</code> deployments add automatic failover and latency-aware routing through one workload API; other partitions use IAM-authenticated regional workload APIs, all through the same CLI.</p>
+<p><b>Global Capacity Orchestrator (GCO)</b>: multi-region accelerated-compute orchestration for AWS — NVIDIA GPUs, AWS Trainium, AWS Inferentia, and CPU (amd64 + arm64 / Graviton) — with capacity-aware placement workflows, spot fallback, and autoscaling inference endpoints. Commercial <code>aws</code> deployments add automatic failover and latency-aware routing through one workload API; other partitions use IAM-authenticated regional workload APIs, all through the same CLI.</p>
 
 <!-- BEGIN BADGE TABLE -->
 <p>

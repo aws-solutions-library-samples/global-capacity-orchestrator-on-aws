@@ -1168,13 +1168,18 @@ class TestDocumentation:
             content = f.read()
 
         assert len(content) > 1000, "README.md should have substantial content"
-        # The H1 wording carries a marketing prefix/suffix on some branches
-        # (e.g. "Automated Deployment of EKS AutoMode Clusters with Global
-        # Capacity Orchestrator (GCO) on AWS"), so assert the project name
-        # appears inside the top-level heading rather than matching an exact
-        # string.
-        assert re.search(r"<h1>[^<]*Global Capacity Orchestrator \(GCO\)[^<]*</h1>", content), (
-            "README.md should have a project-title H1 naming Global Capacity Orchestrator (GCO)"
+        # The H1 carries the official guidance name ("Guidance for EKS
+        # AutoMode Clusters with Global Capacity Orchestrator on AWS") and may
+        # accentuate the project name with inline markup (<br>, <em>), so
+        # assert the project name appears inside the top-level heading rather
+        # than matching an exact string.
+        assert re.search(r"<h1>.*Global Capacity Orchestrator.*</h1>", content), (
+            "README.md should have a project-title H1 naming Global Capacity Orchestrator"
+        )
+        # The short project name is introduced in the intro copy instead of
+        # the official title.
+        assert "Global Capacity Orchestrator (GCO)" in content, (
+            "README.md should introduce the GCO acronym"
         )
 
     def test_architecture_doc_exists(self):

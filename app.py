@@ -52,8 +52,7 @@ from gco.stacks.regional_stack import GCORegionalStack
 # published guidance (SO9707) through one stack.
 SOLUTION_ID = "SO9707"
 SOLUTION_DESCRIPTION_PREFIX = (
-    f"({SOLUTION_ID}) - Guidance for Automated Deployment of EKS AutoMode Clusters "
-    "with Global Capacity Orchestrator on AWS"
+    f"({SOLUTION_ID}) - Guidance for EKS AutoMode Clusters with Global Capacity Orchestrator on AWS"
 )
 
 
