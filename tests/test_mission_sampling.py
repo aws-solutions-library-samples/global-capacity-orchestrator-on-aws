@@ -691,7 +691,6 @@ def test_mcp_backend_satisfies_protocol() -> None:
 import unittest.mock as mock  # noqa: E402
 
 from mission.sampling import (  # noqa: E402
-    BEDROCK_MAX_TOKENS,
     BEDROCK_READ_TIMEOUT_SECONDS,
     BEDROCK_TEMPERATURE,
     DEFAULT_BEDROCK_MODEL_ID,
@@ -955,12 +954,11 @@ def test_bedrock_backend_passes_correct_inference_config() -> None:
     kwargs = fake_client.converse_calls[0]
     assert kwargs["modelId"] == "explicit-model"
     assert kwargs["messages"] == [{"role": "user", "content": [{"text": prompt.assemble()}]}]
-    # Pinned to the named constants so a tunable bump in one place
-    # carries through here without producing a test-only regression.
-    assert kwargs["inferenceConfig"] == {
-        "maxTokens": BEDROCK_MAX_TOKENS,
-        "temperature": BEDROCK_TEMPERATURE,
-    }
+    # Pinned to the named constant so a tunable bump in one place carries
+    # through here without producing a test-only regression. No maxTokens:
+    # GCO sets no output-token cap, so the Converse default (the model's own
+    # maximum output length) applies.
+    assert kwargs["inferenceConfig"] == {"temperature": BEDROCK_TEMPERATURE}
     assert "additionalModelRequestFields" not in kwargs
 
 
@@ -968,8 +966,9 @@ def test_bedrock_backend_applies_default_high_reasoning_without_sampling_control
     """The canonical Claude default receives adaptive thinking at the set effort.
 
     ``temperature`` is dropped because Claude removed sampling controls from
-    Opus 4.7 onward, while ``maxTokens`` — still required by the model —
-    survives.
+    Opus 4.7 onward, and GCO sets no ``maxTokens``, so no inference controls
+    remain at all — the response is bounded only by the model's own maximum
+    output length.
     """
     fake_client = _FakeBedrockClient(response=_well_shaped_response("ok"))
     with _patch_boto3_session(fake_client):
@@ -977,8 +976,7 @@ def test_bedrock_backend_applies_default_high_reasoning_without_sampling_control
         _run(backend.sample(_make_prompt()))
 
     kwargs = fake_client.converse_calls[0]
-    assert kwargs["inferenceConfig"] == {"maxTokens": BEDROCK_MAX_TOKENS}
-    assert "temperature" not in kwargs["inferenceConfig"]
+    assert "inferenceConfig" not in kwargs
     assert kwargs["additionalModelRequestFields"] == {
         "thinking": {"type": "adaptive"},
         "output_config": {"effort": "high"},

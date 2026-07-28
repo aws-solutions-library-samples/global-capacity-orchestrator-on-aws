@@ -50,7 +50,9 @@ _CLAUDE_ADAPTIVE_THINKING_MODELS = frozenset(
 # Claude dropped sampling controls starting with Opus 4.7 ("temperature,
 # top_p, and top_k parameters are no longer supported"); verified live against
 # the Opus 5 global profile, which answers a ValidationException for each.
-# ``maxTokens`` is still required and stays.
+# ``maxTokens`` is accepted and passes through, but only when a caller opts
+# into a cap; GCO's own call sites deliberately set none, so the Converse
+# default — the model's own maximum output length — applies.
 _CLAUDE_UNSUPPORTED_SAMPLING_FIELDS = frozenset({"temperature", "topP", "topK"})
 BEDROCK_READ_TIMEOUT_SECONDS = 3600
 _DISTRIBUTION_NAME = "gco-cli"
@@ -408,8 +410,47 @@ def is_bedrock_ftu_form_error(error: BaseException | None) -> bool:
     return False
 
 
+#: Remediation shown when a Converse response was cut off by an output-token
+#: limit. GCO's own call sites set no ``maxTokens`` (the Converse default is
+#: the model's maximum output length), so this fires only at the model's own
+#: ceiling or under an explicitly configured cap.
+BEDROCK_TRUNCATION_REMEDIATION = (
+    "Bedrock stopped generating before the answer was complete "
+    '(stopReason="max_tokens"). GCO sets no output-token cap by default, so '
+    "the response hit either the model's own maximum output length or an "
+    "explicitly configured maxTokens cap. Try a shorter or narrower request "
+    "(for the capacity advisor: fewer instance types or regions), raise or "
+    "remove any explicit maxTokens cap, or choose a model with a larger "
+    "output window via --model."
+)
+
+
+class BedrockResponseTruncatedError(RuntimeError):
+    """A Converse response was cut off by an output-token limit.
+
+    Raised instead of returning truncated text because every GCO consumer of
+    Bedrock text does worse with a partial answer than with a clear failure:
+    the capacity advisor would surface a confusing JSON-parse error and the
+    Mission engine would record a silently incomplete rationale. Subclasses
+    ``RuntimeError`` so existing callers that catch ``RuntimeError`` around
+    Bedrock calls keep working.
+    """
+
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(message or BEDROCK_TRUNCATION_REMEDIATION)
+
+
 def extract_bedrock_converse_text(response: Mapping[str, Any]) -> str:
-    """Return the first non-empty text block, skipping reasoning content."""
+    """Return the first non-empty text block, skipping reasoning content.
+
+    Raises :class:`BedrockResponseTruncatedError` when the response was cut
+    off by an output-token limit (``stopReason == "max_tokens"``); the
+    truncation check runs first because a partial text block would otherwise
+    be returned as if it were a complete answer.
+    """
+    if response.get("stopReason") == "max_tokens":
+        raise BedrockResponseTruncatedError()
+
     content = response["output"]["message"]["content"]
     if not isinstance(content, list):
         raise TypeError("Bedrock response content must be a list")
@@ -441,9 +482,11 @@ __all__ = [
     "BEDROCK_FTU_FORM_ERROR_CODE",
     "BEDROCK_FTU_REMEDIATION",
     "BEDROCK_READ_TIMEOUT_SECONDS",
+    "BEDROCK_TRUNCATION_REMEDIATION",
     "BedrockDefaultConfiguration",
     "BedrockFTUFormNotAcceptedError",
     "BedrockModelConfigurationError",
+    "BedrockResponseTruncatedError",
     "build_bedrock_converse_options",
     "extract_bedrock_converse_text",
     "get_default_bedrock_configuration",

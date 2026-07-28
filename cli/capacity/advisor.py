@@ -15,6 +15,7 @@ from botocore.exceptions import ClientError
 from cli.config import GCOConfig, get_config
 from gco.bedrock import (
     BEDROCK_READ_TIMEOUT_SECONDS,
+    BedrockResponseTruncatedError,
     build_bedrock_converse_options,
     extract_bedrock_converse_text,
     get_default_bedrock_model_id,
@@ -25,6 +26,12 @@ from .checker import CapacityChecker
 from .multi_region import MultiRegionCapacityChecker, compute_price_trend
 
 logger = logging.getLogger(__name__)
+
+
+def _snippet(text: str, limit: int = 200) -> str:
+    """Compact, single-line prefix of ``text`` for parse-failure messages."""
+    collapsed = " ".join(text.split())
+    return collapsed[:limit] + ("..." if len(collapsed) > limit else "")
 
 
 @dataclass
@@ -103,7 +110,8 @@ class BedrockCapacityAdvisor:
         Gather comprehensive capacity data for AI analysis.
 
         Args:
-            instance_types: List of instance types to analyze (defaults to common GPU types)
+            instance_types: List of instance types to analyze (defaults to one
+                representative per current GPU generation, T4 through Blackwell)
             regions: List of regions to check (defaults to deployed GCO regions)
 
         Returns:
@@ -111,17 +119,25 @@ class BedrockCapacityAdvisor:
         """
         from cli.aws_client import get_aws_client
 
-        # Default to common GPU instance types if not specified
+        # Default to one representative per current GPU generation, spanning
+        # budget inference through frontier training, so workload questions
+        # about any generation get real telemetry. Sibling sizes of the same
+        # GPU (e.g. g5.2xlarge/g5.4xlarge) are deliberately omitted — each
+        # type costs a full set of AWS API calls per region. GB200/GB300
+        # NVL72 are UltraServer families, not standalone EC2 instance types
+        # (see cli/capacity/blocks.py NON_STANDALONE_INSTANCE_NOTES), so the
+        # standalone Blackwell types represent that generation here.
         if not instance_types:
             instance_types = [
-                "g4dn.xlarge",
-                "g4dn.2xlarge",
-                "g4dn.4xlarge",
-                "g5.xlarge",
-                "g5.2xlarge",
-                "g5.4xlarge",
-                "p3.2xlarge",
-                "p4d.24xlarge",
+                "g4dn.xlarge",  # T4 — budget inference
+                "g6.xlarge",  # L4 — current-gen budget inference
+                "g5.xlarge",  # A10G — mainstream single-GPU
+                "g6e.xlarge",  # L40S — current-gen mainstream single-GPU
+                "p4d.24xlarge",  # 8x A100 — distributed training
+                "p5.48xlarge",  # 8x H100 — large-scale training
+                "p5en.48xlarge",  # 8x H200 — large-scale training
+                "p6-b200.48xlarge",  # 8x B200 (Blackwell) — frontier training
+                "p6-b300.48xlarge",  # 8x B300 (Blackwell Ultra) — frontier training
             ]
 
         # Get deployed regions if not specified
@@ -158,73 +174,107 @@ class BedrockCapacityAdvisor:
                 )
             except Exception as e:
                 logger.debug("Failed to get cluster metrics for %s: %s", region, e)
+
+        # Failed lookups are recorded here and rendered into the prompt so the
+        # model reasons about *missing* data instead of inventing a story for
+        # why a row is absent (e.g. GetSpotPlacementScores' 24-hour
+        # new-configuration limit must not read as "this type has no spot").
+        data["data_gaps"] = []
+
+        def record_gap(instance_type: str, region: str, source: str, error: Exception) -> None:
+            code = (
+                error.response.get("Error", {}).get("Code", "")
+                if isinstance(error, ClientError)
+                else ""
+            ) or type(error).__name__
+            data["data_gaps"].append(
+                {
+                    "instance_type": instance_type,
+                    "region": region,
+                    "source": source,
+                    "error": code,
+                }
+            )
+            logger.debug(
+                "Capacity lookup %r failed for %s in %s: %s", source, instance_type, region, error
+            )
+
         for instance_type in instance_types:
             data["spot_data"][instance_type] = {}
             data["on_demand_data"][instance_type] = {}
 
             for region in regions:
+                # Each lookup is isolated so one failing or throttled API
+                # cannot discard the other signals for this (type, region)
+                # pair, which previously erased real on-demand pricing and
+                # spot history whenever the placement-score call failed.
+                spot_entry: dict[str, Any] = {"placement_scores": {}, "prices": []}
                 try:
-                    # Get spot placement scores and prices
-                    spot_scores = self._capacity_checker.get_spot_placement_score(
-                        instance_type, region
+                    spot_entry["placement_scores"] = (
+                        self._capacity_checker.get_spot_placement_score(instance_type, region)
                     )
+                except Exception as e:
+                    record_gap(instance_type, region, "spot placement score", e)
+                try:
                     spot_prices = self._capacity_checker.get_spot_price_history(
                         instance_type, region, days=7
                     )
-                    on_demand_price = self._capacity_checker.get_on_demand_price(
-                        instance_type, region
-                    )
-
-                    data["spot_data"][instance_type][region] = {
-                        "placement_scores": spot_scores,
-                        "prices": [
-                            {
-                                "az": p.availability_zone,
-                                "current": p.current_price,
-                                "avg_7d": p.avg_price_7d,
-                                "stability": p.price_stability,
-                            }
-                            for p in spot_prices
-                        ],
-                    }
-
-                    # Spot price trend analysis per AZ (for AI interpretation)
-                    try:
-                        ec2 = self._session.client("ec2", region_name=region)
-                        raw_resp = ec2.describe_spot_price_history(
-                            InstanceTypes=[instance_type],
-                            ProductDescriptions=["Linux/UNIX"],
-                            StartTime=datetime.now(UTC) - timedelta(days=7),
-                            EndTime=datetime.now(UTC),
-                        )
-                        az_raw: dict[str, list[float]] = {}
-                        for item in raw_resp.get("SpotPriceHistory", []):
-                            az = item["AvailabilityZone"]
-                            if az not in az_raw:
-                                az_raw[az] = []
-                            az_raw[az].append(float(item["SpotPrice"]))
-                        az_trends = {
-                            az: compute_price_trend(prices)
-                            for az, prices in az_raw.items()
-                            if len(prices) >= 2
+                    spot_entry["prices"] = [
+                        {
+                            "az": p.availability_zone,
+                            "current": p.current_price,
+                            "avg_7d": p.avg_price_7d,
+                            "stability": p.price_stability,
                         }
-                        if az_trends:
-                            data["spot_data"][instance_type][region]["price_trends"] = az_trends
-                    except Exception as e:
-                        logger.debug(
-                            "Failed to get price trends for %s in %s: %s", instance_type, region, e
-                        )
+                        for p in spot_prices
+                    ]
+                except Exception as e:
+                    record_gap(instance_type, region, "spot price history", e)
+                data["spot_data"][instance_type][region] = spot_entry
 
-                    data["on_demand_data"][instance_type][region] = {
-                        "price_per_hour": on_demand_price,
-                        "available": self._capacity_checker.check_instance_available_in_region(
-                            instance_type, region
-                        ),
+                # Spot price trend analysis per AZ (for AI interpretation)
+                try:
+                    ec2 = self._session.client("ec2", region_name=region)
+                    raw_resp = ec2.describe_spot_price_history(
+                        InstanceTypes=[instance_type],
+                        ProductDescriptions=["Linux/UNIX"],
+                        StartTime=datetime.now(UTC) - timedelta(days=7),
+                        EndTime=datetime.now(UTC),
+                    )
+                    az_raw: dict[str, list[float]] = {}
+                    for item in raw_resp.get("SpotPriceHistory", []):
+                        az = item["AvailabilityZone"]
+                        if az not in az_raw:
+                            az_raw[az] = []
+                        az_raw[az].append(float(item["SpotPrice"]))
+                    az_trends = {
+                        az: compute_price_trend(prices)
+                        for az, prices in az_raw.items()
+                        if len(prices) >= 2
                     }
+                    if az_trends:
+                        data["spot_data"][instance_type][region]["price_trends"] = az_trends
                 except Exception as e:
                     logger.debug(
-                        "Failed to gather capacity data for %s in %s: %s", instance_type, region, e
+                        "Failed to get price trends for %s in %s: %s", instance_type, region, e
                     )
+
+                od_entry: dict[str, Any] = {"price_per_hour": None, "available": None}
+                try:
+                    od_entry["price_per_hour"] = self._capacity_checker.get_on_demand_price(
+                        instance_type, region
+                    )
+                except Exception as e:
+                    record_gap(instance_type, region, "on-demand price", e)
+                try:
+                    od_entry["available"] = (
+                        self._capacity_checker.check_instance_available_in_region(
+                            instance_type, region
+                        )
+                    )
+                except Exception as e:
+                    record_gap(instance_type, region, "region availability", e)
+                data["on_demand_data"][instance_type][region] = od_entry
 
         # Gather capacity reservation and block data
         data["reservations"] = {}
@@ -305,6 +355,7 @@ class BedrockCapacityAdvisor:
             data["weighted_recommendation"] = {
                 "top_region": weighted_results.get("region"),
                 "scoring_method": weighted_results.get("scoring_method", "simple"),
+                "instance_type": weighted_results.get("instance_type"),
                 "all_regions": weighted_results.get("all_regions", []),
             }
         except Exception as e:
@@ -426,6 +477,15 @@ IMPORTANT DISCLAIMERS:
                 avg_price = sum(p["current"] for p in prices) / len(prices) if prices else "N/A"
                 prompt += f"    {region}: Score={regional_score}/10, "
                 prompt += f"Avg Price=${avg_price if isinstance(avg_price, str) else f'{avg_price:.4f}'}/hr\n"
+                trends = spot_info.get("price_trends", {})
+                if trends:
+                    rendered = ", ".join(
+                        f"{az} {t['direction']} "
+                        f"(normalized slope {t['normalized_slope']:+.2f}, "
+                        f"{t['price_changes']} price changes)"
+                        for az, t in sorted(trends.items())
+                    )
+                    prompt += f"      7-day spot price trend by AZ: {rendered}\n"
         prompt += "\n"
 
         # On-demand data summary
@@ -434,9 +494,12 @@ IMPORTANT DISCLAIMERS:
             prompt += f"  {instance_type}:\n"
             for region, od_info in regions_data.items():
                 price = od_info.get("price_per_hour")
-                available = od_info.get("available", False)
+                available = od_info.get("available")
+                # None means the offerings lookup failed — say "unknown" so the
+                # model cannot mistake a failed check for "not offered".
+                availability = "unknown (lookup failed)" if available is None else available
                 prompt += f"    {region}: ${price:.4f}/hr" if price else f"    {region}: N/A"
-                prompt += f" (Available: {available})\n"
+                prompt += f" (Available: {availability})\n"
         prompt += "\n"
 
         # Capacity reservations (ODCRs)
@@ -467,6 +530,69 @@ IMPORTANT DISCLAIMERS:
                             f"{b['duration_hours']}h starting {b['start_date']}, "
                             f"${b['upfront_fee']}\n"
                         )
+            prompt += "\n"
+
+        # Capacity block availability trends (26-week offering-density regression)
+        block_trends = capacity_data.get("capacity_block_trends", {})
+        has_block_trends = any(bool(regions_data) for regions_data in block_trends.values())
+        if has_block_trends:
+            prompt += "CAPACITY BLOCK AVAILABILITY TRENDS (26-week, near-term vs far-term):\n"
+            for instance_type, regions_data in block_trends.items():
+                for region, trend in regions_data.items():
+                    prompt += (
+                        f"  {instance_type} in {region}: "
+                        f"{trend['trend_score']:+.2f} ({trend['interpretation']})\n"
+                    )
+            prompt += "\n"
+
+        # Algorithmic multi-signal ranking (context for the model, not binding)
+        weighted = capacity_data.get("weighted_recommendation")
+        if weighted and weighted.get("all_regions"):
+            scoring_method = weighted.get("scoring_method", "simple")
+            scored_for = (
+                f" for {weighted['instance_type']}" if weighted.get("instance_type") else ""
+            )
+            prompt += (
+                f"ALGORITHMIC REGION RANKING ({scoring_method} scoring{scored_for}; "
+                "lower score = better; advisory pre-computation, weigh it "
+                "against the raw data above):\n"
+            )
+            for entry in weighted["all_regions"]:
+                prompt += f"  {entry['region']}: score={entry['score']:.1f}"
+                details = []
+                if entry.get("spot_placement_score") is not None:
+                    details.append(f"spot availability {entry['spot_placement_score']:.0%}")
+                if entry.get("spot_price_ratio") is not None:
+                    details.append(f"spot/on-demand price ratio {entry['spot_price_ratio']:.2f}")
+                if entry.get("capacity_block_trend"):
+                    details.append(f"block trend {entry['capacity_block_trend']:+.2f}")
+                details.append(f"queue depth {entry.get('queue_depth', 'N/A')}")
+                gpu_util = entry.get("gpu_utilization")
+                if gpu_util is not None:
+                    details.append(f"GPU util {gpu_util:.0f}%")
+                prompt += f" ({', '.join(details)})\n"
+            prompt += "\n"
+
+        # Failed lookups — spelled out so the model reasons about missing
+        # data instead of inventing an explanation for absent rows (e.g. the
+        # placement-score API's 24-hour new-configuration limit must not read
+        # as "this instance type has no spot pools").
+        data_gaps = capacity_data.get("data_gaps") or []
+        if data_gaps:
+            prompt += "DATA GAPS (lookups that FAILED — treat as unknown, not as unavailable):\n"
+            grouped: dict[tuple[str, str, str], list[str]] = {}
+            for gap in data_gaps:
+                key = (gap["source"], gap["error"], gap["region"])
+                grouped.setdefault(key, []).append(gap["instance_type"])
+            for (source, error, region), types in sorted(grouped.items()):
+                prompt += (
+                    f"  {source} in {region} failed with {error} for: {', '.join(sorted(types))}\n"
+                )
+            prompt += (
+                "  Do not draw capacity or availability conclusions from these "
+                "missing values; rely on the signals that are present and "
+                "mention the gap in your warnings.\n"
+            )
             prompt += "\n"
 
         if historical_context:
@@ -553,7 +679,11 @@ Respond ONLY with the JSON object, no additional text."""
                 messages=[{"role": "user", "content": [{"text": prompt}]}],
                 **build_bedrock_converse_options(
                     self.model_id,
-                    inference_config={"maxTokens": 2048, "temperature": 0.1},
+                    # Deliberately no maxTokens: the Converse default is the
+                    # model's own maximum output length, so reasoning plus the
+                    # JSON answer can never hit a GCO-imposed cap. A cap is
+                    # opt-in — pass maxTokens here to restore one.
+                    inference_config={"temperature": 0.1},
                     apply_default_reasoning=self._uses_default_model,
                 ),
             )
@@ -570,7 +700,10 @@ Respond ONLY with the JSON object, no additional text."""
                 json_str = response_text[json_start:json_end]
                 result = json.loads(json_str)
             else:
-                raise ValueError("No valid JSON found in response")
+                raise ValueError(
+                    "No JSON object found in the model response "
+                    f"(response begins: {_snippet(response_text)!r})"
+                )
 
             return BedrockCapacityRecommendation(
                 recommended_region=result.get("recommended_region", "unknown"),
@@ -601,7 +734,16 @@ Respond ONLY with the JSON object, no additional text."""
                 ) from e
             raise RuntimeError(f"Bedrock API error: {e}") from e
         except json.JSONDecodeError as e:
-            raise RuntimeError(f"Failed to parse AI response as JSON: {e}") from e
+            # ``response_text`` is always bound here: the decoder can only
+            # fail after the response text was extracted.
+            raise RuntimeError(
+                f"Failed to parse AI response as JSON: {e} "
+                f"(response begins: {_snippet(response_text)!r})"
+            ) from e
+        except BedrockResponseTruncatedError:
+            # Already carries its own remediation; wrapping it in the generic
+            # "Failed to get AI recommendation" message would only bury it.
+            raise
         except Exception as e:
             raise RuntimeError(f"Failed to get AI recommendation: {e}") from e
 
@@ -672,7 +814,9 @@ Respond ONLY with the JSON object, no additional text."""
         Reads the historical capacity surface, builds a timing-focused prompt,
         and asks Bedrock. Raises ``ValueError`` when there are no samples yet;
         propagates the underlying ``ClientError`` (e.g. ResourceNotFoundException)
-        when the history table does not exist so callers can surface a hint.
+        when the history table does not exist so callers can surface a hint, and
+        ``BedrockResponseTruncatedError`` when the model's answer was cut off by
+        an output-token limit.
         """
         from cli.capacity.history import get_capacity_history_store
 
@@ -692,7 +836,8 @@ Respond ONLY with the JSON object, no additional text."""
             messages=[{"role": "user", "content": [{"text": prompt}]}],
             **build_bedrock_converse_options(
                 self.model_id,
-                inference_config={"maxTokens": 2048, "temperature": 0.2},
+                # No maxTokens by default — see get_recommendation.
+                inference_config={"temperature": 0.2},
                 apply_default_reasoning=self._uses_default_model,
             ),
         )

@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkabl
 
 from gco.bedrock import (
     BEDROCK_READ_TIMEOUT_SECONDS,
+    BedrockResponseTruncatedError,
     build_bedrock_converse_options,
     extract_bedrock_converse_text,
     get_default_bedrock_model_id,
@@ -78,7 +79,6 @@ if TYPE_CHECKING:  # pragma: no cover - import-time only
     from fastmcp import Context as _FastMCPContext  # noqa: F401
 
 __all__ = [
-    "BEDROCK_MAX_TOKENS",
     "BEDROCK_READ_TIMEOUT_SECONDS",
     "BEDROCK_TEMPERATURE",
     "DEFAULT_BEDROCK_MODEL_ID",
@@ -238,11 +238,6 @@ ENV_BEDROCK_MODEL_ID: str = "GCO_MISSION_BEDROCK_MODEL_ID"
 
 #: Env var that overrides :data:`DEFAULT_BEDROCK_REGION` at runtime.
 ENV_BEDROCK_REGION: str = "GCO_MISSION_BEDROCK_REGION"
-
-#: Maximum response tokens for non-default Bedrock model overrides. The
-#: canonical Nova 2 default uses high reasoning, for which AWS requires
-#: maxTokens to be unset; :func:`build_bedrock_converse_options` removes it.
-BEDROCK_MAX_TOKENS: int = 8192
 
 #: Sampling temperature for non-default Bedrock model overrides. The
 #: canonical Nova 2 default uses high reasoning, for which AWS requires
@@ -819,6 +814,9 @@ class SamplingTransportError(Exception):
     * ``"bedrock_malformed_response"`` — Converse returned a payload
       that did not have the expected ``output.message.content[0].text``
       shape.
+    * ``"bedrock_truncated_response"`` — the answer was cut off by an
+      output-token limit (``stopReason == "max_tokens"``), so its text
+      cannot be trusted to be complete.
     * ``"bedrock_no_credentials"`` — the local ``boto3`` session could
       not resolve credentials.
 
@@ -986,6 +984,10 @@ class BedrockSamplingBackend:
       ``output.message.content`` — including reasoning-only and empty
       ``content`` lists — surfaces as :class:`SamplingTransportError`
       with code ``"bedrock_malformed_response"``.
+    * A response cut off by an output-token limit
+      (``stopReason == "max_tokens"``) surfaces as
+      :class:`SamplingTransportError` with code
+      ``"bedrock_truncated_response"``.
     """
 
     backend_name: Literal["mcp", "bedrock"] = "bedrock"
@@ -1082,6 +1084,9 @@ class BedrockSamplingBackend:
                   code from the envelope.
                 * ``bedrock_malformed_response`` — the response did not
                   contain a non-empty final text content block.
+                * ``bedrock_truncated_response`` — the response was cut
+                  off by an output-token limit and cannot be trusted to
+                  be complete.
             gco.bedrock.BedrockFTUFormNotAcceptedError: The account has
                 not submitted Anthropic's one-time first-time-use case
                 form. Raised instead of a transport error so callers
@@ -1096,10 +1101,11 @@ class BedrockSamplingBackend:
         text = prompt.assemble()
         converse_options = build_bedrock_converse_options(
             self.model_id,
-            inference_config={
-                "maxTokens": BEDROCK_MAX_TOKENS,
-                "temperature": BEDROCK_TEMPERATURE,
-            },
+            # Deliberately no maxTokens: the Converse default is the model's
+            # own maximum output length, so a rationale can never be cut off
+            # by a GCO-imposed cap. A cap is opt-in — pass maxTokens here to
+            # restore one.
+            inference_config={"temperature": BEDROCK_TEMPERATURE},
             apply_default_reasoning=self._uses_default_model,
         )
         try:
@@ -1135,6 +1141,10 @@ class BedrockSamplingBackend:
 
         try:
             return extract_bedrock_converse_text(response)
+        except BedrockResponseTruncatedError as err:
+            # A cut-off rationale is unusable; let the deterministic-fallback
+            # path absorb it like any other transport-shaped fault.
+            raise SamplingTransportError("bedrock_truncated_response") from err
         except (KeyError, IndexError, TypeError) as err:
             raise SamplingTransportError("bedrock_malformed_response") from err
 

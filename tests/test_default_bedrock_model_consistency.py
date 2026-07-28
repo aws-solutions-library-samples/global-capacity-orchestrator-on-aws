@@ -199,7 +199,8 @@ def test_default_high_thinking_translates_to_native_converse_fields() -> None:
 
     ``temperature``/``topP`` are dropped (Claude removed sampling controls from
     Opus 4.7 onward and answers a ValidationException for them) while
-    ``maxTokens`` — which the model still requires — survives.
+    ``maxTokens`` — an opt-in cap that GCO's own call sites no longer set —
+    still passes through for callers that supply one.
     """
     options = build_bedrock_converse_options(
         _EXPECTED_DEFAULT_MODEL_ID,

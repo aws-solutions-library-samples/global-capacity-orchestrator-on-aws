@@ -2329,9 +2329,10 @@ class TestBedrockCapacityAdvisor:
                 assert rec.recommended_capacity_type == "spot"
                 assert rec.confidence == "high"
                 request = mock_bedrock.converse.call_args.kwargs
-                # The canonical Claude default keeps maxTokens (still required)
-                # and drops temperature, which Claude no longer supports.
-                assert request["inferenceConfig"] == {"maxTokens": 2048}
+                # No inferenceConfig at all: GCO sets no maxTokens (the
+                # Converse default is the model's own maximum output length)
+                # and Claude dropped temperature, so nothing remains.
+                assert "inferenceConfig" not in request
                 assert request["additionalModelRequestFields"] == {
                     "thinking": {"type": "adaptive"},
                     "output_config": {"effort": "high"},
@@ -2411,7 +2412,10 @@ class TestBedrockCapacityAdvisor:
                     advisor.get_recommendation()
                     pytest.fail("Should have raised RuntimeError")
                 except RuntimeError as e:
-                    assert "No valid JSON found" in str(e)
+                    # The failure names the problem and quotes the response
+                    # head so the operator can see what the model actually said.
+                    assert "No JSON object found" in str(e)
+                    assert "This is not valid JSON" in str(e)
 
 
 class TestGetBedrockCapacityAdvisor:
@@ -3427,11 +3431,25 @@ class TestAdvisorGatherExceptions:
         assert data["cluster_metrics"] == []
 
     def test_spot_data_exception(self):
+        """A failing placement-score call no longer discards the whole pair.
+
+        The other signals for the (type, region) pair are kept and the failed
+        lookup is recorded as a data gap for the prompt.
+        """
         advisor = _make_advisor_with_mocks()
         _setup_advisor_mocks(advisor)
         advisor._capacity_checker.get_spot_placement_score.side_effect = RuntimeError("boom")
         data = advisor.gather_capacity_data(instance_types=["g4dn.xlarge"], regions=["us-east-1"])
-        assert data["spot_data"]["g4dn.xlarge"] == {}
+        entry = data["spot_data"]["g4dn.xlarge"]["us-east-1"]
+        assert entry["placement_scores"] == {}
+        assert {
+            "instance_type": "g4dn.xlarge",
+            "region": "us-east-1",
+            "source": "spot placement score",
+            "error": "RuntimeError",
+        } in data["data_gaps"]
+        # The independent lookups for the same pair still landed.
+        assert data["on_demand_data"]["g4dn.xlarge"]["us-east-1"]["available"] is not None
 
     def test_reservation_exception(self):
         advisor = _make_advisor_with_mocks()

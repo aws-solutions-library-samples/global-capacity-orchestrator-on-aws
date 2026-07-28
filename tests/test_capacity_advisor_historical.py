@@ -152,9 +152,10 @@ class TestPredictCapacityWindow:
         assert result.avoid_windows[0]["day"] == "Friday"
         assert "Mondays" in result.reasoning
         request = client.converse.call_args.kwargs
-        # The canonical Claude default keeps maxTokens (still required) and
-        # drops temperature, which Claude no longer supports.
-        assert request["inferenceConfig"] == {"maxTokens": 2048}
+        # No inferenceConfig at all: GCO sets no maxTokens (the Converse
+        # default is the model's own maximum output length) and Claude
+        # dropped temperature, so nothing remains.
+        assert "inferenceConfig" not in request
         assert request["additionalModelRequestFields"] == {
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": "high"},

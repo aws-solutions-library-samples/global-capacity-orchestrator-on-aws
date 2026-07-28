@@ -303,10 +303,16 @@ def ai_recommend(
     """Get AI-powered capacity recommendation using Amazon Bedrock.
 
     This command gathers comprehensive capacity data including:
-    - Spot placement scores and pricing across regions
+    - Spot placement scores, pricing, and 7-day per-AZ price trends across regions
     - On-demand availability and pricing
+    - Capacity Reservations (ODCRs), Capacity Block offerings, and 26-week
+      block-availability trends
     - Current cluster utilization (queue depth, GPU/CPU usage)
     - Running and pending job counts
+    - The algorithmic multi-signal region ranking as advisory context
+
+    Without --instance-type, one representative type per current GPU
+    generation is scanned (T4, L4, A10G, L40S, A100, H100, H200, B200, B300).
 
     The data is analyzed by an LLM to provide intelligent recommendations
     for where to place your workload.
@@ -431,7 +437,9 @@ def ai_recommend(
         if is_bedrock_ftu_form_error(e):
             formatter.print_error(BEDROCK_FTU_REMEDIATION)
             sys.exit(1)
-        formatter.print_error(f"Failed to get AI recommendation: {e}")
+        # Advisor errors are already fully worded (and may carry their own
+        # remediation); re-prefixing here used to print the same phrase twice.
+        formatter.print_error(str(e))
         sys.exit(1)
 
 

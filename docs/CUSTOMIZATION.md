@@ -1546,7 +1546,13 @@ default because:
 > **Cost and latency:** reasoning tokens are billed as output tokens. High
 > effort can materially increase latency and token usage. Claude removed
 > `temperature`, `top_p`, and `top_k` starting with Opus 4.7, so GCO omits
-> those controls for the canonical default and keeps only `maxTokens`.
+> those controls for the canonical default. GCO also sets no `maxTokens` cap
+> on any of its Bedrock requests: the Converse default — the model's own
+> maximum output length — applies, so reasoning plus the final answer are
+> never cut off by a GCO-imposed limit. A cap is opt-in for code that calls
+> the shared helpers directly, and a response that still hits the model's own
+> ceiling surfaces as an explicit truncation error rather than a confusing
+> JSON-parse failure.
 >
 > These Bedrock features are advisory and degrade gracefully. When no model is reachable (no credentials, model not enabled, or access denied) the Mission engine falls back to its deterministic templates and the capacity advisor surfaces a clear error. Core orchestration never depends on Bedrock. The one exception is the Anthropic FTU form: because it is a permanent account-setup gap rather than a transient fault, it is reported as an error instead of being absorbed by a fallback.
 
