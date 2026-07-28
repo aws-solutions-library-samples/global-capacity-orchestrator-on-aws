@@ -220,7 +220,11 @@ print(json.dumps(data))
 BUILD_SYSTEM_PINS="$(extract_build_system_pins pyproject.toml)"
 if [ -n "$BUILD_SYSTEM_PINS" ]; then
   while IFS='|' read -r bs_name bs_version bs_raw; do
-    [ -n "$bs_name" ] && [ -n "$bs_version" ] || continue
+    # Only exact pins are compared; non-exact entries surface through
+    # the version-consistency policy check instead.
+    if [ -z "$bs_name" ] || [ -z "$bs_version" ]; then
+      continue
+    fi
     bs_latest="$(curl -fsSL --max-time 15 \
       "https://pypi.org/pypi/${bs_name}/json" 2>/dev/null \
       | jq -r '.info.version // empty' 2>/dev/null)" || true
