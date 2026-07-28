@@ -4214,6 +4214,13 @@ class StackManager:
         )
         record_cleanup("bastions", {"terminated_instances": bastions})
 
+        # Non-strict teardowns also retire the bastion's standing IAM
+        # role/profile and, below, the implicit log groups CloudFormation
+        # never modeled. Strict (live-validation) teardowns skip both: the
+        # harness owns fenced log-group deletion and audits IAM itself.
+        if not strict_identity:
+            record_cleanup("bastion-iam", self._cleanup_bastion_iam())
+
         global_stack_name = f"{project_name}-global"
         backup = self._cleanup_backup_vault(
             expected_stack_id=(expected_stack_ids or {}).get(global_stack_name),
@@ -4229,6 +4236,28 @@ class StackManager:
 
         successful: list[str] = []
         failed: list[str] = []
+
+        # Capture implicit log-group names while the source stacks still
+        # exist; the exact derived names are deleted by ``finish`` below
+        # once their stacks are gone. Strict teardowns collect nothing —
+        # the live-validation harness owns fenced log-group deletion.
+        implicit_log_groups: dict[str, dict[str, Any]] = {}
+        if not strict_identity:
+            implicit_log_groups = self._collect_implicit_log_groups(stacks)
+
+        def finish(overall: bool) -> tuple[bool, list[str], list[str]]:
+            """Funnel every exit through the implicit log-group sweep.
+
+            Called at each return point so a partially failed teardown
+            still cleans up the stacks that DID delete. New exit paths
+            must return through here as well.
+            """
+            if implicit_log_groups:
+                record_cleanup(
+                    "implicit-log-groups",
+                    self._cleanup_implicit_log_groups(implicit_log_groups, successful),
+                )
+            return overall, successful, failed
 
         for stack_name in post_regional_stacks:
             if on_stack_start:
@@ -4252,7 +4281,7 @@ class StackManager:
             if stack_name not in failed:
                 failed.append(stack_name)
         if any(stack in failed for stack in post_regional_stacks) or phase_remaining:
-            return False, successful, failed
+            return finish(False)
 
         if regional_api_stacks:
             if parallel and len(regional_api_stacks) > 1:
@@ -4295,7 +4324,7 @@ class StackManager:
                 if stack_name not in failed:
                     failed.append(stack_name)
             if any(stack in failed for stack in regional_api_stacks) or phase_remaining:
-                return False, successful, failed
+                return finish(False)
 
         watchdog_stops: dict[str, Event] = {}
         watchdog_threads: dict[str, Thread] = {}
@@ -4398,7 +4427,7 @@ class StackManager:
             if stack_name not in failed:
                 failed.append(stack_name)
         if any(stack in failed for stack in regional_stacks) or phase_remaining:
-            return False, successful, failed
+            return finish(False)
 
         for stack_name in pre_regional_stacks:
             if on_stack_start:
@@ -4422,9 +4451,9 @@ class StackManager:
                 if remaining_stack not in failed:
                     failed.append(remaining_stack)
             if not success or phase_remaining:
-                return False, successful, failed
+                return finish(False)
 
-        return len(failed) == 0, successful, failed
+        return finish(len(failed) == 0)
 
     def _destroy_stacks_parallel(
         self,
@@ -4887,6 +4916,169 @@ class StackManager:
                 break
             _time.sleep(poll_interval_seconds)
         return remaining
+
+    # ------------------------------------------------------------------
+    # Implicit log-group + bastion IAM cleanup (non-strict destroy only)
+    # ------------------------------------------------------------------
+    #
+    # CloudFormation only deletes the log groups it modeled. Lambda default
+    # groups (``/aws/lambda/<function>``), the EKS control-plane group
+    # (``/aws/eks/<cluster>/cluster``), and the Container Insights groups
+    # (``/aws/containerinsights/<cluster>/…``) are created out-of-band by
+    # the services themselves, so ``destroy-all`` used to report success
+    # while leaving them behind — a real teardown orphaned 22 of them plus
+    # the ephemeral-bastion IAM role/profile, which then failed the live
+    # release validation's clean-account baseline gate.
+    #
+    # The cleanup below deletes ONLY exact names derived from the project's
+    # own stack resources, captured while the stacks still exist, and only
+    # for stacks whose deletion actually succeeded. It never runs in strict
+    # (live-validation) teardowns: the harness checkpoints, tags, and
+    # fences its own log-group generations and must remain the single
+    # owner of that deletion authority.
+
+    # The service-side patterns implicit log groups follow. An explicit
+    # ``AWS::Logs::LogGroup`` resource is deliberately absent here —
+    # CloudFormation owns those directly.
+    _EKS_CONTAINER_INSIGHTS_SUFFIXES = ("application", "dataplane", "host", "performance")
+
+    @staticmethod
+    def _implicit_log_group_names(resource_type: str, physical_id: str) -> tuple[str, ...]:
+        """Exact implicit log-group names a stack resource creates out-of-band."""
+        if resource_type == "AWS::Lambda::Function":
+            return (f"/aws/lambda/{physical_id}",)
+        if resource_type == "AWS::EKS::Cluster":
+            return (
+                f"/aws/eks/{physical_id}/cluster",
+                *(
+                    f"/aws/containerinsights/{physical_id}/{suffix}"
+                    for suffix in StackManager._EKS_CONTAINER_INSIGHTS_SUFFIXES
+                ),
+            )
+        return ()
+
+    def _collect_implicit_log_groups(self, stacks: Collection[str]) -> dict[str, dict[str, Any]]:
+        """Derive per-stack implicit log-group names while the stacks are live.
+
+        Best-effort: a stack that cannot be described or listed is skipped
+        with a warning — collection must never block the destroy itself.
+        """
+        collected: dict[str, dict[str, Any]] = {}
+        for stack_name in stacks:
+            try:
+                target = self._describe_stack_target(stack_name)
+                if target is None:
+                    continue
+                region, cloudformation, stack = target
+                names: list[str] = []
+                paginator = cloudformation.get_paginator("list_stack_resources")
+                for page in paginator.paginate(StackName=str(stack["StackId"])):
+                    for item in page.get("StackResourceSummaries", []):
+                        resource_type = str(item.get("ResourceType") or "")
+                        physical_id = str(item.get("PhysicalResourceId") or "")
+                        if not physical_id:
+                            continue
+                        names.extend(self._implicit_log_group_names(resource_type, physical_id))
+                if names:
+                    collected[stack_name] = {"region": region, "log_groups": sorted(set(names))}
+            except Exception as exc:  # noqa: BLE001 - best-effort collection
+                logger.warning("Could not derive implicit log groups for %s: %s", stack_name, exc)
+        return collected
+
+    def _cleanup_implicit_log_groups(
+        self,
+        collected: Mapping[str, Mapping[str, Any]],
+        successful_stacks: Collection[str],
+    ) -> dict[str, Any]:
+        """Delete the exact derived log groups of successfully destroyed stacks.
+
+        A missing group is normal (a Lambda that never logged, or a custom
+        ``LoggingConfig`` pointing elsewhere) and is recorded, not retried.
+        Every error is recorded and swallowed: cleanup never converts a
+        successful destroy into a failure.
+        """
+        import boto3
+
+        outcome: dict[str, Any] = {"deleted": [], "missing": [], "errors": []}
+        clients: dict[str, Any] = {}
+        for stack_name in sorted(successful_stacks):
+            details = collected.get(stack_name)
+            if not details:
+                continue
+            region = str(details.get("region") or "")
+            for name in details.get("log_groups", []):
+                try:
+                    client = clients.get(region)
+                    if client is None:
+                        client = boto3.client("logs", region_name=region)
+                        clients[region] = client
+                    client.delete_log_group(logGroupName=name)
+                    outcome["deleted"].append(f"{region}:{name}")
+                except ClientError as exc:
+                    code = str(exc.response.get("Error", {}).get("Code") or "")
+                    if code == "ResourceNotFoundException":
+                        outcome["missing"].append(f"{region}:{name}")
+                    else:
+                        outcome["errors"].append(f"{region}:{name}: {code}")
+                except Exception as exc:  # noqa: BLE001 - best-effort cleanup
+                    outcome["errors"].append(f"{region}:{name}: {type(exc).__name__}: {exc}")
+        if outcome["deleted"]:
+            print(
+                f"  Deleted {len(outcome['deleted'])} implicit CloudWatch log group(s) "
+                "left behind by Lambda/EKS/Container Insights."
+            )
+        for failure in outcome["errors"]:
+            logger.warning("Implicit log-group cleanup failed for %s", failure)
+        return outcome
+
+    def _cleanup_bastion_iam(self) -> dict[str, Any]:
+        """Best-effort teardown of the ephemeral-bastion IAM role + profile.
+
+        ``destroy_ephemeral_bastion`` already attempts this when a tunnel
+        closes normally, but a killed process leaves the pair behind (they
+        cost nothing, yet fail any clean-account audit). Deletion is by the
+        exact project-scoped names from the bastion naming contract; a
+        ``NoSuchEntity`` response simply means there was nothing to clean.
+        """
+        from .ephemeral_bastion import (
+            _run_aws,
+            bastion_profile_name,
+            bastion_role_name,
+            build_iam_teardown_commands,
+        )
+
+        outcome: dict[str, Any] = {
+            "completed_steps": 0,
+            "absent_steps": 0,
+            "errors": [],
+        }
+        try:
+            role_name = bastion_role_name(self.config.project_name)
+            profile_name = bastion_profile_name(self.config.project_name)
+            outcome["role"] = role_name
+            outcome["profile"] = profile_name
+            steps = build_iam_teardown_commands(
+                role_name,
+                profile_name,
+                self.config.global_region,
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort cleanup
+            outcome["errors"].append(f"{type(exc).__name__}: {exc}")
+            return outcome
+        for step in steps:
+            try:
+                _run_aws(step)
+                outcome["completed_steps"] += 1
+            except RuntimeError as exc:
+                if "NoSuchEntity" in str(exc):
+                    outcome["absent_steps"] += 1
+                    continue
+                outcome["errors"].append(f"{' '.join(step[:3])}: {exc}")
+        if outcome["completed_steps"] and not outcome["errors"]:
+            print("  Removed the ephemeral-bastion IAM role and instance profile.")
+        for failure in outcome["errors"]:
+            logger.warning("Bastion IAM teardown step failed: %s", failure)
+        return outcome
 
     def cleanup_eks_security_groups(self) -> None:
         """Clean up EKS-managed security groups across all regional stacks.

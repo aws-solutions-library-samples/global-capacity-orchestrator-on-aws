@@ -10,14 +10,13 @@ import traceback
 from pathlib import Path
 from typing import Any, Literal
 
-import boto3
-
 from cli.aws_client import GCOAWSClient
 from cli.config import GCOConfig
 from cli.jobs import JobManager
 from cli.stacks import StackManager
 
 from .actions import action_final_inventory, destroy_deployment
+from .aws_session import ThrottleResilientSession
 from .models import (
     ActionResult,
     RunCheckpoint,
@@ -71,7 +70,11 @@ class LiveValidationRunner:
                 action_results=list(self.checkpoint.action_results.values()),
                 baseline=self.checkpoint.baseline,
             )
-            self.session = boto3.Session()
+            # Adaptive throttle retries for every harness client: the
+            # inventory scanners issue one metadata read per resource across
+            # every enabled Region, and a Regional TPS squeeze must surface
+            # as a bounded wait, not a failed action. See aws_session.py.
+            self.session = ThrottleResilientSession()
             self.aws_client = GCOAWSClient(self.config)
             self.aws_client._session = self.session
             self.job_manager = JobManager(self.config)

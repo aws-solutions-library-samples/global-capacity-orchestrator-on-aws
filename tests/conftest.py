@@ -116,6 +116,9 @@ _DESTROY_CLEANUP_OWNERS = {
     "TestEksSecurityGroupCleanup",
     "TestCleanupEksSecurityGroups",
     "TestEksSgWatchdog",
+    "TestImplicitLogGroupCleanup",
+    "TestBastionIamCleanup",
+    "TestDestroyOrchestratedImplicitCleanupWiring",
 }
 
 
@@ -130,6 +133,20 @@ def _no_real_destroy_cleanup_aws_calls(request):
         patch.object(_stacks.StackManager, "_cleanup_backup_vault", return_value=None),
         patch.object(_stacks.StackManager, "_cleanup_eks_security_groups", return_value=None),
         patch.object(_stacks.StackManager, "_start_eks_sg_watchdog", return_value=MagicMock()),
+        # The implicit log-group + bastion IAM sweep added for non-strict
+        # teardowns is boto3/AWS-CLI-backed as well; orchestration tests
+        # that don't own these helpers must never fire them for real.
+        patch.object(_stacks.StackManager, "_collect_implicit_log_groups", return_value={}),
+        patch.object(
+            _stacks.StackManager,
+            "_cleanup_implicit_log_groups",
+            return_value={"deleted": [], "missing": [], "errors": []},
+        ),
+        patch.object(
+            _stacks.StackManager,
+            "_cleanup_bastion_iam",
+            return_value={"completed_steps": 0, "absent_steps": 0, "errors": []},
+        ),
     ):
         yield
 

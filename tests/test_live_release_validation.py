@@ -3629,7 +3629,7 @@ class TestLocalOnlyRuntime:
         monkeypatch.setenv("GITHUB_ACTIONS", "TRUE")
 
         with (
-            patch.object(runner.boto3, "Session") as session,
+            patch.object(runner, "ThrottleResilientSession") as session,
             pytest.raises(RuntimeError, match="must not run in GitHub Actions"),
         ):
             runner.LiveValidationRunner(settings)
@@ -3908,3 +3908,92 @@ class TestManifestPathResolution:
         assert referenced, "no _load_manifest call sites found; update the scanner regex"
         for filename in sorted(referenced):
             assert (package / "manifests" / filename).is_file(), filename
+
+
+class TestThrottleResilientSession:
+    """Every harness client gets adaptive throttle retries by default.
+
+    A real ``final-inventory`` failed with ``ThrottlingException … reached
+    max retries: 4`` on CloudWatch Logs ``ListTagsForResource`` while
+    scanning 17 Regions. The facade must pace and retry that class of
+    error without changing any other session behavior.
+    """
+
+    def _facade(self):
+        from unittest.mock import MagicMock
+
+        from scripts.live_release_validation.aws_session import ThrottleResilientSession
+
+        inner = MagicMock()
+        return ThrottleResilientSession(inner), inner
+
+    def test_client_injects_adaptive_retry_config(self) -> None:
+        facade, inner = self._facade()
+
+        facade.client("logs", region_name="eu-west-1")
+
+        inner.client.assert_called_once()
+        args, kwargs = inner.client.call_args
+        assert args == ("logs",)
+        assert kwargs["region_name"] == "eu-west-1"
+        retries = kwargs["config"].retries
+        assert retries["mode"] == "adaptive"
+        assert retries["max_attempts"] >= 10
+
+    def test_resource_injects_the_same_retry_config(self) -> None:
+        facade, inner = self._facade()
+
+        facade.resource("s3")
+
+        retries = inner.resource.call_args.kwargs["config"].retries
+        assert retries["mode"] == "adaptive"
+
+    def test_caller_config_fields_survive_the_merge(self) -> None:
+        from botocore.config import Config
+
+        facade, inner = self._facade()
+
+        facade.client("logs", config=Config(read_timeout=7))
+
+        merged = inner.client.call_args.kwargs["config"]
+        assert merged.read_timeout == 7
+        assert merged.retries["mode"] == "adaptive"
+
+    def test_caller_retry_settings_win_over_the_default(self) -> None:
+        from botocore.config import Config
+
+        facade, inner = self._facade()
+
+        facade.client("logs", config=Config(retries={"mode": "standard", "max_attempts": 2}))
+
+        merged = inner.client.call_args.kwargs["config"]
+        assert merged.retries == {"mode": "standard", "max_attempts": 2}
+
+    def test_other_session_attributes_delegate_unchanged(self) -> None:
+        facade, inner = self._facade()
+        inner.get_available_regions.return_value = ["us-east-1"]
+        inner.region_name = "us-east-2"
+
+        assert facade.get_available_regions("logs") == ["us-east-1"]
+        assert facade.region_name == "us-east-2"
+
+    def test_default_construction_wraps_a_real_boto3_session(self) -> None:
+        from unittest.mock import patch
+
+        from scripts.live_release_validation import aws_session
+
+        with patch.object(aws_session.boto3, "Session") as session_cls:
+            facade = aws_session.ThrottleResilientSession()
+
+        session_cls.assert_called_once_with()
+        assert facade._session is session_cls.return_value
+
+    def test_runner_builds_its_session_through_the_facade(self) -> None:
+        """The runner must not hand raw boto3 sessions to the scanners."""
+        import inspect
+
+        from scripts.live_release_validation import runner
+
+        source = inspect.getsource(runner.LiveValidationRunner.__init__)
+        assert "ThrottleResilientSession()" in source
+        assert "boto3.Session()" not in source

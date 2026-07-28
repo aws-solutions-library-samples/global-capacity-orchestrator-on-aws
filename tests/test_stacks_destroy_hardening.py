@@ -670,3 +670,377 @@ class TestWaitForBastionNetworkInterfaces:
 
         assert remaining == {"eni-1"}
         ec2.delete_network_interface.assert_not_called()
+
+
+class TestImplicitLogGroupCleanup:
+    """Non-strict teardown sweeps the log groups CloudFormation never modeled.
+
+    Lambda default groups and the EKS control-plane/Container Insights
+    groups are created out-of-band by the services, so ``destroy-all``
+    used to report success while orphaning them (22 survived a real
+    teardown and failed the live-validation clean-account gate). The
+    sweep may only ever delete exact names derived from the project's
+    own stack resources, and only for stacks whose deletion succeeded.
+    """
+
+    def _manager(self):
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        return StackManager(config)
+
+    # -- name derivation ----------------------------------------------
+
+    def test_lambda_function_derives_its_default_group(self):
+        from cli.stacks import StackManager
+
+        names = StackManager._implicit_log_group_names(
+            "AWS::Lambda::Function", "gco-us-east-1-GaRegistration-UJUi"
+        )
+        assert names == ("/aws/lambda/gco-us-east-1-GaRegistration-UJUi",)
+
+    def test_eks_cluster_derives_control_plane_and_container_insights(self):
+        from cli.stacks import StackManager
+
+        names = StackManager._implicit_log_group_names("AWS::EKS::Cluster", "gco-us-east-1")
+        assert names == (
+            "/aws/eks/gco-us-east-1/cluster",
+            "/aws/containerinsights/gco-us-east-1/application",
+            "/aws/containerinsights/gco-us-east-1/dataplane",
+            "/aws/containerinsights/gco-us-east-1/host",
+            "/aws/containerinsights/gco-us-east-1/performance",
+        )
+
+    def test_explicit_log_group_resources_are_cloudformation_owned(self):
+        """CFN deletes modeled AWS::Logs::LogGroup resources itself."""
+        from cli.stacks import StackManager
+
+        assert StackManager._implicit_log_group_names("AWS::Logs::LogGroup", "/gco/api") == ()
+        assert StackManager._implicit_log_group_names("AWS::SQS::Queue", "gco-jobs") == ()
+
+    # -- collection ----------------------------------------------------
+
+    def _stack_target(self, resources):
+        cfn = MagicMock()
+        paginator = MagicMock()
+        paginator.paginate.return_value = [{"StackResourceSummaries": resources}]
+        cfn.get_paginator.return_value = paginator
+        stack = {"StackId": "arn:aws:cloudformation:us-east-1:111111111111:stack/gco-us-east-1/x"}
+        return ("us-east-1", cfn, stack)
+
+    def test_collects_exact_names_from_live_stack_resources(self):
+        manager = self._manager()
+        target = self._stack_target(
+            [
+                {
+                    "ResourceType": "AWS::Lambda::Function",
+                    "PhysicalResourceId": "gco-helm-us-east-1",
+                },
+                {"ResourceType": "AWS::EKS::Cluster", "PhysicalResourceId": "gco-us-east-1"},
+                {"ResourceType": "AWS::Logs::LogGroup", "PhysicalResourceId": "/gco/explicit"},
+                {"ResourceType": "AWS::Lambda::Function", "PhysicalResourceId": ""},
+            ]
+        )
+        with patch.object(manager, "_describe_stack_target", return_value=target):
+            collected = manager._collect_implicit_log_groups(["gco-us-east-1"])
+
+        assert collected == {
+            "gco-us-east-1": {
+                "region": "us-east-1",
+                "log_groups": [
+                    "/aws/containerinsights/gco-us-east-1/application",
+                    "/aws/containerinsights/gco-us-east-1/dataplane",
+                    "/aws/containerinsights/gco-us-east-1/host",
+                    "/aws/containerinsights/gco-us-east-1/performance",
+                    "/aws/eks/gco-us-east-1/cluster",
+                    "/aws/lambda/gco-helm-us-east-1",
+                ],
+            }
+        }
+
+    def test_absent_stack_collects_nothing(self):
+        manager = self._manager()
+        with patch.object(manager, "_describe_stack_target", return_value=None):
+            assert manager._collect_implicit_log_groups(["gco-us-east-1"]) == {}
+
+    def test_collection_is_best_effort_per_stack(self):
+        """One stack's describe failure must not block the others."""
+        manager = self._manager()
+        good = self._stack_target(
+            [{"ResourceType": "AWS::Lambda::Function", "PhysicalResourceId": "gco-fn"}]
+        )
+
+        def describe(stack_name):
+            if stack_name == "gco-broken":
+                raise RuntimeError("CloudFormation unavailable")
+            return good
+
+        with patch.object(manager, "_describe_stack_target", side_effect=describe):
+            collected = manager._collect_implicit_log_groups(["gco-broken", "gco-us-east-1"])
+
+        assert list(collected) == ["gco-us-east-1"]
+
+    # -- deletion ------------------------------------------------------
+
+    def _collected(self):
+        return {
+            "gco-us-east-1": {
+                "region": "us-east-1",
+                "log_groups": ["/aws/eks/gco-us-east-1/cluster", "/aws/lambda/gco-fn"],
+            },
+            "gco-global": {
+                "region": "us-east-2",
+                "log_groups": ["/aws/lambda/gco-global-Poller"],
+            },
+        }
+
+    def test_deletes_only_groups_of_successfully_destroyed_stacks(self):
+        manager = self._manager()
+        logs = MagicMock()
+        with patch("boto3.client", return_value=logs) as client_factory:
+            outcome = manager._cleanup_implicit_log_groups(self._collected(), ["gco-us-east-1"])
+
+        client_factory.assert_called_once_with("logs", region_name="us-east-1")
+        deleted = {call.kwargs["logGroupName"] for call in logs.delete_log_group.call_args_list}
+        assert deleted == {"/aws/eks/gco-us-east-1/cluster", "/aws/lambda/gco-fn"}
+        assert outcome["deleted"] == [
+            "us-east-1:/aws/eks/gco-us-east-1/cluster",
+            "us-east-1:/aws/lambda/gco-fn",
+        ]
+        assert outcome["errors"] == []
+
+    def test_missing_group_is_recorded_not_retried(self):
+        """A Lambda that never logged has no default group — that's normal."""
+        manager = self._manager()
+        logs = MagicMock()
+        logs.delete_log_group.side_effect = ClientError(
+            {"Error": {"Code": "ResourceNotFoundException"}}, "DeleteLogGroup"
+        )
+        with patch("boto3.client", return_value=logs):
+            outcome = manager._cleanup_implicit_log_groups(
+                self._collected(), ["gco-us-east-1", "gco-global"]
+            )
+
+        assert outcome["deleted"] == []
+        assert len(outcome["missing"]) == 3
+        assert outcome["errors"] == []
+
+    def test_delete_errors_are_recorded_and_swallowed(self):
+        """Cleanup must never convert a successful destroy into a failure."""
+        manager = self._manager()
+        logs = MagicMock()
+        logs.delete_log_group.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException"}}, "DeleteLogGroup"
+        )
+        with patch("boto3.client", return_value=logs):
+            outcome = manager._cleanup_implicit_log_groups(self._collected(), ["gco-global"])
+
+        assert outcome["errors"] == [
+            "us-east-2:/aws/lambda/gco-global-Poller: AccessDeniedException"
+        ]
+
+
+class TestBastionIamCleanup:
+    """destroy-all retires the ephemeral-bastion IAM role + profile.
+
+    ``destroy_ephemeral_bastion`` already does this on a clean tunnel
+    close, but a killed process orphans the pair; both survived a real
+    teardown and tripped the live-validation clean-account gate.
+    """
+
+    def _manager(self, project_name="gco"):
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = project_name
+        config.global_region = "us-east-2"
+        return StackManager(config)
+
+    def test_runs_the_exact_teardown_commands_in_order(self):
+        manager = self._manager()
+        with patch("cli.ephemeral_bastion._run_aws", return_value="") as run_aws:
+            outcome = manager._cleanup_bastion_iam()
+
+        operations = [call.args[0][2] for call in run_aws.call_args_list]
+        assert operations == [
+            "remove-role-from-instance-profile",
+            "delete-instance-profile",
+            "detach-role-policy",
+            "delete-role",
+        ]
+        for call in run_aws.call_args_list:
+            argv = call.args[0]
+            assert argv[:2] == ["aws", "iam"]
+            assert "gco-ephemeral-bastion" in " ".join(argv)
+        assert outcome["completed_steps"] == 4
+        assert outcome["errors"] == []
+
+    def test_absent_role_and_profile_read_as_clean(self):
+        """NoSuchEntity everywhere simply means nothing was orphaned."""
+        manager = self._manager()
+        with patch(
+            "cli.ephemeral_bastion._run_aws",
+            side_effect=RuntimeError("An error occurred (NoSuchEntity) ..."),
+        ):
+            outcome = manager._cleanup_bastion_iam()
+
+        assert outcome["completed_steps"] == 0
+        assert outcome["absent_steps"] == 4
+        assert outcome["errors"] == []
+
+    def test_step_failures_are_recorded_and_do_not_raise(self):
+        manager = self._manager()
+        with patch(
+            "cli.ephemeral_bastion._run_aws",
+            side_effect=RuntimeError("AccessDenied"),
+        ):
+            outcome = manager._cleanup_bastion_iam()
+
+        assert outcome["completed_steps"] == 0
+        assert len(outcome["errors"]) == 4
+
+    def test_invalid_project_name_is_best_effort_not_fatal(self):
+        manager = self._manager(project_name=MagicMock())
+        with patch("cli.ephemeral_bastion._run_aws") as run_aws:
+            outcome = manager._cleanup_bastion_iam()
+
+        run_aws.assert_not_called()
+        assert outcome["errors"]
+
+
+class TestDestroyOrchestratedImplicitCleanupWiring:
+    """The sweep runs on every non-strict exit path and never in strict mode."""
+
+    def _run(self, *, destroy_results, strict=False, collected=None):
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        config.global_region = "us-east-2"
+        stacks = ["gco-global", "gco-us-east-1"]
+        cleanups: list[tuple[str, dict]] = []
+
+        base_patches = [
+            patch.object(StackManager, "list_stacks", return_value=stacks),
+            patch.object(StackManager, "_image_registry_destroy_preflight", return_value=True),
+            patch.object(StackManager, "cleanup_orphaned_bastions", return_value=0),
+            patch.object(
+                StackManager,
+                "_cleanup_backup_vault",
+                return_value={"errors": []},
+            ),
+            patch.object(StackManager, "_start_eks_sg_watchdog", return_value=MagicMock()),
+            patch.object(
+                StackManager,
+                "_cleanup_eks_security_groups",
+                return_value={"errors": [], "blocked_by_enis": []},
+            ),
+            patch.object(StackManager, "_destroy_phase_remaining_stacks", return_value=[]),
+            patch.object(StackManager, "destroy", side_effect=destroy_results),
+        ]
+        if strict:
+            base_patches.append(
+                patch.object(StackManager, "_resolve_strict_teardown_resources", return_value={})
+            )
+
+        kwargs = {}
+        if strict:
+            kwargs = {
+                "expected_stack_ids": {
+                    "gco-global": "arn:aws:cloudformation:us-east-2:1:stack/gco-global/x",
+                    "gco-us-east-1": "arn:aws:cloudformation:us-east-1:1:stack/gco-us-east-1/y",
+                },
+                "authorize_stack": lambda *_args: None,
+            }
+
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for item in base_patches:
+                stack.enter_context(item)
+            collect = stack.enter_context(
+                patch.object(
+                    StackManager,
+                    "_collect_implicit_log_groups",
+                    return_value=collected if collected is not None else {},
+                )
+            )
+            cleanup = stack.enter_context(
+                patch.object(
+                    StackManager,
+                    "_cleanup_implicit_log_groups",
+                    return_value={"deleted": [], "missing": [], "errors": []},
+                )
+            )
+            bastion_iam = stack.enter_context(
+                patch.object(
+                    StackManager,
+                    "_cleanup_bastion_iam",
+                    return_value={"completed_steps": 0, "absent_steps": 4, "errors": []},
+                )
+            )
+            manager = StackManager(config)
+            result = manager.destroy_orchestrated(
+                force=True,
+                on_cleanup_complete=lambda name, details: cleanups.append((name, details)),
+                **kwargs,
+            )
+        return result, collect, cleanup, bastion_iam, cleanups
+
+    def test_full_success_sweeps_collected_groups(self):
+        collected = {"gco-us-east-1": {"region": "us-east-1", "log_groups": ["/aws/lambda/x"]}}
+        (ok, successful, failed), collect, cleanup, bastion_iam, cleanups = self._run(
+            destroy_results=[True, True],
+            collected=collected,
+        )
+
+        assert ok is True and failed == []
+        collect.assert_called_once()
+        cleanup.assert_called_once()
+        assert cleanup.call_args.args[0] == collected
+        assert sorted(cleanup.call_args.args[1]) == ["gco-global", "gco-us-east-1"]
+        bastion_iam.assert_called_once()
+        assert {name for name, _ in cleanups} >= {"bastions", "bastion-iam", "implicit-log-groups"}
+
+    def test_partial_failure_still_sweeps_the_destroyed_stacks(self):
+        """gco-us-east-1 deletes, gco-global fails: its groups still go."""
+        collected = {
+            "gco-us-east-1": {"region": "us-east-1", "log_groups": ["/aws/lambda/x"]},
+            "gco-global": {"region": "us-east-2", "log_groups": ["/aws/lambda/y"]},
+        }
+        (ok, successful, failed), _collect, cleanup, _bastion, _cleanups = self._run(
+            destroy_results=[True, False],
+            collected=collected,
+        )
+
+        assert ok is False
+        assert successful == ["gco-us-east-1"]
+        assert failed == ["gco-global"]
+        cleanup.assert_called_once()
+        assert cleanup.call_args.args[1] == ["gco-us-east-1"]
+
+    def test_nothing_collected_records_no_sweep(self):
+        (ok, _successful, _failed), collect, cleanup, bastion_iam, cleanups = self._run(
+            destroy_results=[True, True],
+            collected={},
+        )
+
+        assert ok is True
+        collect.assert_called_once()
+        cleanup.assert_not_called()
+        bastion_iam.assert_called_once()
+        assert "implicit-log-groups" not in {name for name, _ in cleanups}
+
+    def test_strict_teardown_runs_neither_sweep(self):
+        """The live-validation harness owns fenced log-group deletion and
+        audits IAM itself — strict mode must stay byte-identical."""
+        (ok, _successful, failed), collect, cleanup, bastion_iam, _cleanups = self._run(
+            destroy_results=[True, True],
+            strict=True,
+        )
+
+        assert ok is True and failed == []
+        collect.assert_not_called()
+        cleanup.assert_not_called()
+        bastion_iam.assert_not_called()

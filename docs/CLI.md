@@ -1043,6 +1043,18 @@ gco stacks destroy-all [OPTIONS]
 | `--parallel` | `-p` | Destroy regional stacks in parallel |
 | `--max-workers` | `-w` | Max parallel workers (default: 4) |
 
+After the stacks are gone, `destroy-all` also sweeps the resources
+CloudFormation never modeled, so a full teardown leaves the account
+genuinely clean: the implicit CloudWatch log groups created out-of-band by
+Lambda (`/aws/lambda/<function>`), the EKS control plane
+(`/aws/eks/<cluster>/cluster`), and Container Insights
+(`/aws/containerinsights/<cluster>/...`), plus the ephemeral SSM bastion's
+IAM role and instance profile if a killed tunnel session left them behind.
+Only exact names derived from the destroyed stacks' own resources (captured
+before deletion) are removed, and only for stacks whose deletion succeeded;
+the sweep is best-effort and never fails the destroy. Log groups belonging
+to stacks that failed to delete are left untouched.
+
 #### `gco stacks bootstrap`
 
 Bootstrap CDK in a region. This is run automatically by `deploy` and `deploy-all` when needed, so manual bootstrapping is optional.
