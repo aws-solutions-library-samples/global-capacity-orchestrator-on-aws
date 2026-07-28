@@ -1340,7 +1340,14 @@ Use shared EFS storage (`/mnt/shared`) to pass data between steps.
 
 View cost breakdowns and estimates for GCO resources. Uses AWS Cost Explorer filtered by the `Project: GCO` tag applied to all resources.
 
-**Setup (one-time):** To filter costs by the `Project` tag, you must activate cost allocation tags in your AWS account:
+**Setup (one-time):** To filter costs by the `Project` tag, you must activate cost allocation tags in your AWS account. The CLI can do this for you:
+
+```bash
+gco costs allocation status    # check what is active
+gco costs allocation activate  # activate Project + aws:eks:cluster-name
+```
+
+See [`gco costs allocation`](#gco-costs-allocation) for details. Alternatively, activate manually:
 
 1. Go to the [AWS Billing Console → Cost Allocation Tags](https://us-east-1.console.aws.amazon.com/billing/home#/tags)
 2. Search for the `Project` tag under "User-defined cost allocation tags"
@@ -1353,10 +1360,10 @@ Until the tag is activated, use `--all` to see total account costs:
 gco costs summary --all
 ```
 
-You can also activate the `Environment` and `Owner` tags for more granular filtering in the AWS Cost Explorer console.
+You can also activate the `Environment` and `Owner` tags for more granular filtering (`gco costs allocation activate -t Environment -t Owner`, or in the console).
 
 <details>
-<summary>All <code>gco costs</code> commands (15) — click to expand</summary>
+<summary>All <code>gco costs</code> commands (18) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -1365,6 +1372,9 @@ You can also activate the `Environment` and `Owner` tags for more granular filte
 | [`gco costs trend`](#gco-costs-trend) | Show daily cost trend with a visual bar chart. |
 | [`gco costs workloads`](#gco-costs-workloads) | Estimate costs for currently running workloads (jobs and inference endpoints) based on instance pricing and runtime. |
 | [`gco costs forecast`](#gco-costs-forecast) | Forecast GCO costs for the next N days based on historical spending patterns. |
+| [`gco costs allocation`](#gco-costs-allocation) | Manage the cost allocation tags behind `gco costs` reporting. |
+| [`gco costs allocation status`](#gco-costs-allocation-status) | Show activation status for GCO's cost allocation tag keys. |
+| [`gco costs allocation activate`](#gco-costs-allocation-activate) | Activate GCO's cost allocation tag keys in the billing account. |
 | [`gco costs k8s`](#gco-costs-k8s) | Query Kubernetes allocation costs across regions via Athena ([OpenCost](https://opencost.io/) data). |
 | [`gco costs k8s namespaces`](#gco-costs-k8s-namespaces) | Show Kubernetes cost by namespace across all regions. |
 | [`gco costs k8s regions`](#gco-costs-k8s-regions) | Show Kubernetes allocation cost by deployment region. |
@@ -1499,6 +1509,66 @@ gco costs forecast --days 60
 ```
 
 > **Note:** Cost Explorer needs at least 14 days of historical data to generate forecasts.
+
+#### `gco costs allocation`
+
+Manage the cost allocation tags behind `gco costs` reporting. Every `gco costs` query filters on the `Project` tag, which only sees spend once the tag key is activated as a cost allocation tag in the billing account. The AWS-generated `aws:eks:cluster-name` key adds per-cluster attribution for the EC2 capacity EKS Auto Mode launches outside CloudFormation.
+
+```bash
+gco costs allocation COMMAND [OPTIONS]
+```
+
+In an AWS Organization, activation requires the management (payer) account — member accounts get an access error. Tag keys only become activatable after AWS observes them on billed usage, which can take up to 24 hours after first deployment.
+
+#### `gco costs allocation status`
+
+Show activation status for GCO's cost allocation tag keys: the user-defined `Project` tag and the AWS-generated `aws:eks:cluster-name` tag by default, plus any extra keys passed with `--tag`. Also lists recent backfill requests when any exist.
+
+```bash
+gco costs allocation status [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--tag` | `-t` | Additional tag key to check (repeatable) |
+
+**Examples:**
+
+```bash
+gco costs allocation status
+gco costs allocation status -t Environment -t Owner
+gco --output json costs allocation status
+```
+
+Keys reported as **Not found** have not yet appeared on billed usage (deploy first, then allow up to 24 hours); **Inactive** keys exist and can be activated.
+
+#### `gco costs allocation activate`
+
+Activate GCO's cost allocation tag keys in the billing account. Activates the `Project` tag (user-defined) and `aws:eks:cluster-name` (AWS-generated) by default. Activation is reversible in the Billing console and only affects billing data from now on; pass `--backfill-from` to also re-tag past usage.
+
+```bash
+gco costs allocation activate [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--tag` | `-t` | Additional tag key to activate (repeatable) |
+| `--backfill-from` | | Also re-tag historical usage from this date (YYYY-MM-DD, up to 12 months back; Billing aligns it to a quarter start) |
+| `--yes` | `-y` | Skip the confirmation prompt |
+
+**Examples:**
+
+```bash
+gco costs allocation activate
+gco costs allocation activate --backfill-from 2026-01-01
+gco costs allocation activate -t Environment -y
+```
+
+After activation, allow up to 24 hours before tag data appears in Cost Explorer. Keys that fail with "not found" have not appeared on billed usage yet — deploy first, then retry.
 
 #### `gco costs k8s`
 

@@ -1473,3 +1473,363 @@ class TestEstimateRunningWorkloadsDetailed:
             workloads = tracker.estimate_running_workloads("us-east-1")
 
         assert all(w.name != "done-job" for w in workloads)
+
+
+# =============================================================================
+# Unit Tests - Cost allocation tags
+# =============================================================================
+
+
+def _tracker_with_ce():
+    """Return (tracker, mock_ce) with the boto3 session already stubbed."""
+    tracker = CostTracker()
+    mock_ce = MagicMock()
+    mock_session = MagicMock()
+    mock_session.client.return_value = mock_ce
+    tracker._session = mock_session
+    return tracker, mock_ce
+
+
+class TestCostAllocationTagStatus:
+    """get_cost_allocation_tag_status reports Active/Inactive/NotFound."""
+
+    def test_defaults_cover_project_and_eks_cluster_name(self):
+        from cli.costs import DEFAULT_COST_ALLOCATION_TAG_KEYS
+
+        assert DEFAULT_COST_ALLOCATION_TAG_KEYS == ("Project", "aws:eks:cluster-name")
+
+    def test_reports_found_and_synthesizes_not_found(self):
+        """A key Billing has never seen is absent from the response — it must
+        surface as NotFound instead of silently disappearing."""
+        tracker, mock_ce = _tracker_with_ce()
+        mock_ce.list_cost_allocation_tags.return_value = {
+            "CostAllocationTags": [
+                {
+                    "TagKey": "Project",
+                    "Type": "UserDefined",
+                    "Status": "Active",
+                    "LastUpdatedDate": "2026-07-01T00:00:00Z",
+                    "LastUsedDate": "2026-07-28T00:00:00Z",
+                }
+            ]
+        }
+
+        statuses = tracker.get_cost_allocation_tag_status()
+
+        assert [s["tag_key"] for s in statuses] == ["Project", "aws:eks:cluster-name"]
+        assert statuses[0]["status"] == "Active"
+        assert statuses[0]["type"] == "UserDefined"
+        assert statuses[1]["status"] == "NotFound"
+        kwargs = mock_ce.list_cost_allocation_tags.call_args.kwargs
+        assert kwargs["TagKeys"] == ["Project", "aws:eks:cluster-name"]
+
+    def test_follows_pagination(self):
+        tracker, mock_ce = _tracker_with_ce()
+        mock_ce.list_cost_allocation_tags.side_effect = [
+            {
+                "CostAllocationTags": [
+                    {"TagKey": "Project", "Type": "UserDefined", "Status": "Inactive"}
+                ],
+                "NextToken": "page-2",
+            },
+            {
+                "CostAllocationTags": [
+                    {"TagKey": "aws:eks:cluster-name", "Type": "AWSGenerated", "Status": "Active"}
+                ]
+            },
+        ]
+
+        statuses = tracker.get_cost_allocation_tag_status()
+
+        assert mock_ce.list_cost_allocation_tags.call_count == 2
+        second_kwargs = mock_ce.list_cost_allocation_tags.call_args_list[1].kwargs
+        assert second_kwargs["NextToken"] == "page-2"
+        assert statuses[0]["status"] == "Inactive"
+        assert statuses[1]["status"] == "Active"
+
+    def test_batches_more_than_twenty_keys(self):
+        """The TagKeys filter caps at 20 entries; larger requests must chunk."""
+        tracker, mock_ce = _tracker_with_ce()
+        mock_ce.list_cost_allocation_tags.return_value = {"CostAllocationTags": []}
+        keys = [f"key-{i}" for i in range(25)]
+
+        statuses = tracker.get_cost_allocation_tag_status(keys)
+
+        assert mock_ce.list_cost_allocation_tags.call_count == 2
+        first = mock_ce.list_cost_allocation_tags.call_args_list[0].kwargs["TagKeys"]
+        second = mock_ce.list_cost_allocation_tags.call_args_list[1].kwargs["TagKeys"]
+        assert len(first) == 20 and len(second) == 5
+        assert len(statuses) == 25
+        assert all(s["status"] == "NotFound" for s in statuses)
+
+
+class TestActivateCostAllocationTags:
+    """activate_cost_allocation_tags splits per-key successes and errors."""
+
+    def test_all_keys_activate(self):
+        tracker, mock_ce = _tracker_with_ce()
+        mock_ce.update_cost_allocation_tags_status.return_value = {"Errors": []}
+
+        result = tracker.activate_cost_allocation_tags()
+
+        assert result == {"activated": ["Project", "aws:eks:cluster-name"], "errors": []}
+        entries = mock_ce.update_cost_allocation_tags_status.call_args.kwargs[
+            "CostAllocationTagsStatus"
+        ]
+        assert entries == [
+            {"TagKey": "Project", "Status": "Active"},
+            {"TagKey": "aws:eks:cluster-name", "Status": "Active"},
+        ]
+
+    def test_per_key_error_does_not_mask_other_successes(self):
+        """One not-yet-discovered key must not hide that the other activated."""
+        tracker, mock_ce = _tracker_with_ce()
+        mock_ce.update_cost_allocation_tags_status.return_value = {
+            "Errors": [
+                {
+                    "TagKey": "aws:eks:cluster-name",
+                    "Code": "TagKeysNotFoundException",
+                    "Message": "Failed to update Cost Allocation Tag: aws:eks:cluster-name",
+                }
+            ]
+        }
+
+        result = tracker.activate_cost_allocation_tags()
+
+        assert result["activated"] == ["Project"]
+        assert result["errors"] == [
+            {
+                "tag_key": "aws:eks:cluster-name",
+                "code": "TagKeysNotFoundException",
+                "message": "Failed to update Cost Allocation Tag: aws:eks:cluster-name",
+            }
+        ]
+
+    def test_batches_more_than_twenty_keys(self):
+        """UpdateCostAllocationTagsStatus caps at 20 entries per call."""
+        tracker, mock_ce = _tracker_with_ce()
+        mock_ce.update_cost_allocation_tags_status.return_value = {"Errors": []}
+        keys = [f"key-{i}" for i in range(25)]
+
+        result = tracker.activate_cost_allocation_tags(keys)
+
+        assert mock_ce.update_cost_allocation_tags_status.call_count == 2
+        first = mock_ce.update_cost_allocation_tags_status.call_args_list[0].kwargs[
+            "CostAllocationTagsStatus"
+        ]
+        second = mock_ce.update_cost_allocation_tags_status.call_args_list[1].kwargs[
+            "CostAllocationTagsStatus"
+        ]
+        assert len(first) == 20 and len(second) == 5
+        assert result["activated"] == keys
+
+
+class TestCostAllocationBackfill:
+    """Backfill start + history wrappers."""
+
+    def test_start_returns_normalized_request(self):
+        tracker, mock_ce = _tracker_with_ce()
+        mock_ce.start_cost_allocation_tag_backfill.return_value = {
+            "BackfillRequest": {
+                "BackfillFrom": "2026-01-01T00:00:00Z",
+                "RequestedAt": "2026-07-28T12:00:00Z",
+                "BackfillStatus": "PROCESSING",
+            }
+        }
+
+        result = tracker.start_cost_allocation_tag_backfill("2026-01-01T00:00:00Z")
+
+        assert result["backfill_from"] == "2026-01-01T00:00:00Z"
+        assert result["status"] == "PROCESSING"
+        assert result["completed_at"] == ""
+        mock_ce.start_cost_allocation_tag_backfill.assert_called_once_with(
+            BackfillFrom="2026-01-01T00:00:00Z"
+        )
+
+    def test_history_follows_pagination(self):
+        tracker, mock_ce = _tracker_with_ce()
+        mock_ce.list_cost_allocation_tag_backfill_history.side_effect = [
+            {
+                "BackfillRequests": [
+                    {
+                        "BackfillFrom": "2026-01-01T00:00:00Z",
+                        "RequestedAt": "2026-07-28T12:00:00Z",
+                        "CompletedAt": "2026-07-28T13:00:00Z",
+                        "BackfillStatus": "SUCCEEDED",
+                    }
+                ],
+                "NextToken": "more",
+            },
+            {
+                "BackfillRequests": [
+                    {
+                        "BackfillFrom": "2025-10-01T00:00:00Z",
+                        "RequestedAt": "2026-01-02T00:00:00Z",
+                        "BackfillStatus": "FAILED",
+                    }
+                ]
+            },
+        ]
+
+        history = tracker.get_cost_allocation_backfill_history()
+
+        assert len(history) == 2
+        assert history[0]["status"] == "SUCCEEDED"
+        assert history[1]["status"] == "FAILED"
+        assert mock_ce.list_cost_allocation_tag_backfill_history.call_count == 2
+
+
+class TestCostsAllocationCLI:
+    """CLI wiring for `gco costs allocation status|activate`."""
+
+    @patch("cli.costs.boto3.Session")
+    def test_status_table_flags_not_found_and_split_cost_guidance(self, mock_session_cls):
+        from cli.main import cli
+
+        mock_ce = MagicMock()
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_ce
+        mock_session_cls.return_value = mock_session
+        mock_ce.list_cost_allocation_tags.return_value = {
+            "CostAllocationTags": [{"TagKey": "Project", "Type": "UserDefined", "Status": "Active"}]
+        }
+        mock_ce.list_cost_allocation_tag_backfill_history.return_value = {"BackfillRequests": []}
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["costs", "allocation", "status"])
+
+        assert result.exit_code == 0
+        assert "Project" in result.output
+        assert "aws:eks:cluster-name" in result.output
+        assert "NotFound" in result.output
+        assert "24 hours" in result.output
+        assert "Split cost allocation data" in result.output
+        assert "console-only" in result.output
+
+    @patch("cli.costs.boto3.Session")
+    def test_status_extra_tags_are_queried(self, mock_session_cls):
+        from cli.main import cli
+
+        mock_ce = MagicMock()
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_ce
+        mock_session_cls.return_value = mock_session
+        mock_ce.list_cost_allocation_tags.return_value = {"CostAllocationTags": []}
+        mock_ce.list_cost_allocation_tag_backfill_history.return_value = {"BackfillRequests": []}
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["costs", "allocation", "status", "-t", "Environment"])
+
+        assert result.exit_code == 0
+        assert "Environment" in result.output
+        kwargs = mock_ce.list_cost_allocation_tags.call_args.kwargs
+        assert kwargs["TagKeys"] == ["Project", "aws:eks:cluster-name", "Environment"]
+
+    @patch("cli.costs.boto3.Session")
+    def test_activate_requires_confirmation(self, mock_session_cls):
+        from cli.main import cli
+
+        mock_ce = MagicMock()
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_ce
+        mock_session_cls.return_value = mock_session
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["costs", "allocation", "activate"], input="n\n")
+
+        assert result.exit_code != 0
+        mock_ce.update_cost_allocation_tags_status.assert_not_called()
+
+    @patch("cli.costs.boto3.Session")
+    def test_activate_yes_activates_defaults(self, mock_session_cls):
+        from cli.main import cli
+
+        mock_ce = MagicMock()
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_ce
+        mock_session_cls.return_value = mock_session
+        mock_ce.update_cost_allocation_tags_status.return_value = {"Errors": []}
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["costs", "allocation", "activate", "-y"])
+
+        assert result.exit_code == 0
+        assert "Project: active" in result.output
+        assert "aws:eks:cluster-name: active" in result.output
+        assert "24 hours" in result.output
+        mock_ce.start_cost_allocation_tag_backfill.assert_not_called()
+
+    @patch("cli.costs.boto3.Session")
+    def test_activate_surfaces_per_key_error_and_exits_nonzero(self, mock_session_cls):
+        from cli.main import cli
+
+        mock_ce = MagicMock()
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_ce
+        mock_session_cls.return_value = mock_session
+        mock_ce.update_cost_allocation_tags_status.return_value = {
+            "Errors": [
+                {
+                    "TagKey": "aws:eks:cluster-name",
+                    "Code": "TagKeysNotFoundException",
+                    "Message": "Failed to update Cost Allocation Tag: aws:eks:cluster-name",
+                }
+            ]
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["costs", "allocation", "activate", "-y"])
+
+        assert result.exit_code == 1
+        assert "Project: active" in result.output
+        assert "TagKeysNotFoundException" in result.output
+        assert "deploy first, then retry" in result.output
+
+    @patch("cli.costs.boto3.Session")
+    def test_activate_backfill_date_is_normalized_to_timestamp(self, mock_session_cls):
+        from cli.main import cli
+
+        mock_ce = MagicMock()
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_ce
+        mock_session_cls.return_value = mock_session
+        mock_ce.update_cost_allocation_tags_status.return_value = {"Errors": []}
+        mock_ce.start_cost_allocation_tag_backfill.return_value = {
+            "BackfillRequest": {
+                "BackfillFrom": "2026-01-01T00:00:00Z",
+                "RequestedAt": "2026-07-28T12:00:00Z",
+                "BackfillStatus": "PROCESSING",
+            }
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["costs", "allocation", "activate", "-y", "--backfill-from", "2026-01-01"],
+        )
+
+        assert result.exit_code == 0
+        mock_ce.start_cost_allocation_tag_backfill.assert_called_once_with(
+            BackfillFrom="2026-01-01T00:00:00Z"
+        )
+        assert "Backfill from 2026-01-01" in result.output
+        assert "PROCESSING" in result.output
+
+    @patch("cli.costs.boto3.Session")
+    def test_status_json_output(self, mock_session_cls):
+        from cli.main import cli
+
+        mock_ce = MagicMock()
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_ce
+        mock_session_cls.return_value = mock_session
+        mock_ce.list_cost_allocation_tags.return_value = {"CostAllocationTags": []}
+        mock_ce.list_cost_allocation_tag_backfill_history.return_value = {"BackfillRequests": []}
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["-o", "json", "costs", "allocation", "status"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert [t["tag_key"] for t in payload["tags"]] == ["Project", "aws:eks:cluster-name"]
+        assert "split_cost_allocation_data" in payload

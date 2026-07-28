@@ -1147,13 +1147,23 @@ GCO includes built-in cost visibility via the `gco costs` CLI commands. These us
 
 ### Activating Cost Allocation Tags
 
-Cost Explorer requires tags to be explicitly activated before they can be used for filtering. This is a one-time setup per AWS account:
+Cost Explorer requires tags to be explicitly activated before they can be used for filtering. This is a one-time setup per AWS account. The CLI handles it:
+
+```bash
+gco costs allocation status                        # check activation state
+gco costs allocation activate                      # Project + aws:eks:cluster-name
+gco costs allocation activate -t Environment -t Owner  # extra keys
+```
+
+Or activate manually in the console:
 
 1. Open the [AWS Billing Console → Cost Allocation Tags](https://us-east-1.console.aws.amazon.com/billing/home#/tags)
 2. Under "User-defined cost allocation tags", search for `Project`
 3. Select the `Project` tag and click "Activate"
 4. Optionally also activate `Environment` and `Owner` for more granular filtering
 5. Wait ~24 hours for the tag data to appear in Cost Explorer
+
+In an AWS Organization, activation (CLI or console) requires the management (payer) account. See [COST_MONITORING.md — Billing-side attribution](COST_MONITORING.md#billing-side-attribution-tags-and-the-cur) for the AWS-generated `aws:eks:cluster-name` tag and split cost allocation data.
 
 ### Verifying Cost Tracking
 

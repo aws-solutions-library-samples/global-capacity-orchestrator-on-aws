@@ -68,7 +68,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server exposes 125 tools by default (up to 165 with all flags enabled) across the full lifecycle of accelerated-workload management:
+The MCP server exposes 134 tools by default (up to 174 with all flags enabled) across the full lifecycle of accelerated-workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -670,6 +670,15 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `cost_trend` | Daily cost trend | safe | — |
 | `cost_workloads` | Estimate accumulated and hourly cost for running workloads | safe | — |
 | `cost_forecast` | Forecast costs for the next N days | safe | — |
+| `cost_allocation_status` | Activation status of GCO's cost allocation tag keys | safe | — |
+| `cost_allocation_activate` | Activate cost allocation tag keys (reversible billing toggle) | low-risk | — |
+| `cost_k8s_namespaces` | Kubernetes cost by namespace across regions ([Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html)/[OpenCost](https://opencost.io/)) | safe | — |
+| `cost_k8s_regions` | Kubernetes allocation cost by deployment region | safe | — |
+| `cost_k8s_trend` | Kubernetes cost over time (daily or hourly buckets) | safe | — |
+| `cost_k8s_top` | Top-N Kubernetes spenders by namespace, region, or cluster | safe | — |
+| `cost_report_status` | Cost monitoring health, including OpenCost status | safe | — |
+| `cost_report_list` | List recent cost report objects in the report bucket | safe | — |
+| `cost_report_generate` | Generate an ad-hoc OpenCost allocation report | low-risk | — |
 
 ### Infrastructure
 

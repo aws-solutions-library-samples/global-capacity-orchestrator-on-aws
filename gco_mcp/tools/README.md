@@ -13,8 +13,8 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 125 tools; with every flag enabled the
-ceiling is 165. See [Feature Flags](../README.md#feature-flags) for the
+default registration the server exposes 134 tools; with every flag enabled the
+ceiling is 174. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
@@ -22,7 +22,7 @@ flag-to-tool mapping.
 | `jobs.py` | 13 | `list_jobs`, `submit_job_sqs`, `submit_job_api`, `get_job`, `get_job_logs`, `get_job_events`, `get_job_pods`, `get_pod_logs`, `get_job_metrics`, `retry_job`, `delete_job` (gated), `cluster_health`, `queue_status` |
 | `capacity.py` | 18 | `check_capacity`, `instance_info`, `recommend_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `find_capacity_blocks`, `find_capacity_reservations`, `capacity_history_show`, `capacity_history_stats`, `capacity_history_patterns`, `capacity_predict`, `reserve_capacity` (gated), `create_reservation` (gated), `cancel_reservation` (gated) |
 | `inference.py` | 20 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `configure_mooncake_store`, `mooncake_topology_status`, `populate_kv_cache` |
-| `costs.py` | 5 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast`, `cost_workloads` |
+| `costs.py` | 14 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast`, `cost_workloads`, `cost_allocation_status`, `cost_allocation_activate`, `cost_k8s_namespaces`, `cost_k8s_regions`, `cost_k8s_trend`, `cost_k8s_top`, `cost_report_status`, `cost_report_list`, `cost_report_generate` |
 | `stacks.py` | 22 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `addons_status`, `valkey_status`, `aurora_status`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `addons_install` (gated), `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated) |
 | `storage.py` | 7 | `list_storage_contents`, `list_file_systems`, `list_storage_buckets`, `files_get`, `files_access_points`, `upload_to_regional_bucket` (gated by `GCO_ENABLE_MODEL_UPLOAD`), `sync_storage_bucket` (gated by `GCO_ENABLE_LOCAL_STORAGE_SYNC`) |
 | `models.py` | 4 | `list_models`, `get_model_uri`, `models_upload` (gated), `delete_model` (gated) |
@@ -117,8 +117,17 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
+| `cost_allocation_activate` | `gco costs allocation activate` — activate cost allocation tag keys (reversible billing toggle). |
+| `cost_allocation_status` | `gco costs allocation status` — activation status of GCO's cost allocation tag keys. |
 | `cost_by_region` | Get cost breakdown by AWS region. |
 | `cost_forecast` | Forecast GCO costs for the next N days. |
+| `cost_k8s_namespaces` | `gco costs k8s namespaces` — Kubernetes cost by namespace across regions (Athena/OpenCost). |
+| `cost_k8s_regions` | `gco costs k8s regions` — Kubernetes allocation cost by deployment region. |
+| `cost_k8s_top` | `gco costs k8s top` — top-N Kubernetes spenders by namespace, region, or cluster. |
+| `cost_k8s_trend` | `gco costs k8s trend` — Kubernetes cost over time (daily or hourly buckets). |
+| `cost_report_generate` | `gco costs report generate` — generate an ad-hoc OpenCost allocation report. |
+| `cost_report_list` | `gco costs report list` — list recent cost report objects in the report bucket. |
+| `cost_report_status` | `gco costs report status` — cost monitoring health, including OpenCost status. |
 | `cost_summary` | Get total GCO spend broken down by AWS service. |
 | `cost_trend` | Get daily cost trend. |
 | `cost_workloads` | Estimate accumulated and hourly cost for running workloads. |

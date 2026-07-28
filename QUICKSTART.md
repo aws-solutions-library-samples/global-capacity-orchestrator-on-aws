@@ -356,7 +356,7 @@ The `inference_monitor` in each target region automatically creates the Kubernet
 
 ### MCP Server (for Cursor / Kiro / LLM integration)
 
-GCO includes an MCP server with 125 tools by default (up to 165 with feature flags) spanning the CLI and project-aware resources. The dev container already has the `[mcp]` extras installed, so all you need is the client-side config. The most portable form passes an absolute path in `args` (works in Cursor, Kiro, Claude Desktop, etc.):
+GCO includes an MCP server with 134 tools by default (up to 174 with feature flags) spanning the CLI and project-aware resources. The dev container already has the `[mcp]` extras installed, so all you need is the client-side config. The most portable form passes an absolute path in `args` (works in Cursor, Kiro, Claude Desktop, etc.):
 
 ```jsonc
 // MCP client config file (for example, Cursor's ~/.cursor/mcp.json)

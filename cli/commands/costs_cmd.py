@@ -321,6 +321,201 @@ def costs_forecast(config: Any, days: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# allocation subgroup — the billing-account switches behind the queries above
+# ---------------------------------------------------------------------------
+
+
+_SPLIT_COST_GUIDANCE = (
+    "Split cost allocation data (per-pod/namespace EC2 allocation in the CUR) "
+    "is a separate, console-only opt-in: Billing and Cost Management -> Cost "
+    "Management preferences -> Split cost allocation data -> Amazon EKS. It "
+    "has no public API, requires the payer account, and surfaces only in "
+    "CUR/CUR 2.0 exports (not Cost Explorer). See docs/COST_MONITORING.md."
+)
+
+
+@costs.group("allocation")
+@pass_config
+def costs_allocation(config: Any) -> None:
+    """Manage the cost allocation tags behind `gco costs` reporting.
+
+    Every `gco costs` query filters on the Project tag, which only sees
+    spend once the tag key is activated as a cost allocation tag in the
+    billing account. The AWS-generated aws:eks:cluster-name key adds
+    per-cluster attribution for the EC2 capacity EKS Auto Mode launches
+    outside CloudFormation. In an AWS Organization, activation requires
+    the management (payer) account.
+    """
+    pass
+
+
+@costs_allocation.command("status")
+@click.option(
+    "--tag",
+    "-t",
+    "extra_tags",
+    multiple=True,
+    help="Additional tag key to check (repeatable)",
+)
+@pass_config
+def costs_allocation_status(config: Any, extra_tags: Any) -> None:
+    """Show activation status for GCO's cost allocation tag keys.
+
+    Examples:
+        gco costs allocation status
+        gco costs allocation status -t Environment -t Owner
+    """
+    from ..costs import DEFAULT_COST_ALLOCATION_TAG_KEYS, get_cost_tracker
+
+    formatter = get_output_formatter(config)
+    keys = list(DEFAULT_COST_ALLOCATION_TAG_KEYS) + [
+        key for key in extra_tags if key not in DEFAULT_COST_ALLOCATION_TAG_KEYS
+    ]
+    try:
+        tracker = get_cost_tracker(config)
+        statuses = tracker.get_cost_allocation_tag_status(keys)
+        backfill_note: str | None = None
+        try:
+            backfills = tracker.get_cost_allocation_backfill_history()
+        except Exception as exc:  # noqa: BLE001 - history is advisory only
+            backfills = []
+            backfill_note = f"backfill history unavailable: {exc}"
+
+        if config.output_format != "table":
+            formatter.print(
+                {
+                    "tags": statuses,
+                    "backfills": backfills,
+                    "split_cost_allocation_data": _SPLIT_COST_GUIDANCE,
+                }
+            )
+            return
+
+        print("\n  Cost Allocation Tag Status")
+        print("  " + "-" * 78)
+        print(f"  {'TAG KEY':<28} {'TYPE':<14} {'STATUS':<10} {'LAST USED':<20}")
+        print("  " + "-" * 78)
+        for tag in statuses:
+            print(
+                f"  {tag['tag_key']:<28} {tag['type']:<14} {tag['status']:<10} "
+                f"{tag['last_used'][:19]:<20}"
+            )
+        print("  " + "-" * 78)
+        if any(tag["status"] == "NotFound" for tag in statuses):
+            formatter.print_info(
+                "NotFound: Billing has not seen this key on billing data yet. Keys "
+                "appear up to 24 hours after first use on a resource that accrues "
+                "cost, and only then can they be activated."
+            )
+        if any(tag["status"] == "Inactive" for tag in statuses):
+            formatter.print_info(
+                "Inactive: run `gco costs allocation activate` from the management "
+                "(payer) account to start tagging billing data with this key."
+            )
+        if backfill_note:
+            formatter.print_info(backfill_note)
+        elif backfills:
+            latest = backfills[0]
+            formatter.print_info(
+                f"Latest backfill: from {latest['backfill_from'][:10]} "
+                f"requested {latest['requested_at'][:19]} — {latest['status']}"
+            )
+        formatter.print_info(_SPLIT_COST_GUIDANCE)
+        print()
+    except Exception as e:
+        formatter.print_error(f"Failed to get cost allocation tag status: {e}")
+        sys.exit(1)
+
+
+@costs_allocation.command("activate")
+@click.option(
+    "--tag",
+    "-t",
+    "extra_tags",
+    multiple=True,
+    help="Additional tag key to activate (repeatable)",
+)
+@click.option(
+    "--backfill-from",
+    help=(
+        "Also re-tag historical usage from this date (YYYY-MM-DD, up to 12 "
+        "months back; Billing aligns it to a quarter start)"
+    ),
+)
+@click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip the confirmation prompt")
+@pass_config
+def costs_allocation_activate(
+    config: Any, extra_tags: Any, backfill_from: Any, assume_yes: bool
+) -> None:
+    """Activate GCO's cost allocation tag keys in the billing account.
+
+    Activates the Project tag (user-defined) and aws:eks:cluster-name
+    (AWS-generated) by default. Activation is reversible in the Billing
+    console and only affects billing data from now on; pass
+    --backfill-from to also re-tag past usage.
+
+    Examples:
+        gco costs allocation activate
+        gco costs allocation activate --backfill-from 2026-01-01
+        gco costs allocation activate -t Environment -y
+    """
+    from ..costs import DEFAULT_COST_ALLOCATION_TAG_KEYS, get_cost_tracker
+
+    formatter = get_output_formatter(config)
+    keys = list(DEFAULT_COST_ALLOCATION_TAG_KEYS) + [
+        key for key in extra_tags if key not in DEFAULT_COST_ALLOCATION_TAG_KEYS
+    ]
+
+    if not assume_yes:
+        click.confirm(
+            f"Activate cost allocation for {', '.join(keys)} in this billing "
+            "account (management/payer account required in an Organization)?",
+            abort=True,
+        )
+
+    try:
+        tracker = get_cost_tracker(config)
+        result = tracker.activate_cost_allocation_tags(keys)
+        backfill = None
+        if backfill_from and result["activated"]:
+            backfill = tracker.start_cost_allocation_tag_backfill(
+                f"{backfill_from}T00:00:00Z" if "T" not in backfill_from else backfill_from
+            )
+
+        if config.output_format != "table":
+            formatter.print({**result, "backfill": backfill})
+            if result["errors"]:
+                sys.exit(1)
+            return
+
+        for key in result["activated"]:
+            formatter.print_success(f"{key}: active")
+        for error in result["errors"]:
+            formatter.print_error(f"{error['tag_key']}: {error['code']} — {error['message']}")
+            if error["code"] == "TagKeysNotFoundException":
+                formatter.print_info(
+                    f"  {error['tag_key']} has not appeared on billing data yet. Tag "
+                    "keys become activatable up to 24 hours after first use on a "
+                    "resource that accrues cost; deploy first, then retry."
+                )
+        if backfill:
+            formatter.print_success(
+                f"Backfill from {backfill['backfill_from'][:10]} requested — "
+                f"status {backfill['status']}"
+            )
+        elif backfill_from and not result["activated"]:
+            formatter.print_info("Backfill skipped: no tag keys were activated.")
+        formatter.print_info(
+            "Newly activated keys start appearing in Cost Explorer within ~24 hours."
+        )
+        if result["errors"]:
+            sys.exit(1)
+    except Exception as e:
+        formatter.print_error(f"Failed to activate cost allocation tags: {e}")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # k8s subgroup — Athena queries over the OpenCost allocation reports
 # ---------------------------------------------------------------------------
 

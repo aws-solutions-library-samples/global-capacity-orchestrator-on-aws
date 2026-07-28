@@ -42,6 +42,7 @@ so disabling observability switches the whole cost pipeline off with it.
 - [Cost reports in S3](#cost-reports-in-s3)
 - [Cross-region analytics with Athena](#cross-region-analytics-with-athena)
 - [Ad-hoc reports and the cost API](#ad-hoc-reports-and-the-cost-api)
+- [Billing-side attribution: tags and the CUR](#billing-side-attribution-tags-and-the-cur)
 - [Spot price-aware scheduling](#spot-price-aware-scheduling)
 - [Release validation](#release-validation)
 - [Troubleshooting](#troubleshooting)
@@ -291,6 +292,75 @@ in other partitions it is always available). Without `--region` the request
 rides the global API to the nearest healthy region, and the response names
 the region that answered. Endpoint details and response shapes:
 [API.md — Cost Reporting](API.md#cost-reporting).
+
+## Billing-side attribution: tags and the CUR
+
+OpenCost allocates **list-price** cost from in-cluster usage in near real
+time. AWS Billing offers two complements that attribute your **actual billed
+spend** — discounts, Savings Plans, and spot pricing included:
+
+### Cost allocation tags
+
+Every `gco costs` Cost Explorer query filters on the `Project` tag, which
+only matches spend after the tag key is activated as a cost allocation tag
+in the billing account:
+
+```bash
+gco costs allocation status    # activation state of GCO's tag keys
+gco costs allocation activate  # activate Project + aws:eks:cluster-name
+```
+
+By default both the user-defined `Project` tag (stamped on every
+CloudFormation-managed resource) and the AWS-generated
+`aws:eks:cluster-name` tag are activated. The AWS-generated key matters for
+GPU spend: EKS Auto Mode launches EC2 capacity outside CloudFormation, so
+those instances never carry `Project` — but AWS stamps them with
+`aws:eks:cluster-name`, giving per-cluster attribution with zero manifest
+changes. Group by it in Cost Explorer or the CUR to split spend by cluster.
+
+Operational notes:
+
+- **Management account.** In an AWS Organization, only the management
+  (payer) account can activate cost allocation tags. Member accounts get an
+  access error.
+- **Latency.** A tag key becomes activatable only after AWS observes it on
+  billed usage — up to 24 hours after first deployment. After activation,
+  allow up to another 24 hours before tagged data appears in Cost Explorer.
+  `gco costs allocation status` reports keys AWS has not seen yet as
+  *Not found*.
+- **Backfill.** Activation affects billing data from that point forward.
+  `gco costs allocation activate --backfill-from 2026-01-01` also re-tags
+  historical usage (up to 12 months back; Billing aligns the date to a
+  quarter start, and one backfill can run at a time). Status shows recent
+  backfill requests.
+- Extra keys (for example `Environment`, `Owner`) activate with repeatable
+  `-t/--tag` options on either command.
+
+### Split cost allocation data
+
+[Split cost allocation data](https://docs.aws.amazon.com/cur/latest/userguide/split-cost-allocation-data.html)
+takes billing-grade attribution one level deeper: AWS splits each EC2
+instance's billed cost across the **pods** that ran on it and writes the
+per-pod rows into the [Cost and Usage Report](https://docs.aws.amazon.com/cur/latest/userguide/what-is-cur.html)
+(CUR / CUR 2.0) with namespace, workload, and cluster dimensions.
+
+There is no public API for enabling it — it is a console-only billing
+preference (`gco costs allocation status` prints the same pointer):
+
+1. Open the [Billing and Cost Management console → Cost management preferences](https://console.aws.amazon.com/costmanagement/home#/settings)
+   in the management account.
+2. Enable **Split cost allocation data**, choosing the metrics source:
+   resource *requests* only, or usage-based splitting via Amazon Managed
+   Service for Prometheus or CloudWatch Container Insights.
+3. Add the split-cost columns to a CUR 2.0 export (Data Exports) if you do
+   not already have one.
+
+The per-pod rows land **only in the CUR** — they never appear in Cost
+Explorer or `gco costs` output. Query them with Athena over your CUR export.
+Think of it as the billing-grade counterpart to the OpenCost pipeline above:
+OpenCost answers "what is this namespace costing right now at list price",
+split cost allocation data answers "what did this namespace actually cost on
+the invoice".
 
 ## Spot price-aware scheduling
 

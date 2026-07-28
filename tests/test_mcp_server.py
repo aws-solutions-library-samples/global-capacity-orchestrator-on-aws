@@ -172,13 +172,14 @@ class TestToolRegistration:
 
     def test_tool_count(self):
         tools = asyncio.run(run_mcp.mcp._list_tools())
-        # The default registry intentionally contains 125 read-only or low-risk
-        # tools. Optional families add 40 more when every flag is enabled:
+        # The default registry intentionally contains 134 read-only or low-risk
+        # tools (125 before the cost allocation/k8s/report family added 9).
+        # Optional families add 40 more when every flag is enabled:
         # capacity purchase (2), image publish (3), destructive operations (15),
         # model upload (2), infrastructure deploy (4), infrastructure destroy
         # (2), local metrics (1), semantic progress (1), local storage sync (1),
-        # and Mission (9). The all-flags ceiling is therefore 165.
-        base_count = 125
+        # and Mission (9). The all-flags ceiling is therefore 174.
+        base_count = 134
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -268,12 +269,23 @@ class TestToolRegistration:
             "configure_mooncake_store",
             "mooncake_topology_status",
             "populate_kv_cache",
-            # ── Cost tracking (all read-only) ──
+            # ── Cost tracking ──
+            # Read-only
             "cost_summary",
             "cost_by_region",
             "cost_trend",
             "cost_forecast",
             "cost_workloads",
+            "cost_allocation_status",
+            "cost_k8s_namespaces",
+            "cost_k8s_regions",
+            "cost_k8s_trend",
+            "cost_k8s_top",
+            "cost_report_status",
+            "cost_report_list",
+            # Mutating (low-risk: reversible billing toggle / S3 report write)
+            "cost_allocation_activate",
+            "cost_report_generate",
             # ── Infrastructure / stacks ──
             # Read-only
             "list_stacks",
@@ -1098,6 +1110,107 @@ class TestCostTools:
             cmd = mock.call_args[0][0]
             assert "forecast" in cmd
             assert "60" in cmd
+
+    def test_cost_allocation_status(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.cost_allocation_status(extra_tags=["Environment"])
+            cmd = mock.call_args[0][0]
+            assert "allocation" in cmd
+            assert "status" in cmd
+            assert cmd[cmd.index("-t") : cmd.index("-t") + 2] == ["-t", "Environment"]
+
+    def test_cost_allocation_activate_defaults(self):
+        """The tool always passes -y — the MCP call is the confirmation."""
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.cost_allocation_activate()
+            cmd = mock.call_args[0][0]
+            assert "allocation" in cmd
+            assert "activate" in cmd
+            assert "-y" in cmd
+            assert "--backfill-from" not in cmd
+
+    def test_cost_allocation_activate_backfill(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.cost_allocation_activate(backfill_from="2026-01-01")
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("--backfill-from") : cmd.index("--backfill-from") + 2] == [
+                "--backfill-from",
+                "2026-01-01",
+            ]
+
+    def test_cost_k8s_namespaces(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.cost_k8s_namespaces(days=30, region="us-east-1")
+            cmd = mock.call_args[0][0]
+            assert "k8s" in cmd
+            assert "namespaces" in cmd
+            assert "30" in cmd
+            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
+
+    def test_cost_k8s_regions(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.cost_k8s_regions(days=30)
+            cmd = mock.call_args[0][0]
+            assert "k8s" in cmd
+            assert "regions" in cmd
+            assert "30" in cmd
+
+    def test_cost_k8s_trend(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.cost_k8s_trend(days=2, granularity="hourly", namespace="gco-jobs")
+            cmd = mock.call_args[0][0]
+            assert "trend" in cmd
+            assert cmd[cmd.index("--granularity") : cmd.index("--granularity") + 2] == [
+                "--granularity",
+                "hourly",
+            ]
+            assert cmd[cmd.index("-n") : cmd.index("-n") + 2] == ["-n", "gco-jobs"]
+
+    def test_cost_k8s_top(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.cost_k8s_top(limit=5, by="region", days=30)
+            cmd = mock.call_args[0][0]
+            assert "top" in cmd
+            assert cmd[cmd.index("--by") : cmd.index("--by") + 2] == ["--by", "region"]
+            assert cmd[cmd.index("-n") : cmd.index("-n") + 2] == ["-n", "5"]
+
+    def test_cost_report_status(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.cost_report_status(region="us-east-1")
+            cmd = mock.call_args[0][0]
+            assert "report" in cmd
+            assert "status" in cmd
+            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
+
+    def test_cost_report_list(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.cost_report_list(adhoc=True, limit=50)
+            cmd = mock.call_args[0][0]
+            assert "report" in cmd
+            assert "list" in cmd
+            assert "--adhoc" in cmd
+            assert cmd[cmd.index("-l") : cmd.index("-l") + 2] == ["-l", "50"]
+
+    def test_cost_report_generate(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.cost_report_generate(region="us-east-1", window_hours=48)
+            cmd = mock.call_args[0][0]
+            assert "generate" in cmd
+            assert cmd[cmd.index("--window-hours") : cmd.index("--window-hours") + 2] == [
+                "--window-hours",
+                "48",
+            ]
+            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
 
 
 class TestInfraTools:
