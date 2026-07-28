@@ -768,6 +768,55 @@ EOF
     [ -z "$output" ]
 }
 
+# ── extract_build_system_pins ───────────────────────────────────────────────
+
+@test "extract_build_system_pins: the real pyproject pins one exact setuptools" {
+    # Policy lock for the repo itself: [build-system] requires must be
+    # exactly one entry — setuptools — with an exact ==X.Y.Z pin (the
+    # version resolved inside pip's build isolation must not float).
+    # ``wheel`` left the list when the pin landed: setuptools >= 70.1
+    # vendors its own wheel support and its docs say not to declare it.
+    run extract_build_system_pins "pyproject.toml"
+    [ "$status" -eq 0 ]
+    count="$(echo "$output" | grep -c .)"
+    [ "$count" -eq 1 ]
+    [[ "$output" =~ ^setuptools\|[0-9]+\.[0-9]+(\.[0-9]+)?\|setuptools==[0-9] ]]
+    ! [[ "$output" == *"wheel"* ]]
+}
+
+@test "extract_build_system_pins: exact pins carry a version, ranges do not" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+[build-system]
+requires = ["setuptools>=77.0.0", "wheel", "Some_Pkg==1.2", "hatchling[extra]==2.0.0"]
+build-backend = "setuptools.build_meta"
+EOF
+    run extract_build_system_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    # A range keeps its raw text but gets no version field.
+    [[ "$output" == *"setuptools||setuptools>=77.0.0"* ]]
+    # A bare name is not an exact pin either.
+    [[ "$output" == *"wheel||wheel"* ]]
+    # An exact pin is PEP-503 normalised and carries its version.
+    [[ "$output" == *"some-pkg|1.2|Some_Pkg==1.2"* ]]
+    # Extras make the resolved artifact set non-obvious; treat as non-exact.
+    [[ "$output" == *"hatchling||hatchling[extra]==2.0.0"* ]]
+    rm -f "$tmpfile"
+}
+
+@test "extract_build_system_pins: returns empty for missing or unparseable file" {
+    run extract_build_system_pins "/nonexistent/pyproject.toml"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+
+    tmpfile="$(mktemp)"
+    echo "[[[not toml" > "$tmpfile"
+    run extract_build_system_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+}
+
 # ── extract_constant_value ──────────────────────────────────────────────────
 
 @test "extract_constant_value: reads LAMBDA_PYTHON_RUNTIME from real constants.py" {

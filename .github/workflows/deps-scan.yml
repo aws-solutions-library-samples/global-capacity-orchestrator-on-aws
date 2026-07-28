@@ -6,7 +6,9 @@
 # `dependency-scan:monthly` from the retired GitLab pipeline.
 #
 # Checks for outdated versions of:
-#   - Python packages pinned in pyproject.toml
+#   - Python packages pinned in pyproject.toml, including the exact-pinned
+#     [build-system] build backend (resolved by pip inside build isolation,
+#     so it is invisible to pip list --outdated)
 #   - Docker images referenced from .github/workflows/*, K8s manifests, examples,
 #     and Helm chart values in lambda/helm-installer/charts.yaml
 #   - Helm chart versions from charts.yaml

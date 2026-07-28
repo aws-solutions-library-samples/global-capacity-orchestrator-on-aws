@@ -176,6 +176,10 @@ print((datetime.date.today() - d).days)
 # report was creating noise: the operator had no action to take on
 # them beyond "wait for upstream". Filter them out so the report
 # only lists packages we can act on.
+#
+# The ``[build-system]`` requires pins (the exact-pinned build backend)
+# are appended to the same surface below via a direct PyPI lookup — pip
+# resolves them inside build isolation, so ``pip list`` never sees them.
 # ---------------------------------------------------------------------------
 echo "=== Checking for outdated Python dependencies ==="
 
@@ -205,6 +209,29 @@ if direct:
     ]
 print(json.dumps(data))
 ")"
+
+# Build-backend pins ([build-system] requires) are Python dependencies
+# too, but they are invisible to ``pip list --outdated``: pip resolves
+# them inside build isolation, not in this venv (a Python 3.14 venv does
+# not even ship setuptools). Compare each exact pin against its PyPI
+# latest and report it through the same Python-packages surface as every
+# other pyproject pin. Non-exact entries are skipped here — the
+# version-consistency section flags those as a policy finding.
+BUILD_SYSTEM_PINS="$(extract_build_system_pins pyproject.toml)"
+if [ -n "$BUILD_SYSTEM_PINS" ]; then
+  while IFS='|' read -r bs_name bs_version bs_raw; do
+    [ -n "$bs_name" ] && [ -n "$bs_version" ] || continue
+    bs_latest="$(curl -fsSL --max-time 15 \
+      "https://pypi.org/pypi/${bs_name}/json" 2>/dev/null \
+      | jq -r '.info.version // empty' 2>/dev/null)" || true
+    [ -n "$bs_latest" ] || continue
+    if [ "$(compare_semver "$bs_version" "$bs_latest")" = "newer" ]; then
+      OUTDATED="$(echo "$OUTDATED" | jq \
+        --arg name "$bs_name" --arg cur "$bs_version" --arg latest "$bs_latest" \
+        '. + [{"name": $name, "version": $cur, "latest_version": $latest}]')"
+    fi
+  done <<< "$BUILD_SYSTEM_PINS"
+fi
 
 PYTHON_COUNT="$(echo "$OUTDATED" | jq 'length')"
 if [ "$PYTHON_COUNT" -eq 0 ]; then
@@ -1079,6 +1106,8 @@ CI_TOOLING_COUNT="$(wc -l < "$CI_TOOLING_RESULTS" 2>/dev/null | tr -d ' ')"
 #     and a matching npm entry in Dependabot.
 #   - the same tool env pin (TRIVY_VERSION/HELM_VERSION/KUBECTL_VERSION)
 #     resolving to different values in different workflow files.
+#   - every [build-system] requires entry in pyproject.toml is an exact
+#     ``==`` pin (the drift itself reports through the Python surface).
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Checking version consistency ==="
@@ -1216,6 +1245,26 @@ if [ -n "$INSTALLER_PINS" ]; then
       echo "${tool_var} (helm-installer Dockerfile / workflows / Dockerfile.dev)|${tool_list}" >> "$CONSISTENCY_RESULTS"
     fi
   done
+fi
+
+# Build-backend pins must use the same exact ``==`` shape as every other
+# Python dependency in pyproject.toml, or the version resolved inside
+# pip's build isolation floats with upstream releases. An empty result is
+# itself a finding — [build-system] always exists here, so nothing coming
+# back means the table was removed or the TOML no longer parses, and a
+# parse break must not silently drop the check.
+BUILD_SYSTEM_PINS="${BUILD_SYSTEM_PINS:-$(extract_build_system_pins pyproject.toml)}"
+if [ -z "$BUILD_SYSTEM_PINS" ]; then
+  echo "  - pyproject.toml [build-system] requires is missing or unparseable"
+  echo "build-system requires (pyproject.toml)|missing or unparseable" >> "$CONSISTENCY_RESULTS"
+else
+  while IFS='|' read -r bs_name bs_version bs_raw; do
+    [ -n "$bs_raw" ] || continue
+    if [ -z "$bs_version" ]; then
+      echo "  - build-system requires entry is not an exact ==X.Y.Z pin: ${bs_raw}"
+      echo "build-system requires (pyproject.toml)|'${bs_raw}' must be an exact ==X.Y.Z pin" >> "$CONSISTENCY_RESULTS"
+    fi
+  done <<< "$BUILD_SYSTEM_PINS"
 fi
 
 CONSISTENCY_COUNT="$(wc -l < "$CONSISTENCY_RESULTS" 2>/dev/null | tr -d ' ')"

@@ -65,6 +65,47 @@ for spec in deps:
 " "$pyproject" 2>/dev/null
 }
 
+# extract_build_system_pins [pyproject_path]
+#
+# Reads ``[build-system].requires`` and emits one ``name|version|raw``
+# line per entry. ``version`` is filled only when the entry is a single
+# exact ``==X[.Y[.Z…]]`` pin with no extras, ranges, or markers;
+# otherwise it is left empty so the consistency check can flag the
+# entry while the PyPI drift check skips it.
+#
+# The build backend is a Python dependency too, but it is invisible to
+# ``pip list --outdated``: pip resolves it inside build isolation, not
+# in the scan venv (a Python 3.14 venv does not even ship setuptools).
+# Before this extractor existed the backend floated on a ``>=`` range
+# with nothing watching it — the exact failure mode the rest of this
+# library exists to catch.
+#
+# Prints nothing for a missing or unparseable file; the consistency
+# check treats that as a finding (fail-visible) rather than a pass.
+extract_build_system_pins() {
+  local pyproject="${1:-pyproject.toml}"
+  [ -f "$pyproject" ] || return 0
+  python3 -c "
+import re, sys, tomllib
+try:
+    with open(sys.argv[1], 'rb') as f:
+        data = tomllib.load(f)
+except Exception:
+    sys.exit(0)
+requires = (data.get('build-system') or {}).get('requires') or []
+for raw in requires:
+    if not isinstance(raw, str) or not raw.strip():
+        continue
+    entry = raw.strip()
+    exact = re.fullmatch(r'([A-Za-z0-9][A-Za-z0-9._-]*)==([0-9]+(?:\.[0-9]+)*)', entry)
+    name_match = re.match(r'[A-Za-z0-9][A-Za-z0-9._-]*', entry)
+    # PEP 503 normalisation: lowercase, ``_`` + ``.`` → ``-``.
+    name = re.sub(r'[-_.]+', '-', name_match.group(0)).lower() if name_match else ''
+    version = exact.group(2) if exact else ''
+    print(f'{name}|{version}|{entry}')
+" "$pyproject" 2>/dev/null
+}
+
 # parse_image_registry <image>
 #
 # Given a Docker image name (without tag), prints "registry|repo" where

@@ -1,7 +1,15 @@
 # GCO (Global Capacity Orchestrator on AWS) - Python Project Configuration
 
 [build-system]
-requires = ["setuptools>=77.0.0", "wheel"]
+# The build backend is pinned exactly, like every other dependency in this
+# file: with a floating ``>=`` the version resolved inside pip's build
+# isolation changes whenever setuptools releases, so two builds of the same
+# commit could package differently. The dependency scanner enforces the
+# exact-pin shape and reports when a newer setuptools release is available
+# (see extract_build_system_pins in .github/scripts/lib_dependency_scan.sh).
+# ``wheel`` is deliberately NOT listed: setuptools >= 70.1 vendors its own
+# wheel support, and the setuptools docs say not to declare it.
+requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -30,7 +38,7 @@ authors = [
     {name = "Jacob Mevorach (@Jmevorach)"}
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
