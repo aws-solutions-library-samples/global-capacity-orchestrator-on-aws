@@ -1909,7 +1909,8 @@ This command gathers comprehensive capacity data including:
 - The algorithmic multi-signal region ranking as advisory context
 
 Without `--instance-type`, one representative type per current GPU generation
-is scanned (T4, L4, A10G, L40S, A100, H100, H200, B200, B300).
+is scanned (T4, L4, A10G, L40S, RTX PRO 4500/6000 Blackwell, A100, H100, H200,
+B200, B300).
 
 The data is analyzed by the Bedrock model selected by `cdk.json`
 `context.bedrock.default_model_id` (Anthropic Claude Opus 5's global inference

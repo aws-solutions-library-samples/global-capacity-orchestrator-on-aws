@@ -130,9 +130,11 @@ class BedrockCapacityAdvisor:
         if not instance_types:
             instance_types = [
                 "g4dn.xlarge",  # T4 — budget inference
-                "g6.xlarge",  # L4 — current-gen budget inference
+                "g6.xlarge",  # L4 — budget inference
                 "g5.xlarge",  # A10G — mainstream single-GPU
-                "g6e.xlarge",  # L40S — current-gen mainstream single-GPU
+                "g6e.xlarge",  # L40S — mainstream single-GPU
+                "g7.2xlarge",  # RTX PRO 4500 Blackwell — current-gen budget inference
+                "g7e.2xlarge",  # RTX PRO 6000 Blackwell — current-gen single-GPU inference
                 "p4d.24xlarge",  # 8x A100 — distributed training
                 "p5.48xlarge",  # 8x H100 — large-scale training
                 "p5en.48xlarge",  # 8x H200 — large-scale training
