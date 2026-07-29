@@ -104,15 +104,14 @@ def _live_operations() -> dict[str, set[str]]:
     generator = _load_generator()
 
     operations: dict[str, set[str]] = {}
-    for module_path in generator.SERVICES.values():
-        document = generator.build_document(module_path)
+    for app in generator.load_apps().values():
+        document = generator.build_document(app)
         for raw_path, methods in document.get("paths", {}).items():
             key = _normalize(raw_path)
             operations.setdefault(key, set()).update(m.upper() for m in methods)
 
         # ``/metrics`` is mounted as a plain Starlette route, so it never appears
         # in the OpenAPI document even though it serves live scrape traffic.
-        app = generator._load_app(module_path)
         for route in app.routes:
             path = getattr(route, "path", None)
             route_methods = getattr(route, "methods", None)
@@ -267,6 +266,6 @@ def test_committed_openapi_documents_are_current() -> None:
 def test_every_service_has_a_committed_openapi_document() -> None:
     """Adding a service to the generator requires committing its document."""
     generator = _load_generator()
-    for service in generator.SERVICES:
+    for service in generator.SERVICE_NAMES:
         target = PROJECT_ROOT / "docs" / "openapi" / f"{service}.json"
         assert target.is_file(), f"missing generated document: {target.relative_to(PROJECT_ROOT)}"

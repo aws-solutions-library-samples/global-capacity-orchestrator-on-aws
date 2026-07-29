@@ -446,9 +446,21 @@ class TestInferenceProxyCanaryRouting:
         assert _target_service(endpoint, "my-llm") == "my-llm-proxy"
 
     def test_proxy_routes_expose_only_supported_methods(self):
+        """Only GET, HEAD, and POST reach either proxy path.
+
+        Methods are unioned per path because each verb is registered as its own
+        route: FastAPI derives an operation's ``operationId`` from
+        ``generate_unique_id``, which is evaluated once per route, so a single
+        route serving all three verbs would emit three OpenAPI operations
+        sharing one ID. See
+        ``tests/test_inference_proxy.py::test_router_operation_ids_are_unique_per_method``.
+        """
         from gco.services.api_routes.inference_proxy import router
 
-        methods_by_path = {route.path: route.methods for route in router.routes}
+        methods_by_path: dict[str, set[str]] = {}
+        for route in router.routes:
+            methods_by_path.setdefault(route.path, set()).update(route.methods)
+
         assert methods_by_path == {
             "/inference/{endpoint_name}": {"GET", "HEAD", "POST"},
             "/inference/{endpoint_name}/{upstream_path:path}": {"GET", "HEAD", "POST"},

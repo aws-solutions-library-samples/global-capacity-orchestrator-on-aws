@@ -23,7 +23,6 @@ missing signing secret, and no AWS call is made during import.
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import os
 import sys
@@ -36,12 +35,12 @@ OUTPUT_DIR = REPO_ROOT / "docs" / "openapi"
 #: Service name -> module exposing a module-level ``app``. The service name is
 #: the filename stem of the generated document and matches the Kubernetes
 #: Service name the application is served under.
-SERVICES: dict[str, str] = {
-    "manifest-processor": "gco.services.manifest_api",
-    "health-monitor": "gco.services.health_api",
-    "inference-proxy": "gco.services.inference_api",
-    "cost-monitor": "gco.services.cost_api",
-}
+SERVICE_NAMES: tuple[str, ...] = (
+    "manifest-processor",
+    "health-monitor",
+    "inference-proxy",
+    "cost-monitor",
+)
 
 #: Routes FastAPI adds for its own interactive documentation. They are real
 #: routes but they are not part of GCO's API contract, and no API Gateway
@@ -49,18 +48,40 @@ SERVICES: dict[str, str] = {
 _DOC_ROUTE_PATHS = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"})
 
 
-def _load_app(module_path: str) -> Any:
-    """Import a service module and return its FastAPI application."""
+def load_apps() -> dict[str, Any]:
+    """Return ``{service name: FastAPI app}`` for every GCO HTTP service.
+
+    The imports are literal rather than resolved through
+    ``importlib.import_module``: there is no reason for this mapping to be
+    dynamic, and a static import set is both easier to follow and impossible to
+    redirect at a module that was never intended to be loaded here.
+
+    Importing does not start a server or call AWS. ``GCO_DEV_MODE`` is set first
+    so the authentication middleware's constructor does not log a configuration
+    error about the signing secret it does not need for schema generation.
+    """
     os.environ.setdefault("GCO_DEV_MODE", "true")
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
-    module = importlib.import_module(module_path)
-    return module.app
+
+    from gco.services import cost_api, health_api, inference_api, manifest_api
+
+    apps = {
+        "manifest-processor": manifest_api.app,
+        "health-monitor": health_api.app,
+        "inference-proxy": inference_api.app,
+        "cost-monitor": cost_api.app,
+    }
+    assert tuple(apps) == SERVICE_NAMES, "SERVICE_NAMES is out of step with load_apps()"
+    return apps
 
 
-def build_document(module_path: str) -> dict[str, Any]:
-    """Return one service's OpenAPI document, minus FastAPI's own doc routes."""
-    app = _load_app(module_path)
+def build_document(app: Any) -> dict[str, Any]:
+    """Return one application's OpenAPI document, minus FastAPI's doc routes.
+
+    Round-tripped through JSON so the returned document contains only plain
+    types, matching exactly what is written to disk.
+    """
     document: dict[str, Any] = json.loads(json.dumps(app.openapi()))
     for path in _DOC_ROUTE_PATHS:
         document.get("paths", {}).pop(path, None)
@@ -84,8 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stale: list[str] = []
 
-    for service, module_path in sorted(SERVICES.items()):
-        rendered = render(build_document(module_path))
+    for service, app in sorted(load_apps().items()):
+        rendered = render(build_document(app))
         target = OUTPUT_DIR / f"{service}.json"
         current = target.read_text(encoding="utf-8") if target.is_file() else None
 
