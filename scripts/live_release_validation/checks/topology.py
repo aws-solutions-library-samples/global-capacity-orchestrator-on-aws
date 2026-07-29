@@ -638,3 +638,126 @@ def _health_stability_samples(
         if round_number < _HEALTH_STABILITY_ROUNDS and interval > 0:
             time.sleep(interval)
     return samples
+
+
+def _validate_metrics_payload(
+    ctx: RunContext,
+    payload: Any,
+    *,
+    endpoint_region: str | None,
+) -> dict[str, Any]:
+    """Require the health monitor's utilization payload from one deployed cluster.
+
+    The shape is checked strictly enough that only ``health_api.get_metrics``
+    satisfies it: a bare 200 from any other service (or a proxy default page)
+    fails here rather than passing as "reachable".
+    """
+    if not isinstance(payload, dict):
+        raise RuntimeError("metrics response is not a JSON object")
+    payload_region = payload.get("region")
+    if payload_region not in ctx.deployment_regions:
+        raise RuntimeError(f"metrics response Region is not deployed: {payload_region!r}")
+    if endpoint_region is not None and payload_region != endpoint_region:
+        raise RuntimeError(
+            f"regional metrics response came from {payload_region!r}, expected {endpoint_region!r}"
+        )
+    expected_cluster_id = f"{ctx.config.project_name}-{payload_region}"
+    if payload.get("cluster_id") != expected_cluster_id:
+        raise RuntimeError(
+            f"metrics response cluster_id is not {expected_cluster_id!r}: "
+            f"{payload.get('cluster_id')!r}"
+        )
+    utilization = payload.get("resource_utilization")
+    if not isinstance(utilization, dict):
+        raise RuntimeError("metrics response has no resource_utilization object")
+    for key in ("cpu_percent", "memory_percent", "gpu_percent"):
+        value = utilization.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise RuntimeError(
+                f"metrics response resource_utilization.{key} is not a "
+                f"non-negative number: {value!r}"
+            )
+    thresholds = payload.get("thresholds")
+    if not isinstance(thresholds, dict):
+        raise RuntimeError("metrics response has no thresholds object")
+    active_jobs = payload.get("active_jobs")
+    if isinstance(active_jobs, bool) or not isinstance(active_jobs, int) or active_jobs < 0:
+        raise RuntimeError(
+            f"metrics response active_jobs is not a non-negative integer: {active_jobs!r}"
+        )
+    return payload
+
+
+def _metrics_reachability_samples(
+    ctx: RunContext,
+    *,
+    global_url: str,
+    regional_urls: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Prove ``/api/v1/metrics`` reaches the health monitor through every gateway.
+
+    This is the regression probe for the shared HTTPRoute's routing of
+    ``/api/v1/metrics``. The path is served only by the health monitor; before
+    the explicit rule existed, the ALB ``/`` catch-all delivered it to the
+    manifest processor and it answered ``404`` through every API Gateway while
+    all manifests looked correct. One fail-fast round per endpoint: a routing
+    regression is deterministic, so retries could only mask slow failure.
+    (`tests/test_gateway_route_coverage.py` pins the manifest side; this pins
+    the deployed behavior.)
+    """
+    probes: list[dict[str, Any]] = [
+        {"scope": "global", "region": None, "endpoint": global_url},
+        *(
+            {"scope": "regional", "region": region, "endpoint": regional_urls[region]}
+            for region in ctx.deployment_regions
+            if region in regional_urls
+        ),
+    ]
+    samples: list[dict[str, Any]] = []
+    ctx.checkpoint.state["topology_metrics_samples"] = samples
+
+    for probe in probes:
+        started = time.monotonic()
+        payload: Any = None
+        sample: dict[str, Any]
+        try:
+            payload = ctx.aws_client.call_api(
+                method="GET",
+                path="/api/v1/metrics",
+                region=probe["region"],
+                max_attempts=1,
+            )
+        except Exception as exc:
+            sample = {
+                **probe,
+                "timestamp": utc_now(),
+                "latency_seconds": round(max(0.0, time.monotonic() - started), 6),
+                "payload": None,
+                "error": _bounded_topology_evidence(f"{type(exc).__name__}: {exc}"),
+            }
+            samples.append(sample)
+            ctx.persist()
+            raise RuntimeError(
+                f"Metrics reachability call failed for {probe['endpoint']}: "
+                f"{sample['error']} — a 404 here means the shared HTTPRoute is "
+                "delivering /api/v1/metrics to a service that does not serve it "
+                "(see post-helm-gateway.yaml)"
+            ) from exc
+
+        error: str | None = None
+        try:
+            _validate_metrics_payload(ctx, payload, endpoint_region=probe["region"])
+        except RuntimeError as exc:
+            error = _bounded_topology_evidence(str(exc))
+        sample = {
+            **probe,
+            "timestamp": utc_now(),
+            "latency_seconds": round(max(0.0, time.monotonic() - started), 6),
+            "payload": to_jsonable(payload),
+            "error": error,
+        }
+        samples.append(sample)
+        ctx.persist()
+        if error is not None:
+            raise RuntimeError(f"Malformed metrics response from {probe['endpoint']}: {error}")
+    return samples

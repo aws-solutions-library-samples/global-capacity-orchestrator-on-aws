@@ -1212,10 +1212,29 @@ class TestDeterministicTopologyReadiness:
 
         def call_api(*, method: str, path: str, region: str | None, max_attempts: int):
             assert method == "GET"
-            assert path == "/api/v1/health"
+            assert path in ("/api/v1/health", "/api/v1/metrics")
             assert max_attempts == 1
-            events.append(f"health:{region or 'global'}")
             payload_region = region or regions[0]
+            if path == "/api/v1/metrics":
+                events.append(f"metrics:{region or 'global'}")
+                return {
+                    "cluster_id": f"gco-live-{payload_region}",
+                    "region": payload_region,
+                    "timestamp": "2026-07-18T00:00:00+00:00",
+                    "status": "healthy",
+                    "resource_utilization": {
+                        "cpu_percent": 12.5,
+                        "memory_percent": 33.0,
+                        "gpu_percent": 0,
+                    },
+                    "thresholds": {
+                        "cpu_threshold": 80,
+                        "memory_threshold": 85,
+                        "gpu_threshold": 90,
+                    },
+                    "active_jobs": 0,
+                }
+            events.append(f"health:{region or 'global'}")
             return {
                 "status": "healthy",
                 "timestamp": "2026-07-18T00:00:00+00:00",
@@ -1428,8 +1447,9 @@ class TestDeterministicTopologyReadiness:
         result = self._invoke(environment)
 
         calls = environment.ctx.aws_client.call_api.call_args_list
-        assert len(calls) == 9
-        assert [item.kwargs["region"] for item in calls] == [
+        health_calls = [item for item in calls if item.kwargs["path"] == "/api/v1/health"]
+        assert len(health_calls) == 9
+        assert [item.kwargs["region"] for item in health_calls] == [
             None,
             "us-east-1",
             "us-west-2",
@@ -1458,6 +1478,89 @@ class TestDeterministicTopologyReadiness:
             for region in environment.ctx.deployment_regions
         )
         assert [item.args for item in environment.sleep.call_args_list] == [(5.0,), (5.0,)]
+
+    def test_metrics_probe_covers_global_and_every_direct_regional_endpoint_once(self) -> None:
+        environment = self._environment(("us-east-1", "us-west-2"))
+
+        result = self._invoke(environment)
+
+        metrics_calls = [
+            item
+            for item in environment.ctx.aws_client.call_api.call_args_list
+            if item.kwargs["path"] == "/api/v1/metrics"
+        ]
+        assert [item.kwargs["region"] for item in metrics_calls] == [
+            None,
+            "us-east-1",
+            "us-west-2",
+        ]
+        assert all(item.kwargs["max_attempts"] == 1 for item in metrics_calls)
+        samples = result["metrics_samples"]
+        assert [sample["scope"] for sample in samples] == ["global", "regional", "regional"]
+        assert all(sample["error"] is None for sample in samples)
+        assert environment.ctx.checkpoint.state["topology_metrics_samples"] is samples
+        # Health stability completes before the first metrics call, so a
+        # metrics-routing failure is attributable to routing, not to an
+        # unhealthy cluster.
+        health_indexes = [
+            index for index, event in enumerate(environment.events) if event.startswith("health:")
+        ]
+        metrics_indexes = [
+            index for index, event in enumerate(environment.events) if event.startswith("metrics:")
+        ]
+        assert max(health_indexes) < min(metrics_indexes)
+
+    def test_metrics_404_names_the_httproute_and_checkpoints_the_sample(self) -> None:
+        """The pre-#196 regression: the ALB catch-all answered 404 for metrics."""
+        environment = self._environment()
+        healthy = {
+            "status": "healthy",
+            "timestamp": "2026-07-18T00:00:00+00:00",
+            "region": "us-east-1",
+            "cluster_id": "gco-live-us-east-1",
+        }
+
+        def call_api(*, method: str, path: str, region: str | None, max_attempts: int):
+            if path == "/api/v1/metrics":
+                raise RuntimeError("API request failed: 404 Not Found")
+            return healthy
+
+        environment.ctx.aws_client.call_api.side_effect = call_api
+
+        with pytest.raises(RuntimeError, match="post-helm-gateway.yaml"):
+            self._invoke(environment)
+
+        samples = environment.ctx.checkpoint.state["topology_metrics_samples"]
+        assert len(samples) == 1
+        assert samples[0]["payload"] is None
+        assert "404" in samples[0]["error"]
+
+    def test_metrics_response_from_the_wrong_service_fails_shape_validation(self) -> None:
+        """A 200 without the health monitor's utilization shape is not reachability."""
+        environment = self._environment()
+        healthy = {
+            "status": "healthy",
+            "timestamp": "2026-07-18T00:00:00+00:00",
+            "region": "us-east-1",
+            "cluster_id": "gco-live-us-east-1",
+        }
+        wrong_service = {
+            "service": "GCO Manifest Processor API",
+            "region": "us-east-1",
+            "cluster_id": "gco-live-us-east-1",
+        }
+
+        def call_api(*, method: str, path: str, region: str | None, max_attempts: int):
+            return wrong_service if path == "/api/v1/metrics" else healthy
+
+        environment.ctx.aws_client.call_api.side_effect = call_api
+
+        with pytest.raises(RuntimeError, match="Malformed metrics response.*resource_utilization"):
+            self._invoke(environment)
+
+        sample = environment.ctx.checkpoint.state["topology_metrics_samples"][0]
+        assert sample["payload"]["service"] == "GCO Manifest Processor API"
+        assert "resource_utilization" in sample["error"]
 
 
 class TestRetainedLogCleanupGenerationFencing:

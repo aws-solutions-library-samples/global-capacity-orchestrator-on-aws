@@ -9,6 +9,7 @@ from ..checks.topology import (
     _bounded_topology_evidence,
     _converge_region_addons,
     _health_stability_samples,
+    _metrics_reachability_samples,
     _queue_counts,
 )
 from ..constants import (
@@ -130,6 +131,11 @@ def action_topology(ctx: RunContext) -> dict[str, Any]:
         global_url=global_url,
         regional_urls=regional_urls,
     )
+    metrics_samples = _metrics_reachability_samples(
+        ctx,
+        global_url=global_url,
+        regional_urls=regional_urls,
+    )
     global_samples = [sample for sample in health_samples if sample["scope"] == "global"]
     global_api = {
         "url": global_url,
@@ -183,6 +189,7 @@ def action_topology(ctx: RunContext) -> dict[str, Any]:
         "clusters": clusters,
         "convergence": convergence,
         "health_samples": health_samples,
+        "metrics_samples": metrics_samples,
         "global_api": global_api,
         "regional_apis": regional_endpoints,
         "queue_baseline": queue_baseline,
