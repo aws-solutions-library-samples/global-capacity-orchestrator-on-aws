@@ -1970,10 +1970,14 @@ class StackManager:
         # Per-stack wall-clock cap so a wedged ``cdk destroy`` (its
         # post-delete polling loop hanging after CloudFormation has
         # already finished) can't block the orchestrator forever. Default
-        # 45 minutes — enough for an EKS regional teardown which can take
-        # 25-30 minutes when SG / ENI cleanup serialises. Override via
+        # 90 minutes: a healthy EKS regional teardown has been observed
+        # needing ~60 (the VPC Lambda ENI detach alone can serialise for
+        # 20+ while CloudFormation keeps making progress), and the prior
+        # 45-minute cap killed the poller mid-delete — the AWS-side
+        # reconciliation below recovered, but the timeout should mark a
+        # wedged CDK, not a normal teardown. Override via
         # GCO_CDK_DESTROY_TIMEOUT_SECONDS.
-        timeout_s = float(os.environ.get("GCO_CDK_DESTROY_TIMEOUT_SECONDS", "2700"))
+        timeout_s = float(os.environ.get("GCO_CDK_DESTROY_TIMEOUT_SECONDS", "5400"))
 
         try:
             result = self._run_cdk(cmd, timeout=timeout_s)

@@ -1022,7 +1022,7 @@ class TestDeployCallsEnsureBootstrapped:
 # `cdk destroy` and `cdk deploy` can hang in their post-action polling loops
 # even after CloudFormation has already finished the underlying delete or
 # create. The orchestrator now caps each cdk subprocess at a wall-clock
-# budget (default 45 min for destroy, 60 min for deploy, env-tunable) and
+# budget (default 90 min for destroy, 60 min for deploy, env-tunable) and
 # reconciles against `DescribeStacks` so a hung cdk doesn't block the
 # orchestrator forever.
 
@@ -1318,7 +1318,7 @@ class TestDestroyTimeoutAndReconciliation:
             assert manager._get_orphan_regional_api_region("acme-regional-api-us-west-2") is None
 
     def test_destroy_passes_timeout_to_run_cdk_with_default_budget(self):
-        """``destroy()`` must pass the default 45-minute timeout to
+        """``destroy()`` must pass the default 90-minute timeout to
         ``_run_cdk`` so a wedged cdk subprocess can't run forever."""
         from cli.stacks import StackManager
 
@@ -1333,8 +1333,9 @@ class TestDestroyTimeoutAndReconciliation:
             assert manager.destroy("gco-monitoring", force=True) is True
 
         assert "timeout" in mock_run.call_args.kwargs
-        # Default is 2700s (45 min).
-        assert mock_run.call_args.kwargs["timeout"] == 2700.0
+        # Default is 5400s (90 min): a healthy EKS regional teardown has
+        # been observed needing ~60, so 45 marked normal deletes as wedged.
+        assert mock_run.call_args.kwargs["timeout"] == 5400.0
 
     def test_destroy_timeout_env_override(self, monkeypatch):
         """``GCO_CDK_DESTROY_TIMEOUT_SECONDS`` overrides the default."""

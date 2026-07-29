@@ -175,6 +175,22 @@ jobs:
         # even when --cov-report= suppresses all reports, so without this every
         # shard fails with "Required test coverage of 90.0% not reached".
         # --cov-report= then leaves just the raw data file to combine.
+        #
+        # --durations prints the slowest tests (setup+call+teardown) in every
+        # shard log, so a test whose wall time balloons is visible in the run
+        # that slowed down rather than only by downloading JUnit artifacts.
+        # --faulthandler-timeout is a stall alarm, not a budget: shard JUnit
+        # history shows otherwise-instant tests (a --help invocation, a fully
+        # mocked unit test) intermittently billing 200-500s on a runner while
+        # neighbouring workers stream normally, and nothing in the log says
+        # where the time went. pytest's built-in faulthandler dumps every
+        # thread's stack into the log when a single test exceeds the limit —
+        # naming the stall at the moment it happens — without failing the test
+        # or adding a dependency (pytest 9 exposes it as the
+        # faulthandler_timeout ini option, hence -o). 180s sits above the
+        # slowest legitimate tests (the documented property-based synth
+        # suites, observed up to ~130s) and below the stalls this exists to
+        # catch.
         env:
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ strategy.job-total }}
@@ -188,6 +204,8 @@ jobs:
             --cov-report= \
             --cov-fail-under=0 \
             --junitxml="report-shard-${SHARD}.xml" \
+            --durations=25 --durations-min=5 \
+            -o faulthandler_timeout=180 \
             -n auto --maxfail=1
           # Renamed off the leading dot so the upload does not need
           # include-hidden-files, and so each shard's data file is distinct.
