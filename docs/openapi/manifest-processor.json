@@ -1,0 +1,2309 @@
+{
+  "components": {
+    "schemas": {
+      "BulkDeleteRequest": {
+        "example": {
+          "dry_run": false,
+          "namespace": "gco-jobs",
+          "older_than_days": 7,
+          "status": "completed"
+        },
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "description": "If true, only return what would be deleted",
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "label_selector": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Comma-separated exact-match label filters (key=value only)",
+            "title": "Label Selector"
+          },
+          "namespace": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Filter by namespace",
+            "title": "Namespace"
+          },
+          "older_than_days": {
+            "anyOf": [
+              {
+                "maximum": 365.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Delete jobs older than N days",
+            "title": "Older Than Days"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Filter by status"
+          }
+        },
+        "title": "BulkDeleteRequest",
+        "type": "object"
+      },
+      "CostReportRequest": {
+        "description": "Request body for POST /api/v1/cost/reports.",
+        "properties": {
+          "include_rows": {
+            "default": false,
+            "description": "Include the normalized allocation rows in the response",
+            "title": "Include Rows",
+            "type": "boolean"
+          },
+          "window_hours": {
+            "default": 24,
+            "description": "Trailing window the ad-hoc report covers, in hours",
+            "maximum": 168.0,
+            "minimum": 1.0,
+            "title": "Window Hours",
+            "type": "integer"
+          }
+        },
+        "title": "CostReportRequest",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "JobFromTemplateRequest": {
+        "example": {
+          "name": "my-training-job",
+          "namespace": "gco-jobs",
+          "parameters": {
+            "image": "my-custom-image:v1"
+          }
+        },
+        "properties": {
+          "name": {
+            "description": "Job name",
+            "maxLength": 63,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "namespace": {
+            "default": "gco-jobs",
+            "description": "Target namespace",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "parameters": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Parameter overrides",
+            "title": "Parameters"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "JobFromTemplateRequest",
+        "type": "object"
+      },
+      "JobStatus": {
+        "enum": [
+          "pending",
+          "running",
+          "completed",
+          "succeeded",
+          "failed"
+        ],
+        "title": "JobStatus",
+        "type": "string"
+      },
+      "JobTemplateRequest": {
+        "example": {
+          "description": "Template for GPU training jobs",
+          "manifest": {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+              "name": "{{name}}"
+            }
+          },
+          "name": "gpu-training-template",
+          "parameters": {
+            "image": "pytorch/pytorch:latest"
+          }
+        },
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Template description",
+            "title": "Description"
+          },
+          "manifest": {
+            "additionalProperties": true,
+            "description": "Job manifest template",
+            "title": "Manifest",
+            "type": "object"
+          },
+          "name": {
+            "description": "Template name",
+            "maxLength": 63,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "parameters": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Default parameter values",
+            "title": "Parameters"
+          }
+        },
+        "required": [
+          "name",
+          "manifest"
+        ],
+        "title": "JobTemplateRequest",
+        "type": "object"
+      },
+      "ManifestSubmissionAPIRequest": {
+        "description": "API model for manifest submission requests.",
+        "example": {
+          "dry_run": false,
+          "manifests": [
+            {
+              "apiVersion": "batch/v1",
+              "kind": "Job",
+              "metadata": {
+                "name": "example"
+              }
+            }
+          ],
+          "namespace": "gco-jobs"
+        },
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "description": "If true, validate manifests without applying them",
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "manifests": {
+            "description": "List of Kubernetes manifests to apply",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Manifests",
+            "type": "array"
+          },
+          "namespace": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Default namespace for resources without namespace specified",
+            "title": "Namespace"
+          },
+          "validate": {
+            "default": true,
+            "description": "If true, perform validation checks on manifests",
+            "title": "Validate",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "manifests"
+        ],
+        "title": "ManifestSubmissionAPIRequest",
+        "type": "object"
+      },
+      "QueuedJobRequest": {
+        "example": {
+          "manifest": {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+              "name": "my-training-job"
+            }
+          },
+          "max_spot_price": 0.5,
+          "namespace": "gco-jobs",
+          "priority": 10,
+          "spot_instance_type": "g5.xlarge",
+          "target_region": "us-east-1"
+        },
+        "properties": {
+          "labels": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional labels for filtering",
+            "title": "Labels"
+          },
+          "manifest": {
+            "additionalProperties": true,
+            "description": "Kubernetes job manifest",
+            "title": "Manifest",
+            "type": "object"
+          },
+          "max_spot_price": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional spot price cap in USD/hour. The job is not dispatched until the current spot price of spot_instance_type in the target region drops to or below this value. Requires spot_instance_type.",
+            "title": "Max Spot Price"
+          },
+          "namespace": {
+            "default": "gco-jobs",
+            "description": "Kubernetes namespace",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "priority": {
+            "default": 0,
+            "description": "Job priority (higher = more important)",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Priority",
+            "type": "integer"
+          },
+          "spot_instance_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "EC2 instance type whose spot price gates dispatch (e.g. g5.xlarge). Requires max_spot_price.",
+            "title": "Spot Instance Type"
+          },
+          "target_region": {
+            "description": "Target region for job execution",
+            "title": "Target Region",
+            "type": "string"
+          }
+        },
+        "required": [
+          "manifest",
+          "target_region"
+        ],
+        "title": "QueuedJobRequest",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "WebhookEvent": {
+        "enum": [
+          "job.completed",
+          "job.failed",
+          "job.started"
+        ],
+        "title": "WebhookEvent",
+        "type": "string"
+      },
+      "WebhookRequest": {
+        "example": {
+          "events": [
+            "job.completed",
+            "job.failed"
+          ],
+          "namespace": "gco-jobs",
+          "url": "https://example.com/webhook"
+        },
+        "properties": {
+          "events": {
+            "description": "Events to subscribe to",
+            "items": {
+              "$ref": "#/components/schemas/WebhookEvent"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "namespace": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Filter by namespace (optional)",
+            "title": "Namespace"
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Secret for HMAC signature (optional)",
+            "title": "Secret"
+          },
+          "url": {
+            "description": "Webhook URL to call",
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "events"
+        ],
+        "title": "WebhookRequest",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Kubernetes manifest submission and management service for GCO (Global Capacity Orchestrator on AWS)",
+    "title": "GCO Manifest Processor API",
+    "version": "2.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/": {
+      "get": {
+        "description": "Root endpoint with basic service information and API overview.",
+        "operationId": "root__get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Root  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Root",
+        "tags": [
+          "Info"
+        ]
+      }
+    },
+    "/api/v1/cost/reports": {
+      "get": {
+        "description": "List this region's most recent cost report objects in S3.",
+        "operationId": "list_cost_reports_api_v1_cost_reports_get",
+        "parameters": [
+          {
+            "description": "List ad-hoc instead of scheduled reports",
+            "in": "query",
+            "name": "adhoc",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "List ad-hoc instead of scheduled reports",
+              "title": "Adhoc",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Maximum objects returned",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Maximum objects returned",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Cost Reports",
+        "tags": [
+          "Cost"
+        ]
+      },
+      "post": {
+        "description": "Generate an ad-hoc cost report for the trailing window.",
+        "operationId": "generate_cost_report_api_v1_cost_reports_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CostReportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Generate Cost Report",
+        "tags": [
+          "Cost"
+        ]
+      }
+    },
+    "/api/v1/cost/status": {
+      "get": {
+        "description": "Cost monitoring status for this region, including OpenCost health.",
+        "operationId": "get_cost_status_api_v1_cost_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Cost Status",
+        "tags": [
+          "Cost"
+        ]
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "description": "Health check endpoint for load balancer health checks.",
+        "operationId": "health_check_api_v1_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health Check",
+        "tags": [
+          "Health"
+        ]
+      }
+    },
+    "/api/v1/jobs": {
+      "delete": {
+        "description": "Bulk delete jobs based on filters.",
+        "operationId": "bulk_delete_jobs_api_v1_jobs_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkDeleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bulk Delete Jobs",
+        "tags": [
+          "Jobs"
+        ]
+      },
+      "get": {
+        "description": "List Kubernetes Jobs with pagination and filtering.",
+        "operationId": "list_jobs_api_v1_jobs_get",
+        "parameters": [
+          {
+            "description": "Filter by namespace",
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by namespace",
+              "title": "Namespace"
+            }
+          },
+          {
+            "description": "Filter by status",
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by status",
+              "title": "Status"
+            }
+          },
+          {
+            "description": "Maximum number of jobs to return",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Maximum number of jobs to return",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Number of jobs to skip",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Number of jobs to skip",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Sort field and order (field:asc|desc)",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "createdAt:desc",
+              "description": "Sort field and order (field:asc|desc)",
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Comma-separated exact-match label filters (key=value only)",
+            "in": "query",
+            "name": "label_selector",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 1024,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated exact-match label filters (key=value only)",
+              "title": "Label Selector"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Jobs",
+        "tags": [
+          "Jobs"
+        ]
+      }
+    },
+    "/api/v1/jobs/from-template/{name}": {
+      "post": {
+        "description": "Create a job from a template with parameter substitution.",
+        "operationId": "create_job_from_template_api_v1_jobs_from_template__name__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobFromTemplateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Job From Template",
+        "tags": [
+          "Templates"
+        ]
+      }
+    },
+    "/api/v1/jobs/{namespace}/{name}": {
+      "delete": {
+        "description": "Delete a Job, optionally requiring its immutable Kubernetes UID.",
+        "operationId": "delete_job_api_v1_jobs__namespace___name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional immutable Kubernetes UID deletion precondition",
+            "in": "query",
+            "name": "expected_uid",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional immutable Kubernetes UID deletion precondition",
+              "title": "Expected Uid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Job",
+        "tags": [
+          "Jobs"
+        ]
+      },
+      "get": {
+        "description": "Get details of a specific Job.",
+        "operationId": "get_job_api_v1_jobs__namespace___name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job",
+        "tags": [
+          "Jobs"
+        ]
+      }
+    },
+    "/api/v1/jobs/{namespace}/{name}/events": {
+      "get": {
+        "description": "Get events related to a Job.",
+        "operationId": "get_job_events_api_v1_jobs__namespace___name__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job Events",
+        "tags": [
+          "Jobs"
+        ]
+      }
+    },
+    "/api/v1/jobs/{namespace}/{name}/logs": {
+      "get": {
+        "description": "Get logs from a Job's pods.",
+        "operationId": "get_job_logs_api_v1_jobs__namespace___name__logs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Container name (for multi-container pods)",
+            "in": "query",
+            "name": "container",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Container name (for multi-container pods)",
+              "title": "Container"
+            }
+          },
+          {
+            "description": "Number of lines from the end",
+            "in": "query",
+            "name": "tail",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "description": "Number of lines from the end",
+              "maximum": 10000,
+              "minimum": 1,
+              "title": "Tail",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Get logs from previous terminated container",
+            "in": "query",
+            "name": "previous",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Get logs from previous terminated container",
+              "title": "Previous",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Only return logs newer than N seconds",
+            "in": "query",
+            "name": "since_seconds",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only return logs newer than N seconds",
+              "title": "Since Seconds"
+            }
+          },
+          {
+            "description": "Include timestamps in log lines",
+            "in": "query",
+            "name": "timestamps",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Include timestamps in log lines",
+              "title": "Timestamps",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job Logs",
+        "tags": [
+          "Jobs"
+        ]
+      }
+    },
+    "/api/v1/jobs/{namespace}/{name}/metrics": {
+      "get": {
+        "description": "Get resource usage metrics for a Job's pods.",
+        "operationId": "get_job_metrics_api_v1_jobs__namespace___name__metrics_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job Metrics",
+        "tags": [
+          "Jobs"
+        ]
+      }
+    },
+    "/api/v1/jobs/{namespace}/{name}/pods": {
+      "get": {
+        "description": "Get pods belonging to a Job.",
+        "operationId": "get_job_pods_api_v1_jobs__namespace___name__pods_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job Pods",
+        "tags": [
+          "Jobs"
+        ]
+      }
+    },
+    "/api/v1/jobs/{namespace}/{name}/pods/{pod_name}/logs": {
+      "get": {
+        "description": "Get logs from a specific pod belonging to a Job.",
+        "operationId": "get_pod_logs_api_v1_jobs__namespace___name__pods__pod_name__logs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "pod_name",
+            "required": true,
+            "schema": {
+              "title": "Pod Name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Container name",
+            "in": "query",
+            "name": "container",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Container name",
+              "title": "Container"
+            }
+          },
+          {
+            "description": "Number of lines from the end",
+            "in": "query",
+            "name": "tail",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "description": "Number of lines from the end",
+              "maximum": 10000,
+              "minimum": 1,
+              "title": "Tail",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Get logs from previous terminated container",
+            "in": "query",
+            "name": "previous",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Get logs from previous terminated container",
+              "title": "Previous",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Pod Logs",
+        "tags": [
+          "Jobs"
+        ]
+      }
+    },
+    "/api/v1/jobs/{namespace}/{name}/retry": {
+      "post": {
+        "description": "Retry a failed job by creating a new job from its spec.",
+        "operationId": "retry_job_api_v1_jobs__namespace___name__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Job",
+        "tags": [
+          "Jobs"
+        ]
+      }
+    },
+    "/api/v1/manifests": {
+      "post": {
+        "description": "Submit Kubernetes manifests for processing.",
+        "operationId": "submit_manifests_api_v1_manifests_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManifestSubmissionAPIRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Manifests",
+        "tags": [
+          "Manifests"
+        ]
+      }
+    },
+    "/api/v1/manifests/validate": {
+      "post": {
+        "description": "Validate manifests without applying them.",
+        "operationId": "validate_manifests_api_v1_manifests_validate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManifestSubmissionAPIRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Validate Manifests",
+        "tags": [
+          "Manifests"
+        ]
+      }
+    },
+    "/api/v1/manifests/{namespace}/{name}": {
+      "delete": {
+        "description": "Delete a specific resource from the cluster.",
+        "operationId": "delete_resource_api_v1_manifests__namespace___name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Kubernetes API version",
+            "in": "query",
+            "name": "api_version",
+            "required": false,
+            "schema": {
+              "default": "apps/v1",
+              "description": "Kubernetes API version",
+              "title": "Api Version",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Resource kind",
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "default": "Deployment",
+              "description": "Resource kind",
+              "title": "Kind",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Resource",
+        "tags": [
+          "Manifests"
+        ]
+      },
+      "get": {
+        "description": "Get the status of a specific resource.",
+        "operationId": "get_resource_status_api_v1_manifests__namespace___name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Kubernetes API version",
+            "in": "query",
+            "name": "api_version",
+            "required": false,
+            "schema": {
+              "default": "apps/v1",
+              "description": "Kubernetes API version",
+              "title": "Api Version",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Resource kind",
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "default": "Deployment",
+              "description": "Resource kind",
+              "title": "Kind",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Resource Status",
+        "tags": [
+          "Manifests"
+        ]
+      }
+    },
+    "/api/v1/queue/jobs": {
+      "get": {
+        "description": "List one bounded page of jobs with optional filters.",
+        "operationId": "list_queued_jobs_api_v1_queue_jobs_get",
+        "parameters": [
+          {
+            "description": "Filter by target region",
+            "in": "query",
+            "name": "target_region",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by target region",
+              "title": "Target Region"
+            }
+          },
+          {
+            "description": "Filter by status",
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by status",
+              "title": "Status"
+            }
+          },
+          {
+            "description": "Filter by namespace",
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by namespace",
+              "title": "Namespace"
+            }
+          },
+          {
+            "description": "Maximum results",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "description": "Maximum results",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque continuation cursor returned by the previous page",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Opaque continuation cursor returned by the previous page",
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Queued Jobs",
+        "tags": [
+          "Job Queue"
+        ]
+      },
+      "post": {
+        "description": "Submit one validated ``batch/v1`` Job exactly once.",
+        "operationId": "submit_job_to_queue_api_v1_queue_jobs_post",
+        "parameters": [
+          {
+            "description": "Stable key for safely replaying an identical submission",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Stable key for safely replaying an identical submission",
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueuedJobRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Job To Queue",
+        "tags": [
+          "Job Queue"
+        ]
+      }
+    },
+    "/api/v1/queue/jobs/{job_id}": {
+      "delete": {
+        "description": "Cancel a job only while it remains unclaimed in the queue.",
+        "operationId": "cancel_queued_job_api_v1_queue_jobs__job_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Cancellation reason",
+            "in": "query",
+            "name": "reason",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Cancellation reason",
+              "title": "Reason"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Queued Job",
+        "tags": [
+          "Job Queue"
+        ]
+      },
+      "get": {
+        "description": "Get details of a specific queued job.",
+        "operationId": "get_queued_job_api_v1_queue_jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Queued Job",
+        "tags": [
+          "Job Queue"
+        ]
+      }
+    },
+    "/api/v1/queue/poll": {
+      "post": {
+        "description": "Run one immediate queue-worker pass for this region.\n\nThe manifest API also runs this same processor continuously when the\ndeployment enables ``CENTRAL_QUEUE_WORKER_ENABLED``. This endpoint remains\nuseful for an authenticated operator-triggered pass and diagnostics.",
+        "operationId": "poll_and_process_jobs_api_v1_queue_poll_post",
+        "parameters": [
+          {
+            "description": "Maximum jobs to process",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 5,
+              "description": "Maximum jobs to process",
+              "maximum": 20,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Poll And Process Jobs",
+        "tags": [
+          "Job Queue"
+        ]
+      }
+    },
+    "/api/v1/queue/stats": {
+      "get": {
+        "description": "Get job queue statistics by region and status.",
+        "operationId": "get_queue_stats_api_v1_queue_stats_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Queue Stats",
+        "tags": [
+          "Job Queue"
+        ]
+      }
+    },
+    "/api/v1/status": {
+      "get": {
+        "description": "Service status endpoint with detailed information.",
+        "operationId": "get_service_status_api_v1_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Service Status Api V1 Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Service Status",
+        "tags": [
+          "Health"
+        ]
+      }
+    },
+    "/api/v1/templates": {
+      "get": {
+        "description": "List all job templates.",
+        "operationId": "list_templates_api_v1_templates_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Templates",
+        "tags": [
+          "Templates"
+        ]
+      },
+      "post": {
+        "description": "Create a new job template.",
+        "operationId": "create_template_api_v1_templates_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobTemplateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Template",
+        "tags": [
+          "Templates"
+        ]
+      }
+    },
+    "/api/v1/templates/{name}": {
+      "delete": {
+        "description": "Delete a job template.",
+        "operationId": "delete_template_api_v1_templates__name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Template",
+        "tags": [
+          "Templates"
+        ]
+      },
+      "get": {
+        "description": "Get a specific job template.",
+        "operationId": "get_template_api_v1_templates__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Template",
+        "tags": [
+          "Templates"
+        ]
+      }
+    },
+    "/api/v1/webhooks": {
+      "get": {
+        "description": "List all registered webhooks.",
+        "operationId": "list_webhooks_api_v1_webhooks_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Namespace"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Webhooks",
+        "tags": [
+          "Webhooks"
+        ]
+      },
+      "post": {
+        "description": "Register a new webhook for job events.",
+        "operationId": "create_webhook_api_v1_webhooks_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Webhook",
+        "tags": [
+          "Webhooks"
+        ]
+      }
+    },
+    "/api/v1/webhooks/{webhook_id}": {
+      "delete": {
+        "description": "Delete a webhook.",
+        "operationId": "delete_webhook_api_v1_webhooks__webhook_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "webhook_id",
+            "required": true,
+            "schema": {
+              "title": "Webhook Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Webhook",
+        "tags": [
+          "Webhooks"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "description": "Kubernetes-style liveness probe.",
+        "operationId": "kubernetes_health_check_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Kubernetes Health Check Healthz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Kubernetes Health Check",
+        "tags": [
+          "Health"
+        ]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "description": "Kubernetes readiness includes the enabled queue worker task.",
+        "operationId": "kubernetes_readiness_check_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Kubernetes Readiness Check Readyz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Kubernetes Readiness Check",
+        "tags": [
+          "Health"
+        ]
+      }
+    }
+  }
+}

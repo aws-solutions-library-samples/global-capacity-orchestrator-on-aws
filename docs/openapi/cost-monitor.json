@@ -1,0 +1,268 @@
+{
+  "components": {
+    "schemas": {
+      "AdhocReportRequest": {
+        "description": "Request body for POST /internal/reports.",
+        "properties": {
+          "include_rows": {
+            "default": false,
+            "description": "Include the normalized allocation rows in the response",
+            "title": "Include Rows",
+            "type": "boolean"
+          },
+          "window_hours": {
+            "default": 24,
+            "description": "Trailing window the report covers, in hours",
+            "maximum": 168.0,
+            "minimum": 1.0,
+            "title": "Window Hours",
+            "type": "integer"
+          }
+        },
+        "title": "AdhocReportRequest",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Scheduled and on-demand OpenCost allocation reporting",
+    "title": "GCO Cost Monitor",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/healthz": {
+      "get": {
+        "description": "Kubernetes-style liveness probe.",
+        "operationId": "kubernetes_health_check_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Kubernetes Health Check Healthz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Kubernetes Health Check",
+        "tags": [
+          "Health"
+        ]
+      }
+    },
+    "/internal/reports": {
+      "get": {
+        "description": "List this region's most recent report objects, newest first.",
+        "operationId": "list_reports_internal_reports_get",
+        "parameters": [
+          {
+            "description": "List ad-hoc instead of scheduled reports",
+            "in": "query",
+            "name": "adhoc",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "List ad-hoc instead of scheduled reports",
+              "title": "Adhoc",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Maximum objects returned",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Maximum objects returned",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Reports Internal Reports Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Reports",
+        "tags": [
+          "Cost"
+        ]
+      },
+      "post": {
+        "description": "Generate one ad-hoc allocation report for the trailing window.",
+        "operationId": "generate_adhoc_report_internal_reports_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdhocReportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Generate Adhoc Report Internal Reports Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Generate Adhoc Report",
+        "tags": [
+          "Cost"
+        ]
+      }
+    },
+    "/internal/status": {
+      "get": {
+        "description": "Service status including OpenCost health and the data-returning probe.",
+        "operationId": "get_status_internal_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Status Internal Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Status",
+        "tags": [
+          "Cost"
+        ]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "description": "Readiness requires the monitor plus a live scheduled-report task.",
+        "operationId": "kubernetes_readiness_check_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Kubernetes Readiness Check Readyz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Kubernetes Readiness Check",
+        "tags": [
+          "Health"
+        ]
+      }
+    }
+  }
+}

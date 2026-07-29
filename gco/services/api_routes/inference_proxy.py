@@ -297,13 +297,11 @@ async def _proxy(
     )
 
 
-@router.api_route("/{endpoint_name}", methods=_SUPPORTED_METHODS)
 async def proxy_inference_root(request: Request, endpoint_name: str) -> StreamingResponse:
     """Proxy an endpoint-root request after platform authentication."""
     return await _proxy(request, endpoint_name)
 
 
-@router.api_route("/{endpoint_name}/{upstream_path:path}", methods=_SUPPORTED_METHODS)
 async def proxy_inference_path(
     request: Request,
     endpoint_name: str,
@@ -311,3 +309,20 @@ async def proxy_inference_path(
 ) -> StreamingResponse:
     """Proxy an endpoint sub-path after platform authentication."""
     return await _proxy(request, endpoint_name, upstream_path)
+
+
+# Register one route per method rather than a single multi-method route.
+# FastAPI derives an operation's ``operationId`` from ``generate_unique_id``,
+# which appends ``list(route.methods)[0]`` — a single arbitrary member of an
+# unordered set — and computes it once per route. A route carrying GET, HEAD,
+# and POST therefore emits three OpenAPI operations sharing one operationId,
+# which violates the spec's uniqueness requirement, makes generated clients
+# collide, and raises a UserWarning on every schema build. One method per
+# route keeps each generated operationId distinct while leaving request
+# handling byte-for-byte identical.
+for _path, _endpoint in (
+    ("/{endpoint_name}", proxy_inference_root),
+    ("/{endpoint_name}/{upstream_path:path}", proxy_inference_path),
+):
+    for _method in _SUPPORTED_METHODS:
+        router.add_api_route(_path, _endpoint, methods=[_method])

@@ -1,0 +1,136 @@
+{
+  "info": {
+    "description": "Health monitoring service for GCO (Global Capacity Orchestrator on AWS) EKS clusters",
+    "title": "GCO Health Monitor API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/": {
+      "get": {
+        "description": "Root endpoint with basic service information",
+        "operationId": "root__get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Root  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Root"
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "description": "Primary health check endpoint for ALB health checks\nReturns 200 if cluster is healthy, 503 if unhealthy",
+        "operationId": "health_check_api_v1_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health Check"
+      }
+    },
+    "/api/v1/metrics": {
+      "get": {
+        "description": "Detailed metrics endpoint with resource utilization information",
+        "operationId": "get_metrics_api_v1_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Metrics Api V1 Metrics Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Metrics"
+      }
+    },
+    "/api/v1/status": {
+      "get": {
+        "description": "Service status endpoint with operational information",
+        "operationId": "get_status_api_v1_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Status Api V1 Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Status"
+      }
+    },
+    "/healthz": {
+      "get": {
+        "description": "Kubernetes-style health check endpoint\nSimple endpoint that returns 200 if the service is running",
+        "operationId": "kubernetes_health_check_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Kubernetes Health Check Healthz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Kubernetes Health Check"
+      }
+    },
+    "/readyz": {
+      "get": {
+        "description": "Kubernetes-style readiness check endpoint\nReturns 200 if the service is ready to serve traffic",
+        "operationId": "kubernetes_readiness_check_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Kubernetes Readiness Check Readyz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Kubernetes Readiness Check"
+      }
+    }
+  }
+}

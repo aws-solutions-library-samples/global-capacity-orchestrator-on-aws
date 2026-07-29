@@ -1,10 +1,36 @@
-# GCO Manifest Processor API
+# GCO API Reference
 
-This document describes the REST API for the GCO Manifest Processor service.
+GCO's HTTP surface is served by four in-cluster services behind one or two API
+Gateways. This document covers all of it:
+
+- the **control-plane API** — manifests, jobs, the global job queue, templates,
+  webhooks, and cost reporting, served by the manifest processor;
+- the **global aggregation API** — cross-region fan-out served by a Lambda at
+  the global API Gateway, not by a cluster service;
+- the **inference API** — authenticated proxying to deployed model endpoints,
+  served by the inference proxy;
+- the **health, readiness, and observability** endpoints, served by the health
+  monitor and by each service's own probe routes.
+
+Surfaces that are deliberately unreachable from outside the VPC are documented
+under [Cluster-Internal Surfaces](#cluster-internal-surfaces) rather than
+omitted, so operators know they exist and why a request from outside cannot
+reach them.
+
+Start with [API Surface at a Glance](#api-surface-at-a-glance): it maps every
+path prefix to the service that answers it, whether the global or regional API
+Gateway exposes it, and which authentication applies.
+
+> **Generated inventory.** The endpoint tables in this document are checked
+> against the running applications by
+> [`tests/test_api_docs_coverage.py`](../tests/test_api_docs_coverage.py), which
+> fails if a route is added, removed, or renamed without updating this file.
+> Machine-readable OpenAPI documents live in [`docs/openapi/`](openapi/).
 
 ## Table of Contents
 
-- [Base URL](#base-url)
+- [API Surface at a Glance](#api-surface-at-a-glance)
+- [Base URLs](#base-urls)
 - [Authentication](#authentication)
 - [Transport Security](#transport-security)
 - [CLI Quick Reference](#cli-quick-reference)
@@ -16,6 +42,8 @@ This document describes the REST API for the GCO Manifest Processor service.
   - [Job Queue (Global)](#job-queue-global)
   - [Job Templates](#job-templates)
   - [Webhooks](#webhooks)
+  - [Cost Reporting (Per Region)](#cost-reporting-per-region)
+  - [Inference](#inference)
 - [Detailed Endpoint Documentation](#detailed-endpoint-documentation)
   - [Global Jobs List](#global-jobs-list)
   - [Global Health Status](#global-health-status)
@@ -38,20 +66,82 @@ This document describes the REST API for the GCO Manifest Processor service.
   - [Create Job from Template](#create-job-from-template)
 - [Webhooks](#webhooks-1)
   - [Register Webhook](#register-webhook)
+- [Inference API](#inference-api)
+  - [Invoking an Endpoint](#invoking-an-endpoint)
+  - [Allowed Upstream Paths](#allowed-upstream-paths)
+  - [Streaming, Timeouts, and Failure Codes](#streaming-timeouts-and-failure-codes)
+  - [Canary and Disaggregated Routing](#canary-and-disaggregated-routing)
+- [Health, Readiness, and Observability](#health-readiness-and-observability)
+- [Cluster-Internal Surfaces](#cluster-internal-surfaces)
 - [Error Responses](#error-responses)
 - [Examples](#examples)
 
 ---
 
-## Base URL
+## API Surface at a Glance
 
-The API is available at the API Gateway endpoint configured during deployment,
-where `<API_GATEWAY_ENDPOINT>` is the host from the `ApiEndpoint`
-CloudFormation output:
+Two things determine whether a request succeeds: whether an API Gateway exposes
+the path at all, and which in-cluster service the ALB routes it to.
+
+**What each API Gateway exposes.** The gateways forward only these prefixes;
+anything else returns a gateway-level error regardless of what the cluster
+services implement.
+
+| Path prefix | Global API Gateway | Regional API Gateway | Handled by |
+|-------------|--------------------|----------------------|------------|
+| `/api/v1/global/*` | Yes (IAM) | No | Cross-region aggregator Lambda |
+| `/api/v1/*` | Yes (IAM) | Yes (IAM) | Forwarded to the regional ALB |
+| `/inference/*` | Yes (IAM, response streaming) | Yes (IAM, response streaming) | Forwarded to the regional ALB |
+| `/studio/login`, `/studio/callback` | Only when the analytics stack is enabled (Cognito) | No | Presigned SageMaker Studio Lambda |
+
+In the commercial `aws` partition the global API Gateway is the workload entry
+point and reaches regions over Global Accelerator. In every other partition the
+global API is aggregate-only and workload traffic uses each region's IAM
+authenticated bridge. See [Base URLs](#base-urls).
+
+**What the ALB routes to which service.** Inside a region, the shared Gateway
+API `HTTPRoute` (`gco-system/gco-routes`) matches on path prefix, longest prefix
+first:
+
+| Path prefix | Service | Notes |
+|-------------|---------|-------|
+| `/api/v1/health` | `health-monitor` | Cluster health; used for Global Accelerator health checks |
+| `/api/v1/manifests` | `manifest-processor` | |
+| `/inference` | `inference-proxy` | |
+| `/healthz` | `health-monitor` | |
+| `/` (catch-all) | `manifest-processor` | Every other `/api/v1/*` path lands here |
+
+Because the catch-all sends everything else to the manifest processor, the
+health monitor's `/api/v1/metrics` and `/api/v1/status` routes are not reachable
+through the ALB: `/api/v1/status` is answered by the manifest processor's own
+route of the same name, and `/api/v1/metrics` has no manifest-processor route
+and returns `404`. Both remain reachable in-cluster by addressing the
+`health-monitor` Service directly. See
+[Cluster-Internal Surfaces](#cluster-internal-surfaces).
+
+## Base URLs
+
+Every path in this document is relative to one of two hosts.
+
+**Global API Gateway** — the `ApiGatewayUrl` / `ApiEndpoint` CloudFormation
+output of the API Gateway stack. Use it for cross-region aggregation, and for
+workload traffic in the commercial `aws` partition:
 
 ```http
 https://<API_GATEWAY_ENDPOINT>/api/v1
 ```
+
+**Regional API Gateway** — the `RegionalApiEndpoint` output of a
+`<project>-regional-api-<region>` stack. Use it to pin a request to one region,
+and for all workload traffic outside the commercial `aws` partition:
+
+```http
+https://<REGIONAL_API_ENDPOINT>/api/v1
+```
+
+Both accept `/inference/*` as well as `/api/v1/*`. The `gco` CLI resolves these
+hosts for you and selects the regional endpoint automatically whenever an
+operation carries an exact target Region.
 
 ## Authentication
 
@@ -72,6 +162,14 @@ select an authorized regional API endpoint for explicit region pinning. The GCO
 CLI does this automatically whenever an API operation carries an exact transport
 target Region. Outside `aws`, workload control and inference use those regional
 IAM endpoints because the global API is aggregate-only.
+
+Four paths are exempt from the HMAC envelope so load balancers, Global
+Accelerator, and the cluster's Prometheus can reach them without credentials:
+`/healthz`, `/readyz`, `/metrics`, and `/api/v1/health`. Of those, only
+`/api/v1/health` is exposed through an API Gateway, and reaching it there still
+requires IAM SigV4 at the edge. Every other path is rejected with `403` unless it
+carries a valid envelope, and with `503` if the service cannot load its signing
+key at all.
 
 ## Transport Security
 
@@ -181,12 +279,19 @@ gco webhooks delete <WEBHOOK_ID>
 
 ### Health & Status
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/healthz` | Kubernetes liveness probe |
-| GET | `/readyz` | Kubernetes readiness probe |
-| GET | `/api/v1/health` | Detailed health check |
-| GET | `/api/v1/status` | Service status and configuration |
+`/api/v1/health` is the only one of these reachable through an API Gateway; it
+requires no HMAC envelope so Global Accelerator can health-check it. The probe
+routes exist on all three request-serving services and are reached in-cluster.
+Full detail, including response shapes, is in
+[Health, Readiness, and Observability](#health-readiness-and-observability).
+
+| Method | Endpoint | Answered by | Reachable via gateway | Description |
+|--------|----------|-------------|-----------------------|-------------|
+| GET | `/api/v1/health` | `health-monitor` | Yes | Cluster health; `200` healthy, `503` unhealthy |
+| GET | `/api/v1/status` | `manifest-processor` | Yes | Service status, resource limits, queue-worker state |
+| GET | `/healthz` | each service | No | Liveness probe |
+| GET | `/readyz` | each service | No | Readiness probe |
+| GET | `/metrics` | each service | No | Prometheus exposition |
 
 ### Global Aggregation (Cross-Region)
 
@@ -268,6 +373,18 @@ Available when `cost_monitoring.enabled` is on (the default). Each region's mani
 | GET | `/api/v1/cost/status` | Cost monitoring + OpenCost health | `gco costs report status` |
 | GET | `/api/v1/cost/reports` | List recent report objects | `gco costs report list` |
 | POST | `/api/v1/cost/reports` | Generate an ad-hoc cost report | `gco costs report generate` |
+
+### Inference
+
+Requests are proxied to a deployed endpoint's in-cluster Service. `GET`, `HEAD`,
+and `POST` are the only accepted methods, and `{upstream_path}` must match the
+allowlist in [Allowed Upstream Paths](#allowed-upstream-paths). Full detail is in
+[Inference API](#inference-api).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET, HEAD, POST | `/inference/{endpoint_name}` | Proxy to the endpoint root |
+| GET, HEAD, POST | `/inference/{endpoint_name}/{upstream_path}` | Proxy to an allowlisted sub-path, e.g. `v1/chat/completions` |
 
 ---
 
@@ -1398,6 +1515,201 @@ DELETE /api/v1/webhooks/{id}
 gco webhooks delete abc12345
 gco webhooks delete abc12345 -y  # Skip confirmation
 ```
+
+---
+
+## Inference API
+
+The inference proxy sits in front of every endpoint deployed by
+`gco inference deploy`. It exists so callers reach models through the same
+IAM-authenticated edge as the control plane: the proxy resolves the endpoint
+name against the DynamoDB endpoint store, then forwards the request to that
+endpoint's in-cluster Service. Callers never address a pod, Service, or model
+container directly, and cannot supply an upstream host.
+
+For deploying and managing endpoints, see the
+[Inference Guide](INFERENCE.md); this section covers only the request surface.
+
+### Invoking an Endpoint
+
+```http
+GET|HEAD|POST /inference/{endpoint_name}
+GET|HEAD|POST /inference/{endpoint_name}/{upstream_path}
+```
+
+`{endpoint_name}` must be a valid Kubernetes DNS label; anything else returns
+`404`. Because most model servers expose an OpenAI-compatible surface, the
+common call is a `POST` to `v1/chat/completions`:
+
+```bash
+export API_GATEWAY_ENDPOINT=<API_GATEWAY_ENDPOINT>
+
+awscurl --service execute-api --region us-east-1 \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+        "model": "my-llm",
+        "messages": [{"role": "user", "content": "Hello"}]
+      }' \
+  "https://$API_GATEWAY_ENDPOINT/inference/my-llm/v1/chat/completions"
+```
+
+List the models a running endpoint serves:
+
+```bash
+awscurl --service execute-api --region us-east-1 \
+  "https://$API_GATEWAY_ENDPOINT/inference/my-llm/v1/models"
+```
+
+Only `Accept`, `Accept-Encoding`, `Cache-Control`, `Content-Encoding`,
+`Content-Type`, `Idempotency-Key`, `If-Match`, `If-None-Match`, `Prefer`,
+`Range`, `User-Agent`, and `X-Request-Id` are forwarded upstream. Hop-by-hop
+headers and anything else a caller sends are dropped, so a model server never
+sees caller-supplied auth or routing headers.
+
+### Allowed Upstream Paths
+
+`{upstream_path}` is matched against an allowlist rather than passed through, so
+a caller cannot reach a model server's administrative surface. Requests outside
+the allowlist are rejected before any upstream connection is made.
+
+| Pattern | Examples |
+|---------|----------|
+| `v1/models` and `v1/models/{model}` | `v1/models`, `v1/models/my-llm` |
+| `v1/chat/completions`, `v1/completions`, `v1/embeddings`, `v1/responses` | OpenAI-compatible generation calls |
+| `v2/models/...` with optional `config`, `infer`, `ready`, `stats` | `v2/models/my-llm/infer` (Triton) |
+| The endpoint's own configured health path | as recorded on the endpoint |
+
+The path segments `admin`, `debug`, `docs`, `instances`, `metrics`, and
+`openapi.json` are rejected outright, as are `.` and `..` segments. A request to
+an unlisted path returns `404`.
+
+### Streaming, Timeouts, and Failure Codes
+
+Responses stream back to the caller unbuffered, so server-sent-event token
+streams work end to end. At the edge this is why `/inference/*` is served by a
+response-streaming Lambda rather than the buffered proxy used for `/api/v1/*`,
+and why the WAF body-size limit that applies elsewhere is not applied to
+`/inference/*`.
+
+Upstream timeouts are bounded and configurable through environment variables on
+the inference-proxy deployment:
+
+| Setting | Default | Bounds |
+|---------|---------|--------|
+| `INFERENCE_PROXY_CONNECT_TIMEOUT_SECONDS` | 5 | 0.1–30 |
+| `INFERENCE_PROXY_READ_TIMEOUT_SECONDS` | 300 | 1–900 |
+| `INFERENCE_PROXY_WRITE_TIMEOUT_SECONDS` | 30 | 1–300 |
+| `INFERENCE_PROXY_POOL_TIMEOUT_SECONDS` | 5 | 0.1–30 |
+
+| Status | Meaning |
+|--------|---------|
+| `404` | Unknown endpoint name, invalid DNS label, or a path outside the allowlist |
+| `400` | Path contained `.` or `..` segments |
+| `502` | The upstream endpoint could not be reached |
+| `503` | The endpoint record exists but its spec is unusable |
+| `504` | The upstream endpoint exceeded the read timeout |
+
+Any other status is the model server's own response, passed through unmodified.
+
+### Canary and Disaggregated Routing
+
+The target Service is always derived from the stored endpoint record, never from
+the request:
+
+- **Plain endpoints** resolve to the `{endpoint_name}` Service.
+- **Canary deployments** send a cryptographically unbiased sample of requests to
+  `{endpoint_name}-canary`, matching the endpoint's configured canary weight. A
+  caller cannot select the canary explicitly.
+- **Mooncake disaggregated endpoints** (`mode: disaggregated` or `both`) resolve
+  to the reconciled `{endpoint_name}-proxy` Service, which performs
+  prefill/decode dispatch internally.
+
+## Health, Readiness, and Observability
+
+Three services answer probe traffic. Only `/api/v1/health` is exposed through an
+API Gateway; the rest are in-cluster, reached by addressing a Service directly
+or scraped by the cluster's Prometheus.
+
+| Endpoint | Service | Auth | Purpose |
+|----------|---------|------|---------|
+| `GET /api/v1/health` | `health-monitor` | None | `200` when the cluster is healthy, `503` otherwise. Global Accelerator health check target |
+| `GET /api/v1/metrics` | `health-monitor` | HMAC envelope | CPU / memory / GPU utilization, configured thresholds, active job count, threshold violations |
+| `GET /api/v1/status` | `health-monitor` | HMAC envelope | Monitor initialization, background task state, webhook dispatcher counters |
+| `GET /api/v1/status` | `manifest-processor` | HMAC envelope | Resource limits, allowed namespaces, template/webhook counts, central queue worker health |
+| `GET /healthz` | all three | None | Liveness. Always `200` when the process is up |
+| `GET /readyz` | all three | None | Readiness. `503` until dependencies are initialized; the manifest processor also reports `503` if its central queue worker has stopped |
+| `GET /metrics` | all three | None | Prometheus exposition for the in-cluster scrape |
+
+`/healthz`, `/readyz`, `/metrics`, and `/api/v1/health` are the only paths that
+bypass the HMAC envelope; see [Authentication](#authentication).
+
+The health monitor also publishes resource utilization and health status to
+CloudWatch every 30 seconds independently of these endpoints, which is how
+dashboards and alarms are fed. See the [Monitoring Guide](MONITORING.md).
+
+> **Reachability caveat.** As described in
+> [API Surface at a Glance](#api-surface-at-a-glance), the ALB catch-all sends
+> every `/api/v1/*` path except `/api/v1/health` and `/api/v1/manifests` to the
+> manifest processor. The health monitor's `/api/v1/metrics` therefore returns
+> `404` through the gateway, and `/api/v1/status` returns the manifest
+> processor's response rather than the health monitor's. Use
+> `gco stacks health` or CloudWatch for cluster utilization instead.
+
+## Cluster-Internal Surfaces
+
+These exist in running deployments but are not exposed by any API Gateway. They
+are documented so operators recognize them in logs, network policies, and
+port-forward sessions.
+
+### Cost Monitor
+
+The cost-monitor service is reachable only from the manifest processor, enforced
+by a Kubernetes NetworkPolicy, and runs no authentication middleware of its own.
+The manifest processor's `/api/v1/cost/*` routes are the authenticated front for
+these:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /internal/status` | Cost monitoring configuration and OpenCost health |
+| `GET /internal/reports` | Recent report objects. Query: `adhoc` (default `false`), `limit` (1–1000, default 50) |
+| `POST /internal/reports` | Generate an ad-hoc report; `201` on success. Body: `window_hours` (1–168, default 24), `include_rows` (default `false`) |
+
+### Mooncake Prefill/Decode Proxy
+
+Deployed only for endpoints using Mooncake disaggregation, as the
+`{endpoint_name}-proxy` Service:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health`, `GET /healthz` | Liveness for the proxy pod |
+| `POST /instances/add` | Register a prefill or decode instance. Requires the `ADMIN_API_KEY` shared secret via `x-admin-api-key` or `Authorization: Bearer`; `403` otherwise. Never exposed through an Ingress |
+| `POST /{path}` | Disaggregation dispatch for serving paths. `503` when no decode backend is Ready |
+| `GET /{path}` | Catch-all `200` so ALB health checks succeed |
+
+The inference proxy's allowlist blocks the `instances` path segment, so
+`/instances/add` cannot be reached through `/inference/{endpoint_name}/...`.
+
+### Service Descriptors
+
+Each request-serving application answers its own root path with a small
+descriptor: service name, version, running status, and an index of the routes it
+implements. No API Gateway forwards `/`, so these are in-cluster only. They are
+useful when port-forwarding to confirm which service a pod is actually running.
+
+| Endpoint | Service | Returns |
+|----------|---------|---------|
+| `GET /` | `manifest-processor` | Name, version, cluster ID, region, and an index of every `/api/v1` route group |
+| `GET /` | `health-monitor` | Name, version, and its three `/api/v1` endpoints |
+| `GET /` | `inference-proxy` | Name, version, and proxy status |
+
+### Interactive API Documentation
+
+Each FastAPI service serves `/docs` (Swagger UI), `/redoc`, and `/openapi.json`.
+No API Gateway forwards these prefixes, so they are in-cluster only. For a local
+copy of the same schemas, see the committed documents in
+[`docs/openapi/`](openapi/) or regenerate them with
+[`scripts/generate_openapi.py`](../scripts/generate_openapi.py).
 
 ---
 

@@ -905,7 +905,15 @@ async def test_route_wrappers_delegate_root_and_subpaths(
 
 
 def test_router_exposes_only_supported_methods() -> None:
-    methods_by_path = {route.path: route.methods for route in proxy.router.routes}
+    """Only GET, HEAD, and POST reach either proxy path.
+
+    Methods are unioned per path because each verb is registered as its own
+    route (see ``test_router_operation_ids_are_unique_per_method``), so a path
+    legitimately appears once per supported method.
+    """
+    methods_by_path: dict[str, set[str]] = {}
+    for route in proxy.router.routes:
+        methods_by_path.setdefault(route.path, set()).update(route.methods)
 
     assert methods_by_path["/inference/{endpoint_name}"] == {"GET", "HEAD", "POST"}
     assert methods_by_path["/inference/{endpoint_name}/{upstream_path:path}"] == {
@@ -913,3 +921,34 @@ def test_router_exposes_only_supported_methods() -> None:
         "HEAD",
         "POST",
     }
+
+
+def test_router_operation_ids_are_unique_per_method() -> None:
+    """Each proxy route carries exactly one method so operationIds stay unique.
+
+    FastAPI's ``generate_unique_id`` appends ``list(route.methods)[0]`` — one
+    arbitrary member of an unordered set — and evaluates it once per route, so
+    a single route serving GET, HEAD, and POST would emit three OpenAPI
+    operations sharing one operationId. That violates the spec's uniqueness
+    requirement and collides in generated clients, so the router registers one
+    route per verb instead.
+    """
+    from fastapi.utils import generate_unique_id
+
+    proxy_routes = [
+        route
+        for route in proxy.router.routes
+        if getattr(route, "path", "").startswith("/inference/{endpoint_name}")
+    ]
+    assert proxy_routes, "expected the inference proxy routes to be registered"
+
+    for route in proxy_routes:
+        assert len(route.methods) == 1, (
+            f"{route.path} serves {sorted(route.methods)}; a multi-method route "
+            "yields duplicate operationIds"
+        )
+
+    operation_ids = [generate_unique_id(route) for route in proxy_routes]
+    assert len(set(operation_ids)) == len(operation_ids), (
+        f"duplicate operationIds generated: {sorted(operation_ids)}"
+    )

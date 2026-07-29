@@ -1,0 +1,408 @@
+{
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Authenticated streaming reverse proxy for managed GCO inference endpoints",
+    "title": "GCO Inference Proxy API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/": {
+      "get": {
+        "description": "Return a small authenticated service descriptor.",
+        "operationId": "root__get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Root  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Root",
+        "tags": [
+          "Info"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "description": "Kubernetes and ALB liveness probe.",
+        "operationId": "kubernetes_health_check_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Kubernetes Health Check Healthz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Kubernetes Health Check",
+        "tags": [
+          "Health"
+        ]
+      }
+    },
+    "/inference/{endpoint_name}": {
+      "get": {
+        "description": "Proxy an endpoint-root request after platform authentication.",
+        "operationId": "proxy_inference_root_inference__endpoint_name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "endpoint_name",
+            "required": true,
+            "schema": {
+              "title": "Endpoint Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Proxy Inference Root",
+        "tags": [
+          "Inference"
+        ]
+      },
+      "head": {
+        "description": "Proxy an endpoint-root request after platform authentication.",
+        "operationId": "proxy_inference_root_inference__endpoint_name__head",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "endpoint_name",
+            "required": true,
+            "schema": {
+              "title": "Endpoint Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Proxy Inference Root",
+        "tags": [
+          "Inference"
+        ]
+      },
+      "post": {
+        "description": "Proxy an endpoint-root request after platform authentication.",
+        "operationId": "proxy_inference_root_inference__endpoint_name__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "endpoint_name",
+            "required": true,
+            "schema": {
+              "title": "Endpoint Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Proxy Inference Root",
+        "tags": [
+          "Inference"
+        ]
+      }
+    },
+    "/inference/{endpoint_name}/{upstream_path}": {
+      "get": {
+        "description": "Proxy an endpoint sub-path after platform authentication.",
+        "operationId": "proxy_inference_path_inference__endpoint_name___upstream_path__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "endpoint_name",
+            "required": true,
+            "schema": {
+              "title": "Endpoint Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "upstream_path",
+            "required": true,
+            "schema": {
+              "title": "Upstream Path",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Proxy Inference Path",
+        "tags": [
+          "Inference"
+        ]
+      },
+      "head": {
+        "description": "Proxy an endpoint sub-path after platform authentication.",
+        "operationId": "proxy_inference_path_inference__endpoint_name___upstream_path__head",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "endpoint_name",
+            "required": true,
+            "schema": {
+              "title": "Endpoint Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "upstream_path",
+            "required": true,
+            "schema": {
+              "title": "Upstream Path",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Proxy Inference Path",
+        "tags": [
+          "Inference"
+        ]
+      },
+      "post": {
+        "description": "Proxy an endpoint sub-path after platform authentication.",
+        "operationId": "proxy_inference_path_inference__endpoint_name___upstream_path__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "endpoint_name",
+            "required": true,
+            "schema": {
+              "title": "Endpoint Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "upstream_path",
+            "required": true,
+            "schema": {
+              "title": "Upstream Path",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Proxy Inference Path",
+        "tags": [
+          "Inference"
+        ]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "description": "Readiness probe; external dependencies are resolved per request.",
+        "operationId": "kubernetes_readiness_check_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Kubernetes Readiness Check Readyz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Kubernetes Readiness Check",
+        "tags": [
+          "Health"
+        ]
+      }
+    }
+  }
+}
