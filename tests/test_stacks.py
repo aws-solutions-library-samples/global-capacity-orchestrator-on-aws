@@ -422,6 +422,161 @@ class TestCdkAssetConsumerLocking:
         assert (build_dir / "handler.py").read_text(encoding="utf-8") == "new-version"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX flock semantics directly")
+class TestAssetLockSharedFirst:
+    """Fresh assets never contend: readers stay shared, and waits are bounded.
+
+    Regression class for two observed incidents with one root cause — the
+    publisher path took its exclusive lock *before* checking freshness:
+
+    * every CI xdist worker serialised behind one exclusive lock at session
+      start just to discover the composite action had already built the
+      assets (the 190-267s "setup" stalls the faulthandler dump attributed to
+      ``_prepare_lambda_asset``); and
+    * a ``gco stacks destroy-all`` froze for 40 minutes inside ``flock``
+      against two abandoned pytest sessions' session-long shared locks,
+      silently, while merely re-validating an already-fresh asset.
+    """
+
+    @staticmethod
+    def _hold_shared_lock(stacks_module, build_dir: Path):
+        """Hold the asset's shared lock through an independent descriptor.
+
+        Simulates another live process (a pytest session) rather than this
+        thread: flock contention is per open file description, so a separate
+        ``open()`` contends exactly like a foreign PID would.
+        """
+        lock_path = build_dir.with_name(f".{build_dir.name}.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+b")
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+        return handle
+
+    def test_prepare_takes_no_exclusive_lock_when_fresh(self, tmp_path, monkeypatch):
+        """A fresh asset is validated under a shared lock only.
+
+        The foreign shared lock stays held throughout; before the fix this
+        call blocked in the exclusive acquisition until the holder exited.
+        The short timeout makes a regression fail in seconds instead of
+        hanging the suite.
+        """
+        import cli.stacks as stacks_module
+
+        monkeypatch.setenv("GCO_ASSET_LOCK_TIMEOUT_SECONDS", "2")
+        source_dir, build_dir = TestCdkAssetConsumerLocking._write_fresh_helm_asset(
+            stacks_module, tmp_path, "fresh-version"
+        )
+        holder = self._hold_shared_lock(stacks_module, build_dir)
+        try:
+
+            def forbidden_builder(staging_dir: Path) -> None:
+                raise AssertionError("a fresh asset must not be rebuilt")
+
+            assert (
+                stacks_module._prepare_lambda_asset(
+                    source_dir,
+                    build_dir,
+                    source_inputs=None,
+                    display_name="helm-installer",
+                    builder=forbidden_builder,
+                )
+                is False
+            )
+        finally:
+            holder.close()
+
+    def test_stale_asset_still_escalates_and_rebuilds(self, tmp_path):
+        """The shared-first check must not lose the publisher path."""
+        import cli.stacks as stacks_module
+
+        source_dir, build_dir = TestCdkAssetConsumerLocking._write_fresh_helm_asset(
+            stacks_module, tmp_path, "old-version"
+        )
+        (source_dir / "handler.py").write_text("new-version", encoding="utf-8")
+
+        def builder(staging_dir: Path) -> None:
+            (staging_dir / "handler.py").write_text("new-version", encoding="utf-8")
+
+        assert (
+            stacks_module._prepare_lambda_asset(
+                source_dir,
+                build_dir,
+                source_inputs=None,
+                display_name="helm-installer",
+                builder=builder,
+            )
+            is True
+        )
+        assert (build_dir / "handler.py").read_text(encoding="utf-8") == "new-version"
+
+    def test_consumer_fast_path_skips_prepare_when_fresh(self, tmp_path):
+        """With every asset fresh, the consumer never enters the publisher path."""
+        import cli.stacks as stacks_module
+
+        TestCdkAssetConsumerLocking._write_fresh_helm_asset(
+            stacks_module, tmp_path, "fresh-version"
+        )
+        with (
+            patch.object(
+                stacks_module,
+                "prepare_cdk_assets",
+                side_effect=AssertionError("must not prepare"),
+            ),
+            stacks_module.cdk_asset_consumer(tmp_path),
+        ):
+            pass
+
+    def test_contended_exclusive_wait_warns_and_times_out_actionably(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A blocked exclusive acquisition names the lock and bounds the wait.
+
+        This is the destroy-vs-abandoned-pytest incident distilled: before,
+        the wait was silent and indefinite; now the log names the lock file
+        and the holder class immediately, and the deadline raises with the
+        `lsof` breadcrumb and the env override.
+        """
+        import logging
+
+        import cli.stacks as stacks_module
+
+        monkeypatch.setenv("GCO_ASSET_LOCK_TIMEOUT_SECONDS", "0.3")
+        _source_dir, build_dir = TestCdkAssetConsumerLocking._write_fresh_helm_asset(
+            stacks_module, tmp_path, "fresh-version"
+        )
+        holder = self._hold_shared_lock(stacks_module, build_dir)
+        try:
+            with (
+                caplog.at_level(logging.WARNING, logger="cli.stacks"),
+                pytest.raises(TimeoutError, match="GCO_ASSET_LOCK_TIMEOUT_SECONDS"),
+                stacks_module._lambda_asset_lock(build_dir, exclusive=True),
+            ):
+                pass  # pragma: no cover — acquisition must raise
+        finally:
+            holder.close()
+        assert any(
+            "asset lock" in record.message and str(build_dir.name) in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_shared_acquisition_remains_concurrent(self, tmp_path, monkeypatch):
+        """Two shared holders coexist; the fix must not serialise readers."""
+        import cli.stacks as stacks_module
+
+        monkeypatch.setenv("GCO_ASSET_LOCK_TIMEOUT_SECONDS", "2")
+        _source_dir, build_dir = TestCdkAssetConsumerLocking._write_fresh_helm_asset(
+            stacks_module, tmp_path, "fresh-version"
+        )
+        holder = self._hold_shared_lock(stacks_module, build_dir)
+        try:
+            with stacks_module._lambda_asset_lock(build_dir, exclusive=False):
+                pass
+        finally:
+            holder.close()
+
+
 class TestStackInfo:
     """Tests for StackInfo dataclass."""
 

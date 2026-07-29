@@ -107,6 +107,10 @@ _LAMBDA_SOURCE_COPY_IGNORE_PATTERNS = (
     "*.pyo",
 )
 _ASSET_LOCK_RETRY_SECONDS = 0.05
+# 15 minutes: comfortably above the longest legitimate hold (a cold publisher
+# rebuild, minutes) while bounding the pathological one (an abandoned pytest
+# session's session-long shared locks, indefinite).
+_ASSET_LOCK_TIMEOUT_SECONDS_DEFAULT = 900.0
 _CDK_ASSET_CONSUMER_MAX_ATTEMPTS = 3
 _CLOUDFORMATION_DELETE_TIMEOUT_SECONDS = 7200.0
 _CLOUDFORMATION_DELETE_POLL_SECONDS = 15.0
@@ -319,17 +323,69 @@ def _windows_lock_is_contended(exc: OSError) -> bool:
     ) in {32, 33, 36}
 
 
+def _asset_lock_timeout_seconds() -> float:
+    """Bounded wait for a contended asset lock, env-tunable.
+
+    Contended acquisitions used to block forever with no diagnostics; a
+    destroy was once observed frozen for 40 minutes inside ``flock`` because
+    two abandoned pytest sessions still held their session-long shared locks.
+    The bound turns that silence into a warning at contention time and an
+    actionable error at the deadline.
+    """
+    raw = os.environ.get("GCO_ASSET_LOCK_TIMEOUT_SECONDS", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return _ASSET_LOCK_TIMEOUT_SECONDS_DEFAULT
+    if not math.isfinite(value) or value <= 0:
+        return _ASSET_LOCK_TIMEOUT_SECONDS_DEFAULT
+    return value
+
+
+def _warn_asset_lock_contended(lock_file: BinaryIO, *, exclusive: bool, timeout: float) -> None:
+    lock_name = getattr(lock_file, "name", "<unknown>")
+    mode = "exclusive" if exclusive else "shared"
+    logger.warning(
+        "Waiting up to %.0fs for the %s asset lock on %s — another process holds "
+        "it (a pytest session holds shared locks for its whole run; a "
+        "deploy/synth/destroy holds the exclusive lock while rebuilding). "
+        "Find the holder with `lsof %s`; tune via GCO_ASSET_LOCK_TIMEOUT_SECONDS.",
+        timeout,
+        mode,
+        lock_name,
+        lock_name,
+    )
+
+
+def _raise_asset_lock_timeout(lock_file: BinaryIO, *, timeout: float) -> None:
+    lock_name = getattr(lock_file, "name", "<unknown>")
+    raise TimeoutError(
+        f"Timed out after {timeout:.0f}s waiting for the asset lock on {lock_name}. "
+        "Another process still holds it — often an abandoned pytest session, which "
+        f"keeps shared locks until it exits. Find it with `lsof {lock_name}`, stop "
+        "it, and retry; raise GCO_ASSET_LOCK_TIMEOUT_SECONDS to wait longer."
+    )
+
+
 def _acquire_asset_file_lock(
     lock_file: BinaryIO,
     *,
     exclusive: bool,
 ) -> None:
-    """Acquire a platform-native interprocess lock."""
+    """Acquire a platform-native interprocess lock, loudly and boundedly.
+
+    The first attempt is non-blocking. On contention a warning names the lock
+    file and the likely holder class, then acquisition polls until the
+    env-tunable deadline so a stuck holder produces an actionable error
+    instead of an indefinite silent hang.
+    """
     if os.name == "nt":
         import msvcrt
 
         msvcrt_api: Any = msvcrt
         _ensure_windows_lock_byte(lock_file)
+        warned = False
+        deadline: float | None = None
         while True:
             lock_file.seek(0)
             try:
@@ -341,12 +397,35 @@ def _acquire_asset_file_lock(
             except OSError as exc:
                 if not _windows_lock_is_contended(exc):
                     raise
+                if not warned:
+                    timeout = _asset_lock_timeout_seconds()
+                    deadline = time.monotonic() + timeout
+                    _warn_asset_lock_contended(lock_file, exclusive=exclusive, timeout=timeout)
+                    warned = True
+                assert deadline is not None
+                if time.monotonic() >= deadline:
+                    _raise_asset_lock_timeout(lock_file, timeout=_asset_lock_timeout_seconds())
                 time.sleep(_ASSET_LOCK_RETRY_SECONDS)
 
     import fcntl
 
     operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-    fcntl.flock(lock_file.fileno(), operation)
+    try:
+        fcntl.flock(lock_file.fileno(), operation | fcntl.LOCK_NB)
+        return
+    except BlockingIOError:
+        pass
+    timeout = _asset_lock_timeout_seconds()
+    deadline = time.monotonic() + timeout
+    _warn_asset_lock_contended(lock_file, exclusive=exclusive, timeout=timeout)
+    while True:
+        try:
+            fcntl.flock(lock_file.fileno(), operation | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                _raise_asset_lock_timeout(lock_file, timeout=timeout)
+            time.sleep(_ASSET_LOCK_RETRY_SECONDS)
 
 
 def _release_asset_file_lock(lock_file: BinaryIO) -> None:
@@ -452,7 +531,19 @@ def _prepare_lambda_asset(
     display_name: str,
     builder: Callable[[Path], None],
 ) -> bool:
-    """Build and atomically publish an asset when its completion proof is stale."""
+    """Build and atomically publish an asset when its completion proof is stale.
+
+    Freshness is checked under a *shared* lock first, so the common case —
+    the asset is already source-current — never contends: concurrent pytest
+    workers validate in parallel instead of serialising behind one writer,
+    and a deploy/destroy against fresh assets never blocks on a pytest
+    session's session-long shared locks. Only a genuinely stale asset
+    escalates to the exclusive publisher lock, which re-checks freshness
+    after acquisition (another publisher may have finished the same rebuild
+    while this one waited).
+    """
+    if _asset_build_is_fresh(source_dir, build_dir, source_inputs=source_inputs):
+        return False
     with _lambda_asset_lock(build_dir, exclusive=True):
         _recover_interrupted_asset_publish(build_dir)
         source_digest = _asset_tree_digest(source_dir, source_inputs=source_inputs)
@@ -649,8 +740,16 @@ def cdk_asset_consumer(project_root: str | Path) -> Iterator[None]:
         return
 
     stale_assets: list[str] = []
-    for _attempt in range(_CDK_ASSET_CONSUMER_MAX_ATTEMPTS):
-        prepare_cdk_assets(root)
+    # Attempt 0 validates under shared locks without preparing anything: when
+    # every asset is already source-current (always true in CI, where the
+    # composite build action runs first, and true locally on any second run)
+    # the consumer takes no exclusive lock and does one hash pass. Concurrent
+    # consumers — xdist workers — therefore proceed in parallel instead of
+    # serialising behind the publisher lock. Later attempts keep the original
+    # prepare-then-revalidate budget for genuinely stale trees.
+    for attempt in range(_CDK_ASSET_CONSUMER_MAX_ATTEMPTS + 1):
+        if attempt:
+            prepare_cdk_assets(root)
         resolved_assets = []
         for spec in _CDK_ASSET_SPECS:
             source_dir, build_dir = spec.paths(root)
