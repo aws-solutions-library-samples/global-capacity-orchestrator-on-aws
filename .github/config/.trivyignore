@@ -147,3 +147,29 @@ GHSA-hrxh-6v49-42gf exp:2026-09-22
 # consistency check holds in lockstep) and drop this entry.
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-14257
 CVE-2026-14257 exp:2026-08-26
+
+# CVE-2026-56852 — golang.org/x/text, statically linked into two pinned Go
+# binaries: the kubectl binary at x/text v0.33.0 (ARG KUBECTL_VERSION in
+# Dockerfile.dev; the identical v1.36.3 is fetched by
+# lambda/helm-installer/Dockerfile) and the docker-buildx CLI plugin at
+# x/text v0.37.0 (ARG BUILDX_VERSION in Dockerfile.dev). Surfaced by
+# security:trivy:container-scan on the GCO dev image and the helm-installer
+# Lambda image. Fixed in x/text 0.39.0.
+#
+# Not yet clearable by a pin bump: v1.36.3 is the latest stable kubectl on
+# any release line (https://dl.k8s.io/release/stable.txt) and buildx v0.35.0
+# is the latest buildx release — no published build of either embeds
+# x/text >= 0.39.0 yet.
+#
+# Low runtime risk: the flaw is a denial-of-service only — norm.Iter enters
+# an infinite loop on invalid UTF-8 input (golang/go#80142). kubectl and
+# buildx here process operator-authored manifests and build contexts, not
+# untrusted remote input, and both images are contributor/CI/deploy tooling
+# rather than long-lived network services.
+#
+# Clears when kubectl and buildx releases ship with x/text >= 0.39.0: bump
+# KUBECTL_VERSION and BUILDX_VERSION in Dockerfile.dev and the kubectl pin in
+# lambda/helm-installer/Dockerfile + lambda/helm-installer-build/Dockerfile,
+# then drop this entry.
+# Advisory: https://avd.aquasec.com/nvd/cve-2026-56852
+CVE-2026-56852 exp:2026-09-28

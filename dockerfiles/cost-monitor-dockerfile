@@ -12,7 +12,7 @@ WORKDIR /app
 # APT_SECURITY_EPOCH busts the CI layer cache so a freshly-published
 # trixie-security patch isn't masked by a stale cached upgrade layer;
 # bump the date when a new fix needs pulling.
-ARG APT_SECURITY_EPOCH=2026-07-12
+ARG APT_SECURITY_EPOCH=2026-07-28
 RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
     && apt-get update \
     && apt-get upgrade -y \
