@@ -1140,31 +1140,10 @@ jobs:
           # container runtime does not need a systemd session.
           sudo loginctl enable-linger "$(id -un)" 2>/dev/null || true
           mkdir -p "$HOME/.config/containers"
-          {
-            echo '[engine]'
-            echo 'cgroup_manager = "cgroupfs"'
-            echo 'events_logger = "file"'
-            # Pin the OCI runtime instead of taking whatever crun the runner
-            # image happens to ship. podman from apt has intermittently paired
-            # with a crun too old for the OCI spec version it generates, and the
-            # container then fails to start at the first RUN with
-            # "unknown version specified" — a deterministic failure inside that
-            # runner, so the build's own retries cannot clear it. The same commit
-            # would pass or fail depending on which image version the job landed
-            # on. runc ships on GitHub's Ubuntu images (Docker depends on it), so
-            # prefer it and fall back to whatever podman would have chosen when
-            # it is absent.
-            if command -v runc >/dev/null 2>&1; then
-              echo 'runtime = "runc"'
-              echo "pinned OCI runtime: $(runc --version | head -1)" >&2
-            else
-              echo "runc not found; leaving podman's default OCI runtime" >&2
-            fi
-            echo '[containers]'
-            echo 'cgroups = "disabled"'
-          } > "$HOME/.config/containers/containers.conf"
-          echo "--- containers.conf ---"
-          cat "$HOME/.config/containers/containers.conf"
+          # The default configuration, written by .github/scripts/podman_ci_config.sh
+          # so the live step can rewrite it for the fallback attempt using the
+          # same code path. See that script for why two configurations exist.
+          .github/scripts/podman_ci_config.sh crun
       - name: Live-prove the generated gco function against Podman
         run: |
           set -euo pipefail
@@ -1184,7 +1163,29 @@ jobs:
           done
           # Fallback so the bind-mount source always exists.
           [ -e "$XDG_RUNTIME_DIR/podman/podman.sock" ] || : >"$XDG_RUNTIME_DIR/podman/podman.sock"
-          .github/scripts/dev_alias_live.sh podman
+
+          # Two OCI runtime configurations are viable here and each fails in a
+          # way the other survives, so try both rather than depending on which
+          # podman/crun pairing the runner image shipped. See
+          # .github/scripts/podman_ci_config.sh for both failure modes.
+          #
+          # This is a genuine alternative configuration, not a blind retry: the
+          # crun failure is deterministic inside a given runner, so re-running
+          # the same setup could never clear it.
+          for runtime in crun runc; do
+            echo "::group::podman dev-alias attempt with ${runtime}"
+            .github/scripts/podman_ci_config.sh "${runtime}"
+            if .github/scripts/dev_alias_live.sh podman; then
+              echo "::endgroup::"
+              echo "dev-alias succeeded with the ${runtime} configuration"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "dev-alias failed with the ${runtime} configuration" >&2
+          done
+
+          echo "dev-alias failed with every OCI runtime configuration" >&2
+          exit 1
 
   integration-dev-alias-finch:
     name: "integration:dev-alias:finch"

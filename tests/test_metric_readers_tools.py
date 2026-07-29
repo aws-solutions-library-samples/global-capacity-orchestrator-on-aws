@@ -524,6 +524,23 @@ def _local_metrics_flag(env: dict[str, str | None]) -> Iterator[dict]:
         else:
             os.environ[key] = value
 
+    # Strip any registration a sibling module leaked onto the shared singleton
+    # before re-importing, so the assertion reflects this env's gate decision
+    # rather than state left behind elsewhere. The FastMCP instance is
+    # module-level and survives reloads, so test_mcp_destructive_gating.py's
+    # umbrella case — which registers every gated tool under
+    # GCO_ENABLE_ALL_TOOLS and does not remove them — otherwise leaves
+    # ``metrics_from_local_file`` present here, and the "absent when the flag is
+    # unset" assertion fails based only on which modules happened to share an
+    # xdist worker. That made it a latent failure the whole time; splitting the
+    # core suite into shards changed the grouping and surfaced it. This mirrors
+    # the ``_clean_gated_tools`` precedent in that file: strip gated names
+    # *before* a default-env assertion, not only after.
+    with contextlib.suppress(Exception):
+        import server
+
+        server.mcp.local_provider.remove_tool(_LOCAL_FILE_TOOL)
+
     # Re-import under the env so the gated decorator re-evaluates its flag.
     if "tools.metrics" in sys.modules:
         del sys.modules["tools.metrics"]
