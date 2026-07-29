@@ -42,14 +42,33 @@ is a FastAPI app in this repository. Both are documented in
 
 ## Using them
 
-Point any OpenAPI-aware tool at a document to generate a client, for example:
+Point any OpenAPI-aware tool at a document to generate a client. The container
+image needs nothing on your host beyond the runtime GCO already requires
+(Docker, [Finch](https://runfinch.com/), or [Podman](https://podman.io/docs)):
 
 ```bash
-npx --yes @openapitools/openapi-generator-cli generate \
-  -i docs/openapi/manifest-processor.json \
-  -g python \
-  -o /tmp/gco-client
+mkdir -p ~/gco-client
+
+docker run --rm \
+  -v "$PWD/docs/openapi:/spec:ro" \
+  -v "$HOME/gco-client:/out" \
+  openapitools/openapi-generator-cli:v7.24.0 \
+  generate -i /spec/manifest-processor.json -g python -o /out
 ```
+
+That produces one API class per tag group — jobs, job queue, manifests,
+templates, webhooks, cost, health — plus a model per request schema.
+
+Two things to know before changing the command:
+
+- **The output path must be inside a directory your runtime shares with the
+  container.** Finch and Podman run a VM, so a bind mount of `/tmp` silently
+  writes inside the VM and leaves the host directory empty. Paths under `$HOME`
+  are shared by default, which is why the example writes there.
+- **`npx @openapitools/openapi-generator-cli` needs a Java runtime.** The npm
+  package is a wrapper that downloads a JAR and shells out to `java`, so without
+  a JRE on your `PATH` it fails with "Unable to locate a Java Runtime". Use the
+  container above, or install a JRE first.
 
 Generated clients handle request shapes only. Every request still needs AWS IAM
 SigV4 signing against the API Gateway host; see
