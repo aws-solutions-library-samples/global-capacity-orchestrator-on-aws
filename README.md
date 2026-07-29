@@ -487,6 +487,7 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 | Mirror Docker Hub images into ECR (Volcano) | [Image Mirror](docs/IMAGE_MIRROR.md) |
 | Configure the SQS queue processor | [Queue Processor Config](docs/CUSTOMIZATION.md#queue-processor-sqs-consumer) |
 | Contribute to the project | [Contributing](CONTRIBUTING.md) |
+| Take GCO into your own repository | [Forking Guide](docs/FORKING.md) |
 | API client examples (Python, curl, AWS CLI) | [Client Examples](docs/client-examples/README.md) |
 | IAM policy templates | [IAM Policies](docs/iam-policies/README.md) |
 | Presentation slides and demo scripts | [Demo Starter Kit](demo/README.md) |
