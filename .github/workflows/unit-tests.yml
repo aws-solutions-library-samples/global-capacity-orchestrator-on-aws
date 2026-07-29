@@ -7,18 +7,22 @@
 # Triggers: push: main, pull_request, workflow_dispatch.
 #
 # Jobs (alphabetical by display name):
-#   - unit:bats:shell              — BATS shell tests
-#   - unit:cdk:config-matrix       — tests/test_cdk_synthesis_matrix.py (in-process, -n auto)
-#   - unit:cdk:nag-compliance      — cdk-nag compliance across full config matrix
+#   - unit:bats:shell               — BATS shell tests
+#   - unit:cdk:config-matrix        — tests/test_cdk_synthesis_matrix.py (in-process, -n auto)
+#   - unit:cdk:nag-compliance       — cdk-nag compliance across full config matrix
 #   - unit:cdk:project-name-scoping — #139: per-project_name name-collision + gco backward-compat synth checks
-#   - unit:cdk:synth               — cdk synth of the default config
-#   - unit:cli:smoke               — gco --help and all subcommand help pages
-#   - unit:cli:smoke:windows       — native Windows cli.stacks/app import + file-lock smoke
-#   - unit:fresh-install           — pip install from scratch, verify imports
-#   - unit:lockfile:freshness      — requirements-lock.txt matches pyproject.toml
-#   - unit:mcp:install             — uv-installs gco-mcp from source, then launches the server
-#   - unit:pytest:core             — offline accelerator policy + pytest (90% enforced floor) + coverage artifact
-#   - unit:workload:imports        — K8s service import + circular-import detection
+#   - unit:cdk:synth                — cdk synth of the default config
+#   - unit:cli:smoke                — gco --help and all subcommand help pages
+#   - unit:cli:smoke:windows        — native Windows cli.stacks/app import + file-lock smoke
+#   - unit:fresh-install            — pip install from scratch, verify imports
+#   - unit:lockfile:freshness       — requirements-lock.txt matches pyproject.toml
+#   - unit:mcp:install              — uv-installs gco-mcp from source, then launches the server
+#   - unit:pytest:core              — combines shard coverage, enforces the 90% floor, publishes the coverage artifact
+#   - unit:pytest:core (shard N/M)  — one balanced slice of the core suite; shard
+#                                     count is set by matrix.shard on
+#                                     unit-pytest-core-shard and the slices are
+#                                     computed at run time by scripts/split_tests.py
+#   - unit:workload:imports         — K8s service import + circular-import detection
 #
 # The HTML coverage report is published to GitHub Pages by a separate
 # workflow — pages.yml ("Deploy Pages") — triggered via workflow_run after
@@ -87,10 +91,28 @@ jobs:
             echo "deps=true" >> "$GITHUB_OUTPUT"
           fi
 
-  unit-pytest-core:
-    name: "unit:pytest:core"
+  # --------------------------------------------------------------------------
+  # The core suite is sharded across parallel jobs, then coverage from every
+  # shard is combined in one place so the 90% floor is still enforced against
+  # the whole codebase rather than against a fraction of it.
+  #
+  # TO CHANGE THE SHARD COUNT, edit `matrix.shard` below and nothing else:
+  # adding `3` to the list produces three shards. `--of` is derived from
+  # `strategy.job-total`, the shard list is computed at run time by
+  # scripts/split_tests.py, and tests/test_split_tests.py asserts the matrix and
+  # the script agree — so a half-finished change fails CI instead of silently
+  # dropping tests.
+  # --------------------------------------------------------------------------
+  unit-pytest-core-shard:
+    name: "unit:pytest:core (shard ${{ matrix.shard }}/${{ strategy.job-total }})"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      # Run every shard even when one fails, so a contributor sees all the
+      # failures in the suite rather than only those in the first shard to break.
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     # Several tests import Lambda handler modules that construct boto3
     # clients at module scope (lambda/api-gateway-proxy/proxy_utils.py,
     # lambda/cross-region-aggregator/handler.py). boto3 requires a region
@@ -122,6 +144,10 @@ jobs:
         # Deterministic and credential-free: the mutable EC2 catalog is checked
         # only by the monthly deps scan, while PRs validate the reviewed catalog,
         # Karpenter families, and exact capacity-history watch list.
+        #
+        # Runs on one shard only: it is a whole-repo policy check, not part of
+        # the sharded suite, so repeating it per shard would only add minutes.
+        if: matrix.shard == 1
         run: |
           python scripts/accelerator_catalog.py validate
           pytest tests/test_accelerator_catalog.py -q
@@ -139,19 +165,91 @@ jobs:
         # first failure" behavior — `-x` itself isn't compatible with xdist.
         # Concise output avoids thousands of per-test log writes; report.xml
         # retains individual test names, timings, and failure details.
+        #
+        # A shard exercises only part of the codebase, so its own coverage
+        # percentage is meaningless: the floor is enforced once, against the
+        # combined data, by unit:pytest:core.
+        #
+        # --cov-fail-under=0 is required, not redundant. pytest-cov reads
+        # fail_under from [tool.coverage.report] in pyproject and enforces it
+        # even when --cov-report= suppresses all reports, so without this every
+        # shard fails with "Required test coverage of 90.0% not reached".
+        # --cov-report= then leaves just the raw data file to combine.
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
         run: |
-          pytest tests/ -q \
-            --ignore=tests/test_integration.py \
-            --ignore=tests/test_nag_compliance.py \
-            --ignore=tests/test_cdk_synthesis_matrix.py \
-            --ignore=tests/test_project_name_scoping.py \
-            --ignore=tests/test_accelerator_catalog.py \
+          set -euo pipefail
+          python scripts/split_tests.py --of "$SHARDS" --summary
+          mapfile -t SHARD_FILES < <(python scripts/split_tests.py --shard "$SHARD" --of "$SHARDS")
+          echo "shard $SHARD/$SHARDS: ${#SHARD_FILES[@]} test files"
+          pytest "${SHARD_FILES[@]}" -q \
             --cov=gco --cov=cli --cov=gco_mcp \
-            --cov-report=xml --cov-report=html --cov-report=json \
-            --cov-report=term-missing \
-            --cov-fail-under=90 \
-            --junitxml=report.xml \
+            --cov-report= \
+            --cov-fail-under=0 \
+            --junitxml="report-shard-${SHARD}.xml" \
             -n auto --maxfail=1
+          # Renamed off the leading dot so the upload does not need
+          # include-hidden-files, and so each shard's data file is distinct.
+          mv .coverage "coverage-data-shard-${SHARD}"
+      - name: Upload shard coverage data
+        if: always()
+        uses: ./.github/actions/upload-artifact-with-retry
+        with:
+          name: pytest-coverage-shard-${{ matrix.shard }}
+          path: |
+            coverage-data-shard-${{ matrix.shard }}
+            report-shard-${{ matrix.shard }}.xml
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # Combines every shard's coverage and enforces the floor. Keeping the display
+  # name `unit:pytest:core` means any branch protection rule that already
+  # requires this check keeps working, and the check still means "the whole core
+  # suite passed and the codebase is at or above the coverage floor".
+  # --------------------------------------------------------------------------
+  unit-pytest-core:
+    name: "unit:pytest:core"
+    needs: unit-pytest-core-shard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6.3.0
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install dependencies
+        # The same pinned dependency set as the shards, so the coverage version
+        # reading the data files matches the one that wrote them.
+        run: pip install -e ".[dev]"
+      - name: Download shard coverage data
+        uses: actions/download-artifact@v8
+        with:
+          pattern: pytest-coverage-shard-*
+          path: shard-artifacts
+          merge-multiple: true
+      - name: Combine coverage and enforce the floor
+        # `coverage combine` maps each shard's data onto the checkout, which sits
+        # at the same absolute path on every runner. fail_under = 90 comes from
+        # pyproject's [tool.coverage.report], so the floor lives in one place.
+        run: |
+          set -euo pipefail
+          ls -l shard-artifacts
+          coverage combine shard-artifacts/coverage-data-shard-*
+          # Write every report before enforcing the floor, so a coverage
+          # regression still publishes an HTML report and the badge input to
+          # look at. These generators honour fail_under too, so each is given
+          # --fail-under=0 to report on its own exit code rather than the
+          # threshold; using `|| true` instead would also swallow real errors
+          # like a corrupt data file.
+          coverage xml --fail-under=0
+          coverage json --fail-under=0
+          coverage html --fail-under=0
+          # Enforce the floor from pyproject's [tool.coverage.report]. This is
+          # the last command, so it decides the job result.
+          coverage report --show-missing
       - name: Upload coverage artifacts
         if: always()
         uses: ./.github/actions/upload-artifact-with-retry
@@ -161,7 +259,7 @@ jobs:
             htmlcov/
             coverage.xml
             coverage.json
-            report.xml
+            shard-artifacts/
           retention-days: 7
 
   unit-bats-shell:

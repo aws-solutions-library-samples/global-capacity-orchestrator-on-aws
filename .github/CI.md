@@ -114,6 +114,39 @@ Shared logic used by multiple jobs. Invoked with `uses: ./.github/actions/<name>
 
 - **`actions/build-lambda-package`** — stages `lambda/kubectl-applier-simple-build/`, `lambda/helm-installer-build/`, and the production-only `lambda/inference-streaming-proxy-build/` graph that CDK synth, pytest, and KICS scans expect. Callers must configure Python 3.14 and Node.js from `.nvmrc`; the action installs and verifies the exact npm version from the Lambda `packageManager` pin before its locked install. Used by `unit:cdk:synth`, `unit:cdk:config-matrix`, `unit:cdk:nag-compliance`, `unit:pytest:core`, and `security:kics:iac`.
 
+## Sharded unit tests
+
+The core pytest suite is split across parallel jobs. `unit:pytest:core (shard N/M)`
+runs one slice; `unit:pytest:core` then combines every slice's coverage and
+enforces the floor. Keeping the combining job's display name means an existing
+required-status-check rule for `unit:pytest:core` still applies, and it still
+means "the whole core suite passed and coverage is at or above the floor".
+
+The split is computed at run time by
+[`scripts/split_tests.py`](../scripts/split_tests.py), which asks pytest for the
+test count of every file and greedily bin-packs files into equally weighted
+shards. Nothing about the partition is checked in, so it cannot drift as tests
+are added, renamed, or deleted.
+
+**To change the shard count, edit `matrix.shard` in `unit-pytest-core-shard` and
+nothing else.** Adding `3` to the list yields three shards: `--of` comes from
+`strategy.job-total`, and the combining job discovers shard artifacts by glob, so
+both adapt automatically. `tests/test_split_tests.py` fails if that contract is
+broken — for instance if the shard total were hardcoded a second time, which
+would keep splitting the suite in two while a third of the tests silently stopped
+running.
+
+Two details worth knowing before editing these jobs:
+
+- Each shard passes `--cov-fail-under=0`. This is load-bearing, not redundant:
+  pytest-cov reads `fail_under` from `[tool.coverage.report]` and applies it even
+  when `--cov-report=` suppresses all reports, so without it every shard fails
+  for covering only its own slice.
+- The combining job writes `coverage xml/json/html` *before* `coverage report`,
+  each with `--fail-under=0`, so a coverage regression still publishes a report
+  and the Pages badge input. The final `coverage report` applies the real floor
+  and decides the job result.
+
 ## CodeQL config
 
 [`codeql/codeql-config.yml`](codeql/codeql-config.yml) is read by the Advanced Setup Python and JavaScript CodeQL jobs in [`workflows/security.yml`](workflows/security.yml), via the `config-file:` input on `github/codeql-action/init@v4`. It does three things:
@@ -453,10 +486,16 @@ npm --prefix lambda/inference-streaming-proxy test
 mypy gco/ cli/ gco_mcp/ scripts/ --exclude 'gco/stacks/'
 mypy gco/stacks/ app.py          # requires ".[cdk,typecheck]"
 
-# Unit tests (matches unit:pytest:core)
-pytest tests/ --cov=gco --cov=cli --cov=gco_mcp --cov-fail-under=90 \
-    --ignore=tests/test_integration.py \
-    --ignore=tests/test_nag_compliance.py
+# Unit tests — the whole core suite in one go. CI splits the same set across
+# `unit:pytest:core (shard N/M)` jobs and combines coverage in `unit:pytest:core`;
+# locally there is no reason to shard.
+pytest $(python scripts/split_tests.py --shard 1 --of 1) \
+    --cov=gco --cov=cli --cov=gco_mcp
+
+# Or run one shard exactly as CI does (coverage floor off; it applies to the
+# combined data only)
+pytest $(python scripts/split_tests.py --shard 1 --of 2) \
+    --cov=gco --cov=cli --cov=gco_mcp --cov-report= --cov-fail-under=0
 
 # cdk-nag compliance matrix (matches unit:cdk:nag-compliance)
 pytest tests/test_nag_compliance.py -n auto

@@ -1144,9 +1144,27 @@ jobs:
             echo '[engine]'
             echo 'cgroup_manager = "cgroupfs"'
             echo 'events_logger = "file"'
+            # Pin the OCI runtime instead of taking whatever crun the runner
+            # image happens to ship. podman from apt has intermittently paired
+            # with a crun too old for the OCI spec version it generates, and the
+            # container then fails to start at the first RUN with
+            # "unknown version specified" — a deterministic failure inside that
+            # runner, so the build's own retries cannot clear it. The same commit
+            # would pass or fail depending on which image version the job landed
+            # on. runc ships on GitHub's Ubuntu images (Docker depends on it), so
+            # prefer it and fall back to whatever podman would have chosen when
+            # it is absent.
+            if command -v runc >/dev/null 2>&1; then
+              echo 'runtime = "runc"'
+              echo "pinned OCI runtime: $(runc --version | head -1)" >&2
+            else
+              echo "runc not found; leaving podman's default OCI runtime" >&2
+            fi
             echo '[containers]'
             echo 'cgroups = "disabled"'
           } > "$HOME/.config/containers/containers.conf"
+          echo "--- containers.conf ---"
+          cat "$HOME/.config/containers/containers.conf"
       - name: Live-prove the generated gco function against Podman
         run: |
           set -euo pipefail

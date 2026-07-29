@@ -523,11 +523,18 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         "related": ["CLUSTER_SHARED_BUCKET", "CUSTOMIZATION"],
     },
     "API": {
-        "summary": "REST API reference for the GCO Manifest Processor service — endpoints, auth, and CLI quick reference.",
+        "summary": (
+            "Reference for every GCO HTTP surface: the control plane (manifests, "
+            "jobs, queue, templates, webhooks, cost), cross-region aggregation, "
+            "inference, health and observability, plus which paths each API "
+            "Gateway exposes and the cluster-internal surfaces."
+        ),
         "topics": ["api", "cli", "jobs", "inference", "webhooks", "templates"],
         "keywords": [
             "rest",
             "manifest processor",
+            "inference proxy",
+            "health monitor",
             "endpoints",
             "auth",
             "hmac request envelope",
@@ -535,6 +542,7 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
             "sigv4",
             "openapi",
             "submit job",
+            "api surface",
         ],
         "related": ["CLI", "ARCHITECTURE"],
     },
@@ -697,6 +705,27 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
             "image registry config",
         ],
         "related": ["ARCHITECTURE", "ANALYTICS"],
+    },
+    "FORKING": {
+        "summary": (
+            "Take GCO into your own repository: repoint badges, clone URLs, the "
+            "GitHub Pages site, and the OIDC trust-policy subject with "
+            "scripts/migrate_fork.py, plus the follow-ups it cannot decide."
+        ),
+        "topics": ["forking", "migration", "repository", "ci", "oidc"],
+        "keywords": [
+            "fork",
+            "migrate",
+            "own repository",
+            "rename repo",
+            "badges",
+            "oidc trust policy",
+            "github pages",
+            "codeowners",
+            "solution id",
+            "upstream remote",
+        ],
+        "related": ["CUSTOMIZATION", "MAINTENANCE"],
     },
     "IMAGE_MIRROR": {
         "summary": "Mirror third-party container images (chiefly Volcano's docker.io images) into the project's gco/* ECR so the cluster pulls from same-account ECR instead of a rate-limited upstream.",

@@ -209,6 +209,11 @@ test = [
     # the same version the metrics-parquet extra already locks), so its unit
     # tests can execute the real writer instead of mocking serialization.
     "pyarrow==25.0.0",
+    # tests/test_presentation_claims.py reads demo/GCO_PRESENTATION.pdf and
+    # checks the headline numbers on the engineering-foundation slide against
+    # the repository, so a stale deck fails CI instead of being noticed on
+    # stage. Text extraction only; nothing writes PDFs.
+    "pypdf==6.14.2",
 ]
 security = [
     "bandit==1.9.4",
