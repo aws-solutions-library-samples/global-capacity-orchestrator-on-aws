@@ -122,6 +122,41 @@ _DESTROY_CLEANUP_OWNERS = {
 }
 
 
+# ============================================================================
+# Function-scoped: never run the stuck-stack pre-check against real AWS
+# ============================================================================
+#
+# ``StackManager.deploy()`` runs ``_check_and_fix_stuck_stack`` before every
+# deployment. Left real, it creates its own boto3 CloudFormation client and
+# calls ``describe_stacks`` — and for a stack in a genuinely stuck state
+# (ROLLBACK_COMPLETE and friends) it proceeds to ``delete_stack``. That is
+# non-hermetic in both directions: on a developer machine with live
+# credentials, any ``test_deploy_*`` case that names a real stack reads it (and
+# in a stuck state would *delete* it); on a shard worker where an earlier test
+# leaked a ``boto3.client`` mock, ``describe_stacks`` returns a MagicMock and
+# the identity validation fails with "CloudFormation returned an invalid
+# identity" — an order-dependent failure that surfaced when sharding changed
+# worker composition. No-op the pre-check for every test except the classes
+# that exercise it directly with their own boto3 mocks; tests that assert it
+# was called still patch it locally, so their patch nests over this one and
+# wins.
+_STUCK_STACK_PRECHECK_OWNERS = {
+    "TestCheckAndFixStuckStack",
+    "TestStrictDeployStackOwnership",
+}
+
+
+@pytest.fixture(autouse=True)
+def _no_real_stuck_stack_precheck(request):
+    if request.cls is not None and request.cls.__name__ in _STUCK_STACK_PRECHECK_OWNERS:
+        yield
+        return
+    from cli import stacks as _stacks
+
+    with patch.object(_stacks.StackManager, "_check_and_fix_stuck_stack", return_value=None):
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _no_real_destroy_cleanup_aws_calls(request):
     if request.cls is not None and request.cls.__name__ in _DESTROY_CLEANUP_OWNERS:
