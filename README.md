@@ -21,7 +21,7 @@
 
 ![GCO Live Demo](demo/live_demo.gif)
 
-*`gco` CLI demo: capacity discovery, cost visibility, 5 schedulers ([Volcano](https://volcano.sh/), [Kueue](https://kueue.sigs.k8s.io/), [YuniKorn](https://yunikorn.apache.org/), Slurm, [KEDA](https://keda.sh/)), [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), [Valkey](https://valkey.io/), live LLM inference, and [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html) — all against one already-deployed cluster. ([source](demo/live_demo.sh) · [re-record](demo/record_demo.sh))*
+*`gco` CLI demo: capacity discovery, cost visibility, 5 schedulers ([Volcano](https://volcano.sh/), [Kueue](https://kueue.sigs.k8s.io/), [YuniKorn](https://yunikorn.apache.org/), [Slurm](https://slurm.schedmd.com/slinky.html), [KEDA](https://keda.sh/)), [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html), [Valkey](https://valkey.io/), live LLM inference, and [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html) — all against one already-deployed cluster. ([source](demo/live_demo.sh) · [re-record](demo/record_demo.sh))*
 
 </details>
 
@@ -45,11 +45,11 @@
 
 </div>
 
-**What it does.** Spins up [EKS Auto Mode](docs/CONCEPTS.md#eks-auto-mode) clusters across any number of SDK-known [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) Regions in one AWS partition. In commercial `aws`, [Global Accelerator](docs/CONCEPTS.md#global-routing) provides latency-aware anycast routing and automatic failover behind the global workload API; other partitions use IAM-authenticated regional workload APIs while retaining the aggregate global API. Capacity tools and auto-region queue/CLI workflows can select a target Region, [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) provisions matching nodes, and shared storage can persist workload outputs. Network routing never substitutes for live GPU-capacity placement.
+**What it does.** Spins up [EKS Auto Mode](docs/CONCEPTS.md#eks-auto-mode) clusters across any number of SDK-known [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) Regions in one [AWS partition](https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/partitions.html). In commercial `aws`, [Global Accelerator](docs/CONCEPTS.md#global-routing) provides latency-aware [anycast routing](https://www.cloudflare.com/learning/cdn/glossary/anycast-network/) and automatic failover behind the global workload API; other partitions use IAM-authenticated regional workload APIs while retaining the aggregate global API. Capacity tools and auto-region queue/CLI workflows can select a target Region, [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) provisions matching nodes, and shared storage can persist workload outputs. Network routing never substitutes for live GPU-capacity placement.
 
-**Who it's for.** Teams running accelerated workloads — LLM training and inference, batch ML, HPC, and general CPU jobs — that need multi-region redundancy, capacity discovery, and IAM-based access without per-cluster kubeconfig distribution. GCO includes the [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) Auto Mode `system` and `general-purpose` NodePools plus project-managed GPU x86, GPU ARM, inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html), Mooncake EFA, Neuron, and CPU NodePools.
+**Who it's for.** Teams running accelerated workloads — LLM training and inference, batch ML, HPC, and general CPU jobs — that need multi-region redundancy, capacity discovery, and IAM-based access without per-cluster kubeconfig distribution. GCO includes the [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) [Auto Mode](https://aws.amazon.com/eks/auto-mode/) `system` and `general-purpose` [NodePools](https://karpenter.sh/docs/concepts/nodepools/) plus project-managed GPU x86, GPU ARM, inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html), [Mooncake](https://kvcache-ai.github.io/Mooncake/) EFA, [Neuron](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/), and CPU NodePools.
 
-**Why it's different.** Capacity-aware placement tools and auto-region workflows, partition-aware authenticated routing, full-stack observability ([CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) dashboards, alarms, [SNS](https://docs.aws.amazon.com/sns/latest/dg/welcome.html)), and a [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) app validated across 20+ config matrix combinations in CI.
+**Why it's different.** Capacity-aware placement tools and auto-region workflows, partition-aware authenticated routing, full-stack observability ([CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) dashboards, alarms, [SNS](https://docs.aws.amazon.com/sns/latest/dg/welcome.html)), and a [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) app validated across 34 config matrix combinations in CI.
 
 ---
 
@@ -60,9 +60,9 @@ gco stacks deploy-all -y      # stand up every region defined in cdk.json
 gco stacks destroy-all -y     # destroy every stack across every region — no orphaned resources
 ```
 
-**Recommended: run everything from the dev container.** GCO pins exact versions of a lot of Python packages (CDK, AWS SDKs, FastAPI, mypy, Ruff, etc.), and installing them on top of an existing Python environment is the most common source of "it doesn't install" reports. The dev container ships a fully resolved environment (Python 3.14, Node.js 24, CDK, kubectl, AWS CLI, Docker CLI + Buildx, all Python deps) so you skip the whole problem.
+**Recommended: run everything from the dev container.** GCO pins exact versions of a lot of Python packages ([CDK](https://docs.aws.amazon.com/cdk/v2/guide/work-with-cdk-python.html), [AWS SDKs](https://pypi.org/project/boto3/), [FastAPI](https://fastapi.tiangolo.com/), [mypy](https://mypy-lang.org/), [Ruff](https://docs.astral.sh/ruff/), etc.), and installing them on top of an existing Python environment is the most common source of "it doesn't install" reports. The dev container ships a fully resolved environment (Python 3.14, Node.js 24, CDK, [kubectl](https://kubernetes.io/docs/reference/kubectl/), [AWS CLI](https://aws.amazon.com/cli/), Docker CLI + [Buildx](https://github.com/docker/buildx), all Python deps) so you skip the whole problem.
 
-**Let the setup script do it all — build the image and wire up a `gco` command for you.** You shouldn't hand-write `docker run …` invocations or live inside an interactive container shell — `scripts/setup-dev-alias.sh` builds the `gco-dev` image and installs the wiring, so `gco` runs straight from your normal shell:
+**Let the setup script do it all — build the image and wire up a `gco` command for you.** You shouldn't hand-write `docker run …` invocations or live inside an interactive container shell — [`scripts/setup-dev-alias.sh`](./scripts/setup-dev-alias.sh) builds the `gco-dev` image and installs the wiring, so `gco` runs straight from your normal shell:
 
 ```bash
 git clone git@github.com:awslabs/global-capacity-orchestrator-on-aws.git
@@ -72,7 +72,7 @@ cd global-capacity-orchestrator-on-aws
 source ~/.zshrc                # or ~/.bashrc — the script prints which file it updated
 ```
 
-`setup-dev-alias.sh` detects your container runtime (Docker, [Finch](https://runfinch.com/), or [Podman](https://podman.io/docs)), builds the `gco-dev` image from `Dockerfile.dev` (re-running rebuilds it, so a stale image is refreshed automatically — pass `--no-build` to skip), wires up the correct socket pass-through, and installs an idempotent `gco` shell *function* (not a bare alias, so arguments and pipes forward correctly and a TTY is attached only when one is present) into your profile. From then on, run GCO straight from your repo checkout — each command executes inside the dev container against your current directory:
+`setup-dev-alias.sh` detects your container runtime ([Docker](https://docs.docker.com/reference/), [Finch](https://runfinch.com/), or [Podman](https://podman.io/docs)), builds the `gco-dev` image from [Dockerfile.dev](./Dockerfile.dev) (re-running rebuilds it, so a stale image is refreshed automatically — pass `--no-build` to skip), wires up the correct socket pass-through, and installs an idempotent `gco` shell *function* (not a bare alias, so arguments and pipes forward correctly and a TTY is attached only when one is present) into your profile. From then on, run GCO straight from your repo checkout — each command executes inside the dev container against your current directory:
 
 ```bash
 gco --help                # explore every command
@@ -82,12 +82,12 @@ gco stacks destroy-all -y # tear it all down
 
 Re-run the script whenever you switch runtimes, or use `--print` to preview the function, `--runtime <name>` to force one, and `--rc <path>` to target a specific profile.
 
-The function shares your host Docker socket with every `gco` call, and `gco stacks deploy-all` uses it for much more than bundling [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) assets: through your host Docker daemon it builds and bundles the Lambda function assets (as `linux/amd64`, cross-built via Buildx so this works on Apple Silicon / arm64) and — when the Volcano image mirror is enabled in `cdk.json` — mirrors third-party images such as the Volcano scheduler from Docker Hub into your [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) before the Helm install runs. The same socket also backs `gco images build` / `push`. See [Prerequisites](#prerequisites) for [Colima](https://github.com/abiosoft/colima)/Finch socket paths and the security note about host-socket pass-through. *Finch users:* Finch runs in its own VM with no host Docker socket to share, so the function omits the socket mount — everyday commands work as-is, while build-heavy ones like `deploy-all` run on the host with Finch as the CDK builder.
+The function shares your host Docker socket with every `gco` call, and `gco stacks deploy-all` uses it for much more than bundling [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) assets: through your host Docker daemon it builds and bundles the [Lambda](https://aws.amazon.com/lambda/) function assets (as `linux/amd64`, cross-built via Buildx so this works on Apple Silicon / arm64) and — when the [Volcano](https://volcano.sh/) image mirror is enabled in [cdk.json](./cdk.json) — mirrors third-party images such as the Volcano scheduler from Docker Hub into your [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) before the Helm install runs. The same socket also backs `gco images build` / `push`. See [Prerequisites](#prerequisites) for [Colima](https://github.com/abiosoft/colima)/[Finch](https://runfinch.com/) socket paths and the security note about host-socket pass-through. *Finch users:* Finch runs in its own VM with no host Docker socket to share, so the function omits the socket mount — everyday commands work as-is, while build-heavy ones like `deploy-all` run on the host with Finch as the CDK builder.
 
 <details>
 <summary>Prefer an interactive container shell instead?</summary>
 
-You can also build the image yourself and drop straight into the dev container, running `gco` from inside it — handy for ad-hoc tools and exploration. The `-v /var/run/docker.sock:/var/run/docker.sock` mount gives the container's Docker CLI access to your host daemon for the asset builds, image mirroring, and bundling described above:
+You can also build the image yourself and drop straight into the dev container, running `gco` from inside it — handy for ad-hoc tools and exploration. The `-v /var/run/docker.sock:/var/run/docker.sock` mount gives the container's [Docker CLI](https://www.docker.com/products/cli/) access to your host daemon for the asset builds, image mirroring, and bundling described above:
 
 ```bash
 docker build -f Dockerfile.dev -t gco-dev .
@@ -115,7 +115,7 @@ cd global-capacity-orchestrator-on-aws && pipx install -e .
 
 See the [Quick Start](#quick-start) for the full install + first-job walkthrough, or [`docs/CLI.md`](docs/CLI.md) for every CLI command.
 
-> **💡 New to the codebase?** GCO ships with the **GCO MCP server** — an [MCP server](gco_mcp/) exposing 134 tools by default (up to 174 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with MCP support (like [Kiro](https://kiro.dev)) and explore GCO conversationally — ask questions about the codebase instead of reading repository files directly: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [gco_mcp/README.md](gco_mcp/README.md).
+> **💡 New to the codebase?** GCO ships with the **GCO MCP server** — an [MCP server](gco_mcp/) exposing 134 tools by default (up to 174 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with [MCP](https://modelcontextprotocol.io/) support (like [Kiro](https://kiro.dev)) and explore GCO conversationally — ask questions about the codebase instead of reading repository files directly: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [gco_mcp/README.md](gco_mcp/README.md).
 
 <details>
 <summary><b>Table of Contents</b></summary>
@@ -222,7 +222,7 @@ gco jobs logs hello-gco -n gco-jobs -r us-east-1
 ### Deploy an Inference Endpoint
 
 ```bash
-gco inference deploy my-llm -i vllm/vllm-openai:v0.24.0 --gpu-count 1
+gco inference deploy my-llm -i vllm/vllm-openai:v0.25.1 --gpu-count 1
 gco inference status my-llm
 gco inference scale my-llm --replicas 3
 ```
@@ -249,14 +249,14 @@ These curated views complement the generated CDK diagram with the multi-region p
 
 The generated reference architecture shows the commercial `aws` workload path. Other partitions retain the global aggregate API but route workload control and inference through each Region's IAM-authenticated bridge.
 
-1. **DevOps / Platform engineers** own the deployment. They configure the platform through `cdk.json` and drive everything from the `gco` CLI.
-2. The **AWS CDK app** synthesises and deploys the GCO stacks with a single `gco stacks deploy-all`, provisioning the global control plane and one regional stack per target region.
-3. **Users** submit jobs and inference requests through the `gco` CLI, which signs every call with **AWS [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html)** credentials.
-4. In commercial `aws`, **Amazon API Gateway** is edge-optimized and is the global workload and aggregate entry point. In other partitions it is regional and aggregate-only. Every exposed method enforces **IAM (SigV4) authentication** before integration.
-5. In `aws`, route-specific **AWS Lambda proxies** sign workload requests with a short-lived HMAC envelope derived from a rotating **AWS [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html)** key; `/api/v1/*` stays buffered while `/inference/*` streams. Other partitions omit these global workload proxies and use equivalent [VPC](https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html) proxies behind the regional APIs.
+1. **DevOps / Platform engineers** own the deployment. They configure the platform through [cdk.json](./cdk.json) and drive everything from the `gco` CLI.
+2. The **[AWS CDK app](./app.py)** synthesises and deploys the GCO stacks with a single `gco stacks deploy-all`, provisioning the global control plane and one regional stack per target region.
+3. **Users** submit jobs and inference requests through the `gco` [CLI](./cli/), which signs every call with **AWS [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html)** credentials.
+4. In commercial `aws`, **Amazon [API Gateway](https://aws.amazon.com/api-gateway/)** is edge-optimized and is the global workload and aggregate entry point. In other partitions it is regional and aggregate-only. Every exposed method enforces **IAM (SigV4) authentication** before integration.
+5. In `aws`, route-specific **[AWS Lambda proxies](./lambda/api-gateway-proxy/)** sign workload requests with a short-lived [HMAC](https://www.okta.com/identity-101/hmac/) envelope derived from a rotating **AWS [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html)** key; `/api/v1/*` stays buffered while `/inference/*` streams. Other partitions omit these global workload proxies and use equivalent [VPC](https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html) [proxies](./lambda/regional-api-proxy/) behind the regional APIs.
 6. In `aws`, **AWS Global Accelerator** routes workload requests over the AWS backbone to a healthy registered Region. Other partitions create no accelerator resources.
 7. A regional internal **AWS [Application Load Balancer](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html)** terminates deployment-local private-root TLS from either Global Accelerator (`aws`) or the regional VPC proxy, then sends HTTP to the platform services behind the shared Gateway API `HTTPRoute`.
-8. Each region runs an **Amazon EKS Auto Mode cluster** with built-in `system` and `general-purpose` NodePools plus project-managed GPU, inference, EFA, Mooncake EFA, Neuron, and CPU NodePools. Platform services include the Health Monitor, Manifest Processor, Queue Processor, Inference Monitor, and dedicated Inference Proxy.
+8. Each region runs an **Amazon EKS Auto Mode cluster** with built-in `system` and `general-purpose` NodePools plus project-managed GPU, inference, EFA, Mooncake EFA, Neuron, and CPU NodePools. Platform services include the [Cost Monitor](./dockerfiles/cost-monitor-dockerfile), [Health Monitor](./dockerfiles/health-monitor-dockerfile), [Manifest Processor](./dockerfiles/manifest-processor-dockerfile), [Queue Processor](./dockerfiles/queue-processor-dockerfile), [Inference Monitor](./dockerfiles/inference-monitor-dockerfile), and dedicated [Inference Proxy](./dockerfiles/inference-proxy-dockerfile).
 
 Below is the per-region workflow for a single regional stack.
 
@@ -264,20 +264,20 @@ Below is the per-region workflow for a single regional stack.
 
 1. An internal **Application Load Balancer** created from the shared `gco-system/gco-gateway` Gateway API resources accepts only HTTPS/443 with a rotating regional ACM leaf, then forwards HTTP to cluster services after TLS termination.
 2. The **Amazon EKS Auto Mode cluster** is the heart of the regional stack, hosting platform services and user workloads with a private API endpoint by default.
-3. **NodePools** provision capacity on demand: built-in `system` and `general-purpose`, plus `gpu-x86-pool`, `gpu-arm-pool`, `gpu-inference-pool`, `gpu-efa-pool`, `mooncake-efa-pool`, `neuron-pool`, and `cpu-general-pool`.
-4. **Workloads and platform services** run across namespaces: `gco-system` (Health Monitor, Manifest Processor, Queue Processor, Inference Monitor, Inference Proxy) and `gco-jobs` / `gco-inference` (training and batch jobs, inference endpoints, and job DAG pipelines).
-5. **Storage and data services** back workloads: Amazon EFS, optional FSx for Lustre, optional Valkey, optional [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html) [pgvector](https://github.com/pgvector/pgvector), and [Amazon S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) for KMS-encrypted model weights.
+3. **NodePools** provision capacity on demand: built-in `system` and `general-purpose`, plus [`gpu-x86-pool`](./lambda/kubectl-applier-simple/manifests/40-nodepool-gpu-x86.yaml), [`gpu-arm-pool`](./lambda/kubectl-applier-simple/manifests/41-nodepool-gpu-arm.yaml), [`gpu-inference-pool`](./lambda/kubectl-applier-simple/manifests/42-nodepool-inference.yaml), [`gpu-efa-pool`](./lambda/kubectl-applier-simple/manifests/43-nodepool-efa.yaml), [`mooncake-efa-pool`](./lambda/kubectl-applier-simple/manifests/46-nodepool-mooncake-efa.yaml), [`neuron-pool`](./lambda/kubectl-applier-simple/manifests/44-nodepool-neuron.yaml), and [`cpu-general-pool`](./lambda/kubectl-applier-simple/manifests/45-nodepool-cpu-general.yaml).
+4. **Workloads and platform services** run across [namespaces](./lambda/kubectl-applier-simple/manifests/00-namespaces.yaml): `gco-system` ([Health Monitor](./gco/services/health_monitor.py), [Manifest Processor](./gco/services/manifest_processor.py), [Queue Processor](./gco/services/queue_processor.py), [Inference Monitor](./gco/services/inference_monitor.py), [Inference Proxy](./gco/services/inference_api.py)) and `gco-jobs` / `gco-inference` (training and batch jobs, inference endpoints, and job DAG pipelines).
+5. **Storage and data services** back workloads: Amazon EFS, optional FSx for Lustre, optional Valkey, optional [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html) [pgvector](https://github.com/pgvector/pgvector), and [Amazon S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) for [KMS](https://aws.amazon.com/kms/)-encrypted model weights.
 6. An always-deployed **Regional API Gateway bridge** gives the aggregator a SigV4-authenticated path to the VPC Lambda and internal ALB. Direct same-account access is optional through `regional_api_enabled` in `aws` and enabled automatically as the required workload ingress elsewhere.
-7. **Regional AWS services** complete the stack: Amazon SQS for job ingestion, DynamoDB-backed state where applicable, and Amazon CloudWatch metrics and logs.
+7. **Regional AWS services** complete the stack: [Amazon SQS](https://aws.amazon.com/sqs/) for job ingestion, [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html)-backed state where applicable, and [Amazon CloudWatch](https://docs.aws.amazon.com/cloudwatch/) [metrics](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/working_with_metrics.html) and [logs](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/WhatIsCloudWatchLogs.html).
 
 <details>
 <summary>Infrastructure diagram generation details</summary>
 
-Regenerate the full architecture and every per-stack view with `python diagrams/infra_diagrams/generate.py`. The generator synthesizes the current CDK app through cdk-dia so the committed diagrams track the deployed resource graph. See [`diagrams/infra_diagrams/README.md`](diagrams/infra_diagrams/README.md) for per-stack flags (`--stack global|api-gateway|regional|regional-api|monitoring|analytics|all`).
+Regenerate the full architecture and every per-stack view with [`python diagrams/infra_diagrams/generate.py`](./diagrams/infra_diagrams/generate.py). The generator synthesizes the current CDK app through [cdk-dia](https://github.com/pistazie/cdk-dia) so the committed diagrams track the deployed resource graph. See [`diagrams/infra_diagrams/README.md`](diagrams/infra_diagrams/README.md) for per-stack flags (`--stack global|api-gateway|regional|regional-api|monitoring|analytics|all`).
 
 </details>
 
-Flowcharts of Lambda handlers, CLI commands, stack constructors, and MCP control paths live under [`diagrams/code_diagrams/`](diagrams/code_diagrams/README.md).
+Flowcharts of Lambda handlers, CLI commands, stack constructors, and MCP control paths live under [`diagrams/code_diagrams/`](diagrams/code_diagrams/README.md). They can be generated with [`python diagrams/code_diagrams/generate.py`](./diagrams/code_diagrams/generate.py). New functions in scripts can have diagrams generated for them by appending to [`diagrams/code_diagrams/_targets.py`](./diagrams/code_diagrams/_targets.py).
 
 > A regional stack can be deployed to any CloudFormation Region known to the installed AWS SDK. Add or remove Regions in `deployment_regions.regional`; all configured Regions must belong to one AWS partition, and GCO imposes no count limit.
 
@@ -289,8 +289,8 @@ Six complementary controls protect backend requests:
 2. **TLS trust separation** — API Gateway uses AWS-managed TLS; proxy-to-ALB traffic uses a deployment-local private root and explicit `backend.<project>.gco.internal` SNI/hostname verification.
 3. **Request-bound HMAC** — a trusted Lambda signs the version, timestamp, nonce, method, exact target, and body digest with a rotating key that is never transmitted. HMAC provides integrity/freshness/replay defense, not encryption.
 4. **Private backend exposure** — regional ALBs are internal and the EKS API endpoint is private by default.
-5. **Freshness and integrity validation** — backend middleware rejects stale, altered, or replayed envelopes.
-6. **[IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) / EKS Pod Identity** — pods receive scoped AWS permissions without static workload credentials.
+5. **Freshness and integrity validation** — backend [middleware](./gco/services/auth_middleware.py) rejects stale, altered, or replayed envelopes.
+6. **[IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) / [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)** — pods receive scoped AWS permissions without static workload credentials.
 
 ```text
 Commercial `aws` request flow:
@@ -315,7 +315,9 @@ See [Architecture Details](docs/ARCHITECTURE.md) for the full deep dive.
 | AWS Service | Usage |
 |-------------|-------|
 | [Amazon EKS](https://aws.amazon.com/eks/) | Kubernetes control plane and Auto Mode compute (GPU, [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/), [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/), CPU nodepools) |
+| [Amazon EC2](https://aws.amazon.com/ec2/) | Accelerated instance fleet plus the capacity APIs behind `gco capacity` — spot placement scores, spot price history, On-Demand Capacity Reservations, and Capacity Blocks for ML |
 | [AWS Global Accelerator](https://aws.amazon.com/global-accelerator/) | Anycast endpoint with health-based cross-region routing and automatic failover |
+| [Elastic Load Balancing](https://aws.amazon.com/elasticloadbalancing/) | Internal Application Load Balancers provisioned from the shared Gateway API resources; terminate deployment-local private-root TLS |
 | [Amazon API Gateway](https://aws.amazon.com/api-gateway/) | IAM-authenticated (SigV4) REST entry point for job submission and inference |
 | [AWS Lambda](https://aws.amazon.com/lambda/) | HMAC-signing proxy functions, Global Accelerator registration, manifest application, and Helm chart installation orchestration |
 | [AWS Step Functions](https://aws.amazon.com/step-functions/) | Orchestrates Helm chart installs — one state per chart with per-chart retry and backoff |
@@ -326,15 +328,22 @@ See [Architecture Details](docs/ARCHITECTURE.md) for the full deep dive.
 | [Amazon FSx for Lustre](https://aws.amazon.com/fsx/lustre/) | Optional high-performance parallel file system for ML training workloads |
 | [Amazon ElastiCache (Valkey)](https://aws.amazon.com/elasticache/) | Optional serverless key-value cache for prompt caching and session state |
 | [Amazon Aurora](https://aws.amazon.com/rds/aurora/) | Optional Serverless v2 PostgreSQL with pgvector for RAG and semantic search |
+| [Amazon SageMaker AI](https://aws.amazon.com/sagemaker/) | Optional Studio domain for interactive notebook analytics (`gco analytics enable`) |
+| [Amazon EMR Serverless](https://aws.amazon.com/emr/serverless/) | Optional Spark application paired with the Studio domain for large-scale notebook analytics |
+| [Amazon Cognito](https://aws.amazon.com/cognito/) | Optional user pool authenticating analytics users to presigned Studio sessions |
 | [Amazon ECR](https://aws.amazon.com/ecr/) | Container image registry with cross-region replication for platform and user images |
 | [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/) | Metrics, logs, alarms, dashboards, and Container Insights for GPU utilization |
 | [Amazon SNS](https://aws.amazon.com/sns/) | Alert notifications for drift detection, health issues, and capacity events |
 | [AWS Secrets Manager](https://aws.amazon.com/secrets-manager/) | Rotating HMAC signing key plus the KMS-encrypted deployment-local TLS root state |
 | [AWS KMS](https://aws.amazon.com/kms/) | Encryption keys for S3 model buckets, EFS, application secrets, and the backend TLS root secret |
+| [AWS Certificate Manager](https://aws.amazon.com/certificate-manager/) | Stable regional certificate ARNs; rotating deployment-local ALB leaf certificates are reimported into them |
 | [AWS IAM](https://aws.amazon.com/iam/) | IRSA roles for pod-level AWS access, service roles, and SigV4 authentication |
 | [AWS CDK](https://aws.amazon.com/cdk/) | Infrastructure as code — synthesizes, validates ([cdk-nag](https://github.com/cdklabs/cdk-nag)), and deploys all stacks |
 | [Amazon VPC](https://aws.amazon.com/vpc/) | Network isolation with public/private subnets, NAT Gateways, and VPC endpoints |
 | [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) | Cost tracking by service, region, and workload via the `gco costs` commands |
+| [Amazon Athena](https://aws.amazon.com/athena/) | Cross-region cost analytics — a KMS-enforced workgroup queried by `gco costs k8s` |
+| [AWS Glue](https://aws.amazon.com/glue/) | Data Catalog database and table (partition projection) over the Parquet cost reports — no crawlers or scheduled repair jobs |
+| [Amazon Bedrock](https://aws.amazon.com/bedrock/) | Optional AI capacity advisor (`gco capacity ai-recommend` / `predict`) and Mission strategy sampling |
 
 ## Sample Cost Table
 
@@ -369,20 +378,7 @@ The following estimates are for a single-region deployment with default settings
 
 ## Supported AWS Regions
 
-GCO can be deployed to any AWS region that supports Amazon EKS, AWS Global Accelerator, and the other services listed above. The deployment regions are configured in `cdk.json` under `deployment_regions.regional`.
-
-**Tested and validated regions:**
-
-| Region | Location |
-|--------|----------|
-| us-east-1 | N. Virginia |
-| us-east-2 | Ohio |
-| us-west-2 | Oregon |
-| eu-west-1 | Ireland |
-| eu-west-2 | London |
-| eu-central-1 | Frankfurt |
-| ap-southeast-1 | Singapore |
-| ap-northeast-1 | Tokyo |
+GCO can be deployed to any AWS region in the `aws`, `aws-cn`, or [GovCloud](https://aws.amazon.com/govcloud-us/) partitions. The deployment regions are configured in `cdk.json` under `deployment_regions.regional`.
 
 **Adding a new region:**
 
@@ -406,16 +402,16 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 ### Compute & Orchestration
 
 - **EKS Auto Mode** with automatic node provisioning — no pre-scaling needed
-- **GPU and accelerator support** through `gpu-x86-pool`, `gpu-arm-pool`, `gpu-inference-pool`, `gpu-efa-pool`, `mooncake-efa-pool`, and `neuron-pool`, plus built-in and project-scoped CPU pools
+- **GPU and accelerator support** through [`gpu-x86-pool`](./lambda/kubectl-applier-simple/manifests/40-nodepool-gpu-x86.yaml), [`gpu-arm-pool`](./lambda/kubectl-applier-simple/manifests/41-nodepool-gpu-arm.yaml), [`gpu-inference-pool`](./lambda/kubectl-applier-simple/manifests/42-nodepool-inference.yaml), [`gpu-efa-pool`](./lambda/kubectl-applier-simple/manifests/43-nodepool-efa.yaml), [`mooncake-efa-pool`](./lambda/kubectl-applier-simple/manifests/46-nodepool-mooncake-efa.yaml), and [`neuron-pool`](./lambda/kubectl-applier-simple/manifests/44-nodepool-neuron.yaml), plus built-in and [project-scoped CPU pools](./lambda/kubectl-applier-simple/manifests/45-nodepool-cpu-general.yaml)
 - **Multiple submission methods**: API Gateway, SQS queues, DynamoDB job queue, or direct kubectl
 - **Job pipelines (DAGs)**: Multi-step ML pipelines with dependency ordering and failure handling
-- **Helm-managed ecosystem**: mandatory KEDA; EFA and Neuron device plugins; Volcano, [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html), [cert-manager](https://cert-manager.io/docs/), optional kube-prometheus-stack, and Kueue; opt-in Slurm/Slinky and YuniKorn
+- **Helm-managed ecosystem**: mandatory KEDA; [EFA](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) and [Neuron](https://docs.aws.amazon.com/eks/latest/userguide/device-management-neuron.html) device plugins; Volcano, [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html), [cert-manager](https://cert-manager.io/docs/), optional [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack), and Kueue; opt-in Slurm/Slinky and YuniKorn
 
 ### Inference Serving
 
 - **Multi-region inference**: Deploy endpoints ([vLLM](https://docs.vllm.ai/en/latest/), TGI, Triton, [TorchServe](https://pytorch.org/serve/), [SGLang](https://docs.sglang.ai/)) across regions with a single command
 - **Canary deployments**: A/B test new model versions with weighted traffic routing
-- **Model weight management**: Central S3 bucket with [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) encryption, automatic sync to each region
+- **Model weight management**: [Central S3 bucket](./docs/CLUSTER_SHARED_BUCKET.md) with [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) encryption, automatic sync to each region
 - **Spot instance support**: Run inference on spot GPUs for significant cost savings
 - **Autoscaling**: HPA-based scaling with CPU/memory metrics
 
@@ -423,9 +419,9 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 
 - **Global Accelerator**: Single anycast endpoint with automatic failover
 - **IAM authentication**: SigV4 at the API Gateway — no kubeconfig distribution
-- **Infrastructure policy validation**: cdk-nag v3 rule packs for AWS Solutions, HIPAA, NIST 800-53, PCI DSS, and Serverless findings (these checks are not certifications)
+- **Infrastructure policy validation**: [cdk-nag](https://github.com/cdklabs/cdk-nag) v3 rule packs for AWS Solutions, HIPAA, NIST 800-53, PCI DSS, and Serverless findings (these checks are not certifications)
 - **Network policies**: Default-deny with explicit allow rules for all service communication
-- **EFA support**: Optional Elastic Fabric Adapter for high-bandwidth distributed training and NIXL-based inference (toggle on/off)
+- **EFA support**: Optional Elastic Fabric Adapter for high-bandwidth distributed training and [NIXL](https://github.com/ai-dynamo/nixl)-based inference (toggle on/off)
 
 ### Storage & Data
 
@@ -440,7 +436,7 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 - **Cost monitoring & analytics** (on by default): per-cluster [OpenCost](https://opencost.io/) with a [Grafana](https://grafana.com/docs/grafana/latest/) cost dashboard, scheduled [Parquet](https://parquet.apache.org/docs/) cost reports to a central S3 bucket, and cross-region [Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) analytics via `gco costs k8s` — see [Cost Monitoring Guide](docs/COST_MONITORING.md)
 - **Spot price-aware scheduling**: central-queue jobs can set a max spot price per instance type and dispatch only when the market clears it
 - **Auto-bootstrap**: CDK bootstrap runs automatically for new regions during deploy
-- **Multi-region monitoring**: CloudWatch dashboards, alarms, and SNS alerts across all regions
+- **Multi-region [monitoring](./docs/MONITORING.md)**: CloudWatch dashboards, alarms, and SNS alerts across all regions
 
 ### ML & Analytics Environment
 
@@ -477,6 +473,7 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 | Use the REST API directly | [API Reference](docs/API.md) |
 | Fix issues | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | Respond to incidents | [Operational Runbooks](docs/RUNBOOKS.md) |
+| Track and analyze workload cost | [Cost Monitoring Guide](docs/COST_MONITORING.md) |
 | Run interactive notebook analytics | [Analytics Guide](docs/ANALYTICS.md) |
 | Drive a goal-directed iteration loop | [Mission Guide](docs/MISSION.md) |
 | Perform routine maintenance & upgrades | [Maintenance Guide](docs/MAINTENANCE.md) |
@@ -523,7 +520,7 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 
 - AWS CLI configured with appropriate credentials
 - Python 3.14+ and Node.js 24 (use `.nvmrc`)
-- npm 11.18.0 and the repository's locked tooling graph: run `npm ci --ignore-scripts --no-audit --no-fund` at the repository root; `gco` prefers its local `node_modules/.bin/cdk` over a global CLI
+- npm 12.0.1 and the repository's locked tooling graph: run `npm ci --ignore-scripts --no-audit --no-fund` at the repository root; `gco` prefers its local `node_modules/.bin/cdk` over a global CLI
 - Docker or Finch (for building container images)
 - A **clean** Python virtual environment or pipx — GCO pins exact versions of many packages, so installing it into an existing environment will commonly fail with dependency-resolver errors. If you hit `ResolutionImpossible`, switch to the dev container instead of debugging your local env.
 
@@ -609,7 +606,7 @@ GCO implements defense-in-depth across five layers (see [Security Model](#securi
 - All API requests require AWS IAM (SigV4) authentication at the API Gateway
 - The trusted proxy Lambda adds a request-bound HMAC envelope using a rotating Secrets Manager key; the reusable key is never sent downstream
 - IRSA (IAM Roles for Service Accounts) provides pod-level AWS access with no static credentials
-- EKS access entries with explicit policy bindings (no aws-auth ConfigMap)
+- EKS access entries with explicit policy bindings (no aws-auth [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/))
 
 **Network Security:**
 
@@ -633,23 +630,24 @@ GCO implements defense-in-depth across five layers (see [Security Model](#securi
 **Infrastructure Policy Validation:**
 
 - Five cdk-nag v3 rule packs run during CDK policy validation:
-  - AWS Solutions best practices
-  - HIPAA Security Rule mappings
-  - NIST 800-53 Rev 5 mappings
-  - PCI DSS 3.2.1 mappings
-  - Serverless best practices
-- Findings are either fixed or explicitly acknowledged with justification in `gco/stacks/nag_suppressions.py`.
+  - [AWS Solutions best practices](https://github.com/cdklabs/cdk-nag/blob/main/RULES.md#awssolutions)
+  - [HIPAA Security Rule mappings](https://github.com/cdklabs/cdk-nag/blob/main/RULES.md#hipaa-security)
+  - [NIST 800-53 Rev 5 mappings](https://github.com/cdklabs/cdk-nag/blob/main/RULES.md#nist-800-53-rev-5)
+  - [PCI DSS 3.2.1 mappings](https://github.com/cdklabs/cdk-nag/blob/main/RULES.md#pci-dss-321)
+  - [Serverless best practices](http://github.com/cdklabs/cdk-nag/blob/main/RULES.md#serverless)
+- Findings are either fixed or explicitly acknowledged with justification in [`gco/stacks/nag_suppressions.py`](./gco/stacks/nag_suppressions.py).
 - These automated checks are not certifications and do not by themselves establish compliance.
 
 **Supply Chain Security:**
 
 - Container images scanned with [Trivy](https://trivy.dev/) on every push (CVE detection)
-- Python dependencies audited with pip-audit (GHSA/CVE detection)
-- Both repository-owned npm graphs are exact-pinned with committed lockfiles, audited on every PR, and updated by [Dependabot](https://docs.github.com/en/code-security/dependabot)
-- Production JavaScript is scanned by [CodeQL](https://codeql.github.com/docs/) and [Semgrep](https://semgrep.dev/docs/); the inference-streaming Lambda has a separate Node.js 24 test workflow with 93% line/function/branch gates
-- Dependency versions pinned with exact hashes in `requirements-lock.txt`
+- Python dependencies audited with [pip-audit](https://github.com/pypa/pip-audit) (GHSA/CVE detection)
+- Both repository-owned npm graphs are exact-pinned with committed lockfiles (see [package.json](./package.json) and [package-lock.json](./package-lock.json)), [audited](https://docs.npmjs.com/cli/v8/commands/npm-audit) on every PR, and updated by [Dependabot](https://docs.github.com/en/code-security/dependabot)
+- Production JavaScript is scanned by [CodeQL](https://codeql.github.com/docs/) and [Semgrep](https://semgrep.dev/docs/); the inference-streaming Lambda has a separate Node.js 24 test workflow with 93% line/function/branch gates (see [./tests/inference-streaming-proxy/](./tests/inference-streaming-proxy/))
+- Dependency versions pinned with exact hashes in `requirements-lock.txt` (see [requirements-lock.txt](./requirements-lock.txt))
 - Dependabot and CodeQL enabled for automated vulnerability alerts
-- SBOM generation via Trivy for all container images
+- Strict [KICS](https://www.kics.io/index.html) and [Checkov](https://www.checkov.io/) infrastructure scans
+- [SBOM](https://www.cisa.gov/topics/information-communications-technology-supply-chain-security/sbom) generation via [Trivy](https://trivy.dev/) for all container images
 
 **Vulnerability Disclosure:**
 For security issues, **do not open a public GitHub issue.** See [`.github/SECURITY.md`](.github/SECURITY.md) for the responsible disclosure process.
