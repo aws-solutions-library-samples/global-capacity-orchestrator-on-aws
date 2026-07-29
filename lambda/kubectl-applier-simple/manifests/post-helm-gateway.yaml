@@ -98,11 +98,33 @@ spec:
       kind: Gateway
       name: gco-gateway
       sectionName: https
+  # Ordered most-specific first, with the `/` catch-all last. Gateway API
+  # awards precedence by path specificity rather than document order, so this
+  # ordering is not what makes routing correct — it is kept so the file reads
+  # the way traffic actually resolves, and so a controller that did consult
+  # order would still behave.
+  #
+  # Every prefix here must be a path some backend Service actually serves.
+  # `/api/v1/metrics` is served only by the health monitor, and without an
+  # explicit rule the catch-all sent it to the manifest processor, which has no
+  # such route — so the endpoint answered 404 through the ALB and both API
+  # Gateways. tests/test_gateway_route_coverage.py now fails if any live path
+  # ends up at a Service that does not serve it.
   rules:
     - matches:
         - path:
             type: PathPrefix
             value: /api/v1/health
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: health-monitor
+          port: 80
+          weight: 1
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/metrics
       backendRefs:
         - group: ""
           kind: Service
@@ -139,6 +161,20 @@ spec:
           name: health-monitor
           port: 80
           weight: 1
+    # Catch-all. Everything not matched above reaches the manifest processor,
+    # which owns the bulk of /api/v1.
+    #
+    # This is also what resolves the one path both services implement:
+    # /api/v1/status. Do not add a rule sending it to the health monitor. A
+    # PathPrefix cannot be split across two Services, and the manifest
+    # processor's response is the one with external consumers — the
+    # cross-region aggregator's /api/v1/global/status fans out to this path and
+    # reads templates_count, webhooks_count, resource_limits, and
+    # allowed_namespaces from it (lambda/cross-region-aggregator/handler.py,
+    # aggregate_metrics). The health monitor returns none of those fields, so
+    # repointing the prefix would leave global status reporting zeros rather
+    # than failing loudly. The health monitor's own /api/v1/status stays
+    # in-cluster, reachable by addressing the health-monitor Service directly.
     - matches:
         - path:
             type: PathPrefix

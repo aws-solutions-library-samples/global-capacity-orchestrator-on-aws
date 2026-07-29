@@ -106,16 +106,19 @@ first:
 | Path prefix | Service | Notes |
 |-------------|---------|-------|
 | `/api/v1/health` | `health-monitor` | Cluster health; used for Global Accelerator health checks |
+| `/api/v1/metrics` | `health-monitor` | Cluster resource utilization |
 | `/api/v1/manifests` | `manifest-processor` | |
 | `/inference` | `inference-proxy` | |
 | `/healthz` | `health-monitor` | |
 | `/` (catch-all) | `manifest-processor` | Every other `/api/v1/*` path lands here |
 
-Because the catch-all sends everything else to the manifest processor, the
-health monitor's `/api/v1/metrics` and `/api/v1/status` routes are not reachable
-through the ALB: `/api/v1/status` is answered by the manifest processor's own
-route of the same name, and `/api/v1/metrics` has no manifest-processor route
-and returns `404`. Both remain reachable in-cluster by addressing the
+`/api/v1/status` is the one path both the health monitor and the manifest
+processor implement, and a path prefix cannot be split between two Services. The
+catch-all resolves it to the **manifest processor**, which is the response with
+external consumers: the cross-region aggregator's `/api/v1/global/status` fans
+out to this path and reads `templates_count`, `webhooks_count`,
+`resource_limits`, and `allowed_namespaces` from it. The health monitor's own
+`/api/v1/status` is therefore in-cluster only, reached by addressing the
 `health-monitor` Service directly. See
 [Cluster-Internal Surfaces](#cluster-internal-surfaces).
 
@@ -1627,9 +1630,9 @@ the request:
 
 ## Health, Readiness, and Observability
 
-Three services answer probe traffic. Only `/api/v1/health` is exposed through an
-API Gateway; the rest are in-cluster, reached by addressing a Service directly
-or scraped by the cluster's Prometheus.
+Three services answer probe traffic. `/api/v1/health` and `/api/v1/metrics` are
+exposed through an API Gateway; the rest are in-cluster, reached by addressing a
+Service directly or scraped by the cluster's Prometheus.
 
 | Endpoint | Service | Auth | Purpose |
 |----------|---------|------|---------|
@@ -1648,13 +1651,14 @@ The health monitor also publishes resource utilization and health status to
 CloudWatch every 30 seconds independently of these endpoints, which is how
 dashboards and alarms are fed. See the [Monitoring Guide](MONITORING.md).
 
-> **Reachability caveat.** As described in
-> [API Surface at a Glance](#api-surface-at-a-glance), the ALB catch-all sends
-> every `/api/v1/*` path except `/api/v1/health` and `/api/v1/manifests` to the
-> manifest processor. The health monitor's `/api/v1/metrics` therefore returns
-> `404` through the gateway, and `/api/v1/status` returns the manifest
-> processor's response rather than the health monitor's. Use
-> `gco stacks health` or CloudWatch for cluster utilization instead.
+> **Which `/api/v1/status` you get.** As described in
+> [API Surface at a Glance](#api-surface-at-a-glance), the ALB resolves
+> `/api/v1/status` to the manifest processor, because a path prefix cannot be
+> split across two Services and that is the response the cross-region
+> aggregator consumes. The health monitor's `/api/v1/status` row above describes
+> its in-cluster response; through either API Gateway, `/api/v1/status` returns
+> the manifest processor's. The health monitor's `/api/v1/metrics` has its own
+> route and is reachable through the gateway.
 
 ## Cluster-Internal Surfaces
 
