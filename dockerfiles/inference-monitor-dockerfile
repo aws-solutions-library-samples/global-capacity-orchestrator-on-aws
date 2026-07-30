@@ -6,7 +6,7 @@ FROM python:3.14.6-slim
 # Apply Debian security patches at build time. APT_SECURITY_EPOCH busts
 # the CI layer cache so a freshly-published trixie-security patch isn't
 # masked by a stale cached upgrade layer; bump the date when needed.
-ARG APT_SECURITY_EPOCH=2026-07-28
+ARG APT_SECURITY_EPOCH=2026-07-30
 RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
     && apt-get update \
     && apt-get upgrade -y \

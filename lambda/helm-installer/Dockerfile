@@ -18,7 +18,7 @@ WORKDIR ${LAMBDA_TASK_ROOT}
 # run. DNF_SECURITY_EPOCH busts the CI layer cache so a freshly-published patch
 # isn't masked by a stale cached upgrade layer; bump the date when a new fix
 # needs pulling.
-ARG DNF_SECURITY_EPOCH=2026-07-28
+ARG DNF_SECURITY_EPOCH=2026-07-30
 # hadolint ignore=DL3041
 RUN echo "dnf security epoch ${DNF_SECURITY_EPOCH}" \
     && dnf upgrade -y --releasever=latest \

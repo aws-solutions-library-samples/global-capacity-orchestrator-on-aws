@@ -268,7 +268,7 @@ hand-bumped epoch ARG that busts the CI layer cache. Bump the date to force a
 rebuild that pulls the latest fixes. The dependency scan flags an epoch older
 than 45 days; Trivy's container scan is the backstop.
 
-- `APT_SECURITY_EPOCH` (Debian images): `Dockerfile.dev` and the four
+- `APT_SECURITY_EPOCH` (Debian images): `Dockerfile.dev` and the six
   `dockerfiles/*-dockerfile` service images.
 - `DNF_SECURITY_EPOCH` (Amazon Linux 2023): `lambda/helm-installer/Dockerfile`.
 
