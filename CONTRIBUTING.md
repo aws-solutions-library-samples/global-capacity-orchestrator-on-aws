@@ -193,7 +193,7 @@ exact npm release declared by `packageManager`:
 bash .github/scripts/use-pinned-npm.sh package.json
 ```
 
-Keep these graphs separate: root development tools must never enter the deployable Lambda bundle. Direct versions must be exact, lockfiles must be committed, and every new repository-owned `package.json` must add a matching npm entry in `.github/dependabot.yml`. CI's `check_npm_package_management` guard fails on an unlocked, ranged, unpinned, or unmanaged graph. Node 24, npm 12.0.1, and the root CDK CLI pin are also checked against `.nvmrc`, `Dockerfile.dev`, `gco/stacks/constants.py`, and both manifests by the monthly dependency scan.
+Keep these graphs separate: root development tools must never enter the deployable Lambda bundle. Direct versions must be exact, lockfiles must be committed, and every new repository-owned `package.json` must add a matching npm entry in `.github/dependabot.yml`. CI's `check_npm_package_management` guard fails on an unlocked, ranged, unpinned, or unmanaged graph. Node 24, npm 12.0.2, and the root CDK CLI pin are also checked against `.nvmrc`, `Dockerfile.dev`, `gco/stacks/constants.py`, and both manifests by the monthly dependency scan.
 
 #### Regenerating the Lockfile
 

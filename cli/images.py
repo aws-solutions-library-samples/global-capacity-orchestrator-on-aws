@@ -107,7 +107,7 @@ _MAINTAINED_IMAGES: dict[str, str] = {
 # this upstream image directly from Docker Hub. Pinned to an explicit version
 # for reproducibility; bump intentionally when validating a new vLLM release
 # and never use a mutable/rolling tag such as ``latest``.
-_DISAGGREGATED_DEFAULT_IMAGE = "vllm/vllm-openai:v0.25.1"
+_DISAGGREGATED_DEFAULT_IMAGE = "vllm/vllm-openai:v0.26.0"
 
 # Default lifecycle policy parameters.
 _DEFAULT_KEEP_TAGGED = 20

@@ -5,16 +5,16 @@
   "engines": {
     "node": "24.x"
   },
-  "packageManager": "npm@12.0.1",
+  "packageManager": "npm@12.0.2",
   "scripts": {
     "cdk": "cdk",
     "cdk-dia": "cdk-dia",
     "lint:markdown": "markdownlint-cli2 --config .github/config/.markdownlint-cli2.yaml"
   },
   "devDependencies": {
-    "aws-cdk": "2.1133.0",
+    "aws-cdk": "2.1134.0",
     "cdk-dia": "0.12.3",
-    "markdownlint-cli2": "0.23.1"
+    "markdownlint-cli2": "0.23.2"
   },
   "overrides": {
     "markdownlint-cli2": {

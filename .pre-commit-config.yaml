@@ -41,7 +41,7 @@ repos:
         args: [-c, .github/config/.yamllint.yml]
 
   - repo: https://github.com/DavidAnson/markdownlint-cli2
-    rev: v0.23.1
+    rev: v0.23.2
     hooks:
       # Configuration (rule set, globs, ignores) lives in
       # .github/config/.markdownlint-cli2.yaml. See CONTRIBUTING.md for

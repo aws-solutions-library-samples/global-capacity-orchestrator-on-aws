@@ -6,13 +6,13 @@
   "engines": {
     "node": "24.x"
   },
-  "packageManager": "npm@12.0.1",
+  "packageManager": "npm@12.0.2",
   "scripts": {
     "test": "node --test --experimental-test-coverage --test-coverage-lines=93 --test-coverage-functions=93 --test-coverage-branches=93 ../../tests/inference-streaming-proxy/*.test.mjs"
   },
   "dependencies": {
-    "@aws-sdk/client-elastic-load-balancing-v2": "3.1089.0",
-    "@aws-sdk/client-secrets-manager": "3.1089.0",
-    "@aws-sdk/client-ssm": "3.1089.0"
+    "@aws-sdk/client-elastic-load-balancing-v2": "3.1098.0",
+    "@aws-sdk/client-secrets-manager": "3.1098.0",
+    "@aws-sdk/client-ssm": "3.1098.0"
   }
 }

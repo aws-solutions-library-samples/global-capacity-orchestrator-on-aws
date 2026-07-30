@@ -222,7 +222,7 @@ gco jobs logs hello-gco -n gco-jobs -r us-east-1
 ### Deploy an Inference Endpoint
 
 ```bash
-gco inference deploy my-llm -i vllm/vllm-openai:v0.25.1 --gpu-count 1
+gco inference deploy my-llm -i vllm/vllm-openai:v0.26.0 --gpu-count 1
 gco inference status my-llm
 gco inference scale my-llm --replicas 3
 ```
@@ -521,7 +521,7 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 
 - AWS CLI configured with appropriate credentials
 - Python 3.14+ and Node.js 24 (use `.nvmrc`)
-- npm 12.0.1 and the repository's locked tooling graph: run `npm ci --ignore-scripts --no-audit --no-fund` at the repository root; `gco` prefers its local `node_modules/.bin/cdk` over a global CLI
+- npm 12.0.2 and the repository's locked tooling graph: run `npm ci --ignore-scripts --no-audit --no-fund` at the repository root; `gco` prefers its local `node_modules/.bin/cdk` over a global CLI
 - Docker or Finch (for building container images)
 - A **clean** Python virtual environment or pipx — GCO pins exact versions of many packages, so installing it into an existing environment will commonly fail with dependency-resolver errors. If you hit `ResolutionImpossible`, switch to the dev container instead of debugging your local env.
 

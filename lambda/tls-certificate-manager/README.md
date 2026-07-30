@@ -176,7 +176,7 @@ Proxy roles cannot read the root secret or use its KMS key; they can read only t
 
 `Dockerfile` builds from the AWS Lambda Python 3.14 base image, applies current Amazon Linux security updates, and installs exact dependency versions from `requirements.txt`:
 
-- `boto3==1.43.55`
+- `boto3==1.43.59`
 - `cryptography==49.0.0`
 
 The container entry point is `handler.lambda_handler`. A container image is required because the Lambda managed runtime does not provide the pinned `cryptography` package.

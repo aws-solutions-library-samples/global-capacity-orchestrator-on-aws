@@ -277,10 +277,10 @@ def backend_tls_certificate_arn_parameter_name(project_name: str, region: str) -
 EKS_ADDON_POD_IDENTITY_AGENT = "v1.3.10-eksbuild.3"
 """EKS Pod Identity Agent — enables IRSA and Pod Identity for service accounts."""
 
-EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.2"
+EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.4"
 """Kubernetes Metrics Server — provides CPU/memory metrics for HPA and ``kubectl top``."""
 
-EKS_ADDON_EFS_CSI_DRIVER = "v3.3.0-eksbuild.1"
+EKS_ADDON_EFS_CSI_DRIVER = "v3.4.1-eksbuild.1"
 """Amazon EFS CSI Driver — mounts EFS file systems as Kubernetes persistent volumes."""
 
 EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v6.4.0-eksbuild.1"
@@ -529,7 +529,7 @@ def cost_athena_workgroup_name(project_name: str) -> str:
     return f"{project_name}-cost"
 
 
-MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.25.1"
+MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.26.0"
 """Default container image for the shared per-region Mooncake master.
 
 The master StatefulSet runs the ``mooncake_master`` daemon (RPC + built-in HTTP
