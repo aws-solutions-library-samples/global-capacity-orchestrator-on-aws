@@ -1739,6 +1739,97 @@ EOF
     [ -z "$output" ]
 }
 
+# ── extract_npm_direct_pins ──────────────────────────────────────────────────
+
+@test "extract_npm_direct_pins: reads exact pins from dependencies and devDependencies" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+{
+  "dependencies": { "@aws-sdk/client-ssm": "3.1098.0" },
+  "devDependencies": { "aws-cdk": "2.1134.0", "cdk-dia": "0.12.3" }
+}
+EOF
+    run extract_npm_direct_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"@aws-sdk/client-ssm|3.1098.0"* ]]
+    [[ "$output" == *"aws-cdk|2.1134.0"* ]]
+    [[ "$output" == *"cdk-dia|0.12.3"* ]]
+    rm -f "$tmpfile"
+}
+
+@test "extract_npm_direct_pins: emits pipe-delimited NAME|VERSION pairs only" {
+    run extract_npm_direct_pins "package.json"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[@A-Za-z0-9/_.-]+\|[0-9]+\.[0-9]+\.[0-9]+ ]]
+    done <<< "$output"
+}
+
+@test "extract_npm_direct_pins: skips range specifiers, keeping only exact pins" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+{
+  "dependencies": {
+    "caret": "^1.0.0",
+    "tilde": "~2.0.0",
+    "star": "*",
+    "gte": ">=3.0.0",
+    "tag": "latest",
+    "exact": "1.2.3"
+  }
+}
+EOF
+    run extract_npm_direct_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$output" = "exact|1.2.3" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_npm_direct_pins: ignores packageManager, engines, and overrides" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+{
+  "engines": { "node": "24.x" },
+  "packageManager": "npm@12.0.2",
+  "overrides": { "some-pkg": { "js-yaml": "5.2.2" } },
+  "devDependencies": { "only-this": "4.5.6" }
+}
+EOF
+    run extract_npm_direct_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$output" = "only-this|4.5.6" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_npm_direct_pins: empty for a missing file" {
+    run extract_npm_direct_pins "/nonexistent/package.json"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_npm_direct_pins: empty for malformed JSON" {
+    tmpfile="$(mktemp)"
+    echo '{ not json' > "$tmpfile"
+    run extract_npm_direct_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_npm_direct_pins: finds every owned graph via list_npm_package_dirs" {
+    run list_npm_package_dirs .
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"."* ]]
+    [[ "$output" == *"lambda/inference-streaming-proxy"* ]]
+    # And each listed graph yields at least one exact pin.
+    while IFS= read -r dir; do
+        run extract_npm_direct_pins "$dir/package.json"
+        [ "$status" -eq 0 ]
+        [ -n "$output" ]
+    done <<< "$(list_npm_package_dirs .)"
+}
+
 # ── extract_security_epochs ─────────────────────────────────────────────────
 
 @test "extract_security_epochs: reads APT_SECURITY_EPOCH from a service Dockerfile" {

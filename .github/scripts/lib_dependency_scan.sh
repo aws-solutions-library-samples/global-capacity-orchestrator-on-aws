@@ -385,6 +385,38 @@ with open(sys.argv[1]) as f:
 " "$file" 2>/dev/null
 }
 
+# extract_npm_direct_pins [package_json_path]
+#
+# Prints ``name|version`` for every exactly-pinned direct dependency in one
+# ``package.json`` — ``dependencies`` and ``devDependencies`` both count, since
+# every repository-owned graph pins tooling through devDependencies. Range
+# specifiers (``^``, ``~``, ``>=``, ``*``, tags) are skipped: the npm package
+# management check already fails graphs that carry them, and a range cannot
+# drift in the "pinned copy is behind latest" sense this scan reports.
+# Missing or malformed files print nothing, matching extract_dockerfile_pins.
+extract_npm_direct_pins() {
+  local file="${1:-package.json}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import json, re, sys
+
+try:
+    with open(sys.argv[1]) as f:
+        manifest = json.load(f)
+except (OSError, json.JSONDecodeError):
+    sys.exit(0)
+
+exact = re.compile(r'^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$')
+for section in ('dependencies', 'devDependencies'):
+    entries = manifest.get(section)
+    if not isinstance(entries, dict):
+        continue
+    for name, version in sorted(entries.items()):
+        if isinstance(version, str) and exact.match(version):
+            print(f'{name}|{version}')
+" "$file" 2>/dev/null
+}
+
 # extract_precommit_hooks [config_path]
 #
 # Parses ``.pre-commit-config.yaml`` and emits one ``repo|rev`` pair per
