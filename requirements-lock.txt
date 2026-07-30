@@ -179,7 +179,7 @@ httpx==0.28.1
     #   mcp
 httpx-sse==0.4.3
     # via mcp
-hypothesis==6.155.7
+hypothesis==6.164.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -303,7 +303,7 @@ packaging==26.2
     #   pytest
     #   tensorboard
     #   wheel
-pandas==3.0.3
+pandas==3.0.5
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -325,7 +325,7 @@ platformdirs==4.9.6
     #   fastmcp-slim
     #   python-discovery
     #   virtualenv
-playwright==1.60.0
+playwright==1.61.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -333,7 +333,7 @@ pluggy==1.6.0
     # via
     #   pytest
     #   pytest-cov
-pre-commit==4.6.0
+pre-commit==4.6.1
     # via gco-cli (pyproject.toml)
 prometheus-client==0.26.0
     # via
@@ -550,11 +550,11 @@ typeguard==2.13.3
     #   jsii
 typer==0.25.1
     # via pydocket
-types-pyyaml==6.0.12.20260518
+types-pyyaml==6.0.12.20260724
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-types-requests==2.33.0.20260518
+types-requests==2.33.0.20260712
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)

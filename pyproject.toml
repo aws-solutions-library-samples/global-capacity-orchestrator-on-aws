@@ -89,7 +89,7 @@ diagrams = [
     # ``lint`` extra to avoid version-drift between the generator and
     # the CI lint gate).
     "pyflowchart==0.6.0",
-    "playwright==1.60.0",
+    "playwright==1.61.0",
     "ruff==0.16.0",
 ]
 # Direct runtime roots for the six production service images. Their Dockerfiles
@@ -157,7 +157,7 @@ image-cost-monitor = [
 # Install only the format(s) you actually read.
 metrics-parquet = [
     # Parquet metric files (pandas.read_parquet + its pyarrow engine).
-    "pandas==3.0.3",
+    "pandas==3.0.5",
     "pyarrow==25.0.0",
 ]
 metrics-tfevents = [
@@ -184,8 +184,8 @@ lint = [
 ]
 typecheck = [
     "mypy==2.3.0",
-    "types-requests==2.33.0.20260518",
-    "types-PyYAML==6.0.12.20260518",
+    "types-requests==2.33.0.20260712",
+    "types-PyYAML==6.0.12.20260724",
 ]
 test = [
     "pytest==9.1.1",
@@ -204,7 +204,7 @@ test = [
     # test seeds a CloudFormation stack for output discovery. Pinning it
     # explicitly keeps test environments reproducible.
     "openapi-spec-validator==0.9.0",
-    "hypothesis==6.155.7",
+    "hypothesis==6.164.0",
     # The cost-monitor service writes Parquet reports via pyarrow (pinned to
     # the same version the metrics-parquet extra already locks), so its unit
     # tests can execute the real writer instead of mocking serialization.
@@ -221,7 +221,7 @@ security = [
 ]
 dev = [
     "gco-cli[cdk,diagrams,lint,typecheck,test,security]",
-    "pre-commit==4.6.0",
+    "pre-commit==4.6.1",
 ]
 
 [project.scripts]
