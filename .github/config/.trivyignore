@@ -53,73 +53,29 @@ CVE-2026-39821 exp:2026-09-22
 CVE-2026-42502 exp:2026-09-22
 CVE-2026-42506 exp:2026-09-22
 
-# CVE-2026-53488, CVE-2026-53489, CVE-2026-53492 (github.com/containerd/containerd/v2
-# v2.2.4) and CVE-2026-34040 (github.com/docker/docker v28.5.2 — Moby authorization
-# bypass) — Go modules statically linked into the docker-buildx CLI plugin that
-# Dockerfile.dev installs (ARG BUILDX_VERSION). Surfaced by security:trivy:container-scan
-# on the GCO dev image — the only scanned image that carries the Buildx plugin. Fixed
-# in containerd 2.2.5 / 2.3.2 and docker/docker 29.3.1.
+# CVE-2026-34040 — github.com/docker/docker v28.5.2 (Moby authorization
+# bypass), statically linked into the docker-buildx CLI plugin that
+# Dockerfile.dev installs (ARG BUILDX_VERSION). Surfaced by
+# security:trivy:container-scan on the GCO dev image — the only scanned image
+# that carries the Buildx plugin. Fixed in docker/docker 29.3.1.
 #
-# Not yet clearable by a pin bump: v0.35.0 is the latest buildx release and even buildx
-# master still pins containerd v2.2.4 and docker/docker v28.5.2, so no released or
-# pre-release buildx carries the fixed modules yet.
+# Not yet clearable by a pin bump: re-checked 2026-07-30 against buildx
+# v0.36.0 (now the pinned release) — its go.mod still requires docker/docker
+# v28.5.2. The same v0.36.0 bump did clear the four suppressions that used to
+# sit beside this one: the containerd trio CVE-2026-53488/-53489/-53492
+# (v0.36.0 pins containerd v2.3.3, past the 2.3.2 fix), the Go-toolchain
+# CVE-2026-39822 (the v0.36.0 release binary reports go1.26.5), and the
+# gRPC-Go GHSA-hrxh-6v49-42gf (v0.36.0 pins grpc v1.82.1, the fixed version).
 #
-# Low runtime risk: buildx is a build-time CLI plugin, not a running containerd or moby
-# daemon, so the containerd runtime CVEs and the Moby daemon authorization-bypass CVE are
-# off the path buildx exercises (registry-to-registry image copy and BuildKit builds).
-# The dev image is a contributor/CI tool that is never deployed to a cluster.
+# Low runtime risk: buildx is a build-time CLI plugin, not a running moby
+# daemon, so the daemon authorization-bypass CVE is off the path buildx
+# exercises (registry-to-registry image copy and BuildKit builds). The dev
+# image is a contributor/CI tool that is never deployed to a cluster.
 #
-# Clears when a buildx release ships rebuilt against containerd >= 2.2.5 and docker/docker
-# >= 29.3.1: bump BUILDX_VERSION in Dockerfile.dev (the monthly deps-scan now tracks it)
-# and drop these entries. Advisory: https://avd.aquasec.com/nvd/cve-2026-53488 (and the
-# matching nvd/cve-2026-XXXXX page for each ID above).
-CVE-2026-53488 exp:2026-09-22
-CVE-2026-53489 exp:2026-09-22
-CVE-2026-53492 exp:2026-09-22
+# Clears when a buildx release ships rebuilt against docker/docker >= 29.3.1:
+# bump BUILDX_VERSION in Dockerfile.dev (the monthly deps-scan tracks it) and
+# drop this entry. Advisory: https://avd.aquasec.com/nvd/cve-2026-34040
 CVE-2026-34040 exp:2026-09-22
-
-# CVE-2026-39822 — Go standard-library os.Root symlink-following / directory
-# traversal, statically linked into the docker-buildx CLI plugin installed by
-# Dockerfile.dev (ARG BUILDX_VERSION, built with Go 1.26.4). Surfaced only by
-# security:trivy:container-scan on the contributor/CI dev image. Fixed in Go
-# 1.26.5 / 1.25.12.
-#
-# Every other binary this CVE used to cover has shipped a Go >= 1.26.5
-# rebuild and is pinned to it: kubectl v1.36.3, helm v4.2.3, the Docker CLI
-# 29.6.2, and the aws-lambda-rie in the current python:3.14 Lambda base.
-#
-# Not yet clearable by a pin bump: v0.35.0 is the latest Buildx release
-# (v0.36.0-rc1 is prerelease-only) and is built with Go 1.26.4, so no
-# released Buildx carries the fixed toolchain yet.
-#
-# Low runtime risk: Buildx is a local build-time CLI against a trusted
-# BuildKit daemon, not deployed to a cluster, and does not traverse
-# attacker-controlled filesystems via os.Root.
-#
-# Clears when a Buildx release ships built with Go >= 1.26.5: bump
-# BUILDX_VERSION in Dockerfile.dev and drop this entry.
-# Advisory: https://avd.aquasec.com/nvd/cve-2026-39822
-CVE-2026-39822 exp:2026-09-22
-
-# GHSA-hrxh-6v49-42gf — gRPC-Go xDS RBAC authorization bypass and HTTP/2
-# transport-server denial of service, statically linked into the docker-buildx
-# CLI plugin installed by Dockerfile.dev (ARG BUILDX_VERSION). Surfaced only by
-# security:trivy:container-scan on the contributor/CI dev image.
-#
-# Not yet clearable by a pin bump: v0.35.0 remains the latest Buildx release,
-# and Buildx master still pins google.golang.org/grpc v1.81.1. The advisory was
-# published on 2026-07-21 and fixes all affected versions in gRPC-Go 1.82.1,
-# but no Buildx release containing that version exists yet.
-#
-# Low runtime risk: Buildx runs as a local build-time CLI against a trusted
-# BuildKit daemon; it is not deployed as a service and does not expose the
-# affected xDS RBAC or HTTP/2 server paths. The dev image is never deployed to
-# a cluster.
-#
-# Clears when a Buildx release ships with google.golang.org/grpc >= 1.82.1:
-# bump BUILDX_VERSION in Dockerfile.dev and remove this entry.
-# Advisory: https://github.com/advisories/GHSA-hrxh-6v49-42gf
-GHSA-hrxh-6v49-42gf exp:2026-09-22
 
 # CVE-2026-14257 (GHSA-mh99-v99m-4gvg) — brace-expansion denial of service via
 # unbounded expansion length, causing an out-of-memory process crash. Present in
@@ -132,10 +88,12 @@ GHSA-hrxh-6v49-42gf exp:2026-09-22
 # and reached the Trivy DB after the last green main run, so it appeared on an
 # unchanged dev image.
 #
-# Not clearable by a pin bump: npm 12.0.1 is the latest release (ARG
-# NPM_VERSION in Dockerfile.dev) and still bundles brace-expansion 5.0.7. The
-# bundled copy lives inside npm's published tarball, where neither
-# `npm audit fix` nor an `overrides` entry can reach it.
+# Not clearable by a pin bump: re-checked 2026-07-30 against npm 12.0.2 (the
+# release this ARG now pins) — it still bundles brace-expansion 5.0.7,
+# verified in the installed tree
+# (node_modules/npm/node_modules/brace-expansion/package.json). The bundled
+# copy lives inside npm's published tarball, where neither `npm audit fix`
+# nor an `overrides` entry can reach it.
 #
 # Low runtime risk: the expansion path is reached through brace globs in npm's
 # own CLI argument handling, driven by the contributor or CI invocation rather
@@ -146,30 +104,28 @@ GHSA-hrxh-6v49-42gf exp:2026-09-22
 # bump ARG NPM_VERSION in Dockerfile.dev (plus the packageManager pins the
 # consistency check holds in lockstep) and drop this entry.
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-14257
-CVE-2026-14257 exp:2026-08-26
+CVE-2026-14257 exp:2026-09-22
 
-# CVE-2026-56852 — golang.org/x/text, statically linked into two pinned Go
-# binaries: the kubectl binary at x/text v0.33.0 (ARG KUBECTL_VERSION in
-# Dockerfile.dev; the identical v1.36.3 is fetched by
-# lambda/helm-installer/Dockerfile) and the docker-buildx CLI plugin at
-# x/text v0.37.0 (ARG BUILDX_VERSION in Dockerfile.dev). Surfaced by
+# CVE-2026-56852 — golang.org/x/text at v0.33.0, statically linked into the
+# pinned kubectl binary (ARG KUBECTL_VERSION in Dockerfile.dev; the identical
+# v1.36.3 is fetched by lambda/helm-installer/Dockerfile). Surfaced by
 # security:trivy:container-scan on the GCO dev image and the helm-installer
 # Lambda image. Fixed in x/text 0.39.0.
 #
-# Not yet clearable by a pin bump: v1.36.3 is the latest stable kubectl on
-# any release line (https://dl.k8s.io/release/stable.txt) and buildx v0.35.0
-# is the latest buildx release — no published build of either embeds
-# x/text >= 0.39.0 yet.
+# Not yet clearable by a pin bump: re-checked 2026-07-30 — v1.36.3 is still
+# the latest stable kubectl on any release line
+# (https://dl.k8s.io/release/stable.txt). The docker-buildx half of this
+# entry cleared with the bump to buildx v0.36.0, which pins x/text v0.40.0;
+# kubectl is now the only binary carrying the flagged module.
 #
 # Low runtime risk: the flaw is a denial-of-service only — norm.Iter enters
-# an infinite loop on invalid UTF-8 input (golang/go#80142). kubectl and
-# buildx here process operator-authored manifests and build contexts, not
-# untrusted remote input, and both images are contributor/CI/deploy tooling
-# rather than long-lived network services.
+# an infinite loop on invalid UTF-8 input (golang/go#80142). kubectl here
+# processes operator-authored manifests, not untrusted remote input, and both
+# images are contributor/CI/deploy tooling rather than long-lived network
+# services.
 #
-# Clears when kubectl and buildx releases ship with x/text >= 0.39.0: bump
-# KUBECTL_VERSION and BUILDX_VERSION in Dockerfile.dev and the kubectl pin in
-# lambda/helm-installer/Dockerfile + lambda/helm-installer-build/Dockerfile,
-# then drop this entry.
+# Clears when a kubectl release ships with x/text >= 0.39.0: bump
+# KUBECTL_VERSION in Dockerfile.dev and the kubectl pin in
+# lambda/helm-installer/Dockerfile, then drop this entry.
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-56852
-CVE-2026-56852 exp:2026-09-28
+CVE-2026-56852 exp:2026-09-22

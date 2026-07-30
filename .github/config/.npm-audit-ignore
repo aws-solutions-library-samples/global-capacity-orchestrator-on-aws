@@ -29,6 +29,9 @@
 # assessment AWS documented for the previous brace-expansion advisory in
 # https://github.com/aws/aws-cdk/issues/38257.
 # Advisory: https://github.com/advisories/GHSA-mh99-v99m-4gvg
+# Re-checked 2026-07-30: the regenerated root lock resolves aws-cdk-lib
+# 2.262.1 (the newest cdk-dia's range admits) and npm audit still reports the
+# same finding at the same node path, so the assessment above stands.
 # Remove this entry and refresh package-lock.json as soon as an aws-cdk-lib
 # release bundles brace-expansion >= 5.0.8.
-.|brace-expansion|GHSA-mh99-v99m-4gvg|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-08-24
+.|brace-expansion|GHSA-mh99-v99m-4gvg|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-09-22
