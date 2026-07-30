@@ -514,7 +514,7 @@ class GCOMonitoringStack(Stack):
                 ),
             ),
         )
-        self.cost_glue_table.add_dependency(self.cost_glue_database)
+        self.cost_glue_table.add_resource_dependency(self.cost_glue_database)
 
         self.cost_athena_workgroup = athena.CfnWorkGroup(
             self,

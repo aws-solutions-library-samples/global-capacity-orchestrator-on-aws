@@ -171,7 +171,7 @@ def _build_all_stacks(app: cdk.App) -> None:
         project_name=project_name,
         env=cdk.Environment(region=api_gateway_region),
     )
-    api_gateway_stack.add_dependency(global_stack)
+    api_gateway_stack.add_stack_dependency(global_stack)
 
     regional_stacks = []
     for region in regional_regions:
@@ -183,8 +183,8 @@ def _build_all_stacks(app: cdk.App) -> None:
             auth_secret_arn=api_gateway_stack.secret.secret_arn,
             env=cdk.Environment(region=region),
         )
-        regional_stack.add_dependency(global_stack)
-        regional_stack.add_dependency(api_gateway_stack)
+        regional_stack.add_stack_dependency(global_stack)
+        regional_stack.add_stack_dependency(api_gateway_stack)
         regional_stacks.append(regional_stack)
         # alb_arn is set during regional stack construction.
         global_stack.add_regional_endpoint(region, regional_stack.alb_arn)  # type: ignore[arg-type]
@@ -199,7 +199,7 @@ def _build_all_stacks(app: cdk.App) -> None:
         env=cdk.Environment(region=monitoring_region),
     )
     for regional_stack in regional_stacks:
-        monitoring_stack.add_dependency(regional_stack)
+        monitoring_stack.add_stack_dependency(regional_stack)
 
     if config.get_analytics_enabled():
         analytics_stack = GCOAnalyticsStack(
@@ -211,7 +211,7 @@ def _build_all_stacks(app: cdk.App) -> None:
                 "Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)"
             ),
         )
-        analytics_stack.add_dependency(global_stack)
+        analytics_stack.add_stack_dependency(global_stack)
 
         analytics_api_config = AnalyticsApiConfig(
             user_pool_arn=analytics_stack.cognito_pool.user_pool_arn,
@@ -225,7 +225,7 @@ def _build_all_stacks(app: cdk.App) -> None:
             ),
         )
         api_gateway_stack.set_analytics_config(analytics_api_config)
-        api_gateway_stack.add_dependency(analytics_stack)
+        api_gateway_stack.add_stack_dependency(analytics_stack)
 
 
 def synth_all_stacks(overlay: dict[str, Any]) -> dict[str, dict[str, Any]]:

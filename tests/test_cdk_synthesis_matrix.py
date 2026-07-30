@@ -119,7 +119,7 @@ def _build_all_stacks(app: cdk.App) -> None:
         global_accelerator_dns=global_stack.get_accelerator_dns_name(),
         env=cdk.Environment(region=api_gateway_region),
     )
-    api_gateway_stack.add_dependency(global_stack)
+    api_gateway_stack.add_stack_dependency(global_stack)
 
     regional_stacks = []
     for region in regional_regions:
@@ -131,8 +131,8 @@ def _build_all_stacks(app: cdk.App) -> None:
             auth_secret_arn=api_gateway_stack.secret.secret_arn,
             env=cdk.Environment(region=region),
         )
-        regional_stack.add_dependency(global_stack)
-        regional_stack.add_dependency(api_gateway_stack)
+        regional_stack.add_stack_dependency(global_stack)
+        regional_stack.add_stack_dependency(api_gateway_stack)
         regional_stacks.append(regional_stack)
         global_stack.add_regional_endpoint(region, regional_stack.alb_arn)  # type: ignore[arg-type]
 
@@ -146,7 +146,7 @@ def _build_all_stacks(app: cdk.App) -> None:
         env=cdk.Environment(region=monitoring_region),
     )
     for regional_stack in regional_stacks:
-        monitoring_stack.add_dependency(regional_stack)
+        monitoring_stack.add_stack_dependency(regional_stack)
 
     if config.get_analytics_enabled():
         analytics_stack = GCOAnalyticsStack(
@@ -155,7 +155,7 @@ def _build_all_stacks(app: cdk.App) -> None:
             config=config,
             env=cdk.Environment(region=api_gateway_region),
         )
-        analytics_stack.add_dependency(global_stack)
+        analytics_stack.add_stack_dependency(global_stack)
 
         analytics_api_config = AnalyticsApiConfig(
             user_pool_arn=analytics_stack.cognito_pool.user_pool_arn,
@@ -169,7 +169,7 @@ def _build_all_stacks(app: cdk.App) -> None:
             ),
         )
         api_gateway_stack.set_analytics_config(analytics_api_config)
-        api_gateway_stack.add_dependency(analytics_stack)
+        api_gateway_stack.add_stack_dependency(analytics_stack)
 
 
 @pytest.mark.parametrize("config_name,overrides", CONFIGS, ids=[c[0] for c in CONFIGS])

@@ -202,7 +202,7 @@ def _build_all_stacks(app: cdk.App, account: str | None = None) -> None:
         project_name=project_name,
         env=cdk.Environment(account=account, region=api_gateway_region),
     )
-    api_gateway_stack.add_dependency(global_stack)
+    api_gateway_stack.add_stack_dependency(global_stack)
 
     regional_stacks = []
     for region in regional_regions:
@@ -214,8 +214,8 @@ def _build_all_stacks(app: cdk.App, account: str | None = None) -> None:
             auth_secret_arn=api_gateway_stack.secret.secret_arn,
             env=cdk.Environment(account=account, region=region),
         )
-        regional_stack.add_dependency(global_stack)
-        regional_stack.add_dependency(api_gateway_stack)
+        regional_stack.add_stack_dependency(global_stack)
+        regional_stack.add_stack_dependency(api_gateway_stack)
         regional_stacks.append(regional_stack)
         global_stack.add_regional_endpoint(region, regional_stack.alb_arn)  # type: ignore[arg-type]
 
@@ -229,7 +229,7 @@ def _build_all_stacks(app: cdk.App, account: str | None = None) -> None:
         env=cdk.Environment(account=account, region=monitoring_region),
     )
     for regional_stack in regional_stacks:
-        monitoring_stack.add_dependency(regional_stack)
+        monitoring_stack.add_stack_dependency(regional_stack)
 
     # Mirror ``app.py``'s conditional analytics-stack instantiation so
     # the ``analytics-enabled`` / ``analytics-enabled-hyperpod`` fixtures
@@ -246,7 +246,7 @@ def _build_all_stacks(app: cdk.App, account: str | None = None) -> None:
                 "Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)"
             ),
         )
-        analytics_stack.add_dependency(global_stack)
+        analytics_stack.add_stack_dependency(global_stack)
 
         analytics_api_config = AnalyticsApiConfig(
             user_pool_arn=analytics_stack.cognito_pool.user_pool_arn,
@@ -260,7 +260,7 @@ def _build_all_stacks(app: cdk.App, account: str | None = None) -> None:
             ),
         )
         api_gateway_stack.set_analytics_config(analytics_api_config)
-        api_gateway_stack.add_dependency(analytics_stack)
+        api_gateway_stack.add_stack_dependency(analytics_stack)
 
 
 def _mock_helm_installer(stack: Any) -> None:

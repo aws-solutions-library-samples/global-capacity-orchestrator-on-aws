@@ -161,7 +161,7 @@ def main() -> None:
         env=cdk.Environment(account=account, region=api_gateway_region),
         description="Global API Gateway with IAM authentication",
     )
-    api_gateway_stack.add_dependency(global_stack)
+    api_gateway_stack.add_stack_dependency(global_stack)
 
     # Create regional stacks for each configured region
     regional_stacks = []
@@ -177,8 +177,8 @@ def main() -> None:
         )
 
         # Add dependencies
-        regional_stack.add_dependency(global_stack)
-        regional_stack.add_dependency(api_gateway_stack)
+        regional_stack.add_stack_dependency(global_stack)
+        regional_stack.add_stack_dependency(api_gateway_stack)
         regional_stacks.append(regional_stack)
 
         # Every region gets an IAM-authenticated API bridge so the centralized
@@ -198,7 +198,7 @@ def main() -> None:
             env=cdk.Environment(account=account, region=region),
             description=f"Regional aggregation and workload bridge for {region}",
         )
-        regional_api_stack.add_dependency(regional_stack)
+        regional_api_stack.add_stack_dependency(regional_stack)
 
     # Create monitoring stack
     monitoring_stack = GCOMonitoringStack(
@@ -214,7 +214,7 @@ def main() -> None:
 
     # Add dependencies on all regional stacks
     for regional_stack in regional_stacks:
-        monitoring_stack.add_dependency(regional_stack)
+        monitoring_stack.add_stack_dependency(regional_stack)
 
     # Optionally instantiate the analytics stack when explicitly enabled via
     # cdk.json. The stack lives in the API gateway region so the
@@ -237,7 +237,7 @@ def main() -> None:
             env=cdk.Environment(account=account, region=api_gateway_region),
             description="Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)",
         )
-        analytics_stack.add_dependency(global_stack)
+        analytics_stack.add_stack_dependency(global_stack)
 
         # Wire the analytics stack's presigned-URL Lambda into the API
         # Gateway stack via a mutator. The API gateway stack was already
@@ -247,7 +247,7 @@ def main() -> None:
         # mutator lets us defer the /studio/* wiring until both stacks
         # exist without changing the existing dependency chain.
         #
-        # ``api_gateway_stack.add_dependency(analytics_stack)`` ensures
+        # ``api_gateway_stack.add_stack_dependency(analytics_stack)`` ensures
         # the analytics stack (and its Lambda) finish deploying before
         # CloudFormation updates the API gateway stack — the Lambda
         # ARN is now a cross-stack reference on the API gateway side.
@@ -263,7 +263,7 @@ def main() -> None:
             ),
         )
         api_gateway_stack.set_analytics_config(analytics_api_config)
-        api_gateway_stack.add_dependency(analytics_stack)
+        api_gateway_stack.add_stack_dependency(analytics_stack)
 
     app.synth()
 
