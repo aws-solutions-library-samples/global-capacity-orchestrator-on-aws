@@ -4,7 +4,7 @@
 
 <p><b><i>One API. Every Accelerator. Any Region.</i></b></p>
 
-<p><b>Global Capacity Orchestrator (GCO)</b>: multi-region accelerated-compute orchestration for AWS — NVIDIA GPUs, <a href="https://aws.amazon.com/ai/machine-learning/trainium/">AWS Trainium</a>, <a href="https://aws.amazon.com/ai/machine-learning/inferentia/">AWS Inferentia</a>, and CPU (amd64 + arm64 / <a href="https://aws.amazon.com/pm/ec2-graviton/">Graviton</a>) — with capacity-aware placement workflows, spot fallback, and autoscaling inference endpoints. Commercial <code>aws</code> deployments add automatic failover and latency-aware routing through one <a href="docs/API.md">workload API</a>; other partitions (<code>aws-cn</code> and <code>aws-us-gov</code>) use <a href="https://aws.amazon.com/iam/">IAM</a>-authenticated regional workload APIs, all through the same <a href="docs/CLI.md">CLI</a>.</p>
+<p><b>Global Capacity Orchestrator (GCO)</b>: multi-region accelerated-compute orchestration for AWS — NVIDIA GPUs, <a href="https://aws.amazon.com/ai/machine-learning/trainium/">AWS Trainium</a>, <a href="https://aws.amazon.com/ai/machine-learning/inferentia/">AWS Inferentia</a>, and CPU (amd64 + arm64 / <a href="https://aws.amazon.com/pm/ec2-graviton/">Graviton</a>) — with capacity-aware placement workflows, spot fallback, and autoscaling inference endpoints. Commercial <code>aws</code> deployments add automatic failover and latency-aware routing through one <a href="docs/API.md">API</a>; other partitions (<code>aws-cn</code> and <code>aws-us-gov</code>) use <a href="https://aws.amazon.com/iam/">IAM</a>-authenticated regional workload APIs, all through the same <a href="docs/CLI.md">CLI</a> and <a href="gco_mcp/README.md">MCP server</a>.</p>
 
 <!-- BEGIN BADGE TABLE -->
 <p>
