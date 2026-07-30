@@ -768,6 +768,62 @@ EOF
     [ -z "$output" ]
 }
 
+# ── extract_python_extras ───────────────────────────────────────────────────
+
+@test "extract_python_extras: lists every optional-dependency group in the real pyproject" {
+    # The python-drift path installs the project with every extras group so
+    # extras-only pins (aws-cdk-lib lives ONLY in ``cdk``) are visible to
+    # ``pip list --outdated``. Spot-check groups that exist today.
+    run extract_python_extras "pyproject.toml"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ (^|$'\n')cdk($|$'\n') ]]
+    [[ "$output" =~ (^|$'\n')diagrams($|$'\n') ]]
+    [[ "$output" =~ (^|$'\n')test($|$'\n') ]]
+    [[ "$output" =~ (^|$'\n')dev($|$'\n') ]]
+    [[ "$output" =~ (^|$'\n')image-health-monitor($|$'\n') ]]
+}
+
+@test "extract_python_extras: emits bare group names only (no pins, no brackets)" {
+    # Output feeds straight into ``pip install -e ".[a,b,c]"`` after a
+    # paste-join, so every line must be a bare extras name.
+    run extract_python_extras "pyproject.toml"
+    [ "$status" -eq 0 ]
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        [[ "$line" =~ ^[A-Za-z0-9._-]+$ ]]
+    done <<< "$output"
+}
+
+@test "extract_python_extras: agrees with tomllib's own view of the group count" {
+    # Guard against the helper silently dropping groups: its line count
+    # must equal the number of keys under [project.optional-dependencies].
+    expected="$(python3 -c "
+import tomllib
+with open('pyproject.toml', 'rb') as f:
+    data = tomllib.load(f)
+print(len(data['project']['optional-dependencies']))
+")"
+    run extract_python_extras "pyproject.toml"
+    [ "$status" -eq 0 ]
+    actual="$(printf '%s\n' "$output" | sed '/^$/d' | wc -l | tr -d ' ')"
+    [ "$actual" = "$expected" ]
+}
+
+@test "extract_python_extras: empty for a missing file" {
+    run extract_python_extras "/nonexistent/pyproject.toml"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_python_extras: empty for malformed TOML" {
+    tmpfile="$(mktemp)"
+    echo '[project not toml' > "$tmpfile"
+    run extract_python_extras "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+}
+
 # ── extract_build_system_pins ───────────────────────────────────────────────
 
 @test "extract_build_system_pins: the real pyproject pins one exact setuptools" {

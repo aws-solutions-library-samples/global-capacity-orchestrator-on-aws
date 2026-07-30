@@ -183,7 +183,22 @@ print((datetime.date.today() - d).days)
 # ---------------------------------------------------------------------------
 echo "=== Checking for outdated Python dependencies ==="
 
-pip install -e . --quiet --root-user-action=ignore
+# Install the project with EVERY optional-dependency group, not just the
+# base dependencies: ``pip list --outdated`` can only report packages that
+# are installed, so a base-only install silently dropped pins that live
+# exclusively in an extras group (``aws-cdk-lib`` in ``cdk``, ``playwright``
+# in ``diagrams``, ``mypy`` in ``typecheck``, ...) even though
+# ``extract_direct_python_deps`` already includes them in the direct-pin
+# filter below. Groups are enumerated from pyproject.toml so a new extras
+# group joins the surface automatically; if enumeration fails, fall back to
+# the old base-only install rather than dropping the report section.
+PYTHON_EXTRAS="$(extract_python_extras pyproject.toml | paste -sd, -)"
+if [ -n "$PYTHON_EXTRAS" ]; then
+  echo "Installing with extras: [${PYTHON_EXTRAS}]"
+  pip install -e ".[${PYTHON_EXTRAS}]" --quiet --root-user-action=ignore
+else
+  pip install -e . --quiet --root-user-action=ignore
+fi
 OUTDATED_RAW="$(pip list --outdated --format=json)"
 
 # Build a newline-separated list of PEP-503-normalised direct-dep names.
