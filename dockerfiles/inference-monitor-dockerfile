@@ -41,22 +41,37 @@ RUN python -c 'import pathlib, tomllib; config = tomllib.loads(pathlib.Path("pyp
         echo "pip install attempt ${attempt} failed; retrying in 10s..."; \
         sleep 10; \
     done \
-    && rm requirements-runtime.txt
+    && rm requirements-runtime.txt \
+    && python -m pip uninstall -y pip
+
+# Nothing installs packages at runtime, so pip is uninstalled above in the
+# same layer that finishes using it: installer tooling stays out of the
+# deployed attack surface and out of the image scanners' findings feed.
+# (3.14-slim ships no setuptools/wheel, and the lock declares no runtime
+# dependency on either, so pip is the only installer present.)
 
 # Keep source-only edits from invalidating the expensive dependency layer.
 COPY gco/ ./gco/
 
+# Precompile the application tree. The pod runs with
+# readOnlyRootFilesystem, so import-time .pyc writes fail silently and
+# every pod start would otherwise re-compile every module from source;
+# compiling at build converts that recurring cost into a one-time one.
+# (site-packages is already compiled by pip at install time. Health
+# checking is owned by the kubelet exec probes in the deployment manifest;
+# a Docker HEALTHCHECK would never be read by Kubernetes.)
+RUN python -m compileall -q ./gco
+
 # Switch to non-root user
 USER gco
 
-# Set environment defaults
-ENV PYTHONUNBUFFERED=1
+# Set environment defaults. PYTHONDONTWRITEBYTECODE documents that runtime
+# bytecode writes are neither needed (everything is precompiled) nor
+# possible (read-only root filesystem).
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 ENV RECONCILE_INTERVAL_SECONDS=15
 ENV INFERENCE_NAMESPACE=gco-inference
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "print('ok')" || exit 1
 
 # Run the inference monitor
 CMD ["python", "-m", "gco.services.inference_monitor"]

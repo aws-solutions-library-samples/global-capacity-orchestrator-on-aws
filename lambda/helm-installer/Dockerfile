@@ -60,4 +60,12 @@ RUN for attempt in 1 2 3; do \
 COPY handler.py .
 COPY charts.yaml .
 
+# Precompile the handler and its site-packages for cold-start latency: the
+# Lambda task root is read-only at invoke time, so any module that reaches
+# the runtime uncompiled is re-compiled from source on every cold start.
+# PYTHONDONTWRITEBYTECODE documents that runtime bytecode writes are neither
+# needed nor possible.
+RUN python -m compileall -q "${LAMBDA_TASK_ROOT}"
+ENV PYTHONDONTWRITEBYTECODE=1
+
 CMD ["handler.lambda_handler"]
