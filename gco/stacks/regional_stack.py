@@ -77,6 +77,7 @@ from typing import Any
 import aws_cdk.aws_eks_v2 as eks
 import yaml
 from aws_cdk import (
+    Acknowledgment,
     CfnJson,
     CfnOutput,
     CfnTag,
@@ -85,6 +86,7 @@ from aws_cdk import (
     Fn,
     RemovalPolicy,
     Stack,
+    Validations,
 )
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_ecr as ecr
@@ -5134,6 +5136,31 @@ class GCORegionalStack(Stack):
             cloudwatch_logs_exports=["postgresql"],
             monitoring_interval=Duration.seconds(60),
             cluster_identifier=f"{project_name}-pgvector-{self.deployment_region}",
+        )
+
+        # aws-cdk-lib >= 2.262 ships a built-in "CloudFormation Validate"
+        # pack whose W9008 wants StorageEncrypted on every CfnDBInstance. The
+        # cluster above sets storage_encrypted=True, and Aurora cluster
+        # members inherit the cluster's storage encryption — the
+        # instance-level property is not applicable to Aurora members, so the
+        # finding cannot be satisfied at the instance. ``Validations.acknowledge``
+        # is the API that feeds the validation report's suppression pass
+        # (``Annotations.acknowledge_warning`` only silences the console
+        # annotation). Note: the current CDK implementation collects these
+        # acknowledgments app-wide per rule ID, so this quiets W9008
+        # everywhere — attaching it here records this cluster as the
+        # provenance in the report, and the five cdk-nag packs' own
+        # RDS storage-encryption rules remain scoped and would still fail
+        # a genuinely unencrypted instance elsewhere.
+        Validations.of(self.aurora_cluster).acknowledge(
+            Acknowledgment(
+                id="CloudFormation-Validate::W9008",
+                reason=(
+                    "Aurora cluster members inherit the cluster's "
+                    "storage_encrypted=True; StorageEncrypted is not applicable "
+                    "on Aurora member DBInstances."
+                ),
+            )
         )
 
         # Construct-level cdk-nag suppressions for Aurora pgvector
