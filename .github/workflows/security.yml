@@ -332,6 +332,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      - name: Pre-pull trufflehog image
+        # Same registry-flake shield the lint.yml docker-run jobs use.
+        uses: ./.github/actions/docker-pull-with-retry
+        with:
+          images: trufflesecurity/trufflehog:3.95.2
       - name: Run TruffleHog
         run: |
           docker run --rm -v "$PWD":/repo \
@@ -351,6 +356,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      - name: Pre-pull gitleaks image
+        uses: ./.github/actions/docker-pull-with-retry
+        with:
+          images: zricethezav/gitleaks:v8.30.1
       - name: Run gitleaks
         run: |
           docker run --rm -v "$PWD":/repo -w /repo \
@@ -394,6 +403,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      - name: Pre-pull checkov image
+        uses: ./.github/actions/docker-pull-with-retry
+        with:
+          images: bridgecrew/checkov:3.2.524
       - name: Run checkov
         run: |
           docker run --rm -v "$PWD":/repo -w /repo \
@@ -432,6 +445,10 @@ jobs:
       - uses: ./.github/actions/build-lambda-package
       - name: cdk synth
         run: npm exec -- cdk synth --quiet
+      - name: Pre-pull KICS image
+        uses: ./.github/actions/docker-pull-with-retry
+        with:
+          images: checkmarx/kics:v2.1.20
       - name: Run KICS
         run: |
           docker run --rm -v "$PWD":/repo -w /repo \
