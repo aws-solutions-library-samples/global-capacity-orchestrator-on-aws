@@ -7,6 +7,7 @@
 # Triggers: push: main, pull_request, workflow_dispatch.
 #
 # Jobs (alphabetical by display name):
+#   - changes                                — PR-only path filter for the dev-tooling jobs below
 #   - integration:dev-alias:docker           — install latest Docker, build gco-dev, prove the generated `gco` alias runs
 #   - integration:dev-alias:finch            — install latest Finch (rootful), build gco-dev, prove the generated `gco` alias runs
 #   - integration:dev-alias:none             — prove setup-dev-alias.sh refuses cleanly when no runtime is installed
@@ -24,6 +25,16 @@
 #   - integration:lambda:imports             — import each Lambda handler
 #   - integration:mcp:server                 — pytest tests/test_mcp_integration.py
 #   - integration:pytest:cross-module        — pytest tests/test_integration.py
+#
+# Dev-tooling jobs (the four integration:dev-alias:* jobs and the two
+# integration:docker:dev-container matrix cells) are gated on the `changes`
+# path filter for pull requests: they install container runtimes from
+# external package repos and build Dockerfile.dev from scratch, yet only
+# validate the dev-onboarding surface. On PRs they run only when that
+# surface (Dockerfile.dev, the alias scripts, the Python dependency pins,
+# .nvmrc, or this workflow) changes; on push to main and workflow_dispatch
+# they always run, so every merge still gets full coverage. Same pattern as
+# the `changes` gate in unit-tests.yml.
 #
 # =============================================================================
 
@@ -43,6 +54,52 @@ permissions:
   contents: read
 
 jobs:
+  # --------------------------------------------------------------------------
+  # Path filter for the dev-tooling jobs (integration:dev-alias:* and
+  # integration:docker:dev-container). Mirrors the `changes` job in
+  # unit-tests.yml: PR-only, diffing the checked-out head against the event's
+  # immutable base SHA rather than GitHub's paginated PR-files API.
+  #
+  # On push to main and workflow_dispatch the filter is skipped and the
+  # dependent jobs always run — every merge gets at least one full run.
+  # --------------------------------------------------------------------------
+  changes:
+    name: "changes"
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: github.event_name == 'pull_request'
+    outputs:
+      dev_tooling: ${{ steps.filter.outputs.dev_tooling }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+      - name: Fetch pull request base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git fetch --no-tags --depth=1 origin "$BASE_SHA"
+      - name: Detect dev-tooling changes
+        id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
+            Dockerfile.dev \
+            scripts/setup-dev-alias.sh \
+            .github/scripts/dev_alias_live.sh \
+            .github/scripts/podman_ci_config.sh \
+            pyproject.toml \
+            requirements-lock.txt \
+            .nvmrc \
+            .github/workflows/integration-tests.yml; then
+            echo "dev_tooling=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "dev_tooling=true" >> "$GITHUB_OUTPUT"
+          fi
+
   integration-helm-charts-valid:
     name: "integration:helm:charts-valid"
     # Proves every (chart, version) pinned in lambda/helm-installer/charts.yaml
@@ -510,6 +567,17 @@ jobs:
     # GitHub provides ubuntu-24.04-arm as a standard public runner, so
     # both paths run on native kernels instead of translating every RUN
     # step through binfmt.
+    #
+    # Gated on the dev-tooling path filter for PRs (see `changes` above):
+    # this job validates Dockerfile.dev's toolchain pins and install path,
+    # all covered by the filtered files. CLI behavior itself is covered on
+    # every PR by unit:cli:smoke. Always runs on push/dispatch.
+    needs: changes
+    if: |
+      always() && (
+        github.event_name != 'pull_request' ||
+        needs.changes.outputs.dev_tooling == 'true'
+      )
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     strategy:
@@ -1104,10 +1172,21 @@ jobs:
   # actually launches the runtime and runs the real CLI — closing the gap left
   # by the mocked tests/BATS/test_setup_dev_alias.bats suite. Logic lives in
   # .github/scripts/dev_alias_live.sh so it can be run locally too.
+  #
+  # All four jobs are gated on the dev-tooling path filter for PRs (see
+  # `changes` at the top of this file): they exercise only the dev-onboarding
+  # surface, and installing runtimes from external package repos on every PR
+  # is the workflow's biggest flake source. Always run on push/dispatch.
   # --------------------------------------------------------------------------
 
   integration-dev-alias-docker:
     name: "integration:dev-alias:docker"
+    needs: changes
+    if: |
+      always() && (
+        github.event_name != 'pull_request' ||
+        needs.changes.outputs.dev_tooling == 'true'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1124,6 +1203,12 @@ jobs:
 
   integration-dev-alias-podman:
     name: "integration:dev-alias:podman"
+    needs: changes
+    if: |
+      always() && (
+        github.event_name != 'pull_request' ||
+        needs.changes.outputs.dev_tooling == 'true'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1189,6 +1274,12 @@ jobs:
 
   integration-dev-alias-finch:
     name: "integration:dev-alias:finch"
+    needs: changes
+    if: |
+      always() && (
+        github.event_name != 'pull_request' ||
+        needs.changes.outputs.dev_tooling == 'true'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1242,6 +1333,12 @@ jobs:
 
   integration-dev-alias-none:
     name: "integration:dev-alias:none"
+    needs: changes
+    if: |
+      always() && (
+        github.event_name != 'pull_request' ||
+        needs.changes.outputs.dev_tooling == 'true'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
