@@ -23,7 +23,7 @@ Run on every push to `main` and every pull request.
 
 ## Satellite Workflows
 
-Workflows outside the four badged gates above. Most are schedule- or dispatch-driven; `mooncake-image.yml` also runs on push and PR but is a narrow, feature-specific contract test rather than a headline gate.
+Workflows outside the four badged gates above. Most are schedule- or dispatch-driven; `mooncake-image.yml` also runs on push and PR (path-filtered) but is a narrow, feature-specific contract test rather than a headline gate.
 
 | File | Trigger | Description |
 |------|---------|-------------|
@@ -31,7 +31,7 @@ Workflows outside the four badged gates above. Most are schedule- or dispatch-dr
 | `deps-scan.yml` | Monthly cron + manual | Check pinned dependencies, offline accelerator/NodePool policy, and online [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) accelerator-catalog drift; update one rolling issue when findings exist |
 | `cve-scan.yml` | Weekly cron + manual | Re-run trivy against current CVE databases |
 | `pages.yml` | `workflow_run` after Unit Tests on `main` | Publish the HTML coverage report + shields.io badge JSON to GitHub Pages. Split out of Unit Tests so a Pages outage can't fail the test gate |
-| `mooncake-image.yml` | `push`: `main`, PR, manual | Contract-test the real upstream Mooncake vLLM image GCO defaults to — proxy `/healthz`, store-config loader, KV-connector names. Not CVE-scanned (upstream image); version drift is caught by `deps-scan` |
+| `mooncake-image.yml` | `push`: `main` + PR (path-filtered to the contract's inputs), weekly cron, manual | Contract-test the real upstream Mooncake vLLM image GCO defaults to — proxy `/healthz`, store-config loader, KV-connector names. Path-filtered because every run pulls the ~9GB image; the weekly run catches upstream tag re-pushes. Not CVE-scanned (upstream image); version drift is caught by `deps-scan` |
 
 The accelerator check deliberately has two tiers: `unit-tests.yml` runs only the
 checked-in deterministic validator, while `deps-scan.yml` adds sequential,

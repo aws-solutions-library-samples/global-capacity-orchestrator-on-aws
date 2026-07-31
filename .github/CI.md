@@ -48,7 +48,7 @@ For contributor-facing docs (how to run tests locally, release process, dependen
 │   ├── integration-tests.yml         # Integration Tests workflow
 │   ├── security.yml                  # Security workflow
 │   ├── lint.yml                      # Linting workflow
-│   ├── mooncake-image.yml            # Mooncake vLLM image contract test (push/PR)
+│   ├── mooncake-image.yml            # Mooncake vLLM image contract test (path-filtered push/PR + weekly)
 │   ├── release.yml                   # Manual workflow_dispatch release
 │   ├── deps-scan.yml                 # Monthly dependency scan
 │   ├── cve-scan.yml                  # Weekly CVE scan
@@ -76,7 +76,7 @@ Each file maps to one row in the README badge table.
 
 ### Satellites
 
-Workflows outside the four badged gates. Most are schedule- or dispatch-driven; `mooncake-image.yml` also runs on push and PR but is a narrow, feature-specific contract test rather than a headline gate.
+Workflows outside the four badged gates. Most are schedule- or dispatch-driven; `mooncake-image.yml` also runs on push and PR (path-filtered) but is a narrow, feature-specific contract test rather than a headline gate.
 
 | File | Trigger | Purpose |
 |------|---------|---------|
@@ -84,7 +84,7 @@ Workflows outside the four badged gates. Most are schedule- or dispatch-driven; 
 | `workflows/deps-scan.yml` | `cron: 0 9 1 * *` (monthly, UTC) + manual | Check pinned dependency versions, deterministic accelerator/NodePool/watch-list policy, and live EC2 accelerator-catalog drift; update one rolling issue when drift is found |
 | `workflows/cve-scan.yml` | `cron: 0 9 * * 1` (Mondays, UTC) + manual | Re-run trivy against current CVE databases |
 | `workflows/pages.yml` | `workflow_run` after **Unit Tests** completes on `main` | Download the `pytest-coverage` artifact from the triggering run, regenerate the shields.io coverage badge, and deploy `htmlcov/` to GitHub Pages via `actions/deploy-pages`. Split out of `unit-tests.yml` so a GitHub Pages backend stall surfaces here instead of failing the test gate |
-| `workflows/mooncake-image.yml` | `push`: `main`, PR, manual | Pull the upstream Mooncake vLLM image pinned in `cli/images.py` (`_DISAGGREGATED_DEFAULT_IMAGE`) and run `tests/test_mooncake_image_contract.py`: prefill-decode proxy health under the image's `python3`, `MooncakeStoreConfig` acceptance of the rendered store config, and KV-connector name registration. Deliberately not Trivy/CVE-scanned — the image is upstream and unpatchable; version drift is surfaced by `deps-scan` |
+| `workflows/mooncake-image.yml` | `push`: `main` + PR, both path-filtered to the contract's inputs (`cli/images.py`, `gco/services/mooncake_pd_proxy.py`, `gco/services/inference_monitor.py`, the test module, the workflow file); `cron: 0 9 * * 1` (Mondays, UTC); manual | Pull the upstream Mooncake vLLM image pinned in `cli/images.py` (`_DISAGGREGATED_DEFAULT_IMAGE`) and run `tests/test_mooncake_image_contract.py`: prefill-decode proxy health under the image's `python3`, `MooncakeStoreConfig` acceptance of the rendered store config, and KV-connector name registration. Path-filtered because every run pulls the ~9GB image; the weekly run catches upstream re-pushes of the pinned tag. Deliberately not Trivy/CVE-scanned — the image is upstream and unpatchable; version drift is surfaced by `deps-scan` |
 
 ### Naming conventions
 
@@ -162,13 +162,13 @@ The scan runs as an Advanced Setup workflow rather than Default Setup so the fil
 The README's badge row has two parts:
 
 1. **Four workflow-status badges** (`Unit Tests`, `Integration Tests`, `Security`, `Linting`) from GitHub's native `badge.svg` endpoint.
-2. **Eight stack/tech badges** (Python, CDK, EKS Auto Mode, Kubernetes, CDK-Nag, etc.) rendered by shields.io from hardcoded values, each linking to the authoritative source (pyproject.toml, cdk.json, upstream docs, etc.).
+2. **One coverage badge** rendered by shields.io from the `coverage-badge.json` endpoint that `pages.yml` publishes to GitHub Pages after each green `push: main` Unit Tests run.
 
-There are no auto-generated test-count or coverage badges — those were removed before the first release because they depended on an orphan `badges` branch and a shields.io endpoint that didn't resolve reliably against a private repo. Room to add them back once the repo goes public; for now the workflow status itself carries the signal.
+The old orphan-`badges`-branch test-count badges were removed before the first release; the Pages-hosted coverage endpoint above replaced that mechanism.
 
 ### "repo or workflow not found" on fresh or private repositories
 
-The four workflow-status badges at the top of the README come from GitHub's native `badge.svg` endpoint and render a placeholder image when the repo is unreachable. All other shields.io URLs (`img.shields.io/badge/...`) are static and always render.
+The four workflow-status badges at the top of the README come from GitHub's native `badge.svg` endpoint and render a placeholder image when the repo is unreachable. The coverage badge (`img.shields.io/endpoint?url=...`) resolves against the GitHub Pages site, so it renders once Pages has deployed at least one coverage report.
 
 If a stale run ever shows a `img.shields.io/github/actions/workflow/status/...` URL rendering as **"repo or workflow not found"**, the usual cause is the repo being private (shields.io hits the public GitHub REST API and gets a 404). Making the repo public resolves it; there's no code change needed.
 

@@ -459,7 +459,7 @@ When required, obtain explicit account and KMS-deletion authorization, run `pyth
 
 ### CI/CD Pipeline
 
-The project uses GitHub Actions for automated testing. Every push and pull request runs six primary workflows in parallel, plus three satellites on schedule or manual trigger.
+The project uses GitHub Actions for automated testing. Every push and pull request runs five primary workflows in parallel, plus satellites on path-filter, schedule, or manual trigger.
 
 #### Primary workflows (run on every push + PR)
 
@@ -470,7 +470,6 @@ The project uses GitHub Actions for automated testing. Every push and pull reque
 | `.github/workflows/security.yml` | Security | bandit, pip-audit, npm audit for every owned graph, trivy (filesystem + per-image), trufflehog, gitleaks, semgrep, checkov, KICS, and CodeQL for Python + JavaScript |
 | `.github/workflows/inference-streaming-proxy.yml` | — (no badge) | Native Node.js 24 tests for the streaming Lambda with 93% line/function/branch gates |
 | `.github/workflows/lint.yml` | Linting | actionlint, hadolint, markdownlint, mypy (strict/stacks/lambda), ruff (format + check, imports included), shellcheck, yamllint |
-| `.github/workflows/mooncake-image.yml` | — (no badge) | Mooncake vLLM image contract: runs the real upstream image GCO defaults to (`cli/images.py::_DISAGGREGATED_DEFAULT_IMAGE`) and asserts the PD proxy starts under `python3` + serves `/healthz`, the rendered store config is accepted by the image's loader, and the connector names GCO emits are registered — so an image-version bump is validated by CI |
 
 Each workflow file has a comment header documenting triggers and per-job purpose — that is the single source of truth. Every job uses `category:tool:test_name` display names (e.g., `unit:pytest:core`, `security:trivy:container-scan`) and `category-tool-test_name` job IDs.
 
@@ -481,16 +480,11 @@ Each workflow file has a comment header documenting triggers and per-job purpose
 | `.github/workflows/release.yml` | Manual (`workflow_dispatch`) | Bump version, tag, and create a GitHub Release with auto-generated notes |
 | `.github/workflows/deps-scan.yml` | `cron: 0 9 1 * *` (monthly) | Check pinned versions plus deterministic NodePool/watch-list policy and live EC2 accelerator-catalog drift; update one rolling issue when drift is detected |
 | `.github/workflows/cve-scan.yml` | `cron: 0 9 * * 1` (weekly) | Re-run Trivy against current CVE databases |
+| `.github/workflows/mooncake-image.yml` | Push/PR path-filtered to the contract's inputs, `cron: 0 9 * * 1` (weekly), manual | Mooncake vLLM image contract: runs the real upstream image GCO defaults to (`cli/images.py::_DISAGGREGATED_DEFAULT_IMAGE`) and asserts the PD proxy starts under `python3` + serves `/healthz`, the rendered store config is accepted by the image's loader, and the connector names GCO emits are registered — so an image-version bump is validated by CI. Path-filtered because every run pulls the ~9GB image |
 
-#### Auto-generated badges
+#### Coverage badge
 
-Three README badges update automatically from `push: main` runs:
-
-- `unit:pytest:core` test count
-- `unit:bats:count`
-- `unit:coverage` percentage
-
-Values are published to the orphan `badges` branch as shields.io endpoint JSON and consumed via `img.shields.io/endpoint?url=…`. Fork PRs cannot write to this branch — the publish step is gated on `push: main`.
+The README coverage badge updates automatically after each green `push: main` Unit Tests run: `pages.yml` regenerates the shields.io endpoint JSON from the run's coverage artifact and publishes it (with the HTML report) to GitHub Pages. Fork PRs cannot affect it — the deploy only triggers from Unit Tests runs on `main`.
 
 #### Running the pipeline locally
 

@@ -21,7 +21,15 @@
 # vulnerability findings aren't actionable here. Version drift (a newer tag is
 # available) is surfaced by the monthly deps-scan workflow instead.
 #
-# Triggers: push:main, pull_request, workflow_dispatch.
+# Triggers: push:main + pull_request, both filtered to the files this contract
+# actually validates (the image pin, the PD proxy script, the config renderers,
+# the test module, and this workflow); weekly schedule; workflow_dispatch.
+#
+# The path filter exists because every run pulls the ~9GB upstream image. The
+# contract can only change when one of the listed files changes, so unrelated
+# pushes and PRs skip the pull entirely. The weekly schedule still catches the
+# two drift modes no repo change would surface: the upstream tag being
+# re-pushed with different content, and runner/toolchain drift.
 #
 # =============================================================================
 
@@ -30,7 +38,23 @@ name: Mooncake Image Contract
 on:
   push:
     branches: [main]
+    paths:
+      - "cli/images.py"
+      - "gco/services/mooncake_pd_proxy.py"
+      - "gco/services/inference_monitor.py"
+      - "tests/test_mooncake_image_contract.py"
+      - ".github/workflows/mooncake-image.yml"
   pull_request:
+    paths:
+      - "cli/images.py"
+      - "gco/services/mooncake_pd_proxy.py"
+      - "gco/services/inference_monitor.py"
+      - "tests/test_mooncake_image_contract.py"
+      - ".github/workflows/mooncake-image.yml"
+  schedule:
+    # 09:00 UTC every Monday — same cadence as cve-scan. Catches upstream
+    # re-pushes of the pinned tag between repo changes.
+    - cron: "0 9 * * 1"
   workflow_dispatch:
 
 concurrency:
