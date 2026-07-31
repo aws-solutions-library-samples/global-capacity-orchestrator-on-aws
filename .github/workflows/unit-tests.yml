@@ -48,16 +48,18 @@ permissions:
 
 jobs:
   # --------------------------------------------------------------------------
-  # Path filter used by the lockfile / fresh-install jobs below. Both of those
-  # only exercise pyproject.toml + requirements-lock.txt (plus the workflow
-  # file itself), so running them on every docs- or code-only PR is waste —
-  # especially unit:fresh-install, which intentionally disables the pip cache.
+  # Path filters used by the lockfile / fresh-install / recorder jobs below.
+  # The lockfile and fresh-install jobs only exercise pyproject.toml +
+  # requirements-lock.txt (plus the workflow file itself), and the macOS
+  # recorder job only exercises demo/, so running them on every docs- or
+  # code-only PR is waste — especially unit:fresh-install, which
+  # intentionally disables the pip cache.
   #
   # On push to main and workflow_dispatch the filter is skipped and the
   # dependent jobs always run: we want at least one guaranteed green run per
   # merge. On PRs, compare the checked-out head directly with the event's
   # immutable base SHA. This avoids GitHub's paginated PR-files API, which can
-  # fail on large PRs, while retaining the same three-path gate.
+  # fail on large PRs, while retaining the same path gates.
   # --------------------------------------------------------------------------
   changes:
     name: "changes"
@@ -66,6 +68,7 @@ jobs:
     if: github.event_name == 'pull_request'
     outputs:
       deps: ${{ steps.filter.outputs.deps }}
+      demo: ${{ steps.demo_filter.outputs.demo }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -89,6 +92,20 @@ jobs:
             echo "deps=false" >> "$GITHUB_OUTPUT"
           else
             echo "deps=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Detect demo recorder changes
+        id: demo_filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
+            demo/ \
+            .github/workflows/unit-tests.yml; then
+            echo "demo=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "demo=true" >> "$GITHUB_OUTPUT"
           fi
 
   # --------------------------------------------------------------------------
@@ -297,6 +314,17 @@ jobs:
 
   unit-recorder-macos-bash32:
     name: "unit:recorder:macos-bash32"
+    # Verifies the demo recorder scripts stay compatible with the macOS
+    # system Bash 3.2. Only demo/ changes can break it, so it is gated on
+    # the demo path filter for PRs (see `changes` above); the ubuntu BATS
+    # job still exercises the recorder logic itself on every PR. Always
+    # runs on push to main / workflow_dispatch.
+    needs: changes
+    if: |
+      always() && (
+        github.event_name != 'pull_request' ||
+        needs.changes.outputs.demo == 'true'
+      )
     runs-on: macos-15
     timeout-minutes: 5
     steps:
