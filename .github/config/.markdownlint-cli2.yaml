@@ -1,8 +1,9 @@
 # Markdownlint configuration for GCO (Global Capacity Orchestrator on AWS)
 #
-# This file is read by both `markdownlint-cli2` (the CLI used in CI and
-# pre-commit) and the vscode-markdownlint editor extension, so contributors
-# see the same warnings locally that CI enforces.
+# This file is used by `markdownlint-cli2` in CI, pre-commit, and the npm
+# `lint:markdown` command. The vscode-markdownlint extension is not currently
+# wired to this nested config by `.vscode/settings.json`; do not assume editor
+# diagnostics use these rules unless workspace settings explicitly configure it.
 #
 # Rule reference: https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
 # cli2 reference: https://github.com/DavidAnson/markdownlint-cli2

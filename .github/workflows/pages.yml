@@ -48,10 +48,14 @@ permissions:
 jobs:
   deploy:
     name: "pages:deploy"
-    # Only publish from a green Unit Tests run. The `branches: [main]` filter
-    # above already restricts the trigger to runs whose head branch is main,
-    # so no additional ref guard is needed here.
-    if: github.event.workflow_run.conclusion == 'success'
+    # workflow_run is privileged: it uses the default-branch workflow and can
+    # write to Pages. Require a successful push from this repository's actual
+    # default branch; the trigger's branch filter remains defense in depth.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == github.event.repository.default_branch
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Job-level permissions replace the top-level block for this job. This job

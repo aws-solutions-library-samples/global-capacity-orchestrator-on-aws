@@ -13,9 +13,8 @@ The previous workflow invoked the standalone script, which:
       Node.js + JSII cold start per invocation.
 
 Running the same configs as an in-process pytest gives us:
-    * ``-n auto`` parallelism out of the box (pytest-xdist runs each
-      worker in its own Python process, so ``cdk.App`` state is
-      isolated without touching ``cdk.json``),
+    * serial execution in CI, avoiding CDK's shared in-process asset-staging
+      cache races while still removing subprocess cold-start overhead,
     * context passed via ``cdk.App(context=…)`` — the supported
       CDK-level injection point, no file mutation,
     * the same Docker-asset and helm-installer Lambda mocks that

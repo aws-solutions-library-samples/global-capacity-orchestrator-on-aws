@@ -886,15 +886,17 @@ print('same' if a == b else ('newer' if b > a else 'older'))
 # Region defaults to us-east-1 (matches the advisor + Mission sampling
 # default region) regardless of the workflow's configured region, so both
 # global.* and geography-scoped cross-Region profiles resolve consistently.
-# Empty output on any failure (no creds, throttling, schema change) — the caller
-# treats an empty result as "skip", same as the other AWS-creds
-# helpers.
+# Profiles without a numeric version key are ignored because they cannot be
+# ordered safely. Empty output on any failure (no creds, throttling, schema
+# change, or no comparable profile) tells the caller to mark the check skipped.
 #
 # IAM action: bedrock:ListInferenceProfiles.
 get_latest_bedrock_model() {
   local current="$1"
   local region="${2:-us-east-1}"
-  [ -n "$current" ] || return 0
+  if [ -z "$current" ] || ! [[ "$current" =~ [0-9] ]]; then
+    return 0
+  fi
   aws bedrock list-inference-profiles \
     --type-equals SYSTEM_DEFINED \
     --region "$region" \
@@ -928,7 +930,7 @@ for prof in data.get('inferenceProfileSummaries', []) or []:
     pid = prof.get('inferenceProfileId', '') or ''
     if (prof.get('status') or 'ACTIVE') != 'ACTIVE':
         continue
-    if pid and family(pid) == target:
+    if pid and key(pid) and family(pid) == target:
         cands.append(pid)
 if cands:
     cands.sort(key=key)

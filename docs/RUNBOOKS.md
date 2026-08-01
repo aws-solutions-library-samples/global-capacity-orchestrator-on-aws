@@ -16,6 +16,7 @@ Step-by-step procedures for common operational scenarios. Each runbook includes 
 - [EKS Cluster Unreachable](#eks-cluster-unreachable)
 - [Inference Endpoint Not Serving Traffic](#inference-endpoint-not-serving-traffic)
 - [Cost Spike Detection](#cost-spike-detection)
+- [CloudFormation Drift Detected or Drift Scan Failed](#cloudformation-drift-detected-or-drift-scan-failed)
 
 ---
 
@@ -695,3 +696,108 @@ gco nodepools list -r us-east-1
      --budget file://budget.json \
      --notifications-with-subscribers file://notifications.json
    ```
+
+---
+
+## CloudFormation Drift Detected or Drift Scan Failed
+
+**Symptoms:** The GCO drift SNS notification reports `DRIFTED`, a regional
+stack's drift status is not `IN_SYNC`, or the scheduled drift-detection Lambda
+reports `DETECTION_FAILED`, a timeout, an IAM denial, or a missing stack.
+
+> **Scope:** The current automated detector is regional-stack scoped. It checks
+> each `GCORegionalStack`; it does not prove the global, API Gateway, monitoring,
+> or optional analytics stacks are in sync. Check those stacks separately when
+> an incident or change could affect them.
+
+**Diagnosis:** Set the affected deployed stack name and Region, then preserve the
+raw detection evidence before changing anything:
+
+```bash
+STACK_NAME=${STACK_NAME:-gco-us-east-1}
+REGION=${REGION:-us-east-1}
+
+DETECTION_ID=$(aws cloudformation detect-stack-drift \
+  --stack-name "$STACK_NAME" --region "$REGION" \
+  --query StackDriftDetectionId --output text)
+echo "Drift detection id: $DETECTION_ID"
+
+# Repeat until DetectionStatus is DETECTION_COMPLETE or DETECTION_FAILED.
+aws cloudformation describe-stack-drift-detection-status \
+  --stack-drift-detection-id "$DETECTION_ID" --region "$REGION"
+
+# Preserve resource-level evidence for review and incident notes.
+aws cloudformation describe-stack-resource-drifts \
+  --stack-name "$STACK_NAME" --region "$REGION" \
+  --stack-resource-drift-status-filters MODIFIED DELETED \
+  > "drift-${STACK_NAME}-${DETECTION_ID}.json"
+
+# Compare the deployed template with the reviewed local CDK source.
+gco stacks diff "$STACK_NAME"
+```
+
+If detection itself failed, inspect the regional stack state and the detector
+Lambda rather than treating the result as a clean scan:
+
+```bash
+aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" --region "$REGION" \
+  --query 'Stacks[0].{Status:StackStatus,Drift:DriftInformation}'
+
+DRIFT_FUNCTION=$(aws cloudformation list-stack-resources \
+  --stack-name "$STACK_NAME" --region "$REGION" \
+  --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function' && contains(LogicalResourceId, 'DriftDetectionFunction')].PhysicalResourceId | [0]" \
+  --output text)
+aws lambda get-function-configuration \
+  --function-name "$DRIFT_FUNCTION" --region "$REGION" \
+  --query '{State:State,LastUpdateStatus:LastUpdateStatus,Role:Role,LogGroup:LoggingConfig.LogGroup}'
+LOG_GROUP=$(aws lambda get-function-configuration \
+  --function-name "$DRIFT_FUNCTION" --region "$REGION" \
+  --query 'LoggingConfig.LogGroup' --output text)
+aws logs tail "$LOG_GROUP" --since 24h --region "$REGION"
+```
+
+**Resolution:**
+
+1. Save the detection-status response, resource-drift JSON, relevant Lambda log
+   events, stack status, and the local `gco stacks diff` output with the incident
+   record before remediation.
+2. Decide whether each difference is intended by comparing it with reviewed
+   commits and change records. Do not normalize an intentional console change
+   by leaving it out-of-band: encode it in CDK/configuration, review it, and
+   deploy the resulting IaC.
+3. For accidental drift, use each resource's `ExpectedProperties` in the saved
+   drift report to restore the live resource with service-specific tooling. If
+   recovery requires a CloudFormation replacement, resource import, or another
+   template change, encode that operation in reviewed IaC, preview it, and then
+   deploy it:
+
+   ```bash
+   gco stacks diff "$STACK_NAME"
+   gco stacks deploy "$STACK_NAME" -y
+   ```
+
+   An unchanged template can produce an empty CDK diff and a no-op deploy even
+   while the live resource remains drifted; do not treat redeploying the same
+   revision as remediation by itself. Deleted or stateful resources require the
+   service's recovery/import procedure and an explicit data-safety review.
+
+4. For `DETECTION_FAILED`, fix the cause in IaC: verify the stack is in a state
+   that supports drift detection, inspect the detector Lambda's role for the
+   required CloudFormation read/drift actions, and resolve throttling or Lambda
+   timeout errors shown in its logs. Do not patch the role in the console and
+   leave that patch as new drift.
+5. Run a fresh detection after remediation and require
+   `DetectionStatus=DETECTION_COMPLETE` and `StackDriftStatus=IN_SYNC`:
+
+   ```bash
+   VERIFY_ID=$(aws cloudformation detect-stack-drift \
+     --stack-name "$STACK_NAME" --region "$REGION" \
+     --query StackDriftDetectionId --output text)
+   aws cloudformation describe-stack-drift-detection-status \
+     --stack-drift-detection-id "$VERIFY_ID" --region "$REGION" \
+     --query '{DetectionStatus:DetectionStatus,StackDriftStatus:StackDriftStatus,Reason:DetectionStatusReason}'
+   ```
+
+   Repeat the status command until it reaches a terminal state; do not close the
+   incident on `DETECTION_IN_PROGRESS`, `DETECTION_FAILED`, or a stale prior ID.

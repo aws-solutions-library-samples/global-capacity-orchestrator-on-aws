@@ -36,9 +36,9 @@ Relationship to other tooling
   cdk-nag v3 writes findings to ``validation-report.json`` in the cloud
   assembly; both this script and the gate read that file.
 * ``tests/test_cdk_synthesis_matrix.py`` — runs ``app.synth()``
-  in-process for each config with pytest-xdist parallelism. Catches
-  synth-time breakage; does NOT catch cdk-nag findings because
-  ``app.synth()`` exits 0 even when unacknowledged findings exist.
+  serially in-process for each config. Catches synth-time breakage; does
+  NOT catch cdk-nag findings because ``app.synth()`` exits 0 even when
+  unacknowledged findings exist.
 
 Typical workflow
 ----------------
@@ -53,8 +53,8 @@ Typical workflow
     python3 scripts/dump_nag_findings.py
     # -> exits 0, no findings.
 
-    # Then run the full pytest gate to confirm:
-    pytest tests/test_nag_compliance.py -n auto -q
+    # Then run the full pytest gate to confirm (serially):
+    pytest tests/test_nag_compliance.py -q
 """
 
 from __future__ import annotations

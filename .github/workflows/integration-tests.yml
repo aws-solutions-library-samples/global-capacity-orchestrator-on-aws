@@ -11,6 +11,7 @@
 #   - integration:dev-alias:finch            — install latest Finch (rootful), build gco-dev, prove the generated `gco` alias runs
 #   - integration:dev-alias:none             — prove setup-dev-alias.sh refuses cleanly when no runtime is installed
 #   - integration:dev-alias:podman           — install latest Podman, build gco-dev, prove the generated `gco` alias runs
+#   - integration:docker:cost-monitor        — build + import-based liveness
 #   - integration:docker:dev-container       — Dockerfile.dev native-arch matrix (amd64 + arm64 runners)
 #   - integration:docker:health-monitor      — build + /healthz + /readyz
 #   - integration:docker:helm-installer      — build + `helm version`/`kubectl version`
@@ -18,6 +19,8 @@
 #   - integration:docker:inference-proxy     — build + import-based liveness
 #   - integration:docker:manifest-processor  — build + /healthz + /readyz
 #   - integration:docker:queue-processor     — build + startup-banner check
+#   - integration:docker:tls-certificate-manager
+#                                             — build + Lambda handler import
 #   - integration:helm:charts-valid          — every charts.yaml (chart,version) resolves + renders with helm
 #   - integration:k8s:manifest-schema        — kubeconform schema validation + YAML/required-kinds/DAG checks
 #   - integration:kind:cluster-e2e           — kind + Calico + Metrics Server + HPA + services + policy/RBAC
@@ -349,6 +352,29 @@ jobs:
   # probes the health endpoint (or exec equivalent), then tears down.
   # --------------------------------------------------------------------------
 
+  integration-docker-cost-monitor:
+    name: "integration:docker:cost-monitor"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-buildx-with-retry
+      - name: Build image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: dockerfiles/cost-monitor-dockerfile
+          tags: cost-monitor:ci
+          load: true
+          cache-from: type=gha,scope=cost-monitor
+          cache-to: type=gha,mode=max,scope=cost-monitor,ignore-error=true
+      - name: Verify image boots the module
+        # OpenCost, Kubernetes, and AWS integrations are exercised only in a
+        # deployed environment; this packaging smoke proves the image imports.
+        run: |
+          docker run --rm cost-monitor:ci \
+            python -c "import gco.services.cost_api as m; print('cost-monitor import OK:', m.__name__)"
+
   integration-docker-health-monitor:
     name: "integration:docker:health-monitor"
     runs-on: ubuntu-latest
@@ -502,6 +528,27 @@ jobs:
         run: |
           docker run --rm --entrypoint helm helm-installer:ci version --short
           docker run --rm --entrypoint kubectl helm-installer:ci version --client=true
+
+  integration-docker-tls-certificate-manager:
+    name: "integration:docker:tls-certificate-manager"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-buildx-with-retry
+      - name: Build image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: lambda/tls-certificate-manager
+          file: lambda/tls-certificate-manager/Dockerfile
+          tags: tls-certificate-manager:ci
+          load: true
+          cache-from: type=gha,scope=tls-certificate-manager
+          cache-to: type=gha,mode=max,scope=tls-certificate-manager,ignore-error=true
+      - name: Verify Lambda handler imports
+        run: |
+          docker run --rm --entrypoint python tls-certificate-manager:ci \
+            -c "import handler; print('tls-certificate-manager import OK:', handler.__name__)"
 
   integration-docker-dev-container:
     name: "integration:docker:dev-container (${{ matrix.arch }})"
@@ -757,6 +804,15 @@ jobs:
           load: true
           cache-from: type=gha,scope=health-monitor
           cache-to: type=gha,mode=max,scope=health-monitor,ignore-error=true
+      - name: Build cost-monitor image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: dockerfiles/cost-monitor-dockerfile
+          tags: cost-monitor:ci
+          load: true
+          cache-from: type=gha,scope=cost-monitor
+          cache-to: type=gha,mode=max,scope=cost-monitor,ignore-error=true
       - name: Build manifest-processor image
         uses: docker/build-push-action@v7.3.0
         with:
@@ -787,6 +843,7 @@ jobs:
       - name: Load images into kind
         run: |
           kind load docker-image health-monitor:ci --name gco-ci
+          kind load docker-image cost-monitor:ci --name gco-ci
           kind load docker-image manifest-processor:ci --name gco-ci
           kind load docker-image inference-monitor:ci --name gco-ci
           kind load docker-image inference-proxy:ci --name gco-ci
@@ -822,12 +879,14 @@ jobs:
               lambda/kubectl-applier-simple/manifests/30-health-monitor.yaml \
               lambda/kubectl-applier-simple/manifests/31-manifest-processor.yaml \
               lambda/kubectl-applier-simple/manifests/32-inference-monitor.yaml \
-              lambda/kubectl-applier-simple/manifests/33-inference-proxy.yaml; do
+              lambda/kubectl-applier-simple/manifests/33-inference-proxy.yaml \
+              lambda/kubectl-applier-simple/manifests/34-cost-monitor.yaml; do
             case "$manifest" in
               *30-health-monitor*)     image="health-monitor:ci"; key="HEALTH_MONITOR_IMAGE" ;;
               *31-manifest-processor*) image="manifest-processor:ci"; key="MANIFEST_PROCESSOR_IMAGE" ;;
               *32-inference-monitor*)  image="inference-monitor:ci"; key="INFERENCE_MONITOR_IMAGE" ;;
               *33-inference-proxy*)    image="inference-proxy:ci"; key="INFERENCE_PROXY_IMAGE" ;;
+              *34-cost-monitor*)       image="cost-monitor:ci"; key="COST_MONITOR_IMAGE" ;;
             esac
             # Stub out every remaining {{PLACEHOLDER}} with a safe literal.
             # These tags were loaded into kind rather than pushed to a registry,
@@ -835,6 +894,8 @@ jobs:
             sed -e "s|{{${key}}}|${image}|g" \
                 -e "s|{{DEPLOYMENT_TIMESTAMP}}|$(date +%s)|g" \
                 -e 's|{{INFERENCE_PROXY_MAX_REQUEST_BODY_BYTES}}|1048576|g' \
+                -e 's|{{COST_REPORT_INTERVAL_MINUTES}}|60|g' \
+                -e 's|{{COST_MONITORING_ENABLED}}|true|g' \
                 -e "s|{{[A-Z_]*}}|ci-stub|g" \
                 -e 's|imagePullPolicy: Always|imagePullPolicy: IfNotPresent|g' \
                 "$manifest" \
@@ -848,6 +909,8 @@ jobs:
           kubectl -n gco-system get deploy manifest-processor
           kubectl -n gco-system get deploy inference-monitor
           kubectl -n gco-system get deploy inference-proxy
+          kubectl -n gco-system get deploy cost-monitor
+          kubectl -n gco-system get service cost-monitor
           # The shared streaming proxy scales independently while retaining its
           # three-pod HA floor. Exact readback guards against partial file apply.
           kubectl -n gco-system get hpa inference-proxy-hpa
@@ -865,15 +928,18 @@ jobs:
               | python3 -c "import json,sys; print(len(json.load(sys.stdin)['items']))")
             ip=$(kubectl -n gco-system get pods -l app=inference-proxy -o json \
               | python3 -c "import json,sys; print(len(json.load(sys.stdin)['items']))")
-            if [ "$hm" -gt 0 ] && [ "$mp" -gt 0 ] && [ "$im" -gt 0 ] && [ "$ip" -gt 0 ]; then
-              echo "Pods created: health-monitor=$hm manifest-processor=$mp inference-monitor=$im inference-proxy=$ip"
+            cm=$(kubectl -n gco-system get pods -l app=cost-monitor -o json \
+              | python3 -c "import json,sys; print(len(json.load(sys.stdin)['items']))")
+            if [ "$hm" -gt 0 ] && [ "$mp" -gt 0 ] && [ "$im" -gt 0 ] \
+                && [ "$ip" -gt 0 ] && [ "$cm" -gt 0 ]; then
+              echo "Pods created: health-monitor=$hm manifest-processor=$mp inference-monitor=$im inference-proxy=$ip cost-monitor=$cm"
               exit 0
             fi
             sleep 2
           done
           echo "Pods never appeared within 60s"
           kubectl -n gco-system get pods -o wide
-          kubectl -n gco-system describe deploy health-monitor manifest-processor inference-monitor inference-proxy
+          kubectl -n gco-system describe deploy health-monitor manifest-processor inference-monitor inference-proxy cost-monitor
           exit 1
       - name: Verify inference proxy HPA is actively computing replicas
         # Admission/readback alone does not prove autoscaling works. Wait for
@@ -1090,12 +1156,13 @@ jobs:
         if: failure()
         run: |
           kubectl get pods -A -o wide || true
-          kubectl -n gco-system describe deploy health-monitor manifest-processor inference-monitor inference-proxy || true
+          kubectl -n gco-system describe deploy health-monitor manifest-processor inference-monitor inference-proxy cost-monitor || true
           kubectl -n gco-system get events --sort-by=.lastTimestamp | tail -50 || true
           kubectl -n gco-system logs deploy/health-monitor --tail=200 || true
           kubectl -n gco-system logs deploy/manifest-processor --tail=200 || true
           kubectl -n gco-system logs deploy/inference-monitor --tail=200 || true
           kubectl -n gco-system logs deploy/inference-proxy --tail=200 || true
+          kubectl -n gco-system logs deploy/cost-monitor --tail=200 || true
 
   # --------------------------------------------------------------------------
   # Dev-onboarding alias live proofs. Each job installs the latest version of a

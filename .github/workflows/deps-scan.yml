@@ -40,8 +40,10 @@
 #     (all offline hygiene checks)
 #
 # If any are outdated, opens (or refreshes) a single rolling GitHub issue with
-# the details and mirrors the report into the workflow run's job summary. Uses
-# the built-in GITHUB_TOKEN with `issues: write` — no long-lived PAT needed.
+# the details and mirrors the report into the workflow run's job summary. Once
+# a complete scan is clean (no skipped checks), comments on and closes that
+# issue. Uses the built-in GITHUB_TOKEN with `issues: write` — no long-lived
+# PAT needed.
 #
 # =============================================================================
 
@@ -167,4 +169,32 @@ jobs:
               --title "$title" \
               --label "dependencies,automated" \
               --body-file "$REPORT_PATH"
+          fi
+      - name: Close the resolved drift issue
+        if: >-
+          steps.scan.outputs.has_drift == 'false' &&
+          steps.scan.outputs.scan_complete == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          today="$(date -u +%Y-%m-%d)"
+          existing="$(gh issue list \
+            --state open --label dependencies --label automated --limit 100 \
+            --json number,title,labels \
+            --jq 'map(select(
+              .title == "[Automated] Dependency updates available"
+              and ([.labels[].name] | index("dependencies"))
+              and ([.labels[].name] | index("automated"))
+            )) | .[0].number // empty')"
+
+          if [ -n "$existing" ]; then
+            message="Resolved by the scheduled deps-scan on ${today}: "
+            message+="no dependency drift was detected. Closing this rolling issue; "
+            message+="a future scan will open a new issue if drift returns."
+            gh issue comment "$existing" --body "$message"
+            gh issue close "$existing"
+            echo "Closed resolved dependency issue #${existing}"
+          else
+            echo "Complete dependency scan is clean and no matching rolling issue is open."
           fi

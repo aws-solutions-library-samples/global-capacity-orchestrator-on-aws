@@ -70,7 +70,7 @@ Each file maps to one row in the README badge table.
 |------|------------|----------------|
 | `workflows/unit-tests.yml` | Unit Tests | pytest with coverage (90% enforced floor; ~92% Python target), explicit offline accelerator catalog/NodePool/watch-list validation, BATS, CLI smoke, CDK synth + config matrix, lockfile freshness, fresh install, MCP install + launch smoke, workload import checks |
 | `workflows/inference-streaming-proxy.yml` | — | Native Node.js 24 tests for the production streaming Lambda, with 93% line/function/branch thresholds |
-| `workflows/integration-tests.yml` | Integration Tests | Per-Dockerfile build + module-import smoke, dev-container smoke, kind E2E with Calico and pinned Metrics Server (NetworkPolicy enforcement, RBAC verification, ResourceQuota/LimitRange, PDB validation, inference-proxy HPA `ScalingActive`, cross-namespace traffic blocking, all 4 service deployments), K8s manifest schema validation (kubeconform), Lambda import validation, cross-module pytest, MCP server pytest |
+| `workflows/integration-tests.yml` | Integration Tests | Per-Dockerfile build + module-import smoke, dev-container smoke, kind E2E with Calico and pinned Metrics Server (NetworkPolicy enforcement, RBAC verification, ResourceQuota/LimitRange, PDB validation, inference-proxy HPA `ScalingActive`, cross-namespace traffic blocking, all 5 service deployments), K8s manifest schema validation (kubeconform), Lambda import validation, cross-module pytest, MCP server pytest |
 | `workflows/security.yml` | Security | bandit, pip-audit, npm audit across every owned package graph, trivy (filesystem + per-image matrix), trufflehog, gitleaks, semgrep, checkov, KICS, CodeQL (Python + JavaScript) |
 | `workflows/lint.yml` | Linting | actionlint, hadolint, markdownlint, mypy (strict / stacks / lambda), ruff (format + check, imports included), shellcheck, yamllint |
 
@@ -81,7 +81,7 @@ Workflows outside the four badged gates. Most are schedule- or dispatch-driven; 
 | File | Trigger | Purpose |
 |------|---------|---------|
 | `workflows/release.yml` | `workflow_dispatch` | Bump version, tag, create a GitHub Release with auto-generated notes. Uses the built-in `GITHUB_TOKEN` — no PAT required |
-| `workflows/deps-scan.yml` | `cron: 0 9 1 * *` (monthly, UTC) + manual | Check pinned dependency versions, deterministic accelerator/NodePool/watch-list policy, and live EC2 accelerator-catalog drift; update one rolling issue when drift is found |
+| `workflows/deps-scan.yml` | `cron: 0 9 1 * *` (monthly, UTC) + manual | Check pinned dependency versions, deterministic accelerator/NodePool/watch-list policy, and live EC2 accelerator-catalog drift; open or refresh one rolling issue when drift is found, then comment and close it after a complete clean scan with no skipped checks |
 | `workflows/cve-scan.yml` | `cron: 0 9 * * 1` (Mondays, UTC) + manual | Re-run trivy against current CVE databases |
 | `workflows/pages.yml` | `workflow_run` after **Unit Tests** completes on `main` | Download the `pytest-coverage` artifact from the triggering run, regenerate the shields.io coverage badge, and deploy `htmlcov/` to GitHub Pages via `actions/deploy-pages`. Split out of `unit-tests.yml` so a GitHub Pages backend stall surfaces here instead of failing the test gate |
 | `workflows/mooncake-image.yml` | `push`: `main`, PR, manual | Pull the upstream Mooncake vLLM image pinned in `cli/images.py` (`_DISAGGREGATED_DEFAULT_IMAGE`) and run `tests/test_mooncake_image_contract.py`: prefill-decode proxy health under the image's `python3`, `MooncakeStoreConfig` acceptance of the rendered store config, and KV-connector name registration. Deliberately not Trivy/CVE-scanned — the image is upstream and unpatchable; version drift is surfaced by `deps-scan` |
@@ -99,8 +99,8 @@ All CI workflows share the same safety defaults:
 - `concurrency.group: ${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: true` so rapid pushes on the same branch supersede in-flight runs. Explicitly **off** on `release.yml` — a half-run release is worse than a slow one. `pages.yml` is the other exception: it uses a dedicated `concurrency.group: pages` with `cancel-in-progress: false` so a real Pages deployment is never cancelled mid-flight.
 - `timeout-minutes` on every job (10 min for lint, 15 for unit, 20–30 for integration).
 - `permissions:` scoped narrowly. All CI workflows run with `contents: read`; `release.yml` upgrades to `contents: write` so the version-bump job can push a tag and create a GitHub Release. `pages.yml`'s deploy job grants `pages: write` + `id-token: write` (to publish to Pages) and `actions: read` (to pull the `pytest-coverage` artifact from the triggering Unit Tests run).
-- Caching: `actions/setup-python@v6` with `cache: pip` and `cache-dependency-path: requirements-lock.txt`. Mypy jobs add an explicit `actions/cache@v5` on `.mypy_cache/`.
-- AWS-backed dependency discovery uses OIDC via `aws-actions/configure-aws-credentials@v4` — never long-lived access keys. The monthly scan uses the role for EKS, RDS, EMR, Bedrock, and EC2 accelerator-catalog reads; deterministic accelerator policy validation remains offline.
+- Caching: `actions/setup-python@v7.0.0` with `cache: pip` and `cache-dependency-path: requirements-lock.txt`. Mypy jobs add an explicit `actions/cache@v6.1.0` on `.mypy_cache/`.
+- AWS-backed dependency discovery uses OIDC via `aws-actions/configure-aws-credentials@v6.2.3` — never long-lived access keys. The monthly scan uses the role for EKS, RDS, EMR, Bedrock, and EC2 accelerator-catalog reads; deterministic accelerator policy validation remains offline.
 
 ## Live release validation stays local
 
@@ -177,7 +177,7 @@ If a stale run ever shows a `img.shields.io/github/actions/workflow/status/...` 
 - `ISSUE_TEMPLATE/bug_report.md` — structured bug report with environment, repro steps, expected vs. actual.
 - `ISSUE_TEMPLATE/feature_request.md` — problem/solution/alternatives framing.
 - `ISSUE_TEMPLATE/config.yml` — links out to the docs (TROUBLESHOOTING.md, QUICKSTART.md) so users who arrive here with a support question are routed there first.
-- `pull_request_template.md` — summary, type-of-change checkboxes (the leading token `feat:`, `fix:`, etc. is what `release.yml` uses to categorize auto-generated release notes), testing checklist.
+- `pull_request_template.md` — summary, reviewer-facing type-of-change checkboxes, release-label guidance (generated notes are categorized by PR labels from `release.yml`), testing checklist.
 
 ## CODEOWNERS
 
@@ -203,7 +203,7 @@ Ecosystems tracked:
 
 ### Dependency-scan script
 
-`scripts/dependency-scan.sh` is the engine behind the monthly `deps-scan` workflow. It detects drift across every dependency surface the project controls and, when run from CI, writes a Markdown report that the workflow turns into a GitHub issue.
+`scripts/dependency-scan.sh` is the engine behind the monthly `deps-scan` workflow. It detects drift across every dependency surface the project controls and, when run from CI, writes a Markdown report. The workflow opens or refreshes one rolling issue while drift exists, then posts a dated resolution comment and closes that issue only when a later scan reports both no drift and no explicitly skipped checks. The script's `scan_complete` output prevents missing AWS credentials or another recorded skip from being mistaken for a clean result.
 
 #### What it checks
 
@@ -369,7 +369,7 @@ To turn the check on without introducing long-lived access keys, configure a Git
      issues: write
    steps:
      # ...existing checkout + tooling install steps...
-     - uses: aws-actions/configure-aws-credentials@v4
+     - uses: aws-actions/configure-aws-credentials@v6.2.3
        with:
          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/GCODependencyScanRole
          aws-region: us-east-1
@@ -455,11 +455,13 @@ Pick an `exp:` date that gives upstream a reasonable window to ship a fix or hav
 
 ## Markdownlint config
 
-Configuration for the `lint:markdownlint:md` job lives in **`.github/config/.markdownlint-cli2.yaml`**. A single file covers three surfaces:
+Configuration for the `lint:markdownlint:md` job lives in **`.github/config/.markdownlint-cli2.yaml`**. The same file covers three repository-wired CLI surfaces:
 
 - The **GitHub Actions job** (`lint-markdownlint-md` in `workflows/lint.yml`) via `DavidAnson/markdownlint-cli2-action`.
 - The **pre-commit hook** (`markdownlint-cli2` in `.pre-commit-config.yaml`).
-- The **vscode-markdownlint** editor extension, which reads the same file so contributors see the same warnings as CI while they type.
+- The local **npm command** (`npm run lint:markdown`).
+
+The vscode-markdownlint extension is not currently configured to read this nested file: `.vscode/settings.json` contains no markdownlint config path. Do not assume editor diagnostics match CI unless that workspace integration is deliberately added and verified.
 
 The config does two things worth calling out:
 
@@ -498,12 +500,13 @@ pytest $(python scripts/split_tests.py --shard 1 --of 1) \
 pytest $(python scripts/split_tests.py --shard 1 --of 2) \
     --cov=gco --cov=cli --cov=gco_mcp --cov-report= --cov-fail-under=0
 
-# cdk-nag compliance matrix (matches unit:cdk:nag-compliance)
-pytest tests/test_nag_compliance.py -n auto
+# CDK matrices run serially: concurrent in-process synths race while staging
+# shared CDK assets. CI fans cdk-nag configs across separate runners instead.
+pytest tests/test_nag_compliance.py
 
 # CDK synth / config matrix (matches unit:cdk:synth and unit:cdk:config-matrix)
 cdk synth --quiet
-pytest tests/test_cdk_synthesis_matrix.py -n auto
+pytest tests/test_cdk_synthesis_matrix.py
 
 # Security (matches security:bandit:sast)
 bandit -r gco/ cli/ -c pyproject.toml --severity-level medium

@@ -526,11 +526,11 @@ bandit -r gco/ cli/ -c pyproject.toml --severity-level medium
 pytest tests/ --cov=gco --cov=cli --cov=gco_mcp --cov-report=html --cov-fail-under=90 \
     --ignore=tests/test_nag_compliance.py
 
-# Run cdk-nag compliance matrix (matches unit:cdk:nag-compliance)
-pytest tests/test_nag_compliance.py -n auto
+# Run cdk-nag compliance matrix serially (matches unit:cdk:nag-compliance)
+pytest tests/test_nag_compliance.py
 
-# Run CDK config matrix (matches unit:cdk:config-matrix)
-pytest tests/test_cdk_synthesis_matrix.py -n auto
+# Run CDK config matrix serially (matches unit:cdk:config-matrix)
+pytest tests/test_cdk_synthesis_matrix.py
 
 # Regenerate the lockfile (after dependency changes — use the Docker workflow
 # documented in Dependency Management above; pip-compile on the host produces

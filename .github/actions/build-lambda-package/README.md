@@ -39,11 +39,11 @@ then performs locked production installs.
 ## Usage
 
 ```yaml
-- uses: actions/checkout@v6
-- uses: actions/setup-node@v6.4.0
+- uses: actions/checkout@v7
+- uses: actions/setup-node@v7.0.0
   with:
     node-version-file: ".nvmrc"
-- uses: actions/setup-python@v6
+- uses: actions/setup-python@v7.0.0
   with:
     python-version: "3.14"
 - run: pip install -e ".[cdk]"

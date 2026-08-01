@@ -20,7 +20,7 @@
 #   - security:semgrep:sast              — semgrep scan --config auto
 #   - security:trivy:filesystem          — trivy fs on the source tree
 #   - security:trivy:container-scan      — trivy image on each built image
-#                                          (5 service images + helm-installer
+#                                          (six service images + two Lambda images
 #                                          + Dockerfile.dev)
 #   - security:trufflehog:secrets        — trufflehog filesystem scan
 #
@@ -252,6 +252,8 @@ jobs:
         include:
           - image: health-monitor
             dockerfile: dockerfiles/health-monitor-dockerfile
+          - image: cost-monitor
+            dockerfile: dockerfiles/cost-monitor-dockerfile
           - image: manifest-processor
             dockerfile: dockerfiles/manifest-processor-dockerfile
           - image: inference-monitor
@@ -263,6 +265,9 @@ jobs:
           - image: helm-installer
             dockerfile: lambda/helm-installer/Dockerfile
             context: lambda/helm-installer
+          - image: tls-certificate-manager
+            dockerfile: lambda/tls-certificate-manager/Dockerfile
+            context: lambda/tls-certificate-manager
           # Dev container — never deployed, but contributors run host-side
           # gco/cdk/kubectl commands inside it. Scanning here means a CVE
           # in the dev image surfaces on the same PR that introduced the
@@ -451,9 +456,9 @@ jobs:
           retention-days: 30
   security-codeql-python-code-analysis:
     name: "security:codeql:python-code-analysis"
-    # CodeQL is strict like every other job in this file: if a query in the
-    # security-and-quality pack raises a finding that isn't filtered by
-    # .github/codeql/codeql-config.yml, the analyze step fails the job.
+    # CodeQL analyzes the configured source and uploads findings to GitHub Code
+    # Scanning. A finding does not itself make the analyze process exit non-zero;
+    # finding-based merge enforcement belongs to repository rules/settings.
     #
     # Why a workflow-file scan (Advanced Setup) rather than GitHub's
     # Default Setup: Default Setup ignores the YAML config file on disk

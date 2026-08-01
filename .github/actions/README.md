@@ -37,11 +37,11 @@ Node.js from `.nvmrc` (via `actions/setup-node`) before invoking this action.
 
 ```yaml
 steps:
-  - uses: actions/checkout@v6
-  - uses: actions/setup-node@v6.4.0
+  - uses: actions/checkout@v7
+  - uses: actions/setup-node@v7.0.0
     with:
       node-version-file: ".nvmrc"
-  - uses: actions/setup-python@v6
+  - uses: actions/setup-python@v7.0.0
     with:
       python-version: "3.14"
   - run: pip install -e ".[cdk]"
@@ -90,9 +90,9 @@ This action removes large preinstalled toolchains the build never uses (Android 
 
 ```yaml
 steps:
-  - uses: actions/checkout@v6
+  - uses: actions/checkout@v7
   - uses: ./.github/actions/free-disk-space
-  - uses: actions/setup-python@v6
+  - uses: actions/setup-python@v7.0.0
     with:
       python-version: "3.14"
 ```
@@ -120,7 +120,7 @@ Installs a pinned Trivy binary by wrapping the official `aquasecurity/setup-triv
 **Usage:**
 
 ```yaml
-- uses: actions/checkout@v6
+- uses: actions/checkout@v7
 - name: Install pinned Trivy
   uses: ./.github/actions/install-trivy
   with:

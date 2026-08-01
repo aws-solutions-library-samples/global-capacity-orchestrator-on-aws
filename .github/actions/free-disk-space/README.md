@@ -24,9 +24,9 @@ persistent developer or production host.
 ## Usage
 
 ```yaml
-- uses: actions/checkout@v6
+- uses: actions/checkout@v7
 - uses: ./.github/actions/free-disk-space
-- uses: actions/setup-python@v6
+- uses: actions/setup-python@v7.0.0
   with:
     python-version: "3.14"
 ```

@@ -9,8 +9,10 @@ Delete any sections that don't apply.
 
 ## Type of change
 
-<!-- Check all that apply. The leading token (feat:, fix:, etc.) is used by
-.github/release.yml to categorize this PR in the auto-generated release notes. -->
+<!-- Check all that apply. These checkboxes are reviewer-facing only; generated
+release notes are categorized by PR labels, not by the tokens below. Apply a
+corresponding label when relevant: breaking/breaking-change, feat/feature/
+enhancement, fix/bug, docs/documentation, or dependencies. -->
 
 - [ ] `feat:` New feature (non-breaking)
 - [ ] `fix:` Bug fix (non-breaking)

@@ -57,8 +57,13 @@
 
 ```bash
 gco stacks deploy-all -y      # stand up every region defined in cdk.json
-gco stacks destroy-all -y     # destroy every stack across every region — no orphaned resources
+gco stacks destroy-all -y     # destroy stacks, then best-effort cleanup of known resources
 ```
+
+Teardown is not an account-wide emptiness guarantee: retained ECR repositories,
+resources configured for retention, and unexpected resources can remain. See
+[`gco stacks destroy-all`](docs/CLI.md#gco-stacks-destroy-all) for the exact
+cleanup scope.
 
 **Recommended: run everything from the dev container.** GCO pins exact versions of a lot of Python packages ([CDK](https://docs.aws.amazon.com/cdk/v2/guide/work-with-cdk-python.html), [AWS SDKs](https://pypi.org/project/boto3/), [FastAPI](https://fastapi.tiangolo.com/), [mypy](https://mypy-lang.org/), [Ruff](https://docs.astral.sh/ruff/), etc.), and installing them on top of an existing Python environment is the most common source of "it doesn't install" reports. The dev container ships a fully resolved environment (Python 3.14, Node.js 24, CDK, [kubectl](https://kubernetes.io/docs/reference/kubectl/), [AWS CLI](https://aws.amazon.com/cli/), Docker CLI + [Buildx](https://github.com/docker/buildx), all Python deps) so you skip the whole problem.
 

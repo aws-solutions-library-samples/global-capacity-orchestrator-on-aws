@@ -72,11 +72,10 @@ python3 scripts/bump_version.py major   # 1.0.0 → 2.0.0
 
 ### Test CDK Synthesis
 
-The [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) configuration matrix is now exercised via pytest (runs in parallel under
-`pytest-xdist`). Invoke it the same way CI does:
+The [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) configuration matrix is exercised via pytest. Run it serially, as CI does, because concurrent in-process synths can race while staging shared CDK assets:
 
 ```bash
-pytest tests/test_cdk_synthesis_matrix.py -n auto
+pytest tests/test_cdk_synthesis_matrix.py
 ```
 
 ### Dump cdk-nag Findings
@@ -90,7 +89,7 @@ python3 scripts/dump_nag_findings.py
 Once you've scoped the relevant `acknowledge_nag_findings` entries, re-run to verify, then run the pytest gate to confirm:
 
 ```bash
-pytest tests/test_nag_compliance.py -n auto -q
+pytest tests/test_nag_compliance.py -q
 ```
 
 ### Test Webhook Delivery

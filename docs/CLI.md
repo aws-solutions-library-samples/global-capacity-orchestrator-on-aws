@@ -1043,17 +1043,20 @@ gco stacks destroy-all [OPTIONS]
 | `--parallel` | `-p` | Destroy regional stacks in parallel |
 | `--max-workers` | `-w` | Max parallel workers (default: 4) |
 
-After the stacks are gone, `destroy-all` also sweeps the resources
-CloudFormation never modeled, so a full teardown leaves the account
-genuinely clean: the implicit CloudWatch log groups created out-of-band by
-Lambda (`/aws/lambda/<function>`), the EKS control plane
+After stack deletion, `destroy-all` makes a best-effort sweep of known resources
+that CloudFormation never modeled. It targets the implicit CloudWatch log groups
+created out-of-band by Lambda (`/aws/lambda/<function>`), the EKS control plane
 (`/aws/eks/<cluster>/cluster`), and Container Insights
-(`/aws/containerinsights/<cluster>/...`), plus the ephemeral SSM bastion's
-IAM role and instance profile if a killed tunnel session left them behind.
-Only exact names derived from the destroyed stacks' own resources (captured
-before deletion) are removed, and only for stacks whose deletion succeeded;
-the sweep is best-effort and never fails the destroy. Log groups belonging
-to stacks that failed to delete are left untouched.
+(`/aws/containerinsights/<cluster>/...`), plus the ephemeral SSM bastion's IAM
+role and instance profile if a killed tunnel session left them behind.
+
+This cleanup is not an account-wide emptiness proof. ECR repositories or other
+resources configured for retention, and unexpected resources outside the known
+inventory, may remain. Only exact names derived from the destroyed stacks' own
+resources (captured before deletion) are considered, and only for stacks whose
+deletion succeeded. Sweep failures are reported best-effort and do not fail the
+destroy command; log groups belonging to stacks that failed to delete are left
+untouched.
 
 #### `gco stacks bootstrap`
 

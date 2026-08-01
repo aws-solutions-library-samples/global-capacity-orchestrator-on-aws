@@ -46,6 +46,7 @@ SUITE_ROOT = "tests"
 #: and the reason for each is visible next to the path.
 DEDICATED_JOB_MODULES: dict[str, str] = {
     "tests/test_integration.py": "integration:pytest:cross-module",
+    "tests/test_mcp_integration.py": "integration:mcp:server",
     "tests/test_nag_compliance.py": "unit:cdk:nag-compliance",
     "tests/test_cdk_synthesis_matrix.py": "unit:cdk:config-matrix",
     "tests/test_project_name_scoping.py": "unit:cdk:project-name-scoping",

@@ -52,15 +52,16 @@
 #    `$WORKFLOWS_DIR` (default: `.github/workflows`).
 # 2. Reporting. The GitLab version POSTed directly to the GitLab issues
 #    API. This version writes a Markdown report to a file and emits
-#    `has_drift=true|false` + `report_path=…` on $GITHUB_OUTPUT so the
-#    calling workflow can open an issue via `gh issue create`.
+#    `has_drift=true|false`, `scan_complete=true|false`, and `report_path=…`
+#    on $GITHUB_OUTPUT so the calling workflow can manage a rolling issue.
 #
 # Environment inputs:
 #   WORKFLOWS_DIR  default: .github/workflows
 #
 # Outputs (via $GITHUB_OUTPUT):
-#   has_drift    "true" when any version is outdated, else "false"
-#   report_path  path to the Markdown report (only set when has_drift=true)
+#   has_drift     "true" when any version is outdated, else "false"
+#   scan_complete "false" when any check was explicitly skipped, else "true"
+#   report_path   path to the Markdown report (only set when has_drift=true)
 # =============================================================================
 set -uo pipefail
 
@@ -479,19 +480,30 @@ if ! aws sts get-caller-identity >/dev/null 2>&1; then
   ADDON_SKIP_REASON="No AWS credentials available (scan needs eks:DescribeAddonVersions). Configure OIDC to enable."
   echo "  $ADDON_SKIP_REASON"
 else
-  extract_eks_addons "gco/stacks/regional_stack.py" | while IFS='|' read -r addon_name current_version; do
+  EKS_ADDONS="$(extract_eks_addons "gco/stacks/regional_stack.py")"
+  if [ -z "$EKS_ADDONS" ]; then
+    ADDON_SKIP_REASON="Could not read EKS add-on pins from gco/stacks/regional_stack.py."
+    echo "  $ADDON_SKIP_REASON"
+  else
+    while IFS='|' read -r addon_name current_version; do
       [ -z "$addon_name" ] && continue
       latest="$(aws eks describe-addon-versions \
         --addon-name "$addon_name" \
         --kubernetes-version "$K8S_VERSION" \
         --query 'addons[0].addonVersions[0].addonVersion' \
-        --output text 2>/dev/null)" || true
+        --output text 2>/dev/null)" || latest=""
 
-      if [ -n "$latest" ] && [ "$latest" != "None" ] && [ "$current_version" != "$latest" ]; then
+      if ! [[ "$latest" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-eksbuild\.[0-9]+$ ]]; then
+        ADDON_SKIP_REASON="EKS add-on lookup failed or returned an invalid version for ${addon_name}."
+        echo "  $ADDON_SKIP_REASON"
+        break
+      fi
+      if [ "$current_version" != "$latest" ]; then
         echo "  - ${addon_name}: ${current_version} -> ${latest}"
         echo "${addon_name}|${current_version}|${latest}" >> "$ADDON_RESULTS"
       fi
-    done
+    done <<< "$EKS_ADDONS"
+  fi
 fi
 
 ADDON_COUNT="$(wc -l < "$ADDON_RESULTS" 2>/dev/null | tr -d ' ')"
@@ -528,7 +540,10 @@ else
     --version-status STANDARD_SUPPORT \
     --output json 2>/dev/null)" || CLUSTER_VERSIONS_JSON=""
 
-  if [ -n "$CLUSTER_VERSIONS_JSON" ]; then
+  if [ -z "$CLUSTER_VERSIONS_JSON" ]; then
+    EKS_K8S_SKIP_REASON="EKS Kubernetes version lookup failed or returned an empty response."
+    echo "  $EKS_K8S_SKIP_REASON"
+  else
     # Max of ``clusterVersion`` across all rows is the newest standard-
     # support minor. We use Python for a proper numeric sort so 1.10
     # beats 1.9 (sort -V already does this, but Python keeps the data
@@ -546,13 +561,17 @@ versions = sorted(
 print(versions[-1] if versions else "")
 ' 2>/dev/null)" || LATEST_K8S=""
 
-    CURRENT_K8S="$(extract_k8s_version "cdk.json")"
+    if [ -z "$LATEST_K8S" ]; then
+      EKS_K8S_SKIP_REASON="EKS Kubernetes version response contained no parseable standard-support versions."
+      echo "  $EKS_K8S_SKIP_REASON"
+    else
+      CURRENT_K8S="$(extract_k8s_version "cdk.json")"
 
-    if [ -n "$LATEST_K8S" ] && [ "$CURRENT_K8S" != "$LATEST_K8S" ] \
-       && [ "$(compare_semver "$CURRENT_K8S" "$LATEST_K8S")" = "newer" ]; then
-      # Grab the standard-support end date for the currently-pinned
-      # minor. Blank when EKS hasn't published one yet (brand-new release).
-      EOS_DATE="$(echo "$CLUSTER_VERSIONS_JSON" | python3 -c "
+      if [ "$CURRENT_K8S" != "$LATEST_K8S" ] \
+         && [ "$(compare_semver "$CURRENT_K8S" "$LATEST_K8S")" = "newer" ]; then
+        # Grab the standard-support end date for the currently-pinned
+        # minor. Blank when EKS hasn't published one yet (brand-new release).
+        EOS_DATE="$(echo "$CLUSTER_VERSIONS_JSON" | python3 -c "
 import json, sys
 cv = sys.argv[1]
 try:
@@ -567,8 +586,9 @@ for row in data.get('clusterVersions', []):
         break
 " "$CURRENT_K8S" 2>/dev/null)" || EOS_DATE=""
 
-      echo "  - kubernetes_version: ${CURRENT_K8S} -> ${LATEST_K8S} (std support ends ${EOS_DATE:-unknown})"
-      echo "kubernetes_version|${CURRENT_K8S}|${LATEST_K8S}|${EOS_DATE:-unknown}" >> "$EKS_K8S_RESULTS"
+        echo "  - kubernetes_version: ${CURRENT_K8S} -> ${LATEST_K8S} (std support ends ${EOS_DATE:-unknown})"
+        echo "kubernetes_version|${CURRENT_K8S}|${LATEST_K8S}|${EOS_DATE:-unknown}" >> "$EKS_K8S_RESULTS"
+      fi
     fi
   fi
 fi
@@ -595,22 +615,33 @@ if ! aws sts get-caller-identity >/dev/null 2>&1; then
 else
   # Extract pinned Aurora PostgreSQL versions from regional_stack.py
   # Pattern: AuroraPostgresEngineVersion.VER_XX_Y
-  extract_aurora_versions "gco/stacks/regional_stack.py" | while read -r current_ver; do
-    [ -z "$current_ver" ] && continue
-    major="$(echo "$current_ver" | cut -d. -f1)"
+  AURORA_VERSIONS="$(extract_aurora_versions "gco/stacks/regional_stack.py")"
+  if [ -z "$AURORA_VERSIONS" ]; then
+    AURORA_SKIP_REASON="Could not read Aurora PostgreSQL engine pins from gco/stacks/regional_stack.py."
+    echo "  $AURORA_SKIP_REASON"
+  else
+    while read -r current_ver; do
+      [ -z "$current_ver" ] && continue
+      major="$(echo "$current_ver" | cut -d. -f1)"
 
-    # Query the latest available engine version for this major line
-    latest="$(aws rds describe-db-engine-versions \
-      --engine aurora-postgresql \
-      --query "DBEngineVersions[?starts_with(EngineVersion, '${major}.')].EngineVersion" \
-      --output text 2>/dev/null \
-      | tr '\t' '\n' | sort -V | tail -1)" || true
+      # Query the latest available engine version for this major line.
+      latest="$(aws rds describe-db-engine-versions \
+        --engine aurora-postgresql \
+        --query "DBEngineVersions[?starts_with(EngineVersion, '${major}.')].EngineVersion" \
+        --output text 2>/dev/null \
+        | tr '\t' '\n' | sort -V | tail -1)" || latest=""
 
-    if [ -n "$latest" ] && [ "$current_ver" != "$latest" ]; then
-      echo "  - aurora-postgresql: ${current_ver} -> ${latest}"
-      echo "aurora-postgresql|${current_ver}|${latest}" >> "$AURORA_RESULTS"
-    fi
-  done
+      if ! [[ "$latest" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+        AURORA_SKIP_REASON="Aurora PostgreSQL engine lookup failed or returned an invalid version for major ${major}."
+        echo "  $AURORA_SKIP_REASON"
+        break
+      fi
+      if [ "$current_ver" != "$latest" ]; then
+        echo "  - aurora-postgresql: ${current_ver} -> ${latest}"
+        echo "aurora-postgresql|${current_ver}|${latest}" >> "$AURORA_RESULTS"
+      fi
+    done <<< "$AURORA_VERSIONS"
+  fi
 fi
 
 AURORA_COUNT="$(wc -l < "$AURORA_RESULTS" 2>/dev/null | tr -d ' ')"
@@ -641,39 +672,56 @@ if ! aws sts get-caller-identity >/dev/null 2>&1; then
   EMR_SKIP_REASON="No AWS credentials available (scan needs elasticmapreduce:ListReleaseLabels). Configure OIDC to enable."
   echo "  $EMR_SKIP_REASON"
 else
-  extract_emr_versions "gco/stacks/constants.py" | while read -r current_label; do
-    [ -z "$current_label" ] && continue
-    # current_label looks like "emr-7.13.0". Filter labels to ones that
-    # start with "emr-<major>." and take the latest by semver-ish sort.
-    # Skip preview/nightly tags (``-preview``, ``-beta``, ``-rc*``). The
-    # latest release label is what we compare against.
-    major="$(echo "$current_label" | sed -E 's/^emr-([0-9]+)\..*/\1/')"
-    latest="$(aws emr list-release-labels \
-      --region us-east-1 \
-      --query 'ReleaseLabels[]' --output text 2>/dev/null \
-      | tr '\t' '\n' \
-      | grep -E "^emr-${major}\.[0-9]+\.[0-9]+$" \
-      | sort -V | tail -1)" || true
+  EMR_VERSIONS="$(extract_emr_versions "gco/stacks/constants.py")"
+  if [ -z "$EMR_VERSIONS" ]; then
+    EMR_SKIP_REASON="Could not read the EMR Serverless release-label pin from gco/stacks/constants.py."
+    echo "  $EMR_SKIP_REASON"
+  else
+    while read -r current_label; do
+      [ -z "$current_label" ] && continue
+      # current_label looks like "emr-7.13.0". Filter labels to ones that
+      # start with "emr-<major>." and take the latest by semver-ish sort.
+      # Skip preview/nightly tags (``-preview``, ``-beta``, ``-rc*``). The
+      # latest release label is what we compare against.
+      major="$(echo "$current_label" | sed -E 's/^emr-([0-9]+)\..*/\1/')"
+      release_labels="$(aws emr list-release-labels \
+        --region us-east-1 \
+        --query 'ReleaseLabels[]' --output text 2>/dev/null)" || release_labels=""
 
-    # Also check whether a newer major release line exists.
-    latest_any="$(aws emr list-release-labels \
-      --region us-east-1 \
-      --query 'ReleaseLabels[]' --output text 2>/dev/null \
-      | tr '\t' '\n' \
-      | grep -E "^emr-[0-9]+\.[0-9]+\.[0-9]+$" \
-      | sort -V | tail -1)" || true
+      if [ -z "$release_labels" ] || [ "$release_labels" = "None" ]; then
+        EMR_SKIP_REASON="EMR release-label lookup failed or returned an empty response."
+        echo "  $EMR_SKIP_REASON"
+        break
+      fi
 
-    if [ -n "$latest" ] && [ "$current_label" != "$latest" ]; then
-      echo "  - emr-serverless: ${current_label} -> ${latest}"
-      echo "emr-serverless|${current_label}|${latest}" >> "$EMR_RESULTS"
-    elif [ -n "$latest_any" ] && [ "$current_label" != "$latest_any" ] \
-         && [ "$(compare_semver "${current_label#emr-}" "${latest_any#emr-}")" = "newer" ]; then
-      # Same minor — no new release in our pinned major — but a new
-      # major exists.
-      echo "  - emr-serverless: ${current_label} -> ${latest_any} (new major available)"
-      echo "emr-serverless|${current_label}|${latest_any}" >> "$EMR_RESULTS"
-    fi
-  done
+      latest="$(echo "$release_labels" \
+        | tr '\t' '\n' \
+        | grep -E "^emr-${major}\.[0-9]+\.[0-9]+$" \
+        | sort -V | tail -1)" || true
+
+      # Also check whether a newer major release line exists.
+      latest_any="$(echo "$release_labels" \
+        | tr '\t' '\n' \
+        | grep -E "^emr-[0-9]+\.[0-9]+\.[0-9]+$" \
+        | sort -V | tail -1)" || true
+
+      if [ -z "$latest_any" ]; then
+        EMR_SKIP_REASON="EMR release-label response contained no parseable stable releases."
+        echo "  $EMR_SKIP_REASON"
+        break
+      fi
+      if [ -n "$latest" ] && [ "$current_label" != "$latest" ]; then
+        echo "  - emr-serverless: ${current_label} -> ${latest}"
+        echo "emr-serverless|${current_label}|${latest}" >> "$EMR_RESULTS"
+      elif [ "$current_label" != "$latest_any" ] \
+           && [ "$(compare_semver "${current_label#emr-}" "${latest_any#emr-}")" = "newer" ]; then
+        # Same minor — no new release in our pinned major — but a new
+        # major exists.
+        echo "  - emr-serverless: ${current_label} -> ${latest_any} (new major available)"
+        echo "emr-serverless|${current_label}|${latest_any}" >> "$EMR_RESULTS"
+      fi
+    done <<< "$EMR_VERSIONS"
+  fi
 fi
 
 EMR_COUNT="$(wc -l < "$EMR_RESULTS" 2>/dev/null | tr -d ' ')"
@@ -715,9 +763,12 @@ elif ! aws sts get-caller-identity >/dev/null 2>&1; then
   BEDROCK_MODEL_SKIP_REASON="No AWS credentials available (scan needs bedrock:ListInferenceProfiles). Configure OIDC to enable."
   echo "  $BEDROCK_MODEL_SKIP_REASON"
 else
-  LATEST_BEDROCK_MODEL="$(get_latest_bedrock_model "$CURRENT_BEDROCK_MODEL" us-east-1)"
-  if [ -n "$LATEST_BEDROCK_MODEL" ] && [ "$CURRENT_BEDROCK_MODEL" != "$LATEST_BEDROCK_MODEL" ] \
-     && [ "$(compare_bedrock_model "$CURRENT_BEDROCK_MODEL" "$LATEST_BEDROCK_MODEL")" = "newer" ]; then
+  LATEST_BEDROCK_MODEL="$(get_latest_bedrock_model "$CURRENT_BEDROCK_MODEL" us-east-1)" || LATEST_BEDROCK_MODEL=""
+  if [ -z "$LATEST_BEDROCK_MODEL" ]; then
+    BEDROCK_MODEL_SKIP_REASON="Bedrock inference-profile lookup failed or returned no active profile in the configured model family."
+    echo "  $BEDROCK_MODEL_SKIP_REASON"
+  elif [ "$CURRENT_BEDROCK_MODEL" != "$LATEST_BEDROCK_MODEL" ] \
+       && [ "$(compare_bedrock_model "$CURRENT_BEDROCK_MODEL" "$LATEST_BEDROCK_MODEL")" = "newer" ]; then
     echo "  - bedrock default model: ${CURRENT_BEDROCK_MODEL} -> ${LATEST_BEDROCK_MODEL}"
     echo "context.bedrock.default_model_id|${CURRENT_BEDROCK_MODEL}|${LATEST_BEDROCK_MODEL}" >> "$BEDROCK_MODEL_RESULTS"
   fi
@@ -1591,6 +1642,22 @@ echo "Base-image epochs:        $EPOCH_COUNT"
 echo "Suppression expiries:     $SUPPRESSION_COUNT"
 echo "Lockfile freshness:       $LOCKFILE_COUNT"
 
+SCAN_COMPLETE=true
+for skip_reason in \
+  "$ADDON_SKIP_REASON" \
+  "$EKS_K8S_SKIP_REASON" \
+  "$AURORA_SKIP_REASON" \
+  "$EMR_SKIP_REASON" \
+  "$BEDROCK_MODEL_SKIP_REASON" \
+  "$ACCELERATOR_SKIP_REASON" \
+  "$CDK_ENUM_SKIP_REASON" \
+  "$PYTHON_RELEASE_SKIP_REASON"; do
+  if [ -n "$skip_reason" ]; then
+    SCAN_COMPLETE=false
+    break
+  fi
+done
+
 if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 0 ] \
    && [ "$HELM_COUNT" -eq 0 ] && [ "$ADDON_COUNT" -eq 0 ] \
    && [ "$EKS_K8S_COUNT" -eq 0 ] \
@@ -1657,7 +1724,10 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
     } >> "$GITHUB_STEP_SUMMARY"
   fi
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
-    echo "has_drift=false" >> "$GITHUB_OUTPUT"
+    {
+      echo "has_drift=false"
+      echo "scan_complete=$SCAN_COMPLETE"
+    } >> "$GITHUB_OUTPUT"
   fi
   exit 0
 fi
@@ -2003,8 +2073,11 @@ summary_row() {
 rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
-  echo "has_drift=true"            >> "$GITHUB_OUTPUT"
-  echo "report_path=$REPORT_FILE"  >> "$GITHUB_OUTPUT"
+  {
+    echo "has_drift=true"
+    echo "scan_complete=$SCAN_COMPLETE"
+    echo "report_path=$REPORT_FILE"
+  } >> "$GITHUB_OUTPUT"
 fi
 
 # Mirror the report into the workflow run's job summary so results are visible

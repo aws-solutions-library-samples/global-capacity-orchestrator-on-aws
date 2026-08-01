@@ -293,7 +293,9 @@ The monthly [`deps-scan`](../.github/CI.md#dependency-scan-script) issue lists
 every surface that has drifted (Python packages, npm graphs, Docker images,
 Helm charts, EKS add-ons, accelerator catalog/NodePool policy, CI tooling, and
 more), grouped with an urgency hint and per-row links to the upstream source.
-To act on it:
+The workflow keeps one rolling issue open while drift exists, then posts a
+dated resolution comment and closes it automatically only after a complete
+clean scan with no explicitly skipped checks. To act on it:
 
 1. Follow the report's **Ref** links to review changelogs for breaking changes.
 2. Update the exact version in `pyproject.toml`, the relevant `package.json`, a
@@ -620,10 +622,10 @@ creates a GitHub Release. Full steps (and the manual fallback) are in
 
 The changelog is the **auto-generated GitHub Release notes**, categorized by PR
 label via `.github/release.yml` (Breaking / Features / Bug fixes / Documentation
-/ Dependencies / Other). Every PR must carry the right label — the leading
-`feat:` / `fix:` / `docs:` token from `.github/pull_request_template.md` is what
-drives categorization. There is no separate `CHANGELOG.md` — the Releases page
-is the changelog.
+/ Dependencies / Other). Every PR must carry the appropriate label; the
+checkboxes and `feat:` / `fix:` / `docs:` tokens in
+`.github/pull_request_template.md` are reviewer-facing prompts only. There is no
+separate `CHANGELOG.md` — the Releases page is the changelog.
 
 ### Deploying
 
@@ -704,7 +706,7 @@ not open-ended:
 
 ### On-call
 
-`docs/RUNBOOKS.md` holds nine step-by-step incident procedures (region
+`docs/RUNBOOKS.md` holds eleven step-by-step incident procedures (region
 unhealthy, DLQ filling, secret-rotation failure, cost spike, and more), and the
 alarms above page through the SNS alert topic. Keep one runbook per alarm so a
 page maps to an action.

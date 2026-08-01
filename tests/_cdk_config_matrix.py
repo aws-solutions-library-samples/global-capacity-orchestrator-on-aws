@@ -435,8 +435,8 @@ CONFIGS.append(
 # NAG_CONFIGS — subset of CONFIGS used by tests/test_nag_compliance.py
 # ---------------------------------------------------------------------------
 # The full CONFIGS list is used by tests/test_cdk_synthesis_matrix.py
-# (in-process synth validation, run in parallel via pytest-xdist). For the
-# in-process cdk-nag compliance test, we only need the configs that produce
+# (serial in-process synth validation; shared CDK asset staging races under
+# pytest-xdist). For the in-process cdk-nag compliance test, we only need the
 # *distinct IAM policy surfaces*.
 # Most configs (valkey-disabled, thresholds-aggressive, helm-minimal, etc.)
 # change Helm charts, resource quotas, or threshold values that don't touch
