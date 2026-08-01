@@ -7,26 +7,25 @@
 # Triggers: push: main, pull_request, workflow_dispatch.
 #
 # Jobs (alphabetical by display name):
-#   - integration:dev-alias:docker           — install latest Docker, build gco-dev, prove the generated `gco` alias runs
-#   - integration:dev-alias:finch            — install latest Finch (rootful), build gco-dev, prove the generated `gco` alias runs
-#   - integration:dev-alias:none             — prove setup-dev-alias.sh refuses cleanly when no runtime is installed
-#   - integration:dev-alias:podman           — install latest Podman, build gco-dev, prove the generated `gco` alias runs
-#   - integration:docker:cost-monitor        — build + import-based liveness
-#   - integration:docker:dev-container       — Dockerfile.dev native-arch matrix (amd64 + arm64 runners)
-#   - integration:docker:health-monitor      — build + /healthz + /readyz
-#   - integration:docker:helm-installer      — build + `helm version`/`kubectl version`
-#   - integration:docker:inference-monitor   — build + import-based liveness
-#   - integration:docker:inference-proxy     — build + import-based liveness
-#   - integration:docker:manifest-processor  — build + /healthz + /readyz
-#   - integration:docker:queue-processor     — build + startup-banner check
-#   - integration:docker:tls-certificate-manager
-#                                             — build + Lambda handler import
-#   - integration:helm:charts-valid          — every charts.yaml (chart,version) resolves + renders with helm
-#   - integration:k8s:manifest-schema        — kubeconform schema validation + YAML/required-kinds/DAG checks
-#   - integration:kind:cluster-e2e           — kind + Calico + Metrics Server + HPA + services + policy/RBAC
-#   - integration:lambda:imports             — import each Lambda handler
-#   - integration:mcp:server                 — pytest tests/test_mcp_integration.py
-#   - integration:pytest:cross-module        — pytest tests/test_integration.py
+#   - integration:dev-alias:docker                — install latest Docker, build gco-dev, prove the generated `gco` alias runs
+#   - integration:dev-alias:finch                 — install latest Finch (rootful), build gco-dev, prove the generated `gco` alias runs
+#   - integration:dev-alias:none                  — prove setup-dev-alias.sh refuses cleanly when no runtime is installed
+#   - integration:dev-alias:podman                — install latest Podman, build gco-dev, prove the generated `gco` alias runs
+#   - integration:docker:cost-monitor             — build + import-based liveness
+#   - integration:docker:dev-container            — Dockerfile.dev native-arch matrix (amd64 + arm64 runners)
+#   - integration:docker:health-monitor           — build + /healthz + /readyz
+#   - integration:docker:helm-installer           — build + `helm version`/`kubectl version`
+#   - integration:docker:inference-monitor        — build + import-based liveness
+#   - integration:docker:inference-proxy          — build + import-based liveness
+#   - integration:docker:manifest-processor       — build + /healthz + /readyz
+#   - integration:docker:queue-processor          — build + startup-banner check
+#   - integration:docker:tls-certificate-manager  — build + Lambda handler import
+#   - integration:helm:charts-valid               — every charts.yaml (chart,version) resolves + renders with helm
+#   - integration:k8s:manifest-schema             — kubeconform schema validation + YAML/required-kinds/DAG checks
+#   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC
+#   - integration:lambda:imports                  — import each Lambda handler
+#   - integration:mcp:server                      — pytest tests/test_mcp_integration.py
+#   - integration:pytest:cross-module             — pytest tests/test_integration.py
 #
 # =============================================================================
 
