@@ -973,26 +973,6 @@ jobs:
             exit 1
           fi
           echo "NetworkPolicies accepted by apiserver: $count"
-      - name: Apply ResourceQuotas and LimitRanges
-        # 04-resource-quotas.yaml defines namespace-level resource governance.
-        # The gco-service-account SA it governs is already created by the
-        # "Apply namespaces + RBAC" step (01-serviceaccounts.yaml).
-        # Substitute template variables with reasonable CI values.
-        # The YAML already quotes the placeholders, so values must be unquoted.
-        run: |
-          set -euo pipefail
-          sed -e 's|{{QUOTA_MAX_CPU}}|100|g' \
-              -e 's|{{QUOTA_MAX_MEMORY}}|200Gi|g' \
-              -e 's|{{QUOTA_MAX_GPU}}|8|g' \
-              -e 's|{{QUOTA_MAX_PODS}}|100|g' \
-              -e 's|{{LIMIT_MAX_CPU}}|16|g' \
-              -e 's|{{LIMIT_MAX_MEMORY}}|64Gi|g' \
-              -e 's|{{LIMIT_MAX_GPU}}|4|g' \
-            lambda/kubectl-applier-simple/manifests/04-resource-quotas.yaml \
-            | kubectl apply -f -
-          kubectl -n gco-jobs get resourcequota gco-jobs-quota
-          kubectl -n gco-jobs get limitrange gco-jobs-limits
-          echo "ResourceQuota and LimitRange applied"
       - name: Verify PodDisruptionBudgets exist
         # Assert every PDB shipped by the four deployment manifests. A count
         # greater than zero can hide a partially applied policy set.
@@ -1114,6 +1094,54 @@ jobs:
 
           kubectl -n gco-jobs delete pod netpol-test --wait=false
           kubectl -n gco-system delete pod netpol-target --wait=false
+      - name: Apply ResourceQuotas and LimitRanges
+        # Apply governance only after the synthetic NetworkPolicy client exits.
+        # Otherwise this LimitRange injects a 100m CPU request into that probe,
+        # which can make it unschedulable on Kind's already-loaded single node.
+        # The gco-service-account SA it governs is already created by the
+        # "Apply namespaces + RBAC" step (01-serviceaccounts.yaml).
+        run: |
+          set -euo pipefail
+          sed -e 's|{{QUOTA_MAX_CPU}}|100|g' \
+              -e 's|{{QUOTA_MAX_MEMORY}}|200Gi|g' \
+              -e 's|{{QUOTA_MAX_GPU}}|8|g' \
+              -e 's|{{QUOTA_MAX_PODS}}|100|g' \
+              -e 's|{{LIMIT_MAX_CPU}}|16|g' \
+              -e 's|{{LIMIT_MAX_MEMORY}}|64Gi|g' \
+              -e 's|{{LIMIT_MAX_GPU}}|4|g' \
+            lambda/kubectl-applier-simple/manifests/04-resource-quotas.yaml \
+            | kubectl apply -f -
+          kubectl -n gco-jobs get resourcequota gco-jobs-quota
+          kubectl -n gco-jobs get limitrange gco-jobs-limits
+
+          # Exercise mutating admission without scheduling another pod on the
+          # capacity-constrained Kind node. Server-side dry run must receive
+          # every LimitRange default before ResourceQuota evaluates the pod.
+          defaulted_pod="$(
+            kubectl -n gco-jobs run limitrange-default-probe \
+              --image=busybox:1.38.0 \
+              --restart=Never \
+              --dry-run=server \
+              -o json \
+              --command -- true
+          )"
+          DEFAULTED_POD="$defaulted_pod" python3 - <<'PY'
+          import json
+          import os
+
+          resources = json.loads(os.environ["DEFAULTED_POD"])["spec"]["containers"][0][
+              "resources"
+          ]
+          expected = {
+              "limits": {"cpu": "1", "memory": "4Gi", "nvidia.com/gpu": "0"},
+              "requests": {"cpu": "100m", "memory": "256Mi", "nvidia.com/gpu": "0"},
+          }
+          if resources != expected:
+              raise SystemExit(
+                  f"LimitRange admission defaults mismatch: expected={expected}, actual={resources}"
+              )
+          PY
+          echo "ResourceQuota and LimitRange admission defaults verified"
       - name: Verify all namespaces exist
         run: |
           set -euo pipefail
