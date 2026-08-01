@@ -190,6 +190,8 @@ def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
 
             if not capacities:
                 formatter.print_warning("No GCO stacks found")
+                if config.output_format != "table":
+                    formatter.print(capacities)
                 return
 
             if config.output_format == "table":

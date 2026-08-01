@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from click.testing import CliRunner
 
+from cli.capacity.multi_region import RegionCapacity
 from cli.commands.capacity_cmd import capacity
 from cli.commands.config_cmd import config_cmd
 from cli.commands.costs_cmd import costs
@@ -1026,6 +1027,122 @@ def test_capacity_status_sorts_regions_and_recommends_lowest_score(
     assert result.exit_code == 0, result.output
     assert result.output.index("us-east-1") < result.output.index("us-west-2")
     assert "Recommended region: us-east-1" in result.output
+
+
+def test_capacity_status_json_emits_empty_array_when_no_stacks(runner: CliRunner) -> None:
+    checker = MagicMock()
+    checker.get_all_regions_capacity.return_value = []
+
+    with patch("cli.capacity.get_multi_region_capacity_checker", return_value=checker):
+        result = _invoke(
+            runner,
+            capacity,
+            ["status"],
+            config=_config(output_format="json"),
+        )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == []
+    assert "No GCO stacks found" in result.stderr
+
+
+def test_capacity_status_json_emits_region_objects(runner: CliRunner) -> None:
+    checker = MagicMock()
+    checker.get_all_regions_capacity.return_value = [
+        RegionCapacity(
+            region="us-east-1",
+            queue_depth=2,
+            running_jobs=1,
+            recommendation_score=12.5,
+        )
+    ]
+
+    with patch("cli.capacity.get_multi_region_capacity_checker", return_value=checker):
+        result = _invoke(
+            runner,
+            capacity,
+            ["status"],
+            config=_config(output_format="json"),
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload[0]["region"] == "us-east-1"
+    assert payload[0]["recommendation_score"] == 12.5
+    assert "REGION" not in result.stdout
+    assert "ℹ" not in result.stdout
+
+
+def test_capacity_recommend_json_emits_structured_result(runner: CliRunner) -> None:
+    checker = MagicMock()
+    checker.recommend_capacity_type.return_value = (
+        "on-demand",
+        "stable capacity for this workload",
+    )
+
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = _invoke(
+            runner,
+            capacity,
+            ["recommend", "-i", "g5.2xlarge", "-r", "us-east-1"],
+            config=_config(output_format="json"),
+        )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {
+        "capacity_type": "on-demand",
+        "explanation": "stable capacity for this workload",
+    }
+    assert "ℹ" not in result.stdout
+
+
+def test_capacity_recommend_table_preserves_human_output(runner: CliRunner) -> None:
+    checker = MagicMock()
+    checker.recommend_capacity_type.return_value = ("spot", "lowest cost")
+
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = _invoke(
+            runner,
+            capacity,
+            ["recommend", "-i", "g5.2xlarge", "-r", "us-east-1"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Recommended: SPOT" in result.output
+    assert "Reason: lowest cost" in result.output
+
+
+def test_capacity_recommend_region_json_ignores_verbose_human_output(
+    runner: CliRunner,
+) -> None:
+    checker = MagicMock()
+    recommendation = {
+        "region": "eu-west-1",
+        "reason": "lowest weighted score",
+        "all_regions": [
+            {
+                "region": "eu-west-1",
+                "score": 0.125,
+                "queue_depth": 1,
+                "gpu_utilization": 25.0,
+            }
+        ],
+    }
+    checker.recommend_region_for_job.return_value = recommendation
+
+    with patch("cli.capacity.get_multi_region_capacity_checker", return_value=checker):
+        result = _invoke(
+            runner,
+            capacity,
+            ["recommend-region", "--gpu", "-i", "p5.48xlarge"],
+            config=_config(output_format="json", verbose=True),
+        )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == recommendation
+    assert "All regions ranked" not in result.stdout
+    assert "✓" not in result.stdout
+    assert "ℹ" not in result.stdout
 
 
 def test_capacity_recommend_region_verbose_prints_ranked_signals(
