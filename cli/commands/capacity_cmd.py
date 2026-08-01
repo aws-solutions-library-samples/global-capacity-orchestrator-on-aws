@@ -90,8 +90,16 @@ def recommend_capacity(config: Any, instance_type: Any, region: Any, fault_toler
             instance_type, region, fault_tolerance
         )
 
-        formatter.print_info(f"Recommended: {capacity_type.upper()}")
-        formatter.print_info(f"Reason: {explanation}")
+        if config.output_format == "table":
+            formatter.print_info(f"Recommended: {capacity_type.upper()}")
+            formatter.print_info(f"Reason: {explanation}")
+        else:
+            formatter.print(
+                {
+                    "capacity_type": capacity_type,
+                    "explanation": explanation,
+                }
+            )
 
     except Exception as e:
         formatter.print_error(f"Failed to get recommendation: {e}")
@@ -184,19 +192,21 @@ def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
                 formatter.print_warning("No GCO stacks found")
                 return
 
-            # Format as table
-            print("\n  REGION          QUEUE  RUNNING  GPU%   CPU%   SCORE")
-            print("  " + "-" * 55)
-            for c in sorted(capacities, key=lambda x: x.recommendation_score):
-                print(
-                    f"  {c.region:<15} {c.queue_depth:>5}  {c.running_jobs:>7}  "
-                    f"{c.gpu_utilization:>4.0f}%  {c.cpu_utilization:>4.0f}%  {c.recommendation_score:>5.0f}"
-                )
+            if config.output_format == "table":
+                print("\n  REGION          QUEUE  RUNNING  GPU%   CPU%   SCORE")
+                print("  " + "-" * 55)
+                for c in sorted(capacities, key=lambda x: x.recommendation_score):
+                    print(
+                        f"  {c.region:<15} {c.queue_depth:>5}  {c.running_jobs:>7}  "
+                        f"{c.gpu_utilization:>4.0f}%  {c.cpu_utilization:>4.0f}%  "
+                        f"{c.recommendation_score:>5.0f}"
+                    )
 
-            # Show recommendation
-            print()
-            best = min(capacities, key=lambda x: x.recommendation_score)
-            formatter.print_info(f"Recommended region: {best.region} (lowest score = best)")
+                print()
+                best = min(capacities, key=lambda x: x.recommendation_score)
+                formatter.print_info(f"Recommended region: {best.region} (lowest score = best)")
+            else:
+                formatter.print(capacities)
 
     except Exception as e:
         formatter.print_error(f"Failed to get capacity status: {e}")
@@ -243,16 +253,19 @@ def recommend_region(
             gpu_count=gpu_count,
         )
 
-        formatter.print_success(f"Recommended region: {recommendation['region']}")
-        formatter.print_info(f"Reason: {recommendation['reason']}")
+        if config.output_format == "table":
+            formatter.print_success(f"Recommended region: {recommendation['region']}")
+            formatter.print_info(f"Reason: {recommendation['reason']}")
 
-        if config.verbose:
-            print("\nAll regions ranked:")
-            for r in recommendation.get("all_regions", []):
-                print(
-                    f"  {r['region']}: score={r['score']:.4f}, "
-                    f"queue={r['queue_depth']}, gpu={r['gpu_utilization']:.0f}%"
-                )
+            if config.verbose:
+                print("\nAll regions ranked:")
+                for r in recommendation.get("all_regions", []):
+                    print(
+                        f"  {r['region']}: score={r['score']:.4f}, "
+                        f"queue={r['queue_depth']}, gpu={r['gpu_utilization']:.0f}%"
+                    )
+        else:
+            formatter.print(recommendation)
 
     except Exception as e:
         formatter.print_error(f"Failed to get recommendation: {e}")
