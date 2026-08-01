@@ -47,7 +47,7 @@ mcp = FastMCP(
         "- infra:// — Dockerfiles, Helm charts, CI/CD config\n"
         "- ci:// — GitHub Actions workflows, composite actions, scripts, issue/PR templates\n"
         "- source:// — Full source code of the platform\n"
-        "- demos:// — Demo walkthroughs, live demo scripts, and presentation materials\n"
+        "- demos:// — Demo walkthroughs and live demo scripts\n"
         "- clients:// — API client examples (Python, curl, AWS CLI)\n"
         "- scripts:// — Utility scripts for cluster access, versioning, testing\n"
         "- tests:// — Test suite documentation, patterns, and configuration\n"

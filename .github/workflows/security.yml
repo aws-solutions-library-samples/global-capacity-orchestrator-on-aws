@@ -7,7 +7,7 @@
 # Triggers: push: main, pull_request, workflow_dispatch.
 #
 # Jobs (alphabetical by display name):
-#   - security:bandit:sast               — bandit on gco/, cli/
+#   - security:bandit:sast               — bandit on gco/, cli/ + demo GIF validation
 #   - security:checkov:iac               — checkov against the whole repo
 #   - security:codeql:javascript-code-analysis
 #                                        — CodeQL security-and-quality pack on JavaScript
@@ -61,6 +61,10 @@ jobs:
       - name: Install security tooling
         run: |
           pip install -e ".[security]"
+      - name: Validate tracked demo GIFs
+        # Decode untrusted media only in this ephemeral, read-only job. The
+        # script also bounds file size, canvas dimensions, and frame count.
+        run: timeout 120s python .github/scripts/validate_demo_gifs.py
       - name: Run bandit
         run: |
           bandit -r gco/ cli/ -c pyproject.toml --severity-level medium \

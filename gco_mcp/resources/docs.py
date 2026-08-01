@@ -1346,7 +1346,7 @@ def docs_index() -> str:
         "- `images://gco/index` — ECR repositories, tags, images, and replication status"
     )
     sections.append("- `source://gco/index` — Source code browser")
-    sections.append("- `demos://gco/index` — Demo walkthroughs and presentation materials")
+    sections.append("- `demos://gco/index` — Demo walkthroughs and scripts")
     sections.append("- `clients://gco/index` — API client examples (Python, curl, AWS CLI)")
     sections.append("- `scripts://gco/index` — Utility scripts")
     sections.append("- `tests://gco/index` — Test suite documentation and patterns")

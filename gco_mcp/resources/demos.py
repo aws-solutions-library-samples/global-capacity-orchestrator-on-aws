@@ -4,12 +4,12 @@ from cli_runner import PROJECT_ROOT  # runtime-resolved checkout root (uvx-safe)
 from server import mcp
 
 DEMO_DIR = PROJECT_ROOT / "demo"
-_DEMO_EXTENSIONS = {".md", ".sh", ".py"}
+_DEMO_EXTENSIONS = {".md", ".sh"}
 
 
 @mcp.resource("demos://gco/index")
 def demos_index() -> str:
-    """List demo walkthroughs, live demo scripts, and presentation materials."""
+    """List demo walkthroughs and live demo scripts."""
     lines = ["# Demo & Walkthrough Resources\n"]
     lines.append("## Walkthroughs")
     for name in ("DEMO_WALKTHROUGH", "INFERENCE_WALKTHROUGH", "LIVE_DEMO"):
@@ -28,16 +28,12 @@ def demos_index() -> str:
         path = DEMO_DIR / name
         if path.is_file():
             lines.append(f"- `demos://gco/{name}` — {name}")
-    lines.append("\n## Utilities")
-    path = DEMO_DIR / "md_to_pdf.py"
-    if path.is_file():
-        lines.append("- `demos://gco/md_to_pdf.py` — Markdown to PDF converter")
     return "\n".join(lines)
 
 
 @mcp.resource("demos://gco/{filename}")
 def demo_resource(filename: str) -> str:
-    """Read a demo walkthrough, script, or utility file."""
+    """Read a demo walkthrough or script."""
     path = DEMO_DIR / filename
     if not path.is_file():
         path = DEMO_DIR / f"{filename}.md"

@@ -19,7 +19,7 @@ MCP resource definitions and live-state adapters. Static modules use `@mcp.resou
 | `cluster.py` | `gco://cluster/` | Live regional NodePool and pending-pod topology. |
 | `config.py` | `config://` | Raw [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) configuration and environment-variable reference. |
 | `costs.py` | `costs://` | Live cost-summary views for a bounded day window. |
-| `demos.py` | `demos://` | Demo walkthroughs, scripts, and presentation materials. |
+| `demos.py` | `demos://` | Demo walkthroughs and scripts. |
 | `docs.py` | `docs://` | Documentation, package guides, ADRs, and examples enriched with metadata. |
 | `iam_policies.py` | `iam://` | [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) policy templates. |
 | `images.py` | `images://` | [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) repository, tag, image, and replication views. |
