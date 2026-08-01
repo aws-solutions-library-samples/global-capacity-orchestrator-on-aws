@@ -44,7 +44,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "boto3==1.43.59",
+    "boto3==1.43.62",
     "click==8.4.2",
     "requests==2.34.2",
     "pyyaml==6.0.3",
@@ -71,7 +71,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cdk = [
-    "aws-cdk-lib==2.262.2",
+    "aws-cdk-lib==2.263.0",
     "cdk-nag==3.0.1",
     "constructs==10.8.0",
 ]
@@ -89,15 +89,15 @@ diagrams = [
     # ``lint`` extra to avoid version-drift between the generator and
     # the CI lint gate).
     "pyflowchart==0.6.0",
-    "playwright==1.61.0",
-    "ruff==0.16.0",
+    "playwright==1.62.0",
+    "ruff==0.16.1",
 ]
 # Direct runtime roots for the six production service images. Their Dockerfiles
 # read exactly one group with Python 3.14's tomllib and use requirements-lock.txt
 # only as the shared transitive constraint; they never install the project extra.
 image-health-monitor = [
-    "boto3==1.43.59",
-    "botocore==1.43.59",
+    "boto3==1.43.62",
+    "botocore==1.43.62",
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "kubernetes==36.0.3",
@@ -106,8 +106,8 @@ image-health-monitor = [
     "uvicorn==0.52.0",
 ]
 image-manifest-processor = [
-    "boto3==1.43.59",
-    "botocore==1.43.59",
+    "boto3==1.43.62",
+    "botocore==1.43.62",
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "kubernetes==36.0.3",
@@ -119,8 +119,8 @@ image-manifest-processor = [
     "uvicorn==0.52.0",
 ]
 image-inference-proxy = [
-    "boto3==1.43.59",
-    "botocore==1.43.59",
+    "boto3==1.43.62",
+    "botocore==1.43.62",
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "prometheus-client==0.26.0",
@@ -128,20 +128,20 @@ image-inference-proxy = [
     "uvicorn==0.52.0",
 ]
 image-inference-monitor = [
-    "boto3==1.43.59",
-    "botocore==1.43.59",
+    "boto3==1.43.62",
+    "botocore==1.43.62",
     "kubernetes==36.0.3",
     "prometheus-client==0.26.0",
     "pyyaml==6.0.3",
 ]
 image-queue-processor = [
-    "boto3==1.43.59",
+    "boto3==1.43.62",
     "kubernetes==36.0.3",
     "pyyaml==6.0.3",
 ]
 image-cost-monitor = [
-    "boto3==1.43.59",
-    "botocore==1.43.59",
+    "boto3==1.43.62",
+    "botocore==1.43.62",
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "prometheus-client==0.26.0",
@@ -179,7 +179,7 @@ mcp = [
     "fastmcp[tasks,code-mode]==3.4.5",
 ]
 lint = [
-    "ruff==0.16.0",
+    "ruff==0.16.1",
     "yamllint==1.38.0",
 ]
 typecheck = [

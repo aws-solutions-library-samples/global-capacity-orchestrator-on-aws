@@ -77,7 +77,7 @@ charts:
     repo_name: kedacore
     repo_url: https://kedacore.github.io/charts
     chart: keda
-    version: "2.20.1"
+    version: "2.20.2"
     namespace: keda
     create_namespace: true
     values:
@@ -338,7 +338,7 @@ charts:
     repo_name: slinky-oci
     repo_url: oci://ghcr.io/slinkyproject/charts
     chart: slurm-operator
-    version: "1.2.0"
+    version: "1.2.1"
     namespace: slurm-operator
     create_namespace: true
     use_oci: true
@@ -352,7 +352,7 @@ charts:
         replicas: 1
         image:
           repository: ghcr.io/slinkyproject/slurm-operator
-          tag: "1.2.0"
+          tag: "1.2.1"
         resources:
           requests:
             cpu: 100m
@@ -369,7 +369,7 @@ charts:
         enabled: true
         image:
           repository: ghcr.io/slinkyproject/slurm-operator-webhook
-          tag: "1.2.0"
+          tag: "1.2.1"
         resources:
           requests:
             cpu: 50m
@@ -390,7 +390,7 @@ charts:
     repo_name: slinky-oci
     repo_url: oci://ghcr.io/slinkyproject/charts
     chart: slurm
-    version: "1.2.0"
+    version: "1.2.1"
     namespace: gco-jobs
     create_namespace: false
     use_oci: true
@@ -541,7 +541,7 @@ charts:
     repo_name: prometheus-community
     repo_url: https://prometheus-community.github.io/helm-charts
     chart: kube-prometheus-stack
-    version: "87.21.0"
+    version: "88.0.1"
     namespace: monitoring
     create_namespace: true
     wait: false

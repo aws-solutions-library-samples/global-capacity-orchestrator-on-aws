@@ -277,7 +277,7 @@ def backend_tls_certificate_arn_parameter_name(project_name: str, region: str) -
 EKS_ADDON_POD_IDENTITY_AGENT = "v1.3.10-eksbuild.3"
 """EKS Pod Identity Agent — enables IRSA and Pod Identity for service accounts."""
 
-EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.4"
+EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.5"
 """Kubernetes Metrics Server — provides CPU/memory metrics for HPA and ``kubectl top``."""
 
 EKS_ADDON_EFS_CSI_DRIVER = "v3.4.1-eksbuild.1"
@@ -322,10 +322,10 @@ restriction. Keep in sync with the AWS EKS networking requirements doc.
 # ``aws rds describe-db-engine-versions`` monthly for newer releases
 # within the same major line.
 
-AURORA_POSTGRES_VERSION = "VER_17_9"
-"""CDK enum name for the Aurora PostgreSQL engine version (e.g. ``rds.AuroraPostgresEngineVersion.VER_17_9``)."""
+AURORA_POSTGRES_VERSION = "VER_17_10"
+"""CDK enum name for the Aurora PostgreSQL engine version (e.g. ``rds.AuroraPostgresEngineVersion.VER_17_10``)."""
 
-AURORA_POSTGRES_VERSION_DISPLAY = "17.9"
+AURORA_POSTGRES_VERSION_DISPLAY = "17.10"
 """Human-readable version string for documentation and logging."""
 # ---------------------------------------------------------------------------
 # Analytics Environment Constants
