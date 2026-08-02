@@ -38,7 +38,11 @@ def parse_dev_pins(dockerfile: Path) -> dict[str, str]:
 
 
 def _single_release_pin(content: str, pattern: str, label: str) -> str:
-    matches = set(re.findall(pattern, content))
+    matches: set[str] = set()
+    for match in re.findall(pattern, content):
+        if not isinstance(match, str):
+            raise VerificationError(f"{label} pin pattern must contain exactly one capture group")
+        matches.add(match)
     if len(matches) != 1:
         values = ", ".join(sorted(matches)) or "none"
         raise VerificationError(f"expected one {label} pin, found: {values}")
