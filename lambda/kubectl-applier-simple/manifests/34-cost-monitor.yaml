@@ -21,6 +21,7 @@ metadata:
   annotations:
     eks.amazonaws.com/role-arn: "{{COST_MONITOR_ROLE_ARN}}"
     gco.aws/feature-gate: "{{COST_MONITORING_ENABLED}}"
+automountServiceAccountToken: false
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -49,6 +50,7 @@ spec:
         karpenter.sh/do-not-disrupt: "true"
     spec:
       serviceAccountName: gco-cost-monitor-sa
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true

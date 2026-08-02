@@ -752,32 +752,23 @@ class GCOAnalyticsStack(Stack):
                 ),
             )
 
-        # EFS resource policy — must include DescribeMountTargets without
-        # the AccessedViaMountTarget condition because SageMaker calls it
-        # during user-profile provisioning. Using AnyPrincipal (AWS:*)
-        # ensures all account roles (execution role, cleanup Lambda, and
-        # the SageMaker service) are covered. Security is enforced by the
-        # VPC security group (NFS traffic only from within the VPC) and
-        # IAM policies on each role — the resource policy is permissive
-        # by design to avoid the intersection-model blocking control-plane
-        # calls.
-        # Note: DescribeAccessPoints/DescribeFileSystems CANNOT be in EFS
-        # resource policies (EFS rejects them). Those rely on IAM only.
+        # EFS file-system policies authorize NFS client access only. Keep
+        # control-plane Describe/Delete permissions on the identities that
+        # need them (the execution and cleanup roles), rather than exposing
+        # them through a wildcard resource principal. The Studio runtime
+        # mounts as its execution role and only through a VPC mount target.
         self.studio_efs.add_to_resource_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
-                principals=[iam.AnyPrincipal()],
+                principals=[self.sagemaker_execution_role],
                 actions=[
                     "elasticfilesystem:ClientMount",
                     "elasticfilesystem:ClientWrite",
                     "elasticfilesystem:ClientRootAccess",
-                    "elasticfilesystem:DescribeMountTargets",
-                    "elasticfilesystem:DescribeFileSystems",
-                    "elasticfilesystem:DeleteAccessPoint",
-                    "elasticfilesystem:DeleteMountTarget",
-                    "elasticfilesystem:DeleteFileSystem",
-                    "elasticfilesystem:DeleteFileSystemPolicy",
                 ],
+                conditions={
+                    "Bool": {"elasticfilesystem:AccessedViaMountTarget": "true"},
+                },
             )
         )
 

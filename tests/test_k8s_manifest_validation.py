@@ -78,6 +78,63 @@ class TestBuiltInNodePoolContracts:
         assert "arch" not in labels
 
 
+class TestStaticPodTokenBoundaries:
+    @staticmethod
+    def _documents(filename: str) -> list[dict]:
+        text = (MANIFESTS_DIR / filename).read_text(encoding="utf-8")
+        rendered = validator.render_placeholders(text)
+        return [document for document in yaml.safe_load_all(rendered) if document]
+
+    def test_shared_inference_service_account_disables_api_token(self) -> None:
+        accounts = {
+            document["metadata"]["namespace"]: document
+            for document in self._documents("01-serviceaccounts.yaml")
+            if document["kind"] == "ServiceAccount"
+        }
+        assert accounts["gco-jobs"]["automountServiceAccountToken"] is False
+        assert accounts["gco-inference"]["automountServiceAccountToken"] is False
+        assert accounts["gco-inference"]["metadata"]["annotations"][
+            "eks.amazonaws.com/role-arn"
+        ]
+
+    def test_cost_monitor_disables_api_token_but_keeps_sts_projection(self) -> None:
+        documents = self._documents("34-cost-monitor.yaml")
+        account = next(document for document in documents if document["kind"] == "ServiceAccount")
+        deployment = next(document for document in documents if document["kind"] == "Deployment")
+        pod = deployment["spec"]["template"]["spec"]
+
+        assert account["automountServiceAccountToken"] is False
+        assert pod["automountServiceAccountToken"] is False
+        assert pod["serviceAccountName"] == "gco-cost-monitor-sa"
+
+        container = pod["containers"][0]
+        environment = {entry["name"]: entry["value"] for entry in container["env"]}
+        role_arn = account["metadata"]["annotations"]["eks.amazonaws.com/role-arn"]
+        token_directory = "/var/run/secrets/eks.amazonaws.com/serviceaccount"
+        assert environment["AWS_ROLE_ARN"] == role_arn
+        assert environment["AWS_WEB_IDENTITY_TOKEN_FILE"] == f"{token_directory}/token"
+
+        token_mount = next(
+            mount for mount in container["volumeMounts"] if mount["name"] == "aws-iam-token"
+        )
+        assert token_mount["mountPath"] == token_directory
+        assert token_mount["readOnly"] is True
+        token_source = next(
+            volume["projected"]["sources"][0]["serviceAccountToken"]
+            for volume in pod["volumes"]
+            if volume["name"] == "aws-iam-token"
+        )
+        assert token_source == {
+            "audience": "sts.amazonaws.com",
+            "expirationSeconds": 86400,
+            "path": "token",
+        }
+
+    def test_nvidia_plugin_disables_api_token(self) -> None:
+        (daemonset,) = self._documents("50-nvidia-device-plugin.yaml")
+        assert daemonset["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
+
+
 # ── render_placeholders ───────────────────────────────────────────────────────
 
 
@@ -386,6 +443,100 @@ class TestKubeconformOutputIntegrity:
 
         assert rc == 2
         assert "unusable JSON output" in capsys.readouterr().err
+
+    def test_v080_separator_pseudo_record_is_ignored(self) -> None:
+        result = {
+            "resources": [
+                {
+                    "filename": "one.yaml",
+                    "kind": "",
+                    "name": "",
+                    "version": "",
+                    "status": "",
+                    "msg": "",
+                },
+                {
+                    "filename": "one.yaml",
+                    "kind": "Namespace",
+                    "name": "one",
+                    "version": "v1",
+                    "status": "statusValid",
+                    "msg": "",
+                },
+            ],
+            "summary": {"valid": 1, "invalid": 0, "errors": 0, "skipped": 0},
+        }
+
+        assert validator.validate_kubeconform_output(result, expected_files=1) == []
+
+    @pytest.mark.parametrize(
+        "record",
+        [
+            pytest.param(
+                {
+                    "filename": "one.yaml",
+                    "kind": "Namespace",
+                    "name": "",
+                    "version": "",
+                    "status": "",
+                    "msg": "",
+                },
+                id="partially-populated",
+            ),
+            pytest.param(
+                {
+                    "filename": "one.yaml",
+                    "kind": "",
+                    "name": "",
+                    "version": "",
+                    "status": "",
+                    "msg": "",
+                    "futureField": "",
+                },
+                id="unknown-field",
+            ),
+            pytest.param(
+                {
+                    "filename": "one.yaml",
+                    "kind": "",
+                    "name": "",
+                    "status": "",
+                    "msg": "",
+                },
+                id="missing-field",
+            ),
+            pytest.param(
+                {
+                    "filename": "",
+                    "kind": "",
+                    "name": "",
+                    "version": "",
+                    "status": "",
+                    "msg": "",
+                },
+                id="empty-filename",
+            ),
+            pytest.param(
+                {
+                    "filename": 7,
+                    "kind": "",
+                    "name": "",
+                    "version": "",
+                    "status": "",
+                    "msg": "",
+                },
+                id="non-string-filename",
+            ),
+        ],
+    )
+    def test_non_separator_blank_records_still_fail_closed(self, record: dict) -> None:
+        result = {
+            "resources": [record],
+            "summary": {"valid": 0, "invalid": 0, "errors": 0, "skipped": 0},
+        }
+
+        errors = validator.validate_kubeconform_output(result, expected_files=1)
+        assert "resources[0] has unknown status ''" in errors
 
     def test_complete_accounted_output_succeeds(
         self,

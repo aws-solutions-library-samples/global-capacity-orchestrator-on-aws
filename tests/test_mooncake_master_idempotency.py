@@ -144,6 +144,8 @@ def test_master_runs_as_root_with_writable_root_filesystem() -> None:
         body for (_ns, name), body in fake.statefulsets.items() if name == "mooncake-master"
     )
     pod = master.spec.template.spec
+    assert pod.service_account_name == "gco-service-account"
+    assert pod.automount_service_account_token is False
     # Runs as root so the startup chmod of the root-owned binary is permitted.
     assert pod.security_context.run_as_user == 0
     assert pod.security_context.run_as_group == 0

@@ -602,6 +602,72 @@ class TestStudioEfs:
             f"expected KmsKeyId to GetAtt analytics key ARN, got {get_att!r}"
         )
 
+    def test_efs_client_policy_is_scoped_to_the_sagemaker_role(self) -> None:
+        """Only the Studio role receives NFS client actions through mount targets."""
+        template = _synth_analytics()
+        fs = next(iter(template.find_resources("AWS::EFS::FileSystem").values()))
+        statements = fs["Properties"]["FileSystemPolicy"]["Statement"]
+        assert len(statements) == 1
+        statement = statements[0]
+
+        roles = template.find_resources("AWS::IAM::Role")
+        role_ids = [
+            logical_id
+            for logical_id, role in roles.items()
+            if isinstance(role["Properties"].get("RoleName"), str)
+            and role["Properties"]["RoleName"].startswith("AmazonSageMaker")
+        ]
+        assert len(role_ids) == 1
+        assert statement["Principal"] == {
+            "AWS": {"Fn::GetAtt": [role_ids[0], "Arn"]},
+        }
+        assert set(statement["Action"]) == {
+            "elasticfilesystem:ClientMount",
+            "elasticfilesystem:ClientWrite",
+            "elasticfilesystem:ClientRootAccess",
+        }
+        assert statement["Condition"] == {
+            "Bool": {"elasticfilesystem:AccessedViaMountTarget": "true"},
+        }
+
+    def test_cleanup_role_keeps_efs_control_plane_permissions(self) -> None:
+        """Stack teardown retains identity-scoped EFS cleanup authorization."""
+        template = _synth_analytics()
+        required_actions = {
+            "elasticfilesystem:DescribeAccessPoints",
+            "elasticfilesystem:DeleteAccessPoint",
+            "elasticfilesystem:DescribeFileSystems",
+            "elasticfilesystem:DescribeMountTargets",
+            "elasticfilesystem:DeleteMountTarget",
+            "elasticfilesystem:DeleteFileSystem",
+            "elasticfilesystem:DeleteFileSystemPolicy",
+        }
+        policies = template.find_resources("AWS::IAM::ManagedPolicy")
+        matches: list[tuple[str, Mapping[str, Any]]] = []
+        for logical_id, policy in policies.items():
+            statements = policy["Properties"]["PolicyDocument"]["Statement"]
+            actions = {
+                action
+                for statement in statements
+                for action in (
+                    statement["Action"]
+                    if isinstance(statement["Action"], list)
+                    else [statement["Action"]]
+                )
+            }
+            if required_actions.issubset(actions):
+                matches.append((logical_id, policy))
+
+        assert len(matches) == 1
+        policy_id, _ = matches[0]
+        attached_roles = [
+            logical_id
+            for logical_id, role in template.find_resources("AWS::IAM::Role").items()
+            if {"Ref": policy_id} in role["Properties"].get("ManagedPolicyArns", [])
+        ]
+        assert len(attached_roles) == 1
+        assert attached_roles[0].startswith("CleanupFunctionServiceRole")
+
     def test_efs_deletion_policy_is_delete_by_default(self) -> None:
         """Default ``efs_removal="destroy"`` yields
         ``DeletionPolicy=Delete`` on the EFS file system."""

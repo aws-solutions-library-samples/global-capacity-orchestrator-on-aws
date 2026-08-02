@@ -323,6 +323,26 @@ _KUBECONFORM_STATUS_TO_SUMMARY = {
     "statusError": "errors",
     "statusSkipped": "skipped",
 }
+_KUBECONFORM_RESOURCE_FIELDS = frozenset(
+    {"filename", "kind", "name", "version", "status", "msg"}
+)
+_KUBECONFORM_BLANK_RESOURCE_FIELDS = ("kind", "name", "version", "status", "msg")
+
+
+def _is_kubeconform_separator_record(resource: object) -> bool:
+    """Recognize kubeconform v0.8.0's record for a leading YAML separator.
+
+    The pinned binary emits one record with a filename but empty semantic
+    fields when a file starts with ``---``. Match that exact shape so a
+    partially populated record or a future unknown field still fails closed.
+    """
+    return (
+        isinstance(resource, dict)
+        and set(resource) == _KUBECONFORM_RESOURCE_FIELDS
+        and isinstance(resource["filename"], str)
+        and bool(resource["filename"])
+        and all(resource[field] == "" for field in _KUBECONFORM_BLANK_RESOURCE_FIELDS)
+    )
 
 
 def validate_kubeconform_output(result: object, *, expected_files: int) -> list[str]:
@@ -336,9 +356,14 @@ def validate_kubeconform_output(result: object, *, expected_files: int) -> list[
         return ["top-level JSON value is not an object"]
 
     errors: list[str] = []
-    resources = result.get("resources")
-    if not isinstance(resources, list):
+    raw_resources = result.get("resources")
+    if not isinstance(raw_resources, list):
         return ["'resources' is missing or is not an array"]
+    resources = [
+        resource
+        for resource in raw_resources
+        if not _is_kubeconform_separator_record(resource)
+    ]
     if not resources:
         errors.append("'resources' is empty")
     elif len(resources) < expected_files:

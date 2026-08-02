@@ -40,6 +40,7 @@ spec:
       labels:
         app: nvidia-device-plugin
     spec:
+      automountServiceAccountToken: false
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists

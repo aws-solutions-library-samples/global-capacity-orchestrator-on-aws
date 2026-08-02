@@ -349,8 +349,16 @@ class TestCreateDeployment:
         init_containers = deployment.spec.template.spec.init_containers
         assert init_containers is not None
         assert len(init_containers) == 1
-        assert init_containers[0].name == "model-sync"
-        assert "aws s3 sync" in init_containers[0].args[0]
+        init_container = init_containers[0]
+        assert init_container.name == "model-sync"
+        assert init_container.command == ["aws"]
+        assert init_container.args == [
+            "s3",
+            "sync",
+            "s3://bucket/models/llama3",
+            "/models/ep",
+            "--quiet",
+        ]
 
     def test_create_deployment_with_model_path(self):
         """model_path should add volume mounts."""

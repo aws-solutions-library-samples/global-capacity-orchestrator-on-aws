@@ -123,7 +123,10 @@ def test_unnamed_admin_secret_auto_provisions_and_creates_proxy(monitor):
     # The proxy is materialized and references the provisioned Secret by name.
     monitor.apps_v1.create_namespaced_deployment.assert_called_once()
     deploy_args, _ = monitor.apps_v1.create_namespaced_deployment.call_args
-    container = deploy_args[1].spec.template.spec.containers[0]
+    pod = deploy_args[1].spec.template.spec
+    assert pod.service_account_name == "gco-service-account"
+    assert pod.automount_service_account_token is False
+    container = pod.containers[0]
     admin_entries = [e for e in (container.env or []) if e.name == PD_PROXY_ADMIN_API_KEY_ENV]
     assert len(admin_entries) == 1
     assert admin_entries[0].value is None

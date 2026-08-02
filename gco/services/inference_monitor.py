@@ -1994,6 +1994,7 @@ class InferenceMonitor:
                     ),
                     spec=client.V1PodSpec(
                         service_account_name="gco-service-account",
+                        automount_service_account_token=False,
                         # The upstream mooncake_master launcher chmods its
                         # bundled binary (root-owned in the image) on startup, so
                         # the master must run as root: a non-root uid cannot
@@ -2499,21 +2500,17 @@ class InferenceMonitor:
                 client.V1EnvVar(name=VLLM_MOONCAKE_BOOTSTRAP_PORT_ENV, value=str(base_port))
             )
 
-        # Add init container to sync model from S3 if model_source is set
+        # Sync directly with literal argv so a model URI can never become
+        # shell syntax. ``aws s3 sync`` avoids retransferring unchanged
+        # objects on reruns while also repairing partial downloads.
         if model_source and model_source.startswith("s3://"):
             model_dest = f"/models/{name}"
             init_containers.append(
                 client.V1Container(
                     name="model-sync",
                     image="amazon/aws-cli:latest",
-                    command=["sh", "-c"],
-                    args=[
-                        f"if [ -d '{model_dest}' ] && [ \"$(ls -A '{model_dest}')\" ]; then "
-                        f"echo 'Model already cached at {model_dest}, skipping sync'; "
-                        f"else echo 'Syncing model from {model_source}...'; "
-                        f"aws s3 sync {model_source} {model_dest} --quiet; "
-                        f"echo 'Model sync complete'; fi"
-                    ],
+                    command=["aws"],
+                    args=["s3", "sync", model_source, model_dest, "--quiet"],
                     volume_mounts=[
                         client.V1VolumeMount(
                             name="model-storage",
@@ -2611,6 +2608,7 @@ class InferenceMonitor:
                     ),
                     spec=client.V1PodSpec(
                         service_account_name="gco-service-account",
+                        automount_service_account_token=False,
                         containers=[container],
                         init_containers=init_containers if init_containers else None,
                         tolerations=tolerations,
@@ -2982,6 +2980,7 @@ class InferenceMonitor:
                     metadata=client.V1ObjectMeta(labels=dict(labels)),
                     spec=client.V1PodSpec(
                         service_account_name="gco-service-account",
+                        automount_service_account_token=False,
                         containers=[container],
                         volumes=[
                             client.V1Volume(
