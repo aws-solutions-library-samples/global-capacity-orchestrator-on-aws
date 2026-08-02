@@ -43,14 +43,8 @@
 
 </details>
 
-**🤖 One command to a working agent — the easiest way to start:**
-
-```bash
-gco autopilot
-```
-
 <details>
-<summary>🤖 Autopilot recording — a real agent session, one command</summary>
+<summary>🤖 Autopilot recording — one command to a working agent, the easiest way to start</summary>
 
 ![GCO Autopilot — one command to a fully configured Claude Code session on Amazon Bedrock, grounded by the GCO MCP server](demo/autopilot.gif)
 
