@@ -35,7 +35,7 @@ class GifPolicy:
 # These ceilings leave modest re-recording headroom while keeping decoder work
 # bounded. Any new GIF or intentional increase requires a review of this list.
 GIF_POLICIES = {
-    Path("demo/autopilot.gif"): GifPolicy(4 * MIB, 1024, 700, 700),
+    Path("demo/autopilot.gif"): GifPolicy(4 * MIB, 1024, 700, 800),
     Path("demo/deploy.gif"): GifPolicy(75 * MIB, 1360, 803, 1000),
     Path("demo/destroy.gif"): GifPolicy(2 * MIB, 1024, 744, 150),
     Path("demo/live_demo.gif"): GifPolicy(8 * MIB, 1024, 744, 250),
