@@ -107,14 +107,20 @@ To use with your fork, edit `cdk.json`:
 {
   "context": {
     "github_repo": "your-org/your-repo",
-    "github_branch": "*"
+    "github_branch": "main"
   }
 }
 ```
 
 Then redeploy from `.github/oidc_provider`: `cdk deploy GCOGitHubOIDCStack`
 
-Setting `github_branch` to `"main"` restricts the role so only the main branch can assume it. `"*"` (the default) allows any branch or tag.
+The default `github_branch` value is `"main"`, matching this upstream
+repository. The dependency workflow itself runs only on
+`github.event.repository.default_branch`, so a fork whose default branch is
+named differently (for example, `trunk`) must set `github_branch` to that exact
+name before deployment. Setting it to `"*"` is an explicit opt-in that allows
+any branch or tag and should be reserved for a role whose permissions and
+environment protections make that broader trust acceptable.
 
 ## Using the Role in Workflows
 

@@ -7,7 +7,7 @@
 # Triggers: push: main, pull_request, workflow_dispatch.
 #
 # Jobs (alphabetical by display name):
-#   - integration:dev-alias:docker                — install latest Docker, build gco-dev, prove the generated `gco` alias runs
+#   - integration:dev-alias:docker                — verify runner Docker, build gco-dev, prove the generated `gco` alias runs
 #   - integration:dev-alias:finch                 — install latest Finch (rootful), build gco-dev, prove the generated `gco` alias runs
 #   - integration:dev-alias:none                  — prove setup-dev-alias.sh refuses cleanly when no runtime is installed
 #   - integration:dev-alias:podman                — install latest Podman, build gco-dev, prove the generated `gco` alias runs
@@ -66,6 +66,7 @@ jobs:
       # (lambda/helm-installer/Dockerfile); that RUN-line copy is now also
       # covered by the consistency check via extract_helm_installer_pins.
       HELM_VERSION: "v4.2.3"
+      HELM_SHA256: "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
@@ -78,12 +79,22 @@ jobs:
       - name: Install Helm
         # Pin to the SAME helm the installer Lambda ships (see
         # lambda/helm-installer/Dockerfile) so CI validates against the exact
-        # binary that performs the real install. Bump both in lockstep.
+        # authenticated binary that performs the real install. Bump the
+        # version and checksum together in every installation path.
         run: |
           set -euo pipefail
-          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | tar xz
-          sudo mv linux-amd64/helm /usr/local/bin/helm
-          rm -rf linux-amd64
+          archive="${RUNNER_TEMP}/helm.tar.gz"
+          install_dir="${RUNNER_TEMP}/helm-install"
+          curl --fail --show-error --location --retry 3 \
+            --output "${archive}" \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${archive}" | sha256sum -c -
+          mkdir -p "${install_dir}"
+          tar -xzf "${archive}" -C "${install_dir}" \
+            --strip-components=1 --no-same-owner linux-amd64/helm
+          sudo install -m 0755 "${install_dir}/helm" /usr/local/bin/helm
+          rm -f "${archive}" "${install_dir}/helm"
+          rmdir "${install_dir}"
           helm version --short
       - name: Validate charts.yaml (resolve + render every pinned chart)
         run: python3 .github/scripts/validate_helm_charts.py --mode online --verbose
@@ -99,6 +110,7 @@ jobs:
       # "CI tooling" section of dependency-scan.sh, the same way
       # TRIVY_VERSION / HELM_VERSION are.
       KUBECONFORM_VERSION: "v0.8.0"
+      KUBECONFORM_SHA256: "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
@@ -112,11 +124,17 @@ jobs:
       - name: Install pinned kubeconform
         run: |
           set -euo pipefail
-          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
-            -o /tmp/kubeconform.tar.gz
-          tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
-          sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
-          rm -f /tmp/kubeconform.tar.gz
+          archive="${RUNNER_TEMP}/kubeconform.tar.gz"
+          install_dir="${RUNNER_TEMP}/kubeconform-install"
+          curl --fail --show-error --location --retry 3 \
+            --output "${archive}" \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  ${archive}" | sha256sum -c -
+          mkdir -p "${install_dir}"
+          tar -xzf "${archive}" -C "${install_dir}" --no-same-owner kubeconform
+          sudo install -m 0755 "${install_dir}/kubeconform" /usr/local/bin/kubeconform
+          rm -f "${archive}" "${install_dir}/kubeconform"
+          rmdir "${install_dir}"
           kubeconform -v
       - name: Validate Kubernetes manifest schemas (kubeconform)
         # Schema-level validation, not just YAML syntax: renders {{PLACEHOLDER}}
@@ -754,8 +772,12 @@ jobs:
     timeout-minutes: 40
     env:
       # kind does not provide the EKS managed add-on used in production. Pin
-      # upstream Metrics Server so the HPA can prove ScalingActive in CI.
+      # upstream test-cluster components, authenticate their manifests, and
+      # expose their versions to the monthly dependency drift scan.
       METRICS_SERVER_VERSION: "v0.9.0"
+      METRICS_SERVER_SHA256: "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b"
+      CALICO_VERSION: "v3.31.5"
+      CALICO_SHA256: "d45842abe9f95afb4d346278eafb2e454dacdfb502d48cf1d5cede71a9046997"
     steps:
       - uses: actions/checkout@v7
       - name: Reclaim runner disk space before Kind image builds
@@ -796,13 +818,18 @@ jobs:
         # inside the job's 30m timeout-minutes.
         run: |
           set -euo pipefail
-          kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.31.5/manifests/calico.yaml
+          calico_manifest="${RUNNER_TEMP}/calico.yaml"
+          curl --fail --show-error --location --retry 3 \
+            --output "${calico_manifest}" \
+            "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
+          echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -
+          kubectl apply -f "${calico_manifest}"
 
           attempts=3
           for i in $(seq 1 "${attempts}"); do
             echo "::group::Calico rollout attempt ${i}/${attempts}"
             # Re-apply is idempotent; nudges anything that failed to schedule.
-            kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.31.5/manifests/calico.yaml
+            kubectl apply -f "${calico_manifest}"
             if kubectl -n kube-system rollout status daemonset/calico-node --timeout=4m \
                && kubectl -n kube-system rollout status deployment/calico-kube-controllers --timeout=2m; then
               echo "Calico is ready."
@@ -833,8 +860,12 @@ jobs:
         # certificate is not signed for the container's InternalIP.
         run: |
           set -euo pipefail
-          kubectl apply -f \
+          metrics_manifest="${RUNNER_TEMP}/metrics-server.yaml"
+          curl --fail --show-error --location --retry 3 \
+            --output "${metrics_manifest}" \
             "https://github.com/kubernetes-sigs/metrics-server/releases/download/${METRICS_SERVER_VERSION}/components.yaml"
+          echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -
+          kubectl apply -f "${metrics_manifest}"
           kubectl -n kube-system patch deployment metrics-server --type=json \
             --patch='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
           kubectl -n kube-system rollout status deployment/metrics-server --timeout=3m
@@ -1256,10 +1287,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - name: Install the latest Docker CE
+      - name: Verify the preinstalled Docker runtime
+        # GitHub-hosted runners include Docker. Verify that trusted runner
+        # surface instead of executing a mutable internet script as root.
         run: |
           set -euo pipefail
-          curl -fsSL https://get.docker.com | sudo sh
           docker version
       - name: Live-prove the generated gco function against Docker
         # Runner user is in the docker group, so the emitted `docker run`
@@ -1348,8 +1380,26 @@ jobs:
             containerd.io docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin \
             moby-engine moby-cli moby-containerd moby-runc moby-buildx moby-compose 2>/dev/null || true
           sudo apt-get autoremove -y 2>/dev/null || true
-          curl -fsSL https://artifact.runfinch.com/deb/GPG_KEY.pub \
-            | sudo gpg --dearmor -o /usr/share/keyrings/runfinch-finch-archive-keyring.gpg
+          finch_key="${RUNNER_TEMP}/runfinch-key.pub"
+          curl --fail --show-error --location --retry 3 \
+            --output "${finch_key}" \
+            https://artifact.runfinch.com/deb/GPG_KEY.pub
+          mapfile -t primary_fingerprints < <(
+            gpg --batch --show-keys --with-colons "${finch_key}" \
+              | awk -F: '$1 == "pub" { want_fingerprint = 1; next }
+                           want_fingerprint && $1 == "fpr" { print $10; want_fingerprint = 0 }'
+          )
+          expected_fingerprint="C97195B13509CD7BD64D7F085E9EEE296292ACB8"
+          if [ "${#primary_fingerprints[@]}" -ne 1 ] \
+             || [ "${primary_fingerprints[0]}" != "${expected_fingerprint}" ]; then
+            echo "::error::Unexpected Finch repository signing-key fingerprint" >&2
+            printf 'Observed primary fingerprints: %s\n' "${primary_fingerprints[*]:-none}" >&2
+            exit 1
+          fi
+          sudo gpg --batch --yes --dearmor \
+            --output /usr/share/keyrings/runfinch-finch-archive-keyring.gpg \
+            "${finch_key}"
+          rm -f "${finch_key}"
           echo "deb [signed-by=/usr/share/keyrings/runfinch-finch-archive-keyring.gpg arch=amd64] https://artifact.runfinch.com/deb noble main" \
             | sudo tee /etc/apt/sources.list.d/runfinch-finch.list
           sudo apt-get update

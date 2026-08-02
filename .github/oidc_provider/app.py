@@ -12,8 +12,8 @@ Configuration is read from ``cdk.json`` context values:
 
     github_repo    — GitHub repository in owner/repo format
                      (default: awslabs/global-capacity-orchestrator-on-aws)
-    github_branch  — Branch restriction; "*" = any branch/tag,
-                     "main" = main only (default: *)
+    github_branch  — Branch restriction; "main" = main only (default),
+                     "*" = explicit opt-in to any branch/tag
 """
 
 import aws_cdk as cdk
@@ -25,7 +25,7 @@ app = cdk.App()
 github_repo = (
     app.node.try_get_context("github_repo") or "awslabs/global-capacity-orchestrator-on-aws"
 )
-github_branch = app.node.try_get_context("github_branch") or "*"
+github_branch = app.node.try_get_context("github_branch") or "main"
 
 GCOGitHubOIDCStack(
     app,

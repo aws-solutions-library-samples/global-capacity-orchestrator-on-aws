@@ -95,6 +95,14 @@ class AdminApiKeySecretError(Exception):
         super().__init__(f"Admin API key Secret {named} is unusable: {reason}")
 
 
+# Official AWS CLI v2 multi-architecture image. Keep the readable release tag
+# and immutable manifest-list digest together: both amd64 and arm64 inference
+# nodes resolve through this single verified index.
+AWS_CLI_IMAGE = (
+    "public.ecr.aws/aws-cli/aws-cli:2.36.14@"
+    "sha256:72180b996fad939e764434d9a69a9512ed699a061cd5db198feeb2e9533fd750"
+)
+
 # Valid TCP port boundaries for KV-transfer bootstrap ports.
 MIN_BOOTSTRAP_PORT = 1024
 MAX_BOOTSTRAP_PORT = 65535
@@ -2508,7 +2516,7 @@ class InferenceMonitor:
             init_containers.append(
                 client.V1Container(
                     name="model-sync",
-                    image="amazon/aws-cli:latest",
+                    image=AWS_CLI_IMAGE,
                     command=["aws"],
                     args=["s3", "sync", model_source, model_dest, "--quiet"],
                     volume_mounts=[

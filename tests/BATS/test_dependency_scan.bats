@@ -709,6 +709,20 @@ EOF
     rm -f "$tmpfile"
 }
 
+@test "is_full_git_commit_sha: accepts complete SHA-1 and SHA-256 ids" {
+    sha1="$(printf 'a%.0s' {1..40})"
+    sha256="$(printf 'b%.0s' {1..64})"
+    is_full_git_commit_sha "$sha1"
+    is_full_git_commit_sha "$sha256"
+}
+
+@test "is_full_git_commit_sha: rejects short hashes and mutable refs" {
+    ! is_full_git_commit_sha "0123456789abcdef"
+    ! is_full_git_commit_sha "main"
+    ! is_full_git_commit_sha "stable"
+    ! is_full_git_commit_sha "v1.2.3"
+}
+
 # ── extract_k8s_version ─────────────────────────────────────────────────────
 
 @test "extract_k8s_version: reads version from cdk.json" {
@@ -939,6 +953,40 @@ EOF
     run extract_constant_value "FOO" "$tmpfile"
     [ "$status" -eq 0 ]
     [ "$output" = "real" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_python_string_constant: reads the immutable AWS CLI image" {
+    run extract_python_string_constant AWS_CLI_IMAGE gco/services/inference_monitor.py
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^public\.ecr\.aws/aws-cli/aws-cli:[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$ ]]
+}
+
+@test "extract_python_string_constant: folds adjacent literals without importing" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+IMAGE = (
+    "registry.example/image:1.2.3@"
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+)
+raise RuntimeError("must not execute")
+EOF
+    run extract_python_string_constant IMAGE "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$output" = "registry.example/image:1.2.3@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_python_string_constant: empty for missing or malformed modules" {
+    run extract_python_string_constant IMAGE /nonexistent/module.py
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+
+    tmpfile="$(mktemp)"
+    printf '%s\n' 'IMAGE = (' > "$tmpfile"
+    run extract_python_string_constant IMAGE "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
     rm -f "$tmpfile"
 }
 
@@ -1579,6 +1627,16 @@ SHIM
     [[ "$output" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
+@test "extract_workflow_env_pin: reads actionlint and Calico maintenance pins" {
+    run extract_workflow_env_pin ACTIONLINT_VERSION
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+    run extract_workflow_env_pin CALICO_VERSION
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
 @test "extract_workflow_env_pin: empty for an unset var" {
     run extract_workflow_env_pin NONEXISTENT_VERSION_XYZ
     [ "$status" -eq 0 ]
@@ -1762,9 +1820,27 @@ EOF
     rm -f "$tmpfile"
 }
 
-# ── check_lockfile_freshness ────────────────────────────────────────────────
+# ── dependency scan completeness + lockfile freshness ───────────────────────
 
-@test "check_lockfile_freshness: the real repo lock has no missing direct deps" {
+@test "dependency_scan_is_complete: succeeds only with no reasons or skips" {
+    reasons="$(mktemp)"
+    run dependency_scan_is_complete "$reasons" "" ""
+    [ "$status" -eq 0 ]
+    printf '%s\n' "registry lookup failed" > "$reasons"
+    run dependency_scan_is_complete "$reasons" "" ""
+    [ "$status" -ne 0 ]
+    : > "$reasons"
+    run dependency_scan_is_complete "$reasons" "" "explicit skip"
+    [ "$status" -ne 0 ]
+    rm -f "$reasons"
+}
+
+@test "dependency_scan_is_complete: fails closed without its reason channel" {
+    run dependency_scan_is_complete /nonexistent/dependency-scan-reasons ""
+    [ "$status" -ne 0 ]
+}
+
+@test "check_lockfile_freshness: the real repo lock matches all direct pins" {
     run check_lockfile_freshness pyproject.toml requirements-lock.txt
     [ "$status" -eq 0 ]
     [ -z "$output" ]
@@ -1780,14 +1856,25 @@ EOF
     printf 'boto3==1.0.0\n' > "$tmpdir/lock.txt"
     run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"totally-missing-pkg"* ]]
-    [[ "$output" != *"boto3"* ]]
-    rm -rf "$tmpdir"
+    [ "$output" = "totally-missing-pkg|2.0.0|<missing>" ]
+    rm -r "$tmpdir"
 }
 
-@test "check_lockfile_freshness: normalises names before comparing (no false positive)" {
-    # A dep written with '.'/'_' in pyproject and '-' in the lock (PEP 503)
-    # must be treated as present.
+@test "check_lockfile_freshness: reports a stale direct version" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/pyproject.toml" <<'EOF'
+[project]
+name = "demo"
+dependencies = ["boto3==2.0.0"]
+EOF
+    printf 'boto3==1.0.0\n' > "$tmpdir/lock.txt"
+    run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
+    [ "$status" -eq 0 ]
+    [ "$output" = "boto3|2.0.0|1.0.0" ]
+    rm -r "$tmpdir"
+}
+
+@test "check_lockfile_freshness: normalises names before comparing" {
     tmpdir="$(mktemp -d)"
     cat > "$tmpdir/pyproject.toml" <<'EOF'
 [project]
@@ -1798,13 +1885,162 @@ EOF
     run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
-    rm -rf "$tmpdir"
+    rm -r "$tmpdir"
 }
 
-@test "check_lockfile_freshness: empty for missing files" {
-    run check_lockfile_freshness /nonexistent/pyproject.toml /nonexistent/lock.txt
+@test "check_lockfile_freshness: accepts whitespace around an exact pin" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/pyproject.toml" <<'EOF'
+[project]
+name = "demo"
+dependencies = ["boto3 == 1.0.0"]
+EOF
+    printf 'boto3==1.0.0\n' > "$tmpdir/lock.txt"
+    run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+    rm -r "$tmpdir"
+}
+
+@test "check_lockfile_freshness: accepts a concrete PEP 440 version" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/pyproject.toml" <<'EOF'
+[project]
+name = "demo"
+dependencies = ["demo-pkg==1!2.0rc1.post2+cpu"]
+EOF
+    printf 'demo-pkg==1!2.0rc1.post2+cpu\n' > "$tmpdir/lock.txt"
+    run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -r "$tmpdir"
+}
+
+@test "check_lockfile_freshness: permits marker-specific versions" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/pyproject.toml" <<'EOF'
+[project]
+name = "demo"
+dependencies = [
+    "demo-pkg == 1.0.0 ; python_version < '3.14'",
+    "demo-pkg==2.0.0; python_version >= '3.14'",
+]
+EOF
+    cat > "$tmpdir/lock.txt" <<'EOF'
+demo-pkg==1.0.0;python_version < '3.14'
+demo_pkg == 2.0.0 ; python_version>='3.14'
+EOF
+    run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -r "$tmpdir"
+}
+
+@test "check_lockfile_freshness: normalises marker whitespace" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/pyproject.toml" <<'EOF'
+[project]
+name = "demo"
+dependencies = [
+    "boto3==1.0.0 ; python_version < '3.14' and implementation_name == 'cpython'",
+]
+EOF
+    printf "%s\n" \
+        "boto3 == 1.0.0;  python_version<'3.14'  and  implementation_name == 'cpython'" \
+        > "$tmpdir/lock.txt"
+    run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -r "$tmpdir"
+}
+
+@test "check_lockfile_freshness: normalises equivalent marker quote styles" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/pyproject.toml" <<'EOF'
+[project]
+name = "demo"
+dependencies = ['demo-pkg==1.0.0; python_version < "3.14"']
+EOF
+    printf "%s\n" "demo-pkg==1.0.0; python_version < '3.14'" > "$tmpdir/lock.txt"
+    run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -r "$tmpdir"
+}
+
+@test "check_lockfile_freshness: reports stale versions by marker identity" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/pyproject.toml" <<'EOF'
+[project]
+name = "demo"
+dependencies = [
+    "demo-pkg==1.0.0; python_version < '3.14'",
+    "demo-pkg==2.0.0; python_version >= '3.14'",
+]
+EOF
+    cat > "$tmpdir/lock.txt" <<'EOF'
+demo-pkg==0.9.0; python_version < '3.14'
+demo-pkg==2.0.0; python_version >= '3.14'
+EOF
+    run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
+    [ "$status" -eq 0 ]
+    [ "$output" = 'demo-pkg;python_version<"3.14"|1.0.0|0.9.0' ]
+    rm -r "$tmpdir"
+}
+
+@test "check_lockfile_freshness: rejects non-concrete equality constraints" {
+    tmpdir="$(mktemp -d)"
+    for spec in \
+        "demo-pkg==1.*" \
+        "demo-pkg==1.0.0,!=1.0.1" \
+        "demo-pkg===1.0.0"; do
+        printf '[project]\nname = "demo"\ndependencies = ["%s"]\n' "$spec" \
+            > "$tmpdir/pyproject.toml"
+        printf '%s\n' "$spec" > "$tmpdir/lock.txt"
+        run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
+        [ "$status" -ne 0 ]
+    done
+    rm -r "$tmpdir"
+}
+
+@test "check_lockfile_freshness: fails closed for missing files" {
+    run check_lockfile_freshness /nonexistent/pyproject.toml /nonexistent/lock.txt
+    [ "$status" -ne 0 ]
+}
+
+@test "check_lockfile_freshness: fails closed for malformed TOML" {
+    tmpdir="$(mktemp -d)"
+    printf '%s\n' '[project' > "$tmpdir/pyproject.toml"
+    printf 'boto3==1.0.0\n' > "$tmpdir/lock.txt"
+    run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
+    [ "$status" -ne 0 ]
+    rm -r "$tmpdir"
+}
+
+@test "check_lockfile_freshness: fails closed for malformed lock records" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/pyproject.toml" <<'EOF'
+[project]
+name = "demo"
+dependencies = ["boto3==1.0.0"]
+EOF
+    printf 'not a pinned requirement\n' > "$tmpdir/lock.txt"
+    run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
+    [ "$status" -ne 0 ]
+    rm -r "$tmpdir"
+}
+
+@test "check_lockfile_freshness: fails closed for non-exact direct pins" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/pyproject.toml" <<'EOF'
+[project]
+name = "demo"
+dependencies = ["boto3>=1.0.0"]
+EOF
+    printf 'boto3==1.0.0\n' > "$tmpdir/lock.txt"
+    run check_lockfile_freshness "$tmpdir/pyproject.toml" "$tmpdir/lock.txt"
+    [ "$status" -ne 0 ]
+    rm -r "$tmpdir"
 }
 
 # ── extract_npm_direct_pins ──────────────────────────────────────────────────
@@ -2080,6 +2316,20 @@ SHIM
     rm -rf "$shimdir"
     [ "$status" -eq 0 ]
     [ "$output" = "ok|1.2.3" ]
+}
+
+@test "get_registry_package_status: valid JSON without a version is incomplete" {
+    shimdir="$(mktemp -d)"
+    make_registry_curl_shim "$shimdir"
+    GCO_FAKE_HTTP_CODE=200 GCO_FAKE_BODY='{}' \
+        PATH="$shimdir:$PATH" run get_registry_package_status npm some-package
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    GCO_FAKE_HTTP_CODE=200 GCO_FAKE_BODY='{"info":{},"urls":[]}' \
+        PATH="$shimdir:$PATH" run get_registry_package_status pypi some-package
+    rm -r "$shimdir"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }
 
 @test "get_registry_package_status: deprecated npm package reports the message" {

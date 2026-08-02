@@ -20,7 +20,7 @@ from stack import GCOGitHubOIDCStack
 
 def _synth_stack(
     github_repo: str = "awslabs/global-capacity-orchestrator-on-aws",
-    github_branch: str = "*",
+    github_branch: str = "main",
 ) -> Template:
     """Synthesize the OIDC stack and return a CDK Template for assertions."""
     app = cdk.App()
@@ -81,9 +81,65 @@ class TestOIDCProviderConfig:
 class TestOIDCTrustPolicy:
     """Verify the IAM role trust policy is correctly scoped."""
 
-    def test_default_repo_wildcard_branch(self):
-        """Default config should use StringLike with repo:*."""
+    def test_default_repo_main_branch(self):
+        """Default config should require the exact main branch subject."""
         template = _synth_stack()
+        template.has_resource_properties(
+            "AWS::IAM::Role",
+            {
+                "AssumeRolePolicyDocument": {
+                    "Statement": Match.array_with(
+                        [
+                            Match.object_like(
+                                {
+                                    "Condition": Match.object_like(
+                                        {
+                                            "StringEquals": Match.object_like(
+                                                {
+                                                    "token.actions.githubusercontent.com:sub": "repo:awslabs/global-capacity-orchestrator-on-aws:ref:refs/heads/main"
+                                                }
+                                            )
+                                        }
+                                    ),
+                                }
+                            )
+                        ]
+                    )
+                }
+            },
+        )
+
+    def test_specific_branch_uses_string_equals(self):
+        """An explicit branch name should be represented exactly."""
+        template = _synth_stack(github_branch="release")
+        template.has_resource_properties(
+            "AWS::IAM::Role",
+            {
+                "AssumeRolePolicyDocument": {
+                    "Statement": Match.array_with(
+                        [
+                            Match.object_like(
+                                {
+                                    "Condition": Match.object_like(
+                                        {
+                                            "StringEquals": Match.object_like(
+                                                {
+                                                    "token.actions.githubusercontent.com:sub": "repo:awslabs/global-capacity-orchestrator-on-aws:ref:refs/heads/release"
+                                                }
+                                            ),
+                                        }
+                                    ),
+                                }
+                            )
+                        ]
+                    )
+                }
+            },
+        )
+
+    def test_explicit_wildcard_uses_string_like(self):
+        """Wildcard trust remains available only as an explicit opt-in."""
+        template = _synth_stack(github_branch="*")
         template.has_resource_properties(
             "AWS::IAM::Role",
             {
@@ -107,9 +163,9 @@ class TestOIDCTrustPolicy:
             },
         )
 
-    def test_specific_branch_uses_string_equals(self):
-        """When github_branch is set, trust policy should use StringEquals."""
-        template = _synth_stack(github_branch="main")
+    def test_custom_repo_reflected_in_trust(self):
+        """Custom github_repo should appear in the main-branch subject."""
+        template = _synth_stack(github_repo="my-org/my-fork")
         template.has_resource_properties(
             "AWS::IAM::Role",
             {
@@ -122,35 +178,9 @@ class TestOIDCTrustPolicy:
                                         {
                                             "StringEquals": Match.object_like(
                                                 {
-                                                    "token.actions.githubusercontent.com:sub": "repo:awslabs/global-capacity-orchestrator-on-aws:ref:refs/heads/main"
+                                                    "token.actions.githubusercontent.com:sub": "repo:my-org/my-fork:ref:refs/heads/main"
                                                 }
-                                            ),
-                                        }
-                                    ),
-                                }
-                            )
-                        ]
-                    )
-                }
-            },
-        )
-
-    def test_custom_repo_reflected_in_trust(self):
-        """Custom github_repo should appear in the trust policy subject claim."""
-        template = _synth_stack(github_repo="my-org/my-fork")
-        template.has_resource_properties(
-            "AWS::IAM::Role",
-            {
-                "AssumeRolePolicyDocument": {
-                    "Statement": Match.array_with(
-                        [
-                            Match.object_like(
-                                {
-                                    "Condition": Match.object_like(
-                                        {
-                                            "StringLike": {
-                                                "token.actions.githubusercontent.com:sub": "repo:my-org/my-fork:*"
-                                            }
+                                            )
                                         }
                                     ),
                                 }

@@ -3,6 +3,6 @@
   "context": {
     "@aws-cdk/core:stackRelativeExports": true,
     "github_repo": "awslabs/global-capacity-orchestrator-on-aws",
-    "github_branch": "*"
+    "github_branch": "main"
   }
 }

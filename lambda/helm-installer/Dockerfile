@@ -24,18 +24,35 @@ RUN echo "dnf security epoch ${DNF_SECURITY_EPOCH}" \
     && dnf upgrade -y --releasever=latest \
     && dnf clean all
 
-# Install Helm
+# Install Helm from the pinned release after authenticating the archive.
+# Keep this non-overridable trust anchor synchronized with the exact amd64
+# asset named below.
 # hadolint ignore=DL3041
-RUN dnf install -y tar gzip && \
-    curl -fsSL https://get.helm.sh/helm-v4.2.3-linux-amd64.tar.gz | tar xz && \
-    mv linux-amd64/helm /usr/local/bin/helm && \
-    rm -rf linux-amd64 && \
-    dnf clean all
+RUN dnf install -y tar gzip \
+    && curl --fail --show-error --location --retry 3 \
+        --output /tmp/helm.tar.gz \
+        https://get.helm.sh/helm-v4.2.3-linux-amd64.tar.gz \
+    && echo "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c  /tmp/helm.tar.gz" \
+        | sha256sum -c - \
+    && mkdir -p /tmp/helm-install \
+    && tar -xzf /tmp/helm.tar.gz -C /tmp/helm-install \
+        --strip-components=1 --no-same-owner linux-amd64/helm \
+    && install -m 0755 /tmp/helm-install/helm /usr/local/bin/helm \
+    && helm version --short \
+    && rm -f /tmp/helm.tar.gz /tmp/helm-install/helm \
+    && rmdir /tmp/helm-install \
+    && dnf clean all
 
-# Install kubectl for cluster connectivity verification.
-RUN curl -LO "https://dl.k8s.io/release/v1.36.3/bin/linux/amd64/kubectl" && \
-    chmod +x kubectl && \
-    mv kubectl /usr/local/bin/kubectl
+# Install kubectl for cluster connectivity verification after authenticating
+# the exact release binary against a non-overridable trust anchor.
+RUN curl --fail --show-error --location --retry 3 \
+        --output /tmp/kubectl \
+        "https://dl.k8s.io/release/v1.36.3/bin/linux/amd64/kubectl" \
+    && echo "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336  /tmp/kubectl" \
+        | sha256sum -c - \
+    && install -m 0755 /tmp/kubectl /usr/local/bin/kubectl \
+    && rm -f /tmp/kubectl \
+    && kubectl version --client=true
 
 # Install Python dependencies.
 #

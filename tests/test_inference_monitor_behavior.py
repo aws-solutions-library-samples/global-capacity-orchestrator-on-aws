@@ -10,6 +10,7 @@ import pytest
 from kubernetes.client.rest import ApiException
 
 from gco.services.inference_monitor import (
+    AWS_CLI_IMAGE,
     MOONCAKE_BOOTSTRAP_BASE_PORT,
     VLLM_MOONCAKE_BOOTSTRAP_PORT_ENV,
     AdminApiKeySecretError,
@@ -659,6 +660,7 @@ def test_deployment_builder_uses_literal_model_sync_argv_without_api_token() -> 
 
     assert pod.service_account_name == "gco-service-account"
     assert pod.automount_service_account_token is False
+    assert model_sync.image == AWS_CLI_IMAGE
     assert model_sync.command == ["aws"]
     assert model_sync.args == [
         "s3",

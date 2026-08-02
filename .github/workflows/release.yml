@@ -86,10 +86,9 @@ jobs:
           git add VERSION gco/_version.py cli/__init__.py
           git commit -m "Release v${NEW_VERSION}"
           git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
-          # Push back to the exact fully qualified protected branch selected
-          # by workflow_dispatch; do not rely on ref-name destination guessing.
-          git push origin "HEAD:${GITHUB_REF}"
-          git push origin "v${NEW_VERSION}"
+          # Publish the commit and its annotated tag as one transaction so a
+          # rejected ref cannot leave a branch-only or tag-only release behind.
+          git push --atomic origin "HEAD:${GITHUB_REF}" "refs/tags/v${NEW_VERSION}"
       - name: Create GitHub Release with generated notes
         env:
           GH_TOKEN: ${{ github.token }}

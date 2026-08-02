@@ -490,6 +490,15 @@ for entry in (data or {}).get('repos', []) or []:
 " "$file" 2>/dev/null
 }
 
+# is_full_git_commit_sha <revision>
+#
+# Returns success only for a complete SHA-1 or SHA-256 object id. Pre-commit
+# accepts branch names and floating labels in ``rev`` too, so merely being
+# non-semver is not enough to call a ref immutable.
+is_full_git_commit_sha() {
+  [[ "$1" =~ ^[0-9a-fA-F]{40}$ || "$1" =~ ^[0-9a-fA-F]{64}$ ]]
+}
+
 # extract_emr_versions <file>
 #
 # Extracts the pinned EMR Serverless release label from the constants module.
@@ -537,6 +546,34 @@ with open(sys.argv[2]) as f:
 m = re.search(r'^' + re.escape(name) + r'\s*=\s*\"([^\"]+)\"', text, re.MULTILINE)
 if m:
     print(m.group(1))
+" "$name" "$file" 2>/dev/null
+}
+
+# extract_python_string_constant <name> <python_path>
+#
+# Parses a module without importing or executing it and prints one top-level
+# string constant. Adjacent/parenthesized literals are already folded into an
+# ``ast.Constant`` by Python, so this safely handles immutable image references
+# split across lines for readability.
+extract_python_string_constant() {
+  local name="$1"
+  local file="$2"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import ast, sys
+try:
+    with open(sys.argv[2], encoding='utf-8') as handle:
+        module = ast.parse(handle.read(), filename=sys.argv[2])
+except (OSError, SyntaxError):
+    raise SystemExit(0)
+for node in module.body:
+    if not isinstance(node, ast.Assign):
+        continue
+    if not any(isinstance(target, ast.Name) and target.id == sys.argv[1] for target in node.targets):
+        continue
+    if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+        print(node.value.value)
+    break
 " "$name" "$file" 2>/dev/null
 }
 
@@ -1449,60 +1486,176 @@ if m:
 " "$file" 2>/dev/null
 }
 
+# dependency_scan_is_complete <incomplete-reasons-file> [skip-reason ...]
+#
+# Returns success only when the durable incomplete-reason channel exists and
+# is empty and every section-specific skip reason is empty. The driver uses
+# this single predicate for its ``scan_complete`` output, so a failed lookup,
+# parser, or explicit skip can never close the rolling dependency issue.
+dependency_scan_is_complete() {
+  local incomplete_reasons_file="$1"
+  shift
+
+  [ -f "$incomplete_reasons_file" ] || return 1
+  [ ! -s "$incomplete_reasons_file" ] || return 1
+
+  local skip_reason
+  for skip_reason in "$@"; do
+    [ -z "$skip_reason" ] || return 1
+  done
+}
+
 # check_lockfile_freshness [pyproject] [lockfile]
 #
-# Prints one PEP-503-normalised direct-dependency name per line for every
-# dep pinned in ``pyproject.toml`` that is ABSENT from ``requirements-lock.txt``
-# — the signature of "added/renamed a dep but forgot to re-run pip-compile".
-# The lock is compiled with ``--all-extras``, so every direct dep (base *and*
-# every optional-dependencies group) is expected to appear. Deterministic and
-# offline: it checks presence only, never version equality, so it never
-# false-positives on the legitimate transitive pins pip-compile adds.
+# Prints ``normalised-name[;marker]|expected-version|locked-version`` for each
+# exact direct dependency whose compiled lock entry is missing or has a
+# different version. ``locked-version`` is ``<missing>`` when no matching
+# name-and-marker entry exists. Both base and optional dependency groups are
+# checked; self-referential ``gco-cli`` extras are intentionally excluded.
 #
-# Empty output when either file is missing or every direct dep is present.
+# Whitespace around ``==`` and marker operators is insignificant. Marker text
+# remains part of the comparison identity so mutually exclusive platform pins
+# can carry different exact versions without being treated as conflicts.
+# Returns nonzero for missing/malformed input, non-exact direct dependencies,
+# conflicting pins with the same marker, or unparseable lock records.
 check_lockfile_freshness() {
   local pyproject="${1:-pyproject.toml}"
   local lockfile="${2:-requirements-lock.txt}"
-  [ -f "$pyproject" ] || return 0
-  [ -f "$lockfile" ] || return 0
   python3 -c "
 import re, sys, tomllib
+
 pyproject, lockfile = sys.argv[1], sys.argv[2]
+
+def fail(message):
+    print(f'lockfile freshness error: {message}', file=sys.stderr)
+    raise SystemExit(2)
+
 try:
-    with open(pyproject, 'rb') as f:
-        data = tomllib.load(f)
-except Exception:
-    sys.exit(0)
-project = data.get('project', {}) or {}
-deps = list(project.get('dependencies', []) or [])
-for group in (project.get('optional-dependencies', {}) or {}).values():
-    deps.extend(group or [])
+    with open(pyproject, 'rb') as handle:
+        data = tomllib.load(handle)
+except (OSError, tomllib.TOMLDecodeError) as exc:
+    fail(f'cannot read {pyproject}: {exc}')
+
+project = data.get('project')
+if not isinstance(project, dict):
+    fail(f'{pyproject} has no valid [project] table')
+base_dependencies = project.get('dependencies', [])
+optional_dependencies = project.get('optional-dependencies', {})
+if not isinstance(base_dependencies, list) or not isinstance(optional_dependencies, dict):
+    fail(f'{pyproject} dependency tables have invalid types')
 
 def norm(name):
     return re.sub(r'[-_.]+', '-', name).lower()
 
-names = set()
-for spec in deps:
+def canonical_marker(marker, source):
+    marker = (marker or '').strip()
+    if not marker:
+        return ''
+    if '|' in marker:
+        fail(f'{source} marker contains an unsupported pipe character')
+    result = []
+    quote = None
+    escaped = False
+    for character in marker:
+        if quote is not None:
+            result.append(character)
+            if escaped:
+                escaped = False
+            elif character == '\\\\':
+                escaped = True
+            elif character == quote:
+                # PEP 508 treats single- and double-quoted marker values as
+                # equivalent. Emit one quote style for identity comparison.
+                result[-1] = '\"'
+                quote = None
+        elif character in ('\"', \"'\"):
+            quote = character
+            result.append('\"')
+        elif not character.isspace():
+            result.append(character)
+    if quote is not None:
+        fail(f'{source} marker has an unterminated quoted value')
+    return ''.join(result)
+
+exact_requirement = re.compile(
+    r'\\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)\\s*'
+    r'(?:\\[\\s*[A-Za-z0-9._-]+(?:\\s*,\\s*[A-Za-z0-9._-]+)*\\s*\\])?\\s*'
+    r'==\\s*(?P<version>[^\\s;]+)\\s*'
+    r'(?:;\\s*(?P<marker>.+?))?\\s*'
+)
+# A concrete PEP-440-shaped literal may carry an epoch, pre/post/dev suffix,
+# or local version, but never a wildcard, another comparator, or a comma-
+# separated clause. This deliberately rejects ``===`` arbitrary equality.
+concrete_version = re.compile(r'v?(?:[0-9]+!)?[0-9]+[A-Za-z0-9._+-]*')
+
+def parse_exact(spec, source):
     if not isinstance(spec, str):
-        continue
-    name = re.split(r'[\\[=!<>;~ ]', spec, maxsplit=1)[0].strip()
-    if not name or name.lower() == 'gco-cli':
-        continue
-    names.add(norm(name))
+        fail(f'{source} contains a non-string dependency')
+    name_match = re.match(r'^\\s*([A-Za-z0-9][A-Za-z0-9._-]*)', spec)
+    if not name_match:
+        fail(f'{source} contains an invalid dependency: {spec!r}')
+    name = norm(name_match.group(1))
+    if name == 'gco-cli':
+        return None
+    match = exact_requirement.fullmatch(spec)
+    if not match:
+        fail(f'{source} dependency is not an exact == pin: {spec!r}')
+    version = match.group('version')
+    if not concrete_version.fullmatch(version):
+        fail(f'{source} dependency is not a concrete exact == pin: {spec!r}')
+    marker = canonical_marker(match.group('marker'), source)
+    return (name, marker), version
 
-locked = set()
-with open(lockfile) as f:
-    for line in f:
-        s = line.strip()
-        if not s or s.startswith('#') or s.startswith('-'):
-            continue
-        name = re.split(r'[\\[=!<>;~ ]', s, maxsplit=1)[0].strip()
-        if name:
-            locked.add(norm(name))
+def add_pin(pins, parsed, source):
+    if parsed is None:
+        return
+    identity, version = parsed
+    previous = pins.get(identity)
+    if previous is not None and previous != version:
+        display = identity[0] + (f';{identity[1]}' if identity[1] else '')
+        fail(f'{display} has conflicting pins in {source}: {previous} and {version}')
+    pins[identity] = version
 
-for missing in sorted(names - locked):
-    print(missing)
-" "$pyproject" "$lockfile" 2>/dev/null
+expected = {}
+for dependency in base_dependencies:
+    add_pin(
+        expected,
+        parse_exact(dependency, '[project].dependencies'),
+        '[project].dependencies',
+    )
+for group, dependencies in optional_dependencies.items():
+    if not isinstance(dependencies, list):
+        fail(f'[project.optional-dependencies].{group} is not an array')
+    source = f'[project.optional-dependencies].{group}'
+    for dependency in dependencies:
+        add_pin(expected, parse_exact(dependency, source), source)
+if not expected:
+    fail(f'{pyproject} contains no exact direct dependency pins')
+
+locked = {}
+try:
+    with open(lockfile, encoding='utf-8') as handle:
+        for line_number, raw_line in enumerate(handle, 1):
+            candidate = raw_line.strip()
+            if not candidate or candidate.startswith(('#', '-')):
+                continue
+            candidate = candidate.split(' #', 1)[0].rstrip()
+            if candidate.endswith('\\\\'):
+                candidate = candidate[:-1].rstrip()
+            source = f'{lockfile}:{line_number}'
+            add_pin(locked, parse_exact(candidate, source), source)
+except OSError as exc:
+    fail(f'cannot read {lockfile}: {exc}')
+if not locked:
+    fail(f'{lockfile} contains no pinned requirements')
+
+for identity, expected_version in sorted(expected.items()):
+    locked_version = locked.get(identity)
+    if locked_version != expected_version:
+        name, marker = identity
+        display = name + (f';{marker}' if marker else '')
+        print(f'{display}|{expected_version}|{locked_version or \"<missing>\"}')
+" "$pyproject" "$lockfile"
 }
 
 # extract_security_epochs <dockerfile>
@@ -1646,13 +1799,16 @@ if registry == 'npm':
     if deprecated:
         print('deprecated|' + ' '.join(str(deprecated).split())[:120])
     else:
-        print('ok|' + str(data.get('version', '')))
+        version = str(data.get('version', '') or '')
+        if version:
+            print('ok|' + version)
 else:
     info = data.get('info') or {}
     urls = data.get('urls') or []
     yanked = bool(urls and urls[0].get('yanked'))
-    version = str(info.get('version', ''))
-    print(('yanked|' if yanked else 'ok|') + version)
+    version = str(info.get('version', '') or '')
+    if version:
+        print(('yanked|' if yanked else 'ok|') + version)
 " "$registry" "$body" 2>/dev/null
   rm -f "$body"
 }

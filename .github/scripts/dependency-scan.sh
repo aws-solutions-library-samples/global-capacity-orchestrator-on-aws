@@ -21,7 +21,9 @@
 #   - Accelerator catalog and Karpenter NodePool policy (offline), plus live
 #     NVIDIA GPU / AWS Neuron EC2 catalog drift across enabled Regions (AWS creds)
 #   - Dockerfile.dev ARG pins (Node LTS major, npm, CDK CLI, kubectl,
-#     AWS CLI v2, Docker CLI, Docker Buildx, uv) — public endpoints, no AWS creds needed
+#     AWS CLI v2, Docker CLI, Docker Buildx, uv) and the immutable AWS CLI
+#     runtime image in gco/services/inference_monitor.py — public registries,
+#     no AWS creds needed
 #   - GCO Autopilot pins from cli/autopilot.py: the CLAUDE_CODE_VERSION
 #     install pin vs the npm latest dist-tag, and companion MCP server
 #     liveness (missing/deprecated/yanked on npm or PyPI) — public
@@ -32,10 +34,11 @@
 #     installed aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, LAMBDA_NODEJS_RUNTIME,
 #     AURORA_POSTGRES_VERSION)
 #   - Latest stable Python release from endoflife.date — public endpoint
-#   - CI tooling the workflows install by hand: Trivy (TRIVY_VERSION), Helm and
-#     kubectl (HELM_VERSION / KUBECTL_VERSION), kubeconform
-#     (KUBECONFORM_VERSION), Metrics Server (METRICS_SERVER_VERSION), and kind
-#     + its node image — public endpoints, no AWS creds
+#   - CI tooling the workflows install by hand: Trivy (TRIVY_VERSION),
+#     actionlint (ACTIONLINT_VERSION), Helm and kubectl (HELM_VERSION /
+#     KUBECTL_VERSION), kubeconform (KUBECONFORM_VERSION), Calico
+#     (CALICO_VERSION), Metrics Server (METRICS_SERVER_VERSION), and kind + its
+#     node image — public endpoints, no AWS creds
 #   - Version consistency: ruff (pyproject / pre-commit / lint workflow),
 #     Python and Node runtime pins, npm packageManager + CDK CLI pins, every
 #     owned npm graph's lockfile/Dependabot coverage, and duplicated *_VERSION
@@ -45,8 +48,8 @@
 #   - Suppression expiries: .trivyignore / .pip-audit-ignore /
 #     .npm-audit-ignore entries expiring within SUPPRESSION_EXPIRY_WARN_DAYS
 #     (before the CI validator hard-fails)
-#   - Lockfile freshness: direct deps in pyproject.toml missing from
-#     requirements-lock.txt
+#   - Lockfile freshness: direct deps in pyproject.toml missing from or pinned
+#     differently in requirements-lock.txt
 #
 # Ports the `.dependency-scan-script` YAML anchor from the retired
 # GitLab pipeline into a standalone shell script. Two behavior changes:
@@ -64,13 +67,30 @@
 #
 # Outputs (via $GITHUB_OUTPUT):
 #   has_drift     "true" when any version is outdated, else "false"
-#   scan_complete "false" when any check was explicitly skipped, else "true"
+#   scan_complete "false" when any check fails or is explicitly skipped,
+#                 else "true"
 #   report_path   path to the Markdown report (only set when has_drift=true)
 # =============================================================================
 set -uo pipefail
 
 WORKFLOWS_DIR="${WORKFLOWS_DIR:-.github/workflows}"
 REPORT_FILE="$(mktemp -t dep-scan-XXXXXX.md 2>/dev/null || mktemp --suffix=.md)"
+INCOMPLETE_REASONS_FILE="$(mktemp -t dep-scan-incomplete-XXXXXX 2>/dev/null || mktemp)"
+
+# Persist incomplete reasons to a file because many checks run in pipeline
+# subshells. A shell variable assignment made there would be lost, while an
+# append to this channel survives and is consumed by the final completeness
+# predicate. Messages go to stderr so they cannot corrupt command substitutions.
+mark_scan_incomplete() {
+  local reason="$1"
+  printf '%s\n' "$reason" >> "$INCOMPLETE_REASONS_FILE"
+  echo "  INCOMPLETE: $reason" >&2
+}
+
+join_scan_incomplete_reasons() {
+  sort -u "$INCOMPLETE_REASONS_FILE" \
+    | awk 'BEGIN { first = 1 } { if (!first) printf "; "; printf "%s", $0; first = 0 } END { print "" }'
+}
 
 # Source shared functions (also used by BATS tests)
 SCAN_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -198,21 +218,37 @@ echo "=== Checking for outdated Python dependencies ==="
 # group joins the surface automatically; if enumeration fails, fall back to
 # the old base-only install rather than dropping the report section.
 PYTHON_EXTRAS="$(extract_python_extras pyproject.toml | paste -sd, -)"
+if [ -z "$PYTHON_EXTRAS" ]; then
+  mark_scan_incomplete "Could not enumerate optional dependency groups from pyproject.toml."
+fi
 if [ -n "$PYTHON_EXTRAS" ]; then
   echo "Installing with extras: [${PYTHON_EXTRAS}]"
-  pip install -e ".[${PYTHON_EXTRAS}]" --quiet --root-user-action=ignore
+  if ! pip install -e ".[${PYTHON_EXTRAS}]" --quiet --root-user-action=ignore; then
+    mark_scan_incomplete "Python dependency installation failed."
+  fi
 else
-  pip install -e . --quiet --root-user-action=ignore
+  if ! pip install -e . --quiet --root-user-action=ignore; then
+    mark_scan_incomplete "Python dependency installation failed and optional groups could not be enumerated."
+  fi
 fi
-OUTDATED_RAW="$(pip list --outdated --format=json)"
+if ! OUTDATED_RAW="$(pip list --outdated --format=json)"; then
+  mark_scan_incomplete "pip list --outdated failed."
+  OUTDATED_RAW="[]"
+elif ! printf '%s' "$OUTDATED_RAW" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  mark_scan_incomplete "pip list --outdated returned malformed JSON."
+  OUTDATED_RAW="[]"
+fi
 
 # Build a newline-separated list of PEP-503-normalised direct-dep names.
 # An empty list disables the filter so we never silently hide drift when
 # the TOML parse breaks. In practice the file always parses — we just
 # can't risk a dropped report section.
 DIRECT_DEPS="$(extract_direct_python_deps pyproject.toml)"
+if [ -z "$DIRECT_DEPS" ]; then
+  mark_scan_incomplete "Could not parse direct Python dependencies from pyproject.toml."
+fi
 
-OUTDATED="$(printf '%s' "$OUTDATED_RAW" | python3 -c "
+if ! OUTDATED="$(printf '%s' "$OUTDATED_RAW" | python3 -c "
 import json, re, sys
 raw = sys.stdin.read()
 direct = set(
@@ -221,14 +257,17 @@ direct = set(
 try:
     data = json.loads(raw) if raw else []
 except json.JSONDecodeError:
-    data = []
+    raise SystemExit(1)
 if direct:
     data = [
         e for e in data
         if re.sub(r'[-_.]+', '-', e.get('name', '')).lower() in direct
     ]
 print(json.dumps(data))
-")"
+")"; then
+  mark_scan_incomplete "Could not parse or filter pip's outdated-package response."
+  OUTDATED="[]"
+fi
 
 # Build-backend pins ([build-system] requires) are Python dependencies
 # too, but they are invisible to ``pip list --outdated``: pip resolves
@@ -238,17 +277,21 @@ print(json.dumps(data))
 # other pyproject pin. Non-exact entries are skipped here — the
 # version-consistency section flags those as a policy finding.
 BUILD_SYSTEM_PINS="$(extract_build_system_pins pyproject.toml)"
-if [ -n "$BUILD_SYSTEM_PINS" ]; then
+if [ -z "$BUILD_SYSTEM_PINS" ]; then
+  mark_scan_incomplete "Could not parse [build-system] requirements from pyproject.toml."
+else
   while IFS='|' read -r bs_name bs_version bs_raw; do
     # Only exact pins are compared; non-exact entries surface through
     # the version-consistency policy check instead.
     if [ -z "$bs_name" ] || [ -z "$bs_version" ]; then
       continue
     fi
-    bs_latest="$(curl -fsSL --max-time 15 \
+    if ! bs_latest="$(curl -fsSL --max-time 15 \
       "https://pypi.org/pypi/${bs_name}/json" 2>/dev/null \
-      | jq -r '.info.version // empty' 2>/dev/null)" || true
-    [ -n "$bs_latest" ] || continue
+      | jq -r '.info.version // empty' 2>/dev/null)" || [ -z "$bs_latest" ]; then
+      mark_scan_incomplete "PyPI lookup failed or returned an invalid version for build dependency ${bs_name}."
+      continue
+    fi
     if [ "$(compare_semver "$bs_version" "$bs_latest")" = "newer" ]; then
       OUTDATED="$(echo "$OUTDATED" | jq \
         --arg name "$bs_name" --arg cur "$bs_version" --arg latest "$bs_latest" \
@@ -283,22 +326,34 @@ echo "=== Checking for outdated npm packages ==="
 NPM_RESULTS="$(mktemp)"
 NPM_COUNT=0
 
-list_npm_package_dirs . | while IFS= read -r package_dir; do
+NPM_PACKAGE_DIRS="$(list_npm_package_dirs .)"
+if [ -z "$NPM_PACKAGE_DIRS" ]; then
+  mark_scan_incomplete "Could not enumerate repository-owned npm package manifests."
+fi
+while IFS= read -r package_dir; do
+  [ -n "$package_dir" ] || continue
   manifest="${package_dir}/package.json"
-  extract_npm_direct_pins "$manifest" | while IFS='|' read -r pkg_name pkg_version; do
+  package_pins="$(extract_npm_direct_pins "$manifest")"
+  if [ -z "$package_pins" ]; then
+    mark_scan_incomplete "Could not parse exact npm dependency pins from ${manifest}."
+    continue
+  fi
+  while IFS='|' read -r pkg_name pkg_version; do
     [ -n "$pkg_name" ] || continue
     # Scoped names carry a '/', which must be encoded in the registry URL.
     encoded_name="$(printf '%s' "$pkg_name" | sed 's|/|%2F|g')"
-    pkg_latest="$(curl -fsSL --max-time 15 \
+    if ! pkg_latest="$(curl -fsSL --max-time 15 \
       "https://registry.npmjs.org/${encoded_name}/latest" 2>/dev/null \
-      | jq -r '.version // empty' 2>/dev/null)" || true
-    [ -n "$pkg_latest" ] || continue
+      | jq -r '.version // empty' 2>/dev/null)" || [ -z "$pkg_latest" ]; then
+      mark_scan_incomplete "npm registry lookup failed or returned an invalid version for ${pkg_name}."
+      continue
+    fi
     if [ "$(compare_semver "$pkg_version" "$pkg_latest")" = "newer" ]; then
       echo "  - ${package_dir}: ${pkg_name} ${pkg_version} -> ${pkg_latest}"
       echo "${package_dir}|${pkg_name}|${pkg_version}|${pkg_latest}" >> "$NPM_RESULTS"
     fi
-  done
-done
+  done <<< "$package_pins"
+done <<< "$NPM_PACKAGE_DIRS"
 
 NPM_COUNT="$(wc -l < "$NPM_RESULTS" | tr -d ' ')"
 if [ "$NPM_COUNT" -eq 0 ]; then
@@ -335,12 +390,18 @@ check_image() {
   repo="$(echo "$parsed" | cut -d'|' -f2)"
 
   local tags=""
-  tags="$(skopeo list-tags "docker://${registry}/${repo}" 2>/dev/null \
+  if ! tags="$(skopeo list-tags "docker://${registry}/${repo}" 2>/dev/null \
     | jq -r '.Tags[]' 2>/dev/null \
     | grep -E "^v?[0-9]+\.[0-9]+\.[0-9]+$" \
-    | sort -V | tail -10)" || return
+    | sort -V | tail -10)"; then
+    mark_scan_incomplete "Container registry tag lookup failed for ${registry}/${repo}."
+    return
+  fi
 
-  [ -z "$tags" ] && return
+  if [ -z "$tags" ]; then
+    mark_scan_incomplete "Container registry returned no stable semver tags for ${registry}/${repo}."
+    return
+  fi
 
   local latest_tag
   latest_tag="$(echo "$tags" | tail -1)"
@@ -376,13 +437,11 @@ grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+" scripts/live_release_valida
   | sed 's/image: //' >> "$ALL_IMAGES" || true
 
 echo "Checking Helm chart value images..."
-python3 - <<'PY' >> "$ALL_IMAGES" || true
+CHART_VALUE_IMAGES=""
+if ! CHART_VALUE_IMAGES="$(python3 - <<'PY'
 import yaml
-try:
-    with open('lambda/helm-installer/charts.yaml') as f:
-        data = yaml.safe_load(f)
-except FileNotFoundError:
-    raise SystemExit(0)
+with open('lambda/helm-installer/charts.yaml') as f:
+    data = yaml.safe_load(f)
 
 
 def find_images(d):
@@ -401,6 +460,11 @@ def find_images(d):
 for name, cfg in (data or {}).get('charts', {}).items():
     find_images(cfg.get('values', {}))
 PY
+)"; then
+  mark_scan_incomplete "Could not parse Helm chart value images."
+elif [ -n "$CHART_VALUE_IMAGES" ]; then
+  printf '%s\n' "$CHART_VALUE_IMAGES" >> "$ALL_IMAGES"
+fi
 
 # Mooncake default image — pinned as a Python constant in cli/images.py
 # (_DISAGGREGATED_DEFAULT_IMAGE), so it is invisible to Dependabot (docker
@@ -409,7 +473,44 @@ PY
 # validate and bump the pin.
 echo "Checking Mooncake default image (cli/images.py)..."
 MOONCAKE_IMAGE="$(extract_mooncake_default_image cli/images.py)"
-[ -n "$MOONCAKE_IMAGE" ] && echo "$MOONCAKE_IMAGE" >> "$ALL_IMAGES"
+if [ -n "$MOONCAKE_IMAGE" ]; then
+  echo "$MOONCAKE_IMAGE" >> "$ALL_IMAGES"
+else
+  mark_scan_incomplete "Could not parse the Mooncake default image from cli/images.py."
+fi
+
+# The model-sync init container uses an official AWS CLI image pinned by both
+# version and manifest-list digest. Strip only the digest for the registry tag
+# lookup; the offline provenance contract separately requires the digest.
+echo "Checking AWS CLI runtime image (gco/services/inference_monitor.py)..."
+AWS_CLI_RUNTIME_IMAGE="$(extract_python_string_constant \
+  AWS_CLI_IMAGE gco/services/inference_monitor.py)"
+if [[ "$AWS_CLI_RUNTIME_IMAGE" =~ ^[^@]+:[^@]+@sha256:[0-9a-f]{64}$ ]]; then
+  AWS_CLI_TAGGED_IMAGE="${AWS_CLI_RUNTIME_IMAGE%@sha256:*}"
+  AWS_CLI_REPOSITORY="${AWS_CLI_TAGGED_IMAGE%:*}"
+  AWS_CLI_TAG="${AWS_CLI_TAGGED_IMAGE##*:}"
+  AWS_CLI_COMMITTED_DIGEST="${AWS_CLI_RUNTIME_IMAGE##*@}"
+  printf '%s\n' "$AWS_CLI_TAGGED_IMAGE" >> "$ALL_IMAGES"
+
+  # Hash the raw top-level manifest rather than selecting a platform-specific
+  # child. The committed digest is a multi-architecture manifest-list digest.
+  AWS_CLI_MANIFEST="$(mktemp)"
+  if ! skopeo inspect --raw "docker://${AWS_CLI_TAGGED_IMAGE}" \
+    > "$AWS_CLI_MANIFEST" 2>/dev/null; then
+    mark_scan_incomplete "Container manifest lookup failed for ${AWS_CLI_TAGGED_IMAGE}."
+  else
+    AWS_CLI_PUBLISHED_DIGEST="sha256:$(sha256sum "$AWS_CLI_MANIFEST" | awk '{print $1}')"
+    if ! [[ "$AWS_CLI_PUBLISHED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+      mark_scan_incomplete "Container manifest digest was invalid for ${AWS_CLI_TAGGED_IMAGE}."
+    elif [ "$AWS_CLI_COMMITTED_DIGEST" != "$AWS_CLI_PUBLISHED_DIGEST" ]; then
+      echo "  - ${AWS_CLI_TAGGED_IMAGE}: committed digest does not match the tag"
+      echo "${AWS_CLI_REPOSITORY}|${AWS_CLI_TAG}@${AWS_CLI_COMMITTED_DIGEST}|${AWS_CLI_TAG}@${AWS_CLI_PUBLISHED_DIGEST}" >> "$DOCKER_RESULTS"
+    fi
+  fi
+  rm -f "$AWS_CLI_MANIFEST"
+else
+  mark_scan_incomplete "Could not parse an immutable AWS_CLI_IMAGE from gco/services/inference_monitor.py."
+fi
 
 sort -u "$ALL_IMAGES" | while read -r img; do
   [ -z "$img" ] && continue
@@ -432,25 +533,42 @@ HELM_RESULTS="$(mktemp)"
 CHARTS_FILE="lambda/helm-installer/charts.yaml"
 
 if [ -f "$CHARTS_FILE" ]; then
-  # Chart entries come from the shared extractor (also covered by BATS) so a
-  # newly-added chart is discovered automatically — one record per entry.
-  extract_helm_charts "$CHARTS_FILE" | while IFS= read -r entry; do
-    chart_name="$(echo "$entry" | jq -r '.name')"
-    repo_url="$(echo "$entry" | jq -r '.repo_url')"
-    chart="$(echo "$entry" | jq -r '.chart')"
-    current="$(echo "$entry" | jq -r '.version')"
-    use_oci="$(echo "$entry" | jq -r '.use_oci')"
-    [ -z "$current" ] && continue
+  CHART_ENTRIES="$(extract_helm_charts "$CHARTS_FILE")"
+  if [ -z "$CHART_ENTRIES" ]; then
+    mark_scan_incomplete "Could not parse Helm chart pins from ${CHARTS_FILE}."
+  fi
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    chart_name="$(echo "$entry" | jq -r '.name // empty')"
+    repo_url="$(echo "$entry" | jq -r '.repo_url // empty')"
+    chart="$(echo "$entry" | jq -r '.chart // empty')"
+    current="$(echo "$entry" | jq -r '.version // empty')"
+    use_oci="$(echo "$entry" | jq -r '.use_oci // false')"
+    if [ -z "$chart_name" ] || [ -z "$repo_url" ] || [ -z "$chart" ] || [ -z "$current" ]; then
+      mark_scan_incomplete "Helm chart parser emitted an incomplete record from ${CHARTS_FILE}."
+      continue
+    fi
 
     latest=""
     if [ "$use_oci" = "true" ]; then
-      latest="$(helm show chart "${repo_url}/${chart}" 2>/dev/null | grep '^version:' | awk '{print $2}')" || true
+      if ! latest="$(helm show chart "${repo_url}/${chart}" 2>/dev/null | grep '^version:' | awk '{print $2}')" \
+         || [ -z "$latest" ]; then
+        mark_scan_incomplete "Helm OCI lookup failed for ${repo_url}/${chart}."
+        continue
+      fi
     else
-      helm repo add "$chart_name" "$repo_url" --force-update > /dev/null 2>&1 || true
-      latest="$(helm search repo "${chart_name}/${chart}" --output json 2>/dev/null | jq -r '.[0].version // empty')" || true
+      if ! helm repo add "$chart_name" "$repo_url" --force-update > /dev/null 2>&1; then
+        mark_scan_incomplete "Helm repository refresh failed for ${chart_name} (${repo_url})."
+        continue
+      fi
+      if ! latest="$(helm search repo "${chart_name}/${chart}" --output json 2>/dev/null \
+        | jq -r '.[0].version // empty')" || [ -z "$latest" ]; then
+        mark_scan_incomplete "Helm chart lookup failed for ${chart_name}/${chart}."
+        continue
+      fi
     fi
 
-    if [ -n "$latest" ] && [ "$current" != "$latest" ]; then
+    if [ "$current" != "$latest" ]; then
       current_stripped="${current#v}"
       latest_stripped="${latest#v}"
       if [ "$current_stripped" != "$latest_stripped" ]; then
@@ -458,7 +576,9 @@ if [ -f "$CHARTS_FILE" ]; then
         echo "${chart_name}|${chart}|${current}|${latest}" >> "$HELM_RESULTS"
       fi
     fi
-  done
+  done <<< "$CHART_ENTRIES"
+else
+  mark_scan_incomplete "${CHARTS_FILE} is missing."
 fi
 
 HELM_COUNT="$(wc -l < "$HELM_RESULTS" 2>/dev/null | tr -d ' ')"
@@ -849,7 +969,10 @@ for k, v in data.items():
 if candidates:
     print(max(candidates))
 ' 2>/dev/null)" || true
-      [ -z "$lts_major" ] && return
+      if [ -z "$lts_major" ]; then
+        mark_scan_incomplete "Node.js release-schedule lookup failed or returned no active LTS major."
+        return
+      fi
       # index.json is newest-first per line, so the first entry whose
       # version sits on the LTS major is that major's latest release.
       latest="$(curl -fsSL --max-time 15 \
@@ -920,7 +1043,10 @@ if candidates:
       ;;
   esac
 
-  [ -z "$latest" ] && return
+  if [ -z "$latest" ]; then
+    mark_scan_incomplete "Upstream version lookup failed for Dockerfile.dev pin ${name}."
+    return
+  fi
 
   # Every pin is a semver, NODE_VERSION included. compare_semver strips
   # a leading ``v`` on both sides, matching the kubectl and buildx pins
@@ -935,12 +1061,16 @@ if candidates:
 }
 
 if [ -f "$DOCKERFILE_PIN_FILE" ]; then
-  extract_dockerfile_pins "$DOCKERFILE_PIN_FILE" | while IFS='|' read -r pin_name pin_value; do
+  DOCKERFILE_PINS="$(extract_dockerfile_pins "$DOCKERFILE_PIN_FILE")"
+  if [ -z "$DOCKERFILE_PINS" ]; then
+    mark_scan_incomplete "Could not parse tooling pins from ${DOCKERFILE_PIN_FILE}."
+  fi
+  while IFS='|' read -r pin_name pin_value; do
     [ -z "$pin_name" ] && continue
     check_dockerfile_pin "$pin_name" "$pin_value"
-  done
+  done <<< "$DOCKERFILE_PINS"
 else
-  echo "  $DOCKERFILE_PIN_FILE not found, skipping."
+  mark_scan_incomplete "$DOCKERFILE_PIN_FILE is missing."
 fi
 
 DOCKERFILE_COUNT="$(wc -l < "$DOCKERFILE_RESULTS" 2>/dev/null | tr -d ' ')"
@@ -1056,11 +1186,11 @@ AUTOPILOT_COUNT="$(wc -l < "$AUTOPILOT_RESULTS" 2>/dev/null | tr -d ' ')"
 # stale hook pins quietly miss new lint rules and bug fixes.
 #
 # Each hook's repo URL is resolved to a tag list via the GitHub API
-# (the only host we use today). The helper returns empty for
-# non-GitHub repos or SHA-pinned ``rev:`` values, in which case that
-# hook is silently skipped — same pattern used by the AWS-creds-gated
-# checks above. Calls are unauthenticated; we make one request per
-# hook, which is well below the 60 req/h public limit.
+# (the only host we use today). Full SHA-1/SHA-256 object ids are accepted as
+# immutable exemptions. Other unsupported refs (branches, floating labels,
+# prereleases) mark the scan incomplete rather than silently disappearing.
+# Calls are unauthenticated; we make one request per hook, which is well below
+# the 60 req/h public limit.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Checking pre-commit hook revisions ==="
@@ -1069,12 +1199,30 @@ PRECOMMIT_RESULTS="$(mktemp)"
 PRECOMMIT_CONFIG=".pre-commit-config.yaml"
 
 if [ -f "$PRECOMMIT_CONFIG" ]; then
-  extract_precommit_hooks "$PRECOMMIT_CONFIG" | while IFS='|' read -r repo current_rev; do
+  PRECOMMIT_HOOKS="$(extract_precommit_hooks "$PRECOMMIT_CONFIG")"
+  if [ -z "$PRECOMMIT_HOOKS" ]; then
+    mark_scan_incomplete "Could not parse hook pins from ${PRECOMMIT_CONFIG}."
+  fi
+  while IFS='|' read -r repo current_rev; do
     [ -z "$repo" ] && continue
     [ -z "$current_rev" ] && continue
+    # Complete Git object ids are immutable and intentionally have no release
+    # drift lookup. Every other non-semver ref may move or cannot be compared
+    # safely, so it makes this scan incomplete instead of receiving a blanket
+    # "SHA" exemption.
+    if is_full_git_commit_sha "$current_rev"; then
+      continue
+    fi
+    if ! [[ "$current_rev" =~ ^v?[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+      mark_scan_incomplete "Unsupported mutable or non-semver pre-commit rev '${current_rev}' for ${repo}."
+      continue
+    fi
 
     latest_rev="$(get_latest_precommit_hook_release "$repo")"
-    [ -z "$latest_rev" ] && continue
+    if [ -z "$latest_rev" ]; then
+      mark_scan_incomplete "Pre-commit tag lookup failed for ${repo}."
+      continue
+    fi
 
     # Strip ``v`` so compare_semver ranks ``v0.22.1`` vs ``v0.22.2``
     # (and the rare unprefixed ``1.38.0`` from yamllint historically)
@@ -1086,9 +1234,9 @@ if [ -f "$PRECOMMIT_CONFIG" ]; then
       echo "  - ${repo}: ${current_rev} -> ${latest_rev}"
       echo "${repo}|${current_rev}|${latest_rev}" >> "$PRECOMMIT_RESULTS"
     fi
-  done
+  done <<< "$PRECOMMIT_HOOKS"
 else
-  echo "  $PRECOMMIT_CONFIG not found, skipping."
+  mark_scan_incomplete "$PRECOMMIT_CONFIG is missing."
 fi
 
 PRECOMMIT_COUNT="$(wc -l < "$PRECOMMIT_RESULTS" 2>/dev/null | tr -d ' ')"
@@ -1128,8 +1276,9 @@ else
   # Lambda Python runtime enum
   LAMBDA_RT_CURRENT="$(extract_constant_value LAMBDA_PYTHON_RUNTIME)"
   LAMBDA_RT_LATEST="$(get_latest_lambda_python_runtime)"
-  if [ -n "$LAMBDA_RT_CURRENT" ] && [ -n "$LAMBDA_RT_LATEST" ] \
-     && [ "$LAMBDA_RT_CURRENT" != "$LAMBDA_RT_LATEST" ]; then
+  if [ -z "$LAMBDA_RT_CURRENT" ] || [ -z "$LAMBDA_RT_LATEST" ]; then
+    mark_scan_incomplete "Could not parse the current or latest Lambda Python runtime enum."
+  elif [ "$LAMBDA_RT_CURRENT" != "$LAMBDA_RT_LATEST" ]; then
     # Convert PYTHON_3_14 → 3.14 so compare_semver can rank them.
     cur_v="$(echo "$LAMBDA_RT_CURRENT" | sed -E 's/^PYTHON_([0-9]+)_([0-9]+)$/\1.\2/')"
     lat_v="$(echo "$LAMBDA_RT_LATEST"  | sed -E 's/^PYTHON_([0-9]+)_([0-9]+)$/\1.\2/')"
@@ -1142,8 +1291,9 @@ else
   # Lambda Node.js runtime enum
   LAMBDA_NODE_RT_CURRENT="$(extract_constant_value LAMBDA_NODEJS_RUNTIME)"
   LAMBDA_NODE_RT_LATEST="$(get_latest_lambda_nodejs_runtime)"
-  if [ -n "$LAMBDA_NODE_RT_CURRENT" ] && [ -n "$LAMBDA_NODE_RT_LATEST" ] \
-     && [ "$LAMBDA_NODE_RT_CURRENT" != "$LAMBDA_NODE_RT_LATEST" ]; then
+  if [ -z "$LAMBDA_NODE_RT_CURRENT" ] || [ -z "$LAMBDA_NODE_RT_LATEST" ]; then
+    mark_scan_incomplete "Could not parse the current or latest Lambda Node.js runtime enum."
+  elif [ "$LAMBDA_NODE_RT_CURRENT" != "$LAMBDA_NODE_RT_LATEST" ]; then
     cur_major="${LAMBDA_NODE_RT_CURRENT#NODEJS_}"
     cur_major="${cur_major%_X}"
     lat_major="${LAMBDA_NODE_RT_LATEST#NODEJS_}"
@@ -1158,8 +1308,9 @@ else
   # Aurora PostgreSQL engine version enum
   AURORA_ENUM_CURRENT="$(extract_constant_value AURORA_POSTGRES_VERSION)"
   AURORA_ENUM_LATEST="$(get_latest_aurora_postgres_version)"
-  if [ -n "$AURORA_ENUM_CURRENT" ] && [ -n "$AURORA_ENUM_LATEST" ] \
-     && [ "$AURORA_ENUM_CURRENT" != "$AURORA_ENUM_LATEST" ]; then
+  if [ -z "$AURORA_ENUM_CURRENT" ] || [ -z "$AURORA_ENUM_LATEST" ]; then
+    mark_scan_incomplete "Could not parse the current or latest Aurora PostgreSQL enum."
+  elif [ "$AURORA_ENUM_CURRENT" != "$AURORA_ENUM_LATEST" ]; then
     cur_v="$(echo "$AURORA_ENUM_CURRENT" | sed -E 's/^VER_([0-9]+)_([0-9]+)$/\1.\2/')"
     lat_v="$(echo "$AURORA_ENUM_LATEST"  | sed -E 's/^VER_([0-9]+)_([0-9]+)$/\1.\2/')"
     if [ "$(compare_semver "$cur_v" "$lat_v")" = "newer" ]; then
@@ -1199,7 +1350,10 @@ LATEST_PYTHON="$(get_latest_python_release)"
 if [ -z "$LATEST_PYTHON" ]; then
   PYTHON_RELEASE_SKIP_REASON="endoflife.date query failed (network or schema change)."
   echo "  $PYTHON_RELEASE_SKIP_REASON"
-elif [ -n "$LAMBDA_RT_CURRENT" ]; then
+elif [ -z "$LAMBDA_RT_CURRENT" ]; then
+  PYTHON_RELEASE_SKIP_REASON="Could not parse LAMBDA_PYTHON_RUNTIME for the Python release comparison."
+  echo "  $PYTHON_RELEASE_SKIP_REASON"
+else
   cur_v="$(echo "$LAMBDA_RT_CURRENT" | sed -E 's/^PYTHON_([0-9]+)_([0-9]+)$/\1.\2/')"
   if [ "$cur_v" != "$LATEST_PYTHON" ] \
      && [ "$(compare_semver "$cur_v" "$LATEST_PYTHON")" = "newer" ]; then
@@ -1215,12 +1369,11 @@ PYTHON_RELEASE_COUNT="$(wc -l < "$PYTHON_RELEASE_RESULTS" 2>/dev/null | tr -d ' 
 # CI tooling pins (public endpoints — no AWS creds)
 #
 # The workflows install their own pinned tooling — Trivy (cve-scan.yml /
-# security.yml), Helm + kubectl (deps-scan.yml), kubeconform and Metrics Server
-# (integration-tests.yml) — from plain ``*_VERSION`` env strings, and the
-# integration-tests workflow also pins kind + its node image on the
-# ``helm/kind-action`` step. None of these are ``uses:`` refs or Dockerfile
-# ``FROM`` lines, so Dependabot never sees them and a stale scanner or tool
-# goes unnoticed. Compare each against its upstream latest.
+# security.yml), actionlint (lint.yml), Helm + kubectl (deps-scan.yml), and
+# kubeconform, Calico, and Metrics Server (integration-tests.yml) — from plain
+# ``*_VERSION`` env strings. The integration workflow also pins kind + its node
+# image on the ``helm/kind-action`` step. None are ``uses:`` refs or Dockerfile
+# ``FROM`` lines, so Dependabot never sees them. Compare each against upstream.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Checking CI tooling pins ==="
@@ -1231,9 +1384,15 @@ CI_TOOLING_RESULTS="$(mktemp)"
 # Records drift when the pinned semver is behind the latest GitHub Release.
 check_github_tool() {
   local name="$1" current="$2" repo="$3" url="$4" latest=""
-  [ -n "$current" ] || return 0
+  if [ -z "$current" ]; then
+    mark_scan_incomplete "Could not parse the committed version pin for ${name}."
+    return 0
+  fi
   latest="$(get_latest_github_release_tag "$repo")"
-  [ -z "$latest" ] && return 0
+  if [ -z "$latest" ]; then
+    mark_scan_incomplete "GitHub release lookup failed for ${name} (${repo})."
+    return 0
+  fi
   if [ "$current" != "$latest" ] \
      && [ "$(compare_semver "$current" "$latest")" = "newer" ]; then
     echo "  - ${name}: ${current} -> ${latest}"
@@ -1245,6 +1404,11 @@ check_github_tool() {
 TRIVY_PIN="$(extract_workflow_env_pin TRIVY_VERSION | head -1)"
 check_github_tool "Trivy (TRIVY_VERSION)" "$TRIVY_PIN" "aquasecurity/trivy" \
   "https://github.com/aquasecurity/trivy/releases"
+
+# actionlint (rhysd/actionlint) — lint.yml downloads this release archive.
+ACTIONLINT_PIN="$(extract_workflow_env_pin ACTIONLINT_VERSION | head -1)"
+check_github_tool "actionlint (ACTIONLINT_VERSION)" "$ACTIONLINT_PIN" "rhysd/actionlint" \
+  "https://github.com/rhysd/actionlint/releases"
 
 # Helm (helm/helm) — HELM_VERSION the deps-scan workflow installs.
 HELM_PIN="$(extract_workflow_env_pin HELM_VERSION | head -1)"
@@ -1269,6 +1433,12 @@ check_github_tool \
   "kubernetes-sigs/metrics-server" \
   "https://github.com/kubernetes-sigs/metrics-server/releases"
 
+# Calico (projectcalico/calico) — kind installs the authenticated release
+# manifest so NetworkPolicy behavior is exercised by the E2E job.
+CALICO_PIN="$(extract_workflow_env_pin CALICO_VERSION | head -1)"
+check_github_tool "Calico (CALICO_VERSION)" "$CALICO_PIN" "projectcalico/calico" \
+  "https://github.com/projectcalico/calico/releases"
+
 # kind (kubernetes-sigs/kind) — the kind binary on the kind-action step.
 KIND_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind"{print $2}')"
 check_github_tool "kind" "$KIND_PIN" "kubernetes-sigs/kind" \
@@ -1279,13 +1449,17 @@ check_github_tool "kind" "$KIND_PIN" "kubernetes-sigs/kind" \
 KUBECTL_WF_PIN="$(extract_workflow_env_pin KUBECTL_VERSION | head -1)"
 if [ -n "$KUBECTL_WF_PIN" ]; then
   kubectl_minor="$(echo "${KUBECTL_WF_PIN#v}" | cut -d. -f1-2)"
-  kubectl_latest="$(curl -fsSL --max-time 15 \
-    "https://dl.k8s.io/release/stable-${kubectl_minor}.txt" 2>/dev/null | tr -d '[:space:]')" || true
-  if [ -n "$kubectl_latest" ] && [ "$KUBECTL_WF_PIN" != "$kubectl_latest" ] \
+  if ! kubectl_latest="$(curl -fsSL --max-time 15 \
+    "https://dl.k8s.io/release/stable-${kubectl_minor}.txt" 2>/dev/null | tr -d '[:space:]')" \
+     || [ -z "$kubectl_latest" ]; then
+    mark_scan_incomplete "kubectl stable-version lookup failed for minor ${kubectl_minor}."
+  elif [ "$KUBECTL_WF_PIN" != "$kubectl_latest" ] \
      && [ "$(compare_semver "$KUBECTL_WF_PIN" "$kubectl_latest")" = "newer" ]; then
     echo "  - kubectl (KUBECTL_VERSION): ${KUBECTL_WF_PIN} -> ${kubectl_latest}"
     echo "kubectl (KUBECTL_VERSION)|${KUBECTL_WF_PIN}|${kubectl_latest}|https://kubernetes.io/releases/" >> "$CI_TOOLING_RESULTS"
   fi
+else
+  mark_scan_incomplete "Could not parse KUBECTL_VERSION from the workflows."
 fi
 
 # kind node image (kindest/node) — report a newer PATCH within the pinned K8s
@@ -1295,15 +1469,18 @@ KIND_NODE_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk
 if [ -n "$KIND_NODE_PIN" ]; then
   node_tag="${KIND_NODE_PIN##*:}"
   node_minor="$(echo "${node_tag#v}" | cut -d. -f1-2)"
-  node_latest="$(skopeo list-tags "docker://docker.io/kindest/node" 2>/dev/null \
+  if ! node_latest="$(skopeo list-tags "docker://docker.io/kindest/node" 2>/dev/null \
     | jq -r '.Tags[]' 2>/dev/null \
     | grep -E "^v?${node_minor}\.[0-9]+$" \
-    | sort -V | tail -1)" || true
-  if [ -n "$node_latest" ] && [ "$node_tag" != "$node_latest" ] \
+    | sort -V | tail -1)" || [ -z "$node_latest" ]; then
+    mark_scan_incomplete "Container registry lookup failed for kindest/node minor ${node_minor}."
+  elif [ "$node_tag" != "$node_latest" ] \
      && [ "$(compare_semver "$node_tag" "$node_latest")" = "newer" ]; then
     echo "  - kind node image (kindest/node): ${node_tag} -> ${node_latest}"
     echo "kind node image (kindest/node)|${node_tag}|${node_latest}|https://hub.docker.com/r/kindest/node/tags" >> "$CI_TOOLING_RESULTS"
   fi
+else
+  mark_scan_incomplete "Could not parse the kind node-image pin from integration-tests.yml."
 fi
 
 CI_TOOLING_COUNT="$(wc -l < "$CI_TOOLING_RESULTS" 2>/dev/null | tr -d ' ')"
@@ -1559,20 +1736,30 @@ SUPPRESSION_COUNT="$(wc -l < "$SUPPRESSION_RESULTS" 2>/dev/null | tr -d ' ')"
 # Lockfile freshness (no network)
 #
 # ``requirements-lock.txt`` is compiled from ``pyproject.toml`` with
-# ``pip-compile --all-extras``. A direct dependency present in pyproject but
-# absent from the lock means someone added/renamed a dep without re-running
-# pip-compile — the lock is stale. Presence-only check: never flags the
-# legitimate transitive pins the lock adds.
+# ``pip-compile --all-extras``. Every direct dependency must use an exact,
+# concrete pin and is matched to the lock by normalized name, canonical marker
+# identity, and version. Missing or mismatched records mean the lock is stale;
+# unrelated transitive pins are ignored.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Checking lockfile freshness ==="
 
 LOCKFILE_RESULTS="$(mktemp)"
-check_lockfile_freshness pyproject.toml requirements-lock.txt | while IFS= read -r lock_missing; do
-  [ -z "$lock_missing" ] && continue
-  echo "  - direct dep missing from requirements-lock.txt: ${lock_missing}"
-  echo "${lock_missing}" >> "$LOCKFILE_RESULTS"
-done
+LOCKFILE_RAW="$(mktemp)"
+if check_lockfile_freshness pyproject.toml requirements-lock.txt > "$LOCKFILE_RAW"; then
+  while IFS='|' read -r lock_name expected_version locked_version; do
+    [ -z "$lock_name" ] && continue
+    if [ "$locked_version" = "<missing>" ]; then
+      echo "  - direct dep missing from requirements-lock.txt: ${lock_name}==${expected_version}"
+    else
+      echo "  - direct dep version mismatch: ${lock_name}==${expected_version} (lock has ${locked_version})"
+    fi
+    echo "${lock_name}|${expected_version}|${locked_version}" >> "$LOCKFILE_RESULTS"
+  done < "$LOCKFILE_RAW"
+else
+  mark_scan_incomplete "Lockfile freshness validation failed; inspect its error above."
+fi
+rm -f "$LOCKFILE_RAW"
 
 LOCKFILE_COUNT="$(wc -l < "$LOCKFILE_RESULTS" 2>/dev/null | tr -d ' ')"
 [ -z "$LOCKFILE_COUNT" ] && LOCKFILE_COUNT=0
@@ -1619,6 +1806,12 @@ write_accelerator_operational_report() {
   } > "$report_path"
 }
 
+record_accelerator_operational_error() {
+  local report_path="$1" title="$2" detail="$3" error_path="$4"
+  write_accelerator_operational_report "$report_path" "$title" "$detail" "$error_path"
+  mark_scan_incomplete "${title}: ${detail}"
+}
+
 python3 scripts/accelerator_catalog.py validate \
   --format markdown \
   --output "$ACCELERATOR_OFFLINE_REPORT" \
@@ -1630,7 +1823,7 @@ elif [ "$ACCELERATOR_OFFLINE_STATUS" -eq 1 ]; then
   ACCELERATOR_OFFLINE_COUNT="$(grep -c '^### ' "$ACCELERATOR_OFFLINE_REPORT" || true)"
   if ! [[ "$ACCELERATOR_OFFLINE_COUNT" =~ ^[1-9][0-9]*$ ]]; then
     ACCELERATOR_OFFLINE_COUNT=1
-    write_accelerator_operational_report \
+    record_accelerator_operational_error \
       "$ACCELERATOR_OFFLINE_REPORT" \
       "Offline accelerator catalog validation" \
       "The validator reported drift but emitted no parseable actionable findings." \
@@ -1640,7 +1833,7 @@ elif [ "$ACCELERATOR_OFFLINE_STATUS" -eq 1 ]; then
   fi
 else
   ACCELERATOR_OFFLINE_COUNT=1
-  write_accelerator_operational_report \
+  record_accelerator_operational_error \
     "$ACCELERATOR_OFFLINE_REPORT" \
     "Offline accelerator catalog validation" \
     "The deterministic validator exited with status ${ACCELERATOR_OFFLINE_STATUS}." \
@@ -1663,7 +1856,7 @@ else
       if { [ "$ACCELERATOR_ONLINE_STATUS" -eq 0 ] && [ "$ACCELERATOR_ONLINE_COUNT" -ne 0 ]; } \
          || { [ "$ACCELERATOR_ONLINE_STATUS" -eq 1 ] && [ "$ACCELERATOR_ONLINE_COUNT" -eq 0 ]; }; then
         ACCELERATOR_ONLINE_COUNT=1
-        write_accelerator_operational_report \
+        record_accelerator_operational_error \
           "$ACCELERATOR_ONLINE_REPORT" \
           "Online EC2 accelerator catalog drift" \
           "The command exit status disagreed with its JSON drift summary." \
@@ -1676,7 +1869,7 @@ else
       fi
     else
       ACCELERATOR_ONLINE_COUNT=1
-      write_accelerator_operational_report \
+      record_accelerator_operational_error \
         "$ACCELERATOR_ONLINE_REPORT" \
         "Online EC2 accelerator catalog drift" \
         "The online scanner emitted a missing or malformed JSON summary." \
@@ -1685,7 +1878,7 @@ else
     fi
   else
     ACCELERATOR_ONLINE_COUNT=1
-    write_accelerator_operational_report \
+    record_accelerator_operational_error \
       "$ACCELERATOR_ONLINE_REPORT" \
       "Online EC2 accelerator catalog drift" \
       "The online scanner exited with status ${ACCELERATOR_ONLINE_STATUS}." \
@@ -1761,7 +1954,8 @@ echo "Suppression expiries:     $SUPPRESSION_COUNT"
 echo "Lockfile freshness:       $LOCKFILE_COUNT"
 
 SCAN_COMPLETE=true
-for skip_reason in \
+if ! dependency_scan_is_complete \
+  "$INCOMPLETE_REASONS_FILE" \
   "$ADDON_SKIP_REASON" \
   "$EKS_K8S_SKIP_REASON" \
   "$AURORA_SKIP_REASON" \
@@ -1770,12 +1964,9 @@ for skip_reason in \
   "$ACCELERATOR_SKIP_REASON" \
   "$AUTOPILOT_SKIP_REASON" \
   "$CDK_ENUM_SKIP_REASON" \
-  "$PYTHON_RELEASE_SKIP_REASON"; do
-  if [ -n "$skip_reason" ]; then
-    SCAN_COMPLETE=false
-    break
-  fi
-done
+  "$PYTHON_RELEASE_SKIP_REASON"; then
+  SCAN_COMPLETE=false
+fi
 
 if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 0 ] \
    && [ "$HELM_COUNT" -eq 0 ] && [ "$ADDON_COUNT" -eq 0 ] \
@@ -1830,20 +2021,25 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}Python release skipped: $PYTHON_RELEASE_SKIP_REASON"
   fi
-  if [ -n "$SKIP_NOTES" ]; then
-    echo "All scanned surfaces are up to date ($SKIP_NOTES)"
-  else
-    echo "All dependencies are up to date."
+  if [ -s "$INCOMPLETE_REASONS_FILE" ]; then
+    [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
+    SKIP_NOTES="${SKIP_NOTES}Incomplete checks: $(join_scan_incomplete_reasons)"
   fi
-  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR"
+  if [ "$SCAN_COMPLETE" != true ]; then
+    STATUS_MESSAGE="No drift was found in completed checks, but the scan is incomplete."
+  else
+    STATUS_MESSAGE="All dependencies are up to date."
+  fi
+  echo "$STATUS_MESSAGE"
+  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "# Dependency Update Report"
       echo ""
-      echo "All scanned surfaces are up to date."
+      echo "$STATUS_MESSAGE"
       if [ -n "$SKIP_NOTES" ]; then
         echo ""
-        echo "_Skipped checks: ${SKIP_NOTES}_"
+        echo "_Incomplete or skipped checks: ${SKIP_NOTES}_"
       fi
     } >> "$GITHUB_STEP_SUMMARY"
   fi
@@ -1869,6 +2065,9 @@ summary_row() {
   elif [ "$count" -gt 0 ]; then
     label="${count} update(s)"
     title="[${title}](#${anchor})"
+  elif [ "$SCAN_COMPLETE" != true ]; then
+    label="no drift found (incomplete scan)"
+    urgency="—"
   else
     label="up to date"
     urgency="—"
@@ -1881,6 +2080,16 @@ summary_row() {
   echo ""
   echo "_Generated $(date -u '+%Y-%m-%d %H:%M UTC') by the \`deps-scan\` workflow._"
   echo ""
+  if [ "$SCAN_COMPLETE" != true ]; then
+    echo "> [!WARNING]"
+    echo "> **Incomplete scan.** Zero-count surfaces are provisional, not confirmed current."
+    if [ -s "$INCOMPLETE_REASONS_FILE" ]; then
+      echo "> Recorded failures: $(join_scan_incomplete_reasons)"
+    else
+      echo "> One or more credential-dependent or optional checks were skipped; see the workflow log."
+    fi
+    echo ""
+  fi
 
   # ----- TL;DR summary -----
   echo "## Summary"
@@ -2176,16 +2385,17 @@ summary_row() {
   if [ "$LOCKFILE_COUNT" -gt 0 ]; then
     echo "## Lockfile Freshness"
     echo ""
-    echo "Direct dependencies pinned in \`pyproject.toml\` but missing from"
-    echo "\`requirements-lock.txt\` — the lock is stale. Regenerate it with"
-    echo "\`pip-compile --all-extras --strip-extras -o requirements-lock.txt pyproject.toml\`."
+    echo "Direct dependencies whose exact pyproject.toml pin is missing from or"
+    echo "different in requirements-lock.txt. Regenerate the lock with"
+    echo "pip-compile --all-extras --strip-extras -o requirements-lock.txt pyproject.toml."
     echo ""
-    emit_md_table "Missing direct dependency" "$LOCKFILE_RESULTS" code
+    emit_md_table "Dependency|Expected|Locked" "$LOCKFILE_RESULTS" code
     echo ""
   fi
 
   # ----- Skipped checks (collapsed) -----
-  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}" ]; then
+  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}" ] \
+     || [ -s "$INCOMPLETE_REASONS_FILE" ]; then
     echo "<details>"
     echo "<summary>Skipped checks</summary>"
     echo ""
@@ -2198,6 +2408,11 @@ summary_row() {
     [ -n "$AUTOPILOT_SKIP_REASON" ]     && echo "- **GCO Autopilot Pins:** $AUTOPILOT_SKIP_REASON"
     [ -n "$CDK_ENUM_SKIP_REASON" ]      && echo "- **CDK Enum Constants:** $CDK_ENUM_SKIP_REASON"
     [ -n "$PYTHON_RELEASE_SKIP_REASON" ] && echo "- **Python Release:** $PYTHON_RELEASE_SKIP_REASON"
+    if [ -s "$INCOMPLETE_REASONS_FILE" ]; then
+      while IFS= read -r incomplete_reason; do
+        echo "- **Incomplete lookup or parse:** ${incomplete_reason}"
+      done < <(sort -u "$INCOMPLETE_REASONS_FILE")
+    fi
     echo ""
     echo "</details>"
     echo ""
@@ -2218,7 +2433,7 @@ summary_row() {
   echo "_Automatically created by the \`deps-scan\` workflow._"
 } > "$REPORT_FILE"
 
-rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR"
+rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {

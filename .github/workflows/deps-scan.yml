@@ -34,8 +34,9 @@
 #     latest aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, LAMBDA_NODEJS_RUNTIME,
 #     AURORA_POSTGRES_VERSION)
 #   - Latest stable Python release from endoflife.date
-#   - CI tooling installed by hand across the workflows (Trivy, Helm, kubectl,
-#     kind + node image) — public endpoints, no AWS creds
+#   - CI tooling installed by hand across the workflows (Trivy, actionlint,
+#     Helm, kubectl, kubeconform, Calico, Metrics Server, kind + node image) and
+#     the digest-pinned runtime AWS CLI image — public endpoints, no AWS creds
 #   - Version consistency: pins and package surfaces that must move together
 #     (ruff, Python + Node runtimes, npm + CDK CLI, every package.json's
 #     lockfile/Dependabot entry, and duplicated *_VERSION workflow env)
@@ -69,7 +70,9 @@ permissions:
 
 env:
   HELM_VERSION: "v4.2.3"
+  HELM_SHA256: "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c"
   KUBECTL_VERSION: "v1.36.3"
+  KUBECTL_SHA256: "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336"
   # All AWS CLI reads are sequential, and adaptive retries absorb transient
   # account-level contention without increasing the monthly request rate.
   AWS_RETRY_MODE: adaptive
@@ -77,10 +80,13 @@ env:
 
 jobs:
   deps-scan:
+    if: github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7.0.0
         with:
           node-version-file: ".nvmrc"
@@ -115,14 +121,30 @@ jobs:
           pip install --upgrade aws-cdk-lib
       - name: Install pinned Helm
         run: |
-          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | tar xz -C /tmp
-          sudo mv /tmp/linux-amd64/helm /usr/local/bin/helm
-          rm -rf /tmp/linux-amd64
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/helm.tar.gz"
+          install_dir="${RUNNER_TEMP}/helm-install"
+          curl --fail --show-error --location --retry 3 \
+            --output "${archive}" \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${archive}" | sha256sum -c -
+          mkdir -p "${install_dir}"
+          tar -xzf "${archive}" -C "${install_dir}" \
+            --strip-components=1 --no-same-owner linux-amd64/helm
+          sudo install -m 0755 "${install_dir}/helm" /usr/local/bin/helm
+          rm -f "${archive}" "${install_dir}/helm"
+          rmdir "${install_dir}"
           helm version --short
       - name: Install pinned kubectl
         run: |
-          curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          set -euo pipefail
+          binary="${RUNNER_TEMP}/kubectl"
+          curl --fail --show-error --location --retry 3 \
+            --output "${binary}" \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "${KUBECTL_SHA256}  ${binary}" | sha256sum -c -
+          sudo install -m 0755 "${binary}" /usr/local/bin/kubectl
+          rm -f "${binary}"
           kubectl version --client --output=yaml | head -5
       - name: Configure AWS credentials (OIDC)
         if: env.GCO_CI_ROLE_ARN != ''
@@ -142,6 +164,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPORT_PATH: ${{ steps.scan.outputs.report_path }}
+          SCAN_COMPLETE: ${{ steps.scan.outputs.scan_complete }}
         run: |
           set -euo pipefail
           # Self-provision the labels we use so `gh issue create --label`
@@ -164,8 +187,13 @@ jobs:
 
           if [ -n "$existing" ]; then
             gh issue edit "$existing" --body-file "$REPORT_PATH"
-            gh issue comment "$existing" \
-              --body "Refreshed by the scheduled deps-scan on ${today}. The report in the issue body above is now current."
+            if [ "$SCAN_COMPLETE" = "true" ]; then
+              refresh_message="Refreshed by the scheduled deps-scan on ${today}. The report in the issue body above is now current."
+            else
+              refresh_message="Refreshed by the scheduled deps-scan on ${today}."
+              refresh_message+=" The report is partial because one or more checks were incomplete; see the failed workflow run."
+            fi
+            gh issue comment "$existing" --body "$refresh_message"
             echo "Refreshed existing issue #${existing}"
           else
             gh issue create \
@@ -201,3 +229,11 @@ jobs:
           else
             echo "Complete dependency scan is clean and no matching rolling issue is open."
           fi
+      - name: Fail an incomplete dependency scan
+        if: >-
+          always() &&
+          steps.scan.outcome == 'success' &&
+          steps.scan.outputs.scan_complete != 'true'
+        run: |
+          echo "::error::Dependency scan was incomplete; see the job summary and INCOMPLETE log entries."
+          exit 1

@@ -21,8 +21,9 @@ Trust Policy:
         repo:<owner>/<repo>:pull_request               (PR)
         repo:<owner>/<repo>:ref:refs/tags/<tag>        (tag push)
 
-    When ``github_branch`` is ``"*"`` (default), the condition uses
-    ``StringLike`` with ``repo:<owner>/<repo>:*`` to allow any ref.
+    ``github_branch`` defaults to ``"main"`` and uses ``StringEquals`` for
+    that exact branch. ``"*"`` is an explicit opt-in that uses ``StringLike``
+    with ``repo:<owner>/<repo>:*`` to allow any ref.
 """
 
 import json
@@ -44,8 +45,9 @@ class GCOGitHubOIDCStack(Stack):
     Parameters:
         github_repo: GitHub repository in ``owner/repo`` format.
             Default: ``awslabs/global-capacity-orchestrator-on-aws``.
-        github_branch: Branch restriction. Use ``"*"`` (default) to allow
-            any branch/tag, or ``"main"`` to restrict to the main branch.
+        github_branch: Exact branch restriction. Defaults to ``"main"``.
+            Set this to the repository's actual default branch when it differs;
+            use ``"*"`` only as an explicit opt-in to any branch or tag.
     """
 
     def __init__(
@@ -54,7 +56,7 @@ class GCOGitHubOIDCStack(Stack):
         construct_id: str,
         *,
         github_repo: str = "awslabs/global-capacity-orchestrator-on-aws",
-        github_branch: str = "*",
+        github_branch: str = "main",
         **kwargs: object,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)

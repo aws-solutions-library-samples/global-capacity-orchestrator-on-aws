@@ -1,0 +1,342 @@
+"""Offline contracts for CI and runtime artifact provenance controls."""
+
+import ast
+import re
+import stat
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _read(relative_path: str) -> str:
+    return (ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def _workflow_step(relative_path: str, step_name: str) -> str:
+    content = _read(relative_path)
+    match = re.search(
+        rf"^      - name: {re.escape(step_name)}\n.*?(?=^      - |\Z)",
+        content,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None, f"workflow step not found: {relative_path}: {step_name}"
+    return match.group(0)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "version", "sha256"),
+    [
+        (
+            ".github/workflows/lint.yml",
+            "1.7.12",
+            "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+        ),
+        (
+            ".github/workflows/integration-tests.yml",
+            "v4.2.3",
+            "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c",
+        ),
+        (
+            ".github/workflows/integration-tests.yml",
+            "v0.8.0",
+            "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883",
+        ),
+        (
+            ".github/workflows/integration-tests.yml",
+            "v3.31.5",
+            "d45842abe9f95afb4d346278eafb2e454dacdfb502d48cf1d5cede71a9046997",
+        ),
+        (
+            ".github/workflows/integration-tests.yml",
+            "v0.9.0",
+            "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b",
+        ),
+        (
+            ".github/workflows/deps-scan.yml",
+            "v4.2.3",
+            "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c",
+        ),
+        (
+            ".github/workflows/deps-scan.yml",
+            "v1.36.3",
+            "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336",
+        ),
+        (
+            "lambda/helm-installer/Dockerfile",
+            "v4.2.3",
+            "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c",
+        ),
+        (
+            "lambda/helm-installer/Dockerfile",
+            "v1.36.3",
+            "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336",
+        ),
+    ],
+)
+def test_downloaded_release_assets_have_committed_checksums(
+    relative_path: str,
+    version: str,
+    sha256: str,
+) -> None:
+    content = _read(relative_path)
+
+    assert version in content
+    assert sha256 in content
+    assert "sha256sum -c -" in content
+
+
+@pytest.mark.parametrize(
+    (
+        "relative_path",
+        "step_name",
+        "version_declaration",
+        "checksum_declaration",
+        "download_fragment",
+        "verification_command",
+    ),
+    [
+        (
+            ".github/workflows/lint.yml",
+            "Install pinned actionlint",
+            'ACTIONLINT_VERSION: "1.7.12"',
+            'ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"',
+            "actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz",
+            'echo "${ACTIONLINT_SHA256}  ${archive}" | sha256sum -c -',
+        ),
+        (
+            ".github/workflows/integration-tests.yml",
+            "Install Helm",
+            'HELM_VERSION: "v4.2.3"',
+            'HELM_SHA256: "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c"',
+            "helm-${HELM_VERSION}-linux-amd64.tar.gz",
+            'echo "${HELM_SHA256}  ${archive}" | sha256sum -c -',
+        ),
+        (
+            ".github/workflows/integration-tests.yml",
+            "Install pinned kubeconform",
+            'KUBECONFORM_VERSION: "v0.8.0"',
+            'KUBECONFORM_SHA256: "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"',
+            "kubeconform-linux-amd64.tar.gz",
+            'echo "${KUBECONFORM_SHA256}  ${archive}" | sha256sum -c -',
+        ),
+        (
+            ".github/workflows/integration-tests.yml",
+            "Install Calico for NetworkPolicy enforcement",
+            'CALICO_VERSION: "v3.31.5"',
+            'CALICO_SHA256: "d45842abe9f95afb4d346278eafb2e454dacdfb502d48cf1d5cede71a9046997"',
+            "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
+            'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
+        ),
+        (
+            ".github/workflows/integration-tests.yml",
+            "Install Metrics Server for HPA reconciliation",
+            'METRICS_SERVER_VERSION: "v0.9.0"',
+            'METRICS_SERVER_SHA256: "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b"',
+            "metrics-server/releases/download/${METRICS_SERVER_VERSION}/components.yaml",
+            'echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -',
+        ),
+        (
+            ".github/workflows/deps-scan.yml",
+            "Install pinned Helm",
+            'HELM_VERSION: "v4.2.3"',
+            'HELM_SHA256: "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c"',
+            "helm-${HELM_VERSION}-linux-amd64.tar.gz",
+            'echo "${HELM_SHA256}  ${archive}" | sha256sum -c -',
+        ),
+        (
+            ".github/workflows/deps-scan.yml",
+            "Install pinned kubectl",
+            'KUBECTL_VERSION: "v1.36.3"',
+            'KUBECTL_SHA256: "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336"',
+            "dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl",
+            'echo "${KUBECTL_SHA256}  ${binary}" | sha256sum -c -',
+        ),
+    ],
+)
+def test_workflow_checksum_is_bound_to_its_download_step(
+    relative_path: str,
+    step_name: str,
+    version_declaration: str,
+    checksum_declaration: str,
+    download_fragment: str,
+    verification_command: str,
+) -> None:
+    workflow = _read(relative_path)
+    step = _workflow_step(relative_path, step_name)
+
+    assert version_declaration in workflow
+    assert checksum_declaration in workflow
+    assert download_fragment in step
+    assert verification_command in step
+
+
+def test_workflows_do_not_execute_mutable_remote_installers() -> None:
+    workflows = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    )
+
+    assert "get.docker.com" not in workflows
+    assert "bash <(curl" not in workflows
+    assert "raw.githubusercontent.com/rhysd/actionlint/main" not in workflows
+
+
+def test_kind_manifests_are_authenticated_before_local_apply() -> None:
+    workflow = _read(".github/workflows/integration-tests.yml")
+
+    assert not re.search(
+        r"kubectl\s+apply\s+-f\s+(?:\\\s*)?[\"']?https://",
+        workflow,
+    )
+    assert 'kubectl apply -f "${calico_manifest}"' in workflow
+    assert 'kubectl apply -f "${metrics_manifest}"' in workflow
+    assert 'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -' in workflow
+    assert 'echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -' in workflow
+
+
+def test_finch_repository_key_is_pinned_by_primary_fingerprint() -> None:
+    workflow = _read(".github/workflows/integration-tests.yml")
+
+    assert "C97195B13509CD7BD64D7F085E9EEE296292ACB8" in workflow
+    assert 'primary_fingerprints[@]}" -ne 1' in workflow
+    assert "gpg --batch --show-keys --with-colons" in workflow
+
+
+def test_dependency_scan_credentials_are_default_branch_only() -> None:
+    workflow = _read(".github/workflows/deps-scan.yml")
+
+    assert (
+        "if: github.ref_type == 'branch' && "
+        "github.ref_name == github.event.repository.default_branch"
+    ) in workflow
+    assert "persist-credentials: false" in workflow
+    assert "persist-credentials: true" not in workflow
+    assert "steps.scan.outputs.scan_complete == 'true'" in workflow
+
+
+def test_dependency_scanner_records_incomplete_queries_before_issue_closure() -> None:
+    scanner = _read(".github/scripts/dependency-scan.sh")
+
+    assert "INCOMPLETE_REASONS_FILE=" in scanner
+    assert "mark_scan_incomplete()" in scanner
+    assert "dependency_scan_is_complete" in scanner
+    assert 'echo "scan_complete=$SCAN_COMPLETE"' in scanner
+    assert scanner.count("mark_scan_incomplete ") >= 20
+
+
+def test_accelerator_operational_errors_always_mark_the_scan_incomplete() -> None:
+    scanner = _read(".github/scripts/dependency-scan.sh")
+    section = scanner[
+        scanner.index("# Accelerator catalog and Karpenter NodePools") : scanner.index(
+            "# Summary + Markdown report"
+        )
+    ]
+    wrapper = section[
+        section.index("record_accelerator_operational_error()") : section.index(
+            "python3 scripts/accelerator_catalog.py validate"
+        )
+    ]
+
+    assert 'mark_scan_incomplete "${title}: ${detail}"' in wrapper
+    assert len(re.findall(r"^\s+record_accelerator_operational_error ", section, re.MULTILINE)) == 5
+    assert len(re.findall(r"^\s+write_accelerator_operational_report ", section, re.MULTILINE)) == 1
+
+
+def test_new_authenticated_pins_are_in_monthly_drift_inventory() -> None:
+    scanner = _read(".github/scripts/dependency-scan.sh")
+
+    assert "ACTIONLINT_PIN=" in scanner
+    assert '"rhysd/actionlint"' in scanner
+    assert "CALICO_PIN=" in scanner
+    assert '"projectcalico/calico"' in scanner
+    assert "extract_python_string_constant" in scanner
+    assert "AWS_CLI_IMAGE gco/services/inference_monitor.py" in scanner
+    assert "skopeo inspect --raw" in scanner
+    assert 'AWS_CLI_COMMITTED_DIGEST="${AWS_CLI_RUNTIME_IMAGE##*@}"' in scanner
+    assert 'AWS_CLI_COMMITTED_DIGEST" != "$AWS_CLI_PUBLISHED_DIGEST' in scanner
+
+
+def test_dependency_scanner_remains_directly_executable() -> None:
+    mode = (ROOT / ".github/scripts/dependency-scan.sh").stat().st_mode
+
+    assert mode & stat.S_IXUSR
+
+
+def test_incomplete_reports_do_not_claim_zero_count_surfaces_are_current() -> None:
+    scanner = _read(".github/scripts/dependency-scan.sh")
+
+    assert "No drift was found in completed checks, but the scan is incomplete." in scanner
+    assert 'label="no drift found (incomplete scan)"' in scanner
+    assert "Zero-count surfaces are provisional, not confirmed current." in scanner
+
+
+def test_release_publishes_branch_and_tag_atomically() -> None:
+    workflow = _read(".github/workflows/release.yml")
+
+    assert ('git push --atomic origin "HEAD:${GITHUB_REF}" "refs/tags/v${NEW_VERSION}"') in workflow
+    assert 'git push origin "HEAD:${GITHUB_REF}"' not in workflow
+    assert 'git push origin "v${NEW_VERSION}"' not in workflow
+
+
+def test_model_sync_uses_an_immutable_official_aws_cli_image() -> None:
+    source = _read("gco/services/inference_monitor.py")
+    module = ast.parse(source)
+    image = next(
+        node.value.value
+        for node in module.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "AWS_CLI_IMAGE" for target in node.targets
+        )
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    )
+
+    assert "amazon/aws-cli:latest" not in source
+    assert re.fullmatch(
+        r"public\.ecr\.aws/aws-cli/aws-cli:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}",
+        image,
+    )
+
+
+def test_actionlint_download_uses_the_published_amd64_asset() -> None:
+    workflow = _read(".github/workflows/lint.yml")
+
+    assert "actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" in workflow
+    assert "actionlint_${ACTIONLINT_VERSION}_linux_x86_64.tar.gz" not in workflow
+
+
+def test_helm_installer_checksums_are_non_overridable_trust_anchors() -> None:
+    dockerfile = _read("lambda/helm-installer/Dockerfile")
+    helm_section = dockerfile[
+        dockerfile.index("# Install Helm") : dockerfile.index("# Install kubectl")
+    ]
+    kubectl_section = dockerfile[
+        dockerfile.index("# Install kubectl") : dockerfile.index("# Install Python dependencies")
+    ]
+
+    assert "ARG HELM_SHA256" not in dockerfile
+    assert "ARG KUBECTL_SHA256" not in dockerfile
+    assert "helm-v4.2.3-linux-amd64.tar.gz" in helm_section
+    assert (
+        "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c  /tmp/helm.tar.gz"
+    ) in helm_section
+    assert "release/v1.36.3/bin/linux/amd64/kubectl" in kubectl_section
+    assert (
+        "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336  /tmp/kubectl"
+    ) in kubectl_section
+
+
+def test_incomplete_dependency_scan_ends_with_a_failing_step() -> None:
+    workflow = _read(".github/workflows/deps-scan.yml")
+    failure_step = workflow.index("- name: Fail an incomplete dependency scan")
+
+    assert failure_step > workflow.index("- name: Close the resolved drift issue")
+    failure_contract = workflow[failure_step:]
+    assert "always()" in failure_contract
+    assert "steps.scan.outputs.scan_complete != 'true'" in failure_contract
+    assert "exit 1" in failure_contract
+    assert "SCAN_COMPLETE: ${{ steps.scan.outputs.scan_complete }}" in workflow
+    assert "The report is partial because one or more checks were incomplete" in workflow
