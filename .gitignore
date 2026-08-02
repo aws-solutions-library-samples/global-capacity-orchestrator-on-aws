@@ -6,6 +6,8 @@ cdk.out/
 cdk-diff.out
 .cdk.staging/
 cdk.context.json
+# Persistent Windows sidecar for serializing atomic cdk.json mutations.
+.gco-config.lock
 
 # Python
 __pycache__/

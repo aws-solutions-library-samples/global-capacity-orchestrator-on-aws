@@ -350,6 +350,76 @@ class TestEngineWriteMechanics:
             "us-west-2",
         ]
 
+    def test_windows_config_lock_uses_stable_sidecar_and_is_reentrant(self, cdk_json: Path):
+        """Windows serializes on one persistent file without relocking nested calls."""
+        from cli import stacks
+
+        lock_path = cdk_json.parent / stacks._CONFIG_LOCK_FILENAME
+        events: list[tuple[str, str, bool]] = []
+
+        def acquire(lock_file: Any, *, exclusive: bool, purpose: str) -> None:
+            assert purpose == "configuration"
+            events.append(("acquire", str(lock_file.name), exclusive))
+
+        def release(lock_file: Any) -> None:
+            events.append(("release", str(lock_file.name), True))
+
+        with (
+            patch.object(stacks.os, "name", "nt"),
+            patch.object(stacks, "_acquire_file_lock", side_effect=acquire),
+            patch.object(stacks, "_release_file_lock", side_effect=release),
+            stacks._config_mutation_lock(cdk_json),
+            stacks._config_mutation_lock(cdk_json),
+        ):
+            assert events == [("acquire", str(lock_path), True)]
+
+        assert events == [
+            ("acquire", str(lock_path), True),
+            ("release", str(lock_path), True),
+        ]
+        assert lock_path.is_file()
+
+    def test_windows_config_lock_acquisition_failure_closes_handle_and_resets_state(
+        self, cdk_json: Path
+    ):
+        """A failed OS lock cannot leak a handle or leave false reentrant state."""
+        from cli import stacks
+
+        failed_handles: list[Any] = []
+        successful_acquisitions: list[str] = []
+
+        def fail_acquisition(lock_file: Any, *, exclusive: bool, purpose: str) -> None:
+            assert exclusive is True
+            assert purpose == "configuration"
+            failed_handles.append(lock_file)
+            raise TimeoutError("configuration lock contention")
+
+        def acquire(lock_file: Any, *, exclusive: bool, purpose: str) -> None:
+            assert exclusive is True
+            assert purpose == "configuration"
+            successful_acquisitions.append(str(lock_file.name))
+
+        with (
+            patch.object(stacks.os, "name", "nt"),
+            patch.object(stacks, "_acquire_file_lock", side_effect=fail_acquisition),
+            pytest.raises(stacks.ConfigMutationLockError, match="configuration lock contention"),
+            stacks._config_mutation_lock(cdk_json),
+        ):
+            pass
+
+        assert len(failed_handles) == 1
+        assert failed_handles[0].closed
+
+        with (
+            patch.object(stacks.os, "name", "nt"),
+            patch.object(stacks, "_acquire_file_lock", side_effect=acquire),
+            patch.object(stacks, "_release_file_lock"),
+            stacks._config_mutation_lock(cdk_json),
+        ):
+            pass
+
+        assert successful_acquisitions == [str(cdk_json.parent / stacks._CONFIG_LOCK_FILENAME)]
+
     def test_feature_writer_participates_in_same_transaction(
         self, cdk_json: Path, monkeypatch: pytest.MonkeyPatch
     ):

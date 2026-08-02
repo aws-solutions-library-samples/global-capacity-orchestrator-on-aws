@@ -13,6 +13,7 @@ module-level runtime cache so tests run in any order.
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from threading import Event, Thread
@@ -71,6 +72,71 @@ class _FakePopenProcess:
 
     def kill(self):
         self.kill_calls += 1
+
+
+class TestPlatformCompatibility:
+    """The CLI module imports and locks configuration on every supported OS."""
+
+    def test_stacks_import_does_not_require_posix_fcntl(self):
+        """Windows can import the stack CLI even though ``fcntl`` is absent."""
+        project_root = Path(__file__).resolve().parents[1]
+        script = """
+import builtins
+
+real_import = builtins.__import__
+
+
+def import_without_fcntl(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "fcntl":
+        raise ModuleNotFoundError("fcntl is unavailable on this platform")
+    return real_import(name, globals, locals, fromlist, level)
+
+
+builtins.__import__ = import_without_fcntl
+import cli.stacks  # noqa: F401
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_config_lock_contention_uses_windows_specific_guidance(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Configuration waits never emit asset or POSIX-only diagnostics."""
+        import errno
+        import logging
+
+        import cli.stacks as stacks_module
+
+        fake_msvcrt = MagicMock()
+        fake_msvcrt.LK_NBLCK = 1
+        fake_msvcrt.LK_UNLCK = 2
+        fake_msvcrt.locking.side_effect = OSError(errno.EACCES, "lock is held")
+        monkeypatch.setenv("GCO_CONFIG_LOCK_TIMEOUT_SECONDS", "0.01")
+        lock_path = tmp_path / ".gco-config.lock"
+
+        with (
+            lock_path.open("a+b") as lock_file,
+            patch.object(stacks_module.os, "name", "nt"),
+            patch.dict(sys.modules, {"msvcrt": fake_msvcrt}),
+            caplog.at_level(logging.WARNING, logger="cli.stacks"),
+            pytest.raises(TimeoutError, match="GCO_CONFIG_LOCK_TIMEOUT_SECONDS"),
+        ):
+            stacks_module._acquire_file_lock(
+                lock_file,
+                exclusive=True,
+                purpose="configuration",
+            )
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("configuration lock" in message for message in messages)
+        assert all("asset lock" not in message and "lsof" not in message for message in messages)
 
 
 class TestContainerRuntimeDetection:

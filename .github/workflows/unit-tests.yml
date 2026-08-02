@@ -390,8 +390,8 @@ jobs:
           python-version: "3.14"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
-      - name: Install CLI with CDK dependencies
-        run: pip install -e ".[cdk]"
+      - name: Install CLI with CDK and test dependencies
+        run: pip install -e ".[cdk,test]"
       - name: Exercise native Windows imports and asset locks
         shell: pwsh
         run: |
@@ -411,6 +411,10 @@ jobs:
           print("Windows CDK imports and asset locks OK")
           '@ | python -
           gco stacks --help
+      - name: Verify native Windows configuration-lock exclusion
+        run: >-
+          python -m pytest -q
+          tests/test_managed_config.py::TestEngineWriteMechanics::test_process_update_waits_for_shared_lock
 
   # End-to-end smoke for `gco autopilot`: the launch plan resolves without
   # Claude Code present, the generated MCP config is valid and matches the
