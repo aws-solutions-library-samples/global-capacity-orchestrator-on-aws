@@ -240,10 +240,23 @@ jobs:
           python-version: "3.14"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
-      - name: Install dependencies
-        # The same pinned dependency set as the shards, so the coverage version
-        # reading the data files matches the one that wrote them.
-        run: pip install -e ".[dev]"
+      - name: Install coverage (same pin as the shards)
+        # This job only runs the `coverage` CLI over the shards' data files
+        # and the checked-out source — it never imports the project — so the
+        # full editable install the shards need (CDK, boto3, the pytest
+        # stack, ...) is dead weight here. Install the coverage pin from
+        # requirements-lock.txt: the shards get coverage transitively from
+        # pyproject's pytest-cov pin, which is what the lock resolved, so
+        # this matches the writer exactly while the lock is current (the
+        # unit:lockfile:freshness job keeps it so) and stays within the
+        # same data-compatible major even across a lock refresh. If the
+        # lockfile ever stops pinning coverage, the grep comes back empty
+        # and the install fails loudly instead of drifting.
+        run: |
+          set -euo pipefail
+          pin="$(grep -E '^coverage==' requirements-lock.txt)"
+          test -n "$pin"
+          pip install "$pin"
       - name: Download shard coverage data
         uses: actions/download-artifact@v8
         with:
