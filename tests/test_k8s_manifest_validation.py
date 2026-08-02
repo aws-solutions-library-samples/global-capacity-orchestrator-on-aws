@@ -308,6 +308,90 @@ class TestFormatFailures:
         assert validator.format_failures({"resources": []}) == []
 
 
+class TestKubeconformOutputIntegrity:
+    @pytest.mark.parametrize(
+        "result",
+        [
+            pytest.param({}, id="blank-or-malformed-json"),
+            pytest.param([], id="non-object-json"),
+            pytest.param(
+                {
+                    "resources": [],
+                    "summary": {"valid": 0, "invalid": 0, "errors": 0, "skipped": 0},
+                },
+                id="empty-results",
+            ),
+            pytest.param(
+                {
+                    "resources": [
+                        {
+                            "filename": "one.yaml",
+                            "kind": "Namespace",
+                            "name": "one",
+                            "status": "statusValid",
+                            "msg": "",
+                        }
+                    ],
+                    "summary": {"valid": 1, "invalid": 0, "errors": 0, "skipped": 0},
+                },
+                id="partial-results",
+            ),
+        ],
+    )
+    def test_zero_exit_with_unusable_json_fails_closed(
+        self,
+        result: object,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        for name in ("one", "two"):
+            (tmp_path / f"{name}.yaml").write_text(
+                f"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {name}\n",
+                encoding="utf-8",
+            )
+        monkeypatch.setattr(validator.shutil, "which", lambda _binary: "/usr/bin/kubeconform")
+        monkeypatch.setattr(validator, "run_kubeconform", lambda *_args, **_kwargs: (0, result))
+
+        rc = validator.main(["--path", str(tmp_path), "--kubeconform-binary", "fake"])
+
+        assert rc == 2
+        assert "unusable JSON output" in capsys.readouterr().err
+
+    def test_complete_accounted_output_succeeds(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        manifest = tmp_path / "one.yaml"
+        manifest.write_text(
+            "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: one\n",
+            encoding="utf-8",
+        )
+        result = {
+            "resources": [
+                {
+                    "filename": "one.yaml",
+                    "kind": "Namespace",
+                    "name": "one",
+                    "status": "statusValid",
+                    "msg": "",
+                }
+            ],
+            "summary": {"valid": 1, "invalid": 0, "errors": 0, "skipped": 0},
+        }
+        monkeypatch.setattr(validator.shutil, "which", lambda _binary: "/usr/bin/kubeconform")
+        monkeypatch.setattr(validator, "run_kubeconform", lambda *_args, **_kwargs: (0, result))
+
+        rc = validator.main(["--path", str(manifest), "--kubeconform-binary", "fake"])
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "OK: 1 manifest(s)" in captured.out
+        assert captured.err == ""
+
+
 class TestMainExplicitInputs:
     def test_missing_input_does_not_mask_existing_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -320,8 +404,20 @@ class TestMainExplicitInputs:
         monkeypatch.setattr(validator.shutil, "which", lambda _binary: "/usr/bin/kubeconform")
 
         def fake_run(directory: Path, **_kwargs):
-            calls.extend(directory.rglob("*.yaml"))
-            return 0, {"resources": [], "summary": {"valid": 1, "skipped": 0}}
+            rendered = list(directory.rglob("*.yaml"))
+            calls.extend(rendered)
+            return 0, {
+                "resources": [
+                    {
+                        "filename": str(rendered[0]),
+                        "kind": "Namespace",
+                        "name": "valid",
+                        "status": "statusValid",
+                        "msg": "",
+                    }
+                ],
+                "summary": {"valid": 1, "invalid": 0, "errors": 0, "skipped": 0},
+            }
 
         monkeypatch.setattr(validator, "run_kubeconform", fake_run)
         rc = validator.main(
@@ -355,7 +451,7 @@ class TestMainExplicitInputs:
                             "msg": "schema error",
                         }
                     ],
-                    "summary": {"valid": 0, "skipped": 0},
+                    "summary": {"valid": 0, "invalid": 1, "errors": 0, "skipped": 0},
                 },
             ),
         )

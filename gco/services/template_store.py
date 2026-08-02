@@ -313,8 +313,18 @@ class WebhookStore:
         self._dynamodb = boto3.resource("dynamodb", region_name=self.region)
         self._table = self._dynamodb.Table(self.table_name)
 
-    def list_webhooks(self, namespace: str | None = None) -> list[dict[str, Any]]:
-        """List webhooks, optionally filtered by namespace."""
+    def list_webhooks(
+        self,
+        namespace: str | None = None,
+        *,
+        include_secret: bool = False,
+    ) -> list[dict[str, Any]]:
+        """List webhooks, optionally filtered by namespace.
+
+        Secrets are redacted by default because this method also backs the
+        public list API. Internal delivery lookups explicitly opt in so HMAC
+        signing still uses the configured secret.
+        """
         try:
             if namespace:
                 response = self._table.query(
@@ -333,16 +343,19 @@ class WebhookStore:
                     )
                     items.extend(response.get("Items", []))
 
-            return [
-                {
+            webhooks: list[dict[str, Any]] = []
+            for item in items:
+                webhook = {
                     "id": item["webhook_id"],
                     "url": item["url"],
                     "events": json.loads(item.get("events", "[]")),
                     "namespace": item.get("namespace"),
                     "created_at": item.get("created_at"),
                 }
-                for item in items
-            ]
+                if include_secret and "secret" in item:
+                    webhook["secret"] = item["secret"]
+                webhooks.append(webhook)
+            return webhooks
         except ClientError as e:
             logger.error(f"Failed to list webhooks: {e}")
             raise
@@ -420,7 +433,7 @@ class WebhookStore:
         self, event: str, namespace: str | None = None
     ) -> list[dict[str, Any]]:
         """Get all webhooks subscribed to a specific event."""
-        webhooks = self.list_webhooks(namespace=namespace)
+        webhooks = self.list_webhooks(namespace=namespace, include_secret=True)
         return [w for w in webhooks if event in w.get("events", [])]
 
 

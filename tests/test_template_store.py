@@ -280,6 +280,7 @@ class TestWebhookStore:
                     "url": "https://example.com/webhook",
                     "events": '["job.completed"]',
                     "namespace": "default",
+                    "secret": "redacted-secret",
                     "created_at": "2024-01-01T00:00:00Z",
                 }
             ]
@@ -288,6 +289,7 @@ class TestWebhookStore:
         result = webhook_store.list_webhooks(namespace="default")
 
         assert len(result) == 1
+        assert "secret" not in result[0]
         mock_dynamodb.query.assert_called_once()
 
     def test_get_webhook_found(self, webhook_store, mock_dynamodb):
@@ -358,6 +360,7 @@ class TestWebhookStore:
                     "webhook_id": "wh-1",
                     "url": "https://example1.com",
                     "events": '["job.completed", "job.failed"]',
+                    "secret": "delivery-secret",
                 },
                 {
                     "webhook_id": "wh-2",
@@ -371,6 +374,7 @@ class TestWebhookStore:
 
         assert len(result) == 1
         assert result[0]["id"] == "wh-1"
+        assert result[0]["secret"] == "delivery-secret"
 
 
 # =============================================================================

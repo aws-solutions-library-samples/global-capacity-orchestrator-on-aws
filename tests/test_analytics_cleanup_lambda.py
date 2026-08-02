@@ -31,6 +31,7 @@ sys.modules.setdefault("analytics_cleanup_handler", _module)
 _SPEC.loader.exec_module(_module)
 
 handler = _module.handler
+_delete_apps = _module._delete_apps
 _delete_user_profiles = _module._delete_user_profiles
 _delete_access_points = _module._delete_access_points
 
@@ -149,6 +150,39 @@ class TestHandler:
         """
         result = handler({"RequestType": "Delete"}, None)
         assert result["Status"] == "SUCCESS"
+
+
+# ---------------------------------------------------------------------------
+# _delete_apps tests
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteApps:
+    def test_timeout_reports_error(self, monkeypatch):
+        """A lingering app must fail cleanup instead of allowing a domain-delete race."""
+        monkeypatch.setattr(_module, "APP_DELETE_WAIT_SECONDS", 0)
+        mock_sm = MagicMock()
+        mock_paginator = MagicMock()
+        mock_paginator.paginate.return_value = [
+            {
+                "Apps": [
+                    {
+                        "AppName": "studio-app",
+                        "AppType": "JupyterLab",
+                        "Status": "Deleting",
+                        "UserProfileName": "alice",
+                    }
+                ]
+            }
+        ]
+        mock_sm.get_paginator.return_value = mock_paginator
+
+        with patch("boto3.client", return_value=mock_sm):
+            errors = _delete_apps("us-east-2", "d-test123")
+
+        assert len(errors) == 1
+        assert "Timed out" in errors[0]
+        assert "studio-app" in errors[0]
 
 
 # ---------------------------------------------------------------------------

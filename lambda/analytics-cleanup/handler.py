@@ -211,7 +211,10 @@ def _delete_apps(region: str, domain_id: str) -> list[str]:
                         logger.error(msg)
                         errors.append(msg)
 
-        # Wait for apps to finish deleting.
+        # Wait for apps to finish deleting. A timeout must be surfaced to the
+        # custom resource handler; otherwise CloudFormation immediately moves
+        # on to space/profile/domain deletion while apps are still attached.
+        active: list[str] = []
         for _ in range(_poll_iterations(APP_DELETE_WAIT_SECONDS)):
             time.sleep(DRAIN_POLL_INTERVAL_SECONDS)
             active = []
@@ -221,7 +224,11 @@ def _delete_apps(region: str, domain_id: str) -> list[str]:
                         active.append(app["AppName"])
             if not active:
                 break
-            logger.info("Waiting for %d app(s) to delete...", len(active))
+            logger.info("Waiting for %d app(s) to delete: %s", len(active), active)
+        else:
+            msg = f"Timed out waiting for apps to delete in {domain_id}: {active}"
+            logger.error(msg)
+            errors.append(msg)
 
     except ClientError as e:
         msg = f"Failed to list apps: {e}"

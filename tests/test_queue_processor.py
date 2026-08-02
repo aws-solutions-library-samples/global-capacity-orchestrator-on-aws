@@ -344,9 +344,18 @@ class TestApplyManifest:
     def test_finished_job_deleted(self):
         qp, res = self._setup_mocks()
         qp.time = MagicMock()
-        res.get.return_value = {"status": {"conditions": [{"type": "Complete"}]}}
+        res.get.return_value = {"status": {"conditions": [{"type": "Complete", "status": "True"}]}}
         assert qp.apply_manifest(_job()).status == "created"
         res.delete.assert_called_once()
+
+    def test_false_terminal_condition_is_not_deleted(self):
+        qp, res = self._setup_mocks()
+        qp.time = MagicMock()
+        res.get.return_value = {"status": {"conditions": [{"type": "Failed", "status": "False"}]}}
+
+        assert qp.apply_manifest(_job()).status == "created"
+
+        res.delete.assert_not_called()
 
     def test_non_namespaced(self):
         qp, res = self._setup_mocks()

@@ -577,6 +577,18 @@ def _inject_security_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
     return manifest
 
 
+def _is_job_finished(job_resource: dict[str, Any]) -> bool:
+    """Return whether a Kubernetes Job has a true terminal condition."""
+    status = job_resource.get("status", {})
+    conditions = status.get("conditions") or [] if isinstance(status, dict) else []
+    return any(
+        isinstance(condition, dict)
+        and condition.get("type") in ("Complete", "Failed")
+        and condition.get("status") == "True"
+        for condition in conditions
+    )
+
+
 def apply_manifest(m: dict[str, Any]) -> ResourceStatus:
     """Apply one prevalidated manifest and return an explicit operation status.
 
@@ -616,9 +628,7 @@ def apply_manifest(m: dict[str, Any]) -> ResourceStatus:
     if kind == "Job":
         try:
             existing = resource.get(name=name, namespace=namespace)
-            conditions = existing.get("status", {}).get("conditions", [])
-            finished = any(c.get("type") in ("Complete", "Failed") for c in conditions)
-            if finished:
+            if _is_job_finished(existing):
                 log.info("Deleting finished Job %s/%s before re-creation", namespace, name)
                 resource.delete(
                     name=name,

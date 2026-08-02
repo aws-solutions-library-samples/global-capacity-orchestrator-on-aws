@@ -26,6 +26,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from gco.services.template_store import WebhookStore
 from gco.services.webhook_dispatcher import (
     BLOCKED_NETWORKS,
     JobStateCache,
@@ -271,6 +272,60 @@ class TestWebhookDispatcher:
             headers = call_args.kwargs["headers"]
             assert "X-GCO-Signature" in headers
             assert headers["X-GCO-Signature"].startswith("sha256=")
+
+    @pytest.mark.asyncio
+    async def test_dispatch_uses_secret_loaded_from_store(self, dispatcher):
+        """The redacted public projection must not disable delivery signing."""
+        table = MagicMock()
+        table.query.return_value = {
+            "Items": [
+                {
+                    "webhook_id": "wh-signed",
+                    "url": "https://example.com/webhook",
+                    "events": '["job.completed"]',
+                    "namespace": "gco-jobs",
+                    "secret": "stored-delivery-secret",
+                }
+            ]
+        }
+        table.scan.return_value = {"Items": []}
+        with patch("gco.services.template_store.boto3.resource") as resource:
+            resource.return_value.Table.return_value = table
+            dispatcher.webhook_store = WebhookStore("webhooks", "us-east-1")
+
+        job = MagicMock()
+        job.metadata.namespace = "gco-jobs"
+        job.metadata.name = "test-job"
+        job.metadata.uid = "job-123"
+        job.metadata.labels = {}
+        job.status.conditions = []
+        job.status.active = 0
+        job.status.succeeded = 1
+        job.status.failed = 0
+        job.status.start_time = None
+        job.status.completion_time = None
+
+        with (
+            patch(
+                "gco.services.webhook_dispatcher.validate_webhook_url",
+                return_value=(True, None),
+            ),
+            patch("httpx.AsyncClient") as mock_client_class,
+        ):
+            mock_client = AsyncMock()
+            mock_response = MagicMock(status_code=200)
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            results = await dispatcher._dispatch_event(WebhookEvent.JOB_COMPLETED, job)
+
+        assert len(results) == 1
+        call = mock_client.post.call_args
+        payload = call.kwargs["content"]
+        expected = hmac.new(
+            b"stored-delivery-secret", payload.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        assert call.kwargs["headers"]["X-GCO-Signature"] == f"sha256={expected}"
 
     @pytest.mark.asyncio
     async def test_deliver_webhook_retry_on_500(self, dispatcher):
