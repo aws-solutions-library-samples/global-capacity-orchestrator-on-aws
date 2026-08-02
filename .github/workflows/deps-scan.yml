@@ -22,8 +22,11 @@
 #   - Accelerator catalog and Karpenter NodePool policy (offline), plus live
 #     NVIDIA GPU / AWS Neuron EC2 catalog drift across enabled Regions (OIDC)
 #   - Dockerfile.dev ARG pins (NODE_VERSION, NPM_VERSION, CDK_VERSION,
-#     KUBECTL_VERSION, AWSCLI_VERSION, DOCKER_VERSION, BUILDX_VERSION) — public endpoints,
-#     no AWS creds needed
+#     KUBECTL_VERSION, AWSCLI_VERSION, DOCKER_VERSION, BUILDX_VERSION,
+#     UV_VERSION) — public endpoints, no AWS creds needed
+#   - GCO Autopilot pins from cli/autopilot.py (CLAUDE_CODE_VERSION vs the
+#     npm latest dist-tag, plus companion MCP server liveness on npm/PyPI)
+#     — public endpoints, no AWS creds needed
 #   - Pre-commit hook revisions in .pre-commit-config.yaml compared against
 #     the latest tag from the upstream Git host (unauthenticated; one call
 #     per hook well below the 60 req/h limit)

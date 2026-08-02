@@ -21,6 +21,7 @@ This separation keeps the Click wiring thin and the business logic testable with
 
 | File | Commands | Description |
 |------|----------|-------------|
+| `autopilot_cmd.py` | `gco autopilot` | Launch a fully configured [Claude Code](https://code.claude.com/docs/en/overview) session on [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) with the GCO MCP server + companion MCPs ([docs](../../docs/AUTOPILOT.md)) |
 | `jobs_cmd.py` | `gco jobs submit`, `submit-sqs`, `submit-direct`, `list`, `get`, `logs`, `events`, `delete`, `health`, `queue-status` | Job submission and lifecycle |
 | `inference_cmd.py` | `gco inference deploy`, `list`, `status`, `scale`, `update-image`, `stop`, `start`, `delete`, `canary`, `promote`, `rollback`, `invoke`, `chat`, `health`, `models` | Inference endpoint management |
 | `stacks_cmd.py` | `gco stacks deploy`, `deploy-all`, `destroy`, `destroy-all`, `list`, `status`, `access`, `bootstrap`, `fsx`, `valkey`, `aurora` | [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) stack deployment and management |

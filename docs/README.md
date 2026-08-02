@@ -21,6 +21,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 | [Architecture](ARCHITECTURE.md) | Engineers | Deep dive into the multi-region infrastructure, security layers, data flow, and scale characteristics |
 | [Quick Start](../QUICKSTART.md) | New users | Get running in under 60 minutes — install, deploy, submit your first job |
 | [CLI Reference](CLI.md) | Operators | Complete command reference for all `gco` CLI commands |
+| [Autopilot](AUTOPILOT.md) | Everyone | `gco autopilot` — one command to a fully configured [Claude Code](https://code.claude.com/docs/en/overview) session on [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) with the GCO MCP server and companion MCPs wired in |
 | [Inference Guide](INFERENCE.md) | ML engineers | Deploy and manage multi-region GPU inference endpoints ([vLLM](https://docs.vllm.ai/en/latest/), TGI, Triton, [SGLang](https://docs.sglang.ai/), [TorchServe](https://pytorch.org/serve/)) |
 | [API Reference](API.md) | Developers | Every HTTP surface: the control plane (manifests, jobs, queue, templates, webhooks, cost), cross-region aggregation, inference, and health/observability |
 | [Customization](CUSTOMIZATION.md) | Platform teams | Add regions, tune nodepools, enable FSx/[Valkey](https://valkey.io/)/EFA, configure queue processor |

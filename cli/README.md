@@ -13,6 +13,7 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | File | Description |
 |------|-------------|
 | `main.py` | CLI entry point and top-level command group registration |
+| `autopilot.py` | Autopilot launch-plan logic: Bedrock model resolution, session MCP config generation, pinned [Claude Code](https://code.claude.com/docs/en/overview) install ([docs](../docs/AUTOPILOT.md)) |
 | `aws_client.py` | AWS SDK client wrapper with region discovery and credential handling |
 | `config.py` | CLI configuration loader (cdk.json, env vars, user config) |
 | `output.py` | Output formatting (table, JSON, YAML) |
@@ -33,6 +34,7 @@ Click command definitions that wire CLI flags to the business logic above.
 
 | File | Commands |
 |------|----------|
+| `autopilot_cmd.py` | `gco autopilot` |
 | `capacity_cmd.py` | `gco capacity check`, `status`, `recommend`, `ai-recommend` |
 | `config_cmd.py` | `gco config show`, `set` |
 | `costs_cmd.py` | `gco costs summary`, `regions`, `trend`, `workloads`, `forecast` |

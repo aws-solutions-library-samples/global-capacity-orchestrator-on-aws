@@ -7,6 +7,7 @@ Complete command-line interface documentation for GCO (Global Capacity Orchestra
 - [Installation](#installation)
 - [Global Options](#global-options)
 - [Commands](#commands)
+  - [autopilot](#autopilot-command)
   - [jobs](#jobs-commands)
   - [queue](#queue-commands)
   - [templates](#templates-commands)
@@ -105,6 +106,48 @@ gco jobs list --region us-east-1
 ```
 
 ## Commands
+
+### Autopilot Command
+
+Launch a fully configured [Claude Code](https://code.claude.com/docs/en/overview) session for GCO — the fastest way to start working with a deployment. Full guide: [docs/AUTOPILOT.md](AUTOPILOT.md).
+
+```bash
+# Turn this terminal into an agent session: Claude Code on Amazon Bedrock
+# (defaults to cdk.json context.bedrock.default_model_id) with the GCO MCP
+# server + the recommended companion MCP servers wired in
+gco autopilot
+
+# Preview the launch plan without installing, writing, or launching
+gco autopilot --dry-run
+
+# Use any Claude model or inference profile enabled on Bedrock
+gco autopilot -m global.anthropic.claude-sonnet-4-6
+
+# Resume the previous session for this workspace (an interactive launch
+# also offers this when a previous session exists)
+gco autopilot --continue
+
+# Enable opt-in GCO MCP tool groups for the session (repeatable; short or
+# full GCO_ENABLE_* form; -e all-tools for everything)
+gco autopilot -e mission -e infrastructure-deploy
+
+# Import your own skills/agents directories, or load Claude Code plugins,
+# for this session only (nothing is copied into the project or ~/.claude)
+gco autopilot --skills ~/team-skills --agents ~/my-agents
+gco autopilot --plugin ~/plugins/incident-response
+
+# GCO MCP server only, no companions
+gco autopilot --no-companions
+
+# Dump the generated MCP config JSON (written to ~/.gco/autopilot/mcp.json
+# at launch and passed with --strict-mcp-config)
+gco autopilot --print-config
+
+# Install Claude Code without prompting if absent, then pass args through
+gco autopilot -y -- --continue
+```
+
+If the `claude` binary is missing, autopilot offers to install the exact pinned release via `npm install -g` — Claude Code is intentionally not baked into the dev container, so setup happens on first use and stays reproducible (the monthly deps-scan tracks the pin).
 
 ### Jobs Commands
 
@@ -4608,6 +4651,10 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_CONFIG` | Path to config file |
 | `GCO_REGIONAL_API` | Use regional API endpoints (`true`/`false`) |
 | `CDK_DOCKER` | Docker command (`docker` or `finch`) |
+| `GCO_AUTOPILOT_MODEL` | Override the Bedrock model `gco autopilot` launches Claude Code with (default: `cdk.json` `context.bedrock.default_model_id`; the `--model` flag wins over this). See [Autopilot](AUTOPILOT.md). |
+| `GCO_AUTOPILOT_SMALL_FAST_MODEL` | Optional Bedrock model for Claude Code's background/fast tasks (unset by default). |
+| `GCO_AUTOPILOT_CONFIG_DIR` | Directory for the generated autopilot MCP config and staged skill/agent imports (default: `~/.gco/autopilot`). |
+| `GCO_AUTOPILOT_PLUGIN_DIRS` | Colon-separated Claude Code plugin dirs/zips loaded into every `gco autopilot` session (merged with per-launch `--plugin` flags). |
 | `GCO_ENABLE_MISSION` | Gate the `gco mission` subcommand group (`true`/`false`). With the flag unset, every subcommand exits 2 with a hint. |
 | `GCO_ENABLE_ALL_TOOLS` | Umbrella flag that satisfies every per-tool gate including `GCO_ENABLE_MISSION`. |
 | `GCO_MISSION_STATE_BACKEND` | Persistence backend for sessions (`filesystem` or `dynamodb`). Unrecognised values fall back to filesystem with a one-line warning. |

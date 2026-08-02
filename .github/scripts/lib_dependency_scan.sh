@@ -406,6 +406,7 @@ allowlist = {
     'AWSCLI_VERSION',
     'DOCKER_VERSION',
     'BUILDX_VERSION',
+    'UV_VERSION',
 }
 with open(sys.argv[1]) as f:
     for line in f:
@@ -1527,4 +1528,131 @@ with open(sys.argv[1]) as f:
         if m:
             print(f'{m.group(1)}|{m.group(2)}')
 " "$file" 2>/dev/null
+}
+
+# extract_claude_code_pin [autopilot_py]
+#
+# Prints the exact Claude Code release ``gco autopilot`` installs, read from
+# the ``CLAUDE_CODE_VERSION`` constant in ``cli/autopilot.py``.
+#
+# Like the Mooncake image above, this pin lives in a Python constant, so
+# neither Dependabot nor the npm-graph sweep sees it — autopilot installs
+# Claude Code lazily via ``npm install -g`` rather than declaring it in any
+# package.json. This extractor feeds the autopilot-pins drift check so a
+# newer npm release is surfaced in the monthly report.
+#
+# The textual contract (a single-line, double-quoted assignment) is locked
+# by tests/test_cli_autopilot.py, so this regex and the constant cannot
+# silently drift apart. Prints nothing if the file or constant is absent —
+# the caller treats an empty result as "skip".
+extract_claude_code_pin() {
+  local file="${1:-cli/autopilot.py}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+with open(sys.argv[1]) as f:
+    text = f.read()
+m = re.search(r'^CLAUDE_CODE_VERSION = \"([^\"]+)\"', text, re.MULTILINE)
+if m:
+    print(m.group(1))
+" "$file" 2>/dev/null
+}
+
+# extract_companion_mcp_packages [autopilot_py]
+#
+# Prints one ``name|registry|package`` line per companion MCP server in the
+# ``COMPANION_MCP_SERVERS`` registry of ``cli/autopilot.py`` — the servers
+# ``gco autopilot`` wires into every session. ``registry`` is ``npm`` or
+# ``pypi``.
+#
+# These packages are launch-time dependencies fetched by npx/uvx, so they
+# appear in no lockfile and no manifest Dependabot watches. The autopilot
+# liveness check uses this list to verify each package is still published
+# (and not deprecated/yanked) on its registry — exactly the failure mode
+# that got mcp-server-fetch and mcp-server-calculator pruned in 2026-08.
+#
+# Parses the ``name=`` / ``registry=`` / ``package=`` keywords inside each
+# ``CompanionServer(`` block textually (no imports), so BATS can exercise it
+# against fixtures; tests/test_cli_autopilot.py locks the source formatting.
+# Prints nothing for a missing or unparseable file.
+extract_companion_mcp_packages() {
+  local file="${1:-cli/autopilot.py}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+with open(sys.argv[1]) as f:
+    text = f.read()
+pattern = re.compile(
+    r'CompanionServer\(\s*name=\"([^\"]+)\",\s*registry=\"([^\"]+)\",\s*package=\"([^\"]+)\",'
+)
+for name, registry, package in pattern.findall(text):
+    print(f'{name}|{registry}|{package}')
+" "$file" 2>/dev/null
+}
+
+# get_registry_package_status <registry> <package>
+#
+# Resolves a package's publication status on its public registry and prints
+# exactly one of:
+#
+#   ok|<latest-version>       published and healthy
+#   missing|                  registry answers 404 — unpublished/renamed
+#   deprecated|<message>      npm ``deprecated`` flag on the latest release
+#   yanked|<latest-version>   PyPI ``yanked`` flag on the latest release
+#
+# Prints nothing on a network/transport failure or an unknown registry so
+# the caller marks the check skipped instead of reporting phantom drift —
+# the same fail-quiet contract as the other ``get_latest_*`` helpers here.
+# Both endpoints are public; no credentials needed.
+get_registry_package_status() {
+  local registry="$1" package="$2"
+  local url="" body="" code=""
+  case "$registry" in
+    npm)
+      # Scoped packages need the slash percent-encoded on the
+      # per-version route (@scope%2Fname/latest).
+      url="https://registry.npmjs.org/${package//\//%2F}/latest"
+      ;;
+    pypi)
+      url="https://pypi.org/pypi/${package}/json"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  body="$(mktemp)"
+  code="$(curl -sSL --max-time 15 -o "$body" -w '%{http_code}' "$url" 2>/dev/null)" || code=""
+  if [ "$code" = "404" ]; then
+    rm -f "$body"
+    echo "missing|"
+    return 0
+  fi
+  if [ "$code" != "200" ]; then
+    rm -f "$body"
+    return 0
+  fi
+
+  python3 -c "
+import json, sys
+registry, path = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(0)
+if registry == 'npm':
+    deprecated = data.get('deprecated')
+    if deprecated:
+        print('deprecated|' + ' '.join(str(deprecated).split())[:120])
+    else:
+        print('ok|' + str(data.get('version', '')))
+else:
+    info = data.get('info') or {}
+    urls = data.get('urls') or []
+    yanked = bool(urls and urls[0].get('yanked'))
+    version = str(info.get('version', ''))
+    print(('yanked|' if yanked else 'ok|') + version)
+" "$registry" "$body" 2>/dev/null
+  rm -f "$body"
 }

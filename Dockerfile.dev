@@ -230,6 +230,44 @@ RUN mkdir -p /usr/local/lib/docker/cli-plugins \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx \
     && docker buildx version
 
+# Install uv (and its uvx runner) — pinned to an exact release, downloaded as
+# the official GitHub release tarball and verified against the SHA-256 the
+# release publishes per artifact.
+#
+# `gco autopilot` launches several companion MCP servers through `uvx`
+# (aws-docs, aws-pricing, eks, ddg-search, shell), so a dev-container
+# autopilot session needs uv on PATH. Same provisioning discipline as every
+# other tool above: pinned direct vendor download + checksum. Bump procedure
+# (keep the three ARGs in lockstep, hashes from the per-artifact *.sha256
+# files on https://github.com/astral-sh/uv/releases):
+ARG UV_VERSION=0.12.1
+ARG UV_SHA256_AMD64=90b2f223fb69d19db49e117da601f64978593417988530aa733d456141b4bcbb
+ARG UV_SHA256_ARM64=769d373e146692c639b5fbaae33b331c297a32e03d30448772051902df52bbf4
+RUN case "${TARGETARCH}" in \
+        amd64)  UV_TARGET="x86_64-unknown-linux-gnu";  UV_SHA256="${UV_SHA256_AMD64}" ;; \
+        arm64)  UV_TARGET="aarch64-unknown-linux-gnu"; UV_SHA256="${UV_SHA256_ARM64}" ;; \
+        *)      echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${UV_TARGET}.tar.gz" \
+      -o /tmp/uv.tar.gz \
+    && echo "${UV_SHA256}  /tmp/uv.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1 \
+    && rm /tmp/uv.tar.gz \
+    && uv --version \
+    && uvx --version
+
+# Runtime npm prefix for tools installed *inside* a running container —
+# most notably the pinned Claude Code release that `gco autopilot` installs
+# on first use. Every image-baked npm global above (npm itself, the CDK CLI)
+# was already installed under /usr/local before this line, so those stay in
+# the image; this prefix only affects `npm install -g` at runtime. The
+# setup-dev-alias.sh `gco` function mounts a named volume here, so the
+# autopilot install survives the `--rm` container lifecycle instead of
+# re-downloading on every launch.
+ENV NPM_CONFIG_PREFIX=/root/.npm-global \
+    PATH="/root/.npm-global/bin:${PATH}"
+RUN mkdir -p /root/.npm-global/bin
+
 # Set working directory
 WORKDIR /workspace
 

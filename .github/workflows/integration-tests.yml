@@ -602,7 +602,44 @@ jobs:
             aws --version
             docker --version
             docker buildx version
+            uv --version
+            uvx --version
           '
+      - name: Exercise gco autopilot inside the dev container
+        # The dev container is the recommended autopilot front door (via the
+        # setup-dev-alias.sh shell function), so prove the pieces the image
+        # contributes without needing AWS credentials or Claude Code:
+        #   1. the runtime npm prefix that the function's gco-dev-tools
+        #      volume mounts over (where the pinned Claude Code install
+        #      persists), and its PATH wiring;
+        #   2. full launch-plan resolution in-container;
+        #   3. MCP config generation with a feature flag, running the GCO
+        #      server from the mounted checkout.
+        run: |
+          set -euo pipefail
+          docker run --rm gco-dev bash -c '
+            set -euo pipefail
+            [ "$(npm config get prefix)" = "/root/.npm-global" ]
+            case ":$PATH:" in
+              *":/root/.npm-global/bin:"*) ;;
+              *) echo "/root/.npm-global/bin missing from PATH" >&2; exit 1 ;;
+            esac
+          '
+          docker run --rm -v "$PWD":/workspace -w /workspace gco-dev \
+            gco autopilot --dry-run
+          docker run --rm -v "$PWD":/workspace -w /workspace gco-dev \
+            gco autopilot -e all-tools --print-config > /tmp/autopilot-config.json
+          python3 - <<'PY'
+          import json
+
+          with open("/tmp/autopilot-config.json") as handle:
+              config = json.load(handle)
+          gco = config["mcpServers"]["gco"]
+          assert gco["env"] == {"GCO_ENABLE_ALL_TOOLS": "true"}, gco
+          assert gco["args"] == ["/workspace/gco_mcp/run_mcp.py"], gco["args"]
+          assert len(config["mcpServers"]) > 1, "companions missing"
+          print(f"in-container autopilot config OK: {len(config['mcpServers'])} servers")
+          PY
       - name: Verify image contains native ${{ matrix.arch }} binaries
         # Two layers of verification:
         #   1. `uname -m` inside the container reports the expected arch.
@@ -636,7 +673,7 @@ jobs:
           import sys
 
           expected = int(os.environ["EXPECTED_E_MACHINE"], 16)
-          for binary in ("/usr/local/bin/kubectl", "/usr/local/bin/docker"):
+          for binary in ("/usr/local/bin/kubectl", "/usr/local/bin/docker", "/usr/local/bin/uv"):
               with pathlib.Path(binary).open("rb") as f:
                   f.seek(0x12)  # ELF e_machine offset
                   e_machine = struct.unpack("<H", f.read(2))[0]

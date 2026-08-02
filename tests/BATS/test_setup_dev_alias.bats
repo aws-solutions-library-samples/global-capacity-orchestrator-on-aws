@@ -317,3 +317,53 @@ SHIM
     grep -q -- '-w /workspace' "$GCO_SHIM_LOG"
     grep -q 'gco --version' "$GCO_SHIM_LOG"
 }
+
+# -- Autopilot persistence mounts ----------------------------------------------
+#
+# `gco autopilot` installs the pinned Claude Code on first use and keeps
+# session state under ~/.claude and ~/.gco. The emitted function must carry
+# the three persistence mounts (npm-global named volume, ~/.claude, ~/.gco)
+# and CLAUDE_CONFIG_DIR on every runtime, or those installs and sessions
+# evaporate with the --rm container.
+
+@test "emitted block carries the autopilot persistence mounts on every runtime" {
+    local rt
+    for rt in docker finch podman; do
+        run bash "$SCRIPT" --print --runtime "$rt"
+        [ "$status" -eq 0 ]
+        [[ "$output" == *'-v gco-dev-tools:/root/.npm-global'* ]]
+        [[ "$output" == *'.claude:/root/.claude'* ]]
+        [[ "$output" == *'.gco:/root/.gco'* ]]
+        [[ "$output" == *'-e CLAUDE_CONFIG_DIR=/root/.claude'* ]]
+    done
+}
+
+@test "emitted block carries the mounts in both TTY and non-TTY branches" {
+    run bash "$SCRIPT" --print --runtime docker
+    [ "$status" -eq 0 ]
+    tty_line="$(echo "$output" | grep -- 'run --rm -it')"
+    notty_line="$(echo "$output" | grep -- 'run --rm -i ')"
+    for line in "$tty_line" "$notty_line"; do
+        [[ "$line" == *'gco-dev-tools:/root/.npm-global'* ]]
+        [[ "$line" == *'CLAUDE_CONFIG_DIR=/root/.claude'* ]]
+    done
+}
+
+@test "emitted function pre-creates the host state dirs before running" {
+    make_shim "$SHIMDIR" docker 0
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    bash "$SCRIPT" --print --runtime docker > "$SHIMDIR/block.sh"
+    # Point HOME at a scratch dir so the function's mkdir -p is observable
+    # (and never touches the real test-runner home).
+    HOME="$SHIMDIR/home"
+    mkdir -p "$HOME"
+    PATH="$SHIMDIR:$PATH"
+    source "$SHIMDIR/block.sh"
+    run gco --version
+    [ "$status" -eq 0 ]
+    [ -d "$HOME/.claude" ]
+    [ -d "$HOME/.gco" ]
+    grep -q -- 'gco-dev-tools:/root/.npm-global' "$GCO_SHIM_LOG"
+    grep -q -- 'CLAUDE_CONFIG_DIR=/root/.claude' "$GCO_SHIM_LOG"
+}

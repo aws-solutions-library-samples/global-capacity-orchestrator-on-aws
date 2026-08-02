@@ -23,6 +23,7 @@ import click
 from . import __version__
 from .commands import (
     analytics,
+    autopilot,
     capacity,
     cluster,
     config_cmd,
@@ -130,6 +131,7 @@ def cli(
 
 
 # Register command groups
+cli.add_command(autopilot)
 cli.add_command(jobs)
 cli.add_command(dag)
 cli.add_command(queue)

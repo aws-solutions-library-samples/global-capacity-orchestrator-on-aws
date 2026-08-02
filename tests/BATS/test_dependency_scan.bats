@@ -458,10 +458,10 @@ EOF
 
 # ── extract_dockerfile_pins ──────────────────────────────────────────────────
 
-@test "extract_dockerfile_pins: finds all seven pins in Dockerfile.dev" {
+@test "extract_dockerfile_pins: finds all eight pins in Dockerfile.dev" {
     run extract_dockerfile_pins "Dockerfile.dev"
     [ "$status" -eq 0 ]
-    # All seven allowlisted pins should be present.
+    # All eight allowlisted pins should be present.
     [[ "$output" == *"NODE_VERSION|"* ]]
     [[ "$output" == *"NPM_VERSION|"* ]]
     [[ "$output" == *"CDK_VERSION|"* ]]
@@ -469,6 +469,18 @@ EOF
     [[ "$output" == *"AWSCLI_VERSION|"* ]]
     [[ "$output" == *"DOCKER_VERSION|"* ]]
     [[ "$output" == *"BUILDX_VERSION|"* ]]
+    [[ "$output" == *"UV_VERSION|"* ]]
+}
+
+@test "extract_dockerfile_pins: UV_VERSION is a bare semver (no v prefix)" {
+    # astral-sh/uv tags releases with a bare semver (0.12.1) and the
+    # release-asset URL embeds it verbatim. Assert the pin matches so the
+    # Dockerfile download URL and the deps-scan compare line up.
+    run extract_dockerfile_pins "Dockerfile.dev"
+    [ "$status" -eq 0 ]
+    uv_line="$(echo "$output" | grep '^UV_VERSION|')"
+    value="${uv_line#UV_VERSION|}"
+    [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
 @test "extract_dockerfile_pins: emits pipe-delimited NAME|VALUE pairs" {
@@ -1916,4 +1928,232 @@ EOF
     [ "$status" -eq 0 ]
     [ "$output" = "APT_SECURITY_EPOCH|2026-06-25" ]
     rm -f "$tmpfile"
+}
+
+# ── extract_claude_code_pin ──────────────────────────────────────────────────
+
+@test "extract_claude_code_pin: reads the pin from cli/autopilot.py" {
+    run extract_claude_code_pin "cli/autopilot.py"
+    [ "$status" -eq 0 ]
+    # An exact three-part semver, matching the reproducible-install policy.
+    [[ "$output" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+@test "extract_claude_code_pin: parses the constant from a fixture" {
+    run bash -c '
+        source .github/scripts/lib_dependency_scan.sh
+        tmpfile="$(mktemp)"
+        cat > "$tmpfile" <<EOF
+# comment line
+CLAUDE_CODE_VERSION = "9.9.9"
+EOF
+        extract_claude_code_pin "$tmpfile"
+        rm -f "$tmpfile"
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "9.9.9" ]
+}
+
+@test "extract_claude_code_pin: empty when constant absent" {
+    run bash -c '
+        source .github/scripts/lib_dependency_scan.sh
+        tmpfile="$(mktemp)"
+        echo "no pin constant here" > "$tmpfile"
+        extract_claude_code_pin "$tmpfile"
+        rm -f "$tmpfile"
+    '
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_claude_code_pin: empty when file is missing" {
+    run extract_claude_code_pin "/nonexistent/cli/autopilot.py"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# ── extract_companion_mcp_packages ───────────────────────────────────────────
+
+@test "extract_companion_mcp_packages: reads the registry from cli/autopilot.py" {
+    run extract_companion_mcp_packages "cli/autopilot.py"
+    [ "$status" -eq 0 ]
+    # Every line is name|registry|package with a known registry, and the
+    # committed registry is non-trivial (a dozen-ish companions).
+    local line_count=0
+    while IFS='|' read -r name registry package; do
+        [ -n "$name" ]
+        [[ "$registry" = "npm" || "$registry" = "pypi" ]]
+        [ -n "$package" ]
+        line_count=$((line_count + 1))
+    done <<< "$output"
+    [ "$line_count" -ge 10 ]
+    # The AWS docs companion anchors the format end-to-end.
+    [[ "$output" == *"aws-docs|pypi|awslabs.aws-documentation-mcp-server"* ]]
+}
+
+@test "extract_companion_mcp_packages: parses entries from a fixture" {
+    run bash -c '
+        source .github/scripts/lib_dependency_scan.sh
+        tmpfile="$(mktemp)"
+        cat > "$tmpfile" <<EOF
+COMPANION_MCP_SERVERS = (
+    CompanionServer(
+        name="alpha",
+        registry="npm",
+        package="@scope/alpha",
+        command="npx",
+    ),
+    CompanionServer(
+        name="beta",
+        registry="pypi",
+        package="beta-server",
+        command="uvx",
+    ),
+)
+EOF
+        extract_companion_mcp_packages "$tmpfile"
+        rm -f "$tmpfile"
+    '
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "alpha|npm|@scope/alpha" ]
+    [ "${lines[1]}" = "beta|pypi|beta-server" ]
+}
+
+@test "extract_companion_mcp_packages: empty when no registry blocks exist" {
+    run bash -c '
+        source .github/scripts/lib_dependency_scan.sh
+        tmpfile="$(mktemp)"
+        echo "def unrelated(): pass" > "$tmpfile"
+        extract_companion_mcp_packages "$tmpfile"
+        rm -f "$tmpfile"
+    '
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_companion_mcp_packages: empty when file is missing" {
+    run extract_companion_mcp_packages "/nonexistent/cli/autopilot.py"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# ── get_registry_package_status ──────────────────────────────────────────────
+
+@test "get_registry_package_status: empty for an unknown registry" {
+    run get_registry_package_status "cargo" "some-crate"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# get_registry_package_status talks to npm/PyPI through curl. These tests
+# steer it with a PATH-shimmed curl that serves a canned body + HTTP code,
+# so every parse branch (ok / deprecated / yanked / missing / transient)
+# is exercised offline against the real function.
+make_registry_curl_shim() {
+    local dir="$1"
+    cat > "$dir/curl" <<'SHIM'
+#!/usr/bin/env bash
+# Minimal stand-in for: curl -sSL --max-time N -o <file> -w '%{http_code}' <url>
+out=""
+url=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        -w) shift 2 ;;
+        --max-time) shift 2 ;;
+        -*) shift ;;
+        *) url="$1"; shift ;;
+    esac
+done
+if [ -n "${GCO_FAKE_URL_LOG:-}" ]; then printf '%s\n' "$url" >> "$GCO_FAKE_URL_LOG"; fi
+if [ -n "$out" ] && [ -n "${GCO_FAKE_BODY:-}" ]; then printf '%s' "$GCO_FAKE_BODY" > "$out"; fi
+printf '%s' "${GCO_FAKE_HTTP_CODE:-200}"
+SHIM
+    chmod +x "$dir/curl"
+}
+
+@test "get_registry_package_status: healthy npm package reports ok|version" {
+    shimdir="$(mktemp -d)"
+    make_registry_curl_shim "$shimdir"
+    GCO_FAKE_HTTP_CODE=200 GCO_FAKE_BODY='{"version":"1.2.3"}' \
+        PATH="$shimdir:$PATH" run get_registry_package_status npm some-package
+    rm -rf "$shimdir"
+    [ "$status" -eq 0 ]
+    [ "$output" = "ok|1.2.3" ]
+}
+
+@test "get_registry_package_status: deprecated npm package reports the message" {
+    shimdir="$(mktemp -d)"
+    make_registry_curl_shim "$shimdir"
+    GCO_FAKE_HTTP_CODE=200 \
+        GCO_FAKE_BODY='{"version":"1.2.3","deprecated":"use other-package instead"}' \
+        PATH="$shimdir:$PATH" run get_registry_package_status npm some-package
+    rm -rf "$shimdir"
+    [ "$status" -eq 0 ]
+    [ "$output" = "deprecated|use other-package instead" ]
+}
+
+@test "get_registry_package_status: scoped npm package percent-encodes the slash" {
+    shimdir="$(mktemp -d)"
+    make_registry_curl_shim "$shimdir"
+    export GCO_FAKE_URL_LOG="$shimdir/urls.log"
+    GCO_FAKE_HTTP_CODE=200 GCO_FAKE_BODY='{"version":"0.1.0"}' \
+        PATH="$shimdir:$PATH" run get_registry_package_status npm "@scope/name"
+    url="$(cat "$GCO_FAKE_URL_LOG")"
+    unset GCO_FAKE_URL_LOG
+    rm -rf "$shimdir"
+    [ "$status" -eq 0 ]
+    [[ "$url" == *"registry.npmjs.org/@scope%2Fname/latest"* ]]
+}
+
+@test "get_registry_package_status: healthy pypi package reports ok|version" {
+    shimdir="$(mktemp -d)"
+    make_registry_curl_shim "$shimdir"
+    GCO_FAKE_HTTP_CODE=200 \
+        GCO_FAKE_BODY='{"info":{"version":"2.0.0"},"urls":[{"yanked":false}]}' \
+        PATH="$shimdir:$PATH" run get_registry_package_status pypi some-package
+    rm -rf "$shimdir"
+    [ "$status" -eq 0 ]
+    [ "$output" = "ok|2.0.0" ]
+}
+
+@test "get_registry_package_status: yanked pypi release reports yanked" {
+    shimdir="$(mktemp -d)"
+    make_registry_curl_shim "$shimdir"
+    GCO_FAKE_HTTP_CODE=200 \
+        GCO_FAKE_BODY='{"info":{"version":"2.0.0"},"urls":[{"yanked":true}]}' \
+        PATH="$shimdir:$PATH" run get_registry_package_status pypi some-package
+    rm -rf "$shimdir"
+    [ "$status" -eq 0 ]
+    [ "$output" = "yanked|2.0.0" ]
+}
+
+@test "get_registry_package_status: 404 reports missing" {
+    shimdir="$(mktemp -d)"
+    make_registry_curl_shim "$shimdir"
+    GCO_FAKE_HTTP_CODE=404 \
+        PATH="$shimdir:$PATH" run get_registry_package_status npm gone-package
+    rm -rf "$shimdir"
+    [ "$status" -eq 0 ]
+    [ "$output" = "missing|" ]
+}
+
+@test "get_registry_package_status: transient HTTP failure prints nothing (skip)" {
+    shimdir="$(mktemp -d)"
+    make_registry_curl_shim "$shimdir"
+    GCO_FAKE_HTTP_CODE=503 \
+        PATH="$shimdir:$PATH" run get_registry_package_status npm some-package
+    rm -rf "$shimdir"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "get_registry_package_status: malformed registry JSON prints nothing (skip)" {
+    shimdir="$(mktemp -d)"
+    make_registry_curl_shim "$shimdir"
+    GCO_FAKE_HTTP_CODE=200 GCO_FAKE_BODY='not json at all' \
+        PATH="$shimdir:$PATH" run get_registry_package_status npm some-package
+    rm -rf "$shimdir"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }

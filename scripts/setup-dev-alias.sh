@@ -136,16 +136,30 @@ choose_rc_file() {
 
 emit_block() {
     local rt="$1" socket="$2" image="$3"
+    # Three persistence mounts make `gco autopilot` (and anything else that
+    # keeps state under ~/.gco) survive the --rm container lifecycle:
+    #   gco-dev-tools -> /root/.npm-global   named volume; the pinned Claude
+    #                                        Code that autopilot installs on
+    #                                        first use persists across runs
+    #   ~/.claude     -> /root/.claude       host dir; CLAUDE_CONFIG_DIR keeps
+    #                                        onboarding state and session
+    #                                        transcripts there, so sessions
+    #                                        resume across container runs
+    #   ~/.gco        -> /root/.gco          host dir; GCO CLI config/cache and
+    #                                        the generated autopilot MCP config
+    # The host dirs are pre-created so a root-owned mount point is never
+    # created on Linux hosts.
     cat <<EOF
 $MARKER_BEGIN
 # Run the \`gco\` CLI inside the GCO dev container, against \$PWD.
 # Managed by scripts/setup-dev-alias.sh — re-run that script to regenerate
 # (for example after switching container runtimes). Runtime: $rt.
 gco() {
+    mkdir -p "\$HOME/.claude" "\$HOME/.gco"
     if [ -t 0 ] && [ -t 1 ]; then
-        $rt run --rm -it -v "\$HOME/.aws:/root/.aws:ro" -v "\$PWD:/workspace" ${socket}-w /workspace $image gco "\$@"
+        $rt run --rm -it -v "\$HOME/.aws:/root/.aws:ro" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -e CLAUDE_CONFIG_DIR=/root/.claude -v "\$PWD:/workspace" ${socket}-w /workspace $image gco "\$@"
     else
-        $rt run --rm -i -v "\$HOME/.aws:/root/.aws:ro" -v "\$PWD:/workspace" ${socket}-w /workspace $image gco "\$@"
+        $rt run --rm -i -v "\$HOME/.aws:/root/.aws:ro" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -e CLAUDE_CONFIG_DIR=/root/.claude -v "\$PWD:/workspace" ${socket}-w /workspace $image gco "\$@"
     fi
 }
 $MARKER_END

@@ -6,6 +6,7 @@ on the root ``cli`` group via ``cli.add_command()``.
 """
 
 from .analytics_cmd import analytics
+from .autopilot_cmd import autopilot
 from .capacity_cmd import capacity
 from .cluster_cmd import cluster
 from .config_cmd import config_cmd
@@ -28,6 +29,7 @@ from .webhooks_cmd import webhooks
 
 __all__ = [
     "analytics",
+    "autopilot",
     "capacity",
     "cluster",
     "config_cmd",

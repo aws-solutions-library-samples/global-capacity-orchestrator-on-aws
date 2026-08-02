@@ -21,7 +21,11 @@
 #   - Accelerator catalog and Karpenter NodePool policy (offline), plus live
 #     NVIDIA GPU / AWS Neuron EC2 catalog drift across enabled Regions (AWS creds)
 #   - Dockerfile.dev ARG pins (Node LTS major, npm, CDK CLI, kubectl,
-#     AWS CLI v2, Docker CLI, Docker Buildx) — public endpoints, no AWS creds needed
+#     AWS CLI v2, Docker CLI, Docker Buildx, uv) — public endpoints, no AWS creds needed
+#   - GCO Autopilot pins from cli/autopilot.py: the CLAUDE_CODE_VERSION
+#     install pin vs the npm latest dist-tag, and companion MCP server
+#     liveness (missing/deprecated/yanked on npm or PyPI) — public
+#     endpoints, no AWS creds needed
 #   - Pre-commit hook revisions in .pre-commit-config.yaml compared
 #     against the latest tag published upstream (GitHub API)
 #   - CDK enum constants from gco/stacks/constants.py compared against the
@@ -799,6 +803,7 @@ BEDROCK_MODEL_COUNT="$(wc -l < "$BEDROCK_MODEL_RESULTS" 2>/dev/null | tr -d ' ')
 #   AWSCLI_VERSION github://aws/aws-cli/tags (v2.x.y semver, no GitHub Releases)
 #   DOCKER_VERSION github://moby/moby/releases/latest (``docker-v<ver>``)
 #   BUILDX_VERSION github://docker/buildx/releases/latest (v<ver>)
+#   UV_VERSION     github://astral-sh/uv/releases/latest (bare semver)
 #
 # All endpoints are public — no AWS credentials needed.
 # ---------------------------------------------------------------------------
@@ -901,6 +906,15 @@ if candidates:
         "https://api.github.com/repos/docker/buildx/releases/latest" 2>/dev/null \
         | jq -r '.tag_name // empty' 2>/dev/null)" || true
       ;;
+    UV_VERSION)
+      # astral-sh/uv publishes GitHub Releases tagged with a bare semver
+      # (e.g. 0.12.1). The dev container ships uv/uvx for the `gco
+      # autopilot` companion MCP servers; bump the two SHA256 ARGs in
+      # lockstep from the per-artifact *.sha256 release files.
+      latest="$(curl -fsSL --max-time 15 \
+        "https://api.github.com/repos/astral-sh/uv/releases/latest" 2>/dev/null \
+        | jq -r '.tag_name // empty' 2>/dev/null)" || true
+      ;;
     *)
       return
       ;;
@@ -931,6 +945,105 @@ fi
 
 DOCKERFILE_COUNT="$(wc -l < "$DOCKERFILE_RESULTS" 2>/dev/null | tr -d ' ')"
 [ -z "$DOCKERFILE_COUNT" ] && DOCKERFILE_COUNT=0
+
+# ---------------------------------------------------------------------------
+# GCO Autopilot pins (Claude Code release + companion MCP servers)
+#
+# ``gco autopilot`` (cli/autopilot.py) carries two dependency surfaces that
+# live in Python constants, invisible to Dependabot and to every sweep above:
+#
+#   CLAUDE_CODE_VERSION      the exact @anthropic-ai/claude-code release the
+#                            command installs on first use. Compared against
+#                            the npm ``latest`` dist-tag — the same source and
+#                            compare_semver treatment as the Dockerfile.dev
+#                            npm-installed pins.
+#   COMPANION_MCP_SERVERS    the npx/uvx-launched companion MCP servers wired
+#                            into every autopilot session. Nothing pins them
+#                            (they resolve at launch), so the risk isn't
+#                            staleness — it's disappearance: a package that is
+#                            unpublished, deprecated, or yanked breaks every
+#                            new session. Each is resolved on its registry and
+#                            reported when unhealthy. This is exactly how
+#                            mcp-server-fetch and mcp-server-calculator broke
+#                            before being pruned in 2026-08.
+#
+# Remediation for companion findings: replace or drop the server in
+# cli/autopilot.py *and* the "Recommended Companion MCP Servers" tables in
+# gco_mcp/README.md — tests/test_cli_autopilot.py fails the PR until the two
+# agree. All endpoints are public — no AWS credentials needed.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking GCO Autopilot pins ==="
+
+AUTOPILOT_RESULTS="$(mktemp)"
+AUTOPILOT_SKIP_REASON=""
+AUTOPILOT_SOURCE="cli/autopilot.py"
+
+if [ ! -f "$AUTOPILOT_SOURCE" ]; then
+  AUTOPILOT_SKIP_REASON="${AUTOPILOT_SOURCE} not found."
+  echo "  $AUTOPILOT_SKIP_REASON"
+else
+  CLAUDE_CODE_PIN="$(extract_claude_code_pin "$AUTOPILOT_SOURCE")"
+  if [ -z "$CLAUDE_CODE_PIN" ]; then
+    AUTOPILOT_SKIP_REASON="CLAUDE_CODE_VERSION not found in ${AUTOPILOT_SOURCE}."
+    echo "  $AUTOPILOT_SKIP_REASON"
+  else
+    CLAUDE_CODE_STATUS="$(get_registry_package_status npm "@anthropic-ai/claude-code")"
+    if [ -z "$CLAUDE_CODE_STATUS" ]; then
+      AUTOPILOT_SKIP_REASON="npm lookup for @anthropic-ai/claude-code failed (network)."
+      echo "  $AUTOPILOT_SKIP_REASON"
+    else
+      CLAUDE_CODE_LATEST="${CLAUDE_CODE_STATUS#*|}"
+      case "$CLAUDE_CODE_STATUS" in
+        ok\|*)
+          if [ -n "$CLAUDE_CODE_LATEST" ] \
+             && [ "$(compare_semver "$CLAUDE_CODE_PIN" "$CLAUDE_CODE_LATEST")" = "newer" ]; then
+            echo "  - CLAUDE_CODE_VERSION: ${CLAUDE_CODE_PIN} -> ${CLAUDE_CODE_LATEST}"
+            echo "@anthropic-ai/claude-code (CLAUDE_CODE_VERSION)|${CLAUDE_CODE_PIN}|${CLAUDE_CODE_LATEST}|https://www.npmjs.com/package/@anthropic-ai/claude-code" >> "$AUTOPILOT_RESULTS"
+          fi
+          ;;
+        *)
+          # The install pin itself is deprecated/unpublished — always drift.
+          echo "  - @anthropic-ai/claude-code: ${CLAUDE_CODE_STATUS%%|*}"
+          echo "@anthropic-ai/claude-code (CLAUDE_CODE_VERSION)|${CLAUDE_CODE_PIN}|${CLAUDE_CODE_STATUS%%|*}|https://www.npmjs.com/package/@anthropic-ai/claude-code" >> "$AUTOPILOT_RESULTS"
+          ;;
+      esac
+    fi
+  fi
+
+  # Companion MCP server liveness. Missing/deprecated/yanked is drift; a
+  # network failure marks the scan incomplete rather than inventing findings.
+  while IFS='|' read -r companion_name companion_registry companion_package; do
+    [ -z "$companion_name" ] && continue
+    companion_status="$(get_registry_package_status "$companion_registry" "$companion_package")"
+    if [ -z "$companion_status" ]; then
+      if [ -z "$AUTOPILOT_SKIP_REASON" ]; then
+        AUTOPILOT_SKIP_REASON="Registry lookup failed for ${companion_package} (${companion_registry}); companion liveness incomplete."
+        echo "  $AUTOPILOT_SKIP_REASON"
+      fi
+      continue
+    fi
+    case "$companion_status" in
+      ok\|*)
+        ;;
+      *)
+        companion_verdict="${companion_status%%|*}"
+        companion_detail="${companion_status#*|}"
+        [ -n "$companion_detail" ] && companion_verdict="${companion_verdict}: ${companion_detail}"
+        if [ "$companion_registry" = "npm" ]; then
+          companion_url="https://www.npmjs.com/package/${companion_package}"
+        else
+          companion_url="https://pypi.org/project/${companion_package}/"
+        fi
+        echo "  - companion ${companion_name}: ${companion_verdict}"
+        echo "companion ${companion_name} (${companion_registry}: ${companion_package})|launch-time (unpinned)|${companion_verdict}|${companion_url}" >> "$AUTOPILOT_RESULTS"
+        ;;
+    esac
+  done < <(extract_companion_mcp_packages "$AUTOPILOT_SOURCE")
+fi
+
+AUTOPILOT_COUNT="$(wc -l < "$AUTOPILOT_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$AUTOPILOT_COUNT" ] && AUTOPILOT_COUNT=0
 
 # ---------------------------------------------------------------------------
 # Pre-commit hook revisions
@@ -1636,6 +1749,11 @@ if [ -n "$PYTHON_RELEASE_SKIP_REASON" ]; then
 else
   echo "Python release:           $PYTHON_RELEASE_COUNT"
 fi
+if [ -n "$AUTOPILOT_SKIP_REASON" ]; then
+  echo "GCO autopilot pins:       (skipped)"
+else
+  echo "GCO autopilot pins:       $AUTOPILOT_COUNT"
+fi
 echo "CI tooling pins:          $CI_TOOLING_COUNT"
 echo "Version consistency:      $CONSISTENCY_COUNT"
 echo "Base-image epochs:        $EPOCH_COUNT"
@@ -1650,6 +1768,7 @@ for skip_reason in \
   "$EMR_SKIP_REASON" \
   "$BEDROCK_MODEL_SKIP_REASON" \
   "$ACCELERATOR_SKIP_REASON" \
+  "$AUTOPILOT_SKIP_REASON" \
   "$CDK_ENUM_SKIP_REASON" \
   "$PYTHON_RELEASE_SKIP_REASON"; do
   if [ -n "$skip_reason" ]; then
@@ -1663,6 +1782,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
    && [ "$EKS_K8S_COUNT" -eq 0 ] \
    && [ "$AURORA_COUNT" -eq 0 ] && [ "$EMR_COUNT" -eq 0 ] \
    && [ "$DOCKERFILE_COUNT" -eq 0 ] \
+   && [ "$AUTOPILOT_COUNT" -eq 0 ] \
    && [ "$PRECOMMIT_COUNT" -eq 0 ] \
    && [ "$CDK_ENUM_COUNT" -eq 0 ] \
    && [ "$PYTHON_RELEASE_COUNT" -eq 0 ] \
@@ -1698,6 +1818,10 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}Online accelerator catalog skipped: $ACCELERATOR_SKIP_REASON"
   fi
+  if [ -n "$AUTOPILOT_SKIP_REASON" ]; then
+    [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
+    SKIP_NOTES="${SKIP_NOTES}GCO autopilot pins skipped: $AUTOPILOT_SKIP_REASON"
+  fi
   if [ -n "$CDK_ENUM_SKIP_REASON" ]; then
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}CDK enums skipped: $CDK_ENUM_SKIP_REASON"
@@ -1711,7 +1835,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
   else
     echo "All dependencies are up to date."
   fi
-  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR"
+  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "# Dependency Update Report"
@@ -1774,6 +1898,7 @@ summary_row() {
   summary_row "Bedrock Default Model"    "$BEDROCK_MODEL_COUNT"  "$BEDROCK_MODEL_SKIP_REASON" "routine"
   summary_row "Accelerator Catalog and NodePools" "$ACCELERATOR_COUNT" "$ACCELERATOR_SUMMARY_SKIP_REASON" "act soon"
   summary_row "Dockerfile.dev Pins"      "$DOCKERFILE_COUNT"     ""                          "routine"
+  summary_row "GCO Autopilot Pins"       "$AUTOPILOT_COUNT"      "$AUTOPILOT_SKIP_REASON"    "act soon"
   summary_row "Pre-commit Hooks"         "$PRECOMMIT_COUNT"      ""                          "routine"
   summary_row "CDK Enum Constants"       "$CDK_ENUM_COUNT"       "$CDK_ENUM_SKIP_REASON"     "routine"
   summary_row "Python Release"           "$PYTHON_RELEASE_COUNT" "$PYTHON_RELEASE_SKIP_REASON" "informational"
@@ -1920,6 +2045,28 @@ summary_row() {
     echo ""
   fi
 
+  if [ "$AUTOPILOT_COUNT" -gt 0 ]; then
+    echo "## GCO Autopilot Pins"
+    echo ""
+    echo "\`gco autopilot\`'s dependency surfaces in \`cli/autopilot.py\`: the"
+    echo "pinned \`CLAUDE_CODE_VERSION\` it installs (compared against the npm"
+    echo "\`latest\` dist-tag) and the launch-time companion MCP servers"
+    echo "(reported when a package is missing, deprecated, or yanked on its"
+    echo "registry — an unhealthy companion breaks every new session, so treat"
+    echo "it like the removals documented in \`gco_mcp/README.md\`). When"
+    echo "changing the companion set, update \`cli/autopilot.py\` and the"
+    echo "\`gco_mcp/README.md\` tables together; \`tests/test_cli_autopilot.py\`"
+    echo "enforces the lockstep."
+    echo ""
+    autopilot_disp="$(mktemp)"
+    while IFS='|' read -r surface cur stat url; do
+      echo "${surface}|\`${cur}\`|${stat}|[registry](${url})"
+    done < "$AUTOPILOT_RESULTS" > "$autopilot_disp"
+    emit_md_table "Surface|Current|Latest / status|Ref" "$autopilot_disp"
+    rm -f "$autopilot_disp"
+    echo ""
+  fi
+
   if [ "$PRECOMMIT_COUNT" -gt 0 ]; then
     echo "## Pre-commit Hooks"
     echo ""
@@ -2038,7 +2185,7 @@ summary_row() {
   fi
 
   # ----- Skipped checks (collapsed) -----
-  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}" ]; then
+  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}" ]; then
     echo "<details>"
     echo "<summary>Skipped checks</summary>"
     echo ""
@@ -2048,6 +2195,7 @@ summary_row() {
     [ -n "$EMR_SKIP_REASON" ]           && echo "- **EMR Serverless:** $EMR_SKIP_REASON"
     [ -n "$BEDROCK_MODEL_SKIP_REASON" ] && echo "- **Bedrock Default Model:** $BEDROCK_MODEL_SKIP_REASON"
     [ -n "$ACCELERATOR_SKIP_REASON" ]   && echo "- **Online Accelerator Catalog:** $ACCELERATOR_SKIP_REASON"
+    [ -n "$AUTOPILOT_SKIP_REASON" ]     && echo "- **GCO Autopilot Pins:** $AUTOPILOT_SKIP_REASON"
     [ -n "$CDK_ENUM_SKIP_REASON" ]      && echo "- **CDK Enum Constants:** $CDK_ENUM_SKIP_REASON"
     [ -n "$PYTHON_RELEASE_SKIP_REASON" ] && echo "- **Python Release:** $PYTHON_RELEASE_SKIP_REASON"
     echo ""
@@ -2070,7 +2218,7 @@ summary_row() {
   echo "_Automatically created by the \`deps-scan\` workflow._"
 } > "$REPORT_FILE"
 
-rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR"
+rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {

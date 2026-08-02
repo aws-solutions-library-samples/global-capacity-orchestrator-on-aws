@@ -333,6 +333,8 @@ Replace `/path/to/global-capacity-orchestrator-on-aws` with the absolute path to
 
 ### Claude Code
 
+> **Shortcut: `gco autopilot`.** If you have the [GCO CLI](../docs/CLI.md) installed, one command launches a Claude Code session with this MCP server *and* every [recommended companion server](#recommended-companion-mcp-servers) below already wired up, on an Amazon Bedrock backend defaulting to GCO's canonical model. See [docs/AUTOPILOT.md](../docs/AUTOPILOT.md). The manual steps below remain the right path for adding the GCO server to an existing Claude Code setup.
+
 [Claude Code](https://code.claude.com/docs/en/mcp) registers stdio servers with the `claude mcp add` CLI. The recommended `uvx` form needs no clone — everything after `--` is the launch command:
 
 ```bash
@@ -1280,8 +1282,7 @@ For navigating code, docs, and the broader web while working on GCO itself.
 | Server | Package | Why it pairs with GCO |
 |--------|---------|----------------------|
 | **Filesystem** | [`@modelcontextprotocol/server-filesystem`](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) | Read/write project files outside the GCO MCP's resource scopes — editing CI configs, scaffolding new example manifests, dropping scratch notes into the repo. Swap `${workspaceFolder}` for the absolute path of the directory you cloned GCO into so it's scoped to that project. |
-| **Fetch** | [`mcp-server-fetch`](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch) | Pull a specific URL into context: a GitHub issue, an AWS release note, an external runbook, a CloudWatch console deep-link. Comes up constantly during incident analysis. |
-| **DuckDuckGo Search** | [`duckduckgo-mcp-server`](https://github.com/nickclyde/duckduckgo-mcp-server) | General-purpose web search for "is this a known issue?" / "what does this CloudFormation error code mean?" investigations. No API key required, unlike most other search MCPs. |
+| **DuckDuckGo Search** | [`duckduckgo-mcp-server`](https://github.com/nickclyde/duckduckgo-mcp-server) | General-purpose web search for "is this a known issue?" / "what does this CloudFormation error code mean?" investigations. No API key required, unlike most other search MCPs. Also fetches page content, which covers the pull-this-URL-into-context workflow. |
 | **DeepWiki** | [`mcp-deepwiki`](https://github.com/regenrek/deepwiki-mcp) | Ask questions against any public GitHub repo's DeepWiki — useful for digging into upstream projects GCO depends on (`fastmcp`, `aws-cdk`, EKS addons, vLLM, etc.) without cloning them. |
 | **Documentation** | [`@andrea9293/mcp-documentation-server`](https://github.com/andrea9293/mcp-documentation-server) | Index local or remote documentation into a small vector store the agent can search semantically. Handy for long-form internal docs that are awkward to grep. |
 | **Playwright** | [`@playwright/mcp`](https://github.com/microsoft/playwright-mcp) | Drive a browser for end-to-end testing of inference endpoints, exercising the AWS console, or scraping a page that doesn't expose a clean API. |
@@ -1304,7 +1305,8 @@ Small helpers that round out the toolbox.
 | Server | Package | Why it pairs with GCO |
 |--------|---------|----------------------|
 | **Shell** | [`mcp-shell-server`](https://github.com/tumf/mcp-shell-server) | Run a small allowlist of read-only shell commands (`ls`, `cat`, `pwd`, `grep`, `wc`, `find`, `touch`) when the agent needs to inspect the working tree itself. Keep `ALLOW_COMMANDS` tight — don't add destructive commands like `rm` or `git`. |
-| **Calculator** | [`mcp-server-calculator`](https://github.com/githejie/mcp-server-calculator) | Reliable arithmetic for cost / capacity math, e.g. "GPU-hours per month at 70% utilization for 12× H100s at the current `p5.48xlarge` spot price". Faster and more accurate than asking the model to do it in its head. |
+
+> **Removed from this list:** `mcp-server-fetch` and `mcp-server-calculator` previously appeared here but no longer start against the current `mcp` Python SDK (both crash on import at launch), so they were dropped as of 2026-08. DuckDuckGo Search's `fetch_content` tool covers the URL-fetching workflow. If the upstream projects recover, they can earn their spots back.
 
 ### Example combined config
 
@@ -1354,10 +1356,6 @@ Here's a `~/.kiro/settings/mcp.json` that wires up the GCO MCP server alongside 
         "${workspaceFolder}"
       ]
     },
-    "fetch": {
-      "command": "uvx",
-      "args": ["mcp-server-fetch"]
-    },
     "ddg-search": {
       "command": "uvx",
       "args": ["duckduckgo-mcp-server"]
@@ -1374,10 +1372,6 @@ Here's a `~/.kiro/settings/mcp.json` that wires up the GCO MCP server alongside 
       "command": "uvx",
       "args": ["mcp-shell-server"],
       "env": { "ALLOW_COMMANDS": "ls,cat,pwd,grep,wc,touch,find" }
-    },
-    "calculator": {
-      "command": "uvx",
-      "args": ["mcp-server-calculator"]
     }
   }
 }

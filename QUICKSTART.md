@@ -4,6 +4,8 @@ Get GCO (Global Capacity Orchestrator on AWS) running in under 60 minutes.
 
 > **💡 Tip:** GCO includes an [MCP server](gco_mcp/) you can connect to an agent for guided exploration. Ask questions like *"What do I need to deploy?"* or *"Explain the architecture"* and the agent will pull from the docs and source code. See [gco_mcp/README.md](gco_mcp/README.md) for setup.
 >
+> **🤖 Or let an agent drive:** once the `gco` CLI is installed (Step 1–2 below), `gco autopilot` turns your terminal into a fully configured [Claude Code](https://code.claude.com/docs/en/overview) session — Amazon Bedrock backend, GCO MCP server, and the recommended companion MCPs, all wired up. See [docs/AUTOPILOT.md](docs/AUTOPILOT.md).
+>
 > **🐳 Use the dev container (recommended).** GCO pins exact versions of a lot of Python packages so CI is reproducible. That makes installing on top of an existing Python environment a frequent source of `ResolutionImpossible` / dependency-resolver errors. **The recommended path is the [dev container](#step-1-clone-and-build-the-dev-container)** — it ships Python, Node.js, CDK, kubectl, AWS CLI, and every Python dep at the exact versions CI uses. The host-install path is an **advanced, non-recommended** path kept for contributors who specifically want to develop on their host; if you just want to deploy GCO, skip it.
 
 ## Table of Contents
