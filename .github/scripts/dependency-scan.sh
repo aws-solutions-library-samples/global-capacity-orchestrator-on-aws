@@ -359,7 +359,7 @@ if [ -d "$WORKFLOWS_DIR" ]; then
   grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+" "$WORKFLOWS_DIR" 2>/dev/null \
     | sed 's/image: //' >> "$ALL_IMAGES" || true
   grep -rhoE "[a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+" "$WORKFLOWS_DIR" 2>/dev/null \
-    | grep -E '^(hadolint|koalaman|semgrep|bridgecrew|checkmarx|trufflesecurity|zricethezav|aquasec|bats|python):' \
+    | grep -E '^(alpine|hadolint|koalaman|semgrep|bridgecrew|checkmarx|trufflesecurity|zricethezav|aquasec|bats|python):' \
     | sed 's/[[:space:]]*$//' >> "$ALL_IMAGES" || true
 fi
 

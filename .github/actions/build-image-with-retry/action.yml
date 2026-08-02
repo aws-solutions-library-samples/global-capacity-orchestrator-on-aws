@@ -68,8 +68,12 @@ runs:
     - name: Wait before retry 1
       if: steps.try1.outcome == 'failure'
       shell: bash
+      env:
+        # Interpolating inputs directly into `run:` is an injection risk
+        # (semgrep run-shell-injection); env indirection keeps the value data.
+        BUILD_TAGS: ${{ inputs.tags }}
       run: |
-        echo "::warning::Build of ${{ inputs.tags }} failed (attempt 1/3); retrying in 15s." \
+        echo "::warning::Build of ${BUILD_TAGS} failed (attempt 1/3); retrying in 15s." \
           "Usually a transient registry/network error."
         sleep 15
 
@@ -89,8 +93,10 @@ runs:
     - name: Wait before retry 2
       if: steps.try1.outcome == 'failure' && steps.try2.outcome == 'failure'
       shell: bash
+      env:
+        BUILD_TAGS: ${{ inputs.tags }}
       run: |
-        echo "::warning::Build of ${{ inputs.tags }} failed (attempt 2/3); retrying in 45s." \
+        echo "::warning::Build of ${BUILD_TAGS} failed (attempt 2/3); retrying in 45s." \
           "Usually a transient registry/network error."
         sleep 45
 
