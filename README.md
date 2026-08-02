@@ -49,9 +49,14 @@
 gco autopilot
 ```
 
+<details>
+<summary>🤖 Autopilot recording — a real agent session, one command</summary>
+
 ![GCO Autopilot — one command to a fully configured Claude Code session on Amazon Bedrock, grounded by the GCO MCP server](demo/autopilot.gif)
 
 *A real session: `gco autopilot` launches [Claude Code](https://code.claude.com/docs/en/overview) on [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) (GCO's default Claude Opus 5 profile) with the [GCO MCP server](gco_mcp/README.md) + [companion MCPs](gco_mcp/README.md#recommended-companion-mcp-servers) wired in, and it answers from the project's own MCP tools ([docs](docs/AUTOPILOT.md) · [re-record](demo/record_autopilot.sh))*
+
+</details>
 
 </div>
 
