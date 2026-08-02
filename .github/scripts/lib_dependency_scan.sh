@@ -551,29 +551,56 @@ if m:
 
 # extract_python_string_constant <name> <python_path>
 #
-# Parses a module without importing or executing it and prints one top-level
-# string constant. Adjacent/parenthesized literals are already folded into an
-# ``ast.Constant`` by Python, so this safely handles immutable image references
-# split across lines for readability.
+# Tokenizes the source without importing or executing it, then literal-evaluates
+# only the requested top-level assignment. Parsing only that expression keeps
+# extraction compatible when the rest of the module uses syntax newer than the
+# scanner's Python interpreter. Adjacent/parenthesized string literals remain
+# supported, while names, calls, and other executable expressions are rejected.
 extract_python_string_constant() {
   local name="$1"
   local file="$2"
   [ -f "$file" ] || return 0
   python3 -c "
-import ast, sys
+import ast, io, sys, tokenize
 try:
     with open(sys.argv[2], encoding='utf-8') as handle:
-        module = ast.parse(handle.read(), filename=sys.argv[2])
-except (OSError, SyntaxError):
+        source = handle.read()
+except OSError:
     raise SystemExit(0)
-for node in module.body:
-    if not isinstance(node, ast.Assign):
-        continue
-    if not any(isinstance(target, ast.Name) and target.id == sys.argv[1] for target in node.targets):
-        continue
-    if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-        print(node.value.value)
-    break
+tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+try:
+    for token in tokens:
+        if not (
+            token.type == tokenize.NAME
+            and token.string == sys.argv[1]
+            and token.start[1] == 0
+        ):
+            continue
+        for token in tokens:
+            if token.type not in (tokenize.NL, tokenize.COMMENT):
+                break
+        if token.type != tokenize.OP or token.string != '=':
+            continue
+        expression = []
+        depth = 0
+        for token in tokens:
+            if token.type == tokenize.OP:
+                if token.string in '([{':
+                    depth += 1
+                elif token.string in ')]}':
+                    depth -= 1
+            if token.type in (tokenize.NEWLINE, tokenize.ENDMARKER) and depth == 0:
+                break
+            expression.append((token.type, token.string))
+        try:
+            value = ast.literal_eval(tokenize.untokenize(expression))
+        except (SyntaxError, ValueError):
+            break
+        if isinstance(value, str):
+            print(value)
+        break
+except tokenize.TokenError:
+    pass
 " "$name" "$file" 2>/dev/null
 }
 

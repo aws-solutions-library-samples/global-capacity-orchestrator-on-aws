@@ -962,6 +962,29 @@ EOF
     [[ "$output" =~ ^public\.ecr\.aws/aws-cli/aws-cli:[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$ ]]
 }
 
+@test "extract_python_string_constant: tolerates source grammar newer than system Python" {
+    [ -x /usr/bin/python3 ] || skip "/usr/bin/python3 is unavailable"
+    run env PATH="/usr/bin:/bin" /bin/bash -c \
+        'source .github/scripts/lib_dependency_scan.sh; extract_python_string_constant AWS_CLI_IMAGE gco/services/inference_monitor.py'
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^public\.ecr\.aws/aws-cli/aws-cli:[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$ ]]
+}
+
+@test "extract_python_string_constant: ignores unrelated unparsable source" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+IMAGE = (
+    "registry.example/image:1.2.3@"
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+)
+this is deliberately invalid Python ???
+EOF
+    run extract_python_string_constant IMAGE "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$output" = "registry.example/image:1.2.3@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ]
+    rm -f "$tmpfile"
+}
+
 @test "extract_python_string_constant: folds adjacent literals without importing" {
     tmpfile="$(mktemp)"
     cat > "$tmpfile" <<'EOF'
