@@ -6,6 +6,7 @@ import stat
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -340,3 +341,55 @@ def test_incomplete_dependency_scan_ends_with_a_failing_step() -> None:
     assert "exit 1" in failure_contract
     assert "SCAN_COMPLETE: ${{ steps.scan.outputs.scan_complete }}" in workflow
     assert "The report is partial because one or more checks were incomplete" in workflow
+
+
+def test_workflows_invoke_behaviorally_tested_runtime_verifiers() -> None:
+    lambda_step = _workflow_step(
+        ".github/workflows/integration-tests.yml", "Import each Lambda handler"
+    )
+    helm_step = _workflow_step(
+        ".github/workflows/integration-tests.yml", "Verify helm + kubectl binaries"
+    )
+    dev_step = _workflow_step(
+        ".github/workflows/integration-tests.yml", "Verify pinned toolchain versions"
+    )
+
+    assert "python3 .github/scripts/verify_lambda_imports.py" in lambda_step
+    assert "verify_container_tool_versions.py helm-installer --image helm-installer:ci" in (
+        " ".join(helm_step.split())
+    )
+    assert "verify_container_tool_versions.py dev --image gco-dev" in " ".join(dev_step.split())
+
+
+def test_dev_container_matrix_keeps_native_amd64_and_arm64_coverage() -> None:
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    rows = workflow["jobs"]["integration-docker-dev-container"]["strategy"]["matrix"]["include"]
+    architecture_contract = {
+        row["arch"]: (row["runner"], row["expected-uname"], row["elf-e-machine"]) for row in rows
+    }
+
+    assert architecture_contract == {
+        "amd64": ("ubuntu-latest", "x86_64", "0x3E"),
+        "arm64": ("ubuntu-24.04-arm", "aarch64", "0xB7"),
+    }
+
+
+def test_direct_docker_scanners_are_prepulled_with_retry() -> None:
+    workflow = yaml.safe_load(_read(".github/workflows/security.yml"))
+    scanner_jobs = {
+        "security-trufflehog-secrets": "trufflesecurity/trufflehog:3.95.2",
+        "security-gitleaks-secrets": "zricethezav/gitleaks:v8.30.1",
+        "security-checkov-iac": "bridgecrew/checkov:3.2.524",
+        "security-kics-iac": "checkmarx/kics:v2.1.20",
+    }
+
+    for job_name, image in scanner_jobs.items():
+        steps = workflow["jobs"][job_name]["steps"]
+        pull_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("uses") == "./.github/actions/docker-pull-with-retry"
+            and step.get("with", {}).get("images") == image
+        )
+        run_index = next(index for index, step in enumerate(steps) if image in step.get("run", ""))
+        assert pull_index < run_index, f"{job_name} must pre-pull {image} before scanning"

@@ -231,9 +231,22 @@ jobs:
   unit-pytest-core:
     name: "unit:pytest:core"
     needs: unit-pytest-core-shard
+    # A skipped required check can be treated as non-blocking. Always schedule
+    # this stable aggregate check, then fail it explicitly unless every matrix
+    # shard succeeded.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Require every core test shard to pass
+        env:
+          SHARD_RESULT: ${{ needs.unit-pytest-core-shard.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "::error::Core pytest shard result was ${SHARD_RESULT}; refusing a successful aggregate check."
+            exit 1
+          fi
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0
         with:

@@ -281,19 +281,7 @@ jobs:
         run: |
           pip install -e .
       - name: Import each Lambda handler
-        run: |
-          set -euo pipefail
-          for d in \
-              lambda/kubectl-applier-simple \
-              lambda/api-gateway-proxy \
-              lambda/ga-registration \
-              lambda/cross-region-aggregator \
-              lambda/regional-api-proxy \
-              lambda/secret-rotation \
-              lambda/helm-installer; do
-            echo "=== $d ==="
-            python -c "import sys; sys.path.insert(0, '$d'); from handler import lambda_handler; print('OK')"
-          done
+        run: python3 .github/scripts/verify_lambda_imports.py
 
   integration-pytest-cross-module:
     name: "integration:pytest:cross-module"
@@ -539,12 +527,11 @@ jobs:
           cache-from: type=gha,scope=helm-installer
           cache-to: type=gha,mode=max,scope=helm-installer,ignore-error=true
       - name: Verify helm + kubectl binaries
-        # This is a Lambda container, not a server. The meaningful check is
-        # that the image's helm and kubectl binaries are invocable at the
-        # pinned versions from the Dockerfile (helm v4.2.3, kubectl v1.36.3).
-        run: |
-          docker run --rm --entrypoint helm helm-installer:ci version --short
-          docker run --rm --entrypoint kubectl helm-installer:ci version --client=true
+        # Require each installed binary to match the reviewed, authenticated
+        # release URL in the image's Dockerfile—not merely execute successfully.
+        run: >-
+          python3 .github/scripts/verify_container_tool_versions.py
+          helm-installer --image helm-installer:ci
 
   integration-docker-tls-certificate-manager:
     name: "integration:docker:tls-certificate-manager"
@@ -614,21 +601,11 @@ jobs:
           docker run --rm -v "$PWD":/workspace -w /workspace gco-dev gco capacity --help
           docker run --rm -v "$PWD":/workspace -w /workspace gco-dev gco stacks --help
       - name: Verify pinned toolchain versions
-        # The Dockerfile pins Node, kubectl, AWS CLI v2, CDK, the Docker
-        # CLI, and Docker Buildx, to specific releases. Confirm each tool reports a non-empty
-        # version — catches pin drift, broken downloads, and PATH issues.
-        run: |
-          docker run --rm gco-dev bash -c '
-            set -euo pipefail
-            node --version
-            cdk --version
-            kubectl version --client=true
-            aws --version
-            docker --version
-            docker buildx version
-            uv --version
-            uvx --version
-          '
+        # The verifier reads all eight reviewed Dockerfile ARG pins and fails
+        # when any installed tool reports a different runtime version.
+        run: >-
+          python3 .github/scripts/verify_container_tool_versions.py
+          dev --image gco-dev
       - name: Exercise gco autopilot inside the dev container
         # The dev container is the recommended autopilot front door (via the
         # setup-dev-alias.sh shell function), so prove the pieces the image

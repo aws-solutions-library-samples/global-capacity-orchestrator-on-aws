@@ -459,7 +459,7 @@ When required, obtain explicit account and KMS-deletion authorization, run `pyth
 
 ### CI/CD Pipeline
 
-The project uses GitHub Actions for automated testing. Every push and pull request runs six primary workflows in parallel, plus three satellites on schedule or manual trigger.
+The project uses GitHub Actions for automated testing. Every push and pull request runs six primary workflows in parallel, plus four satellite workflows triggered by a successful test run, a schedule, or a manual dispatch.
 
 #### Primary workflows (run on every push + PR)
 
@@ -481,16 +481,11 @@ Each workflow file has a comment header documenting triggers and per-job purpose
 | `.github/workflows/release.yml` | Manual (`workflow_dispatch`) | Bump version, tag, and create a GitHub Release with auto-generated notes |
 | `.github/workflows/deps-scan.yml` | `cron: 0 9 1 * *` (monthly) | Check pinned versions plus deterministic NodePool/watch-list policy and live EC2 accelerator-catalog drift; update one rolling issue when drift is detected |
 | `.github/workflows/cve-scan.yml` | `cron: 0 9 * * 1` (weekly) | Re-run Trivy against current CVE databases |
+| `.github/workflows/pages.yml` | Successful `Unit Tests` push run on the default branch (`workflow_run`) | Download that run's coverage artifact and publish the HTML report plus coverage badge to GitHub Pages |
 
-#### Auto-generated badges
+#### Published coverage report and badge
 
-Three README badges update automatically from `push: main` runs:
-
-- `unit:pytest:core` test count
-- `unit:bats:count`
-- `unit:coverage` percentage
-
-Values are published to the orphan `badges` branch as shields.io endpoint JSON and consumed via `img.shields.io/endpoint?url=…`. Fork PRs cannot write to this branch — the publish step is gated on `push: main`.
+After a successful `Unit Tests` push run on the repository's default branch, `pages.yml` downloads that exact run's `pytest-coverage` artifact. It publishes `htmlcov/` and generates `coverage-badge.json` in the same GitHub Pages site. The README's custom shields.io endpoint reads that Pages JSON; test-count and BATS-count endpoint badges are not generated. Pull requests cannot deploy Pages because the workflow requires a successful same-repository default-branch push.
 
 #### Running the pipeline locally
 

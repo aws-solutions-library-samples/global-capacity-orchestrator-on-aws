@@ -210,6 +210,17 @@ def test_combining_job_enforces_the_floor_and_needs_every_shard(
         "rules continue to match"
     )
     assert job["needs"] == "unit-pytest-core-shard"
+    assert job["if"] == "${{ always() }}", (
+        "the stable required check must run even when a matrix shard fails; a "
+        "skipped required job can otherwise be treated as non-blocking"
+    )
+
+    guard = next(
+        step for step in job["steps"] if step.get("name") == "Require every core test shard to pass"
+    )
+    assert guard["env"]["SHARD_RESULT"] == "${{ needs.unit-pytest-core-shard.result }}"
+    assert 'if [ "$SHARD_RESULT" != "success" ]' in guard["run"]
+    assert "exit 1" in guard["run"]
 
     bodies = "\n".join(step.get("run", "") for step in job["steps"] if isinstance(step, dict))
     assert "coverage combine" in bodies
