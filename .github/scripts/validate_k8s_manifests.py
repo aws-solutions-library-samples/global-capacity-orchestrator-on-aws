@@ -323,9 +323,7 @@ _KUBECONFORM_STATUS_TO_SUMMARY = {
     "statusError": "errors",
     "statusSkipped": "skipped",
 }
-_KUBECONFORM_RESOURCE_FIELDS = frozenset(
-    {"filename", "kind", "name", "version", "status", "msg"}
-)
+_KUBECONFORM_RESOURCE_FIELDS = frozenset({"filename", "kind", "name", "version", "status", "msg"})
 _KUBECONFORM_BLANK_RESOURCE_FIELDS = ("kind", "name", "version", "status", "msg")
 
 
@@ -360,9 +358,7 @@ def validate_kubeconform_output(result: object, *, expected_files: int) -> list[
     if not isinstance(raw_resources, list):
         return ["'resources' is missing or is not an array"]
     resources = [
-        resource
-        for resource in raw_resources
-        if not _is_kubeconform_separator_record(resource)
+        resource for resource in raw_resources if not _is_kubeconform_separator_record(resource)
     ]
     if not resources:
         errors.append("'resources' is empty")

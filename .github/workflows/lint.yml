@@ -96,10 +96,10 @@ jobs:
       - name: ruff format --check
         # astral-sh/ruff-action ships a prebuilt ruff binary, so this job
         # skips the ~30-40s setup-python + pip-install-e-[lint] overhead
-        # the other lint jobs pay. The version is pinned to match the
-        # ruff==0.15.21 entry in pyproject.toml's [project.optional-dependencies]
+        # the other lint jobs pay. The version is pinned to match the exact
+        # ruff entry in pyproject.toml's [project.optional-dependencies]
         # lint group so the pre-commit hook, developer installs, and CI
-        # stay in lockstep. Bump both together.
+        # stay in lockstep. Bump all three together.
         uses: astral-sh/ruff-action@v4.1.0
         with:
           version: "0.16.1"

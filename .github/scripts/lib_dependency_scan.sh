@@ -1084,9 +1084,10 @@ for job in (data or {}).get('jobs', {}).values():
 #
 # Prints the ruff version pinned in each place the project keeps it, one
 # ``source|version`` per line (version normalised without a leading ``v``):
-#   pyproject|0.15.19     ruff==X in [project.optional-dependencies]
-#   precommit|0.15.20     astral-sh/ruff-pre-commit rev in .pre-commit-config.yaml
-#   lint-action|0.15.19   astral-sh/ruff-action version input in lint.yml
+# Example output shape (the values differ when local pins drift):
+#   pyproject|1.2.3      ruff==X in [project.optional-dependencies]
+#   precommit|1.2.4      astral-sh/ruff-pre-commit rev in .pre-commit-config.yaml
+#   lint-action|1.2.3    astral-sh/ruff-action version input in lint.yml
 #
 # Ruff is pinned in three spots that must move together (developer install,
 # the pre-commit hook, and the prebuilt-binary CI lint job). The base Python

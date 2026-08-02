@@ -93,9 +93,7 @@ class TestStaticPodTokenBoundaries:
         }
         assert accounts["gco-jobs"]["automountServiceAccountToken"] is False
         assert accounts["gco-inference"]["automountServiceAccountToken"] is False
-        assert accounts["gco-inference"]["metadata"]["annotations"][
-            "eks.amazonaws.com/role-arn"
-        ]
+        assert accounts["gco-inference"]["metadata"]["annotations"]["eks.amazonaws.com/role-arn"]
 
     def test_cost_monitor_disables_api_token_but_keeps_sts_projection(self) -> None:
         documents = self._documents("34-cost-monitor.yaml")
