@@ -98,3 +98,7 @@ lambda/inference-streaming-proxy/node_modules/
 # Local-only security documents (never commit)
 SECURITY_RESPONSE.md
 THREAT_MODEL.md
+
+# Locally generated video conversions of the committed demo GIFs
+# (see demo/gif_to_mp4.sh) — the GIFs are the tracked source of truth.
+demo/*.mp4

@@ -43,7 +43,7 @@ gco autopilot
 
 ## The Front Door
 
-With git and a container runtime installed, this is the whole journey from nothing to a working agent session:
+With git and a container runtime installed, this is the whole journey from nothing to a working Claude Code setup:
 
 ```bash
 git clone https://github.com/awslabs/global-capacity-orchestrator-on-aws.git

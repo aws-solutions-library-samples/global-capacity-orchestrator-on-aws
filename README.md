@@ -44,7 +44,7 @@
 </details>
 
 <details>
-<summary>🤖 Autopilot recording — one command to a working agent, the easiest way to start</summary>
+<summary>🤖 Autopilot recording — one command to a working Claude Code setup, the easiest way to start</summary>
 
 ![GCO Autopilot — one command to a fully configured Claude Code session on Amazon Bedrock, grounded by the GCO MCP server](demo/autopilot.gif)
 

@@ -240,13 +240,18 @@ EXPECT_DRIVER
 set -euo pipefail
 cd "\$REPO_ROOT"
 export PATH="\${SHIM_DIR}:\${PATH}"
+# tput cols runs inside command substitutions in lib_demo.sh, where stdout
+# is a pipe rather than the recording PTY, so it falls back to 80 unless
+# COLUMNS is exported. Without this the banner renders 80 wide on a
+# ${COLS}-column recording and sits awkwardly off-center.
+export COLUMNS="\${COLS}" LINES="\${ROWS}"
 
 # shellcheck source=demo/lib_demo.sh
 source "\${REPO_ROOT}/demo/lib_demo.sh"
 setup_colors
 
 banner "GCO Autopilot"
-narrate "One command turns your terminal into a fully configured agent session:"
+narrate "One command turns your terminal into a working Claude Code setup:"
 narrate "Claude Code on Amazon Bedrock + the GCO MCP server + companion MCPs."
 sleep 3
 
@@ -272,13 +277,16 @@ else
 set -euo pipefail
 cd "$REPO_ROOT"
 export PATH="${SHIM_DIR}:${PATH}"
+# See the live driver: COLUMNS keeps tput-in-substitution honest so the
+# banner spans the full recording width.
+export COLUMNS="${COLS}" LINES="${ROWS}"
 
 # shellcheck source=demo/lib_demo.sh
 source "${REPO_ROOT}/demo/lib_demo.sh"
 setup_colors
 
 banner "GCO Autopilot"
-narrate "One command from a plain terminal to a fully configured agent session:"
+narrate "One command from a plain terminal to a working Claude Code setup:"
 narrate "Claude Code + the GCO MCP server + the recommended companion MCPs,"
 narrate "on Amazon Bedrock with GCO's canonical default model."
 sleep 3
@@ -304,7 +312,7 @@ rm -f "$CAST_FILE"
 
 # --idle-time-limit caps recorded pauses (model thinking time in live mode)
 # so the GIF stays short without editing the cast by hand.
-export REPO_ROOT SHIM_DIR
+export REPO_ROOT SHIM_DIR COLS ROWS
 asciinema rec \
     --cols "$COLS" \
     --rows "$ROWS" \
