@@ -5,8 +5,11 @@ Provides functionality to interact with EFS and FSx for Lustre file systems
 attached to GCO regional stacks.
 """
 
+import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from typing import Any
 
 import boto3
@@ -16,6 +19,132 @@ from ._image_uri import aws_partition, aws_url_suffix
 from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
 from .kubectl_helpers import update_kubeconfig
+
+_DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?")
+_DNS_SUBDOMAIN_RE = re.compile(
+    r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*"
+)
+
+
+def _validated_kubernetes_name(
+    value: str,
+    field: str,
+    *,
+    allow_subdomains: bool,
+) -> str:
+    """Return a Kubernetes name after strict DNS syntax validation."""
+    max_length = 253 if allow_subdomains else 63
+    pattern = _DNS_SUBDOMAIN_RE if allow_subdomains else _DNS_LABEL_RE
+    if not isinstance(value, str) or not value or len(value) > max_length:
+        raise ValueError(f"{field} must be a non-empty Kubernetes DNS name")
+    if pattern.fullmatch(value) is None:
+        raise ValueError(f"{field} contains characters not allowed in a Kubernetes DNS name")
+    return value
+
+
+def _validated_copy_path(value: str, field: str) -> str:
+    """Reject empty paths and control characters before passing them to kubectl."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty path")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError(f"{field} must not contain control characters")
+    return value
+
+
+def _validated_local_destination(local_path: str) -> str:
+    """Ensure kubectl cannot reinterpret the local destination as a pod spec."""
+    local_path = _validated_copy_path(local_path, "local_path")
+    if ":" in local_path:
+        raise ValueError("local_path must not contain ':' because kubectl treats it as a pod path")
+    return local_path
+
+
+def _validated_pod_remote_path(remote_path: str) -> str:
+    """Require an absolute pod path so remote tar sees no ambiguous input."""
+    remote_path = _validated_copy_path(remote_path, "remote_path")
+    if "\\" in remote_path:
+        raise ValueError("remote_path must not contain backslashes")
+    if not remote_path.startswith("/"):
+        raise ValueError("remote_path must be absolute when copying from a pod")
+    return remote_path
+
+
+def _storage_sub_path(remote_path: str) -> str | None:
+    """Return a safe PVC subPath, or ``None`` when the root was requested."""
+    remote_path = _validated_copy_path(remote_path, "remote_path")
+    if "\\" in remote_path:
+        raise ValueError("remote_path must not contain backslashes")
+    relative = remote_path.lstrip("/")
+    if not relative:
+        return None
+    if any(part in (".", "..") for part in relative.split("/")):
+        raise ValueError("remote_path must stay beneath the mounted storage root")
+    return str(PurePosixPath(relative))
+
+
+def _storage_remote_path(mount_path: str, remote_path: str) -> str:
+    """Resolve a user path beneath a helper pod's storage mount.
+
+    The same validated relative path is mounted with Kubernetes ``subPath`` in
+    the helper pod. Kubelet's symlink-safe subPath resolution makes the runtime
+    boundary stronger than a lexical ``..`` check alone.
+    """
+    sub_path = _storage_sub_path(remote_path)
+    if sub_path is None:
+        return mount_path
+    return str(PurePosixPath(mount_path).joinpath(sub_path))
+
+
+def _helper_pod_manifest(
+    *,
+    pod_name: str,
+    namespace: str,
+    pvc_name: str,
+    mount_path: str,
+    app_label: str,
+    storage_sub_path: str | None = None,
+) -> str:
+    """Build a JSON Kubernetes manifest without YAML string interpolation."""
+    volume_mount: dict[str, Any] = {
+        "name": "storage",
+        "mountPath": mount_path,
+        "readOnly": True,
+    }
+    if storage_sub_path is not None:
+        volume_mount["subPath"] = storage_sub_path
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": pod_name,
+            "namespace": namespace,
+            "labels": {"app": app_label},
+        },
+        "spec": {
+            "automountServiceAccountToken": False,
+            "enableServiceLinks": False,
+            "restartPolicy": "Never",
+            "containers": [
+                {
+                    "name": "helper",
+                    "image": "busybox:1.38.0",
+                    "command": ["sleep", "300"],
+                    "resources": {
+                        "requests": {"cpu": "50m", "memory": "64Mi"},
+                        "limits": {"cpu": "200m", "memory": "256Mi"},
+                    },
+                    "volumeMounts": [volume_mount],
+                }
+            ],
+            "volumes": [
+                {
+                    "name": "storage",
+                    "persistentVolumeClaim": {"claimName": pvc_name},
+                }
+            ],
+        },
+    }
+    return json.dumps(manifest)
 
 
 @dataclass
@@ -338,6 +467,13 @@ class FileSystemClient:
         import os
         import subprocess
 
+        namespace = _validated_kubernetes_name(namespace, "namespace", allow_subdomains=False)
+        pod_name = _validated_kubernetes_name(pod_name, "pod_name", allow_subdomains=True)
+        remote_path = _validated_pod_remote_path(remote_path)
+        local_path = _validated_local_destination(local_path)
+        if container is not None:
+            container = _validated_kubernetes_name(container, "container", allow_subdomains=False)
+
         # Update kubeconfig for the cluster
         cluster_name = f"{self.config.project_name}-{region}"
         update_kubeconfig(cluster_name, region)
@@ -345,10 +481,11 @@ class FileSystemClient:
         # Build kubectl cp command
         # Format: kubectl cp <namespace>/<pod>:<remote_path> <local_path>
         source = f"{namespace}/{pod_name}:{remote_path}"
-        cmd = ["kubectl", "cp", source, local_path]
+        cmd = ["kubectl", "cp"]
 
         if container:
             cmd.extend(["-c", container])
+        cmd.extend(["--", source, local_path])
 
         try:
             subprocess.run(
@@ -409,12 +546,19 @@ class FileSystemClient:
         import time
         import uuid
 
+        if storage_type not in ("efs", "fsx"):
+            raise ValueError("storage_type must be 'efs' or 'fsx'")
+        namespace = _validated_kubernetes_name(namespace, "namespace", allow_subdomains=False)
+
         # Determine PVC name based on storage type
         if pvc_name is None:
             pvc_name = "gco-shared-storage" if storage_type == "efs" else "gco-fsx-storage"
+        pvc_name = _validated_kubernetes_name(pvc_name, "pvc_name", allow_subdomains=True)
 
         # Determine mount path based on storage type
         mount_path = "/efs" if storage_type == "efs" else "/fsx"
+        storage_sub_path = _storage_sub_path(remote_path)
+        full_remote_path = _storage_remote_path(mount_path, remote_path)
 
         # Generate unique pod name
         helper_pod_name = f"gco-list-helper-{uuid.uuid4().hex[:8]}"
@@ -433,35 +577,14 @@ class FileSystemClient:
         # listing files doesn't need a GPU — because K8s quota admission
         # would attribute the LimitRange's ``max.nvidia.com/gpu`` to the
         # pod's request.
-        pod_manifest = f"""
-apiVersion: v1
-kind: Pod
-metadata:
-  name: {helper_pod_name}
-  namespace: {namespace}
-  labels:
-    app: gco-list-helper
-spec:
-  restartPolicy: Never
-  containers:
-  - name: helper
-    image: busybox:1.38.0
-    command: ["sleep", "300"]
-    resources:
-      requests:
-        cpu: "50m"
-        memory: "64Mi"
-      limits:
-        cpu: "200m"
-        memory: "256Mi"
-    volumeMounts:
-    - name: storage
-      mountPath: {mount_path}
-  volumes:
-  - name: storage
-    persistentVolumeClaim:
-      claimName: {pvc_name}
-"""
+        pod_manifest = _helper_pod_manifest(
+            pod_name=helper_pod_name,
+            namespace=namespace,
+            pvc_name=pvc_name,
+            mount_path=full_remote_path,
+            app_label="gco-list-helper",
+            storage_sub_path=storage_sub_path,
+        )
 
         try:
             # Create the helper pod
@@ -499,9 +622,6 @@ spec:
             if waited >= max_wait:
                 raise RuntimeError("Helper pod did not become ready in time")
 
-            # Build the full path inside the pod
-            full_remote_path = f"{mount_path}/{remote_path.lstrip('/')}"
-
             # List contents using kubectl exec
             list_result = subprocess.run(
                 [
@@ -513,6 +633,7 @@ spec:
                     "--",
                     "ls",
                     "-la",
+                    "--",
                     full_remote_path,
                 ],
                 capture_output=True,
@@ -613,12 +734,20 @@ spec:
         import time
         import uuid
 
+        if storage_type not in ("efs", "fsx"):
+            raise ValueError("storage_type must be 'efs' or 'fsx'")
+        namespace = _validated_kubernetes_name(namespace, "namespace", allow_subdomains=False)
+        local_path = _validated_local_destination(local_path)
+
         # Determine PVC name based on storage type
         if pvc_name is None:
             pvc_name = "gco-shared-storage" if storage_type == "efs" else "gco-fsx-storage"
+        pvc_name = _validated_kubernetes_name(pvc_name, "pvc_name", allow_subdomains=True)
 
         # Determine mount path based on storage type
         mount_path = "/efs" if storage_type == "efs" else "/fsx"
+        storage_sub_path = _storage_sub_path(remote_path)
+        full_remote_path = _storage_remote_path(mount_path, remote_path)
 
         # Generate unique pod name
         helper_pod_name = f"gco-download-helper-{uuid.uuid4().hex[:8]}"
@@ -632,35 +761,14 @@ spec:
         # Explicit ``resources`` block avoids the LimitRange admission plugin
         # substituting ``max.nvidia.com/gpu`` as an implicit request — see the
         # ``ls`` helper above for the full rationale.
-        pod_manifest = f"""
-apiVersion: v1
-kind: Pod
-metadata:
-  name: {helper_pod_name}
-  namespace: {namespace}
-  labels:
-    app: gco-download-helper
-spec:
-  restartPolicy: Never
-  containers:
-  - name: helper
-    image: busybox:1.38.0
-    command: ["sleep", "300"]
-    resources:
-      requests:
-        cpu: "50m"
-        memory: "64Mi"
-      limits:
-        cpu: "200m"
-        memory: "256Mi"
-    volumeMounts:
-    - name: storage
-      mountPath: {mount_path}
-  volumes:
-  - name: storage
-    persistentVolumeClaim:
-      claimName: {pvc_name}
-"""
+        pod_manifest = _helper_pod_manifest(
+            pod_name=helper_pod_name,
+            namespace=namespace,
+            pvc_name=pvc_name,
+            mount_path=full_remote_path,
+            app_label="gco-download-helper",
+            storage_sub_path=storage_sub_path,
+        )
 
         try:
             # Create the helper pod
@@ -698,12 +806,9 @@ spec:
             if waited >= max_wait:
                 raise RuntimeError("Helper pod did not become ready in time")
 
-            # Build the full path inside the pod
-            full_remote_path = f"{mount_path}/{remote_path.lstrip('/')}"
-
             # Copy files from the helper pod
             source = f"{namespace}/{helper_pod_name}:{full_remote_path}"
-            cmd = ["kubectl", "cp", source, local_path]
+            cmd = ["kubectl", "cp", "--", source, local_path]
 
             subprocess.run(
                 cmd, check=True, capture_output=True, text=True

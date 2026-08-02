@@ -38,6 +38,10 @@ teardown() {
 }
 
 # -- Static checks ------------------------------------------------------------
+@test "setup-dev-alias.sh remains executable" {
+    [ -x "$SCRIPT" ]
+}
+
 @test "setup-dev-alias.sh passes bash -n" {
     bash -n "$SCRIPT"
 }
@@ -104,6 +108,50 @@ teardown() {
     run bash "$SCRIPT" --print --runtime docker --image my/gco:dev
     [ "$status" -eq 0 ]
     [[ "$output" == *"my/gco:dev gco"* ]]
+}
+
+@test "generated runtime cannot inject commands into the sourced profile" {
+    marker="$SHIMDIR/runtime-injected"
+    malicious="docker; touch $marker"
+    bash "$SCRIPT" --print --runtime "$malicious" > "$SHIMDIR/runtime-block.sh" 2>/dev/null
+    bash -n "$SHIMDIR/runtime-block.sh"
+    source "$SHIMDIR/runtime-block.sh"
+    ! gco --version >/dev/null 2>&1
+    [ ! -e "$marker" ]
+}
+
+@test "generated image cannot inject commands into the sourced profile" {
+    marker="$SHIMDIR/image-injected"
+    make_shim "$SHIMDIR" docker 0
+    PATH="$SHIMDIR:$PATH"
+    bash "$SCRIPT" --print --runtime docker --image "gco; touch $marker" > "$SHIMDIR/image-block.sh"
+    bash -n "$SHIMDIR/image-block.sh"
+    source "$SHIMDIR/image-block.sh"
+    run gco --version
+    [ "$status" -eq 0 ]
+    [ ! -e "$marker" ]
+}
+
+@test "generated podman socket mount quotes XDG_RUNTIME_DIR" {
+    marker="$SHIMDIR/socket-injected"
+    make_shim "$SHIMDIR" podman 0
+    PATH="$SHIMDIR:$PATH"
+    malicious_dir="$SHIMDIR/socket'; touch $marker; #"
+    XDG_RUNTIME_DIR="$malicious_dir" \
+        bash "$SCRIPT" --print --runtime podman > "$SHIMDIR/socket-block.sh"
+    bash -n "$SHIMDIR/socket-block.sh"
+    source "$SHIMDIR/socket-block.sh"
+    run gco --version
+    [ "$status" -eq 0 ]
+    [ ! -e "$marker" ]
+}
+
+@test "line breaks cannot inject profile markers across reinstalls" {
+    payload=$'gco-dev\n# <<< gco <<<\nprintf PROFILE_MARKER_INJECTION'
+    run bash "$SCRIPT" --runtime docker --no-build --image "$payload" --rc "$RCFILE"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"must not contain line breaks"* ]]
+    [ ! -e "$RCFILE" ]
 }
 
 @test "--print does not create the rc file" {

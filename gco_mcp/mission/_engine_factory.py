@@ -63,6 +63,7 @@ if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
 
 __all__ = [
     "EngineDependencies",
+    "MissionToolResultError",
     "build_engine_dependencies",
     "build_mission_engine",
     "fetch_registered_tool_metadata",
@@ -161,6 +162,38 @@ async def fetch_registered_tool_metadata() -> tuple[dict[str, Any], dict[str, st
 # ---------------------------------------------------------------------------
 
 
+class MissionToolResultError(RuntimeError):
+    """A live FastMCP tool returned a typed transport-level error result."""
+
+    def __init__(self, tool_name: str, details: Any) -> None:
+        self.tool_name = tool_name
+        self.details = details
+        if details is None:
+            summary = "no error details"
+        elif isinstance(details, str):
+            summary = details
+        else:
+            summary = json.dumps(details, sort_keys=True, default=str)
+        super().__init__(f"tool {tool_name!r} returned an error result: {summary}")
+
+
+def _tool_result_payload(result: Any) -> Any:
+    """Unwrap a FastMCP result into a JSON-serialisable observation payload."""
+    structured = getattr(result, "structured_content", None)
+    if isinstance(structured, dict):
+        return structured
+    content_blocks = getattr(result, "content", None) or []
+    if content_blocks:
+        first = content_blocks[0]
+        text_payload = getattr(first, "text", None)
+        if isinstance(text_payload, str):
+            try:
+                return json.loads(text_payload)
+            except TypeError, ValueError:
+                return text_payload
+    return None
+
+
 async def _live_dispatch_tool(
     tool_name: str,
     args: dict[str, Any],
@@ -177,6 +210,9 @@ async def _live_dispatch_tool(
     * Fall back to the first content block's ``text`` field;
       best-effort JSON-parse so structured string-returning tools
       round-trip as dicts.
+    * A result with FastMCP's typed ``is_error`` flag raises
+      :class:`MissionToolResultError`, so the engine records the call as
+      ``failed`` instead of treating an error body as a successful observation.
     * Anything else returns ``None`` so the engine records a benign
       placeholder rather than a non-serialisable object.
 
@@ -206,20 +242,10 @@ async def _live_dispatch_tool(
     if tool_obj is None:
         raise RuntimeError(f"tool {tool_name!r} not registered")
     result = await tool_obj.run(args)
-
-    structured = getattr(result, "structured_content", None)
-    if isinstance(structured, dict):
-        return structured
-    content_blocks = getattr(result, "content", None) or []
-    if content_blocks:
-        first = content_blocks[0]
-        text_payload = getattr(first, "text", None)
-        if isinstance(text_payload, str):
-            try:
-                return json.loads(text_payload)
-            except TypeError, ValueError:
-                return text_payload
-    return None
+    payload = _tool_result_payload(result)
+    if getattr(result, "is_error", False) is True:
+        raise MissionToolResultError(tool_name, payload)
+    return payload
 
 
 def make_stub_dispatcher() -> ToolDispatcher:

@@ -7,10 +7,115 @@ patched out. The broader end-to-end coverage of EFS/FSx discovery,
 DataSync transfers, and error paths lives in test_files_extended.py.
 """
 
+import json
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+class TestStorageHelperHardening:
+    """Validate helper-pod boundaries before any cluster interaction."""
+
+    def test_manifest_is_structured_and_does_not_mount_service_account_token(self):
+        from cli.files import _helper_pod_manifest
+
+        manifest = json.loads(
+            _helper_pod_manifest(
+                pod_name="gco-list-helper-deadbeef",
+                namespace="gco-jobs",
+                pvc_name="gco-shared-storage",
+                mount_path="/efs",
+                app_label="gco-list-helper",
+            )
+        )
+
+        assert manifest["metadata"]["namespace"] == "gco-jobs"
+        assert manifest["spec"]["automountServiceAccountToken"] is False
+        assert manifest["spec"]["enableServiceLinks"] is False
+        assert manifest["spec"]["containers"][0]["volumeMounts"][0]["readOnly"] is True
+        assert manifest["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == (
+            "gco-shared-storage"
+        )
+
+    def test_manifest_mounts_requested_item_with_kubernetes_subpath(self):
+        from cli.files import _helper_pod_manifest
+
+        manifest = json.loads(
+            _helper_pod_manifest(
+                pod_name="gco-download-helper-deadbeef",
+                namespace="gco-jobs",
+                pvc_name="gco-shared-storage",
+                mount_path="/efs/results/model.bin",
+                app_label="gco-download-helper",
+                storage_sub_path="results/model.bin",
+            )
+        )
+        volume_mount = manifest["spec"]["containers"][0]["volumeMounts"][0]
+        assert volume_mount == {
+            "name": "storage",
+            "mountPath": "/efs/results/model.bin",
+            "readOnly": True,
+            "subPath": "results/model.bin",
+        }
+
+    @pytest.mark.parametrize(
+        "remote_path",
+        ("../var/run/secrets", "results/../../etc", "./results"),
+    )
+    def test_storage_path_rejects_non_descendant_segments(self, remote_path: str):
+        from cli.files import _storage_remote_path
+
+        with pytest.raises(ValueError, match="mounted storage root"):
+            _storage_remote_path("/efs", remote_path)
+
+    @pytest.mark.parametrize(
+        "remote_path",
+        (r"..\..\etc", r"folder\file"),
+    )
+    def test_storage_path_rejects_kubectl_backslash_reinterpretation(self, remote_path: str):
+        from cli.files import _storage_remote_path
+
+        with pytest.raises(ValueError, match="backslashes"):
+            _storage_remote_path("/efs", remote_path)
+
+    @pytest.mark.parametrize(
+        ("value", "field", "allow_subdomains"),
+        (
+            ("gco-jobs\nspec: {}", "namespace", False),
+            ("pod:name", "pod_name", True),
+            ("UPPERCASE", "pvc_name", True),
+        ),
+    )
+    def test_kubernetes_names_reject_manifest_and_file_spec_injection(
+        self, value: str, field: str, allow_subdomains: bool
+    ):
+        from cli.files import _validated_kubernetes_name
+
+        with pytest.raises(ValueError, match="Kubernetes DNS name"):
+            _validated_kubernetes_name(
+                value,
+                field,
+                allow_subdomains=allow_subdomains,
+            )
+
+    def test_local_destination_cannot_be_reinterpreted_as_remote(self):
+        from cli.files import _validated_local_destination
+
+        with pytest.raises(ValueError, match="must not contain ':'"):
+            _validated_local_destination("other-pod:/tmp/result")
+
+    def test_direct_pod_copy_requires_absolute_remote_path(self):
+        from cli.files import _validated_pod_remote_path
+
+        with pytest.raises(ValueError, match="must be absolute"):
+            _validated_pod_remote_path("--checkpoint-action=exec=sh")
+
+    def test_direct_pod_copy_rejects_kubectl_backslash_reinterpretation(self):
+        from cli.files import _validated_pod_remote_path
+
+        with pytest.raises(ValueError, match="backslashes"):
+            _validated_pod_remote_path(r"/safe\..\etc/passwd")
 
 
 class TestFileSystemInfo:
@@ -867,6 +972,37 @@ class TestFileSystemClientDownloadFromStorage:
                             assert result["status"] == "success"
                             assert result["size_bytes"] == 2048
                             assert result["storage_type"] == "efs"
+                            apply_call = next(
+                                call for call in mock_run.call_args_list if "apply" in call.args[0]
+                            )
+                            manifest = json.loads(apply_call.kwargs["input"])
+                            assert manifest["spec"]["automountServiceAccountToken"] is False
+                            volume_mount = manifest["spec"]["containers"][0]["volumeMounts"][0]
+                            assert volume_mount["mountPath"] == "/efs/my-job/outputs"
+                            assert volume_mount["subPath"] == "my-job/outputs"
+                            assert volume_mount["readOnly"] is True
+
+    def test_download_from_storage_rejects_traversal_before_cluster_access(self):
+        """A parent segment is rejected before kubeconfig or pod creation."""
+        from cli.files import FileSystemClient
+
+        with (
+            patch("cli.files.get_config") as mock_config,
+            patch("cli.files.get_aws_client") as mock_aws,
+            patch("cli.files.update_kubeconfig") as mock_update,
+        ):
+            mock_config.return_value = MagicMock(project_name="gco")
+            mock_aws.return_value = MagicMock()
+            client = FileSystemClient()
+
+            with pytest.raises(ValueError, match="mounted storage root"):
+                client.download_from_storage(
+                    region="us-east-1",
+                    remote_path="../../var/run/secrets/kubernetes.io/serviceaccount/token",
+                    local_path="./token",
+                )
+
+        mock_update.assert_not_called()
 
     def test_download_from_storage_fsx(self):
         """Test download from FSx storage."""

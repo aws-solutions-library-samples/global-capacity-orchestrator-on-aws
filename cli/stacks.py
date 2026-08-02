@@ -35,6 +35,7 @@ Environment Variables:
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -52,12 +53,12 @@ import time
 import uuid
 from collections.abc import Callable, Collection, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from threading import Event, Lock, Thread, local
+from threading import Event, Lock, RLock, Thread, local
 from typing import TYPE_CHECKING, Any, BinaryIO, TypedDict
 
 from botocore.exceptions import ClientError
@@ -85,6 +86,14 @@ if TYPE_CHECKING:
     from .config import GCOConfig
 
 logger = logging.getLogger(__name__)
+
+# Every writer that replaces cdk.json must participate in the same transaction
+# lock. The process-local RLock handles threads and nested feature updates; the
+# advisory directory lock coordinates separate CLI/MCP processes while staying
+# stable across ``os.replace`` of the configuration inode.
+_CONFIG_THREAD_LOCKS: dict[Path, Any] = {}
+_CONFIG_THREAD_LOCKS_GUARD = Lock()
+_CONFIG_LOCK_STATE = local()
 
 # Python packages ``app.py`` imports at CDK synth time. They ship in the
 # optional ``[cdk]`` extra (see pyproject.toml), NOT the base install, so a
@@ -598,6 +607,55 @@ def _atomic_write_bytes(target: Path, content: bytes, *, mode: int | None = None
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+class ConfigMutationLockError(RuntimeError):
+    """The shared cdk.json transaction lock could not be acquired."""
+
+
+@contextmanager
+def _config_mutation_lock(path: Path) -> Iterator[None]:
+    """Serialize a complete read/modify/replace transaction for ``path``.
+
+    The directory descriptor remains stable when an atomic writer replaces the
+    target inode. A thread-local held-set makes this context reentrant, which is
+    required by analytics teardown: it holds the transaction across its
+    temporary mutation and nested feature-toggle writes.
+    """
+    lock_key = path.parent.resolve()
+    with _CONFIG_THREAD_LOCKS_GUARD:
+        thread_lock = _CONFIG_THREAD_LOCKS.setdefault(lock_key, RLock())
+
+    with thread_lock:
+        held_directories = getattr(_CONFIG_LOCK_STATE, "held_directories", None)
+        if held_directories is None:
+            held_directories = set()
+            _CONFIG_LOCK_STATE.held_directories = held_directories
+        if lock_key in held_directories:
+            yield
+            return
+
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_DIRECTORY", 0)
+        lock_fd: int | None = None
+        try:
+            lock_fd = os.open(lock_key, flags)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        except OSError as exc:
+            if lock_fd is not None:
+                os.close(lock_fd)
+            raise ConfigMutationLockError(
+                f"could not lock configuration directory {lock_key}: {exc}"
+            ) from exc
+
+        held_directories.add(lock_key)
+        try:
+            yield
+        finally:
+            held_directories.discard(lock_key)
+            assert lock_fd is not None
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
 
 @lru_cache(maxsize=1)
@@ -1866,33 +1924,43 @@ class StackManager:
     ) -> bool:
         """Destroy stacks while restoring any temporary config mutation exactly."""
         config_path: Path | None = None
-        original_bytes: bytes | None = None
-        original_mode: int | None = None
         if stack_name and not all_stacks and "analytics" in stack_name:
             config_path = _find_cdk_json()
             if config_path is None:
                 raise RuntimeError("cdk.json not found before analytics destroy")
-            original_bytes = config_path.read_bytes()
-            original_mode = stat.S_IMODE(config_path.stat().st_mode)
-        try:
-            return self._destroy(
-                stack_name=stack_name,
-                all_stacks=all_stacks,
-                force=force,
-                output_dir=output_dir,
-                expected_stack_id=expected_stack_id,
-                expected_stack_ids=expected_stack_ids,
-                prepared_change_sets=prepared_change_sets,
-                authorize_stack=authorize_stack,
-                allow_bootstrap=allow_bootstrap,
-                bootstrap_stacks=bootstrap_stacks,
-                strict_deployment_token=strict_deployment_token,
-                on_change_set_prepared=on_change_set_prepared,
-                on_ecr_repository_created=on_ecr_repository_created,
-            )
-        finally:
-            if config_path is not None and original_bytes is not None:
-                _atomic_write_bytes(config_path, original_bytes, mode=original_mode)
+
+        # Analytics teardown may temporarily enable a disabled stack in the CDK
+        # app. Hold the shared configuration transaction through restore so a
+        # concurrent CLI/MCP edit cannot be silently overwritten by the exact-
+        # bytes rollback in ``finally``.
+        lock_context = (
+            _config_mutation_lock(config_path) if config_path is not None else nullcontext()
+        )
+        with lock_context:
+            original_bytes: bytes | None = None
+            original_mode: int | None = None
+            if config_path is not None:
+                original_bytes = config_path.read_bytes()
+                original_mode = stat.S_IMODE(config_path.stat().st_mode)
+            try:
+                return self._destroy(
+                    stack_name=stack_name,
+                    all_stacks=all_stacks,
+                    force=force,
+                    output_dir=output_dir,
+                    expected_stack_id=expected_stack_id,
+                    expected_stack_ids=expected_stack_ids,
+                    prepared_change_sets=prepared_change_sets,
+                    authorize_stack=authorize_stack,
+                    allow_bootstrap=allow_bootstrap,
+                    bootstrap_stacks=bootstrap_stacks,
+                    strict_deployment_token=strict_deployment_token,
+                    on_change_set_prepared=on_change_set_prepared,
+                    on_ecr_repository_created=on_ecr_repository_created,
+                )
+            finally:
+                if config_path is not None and original_bytes is not None:
+                    _atomic_write_bytes(config_path, original_bytes, mode=original_mode)
 
     def _destroy(
         self,
@@ -5740,34 +5808,35 @@ def _update_feature_config(
 
     import json
 
-    with open(cdk_json_path, encoding="utf-8") as f:
-        cdk_config = json.load(f)
+    with _config_mutation_lock(cdk_json_path):
+        with open(cdk_json_path, encoding="utf-8") as f:
+            cdk_config = json.load(f)
 
-    if "context" not in cdk_config:
-        cdk_config["context"] = {}
+        if "context" not in cdk_config:
+            cdk_config["context"] = {}
 
-    if region:
-        region_key = f"{feature_key}_regions"
-        if region_key not in cdk_config["context"]:
-            cdk_config["context"][region_key] = {}
-        if region not in cdk_config["context"][region_key]:
-            cdk_config["context"][region_key][region] = {}
-        for key, value in settings.items():
-            if value is not None or key == "enabled":
-                cdk_config["context"][region_key][region][key] = value
-    else:
-        if feature_key not in cdk_config["context"]:
-            cdk_config["context"][feature_key] = {**default_config}
-        for key, value in settings.items():
-            if value is not None or key == "enabled":
-                cdk_config["context"][feature_key][key] = value
+        if region:
+            region_key = f"{feature_key}_regions"
+            if region_key not in cdk_config["context"]:
+                cdk_config["context"][region_key] = {}
+            if region not in cdk_config["context"][region_key]:
+                cdk_config["context"][region_key][region] = {}
+            for key, value in settings.items():
+                if value is not None or key == "enabled":
+                    cdk_config["context"][region_key][region][key] = value
+        else:
+            if feature_key not in cdk_config["context"]:
+                cdk_config["context"][feature_key] = {**default_config}
+            for key, value in settings.items():
+                if value is not None or key == "enabled":
+                    cdk_config["context"][feature_key][key] = value
 
-    serialized = json.dumps(cdk_config, indent=2).encode("utf-8")
-    _atomic_write_bytes(
-        cdk_json_path,
-        serialized,
-        mode=stat.S_IMODE(cdk_json_path.stat().st_mode),
-    )
+        serialized = json.dumps(cdk_config, indent=2).encode("utf-8")
+        _atomic_write_bytes(
+            cdk_json_path,
+            serialized,
+            mode=stat.S_IMODE(cdk_json_path.stat().st_mode),
+        )
 
 
 # =============================================================================

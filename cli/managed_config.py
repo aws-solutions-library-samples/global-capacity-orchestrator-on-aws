@@ -34,7 +34,8 @@ import json
 import logging
 import os
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,14 @@ from gco.stacks.constants import (
     validated_regional_deployment_regions,
 )
 
-from .stacks import _atomic_write_bytes, _find_cdk_json
+from .stacks import (
+    ConfigMutationLockError,
+    _atomic_write_bytes,
+    _find_cdk_json,
+)
+from .stacks import (
+    _config_mutation_lock as _shared_config_mutation_lock,
+)
 
 logger = logging.getLogger("gco.cli.managed_config")
 
@@ -269,6 +277,16 @@ def _require_writable(path: Path) -> None:
     )
 
 
+@contextmanager
+def _config_mutation_lock(path: Path) -> Iterator[None]:
+    """Translate shared-lock failures into this module's public error type."""
+    try:
+        with _shared_config_mutation_lock(path):
+            yield
+    except ConfigMutationLockError as exc:
+        raise ManagedConfigError(str(exc)) from exc
+
+
 def _load_document(path: Path) -> tuple[dict[str, Any], bytes]:
     """Parse the target document, keeping raw bytes for faithful re-encoding."""
     raw = path.read_bytes()
@@ -323,61 +341,62 @@ def _apply(
     value: str,
     config_path: Path | str | None,
 ) -> ChangeReport:
-    """Shared add/remove core: resolve, load, no-op check, validate, write."""
+    """Shared add/remove core: resolve, lock, load, validate, and write."""
     path = _resolve_config_path(config_path)
-    document, raw = _load_document(path)
-    old = _current_values(document, key)
+    with _config_mutation_lock(path):
+        document, raw = _load_document(path)
+        old = _current_values(document, key)
 
-    if action == "add":
-        changed = value not in old
-        candidate = (*old, value) if changed else old
-    else:
-        changed = value in old
-        candidate = tuple(entry for entry in old if entry != value) if changed else old
+        if action == "add":
+            changed = value not in old
+            candidate = (*old, value) if changed else old
+        else:
+            changed = value in old
+            candidate = tuple(entry for entry in old if entry != value) if changed else old
 
-    if not changed:
-        report = ChangeReport(key.key_id, action, value, False, old, old, path)
+        if not changed:
+            report = ChangeReport(key.key_id, action, value, False, old, old, path)
+            logger.info(
+                "managed-config no-op: key=%s action=%s value=%s path=%s",
+                key.key_id,
+                action,
+                value,
+                path,
+            )
+            return report
+
+        try:
+            key.validate_result(document, candidate)
+        except ValueError as exc:
+            logger.warning(
+                "managed-config refused: key=%s action=%s value=%s path=%s reason=%s",
+                key.key_id,
+                action,
+                value,
+                path,
+                exc,
+            )
+            raise ManagedConfigError(f"refusing to update {key.key_id}: {exc}") from exc
+
+        _require_writable(path)
+        # Materialize only what this key manages; absent sibling scalars keep
+        # falling through to the reader defaults instead of being frozen into
+        # the file by an unrelated edit.
+        container = document["context"].setdefault(key.container, {})
+        container[key.leaf] = list(candidate)
+        _write_document(path, document, raw)
+
+        report = ChangeReport(key.key_id, action, value, True, old, candidate, path)
         logger.info(
-            "managed-config no-op: key=%s action=%s value=%s path=%s",
+            "managed-config write: key=%s action=%s value=%s old=%s new=%s path=%s",
             key.key_id,
             action,
             value,
+            list(old),
+            list(candidate),
             path,
         )
         return report
-
-    try:
-        key.validate_result(document, candidate)
-    except ValueError as exc:
-        logger.warning(
-            "managed-config refused: key=%s action=%s value=%s path=%s reason=%s",
-            key.key_id,
-            action,
-            value,
-            path,
-            exc,
-        )
-        raise ManagedConfigError(f"refusing to update {key.key_id}: {exc}") from exc
-
-    _require_writable(path)
-    # Materialize only what this key manages; absent sibling scalars keep
-    # falling through to the reader defaults instead of being frozen into
-    # the file by an unrelated edit.
-    container = document["context"].setdefault(key.container, {})
-    container[key.leaf] = list(candidate)
-    _write_document(path, document, raw)
-
-    report = ChangeReport(key.key_id, action, value, True, old, candidate, path)
-    logger.info(
-        "managed-config write: key=%s action=%s value=%s old=%s new=%s path=%s",
-        key.key_id,
-        action,
-        value,
-        list(old),
-        list(candidate),
-        path,
-    )
-    return report
 
 
 def managed_list_add(
@@ -419,48 +438,49 @@ def managed_scalar_set(
 ) -> ChangeReport:
     """Set a managed scalar; validated, atomic, and a no-op when unchanged."""
     path = _resolve_config_path(config_path)
-    document, raw = _load_document(path)
-    old = _current_scalar(document, key)
+    with _config_mutation_lock(path):
+        document, raw = _load_document(path)
+        old = _current_scalar(document, key)
 
-    if value == old:
-        report = ChangeReport(key.key_id, "set", value, False, old, old, path)
+        if value == old:
+            report = ChangeReport(key.key_id, "set", value, False, old, old, path)
+            logger.info(
+                "managed-config no-op: key=%s action=set value=%s path=%s",
+                key.key_id,
+                value,
+                path,
+            )
+            return report
+
+        try:
+            key.validate_result(document, value)
+        except ValueError as exc:
+            logger.warning(
+                "managed-config refused: key=%s action=set value=%s path=%s reason=%s",
+                key.key_id,
+                value,
+                path,
+                exc,
+            )
+            raise ManagedConfigError(f"refusing to update {key.key_id}: {exc}") from exc
+
+        _require_writable(path)
+        # Materialize only the managed leaf; sibling keys (e.g. bedrock.thinking)
+        # and absent sibling scalars keep their current state / reader defaults.
+        container = document["context"].setdefault(key.container, {})
+        container[key.leaf] = value
+        _write_document(path, document, raw)
+
+        report = ChangeReport(key.key_id, "set", value, True, old, value, path)
         logger.info(
-            "managed-config no-op: key=%s action=set value=%s path=%s",
+            "managed-config write: key=%s action=set value=%s old=%s new=%s path=%s",
             key.key_id,
+            value,
+            old,
             value,
             path,
         )
         return report
-
-    try:
-        key.validate_result(document, value)
-    except ValueError as exc:
-        logger.warning(
-            "managed-config refused: key=%s action=set value=%s path=%s reason=%s",
-            key.key_id,
-            value,
-            path,
-            exc,
-        )
-        raise ManagedConfigError(f"refusing to update {key.key_id}: {exc}") from exc
-
-    _require_writable(path)
-    # Materialize only the managed leaf; sibling keys (e.g. bedrock.thinking)
-    # and absent sibling scalars keep their current state / reader defaults.
-    container = document["context"].setdefault(key.container, {})
-    container[key.leaf] = value
-    _write_document(path, document, raw)
-
-    report = ChangeReport(key.key_id, "set", value, True, old, value, path)
-    logger.info(
-        "managed-config write: key=%s action=set value=%s old=%s new=%s path=%s",
-        key.key_id,
-        value,
-        old,
-        value,
-        path,
-    )
-    return report
 
 
 # ---------------------------------------------------------------------------

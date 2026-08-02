@@ -36,6 +36,31 @@ log()  { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# Values supplied through --runtime, --image, CDK_DOCKER, or
+# XDG_RUNTIME_DIR are persisted into a shell profile and therefore cross a
+# second shell-parsing boundary. Emit simple image/runtime names unchanged for
+# readability, but POSIX-single-quote anything containing shell syntax. The
+# sed replacement turns each embedded apostrophe into the safe '\'' sequence.
+shell_quote() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
+
+shell_word() {
+    case "$1" in
+        ""|*[!A-Za-z0-9_./:@+-]*) shell_quote "$1" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+require_single_line() {
+    local label="$1" value="$2"
+    case "$value" in
+        *$'\n'*|*$'\r'*) die "$label must not contain line breaks" ;;
+    esac
+}
+
 usage() {
     cat <<'EOF'
 setup-dev-alias.sh — install a `gco` shell function for the dev container.
@@ -107,11 +132,13 @@ resolve_runtime() {
 }
 
 socket_args_for() {
+    local mount=""
     case "$1" in
-        docker) printf -- '-v /var/run/docker.sock:/var/run/docker.sock ' ;;
-        podman) printf -- '-v %s:/var/run/docker.sock ' "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" ;;
-        *) : ;;
+        docker) mount="/var/run/docker.sock:/var/run/docker.sock" ;;
+        podman) mount="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock:/var/run/docker.sock" ;;
+        *) return 0 ;;
     esac
+    printf -- '-v %s ' "$(shell_quote "$mount")"
 }
 
 socket_desc_for() {
@@ -135,7 +162,9 @@ choose_rc_file() {
 }
 
 emit_block() {
-    local rt="$1" socket="$2" image="$3"
+    local rt="$1" socket="$2" image="$3" rt_word image_word
+    rt_word="$(shell_word "$rt")"
+    image_word="$(shell_word "$image")"
     # Three persistence mounts make `gco autopilot` (and anything else that
     # keeps state under ~/.gco) survive the --rm container lifecycle:
     #   gco-dev-tools -> /root/.npm-global   named volume; the pinned Claude
@@ -153,13 +182,13 @@ emit_block() {
 $MARKER_BEGIN
 # Run the \`gco\` CLI inside the GCO dev container, against \$PWD.
 # Managed by scripts/setup-dev-alias.sh — re-run that script to regenerate
-# (for example after switching container runtimes). Runtime: $rt.
+# after switching container runtimes or image names.
 gco() {
     mkdir -p "\$HOME/.claude" "\$HOME/.gco"
     if [ -t 0 ] && [ -t 1 ]; then
-        $rt run --rm -it -v "\$HOME/.aws:/root/.aws:ro" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -e CLAUDE_CONFIG_DIR=/root/.claude -v "\$PWD:/workspace" ${socket}-w /workspace $image gco "\$@"
+        $rt_word run --rm -it -v "\$HOME/.aws:/root/.aws:ro" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -e CLAUDE_CONFIG_DIR=/root/.claude -v "\$PWD:/workspace" ${socket}-w /workspace $image_word gco "\$@"
     else
-        $rt run --rm -i -v "\$HOME/.aws:/root/.aws:ro" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -e CLAUDE_CONFIG_DIR=/root/.claude -v "\$PWD:/workspace" ${socket}-w /workspace $image gco "\$@"
+        $rt_word run --rm -i -v "\$HOME/.aws:/root/.aws:ro" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -e CLAUDE_CONFIG_DIR=/root/.claude -v "\$PWD:/workspace" ${socket}-w /workspace $image_word gco "\$@"
     fi
 }
 $MARKER_END
@@ -217,6 +246,10 @@ install_block() {
 
 runtime="$(resolve_runtime || true)"
 [ -n "$runtime" ] || die "no container runtime found. Install Docker, Finch, or Podman and start it, then re-run (or force one with --runtime NAME)."
+require_single_line "container runtime" "$runtime"
+if [ "$runtime" = "podman" ]; then
+    require_single_line "XDG_RUNTIME_DIR" "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+fi
 
 socket="$(socket_args_for "$runtime")"
 
@@ -234,6 +267,7 @@ if [ "$runtime" = "podman" ]; then
         *)   image_ref="localhost/$IMAGE" ;;
     esac
 fi
+require_single_line "image name" "$image_ref"
 
 block="$(emit_block "$runtime" "$socket" "$image_ref")"
 

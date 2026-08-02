@@ -3534,6 +3534,44 @@ class TestEngineFactoryLiveDispatcher:
         finally:
             server_module.mcp = original
 
+    def test_live_dispatch_typed_error_result_raises(self) -> None:
+        """FastMCP ``is_error`` results must become failed engine calls."""
+        import asyncio
+
+        from mission._engine_factory import MissionToolResultError, _live_dispatch_tool
+
+        class _Block:
+            text = '{"code": "access_denied", "message": "not authorized"}'
+
+        class _Result:
+            is_error = True
+            structured_content = None
+            content = [_Block()]
+
+        class _FakeTool:
+            async def run(self, args: dict[str, Any]) -> Any:
+                return _Result()
+
+        class _FakeMCP:
+            async def get_tool(self, name: str) -> Any:
+                return _FakeTool()
+
+        import server as server_module
+
+        original = server_module.mcp
+        server_module.mcp = _FakeMCP()  # type: ignore[assignment]
+        try:
+            with pytest.raises(MissionToolResultError, match="access_denied") as excinfo:
+                asyncio.run(_live_dispatch_tool("restricted_tool", {}, None))
+        finally:
+            server_module.mcp = original
+
+        assert excinfo.value.tool_name == "restricted_tool"
+        assert excinfo.value.details == {
+            "code": "access_denied",
+            "message": "not authorized",
+        }
+
     def test_live_dispatch_prefers_structured_content(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
