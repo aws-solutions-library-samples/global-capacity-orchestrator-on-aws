@@ -125,8 +125,10 @@ def _has_retain_tag(ecr: Any, repository_arn: str) -> bool:
     try:
         resp = ecr.list_tags_for_resource(resourceArn=repository_arn)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("list_tags_for_resource failed for %s: %s", repository_arn, exc)
-        return False
+        logger.error("list_tags_for_resource failed for %s: %s", repository_arn, exc)
+        raise RuntimeError(
+            f"Unable to verify retention tags for {repository_arn}; refusing deletion"
+        ) from exc
     for tag in resp.get("tags", []) or []:
         if tag.get("Key") == "gco:retain" and str(tag.get("Value", "")).lower() == "true":
             return True
@@ -205,17 +207,6 @@ def _handle_delete(ecr: Any, properties: dict[str, Any], physical_id: str) -> di
 
     repository_arn = existing.get("repositoryArn", physical_id)
 
-    if _has_retain_tag(ecr, repository_arn):
-        logger.info(
-            "Repository %s carries gco:retain=true; preserving despite removal_policy=%s.",
-            repository_name,
-            removal_policy,
-        )
-        return {
-            "PhysicalResourceId": physical_id,
-            "Data": {"Deleted": "false", "Reason": "retain-tag"},
-        }
-
     if removal_policy != "destroy":
         logger.info(
             "removal_policy=%s for %s; leaving the repository in place.",
@@ -225,6 +216,17 @@ def _handle_delete(ecr: Any, properties: dict[str, Any], physical_id: str) -> di
         return {
             "PhysicalResourceId": physical_id,
             "Data": {"Deleted": "false", "Reason": "removal-policy-retain"},
+        }
+
+    if _has_retain_tag(ecr, repository_arn):
+        logger.info(
+            "Repository %s carries gco:retain=true; preserving despite removal_policy=%s.",
+            repository_name,
+            removal_policy,
+        )
+        return {
+            "PhysicalResourceId": physical_id,
+            "Data": {"Deleted": "false", "Reason": "retain-tag"},
         }
 
     if empty_on_delete:

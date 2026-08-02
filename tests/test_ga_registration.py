@@ -6,7 +6,7 @@ CA removal, and both CloudFormation and Step Functions entrypoints.
 """
 
 import json
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 from botocore.exceptions import ClientError
@@ -239,8 +239,19 @@ class TestGatewayHostnameLookup:
                 ),
             ]
         }
+        elb.describe_tags.return_value = {
+            "TagDescriptions": [
+                _make_tags(
+                    PLATFORM_ALB_ARN,
+                    {
+                        "gco.aws/gateway": "gco-system/gco-gateway",
+                        "elbv2.k8s.aws/cluster": "test-cluster",
+                    },
+                )
+            ]
+        }
 
-        assert handler.find_alb_by_gateway_hostname(elb, PLATFORM_ALB_DNS) == (
+        assert handler.find_alb_by_gateway_hostname(elb, PLATFORM_ALB_DNS, "test-cluster") == (
             PLATFORM_ALB_DNS,
             PLATFORM_ALB_ARN,
             "provisioning",
@@ -253,11 +264,61 @@ class TestGatewayHostnameLookup:
             "LoadBalancers": [_make_alb(PLATFORM_ALB_ARN, "gateway", PLATFORM_ALB_DNS)]
         }
 
-        assert handler.find_alb_by_gateway_hostname(elb, "other.example.com") == (
+        assert handler.find_alb_by_gateway_hostname(elb, "other.example.com", "test-cluster") == (
             None,
             None,
             None,
         )
+
+    def test_rejects_hostname_match_without_exact_ownership_tags(self, ga_module):
+        handler, _, _ = ga_module
+        elb = MagicMock()
+        elb.describe_load_balancers.return_value = {
+            "LoadBalancers": [_make_alb(PLATFORM_ALB_ARN, "gateway", PLATFORM_ALB_DNS)]
+        }
+        elb.describe_tags.return_value = {
+            "TagDescriptions": [
+                _make_tags(
+                    PLATFORM_ALB_ARN,
+                    {"elbv2.k8s.aws/cluster": "other-cluster"},
+                )
+            ]
+        }
+
+        assert handler.find_alb_by_gateway_hostname(elb, PLATFORM_ALB_DNS, "test-cluster") == (
+            None,
+            None,
+            None,
+        )
+
+    def test_follows_pagination_before_validating_exact_tags(self, ga_module):
+        handler, _, _ = ga_module
+        elb = MagicMock()
+        elb.describe_load_balancers.side_effect = [
+            {"LoadBalancers": [], "NextMarker": "page-2"},
+            {"LoadBalancers": [_make_alb(PLATFORM_ALB_ARN, "gateway", PLATFORM_ALB_DNS)]},
+        ]
+        elb.describe_tags.return_value = {
+            "TagDescriptions": [
+                _make_tags(
+                    PLATFORM_ALB_ARN,
+                    {
+                        "gco.aws/gateway": "gco-system/gco-gateway",
+                        "elbv2.k8s.aws/cluster": "test-cluster",
+                    },
+                )
+            ]
+        }
+
+        assert handler.find_alb_by_gateway_hostname(elb, PLATFORM_ALB_DNS, "test-cluster") == (
+            PLATFORM_ALB_DNS,
+            PLATFORM_ALB_ARN,
+            "active",
+        )
+        assert elb.describe_load_balancers.call_args_list == [
+            call(),
+            call(Marker="page-2"),
+        ]
 
 
 class TestExactTagFallback:

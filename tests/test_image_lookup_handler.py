@@ -259,6 +259,33 @@ def test_destroy_with_empty_on_delete_purges_then_deletes(
     mock_ecr.delete_repository.assert_called_once_with(repositoryName="gco/x", force=False)
 
 
+def test_destroy_refuses_delete_when_retain_tags_cannot_be_read(
+    handler_module, mock_ecr: MagicMock, monkeypatch
+) -> None:
+    """A tag authorization/read failure must never authorize repository deletion."""
+    arn = "arn:aws:ecr:us-east-2:111:repository/gco/x"
+    mock_ecr.describe_repositories.return_value = {
+        "repositories": [{"repositoryArn": arn, "repositoryUri": "u", "repositoryName": "gco/x"}]
+    }
+    mock_ecr.list_tags_for_resource.side_effect = PermissionError("denied")
+    monkeypatch.setattr(handler_module, "_ecr_client", lambda: mock_ecr)
+    event = {
+        "RequestType": "Delete",
+        "PhysicalResourceId": arn,
+        "ResourceProperties": {
+            "RepositoryName": "gco/x",
+            "RemovalPolicy": "destroy",
+            "EmptyOnDelete": True,
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="refusing deletion"):
+        handler_module.lambda_handler(event, None)
+
+    mock_ecr.batch_delete_image.assert_not_called()
+    mock_ecr.delete_repository.assert_not_called()
+
+
 def test_destroy_when_repo_already_absent(handler_module, mock_ecr: MagicMock, monkeypatch) -> None:
     """A Delete event for a missing repo is a no-op success."""
     mock_ecr.describe_repositories.side_effect = mock_ecr.exceptions.RepositoryNotFoundException(

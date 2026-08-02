@@ -575,29 +575,35 @@ def install_chart(
     if create_ns:
         args.append("--create-namespace")
 
-    # Write values to temp file using secure method
-    if values:
-        fd, values_file = tempfile.mkstemp(suffix=".yaml")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                yaml.dump(values, f)
-        except Exception:
-            os.close(fd)
-            raise
-        args.extend(["--values", values_file])
+    # Write values to a mode-0600 temp file and remove it on every return or
+    # exception path. Chart values can contain credentials and role details.
+    values_file: str | None = None
+    try:
+        if values:
+            fd, values_file = tempfile.mkstemp(suffix=".yaml")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    yaml.dump(values, f)
+            except Exception:
+                # ``fdopen`` normally owns and closes the descriptor, but also
+                # cover failures before ownership is transferred.
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                raise
+            args.extend(["--values", values_file])
 
-    # Preflight: if a previous upgrade was interrupted, the release is
-    # wedged in ``pending-*`` and blocks all subsequent operations. Clear
-    # the stuck secret before attempting the upgrade so we don't have to
-    # rely on rollback-after-failure (which itself hangs when the chart's
-    # operator is stuck reconciling the half-applied state).
-    _clear_stuck_release(chart_name, namespace, kubeconfig)
+        # Preflight: if a previous upgrade was interrupted, the release is
+        # wedged in ``pending-*`` and blocks all subsequent operations. Clear
+        # the stuck secret before attempting the upgrade so we don't have to
+        # rely on rollback-after-failure (which itself hangs when the chart's
+        # operator is stuck reconciling the half-applied state).
+        _clear_stuck_release(chart_name, namespace, kubeconfig)
 
-    code, stdout, stderr = run_helm(args, kubeconfig)
+        code, _stdout, stderr = run_helm(args, kubeconfig)
 
-    if code == 0:
-        return True, f"Successfully installed {chart_name}"
-    else:
+        if code == 0:
+            return True, f"Successfully installed {chart_name}"
+
         # If we still hit "another operation in progress" despite the
         # preflight (e.g. a concurrent operation started between the check
         # and the upgrade), clear the stuck state and retry once. Unlike
@@ -614,6 +620,10 @@ def install_chart(
                 return True, f"Successfully installed {chart_name} (after clearing stuck state)"
             return False, f"Failed to install {chart_name}: {stderr2}"
         return False, f"Failed to install {chart_name}: {stderr}"
+    finally:
+        if values_file:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(values_file)
 
 
 def _delete_keda_custom_resources(kubeconfig: str) -> tuple[bool, str]:

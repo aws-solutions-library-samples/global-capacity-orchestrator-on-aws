@@ -193,29 +193,56 @@ def find_gateway_address(
     return None
 
 
+def _list_load_balancers(elb_client: Any) -> list[dict[str, Any]]:
+    """List every load balancer, following ELBv2 marker pagination."""
+    load_balancers: list[dict[str, Any]] = []
+    marker: str | None = None
+    seen_markers: set[str] = set()
+    while True:
+        kwargs = {"Marker": marker} if marker else {}
+        response = elb_client.describe_load_balancers(**kwargs)
+        load_balancers.extend(response.get("LoadBalancers", []))
+        next_marker = response.get("NextMarker")
+        if not isinstance(next_marker, str) or not next_marker:
+            return load_balancers
+        if next_marker in seen_markers:
+            raise RuntimeError(f"ELB pagination repeated marker {next_marker!r}")
+        seen_markers.add(next_marker)
+        marker = next_marker
+
+
 def find_alb_by_gateway_hostname(
-    elb_client: Any, hostname: str
+    elb_client: Any, hostname: str, cluster_name: str
 ) -> tuple[str | None, str | None, str | None]:
-    """Resolve a Gateway status hostname to an internal application ALB."""
+    """Resolve a Gateway hostname only to its exactly owned internal ALB."""
     try:
-        load_balancers = elb_client.describe_load_balancers().get("LoadBalancers", [])
-        for load_balancer in load_balancers:
-            if (
-                load_balancer.get("Type") == "application"
-                and load_balancer.get("Scheme") == "internal"
-                and load_balancer.get("DNSName") == hostname
+        candidates = [
+            load_balancer
+            for load_balancer in _list_load_balancers(elb_client)
+            if load_balancer.get("Type") == "application"
+            and load_balancer.get("Scheme") == "internal"
+            and load_balancer.get("DNSName") == hostname
+        ]
+        if not candidates:
+            return None, None, None
+
+        arns = [str(load_balancer["LoadBalancerArn"]) for load_balancer in candidates]
+        tags_by_arn = _describe_tags(elb_client, arns)
+        for load_balancer in candidates:
+            arn = str(load_balancer["LoadBalancerArn"])
+            tags = tags_by_arn.get(arn, {})
+            if not (
+                tags.get(GATEWAY_TAG) == GATEWAY_REFERENCE and tags.get(CLUSTER_TAG) == cluster_name
             ):
-                state = load_balancer.get("State", {}).get("Code", "unknown")
-                logger.info(
-                    "Found Gateway ALB by hostname: %s (state: %s)",
-                    load_balancer.get("LoadBalancerName", "<unknown>"),
-                    state,
-                )
-                return (
-                    str(load_balancer["DNSName"]),
-                    str(load_balancer["LoadBalancerArn"]),
-                    str(state),
-                )
+                logger.warning("Rejecting hostname-matched ALB without exact ownership: %s", arn)
+                continue
+            state = str(load_balancer.get("State", {}).get("Code", "unknown"))
+            logger.info(
+                "Found exactly owned Gateway ALB by hostname: %s (state: %s)",
+                load_balancer.get("LoadBalancerName", "<unknown>"),
+                state,
+            )
+            return str(load_balancer["DNSName"]), arn, state
     except Exception as exc:  # noqa: BLE001 - discovery polling retries
         logger.warning("Error finding Gateway ALB by hostname: %s", exc)
     return None, None, None
@@ -250,7 +277,7 @@ def find_platform_alb_by_tags(
     try:
         load_balancers = [
             load_balancer
-            for load_balancer in elb_client.describe_load_balancers().get("LoadBalancers", [])
+            for load_balancer in _list_load_balancers(elb_client)
             if load_balancer.get("Type") == "application"
             and load_balancer.get("Scheme") == "internal"
         ]
@@ -293,7 +320,7 @@ def find_active_alb(
     """
     hostname = find_gateway_address(http, k8s_endpoint, k8s_headers)
     if hostname:
-        dns_name, arn, state = find_alb_by_gateway_hostname(elb_client, hostname)
+        dns_name, arn, state = find_alb_by_gateway_hostname(elb_client, hostname, cluster_name)
         if arn and state == "active":
             logger.info("Found active ALB from Gateway status: %s", hostname)
             return dns_name, arn

@@ -2190,6 +2190,14 @@ def lambda_handler(event: dict[str, Any], context: Any) -> Any:
             response_data = apply_manifests(
                 cluster_name, region, manifests_dir, replacements, post_helm
             )
+            failed_count = int(response_data.get("FailedCount", 0))
+            prune_failures = response_data.get("PruneFailures")
+            if failed_count > 0 or prune_failures not in (None, "", "None"):
+                raise RuntimeError(
+                    "Manifest application reported failures: "
+                    f"failed_count={failed_count}, failed={response_data.get('Failed', 'unknown')}, "
+                    f"prune_failures={prune_failures or 'None'}"
+                )
             send_response(event, context, SUCCESS, response_data, physical_resource_id)
 
         elif request_type == "Delete":

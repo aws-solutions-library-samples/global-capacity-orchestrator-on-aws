@@ -236,6 +236,51 @@ class TestInstallChartPreflight:
         assert ok is False
         assert "invalid chart values" in message
 
+    def test_values_file_is_removed_after_success(self):
+        config = self._minimal_config()
+        config["values"] = {"apiToken": "sensitive-test-value"}
+        observed_paths = []
+
+        def run_helm(args, _kubeconfig):
+            values_path = Path(args[args.index("--values") + 1])
+            assert values_path.exists()
+            assert stat.S_IMODE(values_path.stat().st_mode) == 0o600
+            observed_paths.append(values_path)
+            return 0, "ok", ""
+
+        with (
+            patch.object(helm_handler, "add_helm_repo", return_value=True),
+            patch.object(helm_handler, "_clear_stuck_release"),
+            patch.object(helm_handler, "run_helm", side_effect=run_helm),
+        ):
+            ok, _ = helm_handler.install_chart("volcano", config, "/tmp/kube", None)
+
+        assert ok is True
+        assert len(observed_paths) == 1
+        assert not observed_paths[0].exists()
+
+    def test_values_file_is_removed_when_helm_raises(self):
+        config = self._minimal_config()
+        config["values"] = {"apiToken": "sensitive-test-value"}
+        observed_paths = []
+
+        def run_helm(args, _kubeconfig):
+            values_path = Path(args[args.index("--values") + 1])
+            assert values_path.exists()
+            observed_paths.append(values_path)
+            raise RuntimeError("helm crashed")
+
+        with (
+            patch.object(helm_handler, "add_helm_repo", return_value=True),
+            patch.object(helm_handler, "_clear_stuck_release"),
+            patch.object(helm_handler, "run_helm", side_effect=run_helm),
+            pytest.raises(RuntimeError, match="helm crashed"),
+        ):
+            helm_handler.install_chart("volcano", config, "/tmp/kube", None)
+
+        assert len(observed_paths) == 1
+        assert not observed_paths[0].exists()
+
 
 class TestInstallChartWaitControl:
     """``install_chart`` honors per-chart ``wait`` / ``wait_timeout`` config."""

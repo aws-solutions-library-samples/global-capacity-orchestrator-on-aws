@@ -928,6 +928,37 @@ class TestLambdaHandler:
         _, kwargs = mock_apply.call_args
         assert kwargs.get("post_helm") is False or mock_apply.call_args[0][4] is False
 
+    def test_failed_apply_sends_failed_cloudformation_response(self, handler_module):
+        event = {
+            "RequestType": "Update",
+            "StackId": "arn:aws:cloudformation:us-east-1:123:stack/test/id",
+            "RequestId": "req-123",
+            "LogicalResourceId": "KubectlApply",
+            "PhysicalResourceId": "phys-123",
+            "ResponseURL": "https://example.com",
+            "ResourceProperties": {
+                "ClusterName": "test-cluster",
+                "Region": "us-east-1",
+                "ImageReplacements": {},
+            },
+        }
+        response = {
+            "AppliedCount": 2,
+            "FailedCount": 1,
+            "Failed": "bad.yaml:Deployment/bad",
+            "PruneFailures": "None",
+        }
+
+        with (
+            patch.object(handler_module, "apply_manifests", return_value=response),
+            patch.object(handler_module, "send_response") as mock_send,
+        ):
+            handler_module.lambda_handler(event, MagicMock())
+
+        assert mock_send.call_count == 1
+        assert mock_send.call_args.args[2] == handler_module.FAILED
+        assert "failed_count=1" in mock_send.call_args.args[5]
+
 
 class TestAddonRolloutRestarts:
     """
