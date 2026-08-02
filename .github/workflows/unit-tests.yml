@@ -412,8 +412,12 @@ jobs:
           '@ | python -
           gco stacks --help
       - name: Verify native Windows configuration-lock exclusion
+        # This item only exercises cli.managed_config/cli.stacks against a
+        # temporary cdk.json. Exclude the repository-wide autouse conftest,
+        # which prepares every CDK Lambda asset and would make this focused
+        # Windows lock test depend on the unrelated Node/npm packaging stack.
         run: >-
-          python -m pytest -q
+          python -m pytest --noconftest -q
           tests/test_managed_config.py::TestEngineWriteMechanics::test_process_update_waits_for_shared_lock
 
   # End-to-end smoke for `gco autopilot`: the launch plan resolves without
