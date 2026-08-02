@@ -1,0 +1,106 @@
+name: "Build Image (with retry)"
+description: |
+  Wraps `docker/build-push-action@v7.3.0` with retry-on-failure.
+
+  Every build starts by resolving base-image metadata against Docker Hub,
+  whose registry and token endpoints intermittently time out on GitHub
+  runners. Observed in CI:
+
+      ERROR: failed to build: failed to solve: DeadlineExceeded:
+      python:3.14.6-slim: failed to resolve source metadata for
+      docker.io/library/python:3.14.6-slim: failed to do request: Head
+      "https://registry-1.docker.io/v2/library/python/manifests/3.14.6-slim":
+      dial tcp ...:443: i/o timeout
+
+  That is a network fault on a public dependency the build does not control,
+  and it failed an integration job before a single layer was built. The
+  build-push action has no retry of its own, so one blip fails the job.
+
+  Retrying the whole action keeps the GHA layer cache semantics identical on
+  every attempt; layers completed by a failed attempt are reused by the next
+  one. Genuine build failures (bad Dockerfile, failing RUN step) are not
+  masked — they are deterministic, so the final attempt fails with the real
+  error. Behaviour matches `docker/build-push-action@v7.3.0` on every
+  successful path; the only observable difference is on transient failures.
+
+  Three attempts with a 15 s / 45 s backoff, matching
+  `setup-buildx-with-retry` (typically paired immediately before this action).
+
+inputs:
+  context:
+    description: "Build context (passed straight through)."
+    required: false
+    default: "."
+  file:
+    description: "Dockerfile path (passed straight through)."
+    required: true
+  tags:
+    description: "Image tag(s) (passed straight through)."
+    required: true
+  load:
+    description: "Load the result into the local image store (passed straight through)."
+    required: false
+    default: "true"
+  cache-from:
+    description: "Cache sources (passed straight through)."
+    required: false
+    default: ""
+  cache-to:
+    description: "Cache destinations (passed straight through)."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Build image (attempt 1 of 3)
+      id: try1
+      uses: docker/build-push-action@v7.3.0
+      continue-on-error: true
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.file }}
+        tags: ${{ inputs.tags }}
+        load: ${{ inputs.load }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
+
+    - name: Wait before retry 1
+      if: steps.try1.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::warning::Build of ${{ inputs.tags }} failed (attempt 1/3); retrying in 15s." \
+          "Usually a transient registry/network error."
+        sleep 15
+
+    - name: Build image (attempt 2 of 3)
+      id: try2
+      if: steps.try1.outcome == 'failure'
+      uses: docker/build-push-action@v7.3.0
+      continue-on-error: true
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.file }}
+        tags: ${{ inputs.tags }}
+        load: ${{ inputs.load }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
+
+    - name: Wait before retry 2
+      if: steps.try1.outcome == 'failure' && steps.try2.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::warning::Build of ${{ inputs.tags }} failed (attempt 2/3); retrying in 45s." \
+          "Usually a transient registry/network error."
+        sleep 45
+
+    - name: Build image (attempt 3 of 3 — final)
+      if: steps.try1.outcome == 'failure' && steps.try2.outcome == 'failure'
+      uses: docker/build-push-action@v7.3.0
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.file }}
+        tags: ${{ inputs.tags }}
+        load: ${{ inputs.load }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}

@@ -1,0 +1,85 @@
+name: "Docker Build (with retry)"
+description: |
+  Runs a plain `docker build` with retry-on-failure, for jobs that
+  deliberately use the daemon's default builder instead of Buildx
+  (e.g. the dev-container matrix, which builds natively on each host
+  arch with no GHA layer cache and wants the image in the local store
+  exactly as a contributor's `docker build` would produce it).
+
+  Every build starts by resolving base-image metadata against Docker Hub,
+  whose registry and token endpoints intermittently time out on GitHub
+  runners. Observed in CI:
+
+      ERROR: failed to build: failed to solve: DeadlineExceeded:
+      python:3.14.6-slim: failed to resolve source metadata for
+      docker.io/library/python:3.14.6-slim: failed to do request: Head
+      "https://registry-1.docker.io/v2/library/python/manifests/3.14.6-slim":
+      dial tcp ...:443: i/o timeout
+
+  Retrying with backoff makes that class self-healing while a genuine build
+  failure (bad Dockerfile, failing RUN step) is deterministic and still
+  fails on the final attempt with the real error. Layers completed by a
+  failed attempt stay in the daemon's cache, so retries resume rather than
+  rebuild from scratch.
+
+inputs:
+  dockerfile:
+    description: "Dockerfile path, passed to -f (empty = the context default)."
+    required: false
+    default: ""
+  tag:
+    description: "Image tag, passed to -t (e.g. `gco-dev`)."
+    required: true
+  context:
+    description: "Build context directory."
+    required: false
+    default: "."
+  attempts:
+    description: "Total attempts (default 3). Set to 1 to disable retries."
+    required: false
+    default: "3"
+  delay:
+    description: "Seconds to sleep between attempts, doubled after each failure (default 15)."
+    required: false
+    default: "15"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Build with retry
+      shell: bash
+      env:
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        TAG: ${{ inputs.tag }}
+        CONTEXT: ${{ inputs.context }}
+        ATTEMPTS: ${{ inputs.attempts }}
+        DELAY: ${{ inputs.delay }}
+      run: |
+        set -euo pipefail
+
+        build_args=(build -t "$TAG")
+        if [ -n "$DOCKERFILE" ]; then
+          build_args+=(-f "$DOCKERFILE")
+        fi
+        build_args+=("$CONTEXT")
+
+        attempt=1
+        delay="$DELAY"
+        while true; do
+          echo "::group::docker ${build_args[*]} (attempt ${attempt}/${ATTEMPTS})"
+          if docker "${build_args[@]}"; then
+            echo "::endgroup::"
+            break
+          fi
+          echo "::endgroup::"
+          if [ "$attempt" -ge "$ATTEMPTS" ]; then
+            echo "::error::docker build of ${TAG} failed after ${ATTEMPTS} attempt(s)."
+            exit 1
+          fi
+          echo "::warning::docker build of ${TAG} failed" \
+            "(attempt ${attempt}/${ATTEMPTS}); retrying in ${delay}s." \
+            "Usually a transient registry/network error."
+          sleep "$delay"
+          delay=$((delay * 2))
+          attempt=$((attempt + 1))
+        done

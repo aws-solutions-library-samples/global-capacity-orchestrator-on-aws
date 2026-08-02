@@ -5,7 +5,9 @@ Reusable GitHub Actions composite actions shared across multiple CI workflows. I
 ## Table of Contents
 
 - [Actions](#actions)
+  - [`build-image-with-retry`](#build-image-with-retry)
   - [`build-lambda-package`](#build-lambda-package)
+  - [`docker-build-with-retry`](#docker-build-with-retry)
   - [`docker-pull-with-retry`](#docker-pull-with-retry)
   - [`free-disk-space`](#free-disk-space)
   - [`install-trivy`](#install-trivy)
@@ -14,6 +16,40 @@ Reusable GitHub Actions composite actions shared across multiple CI workflows. I
 - [Adding a New Action](#adding-a-new-action)
 
 ## Actions
+
+### `build-image-with-retry`
+
+Wraps `docker/build-push-action@v7.3.0` with retry-on-failure. Every build starts by resolving base-image metadata against Docker Hub, whose registry and token endpoints intermittently time out on GitHub runners (`failed to resolve source metadata for docker.io/library/python:3.14.6-slim ... dial tcp ...:443: i/o timeout`) — a network fault that failed an integration job before a single layer was built. The build-push action has no retry of its own, so one blip fails the job.
+
+Retrying the whole action keeps the GHA layer-cache semantics identical on every attempt, and layers completed by a failed attempt are reused by the next. Genuine build failures are deterministic and still fail on the final attempt with the real error. Behaviour matches `docker/build-push-action@v7.3.0` on every successful path. Three attempts with a 15 s / 45 s backoff, matching [`setup-buildx-with-retry`](#setup-buildx-with-retry) (typically paired immediately before this action).
+
+**Inputs (passed straight through to `build-push-action`):**
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `context` | `.` | Build context |
+| `file` | (required) | Dockerfile path |
+| `tags` | (required) | Image tag(s) |
+| `load` | `true` | Load the result into the local image store |
+| `cache-from` | `""` | Cache sources |
+| `cache-to` | `""` | Cache destinations |
+
+**Used by:** every `integration:docker:*` image job and the kind E2E builds in `integration-tests.yml`, and `security:trivy:container-scan` in `security.yml`. Drop-in replacement for `docker/build-push-action@v7.3.0` for the input surface above.
+
+**Usage:**
+
+```yaml
+- uses: ./.github/actions/setup-buildx-with-retry
+- name: Build image
+  uses: ./.github/actions/build-image-with-retry
+  with:
+    context: .
+    file: dockerfiles/cost-monitor-dockerfile
+    tags: cost-monitor:ci
+    load: true
+    cache-from: type=gha,scope=cost-monitor
+    cache-to: type=gha,mode=max,scope=cost-monitor,ignore-error=true
+```
 
 ### `build-lambda-package`
 
@@ -48,6 +84,32 @@ steps:
   - uses: ./.github/actions/build-lambda-package
 ```
 
+### `docker-build-with-retry`
+
+Runs a plain `docker build` (the daemon's default builder — no Buildx) with a retry loop, for jobs that deliberately want the image built exactly as a contributor's `docker build` would produce it. Same failure class as [`build-image-with-retry`](#build-image-with-retry): Docker Hub registry timeouts while resolving base-image metadata. Layers completed by a failed attempt stay in the daemon cache, so retries resume rather than rebuild. Genuine build failures still fail on the final attempt with the real error.
+
+**Inputs:**
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `dockerfile` | `""` | Dockerfile path passed to `-f` (empty = the context default) |
+| `tag` | (required) | Image tag passed to `-t` |
+| `context` | `.` | Build context directory |
+| `attempts` | `3` | Total attempts. Set to `1` to disable retries. |
+| `delay` | `15` | Seconds between attempts, doubled after each failure |
+
+**Used by:** `integration:docker:dev-container` (`integration-tests.yml`) — the native-arch matrix that intentionally avoids Buildx and the GHA cache.
+
+**Usage:**
+
+```yaml
+- name: Build dev container
+  uses: ./.github/actions/docker-build-with-retry
+  with:
+    dockerfile: Dockerfile.dev
+    tag: gco-dev
+```
+
 ### `docker-pull-with-retry`
 
 Pulls one or more pinned container images with a retry loop, so a following `docker run` finds them in the local cache. Docker Hub's registry and token endpoints intermittently time out on GitHub runners (`auth.docker.io ... Client.Timeout exceeded while awaiting headers`), and because a plain `docker run` pulls implicitly with no retry, a single blip failed a lint job whose checks never ran. Retrying with backoff makes that class self-healing; a genuinely missing or unauthorised image still fails on the final attempt with the real registry error.
@@ -60,7 +122,7 @@ Pulls one or more pinned container images with a retry loop, so a following `doc
 | `attempts` | `3` | Total attempts per image. Set to `1` to disable retries. |
 | `delay` | `15` | Seconds to sleep between attempts. |
 
-**Used by:** `lint.yml` (`lint:hadolint:dockerfile`, `lint:shellcheck:shell`) — the jobs that run a Docker Hub linter image directly.
+**Used by:** `lint.yml` (`lint:hadolint:dockerfile`, `lint:shellcheck:shell`), `security.yml` (`security:trufflehog:secrets`), `integration-tests.yml` (`integration:docker:dev-container` — DinD probe base image), and `mooncake-image.yml` — every job that runs or builds from a Docker Hub image it did not itself build.
 
 **Usage:**
 
@@ -147,8 +209,10 @@ Behaviour matches `docker/setup-buildx-action@v4.2.0` for every successful path;
 
 ```yaml
 - uses: ./.github/actions/setup-buildx-with-retry
-- uses: docker/build-push-action@v7.3.0
+- uses: ./.github/actions/build-image-with-retry
   with:
+    file: dockerfiles/my-image-dockerfile
+    tags: my-image:ci
     cache-from: type=gha,scope=my-image
 ```
 

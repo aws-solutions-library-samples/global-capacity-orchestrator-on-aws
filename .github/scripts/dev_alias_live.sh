@@ -120,8 +120,28 @@ if [ "$SKIP_BUILD" -eq 1 ]; then
         || die "setup-dev-alias.sh failed to install the gco function for $RUNTIME"
 else
     note "setup GCO: setup-dev-alias.sh builds $IMAGE from Dockerfile.dev with $RUNTIME and installs the function"
-    "$SETUP" --runtime "$RUNTIME" --image "$IMAGE" --rc "$rc" \
-        || die "setup-dev-alias.sh failed to build $IMAGE / install the gco function for $RUNTIME"
+    # The build pulls the base image from Docker Hub, whose registry endpoints
+    # intermittently time out on GitHub runners. Retry the whole setup run
+    # (build + rc write, both idempotent; completed layers stay cached) so a
+    # transient registry blip does not fail the job — or, in the podman job,
+    # masquerade as an OCI-runtime configuration failure and burn one of its
+    # crun/runc attempts.
+    build_ok=0
+    retry_delay=15
+    for attempt in 1 2 3; do
+        if "$SETUP" --runtime "$RUNTIME" --image "$IMAGE" --rc "$rc"; then
+            build_ok=1
+            break
+        fi
+        if [ "$attempt" -lt 3 ]; then
+            printf 'setup-dev-alias.sh failed (attempt %s/3); retrying in %ss (usually a transient registry/network error)\n' \
+                "$attempt" "$retry_delay" >&2
+            sleep "$retry_delay"
+            retry_delay=$((retry_delay * 2))
+        fi
+    done
+    [ "$build_ok" -eq 1 ] \
+        || die "setup-dev-alias.sh failed to build $IMAGE / install the gco function for $RUNTIME (after 3 attempts)"
 fi
 grep -q '>>> gco >>>' "$rc" || die "setup script did not write a gco function block"
 

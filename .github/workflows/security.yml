@@ -291,7 +291,7 @@ jobs:
         # is used by the integration:docker:* jobs and the kind E2E build,
         # so each image's layers are built exactly once per commit and
         # reused everywhere.
-        uses: docker/build-push-action@v7.3.0
+        uses: ./.github/actions/build-image-with-retry
         with:
           context: ${{ matrix.context || '.' }}
           file: ${{ matrix.dockerfile }}
@@ -341,6 +341,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      - name: Pre-pull TruffleHog image (with retry)
+        # A plain `docker run` pulls implicitly with no retry; pre-pulling
+        # keeps a Docker Hub blip from failing the scan before it starts.
+        # Keep the tag in lockstep with the run step below.
+        uses: ./.github/actions/docker-pull-with-retry
+        with:
+          images: trufflesecurity/trufflehog:3.95.2
       - name: Run TruffleHog
         run: |
           docker run --rm -v "$PWD":/repo \

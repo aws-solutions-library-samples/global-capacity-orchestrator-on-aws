@@ -67,14 +67,21 @@ jobs:
         # gco.services.inference_monitor, which imports the kubernetes client
         # (the [image-inference-monitor] group). [test] brings pytest.
         run: pip install -e ".[image-inference-monitor,test]"
-      - name: Resolve + pull the Mooncake image (single source of truth)
+      - name: Resolve the Mooncake image (single source of truth)
         # The version is read from cli.images so this job always validates the
         # exact image GCO defaults to — bump the constant and CI re-validates.
+        id: mooncake-image
         run: |
           set -euo pipefail
           IMAGE="$(python3 -c 'from cli.images import _DISAGGREGATED_DEFAULT_IMAGE; print(_DISAGGREGATED_DEFAULT_IMAGE)')"
           echo "Mooncake default image: $IMAGE"
-          docker pull "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+      - name: Pull the Mooncake image (with retry)
+        uses: ./.github/actions/docker-pull-with-retry
+        with:
+          images: ${{ steps.mooncake-image.outputs.image }}
+          # The ~9GB vLLM image is a long pull; give retries breathing room.
+          delay: "30"
       - name: Run image contract tests
         run: |
           pytest tests/test_mooncake_image_contract.py -m mooncake_image -v \
