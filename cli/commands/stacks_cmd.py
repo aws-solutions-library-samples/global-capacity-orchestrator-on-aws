@@ -936,7 +936,7 @@ def bedrock_set_model(config: Any, model_id: Any, config_path: Any, yes: Any) ->
     (bedrock.thinking) are preserved.
 
     Examples:
-        gco stacks bedrock set-model global.anthropic.claude-opus-5
+        gco stacks bedrock set-model us.amazon.nova-pro-v1:0
         gco stacks bedrock set-model us.amazon.nova-2-lite-v1:0 -y
     """
     from ..managed_config import ManagedConfigError, set_default_bedrock_model

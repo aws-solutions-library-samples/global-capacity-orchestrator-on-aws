@@ -646,6 +646,6 @@ if is_enabled(FLAG_CONFIG_MANAGEMENT):
 
         Args:
             model_id: Bedrock model or inference-profile ID
-                (e.g. global.anthropic.claude-opus-5).
+                (e.g. us.amazon.nova-2-lite-v1:0).
         """
         return cli_runner._run_cli("stacks", "bedrock", "set-model", model_id, "-y")
