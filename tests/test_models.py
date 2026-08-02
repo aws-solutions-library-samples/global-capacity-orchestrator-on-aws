@@ -300,6 +300,19 @@ class TestResourceStatus:
         )
         assert not status.is_successful()
 
+    def test_valid_forbidden_status_is_not_successful(self):
+        """Authorization denials are explicit unsuccessful results."""
+        status = ResourceStatus(
+            api_version="v1",
+            kind="Secret",
+            name="credentials",
+            namespace="default",
+            status="forbidden",
+            message="Resource kind 'Secret' is not allowed",
+        )
+
+        assert not status.is_successful()
+
     def test_invalid_status_value(self):
         """Test that invalid status value raises error."""
         with pytest.raises(ValueError, match="Status must be one of"):

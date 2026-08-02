@@ -119,6 +119,7 @@ class TestRenderPlaceholders:
         [
             "03-network-policies.yaml",  # the structural VPC CIDR placeholder
             "30-health-monitor.yaml",  # bare image: placeholder + quoted values
+            "31-manifest-processor.yaml",  # REST policy env wiring
             "post-helm-sqs-consumer.yaml",  # the bare integer placeholders
             "04-resource-quotas.yaml",  # quoted-string placeholders only
         ],
@@ -132,6 +133,34 @@ class TestRenderPlaceholders:
         assert "{{" not in rendered
         docs = list(yaml.safe_load_all(rendered))
         assert any(doc for doc in docs), "rendered manifest produced no YAML documents"
+
+    def test_manifest_processor_security_policy_env_is_fully_wired(self) -> None:
+        raw = (MANIFESTS_DIR / "31-manifest-processor.yaml").read_text(encoding="utf-8")
+        # Only the image token occupies an unquoted YAML scalar. Preserve the
+        # quoted env tokens so this test can assert their exact wiring.
+        docs = list(
+            yaml.safe_load_all(
+                raw.replace("{{MANIFEST_PROCESSOR_IMAGE}}", "example.invalid/manifest:test")
+            )
+        )
+        deployment = next(doc for doc in docs if doc and doc.get("kind") == "Deployment")
+        env = {
+            item["name"]: item.get("value")
+            for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+        }
+
+        expected = {
+            "YAML_MAX_DEPTH": "{{MP_YAML_MAX_DEPTH}}",
+            "BLOCK_PRIVILEGED": "{{MP_BLOCK_PRIVILEGED}}",
+            "BLOCK_PRIVILEGE_ESCALATION": "{{MP_BLOCK_PRIVILEGE_ESCALATION}}",
+            "BLOCK_HOST_NETWORK": "{{MP_BLOCK_HOST_NETWORK}}",
+            "BLOCK_HOST_PID": "{{MP_BLOCK_HOST_PID}}",
+            "BLOCK_HOST_IPC": "{{MP_BLOCK_HOST_IPC}}",
+            "BLOCK_HOST_PATH": "{{MP_BLOCK_HOST_PATH}}",
+            "BLOCK_ADDED_CAPABILITIES": "{{MP_BLOCK_ADDED_CAPABILITIES}}",
+            "BLOCK_RUN_AS_ROOT": "{{MP_BLOCK_RUN_AS_ROOT}}",
+        }
+        assert {name: env.get(name) for name in expected} == expected
 
 
 # ── iter_target_files (live, offline) ─────────────────────────────────────────

@@ -2861,6 +2861,11 @@ class GCORegionalStack(Stack):
             ],
         )
 
+        security_policy = job_policy.get("manifest_security_policy", {})
+
+        def _policy_str(value: object) -> str:
+            return "true" if value else "false"
+
         image_replacements = {
             "{{BACKEND_TLS_CERTIFICATE_ARN}}": self.backend_tls_certificate_arn,
             "{{HEALTH_MONITOR_IMAGE}}": self.health_monitor_image.image_uri,
@@ -2944,6 +2949,25 @@ class GCORegionalStack(Stack):
                 )
             ),
             "{{MP_TRUSTED_DOCKERHUB_ORGS}}": ",".join(job_policy.get("trusted_dockerhub_orgs", [])),
+            # Manifest parsing and pod-security policy use the same values as
+            # the queue processor, preventing REST/SQS validation drift.
+            "{{MP_YAML_MAX_DEPTH}}": str(mp_config.get("yaml_max_depth", 50)),
+            "{{MP_BLOCK_PRIVILEGED}}": _policy_str(security_policy.get("block_privileged", True)),
+            "{{MP_BLOCK_PRIVILEGE_ESCALATION}}": _policy_str(
+                security_policy.get("block_privilege_escalation", True)
+            ),
+            "{{MP_BLOCK_HOST_NETWORK}}": _policy_str(
+                security_policy.get("block_host_network", True)
+            ),
+            "{{MP_BLOCK_HOST_PID}}": _policy_str(security_policy.get("block_host_pid", True)),
+            "{{MP_BLOCK_HOST_IPC}}": _policy_str(security_policy.get("block_host_ipc", True)),
+            "{{MP_BLOCK_HOST_PATH}}": _policy_str(security_policy.get("block_host_path", True)),
+            "{{MP_BLOCK_ADDED_CAPABILITIES}}": _policy_str(
+                security_policy.get("block_added_capabilities", True)
+            ),
+            "{{MP_BLOCK_RUN_AS_ROOT}}": _policy_str(
+                security_policy.get("block_run_as_root", False)
+            ),
             # Manifest processor request body size cap (HTTP 413 middleware).
             # Lives at cdk.json::manifest_processor.max_request_body_bytes.
             "{{MP_MAX_REQUEST_BODY_BYTES}}": str(
@@ -3103,11 +3127,6 @@ class GCORegionalStack(Stack):
             # Security policy toggles — shared with the REST manifest_processor.
             # Both services read the same cdk.json section so a single policy
             # flip (e.g. block_run_as_root: true) takes effect on both paths.
-            security_policy = job_policy.get("manifest_security_policy", {})
-
-            def _policy_str(v: object) -> str:
-                return "true" if v else "false"
-
             image_replacements["{{QP_BLOCK_PRIVILEGED}}"] = _policy_str(
                 security_policy.get("block_privileged", True)
             )

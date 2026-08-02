@@ -144,6 +144,8 @@ spec:
               value: "{{MP_REQUIRE_ACCELERATOR_TOLERATION}}"
             - name: MAX_REQUEST_BODY_BYTES
               value: "{{MP_MAX_REQUEST_BODY_BYTES}}"
+            - name: YAML_MAX_DEPTH
+              value: "{{MP_YAML_MAX_DEPTH}}"
             # Namespace allowlist — shared with the queue processor via
             # cdk.json::job_validation_policy.allowed_namespaces.
             - name: ALLOWED_NAMESPACES
@@ -158,6 +160,24 @@ spec:
               value: "{{MP_TRUSTED_REGISTRIES}}"
             - name: TRUSTED_DOCKERHUB_ORGS
               value: "{{MP_TRUSTED_DOCKERHUB_ORGS}}"
+            # Security policy toggles — sourced from the same shared policy as
+            # the SQS worker so neither submission path is weaker.
+            - name: BLOCK_PRIVILEGED
+              value: "{{MP_BLOCK_PRIVILEGED}}"
+            - name: BLOCK_PRIVILEGE_ESCALATION
+              value: "{{MP_BLOCK_PRIVILEGE_ESCALATION}}"
+            - name: BLOCK_HOST_NETWORK
+              value: "{{MP_BLOCK_HOST_NETWORK}}"
+            - name: BLOCK_HOST_PID
+              value: "{{MP_BLOCK_HOST_PID}}"
+            - name: BLOCK_HOST_IPC
+              value: "{{MP_BLOCK_HOST_IPC}}"
+            - name: BLOCK_HOST_PATH
+              value: "{{MP_BLOCK_HOST_PATH}}"
+            - name: BLOCK_ADDED_CAPABILITIES
+              value: "{{MP_BLOCK_ADDED_CAPABILITIES}}"
+            - name: BLOCK_RUN_AS_ROOT
+              value: "{{MP_BLOCK_RUN_AS_ROOT}}"
           resources:
             requests:
               cpu: 500m

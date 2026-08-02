@@ -530,6 +530,20 @@ def test_convergence_payload_carries_enabled_features_and_security_policy(featur
     assert observability["prometheus-node-exporter"]["tolerations"]
 
     replacements = properties["ImageReplacements"]
+    expected_manifest_processor_values = {
+        "{{MP_YAML_MAX_DEPTH}}": "50",
+        "{{MP_BLOCK_PRIVILEGED}}": "true",
+        "{{MP_BLOCK_PRIVILEGE_ESCALATION}}": "true",
+        "{{MP_BLOCK_HOST_NETWORK}}": "false",
+        "{{MP_BLOCK_HOST_PID}}": "true",
+        "{{MP_BLOCK_HOST_IPC}}": "false",
+        "{{MP_BLOCK_HOST_PATH}}": "true",
+        "{{MP_BLOCK_ADDED_CAPABILITIES}}": "true",
+        "{{MP_BLOCK_RUN_AS_ROOT}}": "true",
+    }
+    for key, expected in expected_manifest_processor_values.items():
+        assert replacements[key] == expected
+
     expected_queue_values = {
         "{{QP_POLLING_INTERVAL}}": "17",
         "{{QP_MAX_CONCURRENT_JOBS}}": "23",

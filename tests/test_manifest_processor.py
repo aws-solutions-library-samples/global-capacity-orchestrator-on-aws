@@ -483,6 +483,9 @@ class TestCreateManifestProcessorFromEnv:
             assert processor.allowed_namespaces == {"gco-jobs"}
             assert processor.allowed_kinds == set(DEFAULT_ALLOWED_KINDS)
             assert processor.validation_enabled is True
+            assert processor.yaml_max_depth == 50
+            assert processor.block_privileged is True
+            assert processor.block_run_as_root is False
 
     def test_create_from_env_custom_values(self):
         """Test creation with custom environment values."""
@@ -495,6 +498,15 @@ class TestCreateManifestProcessorFromEnv:
             "ALLOWED_NAMESPACES": "default,production,staging",
             "ALLOWED_KINDS": "Job,ConfigMap",
             "VALIDATION_ENABLED": "false",
+            "YAML_MAX_DEPTH": "17",
+            "BLOCK_PRIVILEGED": "false",
+            "BLOCK_PRIVILEGE_ESCALATION": "true",
+            "BLOCK_HOST_NETWORK": "false",
+            "BLOCK_HOST_PID": "true",
+            "BLOCK_HOST_IPC": "false",
+            "BLOCK_HOST_PATH": "true",
+            "BLOCK_ADDED_CAPABILITIES": "false",
+            "BLOCK_RUN_AS_ROOT": "true",
         }
 
         with (
@@ -518,6 +530,15 @@ class TestCreateManifestProcessorFromEnv:
             assert "production" in processor.allowed_namespaces
             assert "staging" in processor.allowed_namespaces
             assert processor.allowed_kinds == {"Job", "ConfigMap"}
+            assert processor.yaml_max_depth == 17
+            assert processor.block_privileged is False
+            assert processor.block_privilege_escalation is True
+            assert processor.block_host_network is False
+            assert processor.block_host_pid is True
+            assert processor.block_host_ipc is False
+            assert processor.block_host_path is True
+            assert processor.block_added_capabilities is False
+            assert processor.block_run_as_root is True
 
     def test_create_from_env_explicit_empty_allowed_kinds_denies_all(self):
         """An explicit empty policy must not silently restore default kinds."""
@@ -798,14 +819,9 @@ class TestDeleteResource:
         mock_resource.delete.assert_called_once_with(name="test-configmap", namespace="default")
 
     @pytest.mark.asyncio
-    async def test_delete_secret_success(self, processor_with_mocks):
-        """Test successful secret deletion."""
-        # Mock the dynamic client
-        mock_resource = MagicMock()
-        mock_resource.namespaced = True
-        mock_resource.delete = MagicMock()
+    async def test_delete_secret_is_forbidden(self, processor_with_mocks):
+        """CRUD cannot bypass the configured resource-kind allowlist."""
         processor_with_mocks._dynamic_client = MagicMock()
-        processor_with_mocks._dynamic_client.resources.get.return_value = mock_resource
 
         result = await processor_with_mocks.delete_resource(
             api_version="v1",
@@ -814,8 +830,9 @@ class TestDeleteResource:
             namespace="default",
         )
 
-        assert result.status == "deleted"
-        mock_resource.delete.assert_called_once_with(name="test-secret", namespace="default")
+        assert result.status == "forbidden"
+        assert "not allowed" in (result.message or "")
+        processor_with_mocks._dynamic_client.resources.get.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_delete_not_found(self, processor_with_mocks):
@@ -861,14 +878,8 @@ class TestDeleteResource:
 
     @pytest.mark.asyncio
     async def test_delete_unsupported_kind(self, processor_with_mocks):
-        """Test deletion of unsupported resource kind."""
-        from kubernetes.dynamic.exceptions import ResourceNotFoundError
-
-        # Mock the dynamic client to raise ResourceNotFoundError for unknown kind
+        """Unknown kinds are denied before dynamic API discovery."""
         processor_with_mocks._dynamic_client = MagicMock()
-        processor_with_mocks._dynamic_client.resources.get.side_effect = ResourceNotFoundError(
-            "Resource not found"
-        )
 
         result = await processor_with_mocks.delete_resource(
             api_version="v1",
@@ -877,8 +888,9 @@ class TestDeleteResource:
             namespace="default",
         )
 
-        assert result.status == "failed"
-        assert "Unknown resource type" in result.message
+        assert result.status == "forbidden"
+        assert "not allowed" in (result.message or "")
+        processor_with_mocks._dynamic_client.resources.get.assert_not_called()
 
 
 class TestGetResourceStatus:
@@ -965,6 +977,60 @@ class TestGetResourceStatus:
         )
 
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_resource_status_disallowed_namespace(self, processor_with_mocks):
+        """Status reads cannot escape the configured namespace allowlist."""
+        processor_with_mocks._dynamic_client = MagicMock()
+
+        result = await processor_with_mocks.get_resource_status(
+            api_version="apps/v1",
+            kind="Deployment",
+            name="test",
+            namespace="kube-system",
+        )
+
+        assert result is not None
+        assert result["forbidden"] is True
+        assert "not allowed" in result["error"]
+        processor_with_mocks._dynamic_client.resources.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_resource_status_rejects_wrong_api_group(self, processor_with_mocks):
+        """A custom API group cannot reuse an allowed built-in kind name."""
+        processor_with_mocks._dynamic_client = MagicMock()
+
+        result = await processor_with_mocks.get_resource_status(
+            api_version="attacker.example/v1",
+            kind="Deployment",
+            name="test",
+            namespace="default",
+        )
+
+        assert result is not None
+        assert result["forbidden"] is True
+        assert "API version" in result["error"]
+        processor_with_mocks._dynamic_client.resources.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_resource_status_rejects_cluster_scoped_discovery(self, processor_with_mocks):
+        """Namespace-shaped endpoints never fall back to cluster scope."""
+        mock_resource = MagicMock()
+        mock_resource.namespaced = False
+        processor_with_mocks._dynamic_client = MagicMock()
+        processor_with_mocks._dynamic_client.resources.get.return_value = mock_resource
+
+        result = await processor_with_mocks.get_resource_status(
+            api_version="v1",
+            kind="ConfigMap",
+            name="test",
+            namespace="default",
+        )
+
+        assert result is not None
+        assert result["forbidden"] is True
+        assert "Cluster-scoped" in result["error"]
+        mock_resource.get.assert_not_called()
 
 
 class TestGetExistingResource:
@@ -2639,33 +2705,33 @@ class TestDeleteResourceEdgeCases:
 
     @pytest.mark.asyncio
     async def test_delete_resource_non_namespaced(self, processor_with_mocks):
-        """Test deleting a non-namespaced resource."""
+        """An allowed GVK discovered as cluster-scoped is still denied."""
         processor = processor_with_mocks
         mock_resource = MagicMock()
         mock_resource.namespaced = False
-        mock_resource.delete = MagicMock()
         processor._dynamic_client = MagicMock()
         processor._dynamic_client.resources.get.return_value = mock_resource
 
-        result = await processor.delete_resource("v1", "Namespace", "test-ns", "cluster-scope")
-        assert result.status == "deleted"
-        mock_resource.delete.assert_called_once_with(name="test-ns")
+        result = await processor.delete_resource("v1", "ConfigMap", "test", "default")
+
+        assert result.status == "forbidden"
+        assert "Cluster-scoped" in (result.message or "")
+        mock_resource.delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_delete_resource_value_error(self, processor_with_mocks):
-        """Test delete_resource handles ValueError for unknown resource type."""
+        """Authorized identifiers still report dynamic discovery failures."""
         processor = processor_with_mocks
-        processor._dynamic_client = MagicMock()
-        processor._dynamic_client.resources.get.side_effect = ValueError("Unknown resource type")
 
         with patch.object(
             processor,
             "_get_api_resource",
-            side_effect=ValueError("Unknown resource type: v1/UnknownKind"),
+            side_effect=ValueError("Unknown resource type: apps/v1/Deployment"),
         ):
-            result = await processor.delete_resource("v1", "UnknownKind", "test", "default")
-            assert result.status == "failed"
-            assert "Unknown resource type" in result.message
+            result = await processor.delete_resource("apps/v1", "Deployment", "test", "default")
+
+        assert result.status == "failed"
+        assert "Unknown resource type" in (result.message or "")
 
 
 class TestGetResourceStatusExceptionPath:

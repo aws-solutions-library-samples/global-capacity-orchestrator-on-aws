@@ -158,6 +158,11 @@ async def get_resource_status(
 
         if resource_info is None:
             raise HTTPException(status_code=500, detail="Failed to retrieve resource information")
+        if resource_info.get("forbidden", False):
+            raise HTTPException(
+                status_code=403,
+                detail=resource_info.get("error", "Resource access denied"),
+            )
 
         response = {
             "cluster_id": processor.cluster_id,
@@ -191,6 +196,12 @@ async def delete_resource(
             api_version=api_version, kind=kind, name=name, namespace=namespace
         )
 
+        if resource_status.status == "forbidden":
+            raise HTTPException(
+                status_code=403,
+                detail=resource_status.message or "Resource access denied",
+            )
+
         response = {
             "success": resource_status.is_successful(),
             "cluster_id": processor.cluster_id,
@@ -209,6 +220,8 @@ async def delete_resource(
         status_code = 200 if resource_status.is_successful() else 400
         return JSONResponse(status_code=status_code, content=response)
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error deleting resource: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {e!s}") from e

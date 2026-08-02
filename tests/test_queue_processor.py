@@ -37,11 +37,12 @@ _QP_ENV_VARS = (
     "BLOCK_RUN_AS_ROOT",
     "ALLOWED_NAMESPACES",
     "ALLOWED_KINDS",
-    "MAX_CPU",
-    "MAX_MEMORY",
-    "MAX_GPU",
+    "MAX_CPU_PER_MANIFEST",
+    "MAX_MEMORY_PER_MANIFEST",
+    "MAX_GPU_PER_MANIFEST",
     "TRUSTED_REGISTRIES",
     "TRUSTED_DOCKERHUB_ORGS",
+    "REQUIRE_ACCELERATOR_TOLERATION",
 )
 
 
@@ -810,14 +811,16 @@ class TestImageRegistryAllowlist:
         ok, err = qp.validate_manifest(_job_with_image("public.ecr.aws/lambda/python:3.14"))
         assert ok, err
 
-    def test_empty_allowlists_disable_check(self, monkeypatch):
-        """Unset/empty allowlists must fail-open (no check), to preserve
-        backward compatibility with operators who haven't opted in."""
+    def test_empty_allowlists_use_secure_defaults(self, monkeypatch):
+        """Missing deployment wiring must retain the REST processor defaults."""
         monkeypatch.setenv("TRUSTED_REGISTRIES", "")
         monkeypatch.setenv("TRUSTED_DOCKERHUB_ORGS", "")
         qp = _reload()
         ok, err = qp.validate_manifest(_job_with_image("evil.example.com/malicious:latest"))
-        assert ok, err
+        assert not ok
+        assert "untrusted" in err.lower()
+        assert "nvcr.io" in qp.TRUSTED_REGISTRIES
+        assert "nvidia" in qp.TRUSTED_DOCKERHUB_ORGS
 
     def test_init_container_image_rejected(self, monkeypatch):
         """initContainers carry real risk (they run with pod privileges
@@ -1427,12 +1430,12 @@ class TestEnvBoolParser:
         qp = _reload()
         import os as _os
 
-        for v in ("false", "False", "0", "no", "off", ""):
+        for v in ("false", "False", "0", "no", "off", "", "   "):
             _os.environ["X"] = v
             try:
-                # Empty string falls back to the default, which we pass as True
-                # so we can distinguish "" from "false".
-                expected = v == ""
+                # Empty/whitespace strings fall back to the default, which we
+                # pass as True so we can distinguish them from "false".
+                expected = not v.strip()
                 assert qp._env_bool("X", True) is expected, f"{v!r} should be {expected}"
             finally:
                 _os.environ.pop("X")

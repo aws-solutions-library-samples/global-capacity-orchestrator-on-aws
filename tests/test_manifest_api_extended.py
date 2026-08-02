@@ -285,6 +285,39 @@ class TestDeleteResourceEndpoint:
             manifest_api_module.manifest_processor = original_processor
 
     @pytest.mark.asyncio
+    async def test_delete_resource_forbidden(self):
+        """Policy denials are preserved as HTTP 403 responses."""
+        from fastapi import HTTPException
+
+        from gco.models import ResourceStatus
+
+        mock_status = ResourceStatus(
+            api_version="v1",
+            kind="Secret",
+            name="credentials",
+            namespace="default",
+            status="forbidden",
+            message="Resource kind 'Secret' is not allowed",
+        )
+        mock_processor = MagicMock()
+        mock_processor.delete_resource = AsyncMock(return_value=mock_status)
+
+        import gco.services.manifest_api as manifest_api_module
+
+        original_processor = manifest_api_module.manifest_processor
+        manifest_api_module.manifest_processor = mock_processor
+
+        try:
+            from gco.services.api_routes.manifests import delete_resource
+
+            with pytest.raises(HTTPException) as exc_info:
+                await delete_resource("default", "credentials", kind="Secret")
+            assert exc_info.value.status_code == 403
+            assert "not allowed" in exc_info.value.detail
+        finally:
+            manifest_api_module.manifest_processor = original_processor
+
+    @pytest.mark.asyncio
     async def test_delete_resource_no_processor(self):
         """Test resource deletion when processor is None."""
         import gco.services.manifest_api as manifest_api_module
@@ -370,6 +403,35 @@ class TestGetResourceEndpoint:
 
             response = await get_resource_status("default", "nonexistent")
             assert response.status_code == 404
+        finally:
+            manifest_api_module.manifest_processor = original_processor
+
+    @pytest.mark.asyncio
+    async def test_get_resource_forbidden(self):
+        """Policy denials are preserved as HTTP 403 responses."""
+        from fastapi import HTTPException
+
+        mock_processor = MagicMock()
+        mock_processor.get_resource_status = AsyncMock(
+            return_value={
+                "exists": False,
+                "forbidden": True,
+                "error": "Namespace 'kube-system' is not allowed",
+            }
+        )
+
+        import gco.services.manifest_api as manifest_api_module
+
+        original_processor = manifest_api_module.manifest_processor
+        manifest_api_module.manifest_processor = mock_processor
+
+        try:
+            from gco.services.api_routes.manifests import get_resource_status
+
+            with pytest.raises(HTTPException) as exc_info:
+                await get_resource_status("kube-system", "test-app")
+            assert exc_info.value.status_code == 403
+            assert "not allowed" in exc_info.value.detail
         finally:
             manifest_api_module.manifest_processor = original_processor
 

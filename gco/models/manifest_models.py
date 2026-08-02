@@ -135,13 +135,20 @@ class ResourceStatus:
     kind: str
     name: str
     namespace: str
-    status: str  # 'created', 'updated', 'unchanged', 'failed'
+    status: str  # 'created', 'updated', 'unchanged', 'failed', 'deleted', 'forbidden'
     message: str | None = None
     uid: str | None = None  # Kubernetes resource UID
 
     def __post_init__(self) -> None:
         """Validate resource status"""
-        valid_statuses = {"created", "updated", "unchanged", "failed", "deleted"}
+        valid_statuses = {
+            "created",
+            "updated",
+            "unchanged",
+            "failed",
+            "deleted",
+            "forbidden",
+        }
         if self.status not in valid_statuses:
             raise ValueError(f"Status must be one of {valid_statuses}, got {self.status}")
 
@@ -193,5 +200,5 @@ class ManifestSubmissionResponse:
         """Get summary of resource processing results"""
         summary = {"created": 0, "updated": 0, "unchanged": 0, "failed": 0}
         for resource in self.resources:
-            summary[resource.status] += 1
+            summary[resource.status] = summary.get(resource.status, 0) + 1
         return summary

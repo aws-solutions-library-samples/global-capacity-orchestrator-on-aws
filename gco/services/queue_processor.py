@@ -36,13 +36,13 @@ Configuration via environment variables:
                              a bare byte count (default: 32Gi)
     TRUSTED_REGISTRIES:      Comma-separated list of registry domains
                              (e.g. "nvcr.io,public.ecr.aws"). Empty/unset
-                             disables the image registry check (fail-open).
+                             uses the REST processor's secure defaults.
                              Keep in sync with
                              cdk.json::job_validation_policy.trusted_registries.
     TRUSTED_DOCKERHUB_ORGS:  Comma-separated list of Docker Hub org names
-                             (e.g. "nvidia,pytorch"). Empty/unset disables
-                             the check. Keep in sync with
-                             cdk.json::job_validation_policy.trusted_dockerhub_orgs.
+                             (e.g. "nvidia,pytorch"). Empty/unset uses the
+                             REST processor's secure defaults. Keep in sync
+                             with cdk.json::job_validation_policy.trusted_dockerhub_orgs.
 
 Security policy toggles (all default to true except ``BLOCK_RUN_AS_ROOT``
 which defaults to false, matching job_validation_policy.manifest_security_policy
@@ -86,7 +86,12 @@ from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 from gco.models import ResourceStatus
-from gco.services.manifest_processor import DEFAULT_ALLOWED_KINDS, validate_resource_kind
+from gco.services.manifest_processor import (
+    DEFAULT_ALLOWED_KINDS,
+    DEFAULT_TRUSTED_DOCKERHUB_ORGS,
+    DEFAULT_TRUSTED_REGISTRIES,
+    validate_resource_kind,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -166,14 +171,14 @@ MAX_GPU = int(os.environ.get("MAX_GPU_PER_MANIFEST", "4"))
 ACCELERATOR_TAINTS = ("nvidia.com/gpu", "aws.amazon.com/neuron", "vpc.amazonaws.com/efa")
 
 # Trusted image sources (populated from cdk.json::manifest_processor at deploy time).
-# Comma-separated env vars; empty/unset disables the check (fail-open logged).
-# Keep in sync with gco/services/manifest_processor.py::_validate_image_sources.
+# Empty/unset values use the same secure defaults as ManifestProcessor so the
+# SQS path cannot bypass REST image-source validation after a wiring error.
 TRUSTED_REGISTRIES = [
     r.strip() for r in os.environ.get("TRUSTED_REGISTRIES", "").split(",") if r.strip()
-]
+] or list(DEFAULT_TRUSTED_REGISTRIES)
 TRUSTED_DOCKERHUB_ORGS = [
     o.strip() for o in os.environ.get("TRUSTED_DOCKERHUB_ORGS", "").split(",") if o.strip()
-]
+] or list(DEFAULT_TRUSTED_DOCKERHUB_ORGS)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -183,7 +188,7 @@ def _env_bool(name: str, default: bool) -> bool:
     "yes", "on" (case-insensitive). Everything else is falsy.
     """
     raw = os.environ.get(name)
-    if raw is None or raw == "":
+    if raw is None or not raw.strip():
         return default
     return raw.strip().lower() in ("true", "1", "yes", "on")
 
@@ -282,10 +287,9 @@ def _is_image_trusted(image: str) -> bool:
       3. Docker Hub images with an org (first segment has no '.' or ':') must
          match an entry in TRUSTED_DOCKERHUB_ORGS
 
-    If both allowlists are empty the check is disabled (fail-open, logged).
+    Empty or missing environment allowlists use the REST processor's secure
+    defaults; they never disable image-source validation.
     """
-    if not TRUSTED_REGISTRIES and not TRUSTED_DOCKERHUB_ORGS:
-        return True
     if not image:
         return True
     if "/" not in image:
@@ -338,9 +342,9 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
     4. **Image registry allowlist** — every container's image must come
        from ``TRUSTED_REGISTRIES`` (registry domains like ``nvcr.io``)
        or ``TRUSTED_DOCKERHUB_ORGS`` (Docker Hub orgs like ``nvidia``).
-       Official Docker Hub images with no slash are always allowed. When
-       both allowlists are empty the check is disabled. Keep the lists in
-       sync with ``cdk.json::job_validation_policy.trusted_registries`` and
+       Official Docker Hub images with no slash are always allowed. Empty or
+       missing allowlists use the shared secure defaults. Keep explicit lists
+       in sync with ``cdk.json::job_validation_policy.trusted_registries`` and
        ``trusted_dockerhub_orgs`` — CDK wires the same config into both
        services.
 

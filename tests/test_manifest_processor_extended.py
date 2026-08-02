@@ -430,14 +430,8 @@ class TestDeleteResourceEdgeCases:
 
     @pytest.mark.asyncio
     async def test_delete_unsupported_resource_type(self, manifest_processor):
-        """Test deleting unsupported resource type."""
-        from kubernetes.dynamic.exceptions import ResourceNotFoundError
-
-        # Mock the dynamic client to raise ResourceNotFoundError for unknown resource type
+        """Unsupported kinds are denied before dynamic API discovery."""
         mock_dynamic = MagicMock()
-        mock_dynamic.resources.get.side_effect = ResourceNotFoundError(
-            "Resource not found: v1/UnsupportedKind"
-        )
         manifest_processor._dynamic_client = mock_dynamic
 
         result = await manifest_processor.delete_resource(
@@ -447,8 +441,9 @@ class TestDeleteResourceEdgeCases:
             namespace="default",
         )
 
-        assert result.status == "failed"
-        assert "Unknown resource type" in result.message
+        assert result.status == "forbidden"
+        assert "not allowed" in (result.message or "")
+        mock_dynamic.resources.get.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_delete_resource_api_error(self, manifest_processor):
@@ -475,9 +470,16 @@ class TestDeleteResourceEdgeCases:
 class TestGetResourceStatusEdgeCases:
     """Tests for get_resource_status edge cases."""
 
+    @staticmethod
+    def _authorize_namespaced_resource(manifest_processor):
+        resource = MagicMock()
+        resource.namespaced = True
+        manifest_processor._get_api_resource = MagicMock(return_value=resource)
+
     @pytest.mark.asyncio
     async def test_get_resource_status_exists(self, manifest_processor):
         """Test getting status of existing resource."""
+        self._authorize_namespaced_resource(manifest_processor)
 
         async def mock_get_existing(*args, **kwargs):
             return {
@@ -501,6 +503,7 @@ class TestGetResourceStatusEdgeCases:
     @pytest.mark.asyncio
     async def test_get_resource_status_not_exists(self, manifest_processor):
         """Test getting status of non-existing resource."""
+        self._authorize_namespaced_resource(manifest_processor)
 
         async def mock_get_existing(*args, **kwargs):
             return None
@@ -519,6 +522,7 @@ class TestGetResourceStatusEdgeCases:
     @pytest.mark.asyncio
     async def test_get_resource_status_error(self, manifest_processor):
         """Test getting status with error."""
+        self._authorize_namespaced_resource(manifest_processor)
 
         async def mock_get_existing(*args, **kwargs):
             raise Exception("API error")

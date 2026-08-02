@@ -94,6 +94,44 @@ DEFAULT_ALLOWED_KINDS = (
     "Pod",
 )
 
+# Authoritative image-source defaults shared by the REST and SQS submission
+# paths. Keep these centralized so missing deployment wiring cannot make either
+# path weaker or let their allowlists drift independently.
+DEFAULT_TRUSTED_REGISTRIES = (
+    "docker.io",
+    "gcr.io",
+    "quay.io",
+    "registry.k8s.io",
+    "k8s.gcr.io",
+    "public.ecr.aws",
+    "nvcr.io",
+)
+DEFAULT_TRUSTED_DOCKERHUB_ORGS = (
+    "nvidia",
+    "pytorch",
+    "rayproject",
+    "tensorflow",
+    "huggingface",
+    "amazon",
+    "bitnami",
+    "gco",
+)
+
+# CRUD endpoints accept only these exact built-in, namespaced GVKs. A kind-only
+# allowlist is insufficient because a custom API group can define the same kind
+# name, and cluster-scoped resources must never be reachable through a
+# namespace-shaped user endpoint.
+RESOURCE_API_VERSIONS: dict[str, frozenset[str]] = {
+    "Job": frozenset({"batch/v1"}),
+    "CronJob": frozenset({"batch/v1"}),
+    "Deployment": frozenset({"apps/v1"}),
+    "StatefulSet": frozenset({"apps/v1"}),
+    "DaemonSet": frozenset({"apps/v1"}),
+    "Service": frozenset({"v1"}),
+    "ConfigMap": frozenset({"v1"}),
+    "Pod": frozenset({"v1"}),
+}
+
 
 class RetryableQueuedJobApplyError(RuntimeError):
     """A deterministic queued Job apply can be retried or adopted safely."""
@@ -290,29 +328,10 @@ class ManifestProcessor:
 
         # Trusted registries for image validation (configurable via cdk.json)
         self.trusted_registries = config_dict.get(
-            "trusted_registries",
-            [
-                "docker.io",
-                "gcr.io",
-                "quay.io",
-                "registry.k8s.io",
-                "k8s.gcr.io",
-                "public.ecr.aws",
-                "nvcr.io",
-            ],
+            "trusted_registries", list(DEFAULT_TRUSTED_REGISTRIES)
         )
         self.trusted_dockerhub_orgs = config_dict.get(
-            "trusted_dockerhub_orgs",
-            [
-                "nvidia",
-                "pytorch",
-                "rayproject",
-                "tensorflow",
-                "huggingface",
-                "amazon",
-                "bitnami",
-                "gco",
-            ],
+            "trusted_dockerhub_orgs", list(DEFAULT_TRUSTED_DOCKERHUB_ORGS)
         )
 
         # Warn about trusted_registries entries that look like Docker Hub orgs (no dot or colon)
@@ -339,6 +358,20 @@ class ManifestProcessor:
         self.block_host_path = security_policy.get("block_host_path", True)
         self.block_added_capabilities = security_policy.get("block_added_capabilities", True)
         self.block_run_as_root = security_policy.get("block_run_as_root", False)
+
+    def _resource_access_error(self, api_version: str, kind: str, namespace: str) -> str | None:
+        """Return an authorization error for a CRUD resource identifier."""
+        if namespace not in self.allowed_namespaces:
+            return f"Namespace '{namespace}' is not allowed"
+        if kind not in self.allowed_kinds:
+            return f"Resource kind '{kind}' is not allowed"
+        allowed_versions = RESOURCE_API_VERSIONS.get(kind)
+        if not allowed_versions or api_version not in allowed_versions:
+            return (
+                f"API version '{api_version}' is not allowed for kind '{kind}'. "
+                f"Allowed versions: {sorted(allowed_versions or ())}"
+            )
+        return None
 
     # ------------------------------------------------------------------
     # Security defaults injection
@@ -1241,12 +1274,21 @@ class ManifestProcessor:
         return False
 
     async def _get_existing_resource(
-        self, api_version: str, kind: str, name: str, namespace: str
+        self,
+        api_version: str,
+        kind: str,
+        name: str,
+        namespace: str,
+        *,
+        api_resource: Any | None = None,
     ) -> dict[str, Any] | None:
-        """Check if a resource already exists using dynamic client"""
+        """Check if a resource already exists using dynamic client."""
         try:
-            # Get the API resource
-            api_resource = self._get_api_resource(api_version, kind)
+            # Reuse an already-authorized discovery result when supplied so a
+            # status request cannot observe a different resource definition
+            # between the scope check and the actual read.
+            if api_resource is None:
+                api_resource = self._get_api_resource(api_version, kind)
 
             # Try to get the resource
             if namespace and api_resource.namespaced:
@@ -1331,15 +1373,32 @@ class ManifestProcessor:
         """
         Delete a resource from the cluster using dynamic client
         """
+        access_error = self._resource_access_error(api_version, kind, namespace)
+        if access_error:
+            return ResourceStatus(
+                api_version=api_version,
+                kind=kind,
+                name=name,
+                namespace=namespace,
+                status="forbidden",
+                message=access_error,
+            )
+
         try:
             # Get the API resource
             api_resource = self._get_api_resource(api_version, kind)
+            if not api_resource.namespaced:
+                return ResourceStatus(
+                    api_version=api_version,
+                    kind=kind,
+                    name=name,
+                    namespace=namespace,
+                    status="forbidden",
+                    message="Cluster-scoped resource operations are not allowed",
+                )
 
-            # Delete the resource
-            if namespace and api_resource.namespaced:
-                api_resource.delete(name=name, namespace=namespace)
-            else:
-                api_resource.delete(name=name)
+            # Every authorized GVK is namespaced; never drop the namespace.
+            api_resource.delete(name=name, namespace=namespace)
 
             return ResourceStatus(
                 api_version=api_version,
@@ -1500,8 +1559,37 @@ class ManifestProcessor:
         """
         Get the status of a specific resource
         """
+        access_error = self._resource_access_error(api_version, kind, namespace)
+        if access_error:
+            return {
+                "api_version": api_version,
+                "kind": kind,
+                "name": name,
+                "namespace": namespace,
+                "exists": False,
+                "forbidden": True,
+                "error": access_error,
+            }
+
         try:
-            resource = await self._get_existing_resource(api_version, kind, name, namespace)
+            api_resource = self._get_api_resource(api_version, kind)
+            if not api_resource.namespaced:
+                return {
+                    "api_version": api_version,
+                    "kind": kind,
+                    "name": name,
+                    "namespace": namespace,
+                    "exists": False,
+                    "forbidden": True,
+                    "error": "Cluster-scoped resource operations are not allowed",
+                }
+            resource = await self._get_existing_resource(
+                api_version,
+                kind,
+                name,
+                namespace,
+                api_resource=api_resource,
+            )
             if resource:
                 return {
                     "api_version": api_version,
@@ -1523,6 +1611,27 @@ class ManifestProcessor:
         except Exception as e:
             logger.error(f"Error getting resource status: {e}")
             return None
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Parse a boolean environment variable using the SQS worker semantics."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"true", "1", "yes", "on"}
+
+
+def _manifest_security_policy_from_env() -> dict[str, bool]:
+    return {
+        "block_privileged": _env_bool("BLOCK_PRIVILEGED", True),
+        "block_privilege_escalation": _env_bool("BLOCK_PRIVILEGE_ESCALATION", True),
+        "block_host_network": _env_bool("BLOCK_HOST_NETWORK", True),
+        "block_host_pid": _env_bool("BLOCK_HOST_PID", True),
+        "block_host_ipc": _env_bool("BLOCK_HOST_IPC", True),
+        "block_host_path": _env_bool("BLOCK_HOST_PATH", True),
+        "block_added_capabilities": _env_bool("BLOCK_ADDED_CAPABILITIES", True),
+        "block_run_as_root": _env_bool("BLOCK_RUN_AS_ROOT", False),
+    }
 
 
 def create_manifest_processor_from_env() -> ManifestProcessor:
@@ -1558,6 +1667,8 @@ def create_manifest_processor_from_env() -> ManifestProcessor:
             ]
         ),
         "validation_enabled": os.getenv("VALIDATION_ENABLED", "true").lower() == "true",
+        "yaml_max_depth": int(os.getenv("YAML_MAX_DEPTH", "50")),
+        "manifest_security_policy": _manifest_security_policy_from_env(),
     }
 
     allowed_kinds_env = os.getenv("ALLOWED_KINDS")
