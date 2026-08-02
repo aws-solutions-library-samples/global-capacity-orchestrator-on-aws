@@ -29,6 +29,10 @@ FLAG_LOCAL_METRICS = "GCO_ENABLE_LOCAL_METRICS"
 # Reads from or writes to the MCP host and can upload data to S3.
 FLAG_LOCAL_STORAGE_SYNC = "GCO_ENABLE_LOCAL_STORAGE_SYNC"
 FLAG_SEMANTIC_PROGRESS = "GCO_ENABLE_SEMANTIC_PROGRESS"
+# Writes to the deployment configuration (cdk.json) on the MCP host —
+# validated, atomic, and audited via the managed-config engine, but still a
+# local-file mutation an agent could chain into a deploy, so default-off.
+FLAG_CONFIG_MANAGEMENT = "GCO_ENABLE_CONFIG_MANAGEMENT"
 
 # Per-tool flags. The umbrella is intentionally not in this tuple — callers
 # iterating ALL_FLAGS for "what gates this tool?" lookups should not see
@@ -44,6 +48,7 @@ ALL_FLAGS = (
     FLAG_LOCAL_METRICS,
     FLAG_LOCAL_STORAGE_SYNC,
     FLAG_SEMANTIC_PROGRESS,
+    FLAG_CONFIG_MANAGEMENT,
 )
 
 

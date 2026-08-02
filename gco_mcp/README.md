@@ -68,7 +68,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server exposes 134 tools by default (up to 174 with all flags enabled) across the full lifecycle of accelerated-workload management:
+The MCP server exposes 134 tools by default (up to 177 with all flags enabled) across the full lifecycle of accelerated-workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -448,6 +448,7 @@ A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, de
 | `GCO_ENABLE_LOCAL_METRICS` | `false` | `metrics_from_local_file` | Reads a metric file from the MCP host beneath `GCO_METRICS_LOCAL_ROOT`; disabled by default to prevent unintended host-file access. |
 | `GCO_ENABLE_LOCAL_STORAGE_SYNC` | `false` | `sync_storage_bucket` | Reads from or writes to the MCP host and can upload objects to S3. A large or unintended sync can consume local disk or [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) storage and network capacity, so the operator must opt in and confine local paths with `GCO_STORAGE_LOCAL_ROOT`. |
 | `GCO_ENABLE_SEMANTIC_PROGRESS` | `false` | `metrics_semantic_progress` | Invokes an LLM-as-judge progress scorer, which can incur model-call cost and sends the supplied scoring inputs to the configured model. |
+| `GCO_ENABLE_CONFIG_MANAGEMENT` | `false` | `list_deployment_regions`, `add_deployment_region`, `remove_deployment_region` | Edits the deployment configuration (`cdk.json`) on the MCP host through the managed-config engine — validated against the same rules CDK synth enforces, atomic, idempotent, and audited. Config-only (deploying is separately gated), but still a local-file mutation an agent could chain into a topology change, so the operator must opt in. Installed (`uvx`/`pip`) servers see a read-only packaged `cdk.json` and refuse with guidance; run from a checkout to use these tools. |
 
 ### Enabling a Flag
 

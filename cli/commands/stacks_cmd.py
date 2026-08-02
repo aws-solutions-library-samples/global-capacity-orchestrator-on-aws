@@ -715,6 +715,143 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
         sys.exit(1)
 
 
+# =============================================================================
+# Deployment-region commands (managed-config engine veneers)
+# =============================================================================
+
+
+@stacks.group("regions")
+@pass_config
+def regions_cmd(config: Any) -> None:
+    """Manage workload deployment Regions in cdk.json.
+
+    These commands edit context.deployment_regions.regional through the
+    managed-config engine: validated against the same rules CDK synth
+    enforces, atomic, idempotent, and audited. They never deploy — run
+    'gco stacks deploy' afterwards to apply the change.
+    """
+    pass
+
+
+@regions_cmd.command("list")
+@click.option("--config-path", help="Explicit cdk.json to use (default: nearest in cwd/parents)")
+@pass_config
+def regions_list(config: Any, config_path: Any) -> None:
+    """Show the configured deployment-region topology.
+
+    Reports the global/api_gateway/monitoring Regions, the workload Region
+    list, the resolved AWS partition, and the cdk.json path backing the
+    answer. On a broken configuration, partition_error explains what CDK
+    synth would reject.
+    """
+    from ..managed_config import ManagedConfigError, get_deployment_regions_status
+
+    formatter = get_output_formatter(config)
+
+    try:
+        status = get_deployment_regions_status(config_path=config_path)
+    except ManagedConfigError as e:
+        formatter.print_error(str(e))
+        sys.exit(1)
+    if config.output_format == "table":
+        # The table cell renderer collapses lists to "[N items]"; join for
+        # humans. JSON/YAML (the MCP path) keep the real list.
+        status["regional"] = ", ".join(status["regional"])
+    formatter.print(status)
+
+
+@regions_cmd.command("add")
+@click.argument("region")
+@click.option("--config-path", help="Explicit cdk.json to use (default: nearest in cwd/parents)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def regions_add(config: Any, region: Any, config_path: Any, yes: Any) -> None:
+    """Add a workload Region to deployment_regions.regional.
+
+    The Region must expose CloudFormation in the AWS SDK's endpoint data and
+    belong to the same AWS partition as the already-configured Regions.
+    Re-adding a present Region is a reported no-op.
+
+    Examples:
+        gco stacks regions add us-west-2
+        gco stacks regions add eu-west-1 -y
+    """
+    from ..managed_config import ManagedConfigError, add_deployment_region
+
+    formatter = get_output_formatter(config)
+
+    if not yes:
+        click.confirm(
+            f"Add {region} to deployment_regions.regional in cdk.json?", abort=True
+        )
+
+    try:
+        report = add_deployment_region(region, config_path=config_path)
+    except ManagedConfigError as e:
+        formatter.print_error(str(e))
+        sys.exit(1)
+
+    if report.changed:
+        formatter.print_success(report.summary())
+        formatter.print_info(
+            "Config only — no stacks were deployed. "
+            f"Run 'gco stacks deploy {config.project_name}-{region}' (or 'gco stacks deploy-all') to apply"
+        )
+    else:
+        formatter.print_info(report.summary())
+
+
+@regions_cmd.command("remove")
+@click.argument("region")
+@click.option("--config-path", help="Explicit cdk.json to use (default: nearest in cwd/parents)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def regions_remove(config: Any, region: Any, config_path: Any, yes: Any) -> None:
+    """Remove a workload Region from deployment_regions.regional.
+
+    The resulting list must stay valid (at least one Region). Removing an
+    absent Region is a reported no-op. Removing an unknown/typo'd entry from
+    a hand-edited config is allowed — validation applies to the result, so
+    this is also the repair path.
+
+    Examples:
+        gco stacks regions remove us-west-2
+        gco stacks regions remove xx-typo-1 -y
+    """
+    from ..managed_config import ManagedConfigError, remove_deployment_region
+
+    formatter = get_output_formatter(config)
+
+    if not yes:
+        formatter.print_warning(
+            f"This only edits cdk.json — a deployed {config.project_name}-{region} "
+            "stack is NOT destroyed by this change."
+        )
+        click.confirm(
+            f"Remove {region} from deployment_regions.regional in cdk.json?", abort=True
+        )
+
+    try:
+        report = remove_deployment_region(region, config_path=config_path)
+    except ManagedConfigError as e:
+        formatter.print_error(str(e))
+        sys.exit(1)
+
+    if report.changed:
+        formatter.print_success(report.summary())
+        formatter.print_info(
+            f"Config only — if {config.project_name}-{region} is deployed, destroy it "
+            f"explicitly with 'gco stacks destroy {config.project_name}-{region}'"
+        )
+    else:
+        formatter.print_info(report.summary())
+
+
+# =============================================================================
+# FSx commands
+# =============================================================================
+
+
 @stacks.group("fsx")
 @pass_config
 def fsx_cmd(config: Any) -> None:

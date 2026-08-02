@@ -966,6 +966,7 @@ Manage CDK infrastructure stacks.
 | [`gco stacks destroy-all`](#gco-stacks-destroy-all) | Destroy all stacks in correct order. |
 | [`gco stacks bootstrap`](#gco-stacks-bootstrap) | Bootstrap CDK in a region. |
 | [`gco stacks access`](#gco-stacks-access) | Configure kubectl access to a GCO EKS cluster. |
+| [`gco stacks regions`](#gco-stacks-regions) | Manage workload deployment Regions in cdk.json (managed-config engine). |
 | [`gco stacks fsx`](#gco-stacks-fsx) | Manage [FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) storage. |
 | [`gco stacks valkey`](#gco-stacks-valkey) | Manage [Valkey](https://valkey.io/) Serverless cache. |
 | [`gco stacks aurora`](#gco-stacks-aurora) | Manage Aurora PostgreSQL ([pgvector](https://github.com/pgvector/pgvector)) database. |
@@ -1137,6 +1138,30 @@ gco stacks access [OPTIONS]
 gco stacks access                             # Auto-detect region from cdk.json
 gco stacks access -r us-west-2                # Specific region
 gco stacks access -c my-cluster -r eu-west-1  # Custom cluster name
+```
+
+#### `gco stacks regions`
+
+Manage workload deployment Regions in cdk.json (`context.deployment_regions.regional`) through the managed-config engine: every edit is validated against the same rules CDK synth enforces (SDK-known Regions, one AWS partition), written atomically, idempotent, and audited. Config-only — run `gco stacks deploy` afterwards to apply, and note that removing a Region never destroys its deployed stack.
+
+```bash
+gco stacks regions COMMAND [OPTIONS]
+```
+
+**Subcommands:**
+
+- `list` - Show the configured topology (`gco stacks regions list`): global/API/monitoring Regions, the workload Region list, the resolved partition, and the cdk.json path. On a broken config, `partition_error` explains what synth would reject.
+- `add` - Add a workload Region (`gco stacks regions add`); re-adding a present Region is a reported no-op.
+- `remove` - Remove a workload Region (`gco stacks regions remove`); the resulting list must stay valid (at least one Region). Removing a typo'd entry from a hand-edited config is allowed — validation applies to the result, so this doubles as the repair path.
+
+All three accept `--config-path` to target an explicit cdk.json (useful when running outside a checkout); `add`/`remove` accept `-y` to skip confirmation.
+
+**Example:**
+
+```bash
+gco stacks regions list
+gco stacks regions add us-west-2 -y
+gco stacks regions remove us-west-2 -y
 ```
 
 #### `gco stacks fsx`

@@ -380,12 +380,14 @@ if _IS_RELOAD and (
         if hasattr(_img_mod, _name):
             globals()[_name] = getattr(_img_mod, _name)
 
-# Reload tools.stacks when either infrastructure flag is set so the
-# gated deploy/destroy/bootstrap tools are present after a test
-# ``importlib.reload(run_mcp)`` cycle. Mirrors the reserve_capacity pattern.
+# Reload tools.stacks when an infrastructure flag or the managed-config
+# flag is set so the gated deploy/destroy/bootstrap and deployment-region
+# tools are present after a test ``importlib.reload(run_mcp)`` cycle.
+# Mirrors the reserve_capacity pattern.
 if _IS_RELOAD and (
     _feature_flags.is_enabled(_feature_flags.FLAG_INFRASTRUCTURE_DEPLOY)
     or _feature_flags.is_enabled(_feature_flags.FLAG_INFRASTRUCTURE_DESTROY)
+    or _feature_flags.is_enabled(_feature_flags.FLAG_CONFIG_MANAGEMENT)
 ):
     from tools import stacks as _stacks_mod  # noqa: E402
 
@@ -397,6 +399,9 @@ if _IS_RELOAD and (
         "addons_install",
         "destroy_stack",
         "destroy_all",
+        "list_deployment_regions",
+        "add_deployment_region",
+        "remove_deployment_region",
     ):
         if hasattr(_stacks_mod, _name):
             globals()[_name] = getattr(_stacks_mod, _name)

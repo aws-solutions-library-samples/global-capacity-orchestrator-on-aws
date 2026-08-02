@@ -73,6 +73,10 @@ UMBRELLA_FLAG_TOOLS = (
     "metrics_from_local_file",
     "sync_storage_bucket",
     "metrics_semantic_progress",
+    # Managed deployment config.
+    "list_deployment_regions",
+    "add_deployment_region",
+    "remove_deployment_region",
     # Mission family.
     "mission_start",
     "mission_status",
@@ -425,6 +429,7 @@ class TestUmbrellaFlag:
             "GCO_ENABLE_LOCAL_METRICS": "",
             "GCO_ENABLE_LOCAL_STORAGE_SYNC": "",
             "GCO_ENABLE_SEMANTIC_PROGRESS": "",
+            "GCO_ENABLE_CONFIG_MANAGEMENT": "",
         }
         with patch.dict(os.environ, clean):
             importlib.reload(run_mcp)
