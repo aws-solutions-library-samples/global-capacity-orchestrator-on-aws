@@ -582,6 +582,36 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "related": ["CONCEPTS", "CUSTOMIZATION", "API"],
     },
+    "AUTOPILOT": {
+        "summary": (
+            "gco autopilot: one command to a fully configured Claude Code "
+            "session on Amazon Bedrock with the GCO MCP server and the "
+            "recommended companion MCP servers wired in."
+        ),
+        "topics": [
+            "cli",
+            "mcp",
+            "agents",
+            "bedrock",
+            "getting-started",
+            "deployment",
+        ],
+        "keywords": [
+            "autopilot",
+            "claude code",
+            "bedrock",
+            "mcp",
+            "agent session",
+            "companion servers",
+            "feature flags",
+            "session resume",
+            "skills",
+            "plugins",
+            "dev container",
+            "front door",
+        ],
+        "related": ["CLI", "CONCEPTS"],
+    },
     "CLI": {
         "summary": "Complete command-line interface reference for the gco CLI across jobs, queues, stacks, capacity, inference, and more.",
         "topics": [

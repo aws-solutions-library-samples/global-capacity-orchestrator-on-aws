@@ -1306,8 +1306,6 @@ Small helpers that round out the toolbox.
 |--------|---------|----------------------|
 | **Shell** | [`mcp-shell-server`](https://github.com/tumf/mcp-shell-server) | Run a small allowlist of read-only shell commands (`ls`, `cat`, `pwd`, `grep`, `wc`, `find`, `touch`) when the agent needs to inspect the working tree itself. Keep `ALLOW_COMMANDS` tight — don't add destructive commands like `rm` or `git`. |
 
-> **Removed from this list:** `mcp-server-fetch` and `mcp-server-calculator` previously appeared here but no longer start against the current `mcp` Python SDK (both crash on import at launch), so they were dropped as of 2026-08. DuckDuckGo Search's `fetch_content` tool covers the URL-fetching workflow. If the upstream projects recover, they can earn their spots back.
-
 ### Example combined config
 
 Here's a `~/.kiro/settings/mcp.json` that wires up the GCO MCP server alongside the companions above. Drop in only the ones you want. The `gco` entry uses the recommended `uvx` form (no clone, no path to set); see [Setup](#setup) for the clone-based alternative and the feature-flag `env` blocks — everything else carries over as-is.

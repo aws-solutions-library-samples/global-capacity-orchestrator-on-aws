@@ -230,17 +230,31 @@ def _source_checkout_root(candidate: Path | None = None) -> Path | None:
     return None
 
 
+#: Every feature flag the GCO MCP server understands: the umbrella flag
+#: first (a perfectly reasonable thing to pass to ``--enable``), then the
+#: per-tool flags. This mirrors ``gco_mcp/feature_flags.py`` rather than
+#: importing it — the CLI must not depend on the MCP package at runtime
+#: (mypy also maps the PEP 420 namespace file under two module names when
+#: both trees are checked together). ``tests/test_cli_autopilot.py`` holds
+#: the two registries in lockstep, so drift fails the PR that introduces it.
+_KNOWN_GCO_MCP_FLAGS: tuple[str, ...] = (
+    "GCO_ENABLE_ALL_TOOLS",
+    "GCO_ENABLE_CAPACITY_PURCHASE",
+    "GCO_ENABLE_MODEL_UPLOAD",
+    "GCO_ENABLE_IMAGE_PUBLISH",
+    "GCO_ENABLE_INFRASTRUCTURE_DEPLOY",
+    "GCO_ENABLE_INFRASTRUCTURE_DESTROY",
+    "GCO_ENABLE_DESTRUCTIVE_OPERATIONS",
+    "GCO_ENABLE_MISSION",
+    "GCO_ENABLE_LOCAL_METRICS",
+    "GCO_ENABLE_LOCAL_STORAGE_SYNC",
+    "GCO_ENABLE_SEMANTIC_PROGRESS",
+)
+
+
 def known_gco_mcp_flags() -> tuple[str, ...]:
-    """Return every feature flag the GCO MCP server understands.
-
-    Sourced from :mod:`gco_mcp.feature_flags` — the registry the server
-    itself evaluates — so autopilot's validation can never drift from the
-    real flag set. The umbrella ``GCO_ENABLE_ALL_TOOLS`` is included here
-    because it is a perfectly reasonable thing to pass to ``--enable``.
-    """
-    from gco_mcp.feature_flags import ALL_FLAGS, FLAG_ALL_TOOLS
-
-    return (FLAG_ALL_TOOLS, *ALL_FLAGS)
+    """Return every feature flag the GCO MCP server understands."""
+    return _KNOWN_GCO_MCP_FLAGS
 
 
 def resolve_mcp_flags(enable: tuple[str, ...]) -> dict[str, str]:

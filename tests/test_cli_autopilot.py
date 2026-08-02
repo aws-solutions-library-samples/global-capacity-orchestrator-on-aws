@@ -11,8 +11,11 @@ stay extractable by the deps-scan regexes.
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -536,9 +539,23 @@ def test_enable_rejects_unknown_flags_with_the_valid_list(runner: CliRunner) -> 
 
 
 def test_enable_flag_set_matches_the_mcp_servers_own_registry() -> None:
-    """Every flag the server evaluates must be reachable through --enable."""
+    """Every flag the server evaluates must be reachable through --enable.
+
+    The CLI carries its own copy of the flag registry — it must not import
+    the MCP package at runtime (installs don't guarantee ``gco_mcp`` on the
+    CLI's import path, and mypy maps the PEP 420 namespace file under two
+    module names when both trees are checked together). This guard is what
+    keeps the copies in lockstep: changing a flag in
+    ``gco_mcp/feature_flags.py`` without mirroring it in
+    ``cli/autopilot.py`` fails here.
+    """
     from cli.autopilot import known_gco_mcp_flags, resolve_mcp_flags
-    from gco_mcp.feature_flags import ALL_FLAGS, FLAG_ALL_TOOLS
+
+    sys.path.insert(0, str(_REPO_ROOT))
+    try:
+        from gco_mcp.feature_flags import ALL_FLAGS, FLAG_ALL_TOOLS
+    finally:
+        sys.path.pop(0)
 
     assert known_gco_mcp_flags() == (FLAG_ALL_TOOLS, *ALL_FLAGS)
     for flag in known_gco_mcp_flags():
@@ -584,6 +601,56 @@ def test_launch_writes_feature_flags_into_the_session_config(
     assert result.exit_code == 0
     written = json.loads((tmp_path / "autopilot" / "mcp.json").read_text(encoding="utf-8"))
     assert written["mcpServers"]["gco"]["env"] == {"GCO_ENABLE_ALL_TOOLS": "true"}
+
+
+# ---------------------------------------------------------------------------
+# Runtime import isolation
+# ---------------------------------------------------------------------------
+
+
+def test_cli_never_requires_the_mcp_package_at_runtime(tmp_path: Path) -> None:
+    """The CLI must work without ``gco_mcp`` being importable at all.
+
+    ``cli/`` and ``gco_mcp/`` are separate top-level trees: installs do not
+    guarantee the MCP package is on the CLI's import path (the CI smoke run
+    proved it), and importing it from ``cli/`` also makes mypy map the
+    PEP 420 namespace file under two module names. This guard runs the
+    autopilot surfaces in a subprocess with ``gco_mcp`` imports blocked by
+    a meta-path hook, so any future runtime dependency fails the unit
+    shards immediately instead of only the CLI smoke job.
+    """
+    script = textwrap.dedent(
+        """
+        import sys
+
+        class BlockGcoMcp:
+            def find_spec(self, name, path=None, target=None):
+                if name == "gco_mcp" or name.startswith("gco_mcp."):
+                    raise ImportError("the CLI must not import gco_mcp at runtime")
+                return None
+
+        sys.meta_path.insert(0, BlockGcoMcp())
+
+        from click.testing import CliRunner
+        from cli.main import cli
+
+        for args in (["--help"], ["autopilot", "--print-config"], ["autopilot", "--dry-run"]):
+            result = CliRunner().invoke(cli, args, obj=None)
+            assert result.exit_code == 0, (args, result.output)
+        print("cli-import-isolation-ok")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env={**os.environ, "GCO_AUTOPILOT_CONFIG_DIR": str(tmp_path / "autopilot")},
+        check=False,
+    )
+    assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    assert "cli-import-isolation-ok" in result.stdout
 
 
 # ---------------------------------------------------------------------------

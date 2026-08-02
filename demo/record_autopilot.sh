@@ -37,7 +37,7 @@
 #                        "plan" (credential-free --dry-run recording)
 #   DEMO_COLS=110        Terminal width for recording (default: 110)
 #   DEMO_ROWS=30         Terminal height for recording (default: 30)
-#   DEMO_SPEED=1.4       Playback speed multiplier for GIF (default: 1.4)
+#   DEMO_SPEED=1.6       Playback speed multiplier for GIF (default: 1.6)
 #   DEMO_THEME=monokai   agg color theme (default: monokai)
 #   DEMO_FONT_FAMILY     agg font fallback chain (default: see lib_demo.sh)
 #   SKIP_GIF=1           Only produce the .cast file, skip GIF conversion
@@ -67,7 +67,7 @@ GIF_FILE="${SCRIPT_DIR}/autopilot.gif"
 
 COLS="${DEMO_COLS:-110}"
 ROWS="${DEMO_ROWS:-30}"
-SPEED="${DEMO_SPEED:-1.4}"
+SPEED="${DEMO_SPEED:-1.6}"
 THEME="${DEMO_THEME:-monokai}"
 DEMO_MODE="${DEMO_MODE:-live}"
 
@@ -182,11 +182,27 @@ set stty_init "rows 30 columns 110"
 # Human-ish typing: avg 80ms/char, 400ms max — visible but not sluggish.
 set send_human {0.08 0.12 1 0.02 0.4}
 
+# Types a question word-by-word. Per-character typing (send -h) makes the
+# TUI composer redraw hundreds of times, which both bloats the cast and
+# renders glitchy under agg; word chunks keep a live typing feel with ~20x
+# fewer redraws.
+proc type_words {text} {
+    foreach word [split $text " "] {
+        send -- "$word "
+        sleep 0.1
+    }
+}
+
 # The GCO MCP server's tools are pre-approved for the session with
 # claude's own --allowedTools flag (through autopilot's passthrough), so
 # the recording is deterministic — no version-specific permission-dialog
 # text to script against. The displayed command shows exactly this.
+# log_user is toggled off around spawn so expect's own echo of the spawn
+# line doesn't appear in the recording (the driver already printed the
+# pretty prompt line).
+log_user 0
 spawn gco autopilot -- --allowedTools mcp__gco
+log_user 1
 
 # Autopilot's own resume prompt (when this workspace has previous
 # sessions), first-run dialogs if any (workspace trust, theme picker),
@@ -201,7 +217,9 @@ expect {
 }
 sleep 4
 
-send -h -- "Which gco command submits a job via SQS, and why is that the recommended path? Check the GCO MCP docs and keep it brief.\r"
+type_words "Which gco command submits a job via SQS, and why is that the recommended path? Answer briefly, using only the GCO MCP doc tools (no shell commands)."
+sleep 1
+send -- "\r"
 
 # Wait for the grounded answer itself (it inevitably names submit-sqs),
 # then let it finish rendering (recorded idle is capped at 2s). A stray
@@ -238,11 +256,15 @@ sleep 1
 
 expect -f "$EXPECT_SCRIPT"
 
-sleep 1
+# The TUI leaves residual chrome behind on exit; give the outro its own
+# clean screen instead of printing into the leftovers.
+printf '\033[2J\033[H'
+banner "GCO Autopilot"
 spacer
 highlight "A real session: the model grounded its answer in GCO's MCP server."
 narrate "Sessions resume next launch; import your own skills with --skills."
-sleep 3
+narrate "Get started:  gco autopilot"
+sleep 4
 DRIVER_SCRIPT
 else
     cat > "$DRIVER" <<'DRIVER_SCRIPT'
@@ -286,7 +308,7 @@ export REPO_ROOT SHIM_DIR
 asciinema rec \
     --cols "$COLS" \
     --rows "$ROWS" \
-    --idle-time-limit 2 \
+    --idle-time-limit 1.5 \
     --overwrite \
     --command "bash --norc --noprofile $DRIVER" \
     "$CAST_FILE"
@@ -340,6 +362,45 @@ echo "✓ Cast sanitized and verified (AWS account IDs → 000000000000)"
 
 strip_emoji_from_cast "$CAST_FILE"
 echo "✓ Tofu-triggering codepoints stripped"
+
+# ── Strip terminal query/response artifacts ─────────────────────────────────
+# The Claude Code TUI probes the terminal (focus tracking, OSC 11 background
+# color, device attributes, XTVERSION), and pieces of those query/response
+# exchanges land in the recorded output stream. agg's renderer doesn't
+# understand them and paints fragments like ``^[[O`` or ``^[]11;rgb:...``
+# literally. They carry no visual content, so they are removed outright.
+python3 - "$CAST_FILE" <<'PYEOF'
+import json
+import re
+import sys
+from pathlib import Path
+
+ARTIFACTS = re.compile(
+    r"\x1b\[[IO]"                                # focus in/out events
+    r"|\x1b\]1[01];[^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC 10/11 color query/response
+    r"|\x1b\[\?\d+(?:;\d+)*c"                    # device-attribute responses
+    r"|\x1b\[>\d+(?:;\d+)*c"                     # secondary DA responses
+    r"|\x1bP>\|[^\x1b]*\x1b\\"                   # XTVERSION response
+)
+
+path = Path(sys.argv[1])
+documents = []
+for line in path.read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    documents.append(json.loads(line))
+
+for document in documents:
+    if isinstance(document, list) and len(document) >= 3 and document[1] == "o":
+        document[2] = ARTIFACTS.sub("", document[2])
+
+path.write_text(
+    "\n".join(json.dumps(d, ensure_ascii=False, separators=(",", ":")) for d in documents)
+    + "\n",
+    encoding="utf-8",
+)
+PYEOF
+echo "✓ Terminal query/response artifacts stripped"
 
 # ── Convert to GIF ──────────────────────────────────────────────────────────
 
