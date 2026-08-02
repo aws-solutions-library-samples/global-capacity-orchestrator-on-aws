@@ -200,10 +200,15 @@ class TestHasRetainTag:
         ecr.list_tags_for_resource.return_value = {"tags": []}
         assert handler._has_retain_tag(ecr, "arn:..") is False
 
-    def test_swallows_list_tags_failure(self, image_lookup_module: Any) -> None:
+    def test_list_tags_failure_refuses_deletion(self, image_lookup_module: Any) -> None:
         handler, ecr = image_lookup_module
         ecr.list_tags_for_resource.side_effect = RuntimeError("denied")
-        assert handler._has_retain_tag(ecr, "arn:..") is False
+
+        with pytest.raises(RuntimeError, match="refusing deletion") as excinfo:
+            handler._has_retain_tag(ecr, "arn:..")
+
+        assert isinstance(excinfo.value.__cause__, RuntimeError)
+        assert str(excinfo.value.__cause__) == "denied"
 
     def test_handles_none_tags(self, image_lookup_module: Any) -> None:
         handler, ecr = image_lookup_module
