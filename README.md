@@ -398,7 +398,7 @@ The following estimates are for a single-region deployment with default settings
 
 - Platform costs (~$210/month) are fixed regardless of workload volume.
 - GPU costs dominate and scale with the number of instances and hours run. Use `gco costs summary` to track actual spend.
-- GPU estimates assume an on-demand g5.xlarge in us-east-1 at ~$1.006/hr (~$734/month over 730 hours); rates vary by region and instance type.
+- GPU estimates assume an on-demand g5.xlarge in us-east-1 at \~$1.006/hr (\~$734/month over 730 hours); rates vary by region and instance type.
 - Optional services (FSx, Valkey, Aurora) add additional cost depending on configuration.
 - The cost table above uses US East (N. Virginia) pricing as of June 2025.
 
