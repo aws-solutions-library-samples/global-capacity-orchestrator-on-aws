@@ -31,12 +31,17 @@ from click.testing import CliRunner
 
 from cli.main import cli
 from cli.managed_config import (
+    BEDROCK_DEFAULT_MODEL,
+    DEPLOYMENT_REGION_SCALARS,
     REGIONAL_DEPLOYMENT_REGIONS,
     ChangeReport,
     ManagedConfigError,
     add_deployment_region,
+    get_bedrock_model_status,
     get_deployment_regions_status,
     remove_deployment_region,
+    set_default_bedrock_model,
+    set_deployment_region_role,
 )
 
 # Ensure gco_mcp/ is importable, mirroring the other MCP test modules.
@@ -48,6 +53,8 @@ REGION_TOOLS = (
     "list_deployment_regions",
     "add_deployment_region",
     "remove_deployment_region",
+    "set_deployment_region",
+    "set_default_bedrock_model",
 )
 
 BASE_CONFIG: dict = {
@@ -59,6 +66,10 @@ BASE_CONFIG: dict = {
             "api_gateway": "us-east-2",
             "monitoring": "us-east-2",
             "regional": ["us-east-1"],
+        },
+        "bedrock": {
+            "default_model_id": "global.anthropic.claude-opus-5",
+            "thinking": {"effort": "high"},
         },
         "project_name": "gco",
     },
@@ -310,6 +321,84 @@ class TestEngineAudit:
 
 
 # =============================================================================
+# Engine: scalar keys (region roles + bedrock default model)
+# =============================================================================
+
+
+class TestEngineScalars:
+    def test_set_role_scalar_writes_and_reports(self, cdk_json: Path):
+        report = set_deployment_region_role("monitoring", "us-west-2", config_path=cdk_json)
+        assert report.changed is True
+        assert report.action == "set"
+        assert report.old == "us-east-2"
+        assert report.new == "us-west-2"
+        written = json.loads(cdk_json.read_text(encoding="utf-8"))
+        assert written["context"]["deployment_regions"]["monitoring"] == "us-west-2"
+        # Untouched siblings stay untouched.
+        assert written["context"]["deployment_regions"]["global"] == "us-east-2"
+
+    def test_set_role_scalar_is_idempotent(self, cdk_json: Path):
+        before = cdk_json.read_bytes()
+        report = set_deployment_region_role("global", "us-east-2", config_path=cdk_json)
+        assert report.changed is False
+        assert "already the value" in report.summary()
+        assert cdk_json.read_bytes() == before
+
+    def test_set_role_scalar_unknown_region_rejected(self, cdk_json: Path):
+        with pytest.raises(ManagedConfigError, match="Invalid region 'xx-bogus-9'"):
+            set_deployment_region_role("global", "xx-bogus-9", config_path=cdk_json)
+
+    def test_set_role_scalar_cross_partition_rejected(self, cdk_json: Path):
+        with pytest.raises(ManagedConfigError, match="single AWS partition"):
+            set_deployment_region_role("api_gateway", "cn-north-1", config_path=cdk_json)
+
+    def test_unknown_role_rejected(self, cdk_json: Path):
+        with pytest.raises(ManagedConfigError, match="unknown deployment-region role"):
+            set_deployment_region_role("bogus_role", "us-east-1", config_path=cdk_json)
+
+    def test_scalar_wrong_type_refused(self, tmp_path: Path):
+        path = tmp_path / "cdk.json"
+        path.write_text(
+            json.dumps({"context": {"deployment_regions": {"global": 42}}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ManagedConfigError, match="must be a JSON string"):
+            set_deployment_region_role("global", "us-east-1", config_path=path)
+
+    def test_set_bedrock_model_preserves_thinking_sibling(self, cdk_json: Path):
+        report = set_default_bedrock_model("us.amazon.nova-2-lite-v1:0", config_path=cdk_json)
+        assert report.changed is True
+        written = json.loads(cdk_json.read_text(encoding="utf-8"))
+        bedrock = written["context"]["bedrock"]
+        assert bedrock["default_model_id"] == "us.amazon.nova-2-lite-v1:0"
+        assert bedrock["thinking"] == {"effort": "high"}
+
+    def test_set_bedrock_model_empty_rejected(self, cdk_json: Path):
+        with pytest.raises(ManagedConfigError, match="non-empty string"):
+            set_default_bedrock_model("   ", config_path=cdk_json)
+
+    def test_set_bedrock_model_surrounding_whitespace_rejected(self, cdk_json: Path):
+        with pytest.raises(ManagedConfigError, match="whitespace"):
+            set_default_bedrock_model(" model-id ", config_path=cdk_json)
+
+    def test_bedrock_status_reads_configured_value(self, cdk_json: Path):
+        status = get_bedrock_model_status(config_path=cdk_json)
+        assert status["default_model_id"] == "global.anthropic.claude-opus-5"
+        assert status["config_path"] == str(cdk_json)
+
+    def test_bedrock_container_materialized_when_absent(self, tmp_path: Path):
+        path = tmp_path / "cdk.json"
+        path.write_text(json.dumps({"context": {"project_name": "gco"}}), encoding="utf-8")
+        report = set_default_bedrock_model("global.anthropic.claude-opus-5", config_path=path)
+        assert report.changed is True
+        assert report.old == ""  # the reader-level "unset" default
+        written = json.loads(path.read_text(encoding="utf-8"))
+        assert written["context"]["bedrock"] == {
+            "default_model_id": "global.anthropic.claude-opus-5"
+        }
+
+
+# =============================================================================
 # CLI veneers: gco stacks regions list/add/remove
 # =============================================================================
 
@@ -407,6 +496,94 @@ class TestRegionsCli:
         assert result.exit_code == 0, result.output
         assert "no change" in result.output
 
+    def test_set_role_with_yes_writes_and_hints(self, cdk_json: Path):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "stacks",
+                "regions",
+                "set",
+                "monitoring",
+                "us-west-2",
+                "--config-path",
+                str(cdk_json),
+                "-y",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "set 'us-west-2'" in result.output
+        assert "deploy-all" in result.output
+        written = json.loads(cdk_json.read_text(encoding="utf-8"))
+        assert written["context"]["deployment_regions"]["monitoring"] == "us-west-2"
+
+    def test_set_rejects_bad_role_at_parse_time(self, cdk_json: Path):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["stacks", "regions", "set", "bogus", "us-east-1", "--config-path", str(cdk_json)],
+        )
+        assert result.exit_code == 2  # click.Choice rejects before our code runs
+
+    def test_set_declined_confirmation_aborts_without_write(self, cdk_json: Path):
+        before = cdk_json.read_bytes()
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "stacks",
+                "regions",
+                "set",
+                "global",
+                "us-west-2",
+                "--config-path",
+                str(cdk_json),
+            ],
+            input="n\n",
+        )
+        assert result.exit_code != 0
+        assert cdk_json.read_bytes() == before
+
+
+class TestBedrockCli:
+    def test_show_reports_model_and_path(self, cdk_json: Path):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["--output", "json", "stacks", "bedrock", "show", "--config-path", str(cdk_json)],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["default_model_id"] == "global.anthropic.claude-opus-5"
+
+    def test_set_model_with_yes_writes(self, cdk_json: Path):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "stacks",
+                "bedrock",
+                "set-model",
+                "us.amazon.nova-2-lite-v1:0",
+                "--config-path",
+                str(cdk_json),
+                "-y",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "set 'us.amazon.nova-2-lite-v1:0'" in result.output
+        written = json.loads(cdk_json.read_text(encoding="utf-8"))
+        assert written["context"]["bedrock"]["default_model_id"] == "us.amazon.nova-2-lite-v1:0"
+
+    def test_set_model_empty_exits_nonzero(self, cdk_json: Path):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["stacks", "bedrock", "set-model", "  ", "--config-path", str(cdk_json), "-y"],
+        )
+        assert result.exit_code == 1
+        assert "refusing to update" in result.output
+
 
 # =============================================================================
 # MCP tools: gating + argv translation
@@ -476,6 +653,30 @@ class TestMcpRegionToolsArgv:
             cmd = mock.call_args[0][0]
         assert cmd[-5:] == ["stacks", "regions", "remove", "us-west-2", "-y"]
 
+    @patch.dict(os.environ, {"GCO_ENABLE_CONFIG_MANAGEMENT": "true"})
+    def test_set_role_argv(self):
+        importlib.reload(run_mcp)
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.set_deployment_region(role="monitoring", region="us-west-2")
+            cmd = mock.call_args[0][0]
+        assert cmd[-6:] == ["stacks", "regions", "set", "monitoring", "us-west-2", "-y"]
+
+    @patch.dict(os.environ, {"GCO_ENABLE_CONFIG_MANAGEMENT": "true"})
+    def test_set_bedrock_model_argv(self):
+        importlib.reload(run_mcp)
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.set_default_bedrock_model(model_id="global.anthropic.claude-opus-5")
+            cmd = mock.call_args[0][0]
+        assert cmd[-5:] == [
+            "stacks",
+            "bedrock",
+            "set-model",
+            "global.anthropic.claude-opus-5",
+            "-y",
+        ]
+
 
 # =============================================================================
 # Registry contract
@@ -489,3 +690,17 @@ class TestRegistryContract:
         assert key.container == "deployment_regions"
         assert key.leaf == "regional"
         assert key.default == ("us-east-1",)
+
+    def test_scalar_registry_covers_the_three_roles(self):
+        assert sorted(DEPLOYMENT_REGION_SCALARS) == ["api_gateway", "global", "monitoring"]
+        for role, key in DEPLOYMENT_REGION_SCALARS.items():
+            assert key.key_id == f"deployment_regions.{role}"
+            assert key.container == "deployment_regions"
+            assert key.leaf == role
+            assert key.default == "us-east-2"  # matches the reader contract
+
+    def test_bedrock_registry_entry_shape(self):
+        key = BEDROCK_DEFAULT_MODEL
+        assert key.key_id == "bedrock.default_model_id"
+        assert key.container == "bedrock"
+        assert key.leaf == "default_model_id"

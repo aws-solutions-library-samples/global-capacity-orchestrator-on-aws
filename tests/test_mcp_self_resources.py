@@ -202,5 +202,12 @@ class TestFeatureFlags:
             "GCO_ENABLE_LOCAL_METRICS": {"metrics_from_local_file"},
             "GCO_ENABLE_LOCAL_STORAGE_SYNC": {"sync_storage_bucket"},
             "GCO_ENABLE_SEMANTIC_PROGRESS": {"metrics_semantic_progress"},
+            "GCO_ENABLE_CONFIG_MANAGEMENT": {
+                "list_deployment_regions",
+                "add_deployment_region",
+                "remove_deployment_region",
+                "set_deployment_region",
+                "set_default_bedrock_model",
+            },
         }
         assert actual == expected

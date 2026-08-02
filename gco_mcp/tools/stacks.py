@@ -612,3 +612,40 @@ if is_enabled(FLAG_CONFIG_MANAGEMENT):
             region: AWS Region name to remove (e.g. us-west-2).
         """
         return cli_runner._run_cli("stacks", "regions", "remove", region, "-y")
+
+    @mcp.tool(tags={"low-risk", "stacks"})
+    @audit_logged
+    def set_deployment_region(role: str, region: str) -> str:
+        """[gated by GCO_ENABLE_CONFIG_MANAGEMENT]
+
+        Set a control-plane Region scalar in cdk.json deployment_regions.
+
+        Config-only and idempotent: the Region must be SDK-known and keep
+        the whole topology (all three scalars plus the workload list) in one
+        AWS partition. Already-deployed stacks are not moved or destroyed —
+        the next deploy creates the stack in the new Region.
+
+        Args:
+            role: Which scalar to set: "global", "api_gateway", or "monitoring".
+            region: AWS Region name (e.g. us-east-2).
+        """
+        return cli_runner._run_cli("stacks", "regions", "set", role, region, "-y")
+
+    @mcp.tool(tags={"low-risk", "stacks"})
+    @audit_logged
+    def set_default_bedrock_model(model_id: str) -> str:
+        """[gated by GCO_ENABLE_CONFIG_MANAGEMENT]
+
+        Set cdk.json bedrock.default_model_id (advisory-feature model default).
+
+        Config-only and idempotent. Model and inference-profile IDs are
+        free-form (custom profiles, marketplace models); validation mirrors
+        the runtime reader (non-empty, no surrounding whitespace). Sibling
+        settings (bedrock.thinking) are preserved; explicit --model / env
+        overrides still take precedence at run time.
+
+        Args:
+            model_id: Bedrock model or inference-profile ID
+                (e.g. global.anthropic.claude-opus-5).
+        """
+        return cli_runner._run_cli("stacks", "bedrock", "set-model", model_id, "-y")

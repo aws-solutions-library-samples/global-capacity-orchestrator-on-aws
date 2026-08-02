@@ -402,6 +402,8 @@ if _IS_RELOAD and (
         "list_deployment_regions",
         "add_deployment_region",
         "remove_deployment_region",
+        "set_deployment_region",
+        "set_default_bedrock_model",
     ):
         if hasattr(_stacks_mod, _name):
             globals()[_name] = getattr(_stacks_mod, _name)

@@ -174,12 +174,12 @@ class TestToolRegistration:
         tools = asyncio.run(run_mcp.mcp._list_tools())
         # The default registry intentionally contains 134 read-only or low-risk
         # tools (125 before the cost allocation/k8s/report family added 9).
-        # Optional families add 43 more when every flag is enabled:
+        # Optional families add 45 more when every flag is enabled:
         # capacity purchase (2), image publish (3), destructive operations (15),
         # model upload (2), infrastructure deploy (4), infrastructure destroy
         # (2), local metrics (1), semantic progress (1), local storage sync (1),
-        # config management (3), and Mission (9). The all-flags ceiling is
-        # therefore 177.
+        # config management (5), and Mission (9). The all-flags ceiling is
+        # therefore 179.
         base_count = 134
         tool_names = [t.name for t in tools]
         expected = base_count
@@ -208,9 +208,9 @@ class TestToolRegistration:
         if "sync_storage_bucket" in tool_names:
             expected += 1  # gated by GCO_ENABLE_LOCAL_STORAGE_SYNC
         if "add_deployment_region" in tool_names:
-            # list/add/remove_deployment_region register together under
-            # GCO_ENABLE_CONFIG_MANAGEMENT.
-            expected += 3
+            # list/add/remove/set_deployment_region + set_default_bedrock_model
+            # register together under GCO_ENABLE_CONFIG_MANAGEMENT.
+            expected += 5
         if "mission_start" in tool_names:
             # The nine mission_* tools register together under GCO_ENABLE_MISSION.
             expected += 9
@@ -477,6 +477,8 @@ class TestToolRegistration:
                     "list_deployment_regions",
                     "add_deployment_region",
                     "remove_deployment_region",
+                    "set_deployment_region",
+                    "set_default_bedrock_model",
                 }
             )
         # The nine mission_* tools register together under GCO_ENABLE_MISSION.

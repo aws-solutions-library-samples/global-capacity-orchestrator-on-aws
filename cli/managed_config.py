@@ -3,7 +3,7 @@
 This module is the categorical answer to "add a CLI/MCP toggle for cdk.json
 knob X" requests (issue #221). Instead of re-implementing read/validate/write
 logic per knob, each externally manageable key registers a :class:`ManagedListKey`
-(list-with-set-semantics today; scalar kinds can join the registry later) and
+(set-semantics list) or :class:`ManagedScalarKey` (single string value) and
 every mutation flows through one engine that guarantees:
 
 - **Resolution**: the target is the same ``cdk.json`` the CDK CLI would use
@@ -64,21 +64,29 @@ class ChangeReport:
     """Uniform result of one managed mutation (including reported no-ops)."""
 
     key_id: str
-    action: str  # "add" | "remove"
+    action: str  # "add" | "remove" | "set"
     value: str
     changed: bool
-    old: tuple[str, ...]
-    new: tuple[str, ...]
+    old: tuple[str, ...] | str
+    new: tuple[str, ...] | str
     config_path: Path
+
+    @staticmethod
+    def _render(side: tuple[str, ...] | str) -> str:
+        return repr(list(side)) if isinstance(side, tuple) else repr(side)
 
     def summary(self) -> str:
         """One human line suitable for CLI output and audit trails."""
         if not self.changed:
-            state = "already present" if self.action == "add" else "not present"
+            state = {
+                "add": "already present",
+                "remove": "not present",
+                "set": "already the value",
+            }[self.action]
             return f"{self.key_id}: no change ({self.value!r} {state})"
         return (
             f"{self.key_id}: {self.action} {self.value!r} "
-            f"({list(self.old)} -> {list(self.new)}) in {self.config_path}"
+            f"({self._render(self.old)} -> {self._render(self.new)}) in {self.config_path}"
         )
 
 
@@ -119,7 +127,78 @@ def _validate_regional_result(document: dict[str, Any], candidate: tuple[str, ..
     validated_deployment_partition((*scalars, *candidate))
 
 
-#: The one key managed today. New knobs register here instead of growing
+@dataclass(frozen=True)
+class ManagedScalarKey:
+    """Registry entry for a single-valued cdk.json context string.
+
+    Same contract as :class:`ManagedListKey` with scalar semantics:
+    ``validate_result`` receives the full parsed document and the candidate
+    string the key would hold after the edit, raising ``ValueError`` to
+    reject. Setting the current value is a reported no-op.
+    """
+
+    key_id: str  # dotted id, e.g. "deployment_regions.global"
+    container: str  # context child object, e.g. "deployment_regions"
+    leaf: str  # string key inside the container, e.g. "global"
+    description: str
+    default: str
+    validate_result: Callable[[dict[str, Any], str], None]
+
+
+def _effective_deployment_scalars(document: dict[str, Any]) -> dict[str, str]:
+    """Return the effective global/api_gateway/monitoring scalar Regions."""
+    container = document.get("context", {}).get("deployment_regions", {})
+    if not isinstance(container, dict):
+        raise ValueError("context.deployment_regions must be a JSON object")
+    return {
+        scalar_key: container.get(scalar_key, _DEFAULT_SCALAR_REGION)
+        for scalar_key in ("global", "api_gateway", "monitoring")
+    }
+
+
+def _effective_regional(document: dict[str, Any]) -> tuple[str, ...]:
+    """Return the effective workload-Region list (default when absent)."""
+    container = document.get("context", {}).get("deployment_regions", {})
+    if not isinstance(container, dict):
+        raise ValueError("context.deployment_regions must be a JSON object")
+    regional = container.get("regional", list(_DEFAULT_REGIONAL))
+    if not isinstance(regional, list):
+        raise ValueError("context.deployment_regions.regional must be a JSON array")
+    return tuple(regional)
+
+
+def _scalar_region_validator(role: str) -> Callable[[dict[str, Any], str], None]:
+    """Build a validator for one deployment-region scalar (``role``).
+
+    The candidate must be an SDK-known CloudFormation Region and the whole
+    resulting topology (candidate + the other scalars + the workload list)
+    must still resolve to one AWS partition — the same constraint synth
+    enforces, applied to the result.
+    """
+
+    def _validate(document: dict[str, Any], candidate: str) -> None:
+        scalars = _effective_deployment_scalars(document)
+        scalars[role] = candidate
+        validated_deployment_partition((*scalars.values(), *_effective_regional(document)))
+
+    return _validate
+
+
+def _validate_bedrock_model_result(document: dict[str, Any], candidate: str) -> None:
+    """Mirror the reader contract in ``gco/bedrock.py``: a non-empty string.
+
+    Model/inference-profile IDs are free-form by design (custom profiles,
+    marketplace models); the runtime reader only requires a non-empty
+    string, so requiring more here would reject valid configurations.
+    """
+    del document  # no cross-key invariants for this knob
+    if not candidate.strip():
+        raise ValueError("bedrock.default_model_id must be a non-empty string")
+    if candidate != candidate.strip():
+        raise ValueError("bedrock.default_model_id must not have leading/trailing whitespace")
+
+
+#: The managed-key registry. New knobs register here instead of growing
 #: bespoke read/validate/write code paths.
 REGIONAL_DEPLOYMENT_REGIONS = ManagedListKey(
     key_id="deployment_regions.regional",
@@ -128,6 +207,32 @@ REGIONAL_DEPLOYMENT_REGIONS = ManagedListKey(
     description="Workload Regions that receive an EKS regional stack",
     default=_DEFAULT_REGIONAL,
     validate_result=_validate_regional_result,
+)
+
+#: The three control-plane region scalars, addressable by role name.
+DEPLOYMENT_REGION_SCALARS: dict[str, ManagedScalarKey] = {
+    role: ManagedScalarKey(
+        key_id=f"deployment_regions.{role}",
+        container="deployment_regions",
+        leaf=role,
+        description=description,
+        default=_DEFAULT_SCALAR_REGION,
+        validate_result=_scalar_region_validator(role),
+    )
+    for role, description in (
+        ("global", "Region hosting partition-wide ECR/S3/DynamoDB and the SSM registry"),
+        ("api_gateway", "Region hosting the API Gateway stack"),
+        ("monitoring", "Region hosting the monitoring stack"),
+    )
+}
+
+BEDROCK_DEFAULT_MODEL = ManagedScalarKey(
+    key_id="bedrock.default_model_id",
+    container="bedrock",
+    leaf="default_model_id",
+    description="Default Bedrock model/inference-profile ID for advisory features",
+    default="",  # the reader has no fallback: it requires the key when consulted
+    validate_result=_validate_bedrock_model_result,
 )
 
 
@@ -289,6 +394,75 @@ def managed_list_remove(
     return _apply(key, "remove", value, config_path)
 
 
+def _current_scalar(document: dict[str, Any], key: ManagedScalarKey) -> str:
+    """Return the configured scalar, or the effective default when absent."""
+    container = document["context"].get(key.container)
+    if container is None:
+        return key.default
+    if not isinstance(container, dict):
+        raise ManagedConfigError(
+            f"context.{key.container} must be a JSON object, found {type(container).__name__}"
+        )
+    value = container.get(key.leaf)
+    if value is None:
+        return key.default
+    if not isinstance(value, str):
+        raise ManagedConfigError(
+            f"context.{key.container}.{key.leaf} must be a JSON string, "
+            f"found {type(value).__name__}"
+        )
+    return value
+
+
+def managed_scalar_set(
+    key: ManagedScalarKey, value: str, *, config_path: Path | str | None = None
+) -> ChangeReport:
+    """Set a managed scalar; validated, atomic, and a no-op when unchanged."""
+    path = _resolve_config_path(config_path)
+    document, raw = _load_document(path)
+    old = _current_scalar(document, key)
+
+    if value == old:
+        report = ChangeReport(key.key_id, "set", value, False, old, old, path)
+        logger.info(
+            "managed-config no-op: key=%s action=set value=%s path=%s",
+            key.key_id,
+            value,
+            path,
+        )
+        return report
+
+    try:
+        key.validate_result(document, value)
+    except ValueError as exc:
+        logger.warning(
+            "managed-config refused: key=%s action=set value=%s path=%s reason=%s",
+            key.key_id,
+            value,
+            path,
+            exc,
+        )
+        raise ManagedConfigError(f"refusing to update {key.key_id}: {exc}") from exc
+
+    _require_writable(path)
+    # Materialize only the managed leaf; sibling keys (e.g. bedrock.thinking)
+    # and absent sibling scalars keep their current state / reader defaults.
+    container = document["context"].setdefault(key.container, {})
+    container[key.leaf] = value
+    _write_document(path, document, raw)
+
+    report = ChangeReport(key.key_id, "set", value, True, old, value, path)
+    logger.info(
+        "managed-config write: key=%s action=set value=%s old=%s new=%s path=%s",
+        key.key_id,
+        value,
+        old,
+        value,
+        path,
+    )
+    return report
+
+
 # ---------------------------------------------------------------------------
 # Deployment-region veneers (domain-named entry points used by the CLI; the
 # MCP tools shell to the CLI commands, matching every other gated tool).
@@ -337,3 +511,33 @@ def add_deployment_region(region: str, *, config_path: Path | str | None = None)
 def remove_deployment_region(region: str, *, config_path: Path | str | None = None) -> ChangeReport:
     """Remove a workload Region from ``deployment_regions.regional``."""
     return managed_list_remove(REGIONAL_DEPLOYMENT_REGIONS, region, config_path=config_path)
+
+
+def set_deployment_region_role(
+    role: str, region: str, *, config_path: Path | str | None = None
+) -> ChangeReport:
+    """Set one control-plane region scalar (``global``/``api_gateway``/``monitoring``)."""
+    key = DEPLOYMENT_REGION_SCALARS.get(role)
+    if key is None:
+        raise ManagedConfigError(
+            f"unknown deployment-region role {role!r}; "
+            f"expected one of {sorted(DEPLOYMENT_REGION_SCALARS)}"
+        )
+    return managed_scalar_set(key, region, config_path=config_path)
+
+
+def get_bedrock_model_status(*, config_path: Path | str | None = None) -> dict[str, Any]:
+    """Return the configured Bedrock default model ID and its backing path."""
+    path = _resolve_config_path(config_path)
+    document, _ = _load_document(path)
+    return {
+        "config_path": str(path),
+        "default_model_id": _current_scalar(document, BEDROCK_DEFAULT_MODEL),
+    }
+
+
+def set_default_bedrock_model(
+    model_id: str, *, config_path: Path | str | None = None
+) -> ChangeReport:
+    """Set ``bedrock.default_model_id`` (advisory-feature model default)."""
+    return managed_scalar_set(BEDROCK_DEFAULT_MODEL, model_id, config_path=config_path)

@@ -50,6 +50,7 @@ from feature_flags import (
     ALL_FLAGS,
     FLAG_ALL_TOOLS,
     FLAG_CAPACITY_PURCHASE,
+    FLAG_CONFIG_MANAGEMENT,
     FLAG_DESTRUCTIVE_OPERATIONS,
     FLAG_IMAGE_PUBLISH,
     FLAG_INFRASTRUCTURE_DEPLOY,
@@ -97,6 +98,12 @@ _TOOL_GATING_TABLE: dict[str, str] = {
     "addons_install": FLAG_INFRASTRUCTURE_DEPLOY,
     "destroy_stack": FLAG_INFRASTRUCTURE_DESTROY,
     "destroy_all": FLAG_INFRASTRUCTURE_DESTROY,
+    # gco_mcp/tools/stacks.py — managed deployment config
+    "list_deployment_regions": FLAG_CONFIG_MANAGEMENT,
+    "add_deployment_region": FLAG_CONFIG_MANAGEMENT,
+    "remove_deployment_region": FLAG_CONFIG_MANAGEMENT,
+    "set_deployment_region": FLAG_CONFIG_MANAGEMENT,
+    "set_default_bedrock_model": FLAG_CONFIG_MANAGEMENT,
     # Other destructive module-level gates
     "delete_job": FLAG_DESTRUCTIVE_OPERATIONS,
     "delete_inference": FLAG_DESTRUCTIVE_OPERATIONS,

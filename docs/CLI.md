@@ -966,7 +966,8 @@ Manage CDK infrastructure stacks.
 | [`gco stacks destroy-all`](#gco-stacks-destroy-all) | Destroy all stacks in correct order. |
 | [`gco stacks bootstrap`](#gco-stacks-bootstrap) | Bootstrap CDK in a region. |
 | [`gco stacks access`](#gco-stacks-access) | Configure kubectl access to a GCO EKS cluster. |
-| [`gco stacks regions`](#gco-stacks-regions) | Manage workload deployment Regions in cdk.json (managed-config engine). |
+| [`gco stacks regions`](#gco-stacks-regions) | Manage deployment Regions in cdk.json (managed-config engine). |
+| [`gco stacks bedrock`](#gco-stacks-bedrock) | Manage the Bedrock model default in cdk.json (managed-config engine). |
 | [`gco stacks fsx`](#gco-stacks-fsx) | Manage [FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) storage. |
 | [`gco stacks valkey`](#gco-stacks-valkey) | Manage [Valkey](https://valkey.io/) Serverless cache. |
 | [`gco stacks aurora`](#gco-stacks-aurora) | Manage Aurora PostgreSQL ([pgvector](https://github.com/pgvector/pgvector)) database. |
@@ -1153,8 +1154,9 @@ gco stacks regions COMMAND [OPTIONS]
 - `list` - Show the configured topology (`gco stacks regions list`): global/API/monitoring Regions, the workload Region list, the resolved partition, and the cdk.json path. On a broken config, `partition_error` explains what synth would reject.
 - `add` - Add a workload Region (`gco stacks regions add`); re-adding a present Region is a reported no-op.
 - `remove` - Remove a workload Region (`gco stacks regions remove`); the resulting list must stay valid (at least one Region). Removing a typo'd entry from a hand-edited config is allowed — validation applies to the result, so this doubles as the repair path.
+- `set` - Set a control-plane Region scalar (`gco stacks regions set <global|api_gateway|monitoring> <region>`); the whole topology must stay in one AWS partition. Already-deployed stacks are not moved or destroyed.
 
-All three accept `--config-path` to target an explicit cdk.json (useful when running outside a checkout); `add`/`remove` accept `-y` to skip confirmation.
+All commands accept `--config-path` to target an explicit cdk.json (useful when running outside a checkout); the mutating ones accept `-y` to skip confirmation.
 
 **Example:**
 
@@ -1162,6 +1164,27 @@ All three accept `--config-path` to target an explicit cdk.json (useful when run
 gco stacks regions list
 gco stacks regions add us-west-2 -y
 gco stacks regions remove us-west-2 -y
+gco stacks regions set monitoring us-west-2 -y
+```
+
+#### `gco stacks bedrock`
+
+Manage the Bedrock model default in cdk.json (`context.bedrock.default_model_id`) — the model/inference-profile ID GCO's advisory Bedrock features (capacity advisor, Mission sampling, autopilot) use unless explicitly overridden. Edits go through the managed-config engine: validated, atomic, idempotent, and audited. Sibling settings (`bedrock.thinking`) are preserved.
+
+```bash
+gco stacks bedrock COMMAND [OPTIONS]
+```
+
+**Subcommands:**
+
+- `show` - Show the configured default model ID and its backing cdk.json path (`gco stacks bedrock show`).
+- `set-model` - Set the default model/inference-profile ID (`gco stacks bedrock set-model`). IDs are free-form (custom profiles, marketplace models); validation mirrors the runtime reader — a non-empty string without surrounding whitespace.
+
+**Example:**
+
+```bash
+gco stacks bedrock show
+gco stacks bedrock set-model global.anthropic.claude-opus-5 -y
 ```
 
 #### `gco stacks fsx`

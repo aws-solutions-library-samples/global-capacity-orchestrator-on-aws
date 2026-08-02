@@ -77,6 +77,8 @@ UMBRELLA_FLAG_TOOLS = (
     "list_deployment_regions",
     "add_deployment_region",
     "remove_deployment_region",
+    "set_deployment_region",
+    "set_default_bedrock_model",
     # Mission family.
     "mission_start",
     "mission_status",
