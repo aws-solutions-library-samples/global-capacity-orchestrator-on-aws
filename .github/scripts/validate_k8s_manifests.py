@@ -343,12 +343,18 @@ def _is_kubeconform_separator_record(resource: object) -> bool:
     )
 
 
-def validate_kubeconform_output(result: object, *, expected_files: int) -> list[str]:
-    """Validate kubeconform's JSON envelope and resource accounting.
+def validate_kubeconform_output(
+    result: object,
+    *,
+    expected_filenames: set[str],
+) -> list[str]:
+    """Validate kubeconform's JSON envelope and per-file resource accounting.
 
     A zero process exit code is not sufficient: blank, malformed, truncated,
     or structurally incomplete JSON must fail closed rather than reporting
-    ``OK: 0 manifest(s)``.
+    ``OK: 0 manifest(s)``. Multi-document inputs may produce many resource
+    records, so completeness is based on exact rendered filenames instead of
+    comparing aggregate record and file counts.
     """
     if not isinstance(result, dict):
         return ["top-level JSON value is not an object"]
@@ -362,17 +368,21 @@ def validate_kubeconform_output(result: object, *, expected_files: int) -> list[
     ]
     if not resources:
         errors.append("'resources' is empty")
-    elif len(resources) < expected_files:
-        errors.append(
-            f"only {len(resources)} resource result(s) were returned for "
-            f"{expected_files} input file(s)"
-        )
 
+    expected = {str(Path(filename).resolve(strict=False)) for filename in expected_filenames}
+    observed: set[str] = set()
     actual_counts = dict.fromkeys(_KUBECONFORM_STATUS_TO_SUMMARY.values(), 0)
     for index, resource in enumerate(resources):
         if not isinstance(resource, dict):
             errors.append(f"resources[{index}] is not an object")
             continue
+
+        filename = resource.get("filename")
+        if not isinstance(filename, str) or not filename:
+            errors.append(f"resources[{index}].filename is missing or is not a non-empty string")
+        else:
+            observed.add(str(Path(filename).resolve(strict=False)))
+
         status = resource.get("status")
         summary_field = (
             _KUBECONFORM_STATUS_TO_SUMMARY.get(status) if isinstance(status, str) else None
@@ -381,6 +391,15 @@ def validate_kubeconform_output(result: object, *, expected_files: int) -> list[
             errors.append(f"resources[{index}] has unknown status {status!r}")
             continue
         actual_counts[summary_field] += 1
+
+    missing = sorted(expected - observed)
+    if missing:
+        errors.append("no resource result was returned for input file(s): " + ", ".join(missing))
+    unexpected = sorted(observed - expected)
+    if unexpected:
+        errors.append(
+            "resource results were returned for unexpected file(s): " + ", ".join(unexpected)
+        )
 
     summary = result.get("summary")
     if not isinstance(summary, dict):
@@ -485,7 +504,8 @@ def main(argv: list[str] | None = None) -> int:
 
     with tempfile.TemporaryDirectory(prefix="gco-k8s-validate-") as tmp:
         rendered_dir = Path(tmp)
-        render_tree(files, rendered_dir)
+        rendered_paths = render_tree(files, rendered_dir)
+        expected_filenames = {str(path) for path in rendered_paths}
 
         rc, result = run_kubeconform(
             rendered_dir,
@@ -493,7 +513,10 @@ def main(argv: list[str] | None = None) -> int:
             strict=not args.no_strict,
         )
 
-    output_errors = validate_kubeconform_output(result, expected_files=len(files))
+    output_errors = validate_kubeconform_output(
+        result,
+        expected_filenames=expected_filenames,
+    )
     result_dict = result if isinstance(result, dict) else {}
 
     if args.verbose and not output_errors:

@@ -47,6 +47,11 @@ from kubernetes.client.models import V1Job
 from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import ResourceNotFoundError
 
+from gco.manifest_security_policy import (
+    MANIFEST_SECURITY_POLICY_DEFAULTS,
+    parse_boolean_environment,
+    validate_manifest_security_policy,
+)
 from gco.models import (
     ManifestSubmissionRequest,
     ManifestSubmissionResponse,
@@ -320,11 +325,15 @@ class ManifestProcessor:
         self.max_gpu_per_manifest = int(config_dict.get("max_gpu_per_manifest", 4))
         # Hard-reject accelerator jobs that lack a matching node toleration.
         # Kept in sync with queue_processor.REQUIRE_ACCELERATOR_TOLERATION.
-        self.require_accelerator_toleration = config_dict.get(
-            "require_accelerator_toleration", True
-        )
+        require_accelerator_toleration = config_dict.get("require_accelerator_toleration", True)
+        if type(require_accelerator_toleration) is not bool:
+            raise ValueError("require_accelerator_toleration must be a boolean")
+        self.require_accelerator_toleration = require_accelerator_toleration
         self.allowed_namespaces = set(config_dict.get("allowed_namespaces", ["gco-jobs"]))
-        self.validation_enabled = config_dict.get("validation_enabled", True)
+        validation_enabled = config_dict.get("validation_enabled", True)
+        if type(validation_enabled) is not bool:
+            raise ValueError("validation_enabled must be a boolean")
+        self.validation_enabled = validation_enabled
 
         # Trusted registries for image validation (configurable via cdk.json)
         self.trusted_registries = config_dict.get(
@@ -349,7 +358,9 @@ class ManifestProcessor:
         self.allowed_kinds = set(config_dict.get("allowed_kinds", DEFAULT_ALLOWED_KINDS))
 
         # Security policy — toggleable checks (configurable via cdk.json)
-        security_policy = config_dict.get("manifest_security_policy", {})
+        security_policy = validate_manifest_security_policy(
+            config_dict.get("manifest_security_policy", {})
+        )
         self.block_privileged = security_policy.get("block_privileged", True)
         self.block_privilege_escalation = security_policy.get("block_privilege_escalation", True)
         self.block_host_network = security_policy.get("block_host_network", True)
@@ -1613,24 +1624,10 @@ class ManifestProcessor:
             return None
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    """Parse a boolean environment variable using the SQS worker semantics."""
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
-    return raw.strip().lower() in {"true", "1", "yes", "on"}
-
-
 def _manifest_security_policy_from_env() -> dict[str, bool]:
     return {
-        "block_privileged": _env_bool("BLOCK_PRIVILEGED", True),
-        "block_privilege_escalation": _env_bool("BLOCK_PRIVILEGE_ESCALATION", True),
-        "block_host_network": _env_bool("BLOCK_HOST_NETWORK", True),
-        "block_host_pid": _env_bool("BLOCK_HOST_PID", True),
-        "block_host_ipc": _env_bool("BLOCK_HOST_IPC", True),
-        "block_host_path": _env_bool("BLOCK_HOST_PATH", True),
-        "block_added_capabilities": _env_bool("BLOCK_ADDED_CAPABILITIES", True),
-        "block_run_as_root": _env_bool("BLOCK_RUN_AS_ROOT", False),
+        key: parse_boolean_environment(key.upper(), default)
+        for key, default in MANIFEST_SECURITY_POLICY_DEFAULTS.items()
     }
 
 
@@ -1653,10 +1650,9 @@ def create_manifest_processor_from_env() -> ManifestProcessor:
         "max_cpu_per_manifest": os.getenv("MAX_CPU_PER_MANIFEST", "10"),
         "max_memory_per_manifest": os.getenv("MAX_MEMORY_PER_MANIFEST", "32Gi"),
         "max_gpu_per_manifest": int(os.getenv("MAX_GPU_PER_MANIFEST", "4")),
-        "require_accelerator_toleration": os.getenv(
-            "REQUIRE_ACCELERATOR_TOLERATION", "true"
-        ).lower()
-        == "true",
+        "require_accelerator_toleration": parse_boolean_environment(
+            "REQUIRE_ACCELERATOR_TOLERATION", True
+        ),
         "allowed_namespaces": (
             ["gco-jobs"]
             if os.getenv("ALLOWED_NAMESPACES") is None
@@ -1666,7 +1662,7 @@ def create_manifest_processor_from_env() -> ManifestProcessor:
                 if namespace.strip()
             ]
         ),
-        "validation_enabled": os.getenv("VALIDATION_ENABLED", "true").lower() == "true",
+        "validation_enabled": parse_boolean_environment("VALIDATION_ENABLED", True),
         "yaml_max_depth": int(os.getenv("YAML_MAX_DEPTH", "50")),
         "manifest_security_policy": _manifest_security_policy_from_env(),
     }

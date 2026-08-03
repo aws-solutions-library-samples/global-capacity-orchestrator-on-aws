@@ -205,6 +205,7 @@ class TestRenderPlaceholders:
         }
 
         expected = {
+            "VALIDATION_ENABLED": "{{MP_VALIDATION_ENABLED}}",
             "YAML_MAX_DEPTH": "{{MP_YAML_MAX_DEPTH}}",
             "BLOCK_PRIVILEGED": "{{MP_BLOCK_PRIVILEGED}}",
             "BLOCK_PRIVILEGE_ESCALATION": "{{MP_BLOCK_PRIVILEGE_ESCALATION}}",
@@ -465,7 +466,35 @@ class TestKubeconformOutputIntegrity:
             "summary": {"valid": 1, "invalid": 0, "errors": 0, "skipped": 0},
         }
 
-        assert validator.validate_kubeconform_output(result, expected_files=1) == []
+        assert (
+            validator.validate_kubeconform_output(
+                result,
+                expected_filenames={"one.yaml"},
+            )
+            == []
+        )
+
+    def test_multidocument_file_cannot_mask_a_missing_input(self) -> None:
+        result = {
+            "resources": [
+                {
+                    "filename": "one.yaml",
+                    "kind": "Namespace",
+                    "name": name,
+                    "status": "statusValid",
+                    "msg": "",
+                }
+                for name in ("one-a", "one-b")
+            ],
+            "summary": {"valid": 2, "invalid": 0, "errors": 0, "skipped": 0},
+        }
+
+        errors = validator.validate_kubeconform_output(
+            result,
+            expected_filenames={"one.yaml", "two.yaml"},
+        )
+
+        assert any("two.yaml" in error and "no resource result" in error for error in errors)
 
     @pytest.mark.parametrize(
         "record",
@@ -533,7 +562,10 @@ class TestKubeconformOutputIntegrity:
             "summary": {"valid": 0, "invalid": 0, "errors": 0, "skipped": 0},
         }
 
-        errors = validator.validate_kubeconform_output(result, expected_files=1)
+        errors = validator.validate_kubeconform_output(
+            result,
+            expected_filenames={"one.yaml"},
+        )
         assert "resources[0] has unknown status ''" in errors
 
     def test_complete_accounted_output_succeeds(
@@ -547,20 +579,24 @@ class TestKubeconformOutputIntegrity:
             "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: one\n",
             encoding="utf-8",
         )
-        result = {
-            "resources": [
-                {
-                    "filename": "one.yaml",
-                    "kind": "Namespace",
-                    "name": "one",
-                    "status": "statusValid",
-                    "msg": "",
-                }
-            ],
-            "summary": {"valid": 1, "invalid": 0, "errors": 0, "skipped": 0},
-        }
         monkeypatch.setattr(validator.shutil, "which", lambda _binary: "/usr/bin/kubeconform")
-        monkeypatch.setattr(validator, "run_kubeconform", lambda *_args, **_kwargs: (0, result))
+
+        def fake_run(directory: Path, **_kwargs):
+            rendered = next(directory.rglob("*.yaml"))
+            return 0, {
+                "resources": [
+                    {
+                        "filename": str(rendered),
+                        "kind": "Namespace",
+                        "name": "one",
+                        "status": "statusValid",
+                        "msg": "",
+                    }
+                ],
+                "summary": {"valid": 1, "invalid": 0, "errors": 0, "skipped": 0},
+            }
+
+        monkeypatch.setattr(validator, "run_kubeconform", fake_run)
 
         rc = validator.main(["--path", str(manifest), "--kubeconform-binary", "fake"])
 
@@ -614,25 +650,23 @@ class TestMainExplicitInputs:
         manifest.write_text("apiVersion: v1\nkind: Pod\nmetadata:\n  name: bad\n")
         missing = tmp_path / "missing.yaml"
         monkeypatch.setattr(validator.shutil, "which", lambda _binary: "/usr/bin/kubeconform")
-        monkeypatch.setattr(
-            validator,
-            "run_kubeconform",
-            lambda _directory, **_kwargs: (
-                1,
-                {
-                    "resources": [
-                        {
-                            "filename": "bad.yaml",
-                            "kind": "Pod",
-                            "name": "bad",
-                            "status": "statusInvalid",
-                            "msg": "schema error",
-                        }
-                    ],
-                    "summary": {"valid": 0, "invalid": 1, "errors": 0, "skipped": 0},
-                },
-            ),
-        )
+
+        def fake_run(directory: Path, **_kwargs):
+            rendered = next(directory.rglob("*.yaml"))
+            return 1, {
+                "resources": [
+                    {
+                        "filename": str(rendered),
+                        "kind": "Pod",
+                        "name": "bad",
+                        "status": "statusInvalid",
+                        "msg": "schema error",
+                    }
+                ],
+                "summary": {"valid": 0, "invalid": 1, "errors": 0, "skipped": 0},
+            }
+
+        monkeypatch.setattr(validator, "run_kubeconform", fake_run)
 
         rc = validator.main(
             ["--path", str(manifest), "--path", str(missing), "--kubeconform-binary", "fake"]

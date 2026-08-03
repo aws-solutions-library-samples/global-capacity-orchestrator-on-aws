@@ -664,6 +664,8 @@ This policy is enforced on **both** submission paths:
 
 CDK wires the same configuration values into both services at deploy time, so a single policy change applies uniformly. An attacker holding `sqs:SendMessage` on the job queue cannot use the SQS path to bypass the checks enforced by the REST path.
 
+Policy values in `cdk.json` must be literal JSON booleans (`true` or `false`). Nulls, strings, numbers, unknown policy fields, and malformed `require_accelerator_toleration` values are rejected before synthesis rather than being converted by truthiness. At runtime, the generated `BLOCK_*`, `REQUIRE_ACCELERATOR_TOLERATION`, and `VALIDATION_ENABLED` variables accept explicit `true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off` spellings (case-insensitive); unset or blank variables retain their documented defaults. Any other non-empty value, including a typo or unresolved placeholder, fails service startup instead of disabling a control.
+
 ### Security Policy Toggles
 
 Each toggle controls a specific security check. Set a toggle to `false` to allow the corresponding pattern, or `true` to block it.

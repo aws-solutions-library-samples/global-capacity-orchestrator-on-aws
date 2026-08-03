@@ -85,6 +85,7 @@ from kubernetes import client, config, dynamic
 from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
+from gco.manifest_security_policy import parse_boolean_environment
 from gco.models import ResourceStatus
 from gco.services.manifest_processor import (
     DEFAULT_ALLOWED_KINDS,
@@ -181,37 +182,25 @@ TRUSTED_DOCKERHUB_ORGS = [
 ] or list(DEFAULT_TRUSTED_DOCKERHUB_ORGS)
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    """Parse a boolean environment variable.
-
-    Empty/unset returns ``default``. Recognized truthy values: "true", "1",
-    "yes", "on" (case-insensitive). Everything else is falsy.
-    """
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return default
-    return raw.strip().lower() in ("true", "1", "yes", "on")
-
-
 # Security-policy toggles. Every one of these mirrors an attribute the REST
 # manifest_processor exposes via cdk.json::job_validation_policy.manifest_security_policy.
 # Both submission paths MUST enforce the same policy — an attacker holding
 # sqs:SendMessage on the job queue must not be able to bypass checks the REST
 # path applies. Structural parity is pinned by
 # tests/test_queue_processor.py::TestSecurityPolicyParityWithManifestProcessor.
-BLOCK_PRIVILEGED = _env_bool("BLOCK_PRIVILEGED", True)
-BLOCK_PRIVILEGE_ESCALATION = _env_bool("BLOCK_PRIVILEGE_ESCALATION", True)
-BLOCK_HOST_NETWORK = _env_bool("BLOCK_HOST_NETWORK", True)
-BLOCK_HOST_PID = _env_bool("BLOCK_HOST_PID", True)
-BLOCK_HOST_IPC = _env_bool("BLOCK_HOST_IPC", True)
-BLOCK_HOST_PATH = _env_bool("BLOCK_HOST_PATH", True)
-BLOCK_ADDED_CAPABILITIES = _env_bool("BLOCK_ADDED_CAPABILITIES", True)
-BLOCK_RUN_AS_ROOT = _env_bool("BLOCK_RUN_AS_ROOT", False)
+BLOCK_PRIVILEGED = parse_boolean_environment("BLOCK_PRIVILEGED", True)
+BLOCK_PRIVILEGE_ESCALATION = parse_boolean_environment("BLOCK_PRIVILEGE_ESCALATION", True)
+BLOCK_HOST_NETWORK = parse_boolean_environment("BLOCK_HOST_NETWORK", True)
+BLOCK_HOST_PID = parse_boolean_environment("BLOCK_HOST_PID", True)
+BLOCK_HOST_IPC = parse_boolean_environment("BLOCK_HOST_IPC", True)
+BLOCK_HOST_PATH = parse_boolean_environment("BLOCK_HOST_PATH", True)
+BLOCK_ADDED_CAPABILITIES = parse_boolean_environment("BLOCK_ADDED_CAPABILITIES", True)
+BLOCK_RUN_AS_ROOT = parse_boolean_environment("BLOCK_RUN_AS_ROOT", False)
 
 # Hard-reject accelerator jobs that lack a matching node toleration. Mirrors
 # manifest_processor.require_accelerator_toleration so the SQS path is not a
 # bypass.
-REQUIRE_ACCELERATOR_TOLERATION = _env_bool("REQUIRE_ACCELERATOR_TOLERATION", True)
+REQUIRE_ACCELERATOR_TOLERATION = parse_boolean_environment("REQUIRE_ACCELERATOR_TOLERATION", True)
 
 
 def _is_registry_domain(entry: str) -> bool:

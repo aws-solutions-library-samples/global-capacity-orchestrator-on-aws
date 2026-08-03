@@ -144,6 +144,8 @@ spec:
               value: "{{MP_REQUIRE_ACCELERATOR_TOLERATION}}"
             - name: MAX_REQUEST_BODY_BYTES
               value: "{{MP_MAX_REQUEST_BODY_BYTES}}"
+            - name: VALIDATION_ENABLED
+              value: "{{MP_VALIDATION_ENABLED}}"
             - name: YAML_MAX_DEPTH
               value: "{{MP_YAML_MAX_DEPTH}}"
             # Namespace allowlist — shared with the queue processor via

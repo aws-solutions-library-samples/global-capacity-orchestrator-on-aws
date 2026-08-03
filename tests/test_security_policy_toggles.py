@@ -22,6 +22,7 @@ from kubernetes import config as k8s_config
 # so `# nosec B108` stays pinned to this single line regardless of how the
 # formatter reflows the manifest dict below.
 _FIXTURE_HOST_PATH = "/tmp"  # nosec B108 - K8s manifest fixture string, not a filesystem operation
+_UNSET = object()
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -38,7 +39,7 @@ def mock_k8s_config():
         yield mock_config
 
 
-def _make_processor(mock_k8s_config, manifest_security_policy=None, extra_config=None):
+def _make_processor(mock_k8s_config, manifest_security_policy=_UNSET, extra_config=None):
     """Create a ManifestProcessor with custom manifest_security_policy overrides."""
     from gco.services.manifest_processor import ManifestProcessor
 
@@ -49,7 +50,7 @@ def _make_processor(mock_k8s_config, manifest_security_policy=None, extra_config
         "allowed_namespaces": ["default", "gco-jobs"],
         "validation_enabled": True,
     }
-    if manifest_security_policy is not None:
+    if manifest_security_policy is not _UNSET:
         config_dict["manifest_security_policy"] = manifest_security_policy
     if extra_config:
         config_dict.update(extra_config)
@@ -283,6 +284,44 @@ class TestBlockRunAsRootToggle:
         manifest = _job_manifest(pod_spec_overrides={"securityContext": {"runAsUser": 0}})
         is_valid, error = processor.validate_manifest(manifest)
         assert is_valid is False
+
+
+# ===========================================================================
+# Malformed policy values fail closed
+# ===========================================================================
+
+
+class TestMalformedSecurityPolicy:
+    """Direct construction cannot bypass deployment-time validation."""
+
+    @pytest.mark.parametrize(
+        "policy",
+        (
+            None,
+            "false",
+            0,
+            [],
+            {"block_host_path": None},
+            {"block_privileged": "false"},
+            {"unknown_toggle": True},
+        ),
+    )
+    def test_rejects_malformed_policy(self, mock_k8s_config, policy):
+        with pytest.raises(ValueError, match="manifest_security_policy"):
+            _make_processor(mock_k8s_config, manifest_security_policy=policy)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        (
+            ("require_accelerator_toleration", "true"),
+            ("require_accelerator_toleration", None),
+            ("validation_enabled", "false"),
+            ("validation_enabled", 1),
+        ),
+    )
+    def test_rejects_malformed_adjacent_boolean_controls(self, mock_k8s_config, field, value):
+        with pytest.raises(ValueError, match=rf"{field} must be a boolean"):
+            _make_processor(mock_k8s_config, extra_config={field: value})
 
 
 # ===========================================================================

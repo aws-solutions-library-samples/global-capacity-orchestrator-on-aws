@@ -31,6 +31,7 @@ from typing import Any, cast
 import boto3
 from aws_cdk import App
 
+from gco.manifest_security_policy import validate_manifest_security_policy
 from gco.models import ClusterConfig, ResourceThresholds
 from gco.stacks.constants import (
     DEFAULT_MAX_REQUEST_BODY_BYTES,
@@ -357,6 +358,10 @@ class ConfigLoader:
         except ValueError as exc:
             raise ConfigValidationError(f"manifest_processor.{exc}") from exc
 
+        validation_enabled = mp_config.get("validation_enabled", True)
+        if type(validation_enabled) is not bool:
+            raise ConfigValidationError("manifest_processor.validation_enabled must be a boolean")
+
         # Validate the shared policy section separately so a misconfigured
         # policy block surfaces a clear error pointing at the right key.
         policy = self.app.node.try_get_context("job_validation_policy")
@@ -365,11 +370,24 @@ class ConfigLoader:
                 "job_validation_policy configuration is required (shared between "
                 "manifest_processor and queue_processor)"
             )
+        if not isinstance(policy, dict):
+            raise ConfigValidationError("job_validation_policy must be an object")
         for policy_field in ("allowed_namespaces", "resource_quotas"):
             if policy_field not in policy:
                 raise ConfigValidationError(
                     f"Missing job_validation_policy configuration: {policy_field}"
                 )
+
+        try:
+            validate_manifest_security_policy(policy.get("manifest_security_policy", {}))
+        except ValueError as exc:
+            raise ConfigValidationError(f"job_validation_policy.{exc}") from exc
+
+        require_toleration = policy.get("require_accelerator_toleration", True)
+        if type(require_toleration) is not bool:
+            raise ConfigValidationError(
+                "job_validation_policy.require_accelerator_toleration must be a boolean"
+            )
 
         # Validate resource limits
         resource_limits = mp_config["resource_limits"]

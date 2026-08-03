@@ -67,6 +67,12 @@ class FeatureConfig(MockConfigLoader):
     def get_cluster_observability_enabled(self):
         return self._optional_features
 
+    def get_manifest_processor_config(self):
+        return {
+            **super().get_manifest_processor_config(),
+            "validation_enabled": False,
+        }
+
 
 def _app_context(
     *,
@@ -531,6 +537,7 @@ def test_convergence_payload_carries_enabled_features_and_security_policy(featur
 
     replacements = properties["ImageReplacements"]
     expected_manifest_processor_values = {
+        "{{MP_VALIDATION_ENABLED}}": "false",
         "{{MP_YAML_MAX_DEPTH}}": "50",
         "{{MP_BLOCK_PRIVILEGED}}": "true",
         "{{MP_BLOCK_PRIVILEGE_ESCALATION}}": "true",

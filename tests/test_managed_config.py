@@ -350,6 +350,50 @@ class TestEngineWriteMechanics:
             "us-west-2",
         ]
 
+    @pytest.mark.skipif(os.name == "nt", reason="requires POSIX directory flock semantics")
+    def test_posix_process_update_obeys_config_lock_timeout(
+        self, cdk_json: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A live holder cannot block another POSIX config writer indefinitely."""
+        import multiprocessing
+
+        context = multiprocessing.get_context("spawn")
+        ready = context.Event()
+        release = context.Event()
+        started = context.Event()
+        result_queue = context.Queue()
+        holder = context.Process(
+            target=_hold_config_lock_worker,
+            args=(str(cdk_json), ready, release),
+        )
+        writer = context.Process(
+            target=_add_region_worker,
+            args=(str(cdk_json), started, result_queue),
+        )
+        monkeypatch.setenv("GCO_CONFIG_LOCK_TIMEOUT_SECONDS", "0.2")
+
+        holder.start()
+        try:
+            assert ready.wait(5), "lock-holder process did not start"
+            writer.start()
+            assert started.wait(5), "writer process did not start"
+            writer.join(timeout=5)
+            assert not writer.is_alive(), "writer ignored the configured lock timeout"
+            assert writer.exitcode == 0
+            succeeded, error = result_queue.get(timeout=2)
+            assert succeeded is False
+            assert "ManagedConfigError" in error
+            assert "Timed out" in error
+            assert "GCO_CONFIG_LOCK_TIMEOUT_SECONDS" in error
+            assert holder.is_alive(), "holder released the lock before the timeout was observed"
+        finally:
+            release.set()
+            holder.join(timeout=5)
+            writer.join(timeout=5)
+
+        assert holder.exitcode == 0
+        assert get_deployment_regions_status(config_path=cdk_json)["regional"] == ["us-east-1"]
+
     def test_windows_config_lock_uses_stable_sidecar_and_is_reentrant(self, cdk_json: Path):
         """Windows serializes on one persistent file without relocking nested calls."""
         from cli import stacks

@@ -495,6 +495,7 @@ class TestCreateManifestProcessorFromEnv:
             "MAX_CPU_PER_MANIFEST": "20",
             "MAX_MEMORY_PER_MANIFEST": "64Gi",
             "MAX_GPU_PER_MANIFEST": "8",
+            "REQUIRE_ACCELERATOR_TOLERATION": "false",
             "ALLOWED_NAMESPACES": "default,production,staging",
             "ALLOWED_KINDS": "Job,ConfigMap",
             "VALIDATION_ENABLED": "false",
@@ -525,6 +526,7 @@ class TestCreateManifestProcessorFromEnv:
             assert processor.region == "eu-west-1"
             assert processor.max_cpu_per_manifest == 20000  # 20 cores in millicores
             assert processor.max_gpu_per_manifest == 8
+            assert processor.require_accelerator_toleration is False
             assert processor.validation_enabled is False
             assert "default" in processor.allowed_namespaces
             assert "production" in processor.allowed_namespaces
@@ -539,6 +541,29 @@ class TestCreateManifestProcessorFromEnv:
             assert processor.block_host_path is True
             assert processor.block_added_capabilities is False
             assert processor.block_run_as_root is True
+
+    @pytest.mark.parametrize(
+        "name",
+        (
+            "BLOCK_PRIVILEGED",
+            "BLOCK_PRIVILEGE_ESCALATION",
+            "BLOCK_HOST_NETWORK",
+            "BLOCK_HOST_PID",
+            "BLOCK_HOST_IPC",
+            "BLOCK_HOST_PATH",
+            "BLOCK_ADDED_CAPABILITIES",
+            "BLOCK_RUN_AS_ROOT",
+            "REQUIRE_ACCELERATOR_TOLERATION",
+            "VALIDATION_ENABLED",
+        ),
+    )
+    def test_create_from_env_rejects_malformed_booleans(self, name):
+        """Typos and unresolved substitutions stop REST service startup."""
+        with (
+            patch.dict("os.environ", {name: "treu"}, clear=True),
+            pytest.raises(ValueError, match=rf"{name} must be an explicit boolean value"),
+        ):
+            create_manifest_processor_from_env()
 
     def test_create_from_env_explicit_empty_allowed_kinds_denies_all(self):
         """An explicit empty policy must not silently restore default kinds."""

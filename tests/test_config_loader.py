@@ -67,6 +67,7 @@ def valid_context():
             "image": "gco/manifest-processor:latest",
             "replicas": 3,
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
+            "validation_enabled": True,
         },
         "job_validation_policy": {
             "allowed_namespaces": ["gco-jobs"],
@@ -726,6 +727,16 @@ class TestConfigValidationEdgeCases:
         ):
             ConfigLoader(app)
 
+    @pytest.mark.parametrize("value", (None, "false", 1, 0))
+    def test_invalid_manifest_processor_validation_enabled(self, valid_context, value):
+        """The master validation switch must be a literal JSON boolean."""
+        valid_context["manifest_processor"]["validation_enabled"] = value
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"manifest_processor\.validation_enabled must be a boolean",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
     def test_missing_manifest_processor_resource_limits(self, valid_context):
         """Test that missing resource_limits fields raises error."""
         valid_context["manifest_processor"]["resource_limits"] = {"cpu": "1000m"}  # Missing memory
@@ -897,6 +908,53 @@ class TestConfigValidationEdgeCases:
             ConfigValidationError, match="job_validation_policy configuration is required"
         ):
             ConfigLoader(app)
+
+    @pytest.mark.parametrize("value", ([], "invalid", 1, False))
+    def test_job_validation_policy_must_be_an_object(self, valid_context, value):
+        """The shared policy container cannot use a truthy non-object value."""
+        valid_context["job_validation_policy"] = value
+        with pytest.raises(ConfigValidationError, match="job_validation_policy must be an object"):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize("value", (None, "false", 0, []))
+    def test_manifest_security_policy_must_be_an_object(self, valid_context, value):
+        """Null and scalar policy values fail synthesis instead of disabling checks."""
+        valid_context["job_validation_policy"]["manifest_security_policy"] = value
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"job_validation_policy\.manifest_security_policy must be an object",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize("value", (None, "true", 1, 0, [], {}))
+    def test_manifest_security_policy_values_must_be_booleans(self, valid_context, value):
+        """Policy members must be JSON booleans, not merely truthy or falsey."""
+        valid_context["job_validation_policy"]["manifest_security_policy"] = {
+            "block_host_path": value
+        }
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"manifest_security_policy\.block_host_path must be a boolean",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_manifest_security_policy_rejects_unknown_fields(self, valid_context):
+        """Misspelled controls cannot be silently ignored during synthesis."""
+        valid_context["job_validation_policy"]["manifest_security_policy"] = {
+            "block_host_paths": True
+        }
+        with pytest.raises(ConfigValidationError, match="unsupported fields.*block_host_paths"):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize("value", (None, "true", 1, 0))
+    def test_require_accelerator_toleration_must_be_boolean(self, valid_context, value):
+        """The adjacent default-on accelerator control is strict too."""
+        valid_context["job_validation_policy"]["require_accelerator_toleration"] = value
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"job_validation_policy\.require_accelerator_toleration must be a boolean",
+        ):
+            ConfigLoader(MockApp(valid_context))
 
 
 class TestAuroraPgvectorConfig:

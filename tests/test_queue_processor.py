@@ -1412,33 +1412,51 @@ class TestCronJobSecurityPolicyChecks:
 
 
 class TestEnvBoolParser:
-    """Sanity checks for the env-var boolean parser."""
+    """Sanity checks for the shared fail-closed env-var boolean parser."""
 
-    def test_env_bool_true_variants(self):
+    def test_env_bool_true_variants(self, monkeypatch):
         qp = _reload()
-        for v in ("true", "True", "TRUE", "1", "yes", "on"):
-            assert qp._env_bool("X", False) is False  # unset default
-            import os as _os
+        for value in ("true", "True", "TRUE", "1", "yes", "on"):
+            monkeypatch.setenv("X", value)
+            assert qp.parse_boolean_environment("X", False) is True
+        monkeypatch.delenv("X")
+        assert qp.parse_boolean_environment("X", False) is False
 
-            _os.environ["X"] = v
-            try:
-                assert qp._env_bool("X", False) is True, f"{v!r} should be true"
-            finally:
-                _os.environ.pop("X")
-
-    def test_env_bool_false_variants(self):
+    def test_env_bool_false_variants(self, monkeypatch):
         qp = _reload()
-        import os as _os
+        for value in ("false", "False", "0", "no", "off"):
+            monkeypatch.setenv("X", value)
+            assert qp.parse_boolean_environment("X", True) is False
+        for value in ("", "   "):
+            monkeypatch.setenv("X", value)
+            assert qp.parse_boolean_environment("X", True) is True
 
-        for v in ("false", "False", "0", "no", "off", "", "   "):
-            _os.environ["X"] = v
-            try:
-                # Empty/whitespace strings fall back to the default, which we
-                # pass as True so we can distinguish them from "false".
-                expected = not v.strip()
-                assert qp._env_bool("X", True) is expected, f"{v!r} should be {expected}"
-            finally:
-                _os.environ.pop("X")
+    @pytest.mark.parametrize("value", ("treu", "2", "${UNRESOLVED_BOOLEAN}"))
+    def test_env_bool_rejects_malformed_values(self, monkeypatch, value):
+        qp = _reload()
+        monkeypatch.setenv("X", value)
+        with pytest.raises(ValueError, match="X must be an explicit boolean value"):
+            qp.parse_boolean_environment("X", True)
+
+    @pytest.mark.parametrize(
+        "name",
+        (
+            "BLOCK_PRIVILEGED",
+            "BLOCK_PRIVILEGE_ESCALATION",
+            "BLOCK_HOST_NETWORK",
+            "BLOCK_HOST_PID",
+            "BLOCK_HOST_IPC",
+            "BLOCK_HOST_PATH",
+            "BLOCK_ADDED_CAPABILITIES",
+            "BLOCK_RUN_AS_ROOT",
+            "REQUIRE_ACCELERATOR_TOLERATION",
+        ),
+    )
+    def test_malformed_boolean_rejects_queue_worker_startup(self, monkeypatch, name):
+        """Every queue-worker admission toggle fails closed during import."""
+        monkeypatch.setenv(name, "${UNRESOLVED_BOOLEAN}")
+        with pytest.raises(ValueError, match=rf"{name} must be an explicit boolean value"):
+            _reload()
 
 
 class TestSecurityPolicyParityWithManifestProcessor:

@@ -110,6 +110,7 @@ from aws_cdk import custom_resources as cr
 from constructs import Construct
 
 from gco.config.config_loader import ConfigLoader
+from gco.manifest_security_policy import validate_manifest_security_policy
 from gco.stacks.aws_load_balancer_controller_policy import (
     aws_load_balancer_controller_policy_document,
 )
@@ -2861,10 +2862,19 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        security_policy = job_policy.get("manifest_security_policy", {})
+        security_policy = validate_manifest_security_policy(
+            job_policy.get("manifest_security_policy", {})
+        )
 
         def _policy_str(value: object) -> str:
+            if type(value) is not bool:
+                raise ValueError("job validation policy values must be booleans")
             return "true" if value else "false"
+
+        require_accelerator_toleration = _policy_str(
+            job_policy.get("require_accelerator_toleration", True)
+        )
+        validation_enabled = _policy_str(mp_config.get("validation_enabled", True))
 
         image_replacements = {
             "{{BACKEND_TLS_CERTIFICATE_ARN}}": self.backend_tls_certificate_arn,
@@ -2922,9 +2932,7 @@ class GCORegionalStack(Stack):
             # Require accelerator (GPU/Neuron/EFA) jobs to carry a matching
             # toleration (shared policy). Mirrored on the SQS path via
             # {{QP_REQUIRE_ACCELERATOR_TOLERATION}} so neither path is a bypass.
-            "{{MP_REQUIRE_ACCELERATOR_TOLERATION}}": (
-                "true" if job_policy.get("require_accelerator_toleration", True) else "false"
-            ),
+            "{{MP_REQUIRE_ACCELERATOR_TOLERATION}}": require_accelerator_toleration,
             # Manifest processor namespace allowlist (sourced from shared policy).
             # Both the REST manifest processor and the SQS queue processor
             # read from job_validation_policy.allowed_namespaces so a single
@@ -2951,23 +2959,20 @@ class GCORegionalStack(Stack):
             "{{MP_TRUSTED_DOCKERHUB_ORGS}}": ",".join(job_policy.get("trusted_dockerhub_orgs", [])),
             # Manifest parsing and pod-security policy use the same values as
             # the queue processor, preventing REST/SQS validation drift.
+            "{{MP_VALIDATION_ENABLED}}": validation_enabled,
             "{{MP_YAML_MAX_DEPTH}}": str(mp_config.get("yaml_max_depth", 50)),
-            "{{MP_BLOCK_PRIVILEGED}}": _policy_str(security_policy.get("block_privileged", True)),
+            "{{MP_BLOCK_PRIVILEGED}}": _policy_str(security_policy["block_privileged"]),
             "{{MP_BLOCK_PRIVILEGE_ESCALATION}}": _policy_str(
-                security_policy.get("block_privilege_escalation", True)
+                security_policy["block_privilege_escalation"]
             ),
-            "{{MP_BLOCK_HOST_NETWORK}}": _policy_str(
-                security_policy.get("block_host_network", True)
-            ),
-            "{{MP_BLOCK_HOST_PID}}": _policy_str(security_policy.get("block_host_pid", True)),
-            "{{MP_BLOCK_HOST_IPC}}": _policy_str(security_policy.get("block_host_ipc", True)),
-            "{{MP_BLOCK_HOST_PATH}}": _policy_str(security_policy.get("block_host_path", True)),
+            "{{MP_BLOCK_HOST_NETWORK}}": _policy_str(security_policy["block_host_network"]),
+            "{{MP_BLOCK_HOST_PID}}": _policy_str(security_policy["block_host_pid"]),
+            "{{MP_BLOCK_HOST_IPC}}": _policy_str(security_policy["block_host_ipc"]),
+            "{{MP_BLOCK_HOST_PATH}}": _policy_str(security_policy["block_host_path"]),
             "{{MP_BLOCK_ADDED_CAPABILITIES}}": _policy_str(
-                security_policy.get("block_added_capabilities", True)
+                security_policy["block_added_capabilities"]
             ),
-            "{{MP_BLOCK_RUN_AS_ROOT}}": _policy_str(
-                security_policy.get("block_run_as_root", False)
-            ),
+            "{{MP_BLOCK_RUN_AS_ROOT}}": _policy_str(security_policy["block_run_as_root"]),
             # Manifest processor request body size cap (HTTP 413 middleware).
             # Lives at cdk.json::manifest_processor.max_request_body_bytes.
             "{{MP_MAX_REQUEST_BODY_BYTES}}": str(
@@ -3128,34 +3133,34 @@ class GCORegionalStack(Stack):
             # Both services read the same cdk.json section so a single policy
             # flip (e.g. block_run_as_root: true) takes effect on both paths.
             image_replacements["{{QP_BLOCK_PRIVILEGED}}"] = _policy_str(
-                security_policy.get("block_privileged", True)
+                security_policy["block_privileged"]
             )
             image_replacements["{{QP_BLOCK_PRIVILEGE_ESCALATION}}"] = _policy_str(
-                security_policy.get("block_privilege_escalation", True)
+                security_policy["block_privilege_escalation"]
             )
             image_replacements["{{QP_BLOCK_HOST_NETWORK}}"] = _policy_str(
-                security_policy.get("block_host_network", True)
+                security_policy["block_host_network"]
             )
             image_replacements["{{QP_BLOCK_HOST_PID}}"] = _policy_str(
-                security_policy.get("block_host_pid", True)
+                security_policy["block_host_pid"]
             )
             image_replacements["{{QP_BLOCK_HOST_IPC}}"] = _policy_str(
-                security_policy.get("block_host_ipc", True)
+                security_policy["block_host_ipc"]
             )
             image_replacements["{{QP_BLOCK_HOST_PATH}}"] = _policy_str(
-                security_policy.get("block_host_path", True)
+                security_policy["block_host_path"]
             )
             image_replacements["{{QP_BLOCK_ADDED_CAPABILITIES}}"] = _policy_str(
-                security_policy.get("block_added_capabilities", True)
+                security_policy["block_added_capabilities"]
             )
             image_replacements["{{QP_BLOCK_RUN_AS_ROOT}}"] = _policy_str(
-                security_policy.get("block_run_as_root", False)
+                security_policy["block_run_as_root"]
             )
             # Require accelerator (GPU/Neuron/EFA) jobs to carry a matching
             # toleration — shared with the REST manifest_processor via
             # {{MP_REQUIRE_ACCELERATOR_TOLERATION}}.
-            image_replacements["{{QP_REQUIRE_ACCELERATOR_TOLERATION}}"] = _policy_str(
-                job_policy.get("require_accelerator_toleration", True)
+            image_replacements["{{QP_REQUIRE_ACCELERATOR_TOLERATION}}"] = (
+                require_accelerator_toleration
             )
 
         # Add Valkey endpoint if enabled

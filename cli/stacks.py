@@ -116,7 +116,7 @@ _LAMBDA_SOURCE_COPY_IGNORE_PATTERNS = (
     "*.pyc",
     "*.pyo",
 )
-_ASSET_LOCK_RETRY_SECONDS = 0.05
+_FILE_LOCK_RETRY_SECONDS = 0.05
 # 15 minutes: comfortably above the longest legitimate hold (a cold publisher
 # rebuild, minutes) while bounding the pathological one (an abandoned pytest
 # session's session-long shared locks, indefinite).
@@ -355,13 +355,12 @@ def _file_lock_timeout_seconds(purpose: _FileLockPurpose) -> float:
 
 
 def _warn_file_lock_contended(
-    lock_file: BinaryIO,
+    lock_name: object,
     *,
     exclusive: bool,
     timeout: float,
     purpose: _FileLockPurpose,
 ) -> None:
-    lock_name = getattr(lock_file, "name", "<unknown>")
     if purpose == "configuration":
         logger.warning(
             "Waiting up to %.0fs for the configuration lock on %s — another CLI "
@@ -386,12 +385,11 @@ def _warn_file_lock_contended(
 
 
 def _raise_file_lock_timeout(
-    lock_file: BinaryIO,
+    lock_name: object,
     *,
     timeout: float,
     purpose: _FileLockPurpose,
 ) -> None:
-    lock_name = getattr(lock_file, "name", "<unknown>")
     if purpose == "configuration":
         raise TimeoutError(
             f"Timed out after {timeout:.0f}s waiting for the configuration lock on "
@@ -406,6 +404,52 @@ def _raise_file_lock_timeout(
         f"keeps shared locks until it exits. Find it with `lsof {lock_name}`, stop "
         "it, and retry; raise GCO_ASSET_LOCK_TIMEOUT_SECONDS to wait longer."
     )
+
+
+def _posix_lock_is_contended(exc: OSError) -> bool:
+    return isinstance(exc, BlockingIOError) or exc.errno in {errno.EACCES, errno.EAGAIN}
+
+
+def _acquire_posix_flock(
+    lock_fd: int,
+    *,
+    lock_name: object,
+    exclusive: bool,
+    purpose: _FileLockPurpose,
+) -> None:
+    """Acquire one POSIX flock with the shared warning and timeout contract."""
+    import fcntl
+
+    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    try:
+        fcntl.flock(lock_fd, operation | fcntl.LOCK_NB)
+        return
+    except OSError as exc:
+        if not _posix_lock_is_contended(exc):
+            raise
+
+    timeout = _file_lock_timeout_seconds(purpose)
+    deadline = time.monotonic() + timeout
+    _warn_file_lock_contended(
+        lock_name,
+        exclusive=exclusive,
+        timeout=timeout,
+        purpose=purpose,
+    )
+    while True:
+        try:
+            fcntl.flock(lock_fd, operation | fcntl.LOCK_NB)
+            return
+        except OSError as exc:
+            if not _posix_lock_is_contended(exc):
+                raise
+            if time.monotonic() >= deadline:
+                _raise_file_lock_timeout(
+                    lock_name,
+                    timeout=timeout,
+                    purpose=purpose,
+                )
+            time.sleep(_FILE_LOCK_RETRY_SECONDS)
 
 
 def _acquire_file_lock(
@@ -426,6 +470,7 @@ def _acquire_file_lock(
 
         msvcrt_api: Any = msvcrt
         _ensure_windows_lock_byte(lock_file)
+        lock_name = getattr(lock_file, "name", "<unknown>")
         warned = False
         deadline: float | None = None
         timeout: float | None = None
@@ -444,7 +489,7 @@ def _acquire_file_lock(
                     timeout = _file_lock_timeout_seconds(purpose)
                     deadline = time.monotonic() + timeout
                     _warn_file_lock_contended(
-                        lock_file,
+                        lock_name,
                         exclusive=exclusive,
                         timeout=timeout,
                         purpose=purpose,
@@ -453,40 +498,18 @@ def _acquire_file_lock(
                 assert deadline is not None and timeout is not None
                 if time.monotonic() >= deadline:
                     _raise_file_lock_timeout(
-                        lock_file,
+                        lock_name,
                         timeout=timeout,
                         purpose=purpose,
                     )
-                time.sleep(_ASSET_LOCK_RETRY_SECONDS)
+                time.sleep(_FILE_LOCK_RETRY_SECONDS)
 
-    import fcntl
-
-    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-    try:
-        fcntl.flock(lock_file.fileno(), operation | fcntl.LOCK_NB)
-        return
-    except BlockingIOError:
-        pass
-    timeout = _file_lock_timeout_seconds(purpose)
-    deadline = time.monotonic() + timeout
-    _warn_file_lock_contended(
-        lock_file,
+    _acquire_posix_flock(
+        lock_file.fileno(),
+        lock_name=getattr(lock_file, "name", "<unknown>"),
         exclusive=exclusive,
-        timeout=timeout,
         purpose=purpose,
     )
-    while True:
-        try:
-            fcntl.flock(lock_file.fileno(), operation | fcntl.LOCK_NB)
-            return
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                _raise_file_lock_timeout(
-                    lock_file,
-                    timeout=timeout,
-                    purpose=purpose,
-                )
-            time.sleep(_ASSET_LOCK_RETRY_SECONDS)
 
 
 def _release_file_lock(lock_file: BinaryIO) -> None:
@@ -704,7 +727,12 @@ def _config_process_lock(lock_key: Path) -> Iterator[None]:
     lock_fd: int | None = None
     try:
         lock_fd = os.open(lock_key, flags)
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        _acquire_posix_flock(
+            lock_fd,
+            lock_name=str(lock_key),
+            exclusive=True,
+            purpose="configuration",
+        )
     except OSError as exc:
         if lock_fd is not None:
             os.close(lock_fd)
