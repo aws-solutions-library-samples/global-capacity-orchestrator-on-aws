@@ -116,7 +116,7 @@ coverage==7.13.5
     # via pytest-cov
 cronsim==2.7
     # via pydocket
-cryptography==49.0.0
+cryptography==50.0.0
     # via
     #   authlib
     #   joserfc

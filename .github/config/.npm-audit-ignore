@@ -19,19 +19,18 @@
 #   package-dir|package|advisory|node-path|exp:YYYY-MM-DD
 # =============================================================================
 
-# GHSA-mh99-v99m-4gvg — brace-expansion DoS via unbounded expansion length
-# (out-of-memory crash). Published 2026-07-24; affects <= 5.0.7, patched in
-# 5.0.8. The latest aws-cdk-lib (2.262.1, already in our lock) bundles
-# minimatch -> brace-expansion 5.0.7 inside its immutable npm tarball, so
-# npm audit fix and overrides cannot replace it and no rebuilt aws-cdk-lib
-# exists yet. The affected minimatch calls process synth-time,
-# developer-authored patterns — not untrusted remote input — the same
-# assessment AWS documented for the previous brace-expansion advisory in
+# GHSA-rgw5-rvv9-x895 (CVE-2026-69152) — brace-expansion DoS via unbounded
+# intermediate arrays, bypassing the CVE-2026-14257 mitigation. Published
+# 2026-08-01; affects >= 4.0.0 < 5.0.9, patched in 5.0.9. The latest
+# aws-cdk-lib (2.263.0, now in our lock — the bump that cleared the previous
+# GHSA-mh99-v99m-4gvg entry here) bundles minimatch -> brace-expansion 5.0.8
+# inside its immutable npm tarball, so npm audit fix and overrides cannot
+# replace it and no aws-cdk-lib release bundling 5.0.9 exists yet. The
+# affected minimatch calls process synth-time, developer-authored patterns —
+# not untrusted remote input — the same assessment AWS documented for the
+# earlier brace-expansion advisory in
 # https://github.com/aws/aws-cdk/issues/38257.
-# Advisory: https://github.com/advisories/GHSA-mh99-v99m-4gvg
-# Re-checked 2026-07-30: the regenerated root lock resolves aws-cdk-lib
-# 2.262.1 (the newest cdk-dia's range admits) and npm audit still reports the
-# same finding at the same node path, so the assessment above stands.
+# Advisory: https://github.com/advisories/GHSA-rgw5-rvv9-x895
 # Remove this entry and refresh package-lock.json as soon as an aws-cdk-lib
-# release bundles brace-expansion >= 5.0.8.
-.|brace-expansion|GHSA-mh99-v99m-4gvg|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-09-22
+# release bundles brace-expansion >= 5.0.9.
+.|brace-expansion|GHSA-rgw5-rvv9-x895|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-09-22

@@ -106,6 +106,57 @@ CVE-2026-34040 exp:2026-09-22
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-14257
 CVE-2026-14257 exp:2026-09-22
 
+# CVE-2026-69152 (GHSA-rgw5-rvv9-x895) — brace-expansion denial of service via
+# unbounded intermediate arrays, bypassing the CVE-2026-14257 mitigation
+# suppressed above. Published 2026-08-01, fixed upstream in brace-expansion
+# 5.0.9. Same vendored copy as CVE-2026-14257: npm ships brace-expansion 5.0.7
+# inside its own node_modules in the dev image, surfaced by
+# security:trivy:container-scan on Dockerfile.dev. The aws-cdk-lib bundled
+# copy in the root package-lock.json (5.0.8 after the 2.263.0 bump) is also
+# in the affected range; npm-audit tracks that one via the matching
+# GHSA-rgw5-rvv9-x895 entry in .npm-audit-ignore.
+#
+# Not clearable by a pin bump: checked 2026-08-04 — npm 12.0.2 (ARG
+# NPM_VERSION in Dockerfile.dev) is the latest npm release on any dist-tag
+# and still bundles brace-expansion 5.0.7; no aws-cdk-lib release bundles
+# 5.0.9 yet. Both copies live inside published tarballs where neither
+# `npm audit fix` nor an `overrides` entry can reach them.
+#
+# Low runtime risk: same exposure profile as CVE-2026-14257 above — the
+# expansion path is driven by contributor/CI-authored brace globs, not
+# untrusted remote input, and the dev image is never deployed to a cluster.
+#
+# Clears when npm ships a release that re-vendors brace-expansion >= 5.0.9:
+# bump ARG NPM_VERSION in Dockerfile.dev (plus the packageManager pins the
+# consistency check holds in lockstep) and drop this entry, along with the
+# matching .npm-audit-ignore entry once aws-cdk-lib re-bundles too.
+# Advisory: https://avd.aquasec.com/nvd/cve-2026-69152
+CVE-2026-69152 exp:2026-09-22
+
+# CVE-2026-69192 (GHSA-mwp4-54f8-5fhr) — ip-address parses leading-zero IPv4
+# octets as decimal while OS resolvers treat them as octal, enabling
+# SSRF/trust-boundary bypass in code that validates an address string and
+# then hands it to a resolver. Fixed upstream in ip-address 10.3.1. Present
+# only as ip-address 10.2.0 vendored inside npm's own node_modules
+# (socks-proxy-agent -> socks -> ip-address) in the dev image, surfaced by
+# security:trivy:container-scan on Dockerfile.dev.
+#
+# Not clearable by a pin bump: checked 2026-08-04 — npm 12.0.2 (ARG
+# NPM_VERSION in Dockerfile.dev) is the latest npm release on any dist-tag
+# and still bundles ip-address 10.2.0 inside its published tarball, out of
+# reach of `npm audit fix` and `overrides`.
+#
+# Low runtime risk: the flagged path only runs when npm connects through a
+# SOCKS proxy (npm's `proxy` config), and the address it parses is the
+# operator-configured proxy host — not untrusted remote input. The dev image
+# is a contributor/CI tool that is never deployed to a cluster.
+#
+# Clears when npm ships a release that re-vendors ip-address >= 10.3.1: bump
+# ARG NPM_VERSION in Dockerfile.dev (plus the packageManager pins the
+# consistency check holds in lockstep) and drop this entry.
+# Advisory: https://avd.aquasec.com/nvd/cve-2026-69192
+CVE-2026-69192 exp:2026-09-22
+
 # CVE-2026-56852 — golang.org/x/text at v0.33.0, statically linked into the
 # pinned kubectl binary (ARG KUBECTL_VERSION in Dockerfile.dev; the identical
 # v1.36.3 is fetched by lambda/helm-installer/Dockerfile). Surfaced by
