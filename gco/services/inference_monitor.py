@@ -27,11 +27,13 @@ Environment Variables:
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
 import re
 import secrets
+import signal
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -3844,18 +3846,46 @@ async def main() -> None:
     metrics_port = int(os.getenv("METRICS_PORT", "9090"))
     start_metrics_server(metrics_port, "inference-monitor", monitor.get_metrics)
 
-    while True:
-        try:
-            await monitor.start()
-        except KeyboardInterrupt:
-            logger.info("Shutting down inference monitor")
-            monitor.stop()
-            break
-        except Exception as e:
-            logger.error("Monitor crashed, restarting in 10s: %s", e, exc_info=True)
-            monitor.stop()
-            monitor._running = False
-            await asyncio.sleep(10)
+    # Kubernetes stops pods with SIGTERM. This process is PID 1 in its
+    # container, and PID 1 receives no kernel-default signal handling — so
+    # without an explicit handler SIGTERM was silently ignored, every pod
+    # rotation burned the full terminationGracePeriodSeconds, and the kubelet
+    # SIGKILLed the monitor mid-reconcile (exit 137). The handler flips the
+    # same stop flag the reconcile loop already honors, so shutdown waits for
+    # the in-flight cycle and exits 0 within one reconcile interval.
+    shutdown_requested = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _handle_sigterm() -> None:
+        logger.info("SIGTERM received; stopping inference monitor after current cycle")
+        shutdown_requested.set()
+        monitor.stop()
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
+    except NotImplementedError:
+        # Non-POSIX event loops (Windows dev environments running the unit
+        # suite) don't support loop signal handlers; in the Linux container
+        # this always succeeds.
+        logger.debug("Event loop does not support signal handlers; skipping SIGTERM hook")
+
+    try:
+        while not shutdown_requested.is_set():
+            try:
+                await monitor.start()
+            except KeyboardInterrupt:
+                logger.info("Shutting down inference monitor")
+                monitor.stop()
+                break
+            except Exception as e:
+                logger.error("Monitor crashed, restarting in 10s: %s", e, exc_info=True)
+                monitor.stop()
+                monitor._running = False
+                await asyncio.sleep(10)
+        logger.info("Inference monitor exited cleanly")
+    finally:
+        with contextlib.suppress(NotImplementedError, ValueError):
+            loop.remove_signal_handler(signal.SIGTERM)
 
 
 if __name__ == "__main__":

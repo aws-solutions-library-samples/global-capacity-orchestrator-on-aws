@@ -11,14 +11,14 @@
 #   - integration:dev-alias:finch                 — install latest Finch (rootful), build gco-dev, prove the generated `gco` alias runs
 #   - integration:dev-alias:none                  — prove setup-dev-alias.sh refuses cleanly when no runtime is installed
 #   - integration:dev-alias:podman                — install latest Podman, build gco-dev, prove the generated `gco` alias runs
-#   - integration:docker:cost-monitor             — build + import-based liveness
+#   - integration:docker:cost-monitor             — build + import smoke + functional boot/probe/shutdown contract
 #   - integration:docker:dev-container            — Dockerfile.dev native-arch matrix (amd64 + arm64 runners)
-#   - integration:docker:health-monitor           — build + /healthz + /readyz
+#   - integration:docker:health-monitor           — build + import smoke + functional boot/probe/shutdown contract
 #   - integration:docker:helm-installer           — build + `helm version`/`kubectl version`
-#   - integration:docker:inference-monitor        — build + import-based liveness
-#   - integration:docker:inference-proxy          — build + import-based liveness
-#   - integration:docker:manifest-processor       — build + /healthz + /readyz
-#   - integration:docker:queue-processor          — build + startup-banner check
+#   - integration:docker:inference-monitor        — build + import smoke + functional metrics/resilience/shutdown contract
+#   - integration:docker:inference-proxy          — build + import smoke + functional boot/probe/shutdown contract
+#   - integration:docker:manifest-processor       — build + import smoke + functional boot/probe/shutdown contract
+#   - integration:docker:queue-processor          — build + import smoke + moto-SQS consume/reject/exit-code contract
 #   - integration:docker:tls-certificate-manager  — build + Lambda handler import
 #   - integration:helm:charts-valid               — every charts.yaml (chart,version) resolves + renders with helm
 #   - integration:k8s:manifest-schema             — kubeconform schema validation + YAML/required-kinds/DAG checks
@@ -374,11 +374,31 @@ jobs:
           cache-from: type=gha,scope=cost-monitor
           cache-to: type=gha,mode=max,scope=cost-monitor,ignore-error=true
       - name: Verify image boots the module
-        # OpenCost, Kubernetes, and AWS integrations are exercised only in a
-        # deployed environment; this packaging smoke proves the image imports.
+        # Crisp early signal: distinguishes "cannot even import" from a boot
+        # failure in the functional test below.
         run: |
           docker run --rm cost-monitor:ci \
             python -c "import gco.services.cost_api as m; print('cost-monitor import OK:', m.__name__)"
+      - name: Functional container test
+        # Boots the image under the deployment manifest's pod-equivalent
+        # constraints (read-only root, tmpfs /tmp, uid 1000, all caps
+        # dropped) and asserts the serving contract: /healthz + /readyz
+        # (readiness must hold with OpenCost/S3 unreachable — the scheduled
+        # reporter degrades instead of dying), Prometheus /metrics, the
+        # manifest's preStop ["python","-c",...] exec shape against the live
+        # shell-less container, 10s stability, and graceful SIGTERM exit 0.
+        # OpenCost/S3 round-trips stay deployed-environment concerns.
+        run: |
+          .github/scripts/functional_container_test.sh \
+            --image cost-monitor:ci --name cost-monitor-fn --host-port 18080 \
+            --env "COST_REPORT_BUCKET=gco-ci-fn-bucket" \
+            --env "AWS_REGION=us-east-1" \
+            --probe "/healthz=200" \
+            --probe "/readyz=200=ready" \
+            --probe "/metrics=200" \
+            --exec-python "import time; time.sleep(0)" \
+            --min-uptime 10 \
+            --expect-stop-exit 0
 
   integration-docker-health-monitor:
     name: "integration:docker:health-monitor"
@@ -401,13 +421,58 @@ jobs:
           cache-from: type=gha,scope=health-monitor
           cache-to: type=gha,mode=max,scope=health-monitor,ignore-error=true
       - name: Verify image boots the module
-        # The FastAPI app's lifespan() calls kubernetes.config.load_incluster_config()
-        # / load_kube_config() on startup, both of which (correctly) fail without
-        # a real K8s API. The kind E2E job below covers the end-to-end HTTP path;
-        # this job's scope is "image builds + Python starts + module imports".
+        # Crisp early signal: distinguishes "cannot even import" from a boot
+        # failure in the functional test below.
         run: |
           docker run --rm health-monitor:ci \
             python -c "import gco.services.health_api as m; print('health-monitor import OK:', m.__name__)"
+      - name: Write stub kubeconfig
+        # lifespan() requires a loadable Kubernetes config. A static
+        # kubeconfig pointing at an unreachable apiserver (port 9, discard —
+        # refuses instantly) parses without connecting, which is exactly what
+        # lets the service reach its serving state outside a cluster. Live
+        # cluster behavior belongs to integration:kind:cluster-e2e.
+        run: |
+          cat > "${RUNNER_TEMP}/kubeconfig" <<'EOF'
+          apiVersion: v1
+          kind: Config
+          clusters:
+            - name: ci-stub
+              cluster:
+                server: https://127.0.0.1:9
+                insecure-skip-tls-verify: true
+          contexts:
+            - name: ci-stub
+              context:
+                cluster: ci-stub
+                user: ci-stub
+          current-context: ci-stub
+          users:
+            - name: ci-stub
+              user:
+                token: ci-stub-token
+          EOF
+      - name: Functional container test
+        # Boots the image under the deployment manifest's pod-equivalent
+        # constraints (read-only root, tmpfs /tmp, uid 1000, all caps
+        # dropped) and asserts the serving contract: probe endpoints, the
+        # auth-exempt /api/v1/health honestly reporting 503/unhealthy while
+        # the apiserver is unreachable, auth fail-closed (503, no
+        # AUTH_SECRET_ARN and no GCO_DEV_MODE), the manifest's preStop
+        # ["python","-c",...] exec shape against the live shell-less
+        # container, 10s stability, and graceful SIGTERM exit 0.
+        run: |
+          .github/scripts/functional_container_test.sh \
+            --image health-monitor:ci --name health-monitor-fn --host-port 18080 \
+            --kubeconfig "${RUNNER_TEMP}/kubeconfig" \
+            --probe "/healthz=200" \
+            --probe "/readyz=200=ready" \
+            --probe "/metrics=200" \
+            --probe "/api/v1/health=503=unhealthy" \
+            --probe "/api/v1/status=503=authentication not configured" \
+            --exec-python "import time; time.sleep(0)" \
+            --min-uptime 10 \
+            --expect-stop-exit 0
 
   integration-docker-manifest-processor:
     name: "integration:docker:manifest-processor"
@@ -426,13 +491,53 @@ jobs:
           cache-from: type=gha,scope=manifest-processor
           cache-to: type=gha,mode=max,scope=manifest-processor,ignore-error=true
       - name: Verify image boots the module
-        # Same rationale as integration:docker:health-monitor — the FastAPI
-        # app fails fast without a real K8s API, so the image-level test
-        # scope is "builds + imports". End-to-end HTTP coverage lives in
-        # integration:kind:cluster-e2e.
+        # Crisp early signal: distinguishes "cannot even import" from a boot
+        # failure in the functional test below.
         run: |
           docker run --rm manifest-processor:ci \
             python -c "import gco.services.manifest_api as m; print('manifest-processor import OK:', m.__name__)"
+      - name: Write stub kubeconfig
+        # Same rationale as integration:docker:health-monitor — parseable
+        # config, unreachable apiserver, no connection at load time.
+        run: |
+          cat > "${RUNNER_TEMP}/kubeconfig" <<'EOF'
+          apiVersion: v1
+          kind: Config
+          clusters:
+            - name: ci-stub
+              cluster:
+                server: https://127.0.0.1:9
+                insecure-skip-tls-verify: true
+          contexts:
+            - name: ci-stub
+              context:
+                cluster: ci-stub
+                user: ci-stub
+          current-context: ci-stub
+          users:
+            - name: ci-stub
+              user:
+                token: ci-stub-token
+          EOF
+      - name: Functional container test
+        # Boots the image under the deployment manifest's pod-equivalent
+        # constraints and asserts the serving contract: /readyz 200 once the
+        # lifespan completes, the auth-exempt /api/v1/health performing a
+        # LIVE apiserver check and honestly reporting 503/disconnected, auth
+        # fail-closed 503 on a guarded route (no AUTH_SECRET_ARN and no
+        # GCO_DEV_MODE), the manifest's preStop ["python","-c",...] exec
+        # shape, and graceful SIGTERM exit 0 (queue-worker drain included).
+        run: |
+          .github/scripts/functional_container_test.sh \
+            --image manifest-processor:ci --name manifest-processor-fn --host-port 18080 \
+            --kubeconfig "${RUNNER_TEMP}/kubeconfig" \
+            --probe "/healthz=200" \
+            --probe "/readyz=200=ready" \
+            --probe "/metrics=200" \
+            --probe "/api/v1/health=503=disconnected" \
+            --probe "/api/v1/templates=503=authentication not configured" \
+            --exec-python "import time; time.sleep(0)" \
+            --expect-stop-exit 0
 
   integration-docker-inference-monitor:
     name: "integration:docker:inference-monitor"
@@ -451,14 +556,53 @@ jobs:
           cache-from: type=gha,scope=inference-monitor
           cache-to: type=gha,mode=max,scope=inference-monitor,ignore-error=true
       - name: Verify image runs and imports
-        # inference-monitor needs a real Kubernetes API on startup, so we
-        # don't run the reconciliation loop. The Dockerfile's HEALTHCHECK
-        # is an exec probe (`python -c "print('ok')"`), so mirror that here:
-        # the meaningful assertion is that the image starts a Python
-        # interpreter and the gco.services.inference_monitor module imports.
+        # Crisp early signal: distinguishes "cannot even import" from a boot
+        # failure in the functional test below.
         run: |
           docker run --rm inference-monitor:ci \
             python -c "import gco.services.inference_monitor as m; print('inference-monitor import OK:', m.__name__)"
+      - name: Write stub kubeconfig
+        # Same rationale as integration:docker:health-monitor — parseable
+        # config, unreachable apiserver, no connection at load time.
+        run: |
+          cat > "${RUNNER_TEMP}/kubeconfig" <<'EOF'
+          apiVersion: v1
+          kind: Config
+          clusters:
+            - name: ci-stub
+              cluster:
+                server: https://127.0.0.1:9
+                insecure-skip-tls-verify: true
+          contexts:
+            - name: ci-stub
+              context:
+                cluster: ci-stub
+                user: ci-stub
+          current-context: ci-stub
+          users:
+            - name: ci-stub
+              user:
+                token: ci-stub-token
+          EOF
+      - name: Functional container test
+        # Runs the real reconciliation loop against an unreachable apiserver
+        # and DynamoDB and asserts the operational contract: the Prometheus
+        # metrics server on :9090 serves gco_service_info, the deployment
+        # manifest's exact exec-probe command works against the live
+        # shell-less container, the loop survives 20s of failing reconcile
+        # attempts without crashing (leader-election/API errors are caught,
+        # not fatal), and SIGTERM exits 0 within the reconcile interval via
+        # the PID-1 signal handler in main().
+        run: |
+          .github/scripts/functional_container_test.sh \
+            --image inference-monitor:ci --name inference-monitor-fn --host-port 19090 \
+            --container-port 9090 --wait-path /metrics \
+            --kubeconfig "${RUNNER_TEMP}/kubeconfig" \
+            --env "AWS_REGION=us-east-1" \
+            --probe "/metrics=200=gco_service_info" \
+            --exec-python "import os; assert os.path.exists('/proc/1')" \
+            --min-uptime 20 \
+            --expect-stop-exit 0
 
   integration-docker-inference-proxy:
     name: "integration:docker:inference-proxy"
@@ -477,11 +621,28 @@ jobs:
           cache-from: type=gha,scope=inference-proxy
           cache-to: type=gha,mode=max,scope=inference-proxy,ignore-error=true
       - name: Verify image boots the module
-        # End-to-end HTTP coverage lives in the kind E2E job below; this
-        # dedicated image job proves the image builds and imports its entrypoint.
+        # Crisp early signal: distinguishes "cannot even import" from a boot
+        # failure in the functional test below.
         run: |
           docker run --rm inference-proxy:ci \
             python -c "import gco.services.inference_api as m; print('inference-proxy import OK:', m.__name__)"
+      - name: Functional container test
+        # The proxy has no startup dependencies (per-request resolution), so
+        # it boots with no env at all. Asserts the serving contract under the
+        # deployment manifest's pod-equivalent constraints: probe endpoints,
+        # auth fail-closed 503 on the inference surface (no AUTH_SECRET_ARN
+        # and no GCO_DEV_MODE — the middleware answers before routing), the
+        # manifest's preStop ["python","-c",...] exec shape, and graceful
+        # SIGTERM exit 0 (uvicorn's 900s drain applies only to open streams).
+        run: |
+          .github/scripts/functional_container_test.sh \
+            --image inference-proxy:ci --name inference-proxy-fn --host-port 18080 \
+            --probe "/healthz=200" \
+            --probe "/readyz=200" \
+            --probe "/metrics=200" \
+            --probe "/inference/v1/models=503=authentication not configured" \
+            --exec-python "import time; time.sleep(0)" \
+            --expect-stop-exit 0
 
   integration-docker-queue-processor:
     name: "integration:docker:queue-processor"
@@ -500,15 +661,189 @@ jobs:
           cache-from: type=gha,scope=queue-processor
           cache-to: type=gha,mode=max,scope=queue-processor,ignore-error=true
       - name: Verify image boots the module
-        # queue-processor is a short-lived KEDA ScaledJob — it has no HTTP
-        # endpoint. With no JOB_QUEUE_URL / SQS_QUEUE_URL set, the module
-        # exits cleanly on startup. We check that by running the module
-        # directly and asserting a clean import path.
+        # Crisp early signal: distinguishes "cannot even import" from a
+        # behavioral failure in the SQS contract tests below.
         run: |
           docker run --rm \
             -e AWS_REGION=us-east-1 \
             queue-processor:ci \
             python -c "import gco.services.queue_processor as m; print('queue-processor import OK:', m.__name__)"
+      - name: Write stub kubeconfig
+        # main() loads a Kubernetes config before touching SQS. A parseable
+        # kubeconfig pointing at an unreachable apiserver satisfies the load
+        # without a cluster; the policy-rejection case below never reaches
+        # the apply step, so no live apiserver is needed.
+        run: |
+          cat > "${RUNNER_TEMP}/kubeconfig" <<'EOF'
+          apiVersion: v1
+          kind: Config
+          clusters:
+            - name: ci-stub
+              cluster:
+                server: https://127.0.0.1:9
+                insecure-skip-tls-verify: true
+          contexts:
+            - name: ci-stub
+              context:
+                cluster: ci-stub
+                user: ci-stub
+          current-context: ci-stub
+          users:
+            - name: ci-stub
+              user:
+                token: ci-stub-token
+          EOF
+      - name: Start moto SQS and create the job queue
+        # moto (the same 5.2.2 the test suite pins in requirements-lock.txt,
+        # installed with the lock as a constraint) provides a real SQS wire
+        # API on the runner. botocore honors AWS_ENDPOINT_URL_SQS, so the
+        # container talks to it with zero code changes — the KEDA ScaledJob
+        # consume path runs for real: receive, validate, delete/retain.
+        run: |
+          set -euo pipefail
+          pip install --constraint requirements-lock.txt "moto[server]==5.2.2"
+          nohup moto_server -H 127.0.0.1 -p 5000 > "${RUNNER_TEMP}/moto.log" 2>&1 &
+          code=""
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5000/moto-api/data.json || true)
+            [ "${code}" = "200" ] && break
+            sleep 1
+          done
+          if [ "${code}" != "200" ]; then
+            echo "::error::moto server never became ready"
+            cat "${RUNNER_TEMP}/moto.log"
+            exit 1
+          fi
+          aws sqs create-queue \
+            --queue-name gco-ci-jobs \
+            --endpoint-url http://127.0.0.1:5000 \
+            --query QueueUrl --output text
+        env:
+          AWS_ACCESS_KEY_ID: testing
+          AWS_SECRET_ACCESS_KEY: testing
+          AWS_REGION: us-east-1
+      - name: Consume from an empty queue (exit 0)
+        # One pod per SQS message is the ScaledJob contract; an empty poll
+        # must exit 0 so KEDA scale-downs don't register as job failures.
+        # --network host lets the container reach moto on the runner's
+        # loopback; the pod-equivalent hardening flags stay on.
+        run: |
+          set -euo pipefail
+          set +e
+          output=$(docker run --rm --network host \
+            --read-only --tmpfs /tmp --user 1000:1000 --cap-drop ALL \
+            --security-opt no-new-privileges \
+            -v "${RUNNER_TEMP}/kubeconfig:/kubeconfig:ro" \
+            -e KUBECONFIG=/kubeconfig \
+            -e JOB_QUEUE_URL="http://127.0.0.1:5000/123456789012/gco-ci-jobs" \
+            -e AWS_ENDPOINT_URL_SQS=http://127.0.0.1:5000 \
+            -e AWS_ACCESS_KEY_ID=testing \
+            -e AWS_SECRET_ACCESS_KEY=testing \
+            -e AWS_REGION=us-east-1 \
+            queue-processor:ci 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "${output}"
+          if [ "${rc}" -ne 0 ] || ! printf '%s\n' "${output}" | grep -q "No messages in queue"; then
+            echo "::error::expected clean empty-queue exit 0, got rc=${rc}"
+            exit 1
+          fi
+      - name: Reject a policy-violating job (exit 1, message retained)
+        # The security-critical behavior: a privileged-container manifest
+        # must fail prevalidation, exit 1, and stay in the queue for the
+        # visibility-timeout retry / DLQ redrive — never be acknowledged.
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/privileged-job.json" <<'EOF'
+          {
+            "job_id": "ci-privileged-reject",
+            "manifests": [
+              {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {"name": "evil", "namespace": "gco-jobs"},
+                "spec": {
+                  "containers": [
+                    {
+                      "name": "c",
+                      "image": "busybox",
+                      "securityContext": {"privileged": true}
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+          EOF
+          aws sqs send-message \
+            --endpoint-url http://127.0.0.1:5000 \
+            --queue-url "http://127.0.0.1:5000/123456789012/gco-ci-jobs" \
+            --message-body "file://${RUNNER_TEMP}/privileged-job.json" \
+            --query MessageId --output text
+          set +e
+          output=$(docker run --rm --network host \
+            --read-only --tmpfs /tmp --user 1000:1000 --cap-drop ALL \
+            --security-opt no-new-privileges \
+            -v "${RUNNER_TEMP}/kubeconfig:/kubeconfig:ro" \
+            -e KUBECONFIG=/kubeconfig \
+            -e JOB_QUEUE_URL="http://127.0.0.1:5000/123456789012/gco-ci-jobs" \
+            -e AWS_ENDPOINT_URL_SQS=http://127.0.0.1:5000 \
+            -e AWS_ACCESS_KEY_ID=testing \
+            -e AWS_SECRET_ACCESS_KEY=testing \
+            -e AWS_REGION=us-east-1 \
+            queue-processor:ci 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "${output}"
+          if [ "${rc}" -ne 1 ]; then
+            echo "::error::expected exit 1 for a policy-violating job, got ${rc}"
+            exit 1
+          fi
+          printf '%s\n' "${output}" | grep -q "privileged containers are not permitted"
+          printf '%s\n' "${output}" | grep -q "failed prevalidation"
+          # The unacknowledged message must still exist (in flight until the
+          # visibility timeout, then retried and eventually DLQ'd).
+          attrs=$(aws sqs get-queue-attributes \
+            --endpoint-url http://127.0.0.1:5000 \
+            --queue-url "http://127.0.0.1:5000/123456789012/gco-ci-jobs" \
+            --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+            --query 'Attributes' --output json)
+          printf '%s\n' "${attrs}"
+          total=$(printf '%s' "${attrs}" | python3 -c "
+          import json, sys
+          attrs = json.load(sys.stdin)
+          visible = int(attrs['ApproximateNumberOfMessages'])
+          in_flight = int(attrs['ApproximateNumberOfMessagesNotVisible'])
+          print(visible + in_flight)
+          ")
+          if [ "${total}" -ne 1 ]; then
+            echo "::error::rejected message was not retained in the queue (total=${total})"
+            exit 1
+          fi
+        env:
+          AWS_ACCESS_KEY_ID: testing
+          AWS_SECRET_ACCESS_KEY: testing
+          AWS_REGION: us-east-1
+      - name: Fail fast without JOB_QUEUE_URL (exit 1)
+        # Misconfiguration must be loud: no queue URL means exit 1 with an
+        # explicit log line, never a silent success.
+        run: |
+          set -euo pipefail
+          set +e
+          output=$(docker run --rm \
+            --read-only --tmpfs /tmp --user 1000:1000 --cap-drop ALL \
+            --security-opt no-new-privileges \
+            -v "${RUNNER_TEMP}/kubeconfig:/kubeconfig:ro" \
+            -e KUBECONFIG=/kubeconfig \
+            -e AWS_REGION=us-east-1 \
+            queue-processor:ci 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "${output}"
+          if [ "${rc}" -ne 1 ] || ! printf '%s\n' "${output}" | grep -q "JOB_QUEUE_URL not set"; then
+            echo "::error::expected exit 1 with 'JOB_QUEUE_URL not set', got rc=${rc}"
+            exit 1
+          fi
 
   integration-docker-helm-installer:
     name: "integration:docker:helm-installer"

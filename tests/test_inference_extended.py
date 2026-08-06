@@ -891,6 +891,45 @@ class TestMainFunction:
         ):
             await main()
 
+    @pytest.mark.asyncio
+    async def test_main_sigterm_stops_cleanly(self):
+        """SIGTERM must stop the loop and return (pod rotations send SIGTERM).
+
+        The monitor runs as PID 1 in its distroless container, where an
+        unhandled SIGTERM is silently ignored and the kubelet escalates to
+        SIGKILL after the grace period. main() installs a loop signal handler
+        that flips the monitor's stop flag; this drives it end to end by
+        delivering a real SIGTERM to the test process.
+        """
+        import asyncio
+        import os
+        import signal
+
+        from gco.services.inference_monitor import main
+
+        running = {"flag": True}
+
+        async def fake_start():
+            while running["flag"]:
+                await asyncio.sleep(0.01)
+
+        mock_monitor = MagicMock()
+        mock_monitor.start = fake_start
+        mock_monitor.stop = MagicMock(side_effect=lambda: running.update(flag=False))
+        mock_monitor.get_metrics.return_value = {"cluster_id": "test"}
+
+        with patch(
+            "gco.services.inference_monitor.create_inference_monitor_from_env",
+            return_value=mock_monitor,
+        ):
+            loop = asyncio.get_running_loop()
+            loop.call_later(0.05, os.kill, os.getpid(), signal.SIGTERM)
+            # A hang here (the pre-fix behavior: nothing ever breaks the loop)
+            # fails via the timeout instead of wedging the suite.
+            await asyncio.wait_for(main(), timeout=10)
+
+        mock_monitor.stop.assert_called()
+
 
 # =============================================================================
 # InferenceManager add_region / remove_region
