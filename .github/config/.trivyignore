@@ -180,3 +180,33 @@ CVE-2026-69192 exp:2026-09-22
 # lambda/helm-installer/Dockerfile, then drop this entry.
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-56852
 CVE-2026-56852 exp:2026-09-22
+
+# CVE-2026-50163 (GHSA-77gc-fj98-665h) — oras.land/oras-go/v2 v2.6.1
+# information disclosure / arbitrary file access via crafted tarball
+# hardlinks, statically linked into the pinned Helm binary
+# (helm-v4.2.3-linux-amd64, lambda/helm-installer/Dockerfile). Surfaced by
+# security:trivy:container-scan on the helm-installer Lambda image — the
+# only scanned image that carries helm. Fixed in oras-go v2.6.2.
+#
+# Not introduced by any change of ours: the advisory reached the Trivy DB
+# after the last green main run and appeared on an unchanged helm binary.
+#
+# Not yet clearable by a pin bump: checked 2026-08-05 — v4.2.3 is the
+# latest helm release on both active lines (v3.21.3 likewise) and both
+# still pin oras-go v2.6.1; the bump to v2.6.2 is merged on helm master
+# only, so it lands in a future helm patch release.
+#
+# Low runtime risk: the flagged path is OCI-registry chart *pull*
+# extraction. The helm-installer Lambda pulls exactly the four
+# version-pinned charts in charts.yaml from operator-configured
+# registries (public.ecr.aws, ghcr.io/slinkyproject) during stack
+# deploys — not untrusted, attacker-supplied artifacts — and the Lambda
+# runs only at deploy time, not as a long-lived network service.
+#
+# Clears when a helm release ships with oras-go >= v2.6.2: bump the helm
+# pin + SHA256 trust anchor in lambda/helm-installer/Dockerfile, the
+# HELM_VERSION/HELM_SHA256 env pairs in integration-tests.yml and
+# deps-scan.yml, and the expected pins in tests/test_supply_chain_integrity.py,
+# then drop this entry.
+# Advisory: https://avd.aquasec.com/nvd/cve-2026-50163
+CVE-2026-50163 exp:2026-09-22

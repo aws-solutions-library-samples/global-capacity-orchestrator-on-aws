@@ -116,6 +116,7 @@ USER gco
 # importing the real service entry module as the runtime user proves the ELF
 # closure, CA trust anchors, zoneinfo, and NSS identity are complete. A gap
 # fails every build — including CDK deploys — instead of the pod.
+# hadolint ignore=SC1088
 RUN ["python", "-c", "import bz2, ctypes, getpass, hashlib, lzma, socket, sqlite3, ssl, zlib, zoneinfo; import gco.services.queue_processor; assert getpass.getuser() == 'gco'; assert ssl.create_default_context().cert_store_stats()['x509_ca'] > 0; zoneinfo.ZoneInfo('UTC'); print('distroless runtime smoke OK')"]
 
 # Run the queue processor
