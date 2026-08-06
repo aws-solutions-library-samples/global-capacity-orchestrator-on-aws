@@ -213,7 +213,9 @@ spec:
           lifecycle:
             preStop:
               exec:
-                command: ["/bin/sh", "-c", "sleep 10"]
+                # The distroless image has no shell; python is the only
+                # executable, so the drain sleep runs through it.
+                command: ["python", "-c", "import time; time.sleep(10)"]
           volumeMounts:
             - name: tmp
               mountPath: /tmp

@@ -1,7 +1,15 @@
 # Dockerfile for Inference Proxy Service
 # Routes authenticated inference requests to regional inference endpoints.
 # Runs as a Deployment in gco-system behind the shared platform ingress.
-FROM python:3.14.6-slim
+#
+# Two-stage distroless build: the pinned python slim builder installs the
+# locked dependency set and applies Debian security patches, then
+# dockerfiles/build_scratch_rootfs.py stages a minimal root filesystem
+# (interpreter, site-packages, app tree, exact ELF closure, CA trust,
+# zoneinfo, dpkg scanner metadata) that the FROM scratch runtime stage copies
+# wholesale. The deployed image contains no shell, package manager, or
+# coreutils. See the script's module docstring for the full rationale.
+FROM python:3.14.6-slim AS builder
 
 # Set working directory
 WORKDIR /app
@@ -9,7 +17,9 @@ WORKDIR /app
 # Apply Debian security patches at build time.
 # APT_SECURITY_EPOCH busts the CI layer cache so a freshly-published
 # trixie-security patch isn't masked by a stale cached upgrade layer;
-# bump the date when a new fix needs pulling.
+# bump the date when a new fix needs pulling. The patched libraries are
+# exactly what build_scratch_rootfs.py copies into the runtime rootfs, so
+# this remains the mechanism that ships fresh glibc/OpenSSL fixes.
 #
 # No OS packages are installed beyond the patched base.
 ARG APT_SECURITY_EPOCH=2026-07-30
@@ -18,9 +28,6 @@ RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
     && apt-get upgrade -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-
-# Create non-root user with the UID/GID enforced by the pod security context
-RUN groupadd -r -g 1000 gco && useradd -r -g gco -u 1000 gco
 
 # Install only this service's direct runtime roots. The roots live in the
 # image-inference-proxy optional-dependency group; Python 3.14's tomllib emits
@@ -49,10 +56,11 @@ RUN python -c 'import pathlib, tomllib; config = tomllib.loads(pathlib.Path("pyp
     && python -m pip uninstall -y pip
 
 # Nothing installs packages at runtime, so pip is uninstalled above in the
-# same layer that finishes using it: installer tooling stays out of the
-# deployed attack surface and out of the image scanners' findings feed.
-# (3.14-slim ships no setuptools/wheel, and the lock declares no runtime
-# dependency on either, so pip is the only installer present.)
+# same layer that finishes using it — before the runtime rootfs is staged:
+# installer tooling stays out of the deployed attack surface and out of the
+# image scanners' findings feed. (3.14-slim ships no setuptools/wheel, and
+# the lock declares no runtime dependency on either, so pip is the only
+# installer present. The rootfs script also drops ensurepip's bundled wheel.)
 
 # Keep source-only edits from invalidating the expensive dependency layer.
 COPY gco/ ./gco/
@@ -64,16 +72,45 @@ COPY gco/ ./gco/
 # (site-packages is already compiled by pip at install time.)
 RUN python -m compileall -q ./gco
 
+# Assemble the minimal runtime rootfs under /rootfs. Fails the build loudly
+# on any unresolved shared library, unattributed file, or missing trust
+# anchor — closure gaps must never ship as crash-looping pods.
+COPY dockerfiles/build_scratch_rootfs.py /opt/build/build_scratch_rootfs.py
+RUN python /opt/build/build_scratch_rootfs.py
+
+# ---------------------------------------------------------------------------
+# Runtime stage: distroless. Only the staged rootfs ships — no shell, no
+# apt/dpkg tooling, no coreutils. Kubelet exec hooks therefore use
+# ["python", "-c", ...] (see the deployment manifest), never /bin/sh.
+FROM scratch
+
+COPY --from=builder /rootfs/ /
+
+# scratch provides no environment at all, so PATH is set explicitly — CMD
+# and any kubelet exec command resolve `python` through it. HOME matches the
+# synthesized passwd entry for uid 1000 (the UID/GID enforced by the pod
+# security context; no login machinery exists to derive it).
 # PYTHONDONTWRITEBYTECODE documents that runtime bytecode writes are
 # neither needed (everything is precompiled) nor possible (read-only root
 # filesystem). PYTHONUNBUFFERED keeps log lines ordered and complete
 # through container runtimes and crashes.
-ENV PYTHONPATH=/app \
+ENV PATH=/usr/local/bin:/usr/bin:/bin \
+    HOME=/home/gco \
+    PYTHONPATH=/app \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Switch to non-root user
+WORKDIR /app
+
+# Switch to non-root user (synthesized in the rootfs /etc/passwd as uid 1000,
+# matching the pod securityContext)
 USER gco
+
+# Build-time runtime smoke, exec form (no shell exists to RUN through):
+# importing the real service entry module as the runtime user proves the ELF
+# closure, CA trust anchors, zoneinfo, and NSS identity are complete. A gap
+# fails every build — including CDK deploys — instead of the pod.
+RUN ["python", "-c", "import bz2, ctypes, getpass, hashlib, lzma, socket, sqlite3, ssl, zlib, zoneinfo; import gco.services.inference_api; assert getpass.getuser() == 'gco'; assert ssl.create_default_context().cert_store_stats()['x509_ca'] > 0; zoneinfo.ZoneInfo('UTC'); print('distroless runtime smoke OK')"]
 
 # Expose port
 EXPOSE 8080

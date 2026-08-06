@@ -1626,10 +1626,11 @@ class TestInferenceProxyAutoscalingManifest:
         assert pod_spec["terminationGracePeriodSeconds"] == 930
         env = {item["name"]: item.get("value") for item in pod_spec["containers"][0]["env"]}
         assert env["GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS"] == "900"
+        # python, not /bin/sh: the distroless service image ships no shell.
         assert pod_spec["containers"][0]["lifecycle"]["preStop"]["exec"]["command"] == [
-            "/bin/sh",
+            "python",
             "-c",
-            "sleep 10",
+            "import time; time.sleep(10)",
         ]
         assert pdb["spec"]["minAvailable"] == 2
         assert pdb["spec"]["selector"]["matchLabels"] == {"app": "inference-proxy"}

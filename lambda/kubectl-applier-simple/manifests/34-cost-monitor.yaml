@@ -121,7 +121,9 @@ spec:
           lifecycle:
             preStop:
               exec:
-                command: ["/bin/sh", "-c", "sleep 5"]
+                # The distroless image has no shell; python is the only
+                # executable, so the drain sleep runs through it.
+                command: ["python", "-c", "import time; time.sleep(5)"]
           volumeMounts:
             - name: aws-iam-token
               mountPath: /var/run/secrets/eks.amazonaws.com/serviceaccount
