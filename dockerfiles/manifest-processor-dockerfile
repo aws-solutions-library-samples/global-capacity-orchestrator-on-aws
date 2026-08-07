@@ -75,8 +75,11 @@ RUN python -m compileall -q ./gco
 
 # Assemble the minimal runtime rootfs under /rootfs. Fails the build loudly
 # on any unresolved shared library, unattributed file, or missing trust
-# anchor — closure gaps must never ship as crash-looping pods.
-COPY dockerfiles/build_scratch_rootfs.py /opt/build/build_scratch_rootfs.py
+# anchor — closure gaps must never ship as crash-looping pods. Also probes
+# which stdlib extensions the builder itself can import and writes that
+# manifest next to runtime_smoke.py in /opt/build for the final stage's
+# bind-mounted parity check.
+COPY dockerfiles/build_scratch_rootfs.py dockerfiles/runtime_smoke.py /opt/build/
 RUN python /opt/build/build_scratch_rootfs.py
 
 # ---------------------------------------------------------------------------
@@ -106,12 +109,18 @@ WORKDIR /app
 # matching the pod securityContext)
 USER gco
 
-# Build-time runtime smoke, exec form (no shell exists to RUN through):
-# importing the real service entry module as the runtime user proves the ELF
-# closure, CA trust anchors, zoneinfo, and NSS identity are complete. A gap
-# fails every build — including CDK deploys — instead of the pod.
-# hadolint ignore=SC1088
-RUN ["python", "-c", "import bz2, ctypes, getpass, hashlib, lzma, socket, sqlite3, ssl, zlib, zoneinfo; import gco.services.manifest_api; assert getpass.getuser() == 'gco'; assert ssl.create_default_context().cert_store_stats()['x509_ca'] > 0; zoneinfo.ZoneInfo('UTC'); print('distroless runtime smoke OK')"]
+# Build-time runtime smoke, exec form (no shell exists to RUN through).
+# runtime_smoke.py imports every stdlib extension the builder could import —
+# the set is derived into runtime_smoke_manifest.json by the rootfs script,
+# so no module list is maintained by hand — plus the real service entry
+# module, as the runtime user, and verifies NSS identity, CA trust anchors,
+# and tzdata. A gap fails every build — including CDK deploys — instead of
+# the pod. The bind mount exists only for this RUN (BuildKit — the default
+# in Docker 23+, buildx, and finch), so the deployed image ships no build
+# tooling; a delete in a later layer would merely hide it, layers being
+# additive.
+RUN --mount=type=bind,from=builder,source=/opt/build,target=/opt/build \
+    ["python", "/opt/build/runtime_smoke.py", "gco.services.manifest_api"]
 
 # Expose port
 EXPOSE 8080

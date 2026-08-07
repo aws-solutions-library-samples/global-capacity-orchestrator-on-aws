@@ -29,13 +29,24 @@ for the redistributed Debian bits).
 The script is stdlib-only, runs as root inside the builder stage, and fails
 loudly: an unresolvable ``ldd`` entry, a library with no owning package, or a
 missing trust anchor each abort the image build rather than surfacing as a
-crash-looping pod. The final stage additionally runs an exec-form import
-smoke as the runtime user, so a closure gap in a *new* dependency breaks the
-build, not the deployment.
+crash-looping pod.
+
+The verification contract is derived, not maintained: this script probes
+which stdlib C extensions are actually importable in the builder (everything
+under ``lib-dynload``, each imported in an isolated subprocess) and writes
+the result as ``runtime_smoke_manifest.json`` next to ``runtime_smoke.py``
+in ``/opt/build``. The final stage reaches both through a BuildKit bind
+mount that exists only for its smoke RUN — the deployed image ships no build
+tooling — and requires every builder-importable extension to import on
+scratch as the runtime user. That builder-to-scratch parity also catches
+``dlopen``'d libraries ldd cannot see, so a closure gap in a *new*
+dependency breaks the build, not the deployment, without anyone curating a
+module list by hand.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -54,6 +65,15 @@ DPKG_STATUS = Path("/var/lib/dpkg/status")
 RUNTIME_USER = "gco"
 RUNTIME_UID = 1000
 RUNTIME_HOME = "/home/gco"
+
+# Enumeration/probe sanity floor: these stdlib extensions must exist and be
+# importable in every supported builder image. This is not a maintained
+# feature list — the manifest itself is fully derived — it is a tripwire so
+# a silently broken glob or probe (yielding an empty or gutted manifest, and
+# with it a vacuously passing smoke) fails the build instead.
+CRITICAL_STDLIB_EXTENSIONS = frozenset(
+    {"_bz2", "_ctypes", "_hashlib", "_lzma", "_socket", "_sqlite3", "_ssl", "_zoneinfo", "zlib"}
+)
 
 # dlopen'd by glibc for thread-cancellation unwinding; never appears as a
 # DT_NEEDED of CPython, so ldd cannot discover it. Seeded explicitly.
@@ -284,6 +304,89 @@ def copy_trust_and_time() -> None:
     stage_path(Path("/etc/timezone")).write_text("Etc/UTC\n", encoding="utf-8")
 
 
+_PROBE_CODE = """
+import importlib
+import json
+import sys
+
+results = {}
+for name in json.load(sys.stdin):
+    try:
+        importlib.import_module(name)
+        results[name] = None
+    except BaseException as exc:  # noqa: BLE001 — record every failure mode
+        results[name] = f"{type(exc).__name__}: {exc}"
+print(json.dumps(results))
+"""
+
+
+def probe_stdlib_extensions() -> tuple[list[str], dict[str, str]]:
+    """Import every ``lib-dynload`` extension in the builder; split the result.
+
+    Returns ``(importable, broken)``. The probe runs in one isolated
+    subprocess (``-I``: no env, no cwd on ``sys.path``) so the assembly
+    process stays untouched and the result reflects a clean interpreter.
+    ``broken`` covers extensions the *builder itself* cannot import —
+    ``python:*-slim`` ships ``_tkinter`` without libtk, for example — which
+    are exactly the ones the runtime smoke must not demand on scratch.
+    """
+    modules = sorted(
+        {path.name.split(".")[0] for path in (USR_LOCAL / "lib").glob("python*/lib-dynload/*.so")}
+    )
+    if not modules:
+        fail("no lib-dynload extensions found; stdlib enumeration broke")
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", _PROBE_CODE],
+        input=json.dumps(modules),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        fail(f"stdlib import probe crashed: {result.stderr.strip()}")
+    outcomes: dict[str, str | None] = json.loads(result.stdout)
+    importable = sorted(name for name, error in outcomes.items() if error is None)
+    broken = {name: error for name, error in sorted(outcomes.items()) if error is not None}
+    missing_critical = CRITICAL_STDLIB_EXTENSIONS - set(importable)
+    if missing_critical:
+        fail(
+            "stdlib probe sanity floor violated — critical extensions not importable "
+            f"in the builder: {sorted(missing_critical)}"
+        )
+    return importable, broken
+
+
+def write_runtime_smoke_manifest(importable: list[str], broken: dict[str, str]) -> None:
+    """Write the derived parity manifest next to this script (in the builder).
+
+    The manifest is the builder-to-scratch parity contract: every extension
+    listed must import in the final image. It deliberately lands in
+    ``/opt/build`` — NOT in the staged rootfs — because the final stage
+    reaches it through a BuildKit bind mount that exists only for the smoke
+    RUN, so no build tooling ships in the deployed image. ``expected_broken``
+    is an audit trail of what the builder itself could not import (and why),
+    so a reader of the build log can distinguish "excluded by parity" from
+    "forgotten".
+    """
+    smoke_source = Path(__file__).with_name("runtime_smoke.py")
+    if not smoke_source.is_file():
+        fail(f"runtime_smoke.py not found next to this script: {smoke_source}")
+    manifest = {
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "runtime_user": RUNTIME_USER,
+        "stdlib_extensions": importable,
+        "expected_broken": broken,
+    }
+    Path(__file__).with_name("runtime_smoke_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    print(
+        f"build_scratch_rootfs: runtime smoke manifest lists {len(importable)} "
+        f"builder-importable stdlib extensions; expected-broken: "
+        f"{', '.join(broken) or 'none'}"
+    )
+
+
 def write_identity_and_os_metadata() -> None:
     """Minimal NSS database, os-release, and top-level filesystem shape."""
     etc = stage_path(Path("/etc"))
@@ -345,6 +448,9 @@ def main() -> None:
 
     write_identity_and_os_metadata()
     copy_trust_and_time()
+
+    importable, broken = probe_stdlib_extensions()
+    write_runtime_smoke_manifest(importable, broken)
 
     packages = owning_packages(real_files)
     # Always attribute the non-library payloads staged above.
