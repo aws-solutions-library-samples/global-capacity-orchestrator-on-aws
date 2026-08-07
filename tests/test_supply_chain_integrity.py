@@ -377,7 +377,7 @@ def test_dev_container_matrix_keeps_native_amd64_and_arm64_coverage() -> None:
 def test_direct_docker_scanners_are_prepulled_with_retry() -> None:
     workflow = yaml.safe_load(_read(".github/workflows/security.yml"))
     scanner_jobs = {
-        "security-trufflehog-secrets": "trufflesecurity/trufflehog:3.95.2",
+        "security-trufflehog-secrets": "trufflesecurity/trufflehog:3.96.0",
         "security-gitleaks-secrets": "zricethezav/gitleaks:v8.30.1",
         "security-checkov-iac": "bridgecrew/checkov:3.2.524",
         "security-kics-iac": "checkmarx/kics:v2.1.20",

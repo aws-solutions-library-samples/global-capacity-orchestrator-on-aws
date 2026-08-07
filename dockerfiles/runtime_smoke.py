@@ -57,11 +57,18 @@ def main() -> int:
 
     for name in extensions:
         try:
+            # Dynamic import IS the check: the names come from the manifest
+            # this build's rootfs script derived (root-written, read-only at
+            # runtime), never from untrusted input.
+            # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
             importlib.import_module(name)
         except BaseException as exc:  # noqa: BLE001 — aggregate every breakage
             failures.append(f"stdlib extension {name}: {type(exc).__name__}: {exc}")
 
     try:
+        # The entry module is a literal baked into each Dockerfile's smoke
+        # RUN, not user input; importing it dynamically is this script's job.
+        # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
         importlib.import_module(entry_module)
     except BaseException as exc:  # noqa: BLE001
         failures.append(f"entry module {entry_module}: {type(exc).__name__}: {exc}")

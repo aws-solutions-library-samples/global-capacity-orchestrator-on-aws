@@ -315,8 +315,10 @@ class TestStdlibProbe:
 
     def test_critical_floor_names_are_real_stdlib_extensions(self, rootfs_mod: ModuleType) -> None:
         # Guards the floor itself against typos: every anchor must import in
-        # the interpreter running this suite (the same pin CI uses).
+        # the interpreter running this suite (the same pin CI uses). The
+        # names are a frozen constant from the build script, not user input.
         for name in rootfs_mod.CRITICAL_STDLIB_EXTENSIONS:
+            # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
             importlib.import_module(name)
 
 

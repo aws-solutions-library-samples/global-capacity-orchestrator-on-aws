@@ -347,12 +347,46 @@ jobs:
         # Keep the tag in lockstep with the run step below.
         uses: ./.github/actions/docker-pull-with-retry
         with:
-          images: trufflesecurity/trufflehog:3.95.2
+          images: trufflesecurity/trufflehog:3.96.0
       - name: Run TruffleHog
+        # --exclude-detectors=lob: Lob's key-verification endpoint began
+        # accepting arbitrary strings, so with --only-verified every ordinary
+        # identifier in the repo — 1,500+ test function names — comes back
+        # Verified:true. Confirmed 2026-08-07 on both 3.95.2 and the 3.96.0
+        # bump (latest); re-check on the next version bump and drop the
+        # exclusion once upstream's Lob verifier discriminates again.
+        #
+        # Retry semantics: TruffleHog exits 183 when verified secrets are
+        # found under --fail — a real finding, failed immediately and never
+        # retried. Any other non-zero exit (verifier network flap, container
+        # runtime hiccup) is transient and retried; the uploaded report
+        # reflects the final attempt.
         run: |
-          docker run --rm -v "$PWD":/repo \
-            trufflesecurity/trufflehog:3.95.2 \
-            filesystem /repo --only-verified --fail --json > trufflehog-report.json 2>&1
+          set -euo pipefail
+          attempts=3
+          for i in $(seq 1 "${attempts}"); do
+            set +e
+            docker run --rm -v "$PWD":/repo \
+              trufflesecurity/trufflehog:3.96.0 \
+              filesystem /repo --only-verified --fail --exclude-detectors=lob \
+              --json > trufflehog-report.json 2>&1
+            rc=$?
+            set -e
+            if [ "${rc}" -eq 0 ]; then
+              echo "TruffleHog passed on attempt ${i}/${attempts}."
+              exit 0
+            fi
+            if [ "${rc}" -eq 183 ]; then
+              echo "::error::TruffleHog found verified secrets (exit 183)."
+              exit 183
+            fi
+            echo "TruffleHog attempt ${i}/${attempts} failed transiently (exit ${rc})."
+            if [ "${i}" -lt "${attempts}" ]; then
+              sleep 15
+            fi
+          done
+          echo "::error::TruffleHog did not complete after ${attempts} attempts."
+          exit 1
       - name: Upload trufflehog report
         if: always()
         uses: ./.github/actions/upload-artifact-with-retry
