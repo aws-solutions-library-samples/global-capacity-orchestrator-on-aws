@@ -18,6 +18,13 @@ from gco.models import (
     ResourceUtilization,
 )
 
+# tests/_floci.py hosts the session fixtures for the opt-in Floci emulator
+# layer (see docs/FLOCI_TESTING.md). Registering it as a plugin makes those
+# fixtures resolvable from the tests/test_floci_*.py modules without each of
+# them re-importing fixture symbols; when GCO_FLOCI_ENDPOINT is unset the
+# modules skip at collection time and none of these fixtures ever run.
+pytest_plugins = ["tests._floci"]
+
 # ============================================================================
 # Session-scoped: ensure Lambda build directories exist for CDK tests
 # ============================================================================
