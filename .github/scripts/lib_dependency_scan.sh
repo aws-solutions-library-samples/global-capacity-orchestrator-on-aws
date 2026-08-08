@@ -147,21 +147,41 @@ for raw in requires:
 # registry is the domain and repo is the path within that registry.
 #
 # Examples:
-#   parse_image_registry "nvcr.io/nvidia/cuda"        → "nvcr.io|nvidia/cuda"
-#   parse_image_registry "pytorch/pytorch"            → "docker.io|pytorch/pytorch"
-#   parse_image_registry "python"                     → "docker.io|library/python"
-#   parse_image_registry "public.ecr.aws/eks/coredns" → "public.ecr.aws|eks/coredns"
+#   parse_image_registry "nvcr.io/nvidia/cuda"          → "nvcr.io|nvidia/cuda"
+#   parse_image_registry "pytorch/pytorch"              → "docker.io|pytorch/pytorch"
+#   parse_image_registry "python"                       → "docker.io|library/python"
+#   parse_image_registry "public.ecr.aws/eks/coredns"   → "public.ecr.aws|eks/coredns"
+#   parse_image_registry "docker.io/library/busybox"    → "docker.io|library/busybox"
+#   parse_image_registry "docker.io/python"             → "docker.io|library/python"
+#
+# A first path component containing a dot, a port colon, or the literal
+# ``localhost`` is treated as a registry domain — the same heuristic container
+# runtimes apply — so a newly referenced registry needs no code change here.
+# The previous enumerated-registry list silently misparsed fully-qualified
+# Docker Hub references (``docker.io/library/busybox`` became repository
+# ``docker.io/library/busybox`` under a second ``docker.io``), which made
+# their tag lookups fail every month.
 parse_image_registry() {
   local image="$1"
-  local registry="" repo=""
+  local registry="" repo="" first=""
   case "$image" in
-    nvcr.io/*|gcr.io/*|quay.io/*|ghcr.io/*|registry.k8s.io/*|public.ecr.aws/*)
-      registry="$(echo "$image" | cut -d'/' -f1)"
-      repo="$(echo "$image" | cut -d'/' -f2-)"
-      ;;
     */*)
-      registry="docker.io"
-      repo="$image"
+      first="${image%%/*}"
+      case "$first" in
+        *.*|*:*|localhost)
+          registry="$first"
+          repo="${image#*/}"
+          # Docker Hub keeps official images under the implicit library/
+          # namespace; restore it for a fully-qualified single-segment repo.
+          if [ "$registry" = "docker.io" ] && [ "${repo#*/}" = "$repo" ]; then
+            repo="library/$repo"
+          fi
+          ;;
+        *)
+          registry="docker.io"
+          repo="$image"
+          ;;
+      esac
       ;;
     *)
       registry="docker.io"
@@ -204,6 +224,56 @@ compare_semver() {
   else
     echo "older"
   fi
+}
+
+# newer_same_variant_tag <current_tag>
+#
+# Reads a raw registry tag list on stdin (one tag per line) and prints the
+# newest tag in the *same variant family* as <current_tag> that is strictly
+# newer than it — or nothing when the pin is already the family's newest.
+#
+# A variant family shares the exact literal suffix after the leading numeric
+# version: ``24.01-py3`` compares only against ``NN[.NN…]-py3`` tags,
+# ``2.6.0-cuda12.6-cudnn9-runtime`` only against its identical variant
+# suffix, ``3.14.6-slim`` only against ``-slim`` tags, and a bare ``1.38.0``
+# only against bare ``X.Y[.Z]`` tags. This mirrors the same-family scoping
+# the Bedrock model check uses: moving to a different variant (another CUDA
+# line, another base distro, dropping ``-slim``) is a human decision, not
+# drift, so it is never suggested. A leading ``v`` is accepted on either
+# side and ignored for comparison.
+#
+# The strict ``^v?X.Y.Z$`` filter this replaces matched nothing for every
+# suffix-tagged repository (NGC, GHCR Slurm, CUDA, PyTorch), which — under
+# ``pipefail`` — surfaced as a permanent "tag lookup failed" every month.
+newer_same_variant_tag() {
+  python3 -c "
+import re, sys
+
+current = sys.argv[1]
+match = re.match(r'^v?(\d+(?:\.\d+)*)(.*)\$', current)
+if not match:
+    raise SystemExit(0)
+suffix = match.group(2)
+current_key = [int(part) for part in match.group(1).split('.')]
+
+pattern = re.compile(r'^v?(\d+(?:\.\d+)*)' + re.escape(suffix) + r'\$')
+best_key = None
+best_tag = None
+for line in sys.stdin:
+    tag = line.strip()
+    if not tag:
+        continue
+    candidate = pattern.match(tag)
+    if candidate is None:
+        continue
+    key = [int(part) for part in candidate.group(1).split('.')]
+    if key <= current_key:
+        continue
+    if best_key is None or key > best_key:
+        best_key, best_tag = key, tag
+if best_tag:
+    print(best_tag)
+" "$1" 2>/dev/null
 }
 
 # parse_accelerator_drift_count <json-summary-file>

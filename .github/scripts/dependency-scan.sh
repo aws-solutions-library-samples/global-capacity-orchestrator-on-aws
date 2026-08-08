@@ -390,26 +390,34 @@ check_image() {
   registry="$(echo "$parsed" | cut -d'|' -f1)"
   repo="$(echo "$parsed" | cut -d'|' -f2)"
 
-  local tags=""
-  if ! tags="$(skopeo list-tags "docker://${registry}/${repo}" 2>/dev/null \
-    | jq -r '.Tags[]' 2>/dev/null \
-    | grep -E "^v?[0-9]+\.[0-9]+\.[0-9]+$" \
-    | sort -V | tail -10)"; then
+  # Fetch and filter separately. A registry/network failure marks the scan
+  # incomplete, while "the registry answered and nothing newer exists in
+  # this variant family" is an up-to-date pin. The previous single pipeline
+  # conflated the two under pipefail: the strict bare-semver grep matched
+  # nothing for suffix-tagged repositories (…-py3, …-cuda…, …-ubuntu…), so
+  # they reported "tag lookup failed" every month even though the registry
+  # was fine.
+  local raw_tags=""
+  if ! raw_tags="$(skopeo list-tags --retry-times 3 "docker://${registry}/${repo}" 2>/dev/null \
+    | jq -r '.Tags[]' 2>/dev/null)" || [ -z "$raw_tags" ]; then
     mark_scan_incomplete "Container registry tag lookup failed for ${registry}/${repo}."
     return
   fi
 
-  if [ -z "$tags" ]; then
-    mark_scan_incomplete "Container registry returned no stable semver tags for ${registry}/${repo}."
+  local latest_tag
+  latest_tag="$(printf '%s\n' "$raw_tags" | newer_same_variant_tag "$current_tag")" || latest_tag=""
+
+  if [ -n "$latest_tag" ]; then
+    echo "  - ${image}:${current_tag} -> ${latest_tag}"
+    echo "${image}|${current_tag}|${latest_tag}" >> "$DOCKER_RESULTS"
     return
   fi
 
-  local latest_tag
-  latest_tag="$(echo "$tags" | tail -1)"
-
-  if [ "$(compare_semver "$current_tag" "$latest_tag")" = "newer" ]; then
-    echo "  - ${image}:${current_tag} -> ${latest_tag}"
-    echo "${image}|${current_tag}|${latest_tag}" >> "$DOCKER_RESULTS"
+  # No newer family member. If the pinned tag itself is no longer listed,
+  # the pin points at something the registry stopped advertising (renamed
+  # variant scheme, withdrawn tag) — that deserves eyes, not silence.
+  if ! printf '%s\n' "$raw_tags" | grep -qxF -e "$current_tag" -e "v${current_tag#v}" -e "${current_tag#v}"; then
+    mark_scan_incomplete "Pinned tag ${current_tag} is no longer listed by ${registry}/${repo}."
   fi
 }
 
@@ -656,19 +664,27 @@ if ! aws sts get-caller-identity >/dev/null 2>&1; then
   EKS_K8S_SKIP_REASON="No AWS credentials available (scan needs eks:DescribeClusterVersions). Configure OIDC to enable."
   echo "  $EKS_K8S_SKIP_REASON"
 else
-  # ``--include-all`` returns every cluster version, not just the
-  # default. ``--version-status STANDARD_SUPPORT`` filters to minors
-  # still in standard support — we don't want to flag the extended-
-  # support lifecycle as "newer."
+  # ``--version-status STANDARD_SUPPORT`` returns every minor still in
+  # standard support — we don't want to flag the extended-support
+  # lifecycle as "newer." It must be the only selector: the API rejects
+  # combining it with ``--include-all`` ("Only one of the defaultOnly,
+  # clusterVersions, includeAll or status request parameters is accepted
+  # at a time"), which is exactly how this check silently broke once.
+  # stderr is captured into the skip reason so the next API-shape change
+  # is diagnosable from the report instead of reading as a generic skip.
+  EKS_K8S_ERR_FILE="$(mktemp)"
   CLUSTER_VERSIONS_JSON="$(aws eks describe-cluster-versions \
-    --include-all \
     --version-status STANDARD_SUPPORT \
-    --output json 2>/dev/null)" || CLUSTER_VERSIONS_JSON=""
+    --output json 2>"$EKS_K8S_ERR_FILE")" || CLUSTER_VERSIONS_JSON=""
 
   if [ -z "$CLUSTER_VERSIONS_JSON" ]; then
-    EKS_K8S_SKIP_REASON="EKS Kubernetes version lookup failed or returned an empty response."
+    EKS_K8S_ERR="$(head -n 1 "$EKS_K8S_ERR_FILE" 2>/dev/null | tr -d '\r')"
+    EKS_K8S_SKIP_REASON="EKS Kubernetes version lookup failed${EKS_K8S_ERR:+: ${EKS_K8S_ERR}}"
+    [ -z "$EKS_K8S_ERR" ] && EKS_K8S_SKIP_REASON="EKS Kubernetes version lookup returned an empty response."
     echo "  $EKS_K8S_SKIP_REASON"
+    rm -f "$EKS_K8S_ERR_FILE"
   else
+    rm -f "$EKS_K8S_ERR_FILE"
     # Max of ``clusterVersion`` across all rows is the newest standard-
     # support minor. We use Python for a proper numeric sort so 1.10
     # beats 1.9 (sort -V already does this, but Python keeps the data
@@ -1959,6 +1975,8 @@ echo "Version consistency:      $CONSISTENCY_COUNT"
 echo "Base-image epochs:        $EPOCH_COUNT"
 echo "Suppression expiries:     $SUPPRESSION_COUNT"
 echo "Lockfile freshness:       $LOCKFILE_COUNT"
+INCOMPLETE_LOOKUP_COUNT="$(sort -u "$INCOMPLETE_REASONS_FILE" 2>/dev/null | grep -c . || true)"
+echo "Incomplete lookups:       ${INCOMPLETE_LOOKUP_COUNT:-0}"
 
 SCAN_COMPLETE=true
 if ! dependency_scan_is_complete \

@@ -125,6 +125,72 @@ setup() {
     [ "$result" = "nvcr.io|nvidia/k8s/dcgm-exporter" ]
 }
 
+@test "parse_image_registry: fully-qualified docker.io keeps a single registry prefix" {
+    # Regression: this used to parse as repo "docker.io/library/busybox"
+    # under a second docker.io, failing the tag lookup every month.
+    result="$(parse_image_registry "docker.io/library/busybox")"
+    [ "$result" = "docker.io|library/busybox" ]
+}
+
+@test "parse_image_registry: docker.io org repo is not given library/" {
+    result="$(parse_image_registry "docker.io/nvidia/cuda")"
+    [ "$result" = "docker.io|nvidia/cuda" ]
+}
+
+@test "parse_image_registry: docker.io single-segment repo gets library/ restored" {
+    result="$(parse_image_registry "docker.io/python")"
+    [ "$result" = "docker.io|library/python" ]
+}
+
+@test "parse_image_registry: unlisted dotted registry is honored without a code change" {
+    result="$(parse_image_registry "my.registry.example/team/app")"
+    [ "$result" = "my.registry.example|team/app" ]
+}
+
+@test "parse_image_registry: registry with a port is treated as a registry" {
+    result="$(parse_image_registry "registry.example:5000/team/app")"
+    [ "$result" = "registry.example:5000|team/app" ]
+}
+
+# ── newer_same_variant_tag ───────────────────────────────────────────────────
+
+@test "newer_same_variant_tag: suffixed family compares within the same variant" {
+    result="$(printf '%s\n' 24.01-py3 25.02-py3 26.07-py3 26.08-rockylinux9 \
+        | newer_same_variant_tag "24.01-py3")"
+    [ "$result" = "26.07-py3" ]
+}
+
+@test "newer_same_variant_tag: bare semver pin never matches suffixed tags" {
+    result="$(printf '%s\n' 1.38.0 1.39.0 1.39.1-glibc 2.0.0-musl \
+        | newer_same_variant_tag "1.38.0")"
+    [ "$result" = "1.39.0" ]
+}
+
+@test "newer_same_variant_tag: multi-part variant suffix must match exactly" {
+    result="$(printf '%s\n' 2.6.0-cuda12.6-cudnn9-runtime 2.13.0-cuda12.6-cudnn9-runtime \
+        2.13.0-cuda12.8-cudnn9-runtime 2.13.0-cuda12.6-cudnn9-devel \
+        | newer_same_variant_tag "2.6.0-cuda12.6-cudnn9-runtime")"
+    [ "$result" = "2.13.0-cuda12.6-cudnn9-runtime" ]
+}
+
+@test "newer_same_variant_tag: leading v is accepted and preserved" {
+    result="$(printf '%s\n' v0.5.16 v0.5.17 0.4.0 \
+        | newer_same_variant_tag "v0.5.16")"
+    [ "$result" = "v0.5.17" ]
+}
+
+@test "newer_same_variant_tag: empty when the pin is the family's newest" {
+    result="$(printf '%s\n' 0.11.0-gpu 0.12.0-gpu 0.12.0-cpu \
+        | newer_same_variant_tag "0.12.0-gpu")"
+    [ -z "$result" ]
+}
+
+@test "newer_same_variant_tag: numeric comparison beats lexicographic order" {
+    result="$(printf '%s\n' 9.9.9 10.0.0 \
+        | newer_same_variant_tag "9.9.9")"
+    [ "$result" = "10.0.0" ]
+}
+
 # ── is_semver_tag ────────────────────────────────────────────────────────────
 
 @test "is_semver_tag: v1.2.3 is semver" {
