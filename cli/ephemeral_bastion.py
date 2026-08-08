@@ -2,9 +2,11 @@
 
 ``gco monitoring open --via-ssm <instance-id>`` tunnels to a private EKS
 endpoint through an *existing* SSM-managed instance. This module lets the CLI
-**create that instance on demand** — a minimal, self-terminating ``t3.micro`` in
-the cluster VPC — and tear it down when the port-forward session ends, so an
-operator doesn't have to keep a standing bastion around just to view Grafana.
+**create that instance on demand** — a minimal, self-terminating ``t3.micro``
+(falling back through equivalent burstable types when a Region or AZ can't
+launch one) in the cluster VPC — and tear it down when the port-forward
+session ends, so an operator doesn't have to keep a standing bastion around
+just to view Grafana.
 
 Orphan safeguards (defence in depth — a crash, ``Ctrl-C``, or a forgotten
 teardown must never leave a paid instance running):
@@ -81,6 +83,29 @@ def bastion_trust_policy(region: str) -> dict[str, object]:
 SSM_MANAGED_POLICY_ARN = ssm_managed_policy_arn("us-east-1")
 
 BASTION_INSTANCE_TYPE = "t3.micro"
+
+# Fallback chain when the preferred type cannot be launched in the target
+# subnet — a Region/AZ that lacks the type entirely, or transient
+# InsufficientInstanceCapacity. Ordered cheapest-first and all x86_64 (the
+# resolved AL2023 AMI is x86_64, so an arm64 type can never be substituted
+# without also changing the AMI). The bastion only forwards an SSM tunnel, so
+# any burstable nano/micro/small class is dimensionally identical for the job.
+BASTION_INSTANCE_TYPE_FALLBACKS: tuple[str, ...] = (
+    "t3a.micro",
+    "t3.small",
+    "t2.micro",
+)
+
+# EC2 error markers that mean "this instance type won't launch here" — the
+# cue to try the next type rather than fail the tunnel. Anything else
+# (auth, quota on vCPUs, malformed request) still raises immediately.
+_INSTANCE_TYPE_UNAVAILABLE_MARKERS = (
+    "InsufficientInstanceCapacity",
+    "Unsupported",
+    "InstanceTypeNotSupported",
+    "unsupported instance type",
+    "not supported in your requested Availability Zone",
+)
 
 # Public SSM parameter that always resolves to the latest Amazon Linux 2023
 # x86_64 AMI in the target region (t3.micro is x86_64).
@@ -662,6 +687,74 @@ def launch_bastion(
     )
 
 
+def _is_instance_type_unavailable(error: Exception) -> bool:
+    """Return whether ``error`` means the type can't launch in this subnet.
+
+    Matches EC2's ``InsufficientInstanceCapacity`` (transient capacity) and
+    ``Unsupported`` family ("not supported in your requested Availability
+    Zone", Regions that never offered the type). Deliberately narrow:
+    authorization, vCPU-quota, and malformed-request errors do not match, so
+    they fail immediately instead of burning the fallback chain.
+    """
+    message = str(error)
+    return any(marker in message for marker in _INSTANCE_TYPE_UNAVAILABLE_MARKERS)
+
+
+def launch_bastion_with_fallback(
+    *,
+    network: BastionNetwork,
+    ami_id: str,
+    region: str,
+    ttl_minutes: int,
+    project_name: str = DEFAULT_PROJECT_NAME,
+    instance_types: tuple[str, ...] = (BASTION_INSTANCE_TYPE, *BASTION_INSTANCE_TYPE_FALLBACKS),
+) -> tuple[str, str]:
+    """Launch the bastion, walking the type chain when a type is unavailable.
+
+    Tries each candidate in order and returns ``(instance_id, instance_type)``
+    for the first successful launch. Only unavailability errors advance the
+    chain; every other failure propagates unchanged from :func:`launch_bastion`
+    (which still owns the instance-profile propagation retry per attempt).
+    Raises the last unavailability error when every candidate is exhausted.
+    """
+    if not instance_types:
+        raise ValueError("instance_types must name at least one candidate")
+    last_error: Exception | None = None
+    for candidate in instance_types:
+        try:
+            instance_id = launch_bastion(
+                network=network,
+                ami_id=ami_id,
+                region=region,
+                ttl_minutes=ttl_minutes,
+                project_name=project_name,
+                instance_type=candidate,
+            )
+        except RuntimeError as exc:  # noqa: PERF203 — bounded fallback chain
+            if not _is_instance_type_unavailable(exc):
+                raise
+            last_error = exc
+            logger.warning(
+                "Instance type %s is unavailable in %s (%s); trying the next fallback.",
+                candidate,
+                region,
+                network.subnet_id,
+            )
+            continue
+        if candidate != instance_types[0]:
+            logger.info(
+                "Launched ephemeral bastion on fallback instance type %s "
+                "(preferred %s unavailable).",
+                candidate,
+                instance_types[0],
+            )
+        return instance_id, candidate
+    raise RuntimeError(
+        f"No bastion instance type in {list(instance_types)} could be launched in "
+        f"{region} ({network.subnet_id}); last error: {last_error}"
+    )
+
+
 def wait_until_ssm_online(
     instance_id: str,
     region: str,
@@ -705,10 +798,16 @@ def create_ephemeral_bastion(
     ami_id = resolve_bastion_ami(region)
     network = resolve_bastion_network(cluster, region)
     ensure_bastion_iam(project_name, region)
-    instance_id = launch_bastion(
+    instance_id, launched_type = launch_bastion_with_fallback(
         network=network, ami_id=ami_id, region=region, ttl_minutes=ttl, project_name=project_name
     )
-    logger.info("Launched ephemeral bastion %s in %s (%s).", instance_id, region, network.subnet_id)
+    logger.info(
+        "Launched ephemeral bastion %s (%s) in %s (%s).",
+        instance_id,
+        launched_type,
+        region,
+        network.subnet_id,
+    )
     if wait_online:
         try:
             wait_until_ssm_online(instance_id, region)

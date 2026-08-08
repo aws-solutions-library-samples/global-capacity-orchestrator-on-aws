@@ -3908,7 +3908,9 @@ gco cluster tunnel [OPTIONS]
 | `--bastion-ttl-minutes` | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`). |
 | `--yes` / `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
 
-The `auto` bastion is a minimal `t3.micro` in the cluster VPC that reuses the
+The `auto` bastion is a minimal `t3.micro` (falling back through `t3a.micro`,
+`t3.small`, then `t2.micro` when a Region or AZ can't launch the preferred
+type) in the cluster VPC that reuses the
 cluster security group (no new security group, and **no inbound ports** — SSM is
 outbound-only), requires IMDSv2, self-terminates after `--bastion-ttl-minutes`,
 and is tagged `gco:ephemeral=true`. It is torn down automatically when the tunnel

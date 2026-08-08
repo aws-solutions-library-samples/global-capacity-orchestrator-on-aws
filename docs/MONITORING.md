@@ -133,7 +133,9 @@ against `https://localhost:8443` with the real endpoint as the TLS server name.
 It requires the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
 locally and an SSM-managed instance in the VPC that can reach the endpoint.
 
-`--via-ssm auto` provisions that instance for you: a minimal `t3.micro` in the
+`--via-ssm auto` provisions that instance for you: a minimal `t3.micro` (with
+automatic fallback through `t3a.micro`, `t3.small`, then `t2.micro` when the
+preferred type isn't launchable in the Region or AZ) in the
 cluster VPC that reuses the cluster security group (no new security group, and
 **no inbound ports** — SSM is agent-initiated outbound only), requires IMDSv2,
 self-terminates after `--bastion-ttl-minutes` (default 120), and is tagged

@@ -441,6 +441,105 @@ class TestLaunchBastion:
             )
 
 
+class TestLaunchBastionFallback:
+    """The type chain advances only on unavailability, never on other errors."""
+
+    def _net(self) -> eb.BastionNetwork:
+        return eb.BastionNetwork(
+            vpc_id="vpc-0123456789abcdef0",
+            subnet_id="subnet-0123456789abcdef0",
+            security_group_id="sg-0123456789abcdef0",
+        )
+
+    def _launch(self, monkeypatch: pytest.MonkeyPatch, fake: object) -> tuple[str, str]:
+        monkeypatch.setattr(eb, "launch_bastion", fake)
+        return eb.launch_bastion_with_fallback(
+            network=self._net(), ami_id="ami-0123456789abcdef0", region="us-east-1", ttl_minutes=120
+        )
+
+    def test_preferred_type_wins_without_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        attempted: list[str] = []
+
+        def _fake(**kwargs: object) -> str:
+            attempted.append(str(kwargs["instance_type"]))
+            return "i-0123456789abcdef0"
+
+        instance_id, launched_type = self._launch(monkeypatch, _fake)
+        assert instance_id == "i-0123456789abcdef0"
+        assert launched_type == eb.BASTION_INSTANCE_TYPE
+        assert attempted == [eb.BASTION_INSTANCE_TYPE]
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "An error occurred (InsufficientInstanceCapacity) calling RunInstances",
+            "Your requested instance type (t3.micro) is not supported in your "
+            "requested Availability Zone (use1-az3)",
+            "An error occurred (Unsupported) when calling the RunInstances operation",
+        ],
+    )
+    def test_unavailable_type_advances_to_the_next_candidate(
+        self, monkeypatch: pytest.MonkeyPatch, message: str
+    ) -> None:
+        attempted: list[str] = []
+
+        def _fake(**kwargs: object) -> str:
+            attempted.append(str(kwargs["instance_type"]))
+            if len(attempted) == 1:
+                raise RuntimeError(message)
+            return "i-0123456789abcdef0"
+
+        instance_id, launched_type = self._launch(monkeypatch, _fake)
+        assert instance_id == "i-0123456789abcdef0"
+        assert launched_type == eb.BASTION_INSTANCE_TYPE_FALLBACKS[0]
+        assert attempted == [eb.BASTION_INSTANCE_TYPE, eb.BASTION_INSTANCE_TYPE_FALLBACKS[0]]
+
+    def test_other_errors_raise_immediately_without_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        attempted: list[str] = []
+
+        def _fake(**kwargs: object) -> str:
+            attempted.append(str(kwargs["instance_type"]))
+            raise RuntimeError("UnauthorizedOperation")
+
+        with pytest.raises(RuntimeError, match="UnauthorizedOperation"):
+            self._launch(monkeypatch, _fake)
+        assert attempted == [eb.BASTION_INSTANCE_TYPE]
+
+    def test_exhausted_chain_reports_every_candidate_and_last_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        attempted: list[str] = []
+
+        def _fake(**kwargs: object) -> str:
+            attempted.append(str(kwargs["instance_type"]))
+            raise RuntimeError("InsufficientInstanceCapacity")
+
+        with pytest.raises(RuntimeError, match="No bastion instance type"):
+            self._launch(monkeypatch, _fake)
+        assert attempted == [eb.BASTION_INSTANCE_TYPE, *eb.BASTION_INSTANCE_TYPE_FALLBACKS]
+
+    def test_empty_chain_is_a_programming_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with pytest.raises(ValueError, match="at least one candidate"):
+            eb.launch_bastion_with_fallback(
+                network=self._net(),
+                ami_id="ami-0123456789abcdef0",
+                region="us-east-1",
+                ttl_minutes=120,
+                instance_types=(),
+            )
+
+    def test_every_candidate_is_a_valid_x86_type_shape(self) -> None:
+        # The resolved AMI is x86_64; an arm64 candidate (t4g.*) would boot
+        # nothing. Guard the chain's shape so a future edit can't break that.
+        for candidate in (eb.BASTION_INSTANCE_TYPE, *eb.BASTION_INSTANCE_TYPE_FALLBACKS):
+            assert eb._INSTANCE_TYPE_RE.match(candidate), candidate
+            assert not candidate.startswith(("t4g", "m6g", "m7g", "c6g", "c7g", "r6g", "r7g")), (
+                f"{candidate} is an arm64 family but the bastion AMI is x86_64"
+            )
+
+
 class TestWaitOnline:
     def test_returns_when_online(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(eb, "_run_aws", lambda cmd, **k: "Online")
