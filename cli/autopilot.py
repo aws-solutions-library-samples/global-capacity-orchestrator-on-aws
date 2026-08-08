@@ -6,11 +6,14 @@ ready to operate GCO:
 
 * **Amazon Bedrock backend.** The session talks to Bedrock through the
   caller's AWS credentials (``CLAUDE_CODE_USE_BEDROCK=1``) and defaults to
-  the same canonical model the rest of GCO uses —
-  ``cdk.json`` ``context.bedrock.default_model_id``, resolved through
-  :mod:`gco.bedrock` so Mission sampling, the capacity advisor, and
-  autopilot can never drift apart. Any Claude model or inference profile
-  available on Bedrock can be substituted with ``--model``.
+  GCO's Claude Code model default — ``cdk.json``
+  ``context.bedrock.claude_code_default_model_id``, resolved through
+  :mod:`gco.bedrock`. The key is deliberately separate from the advisory
+  ``default_model_id`` that Mission sampling and the capacity advisor
+  share: repointing the interactive agent and repointing advisory Converse
+  calls are independent decisions, and future agent runners (Codex,
+  opencode, ...) get their own sibling keys. Any Claude model or inference
+  profile available on Bedrock can be substituted with ``--model``.
 * **GCO MCP server.** Wired in automatically — from the local checkout when
   autopilot runs inside one (so uncommitted MCP changes are live), otherwise
   from the release tag matching the installed ``gco-cli`` version.
@@ -46,7 +49,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from gco.bedrock import get_default_bedrock_model_id
+from gco.bedrock import get_default_claude_code_model_id
 
 from . import __version__
 
@@ -369,13 +372,15 @@ def resolve_model(explicit: str | None) -> tuple[str, list[str]]:
     """Resolve the Bedrock model id and return it with any advisory warnings.
 
     Precedence: ``--model`` flag > ``GCO_AUTOPILOT_MODEL`` env > the
-    canonical ``cdk.json`` default. The result is advisory-validated only:
-    Bedrock ids for Claude contain ``anthropic``/``claude``, but application
-    inference-profile ARNs are opaque, so an unfamiliar id produces a
-    warning rather than a refusal.
+    ``cdk.json`` Claude Code default
+    (``context.bedrock.claude_code_default_model_id``, deliberately separate
+    from the advisory default Mission and the capacity advisor share). The
+    result is advisory-validated only: Bedrock ids for Claude contain
+    ``anthropic``/``claude``, but application inference-profile ARNs are
+    opaque, so an unfamiliar id produces a warning rather than a refusal.
     """
     warnings: list[str] = []
-    model = explicit or os.environ.get(_MODEL_ENV) or get_default_bedrock_model_id()
+    model = explicit or os.environ.get(_MODEL_ENV) or get_default_claude_code_model_id()
     model = model.strip()
     lowered = model.lower()
     if "anthropic" not in lowered and "claude" not in lowered:

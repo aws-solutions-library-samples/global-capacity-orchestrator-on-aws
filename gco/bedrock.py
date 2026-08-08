@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 _BEDROCK_CONTEXT_KEY = "bedrock"
 _DEFAULT_MODEL_ID_KEY = "default_model_id"
+_CLAUDE_CODE_MODEL_ID_KEY = "claude_code_default_model_id"
 _THINKING_KEY = "thinking"
 _THINKING_EFFORT_KEY = "effort"
 # Effort levels accepted in ``cdk.json``. This is deliberately the
@@ -126,11 +127,8 @@ def _canonical_cdk_json_path() -> Path:
     )
 
 
-def _bedrock_configuration_from_payload(
-    payload: Any,
-    path: Path,
-) -> BedrockDefaultConfiguration:
-    """Extract and strictly validate the canonical Bedrock configuration."""
+def _bedrock_block_from_payload(payload: Any, path: Path) -> dict[str, Any]:
+    """Validate the document structure down to the ``context.bedrock`` object."""
     if not isinstance(payload, dict):
         raise BedrockModelConfigurationError(f"{path}: document root must be an object")
 
@@ -143,6 +141,15 @@ def _bedrock_configuration_from_payload(
         raise BedrockModelConfigurationError(
             f"{path}: context.{_BEDROCK_CONTEXT_KEY} must be an object"
         )
+    return bedrock
+
+
+def _bedrock_configuration_from_payload(
+    payload: Any,
+    path: Path,
+) -> BedrockDefaultConfiguration:
+    """Extract and strictly validate the canonical advisory configuration."""
+    bedrock = _bedrock_block_from_payload(payload, path)
 
     model_id = bedrock.get(_DEFAULT_MODEL_ID_KEY)
     if not isinstance(model_id, str) or not model_id.strip():
@@ -178,18 +185,22 @@ def _model_id_from_payload(payload: Any, path: Path) -> str:
     return _bedrock_configuration_from_payload(payload, path).model_id
 
 
-def get_default_bedrock_configuration(
-    cdk_json_path: Path | None = None,
-) -> BedrockDefaultConfiguration:
-    """Return the validated canonical Bedrock configuration from ``cdk.json``.
+def _claude_code_model_id_from_payload(payload: Any, path: Path) -> str:
+    """Extract and validate the Claude Code session model default."""
+    bedrock = _bedrock_block_from_payload(payload, path)
 
-    An explicit path is strict. Without one, resolution uses only the config
-    owned by this GCO source checkout or the config recorded in the installed
-    ``gco-cli`` distribution. Current-working-directory and ancestor files are
-    deliberately ignored so an unrelated project cannot change model routing.
-    Once selected, a missing, unreadable, malformed, or incomplete canonical
-    file fails closed rather than falling through to a stale copy.
-    """
+    model_id = bedrock.get(_CLAUDE_CODE_MODEL_ID_KEY)
+    if not isinstance(model_id, str) or not model_id.strip():
+        raise BedrockModelConfigurationError(
+            f"{path}: context.{_BEDROCK_CONTEXT_KEY}.{_CLAUDE_CODE_MODEL_ID_KEY} "
+            "must be a non-empty string. Add the key to the deployment config "
+            "or run `gco stacks bedrock set-claude-code-model <model-id>`."
+        )
+    return model_id.strip()
+
+
+def _canonical_payload(cdk_json_path: Path | None) -> tuple[Any, Path]:
+    """Load and JSON-parse the selected canonical config, failing closed."""
     path = cdk_json_path.resolve() if cdk_json_path is not None else _canonical_cdk_json_path()
     if not path.is_file():
         raise BedrockModelConfigurationError(f"Canonical Bedrock config is not a file: {path}")
@@ -204,17 +215,55 @@ def get_default_bedrock_configuration(
     except json.JSONDecodeError as exc:
         raise BedrockModelConfigurationError(f"Invalid JSON in {path}: {exc}") from exc
 
+    return payload, path
+
+
+def get_default_bedrock_configuration(
+    cdk_json_path: Path | None = None,
+) -> BedrockDefaultConfiguration:
+    """Return the validated canonical Bedrock configuration from ``cdk.json``.
+
+    An explicit path is strict. Without one, resolution uses only the config
+    owned by this GCO source checkout or the config recorded in the installed
+    ``gco-cli`` distribution. Current-working-directory and ancestor files are
+    deliberately ignored so an unrelated project cannot change model routing.
+    Once selected, a missing, unreadable, malformed, or incomplete canonical
+    file fails closed rather than falling through to a stale copy.
+    """
+    payload, path = _canonical_payload(cdk_json_path)
     return _bedrock_configuration_from_payload(payload, path)
 
 
 def get_default_bedrock_model_id(cdk_json_path: Path | None = None) -> str:
-    """Return the sole checked-in Bedrock model default from ``cdk.json``."""
+    """Return the checked-in advisory Bedrock model default from ``cdk.json``.
+
+    This is the model Mission sampling and the capacity advisor use when no
+    explicit override is supplied; ``gco autopilot`` resolves its own default
+    through :func:`get_default_claude_code_model_id`.
+    """
     return get_default_bedrock_configuration(cdk_json_path).model_id
 
 
 def get_default_bedrock_thinking_effort(cdk_json_path: Path | None = None) -> str:
     """Return the canonical default model's validated reasoning effort."""
     return get_default_bedrock_configuration(cdk_json_path).thinking_effort
+
+
+def get_default_claude_code_model_id(cdk_json_path: Path | None = None) -> str:
+    """Return the checked-in Claude Code session model default from ``cdk.json``.
+
+    This is the model ``gco autopilot`` hands to Claude Code, deliberately
+    independent of the advisory ``default_model_id`` consumed by Mission
+    sampling and the capacity advisor: repointing an interactive agent and
+    repointing advisory Converse calls are separate decisions, and future
+    agent runners get their own sibling keys. Validation is equally
+    independent — a malformed advisory ``thinking`` block cannot fail this
+    accessor, and a missing Claude Code key cannot fail the advisory path.
+    Path selection and trust boundaries match
+    :func:`get_default_bedrock_configuration`.
+    """
+    payload, path = _canonical_payload(cdk_json_path)
+    return _claude_code_model_id_from_payload(payload, path)
 
 
 def _supports_nova_2_reasoning(model_id: str) -> bool:
@@ -492,6 +541,7 @@ __all__ = [
     "get_default_bedrock_configuration",
     "get_default_bedrock_model_id",
     "get_default_bedrock_thinking_effort",
+    "get_default_claude_code_model_id",
     "is_bedrock_ftu_form_error",
     "raise_if_bedrock_ftu_form_error",
 ]

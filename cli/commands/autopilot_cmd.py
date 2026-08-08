@@ -181,7 +181,7 @@ def _print_dry_run(formatter: Any, plan: dict[str, Any]) -> None:
     default=None,
     help=(
         "Bedrock model or inference-profile id for the session "
-        "(default: cdk.json context.bedrock.default_model_id; "
+        "(default: cdk.json context.bedrock.claude_code_default_model_id; "
         "env override: GCO_AUTOPILOT_MODEL)."
     ),
 )
@@ -309,8 +309,8 @@ def autopilot(
 
     One command turns this terminal into an agent session with the GCO MCP
     server plus the recommended companion MCP servers, talking to Amazon
-    Bedrock with your AWS credentials. The model defaults to GCO's
-    canonical Bedrock default (cdk.json context.bedrock.default_model_id)
+    Bedrock with your AWS credentials. The model defaults to GCO's Claude
+    Code default (cdk.json context.bedrock.claude_code_default_model_id)
     and can be any Claude model or inference profile enabled on Bedrock.
 
     If the Claude Code CLI is not installed, autopilot offers to install

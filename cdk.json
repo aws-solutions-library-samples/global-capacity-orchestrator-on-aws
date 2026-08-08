@@ -38,9 +38,10 @@
       "Owner": "platform-team"
     },
 
-    "_comment_bedrock": "Shared defaults for optional advisory Bedrock features. Mission sampling and the capacity advisor both consume this system-defined global cross-Region inference-profile ID and its reasoning-effort preference; explicit command/environment model overrides still take precedence and do not inherit model-specific thinking fields. The stock Anthropic default requires the one-time Anthropic first-time-use case form per account (https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html); see docs/CUSTOMIZATION.md (Bedrock Model Selection).",
+    "_comment_bedrock": "Model defaults for GCO's optional Bedrock-powered features, resolved through gco/bedrock.py. default_model_id and thinking.effort are the advisory defaults: Mission sampling and the capacity advisor consume them, and canonical reasoning translation applies only to that model. claude_code_default_model_id is the session model `gco autopilot` hands to Claude Code (per-launch overrides: --model flag or GCO_AUTOPILOT_MODEL); future agent runners get their own sibling key. Explicit command/environment model overrides always take precedence and never inherit model-specific thinking fields. Both keys ship the same Anthropic profile, which requires the one-time Anthropic first-time-use case form per account (https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html); see docs/CUSTOMIZATION.md (Bedrock Model Selection).",
     "bedrock": {
       "default_model_id": "global.anthropic.claude-opus-5",
+      "claude_code_default_model_id": "global.anthropic.claude-opus-5",
       "thinking": {
         "effort": "high"
       }

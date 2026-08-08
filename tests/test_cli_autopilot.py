@@ -30,7 +30,7 @@ from cli.autopilot import (
 )
 from cli.commands.autopilot_cmd import autopilot
 from cli.config import GCOConfig
-from gco.bedrock import get_default_bedrock_model_id
+from gco.bedrock import get_default_claude_code_model_id
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _AUTOPILOT_SOURCE = _REPO_ROOT / "cli" / "autopilot.py"
@@ -87,7 +87,7 @@ def test_dry_run_defaults_to_the_canonical_bedrock_model(runner: CliRunner) -> N
     result = _invoke(runner, ["--dry-run"])
 
     assert result.exit_code == 0
-    assert get_default_bedrock_model_id() in result.output
+    assert get_default_claude_code_model_id() in result.output
     assert "Dry run only" in result.output
 
 
@@ -384,7 +384,7 @@ def test_json_dry_run_emits_the_plan_without_the_full_config(runner: CliRunner) 
 
     assert result.exit_code == 0
     plan = json.loads(result.output)
-    assert plan["model"] == get_default_bedrock_model_id()
+    assert plan["model"] == get_default_claude_code_model_id()
     assert "mcp_config" not in plan
     assert "resumable_session" in plan
 
