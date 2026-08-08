@@ -1347,6 +1347,38 @@ EOF
     [ -z "$output" ]
 }
 
+@test "extract_default_bedrock_model: reads the claude code leaf from cdk.json" {
+    expected="$(python3 -c '
+import json
+with open("cdk.json") as handle:
+    print(json.load(handle)["context"]["bedrock"]["claude_code_default_model_id"])
+')"
+    [ -n "$expected" ]
+    run extract_default_bedrock_model "cdk.json" "claude_code_default_model_id"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$expected" ]
+}
+
+@test "extract_default_bedrock_model: explicit leaf selects the requested key" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+{"context":{"bedrock":{"default_model_id":"us.amazon.nova-pro-v1:0","claude_code_default_model_id":"us.anthropic.claude-sonnet-4-6"}}}
+EOF
+    run extract_default_bedrock_model "$tmpfile" "claude_code_default_model_id"
+    [ "$status" -eq 0 ]
+    [ "$output" = "us.anthropic.claude-sonnet-4-6" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_default_bedrock_model: empty when the requested leaf is absent" {
+    tmpfile="$(mktemp)"
+    echo '{"context":{"bedrock":{"default_model_id":"us.amazon.nova-pro-v1:0"}}}' > "$tmpfile"
+    run extract_default_bedrock_model "$tmpfile" "claude_code_default_model_id"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+}
+
 # ── bedrock_model_family ────────────────────────────────────────────
 
 @test "bedrock_model_family: Nova Pro keeps the tier, drops the version" {

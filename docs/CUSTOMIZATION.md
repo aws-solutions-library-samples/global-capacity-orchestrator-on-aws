@@ -1639,22 +1639,28 @@ gco mission start "..." --bedrock-model-id us.meta.llama3-3-70b-instruct-v1:0
 
 The `ai_recommend` MCP tool takes the same override as a `model="..."` argument; omit it to use the default.
 
-**2. Per environment (env vars)** — these apply to the Mission sampling backend:
+**2. Per environment (env vars)** — the first two apply to the Mission
+sampling backend, the third to `gco autopilot`:
 
 ```bash
 export GCO_MISSION_BEDROCK_MODEL_ID="us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 export GCO_MISSION_BEDROCK_REGION="eu-west-1"   # default: us-east-1
+export GCO_AUTOPILOT_MODEL="us.anthropic.claude-sonnet-4-6"   # Claude Code sessions
 ```
 
-**3. Change the default for everyone** — edit the one canonical value:
+**3. Change the defaults for everyone** — edit the canonical values:
 
 | File | Keys |
 |------|------|
-| `cdk.json` | `context.bedrock.default_model_id`, `context.bedrock.thinking.effort` |
+| `cdk.json` | `context.bedrock.default_model_id`, `context.bedrock.thinking.effort` (advisory: capacity advisor + Mission sampling) |
+| `cdk.json` | `context.bedrock.claude_code_default_model_id` (the model `gco autopilot` hands to Claude Code) |
 
-Both Python consumers resolve those values through `gco.bedrock`. The same
-`cdk.json` is shipped as package data so installed CLI and MCP entry points
-retain the default when they run outside a source checkout.
+The two model keys are deliberately independent so repointing the interactive
+agent never repoints advisory Converse calls, and vice versa (`gco stacks
+bedrock set-model` / `set-claude-code-model` edit them safely). Every consumer
+resolves its key through `gco.bedrock`. The same `cdk.json` is shipped as
+package data so installed CLI and MCP entry points retain the defaults when
+they run outside a source checkout.
 `tests/test_default_bedrock_model_consistency.py` guards the resolver,
 compatibility aliases, package-data declaration, inference-profile shape,
 reasoning translation, and captured fixture.
@@ -1668,7 +1674,9 @@ profiles. A per-call or environment override, or a default in neither dialect
 `thinking.type: "enabled"` form), keeps that caller's normal inference controls
 and receives no reasoning fields.
 
-Resolution order: per-call flag (`--model` / `--bedrock-model-id` / MCP `model=`) → `GCO_MISSION_BEDROCK_MODEL_ID` (Mission path only) → `cdk.json` `context.bedrock.default_model_id`.
+Resolution order (advisory features): per-call flag (`--model` / `--bedrock-model-id` / MCP `model=`) → `GCO_MISSION_BEDROCK_MODEL_ID` (Mission path only) → `cdk.json` `context.bedrock.default_model_id`.
+
+Resolution order (`gco autopilot`): `--model` / `-m` flag → `GCO_AUTOPILOT_MODEL` → `cdk.json` `context.bedrock.claude_code_default_model_id`. See [Autopilot → Choosing a Model](AUTOPILOT.md#choosing-a-model).
 
 ### What to check when choosing a model
 

@@ -371,7 +371,11 @@ When the scan flags a newer same-family model (or you decide to move the default
 deliberately):
 
 1. Change `cdk.json` `context.bedrock.default_model_id` to the new id and set
-   `context.bedrock.thinking.effort` to a level the model supports. The stock
+   `context.bedrock.thinking.effort` to a level the model supports. Decide
+   separately whether `context.bedrock.claude_code_default_model_id` — the
+   independent default `gco autopilot` hands to Claude Code — should move too:
+   the advisory default can be any Converse-capable family, while the Claude
+   Code default should stay a Claude model. The stock
    value is a system-defined **global inference profile**; global profiles can
    route worldwide and are unsuitable when a geography boundary is required.
    Use an appropriate geography-scoped profile (`us.` / `eu.` / `jp.` / etc.)
@@ -379,6 +383,7 @@ deliberately):
    dialect GCO does not yet translate, add it to the dialect dispatch in
    `gco/bedrock.py` — otherwise the configured effort is silently inert. Update
    the intentionally independent `_EXPECTED_DEFAULT_MODEL_ID`,
+   `_EXPECTED_CLAUDE_CODE_MODEL_ID` (when moving the autopilot default),
    `_EXPECTED_FIXTURE_NAME`, and thinking review
    pins in `tests/test_default_bedrock_model_consistency.py`; those assertions
    are not runtime defaults, but they make model, fixture, and reasoning changes
@@ -455,8 +460,9 @@ resolved lockfile, so a clean checkout installs the same graph CI ran.
 - Versions that live outside `pyproject.toml` — workflow `*_VERSION` env pins,
   Dockerfile `ARG`s, `lambda/helm-installer/charts.yaml`,
   `gco/stacks/constants.py`, the Python-constant Mooncake default image in
-  `cli/images.py`, and the Bedrock model at
-  `cdk.json` `context.bedrock.default_model_id` (see
+  `cli/images.py`, and the Bedrock models at `cdk.json`
+  `context.bedrock.default_model_id` and
+  `context.bedrock.claude_code_default_model_id` (see
   [Refreshing the Bedrock default model](#refreshing-the-bedrock-default-model)).
   These are tracked by the monthly scan rather than Dependabot.
 

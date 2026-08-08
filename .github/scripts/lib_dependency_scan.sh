@@ -839,35 +839,40 @@ if m:
 " "$file" 2>/dev/null
 }
 
-# extract_default_bedrock_model [cdk_json_path]
+# extract_default_bedrock_model [cdk_json_path] [leaf_key]
 #
-# Prints the shared default Bedrock model id from
-# ``cdk.json`` ``context.bedrock.default_model_id``. Mission sampling and
-# the capacity advisor both resolve this system-defined cross-Region inference
-# profile through ``gco.bedrock`` when no explicit override is supplied.
+# Prints a configured Bedrock model id from ``cdk.json``
+# ``context.bedrock.<leaf_key>`` (default leaf: ``default_model_id``).
+# Two managed leaves exist: ``default_model_id`` — the advisory default that
+# Mission sampling and the capacity advisor resolve through ``gco.bedrock``
+# when no explicit override is supplied — and
+# ``claude_code_default_model_id``, the session model ``gco autopilot`` hands
+# to Claude Code. The keys are deliberately independent knobs.
 #
-# This value feeds the Bedrock-model drift check in dependency-scan.sh, which
-# compares it against the newest profile in the same model family
-# (get_latest_bedrock_model). A newer release is the cue to update cdk.json and
-# re-capture the scaffold fixture under tests/fixtures/scaffold_responses/.
+# These values feed the Bedrock-model drift check in dependency-scan.sh, which
+# compares each against the newest profile in the same model family
+# (get_latest_bedrock_model). A newer release is the cue to update cdk.json
+# and, for the advisory key, re-capture the scaffold fixture under
+# tests/fixtures/scaffold_responses/.
 #
 # Prints nothing if the file is absent, malformed, or does not contain a
 # non-empty string at the expected path. The caller treats empty output as a
 # skip, matching the other extractors in this library.
 extract_default_bedrock_model() {
   local file="${1:-cdk.json}"
+  local leaf="${2:-default_model_id}"
   [ -f "$file" ] || return 0
   python3 -c "
 import json, sys
 try:
     with open(sys.argv[1]) as handle:
         data = json.load(handle)
-    value = data.get('context', {}).get('bedrock', {}).get('default_model_id')
+    value = data.get('context', {}).get('bedrock', {}).get(sys.argv[2])
 except Exception:
     value = None
 if isinstance(value, str) and value.strip():
     print(value.strip())
-" "$file" 2>/dev/null
+" "$file" "$leaf" 2>/dev/null
 }
 
 # bedrock_model_family <inference_profile_id>

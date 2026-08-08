@@ -15,7 +15,8 @@
 #   - EKS Kubernetes minor from cdk.json (AWS creds)
 #   - Aurora PostgreSQL engine versions (AWS creds)
 #   - EMR Serverless release labels (AWS creds)
-#   - Bedrock default model id from cdk.json context.bedrock.default_model_id
+#   - Bedrock default model ids from cdk.json context.bedrock.default_model_id
+#     (advisory) and context.bedrock.claude_code_default_model_id (autopilot),
 #     compared against the newest system-defined inference profile in the same
 #     model family (AWS creds)
 #   - Accelerator catalog and Karpenter NodePool policy (offline), plus live
@@ -854,18 +855,20 @@ EMR_COUNT="$(wc -l < "$EMR_RESULTS" 2>/dev/null | tr -d ' ')"
 # ---------------------------------------------------------------------------
 # Bedrock default model (best-effort — requires AWS credentials)
 #
-# Compares the shared default Bedrock model id in
-# cdk.json (context.bedrock.default_model_id) against the newest
+# Compares each configured Bedrock model default in cdk.json —
+# context.bedrock.default_model_id (advisory: Mission sampling + capacity
+# advisor) and context.bedrock.claude_code_default_model_id (the session
+# model gco autopilot hands to Claude Code) — against the newest
 # system-defined inference profile in the SAME model family, as listed by
-# aws bedrock list-inference-profiles. The Python consumers resolve this one
-# configuration value through gco.bedrock, so the scan and both advisory paths
-# cannot silently diverge.
+# aws bedrock list-inference-profiles. Every consumer resolves its key
+# through gco.bedrock, so the scan and the runtime paths cannot silently
+# diverge; the keys are independent knobs and each gets its own drift row.
 #
 # Same-family scoping (see bedrock_model_family) means we only flag a newer
 # release of the same model line (e.g. a newer global Amazon Nova Lite) — never a
 # different tier or provider, since switching those is a human decision,
-# not drift. When a newer release is reported, update
-# context.bedrock.default_model_id in cdk.json, then re-capture the scaffold
+# not drift. When a newer release is reported, update the flagged key in
+# cdk.json; for the advisory key also re-capture the scaffold
 # fixture with scripts/capture_scaffold_fixtures.py.
 #
 # IAM action: bedrock:ListInferenceProfiles. Pinned to us-east-1 (the
@@ -878,24 +881,28 @@ echo "=== Checking Bedrock default model ==="
 
 BEDROCK_MODEL_RESULTS="$(mktemp)"
 BEDROCK_MODEL_SKIP_REASON=""
-CURRENT_BEDROCK_MODEL="$(extract_default_bedrock_model cdk.json)"
 
-if [ -z "$CURRENT_BEDROCK_MODEL" ]; then
-  BEDROCK_MODEL_SKIP_REASON="Could not read context.bedrock.default_model_id from cdk.json."
-  echo "  $BEDROCK_MODEL_SKIP_REASON"
-elif ! aws sts get-caller-identity >/dev/null 2>&1; then
+if ! aws sts get-caller-identity >/dev/null 2>&1; then
   BEDROCK_MODEL_SKIP_REASON="No AWS credentials available (scan needs bedrock:ListInferenceProfiles). Configure OIDC to enable."
   echo "  $BEDROCK_MODEL_SKIP_REASON"
 else
-  LATEST_BEDROCK_MODEL="$(get_latest_bedrock_model "$CURRENT_BEDROCK_MODEL" us-east-1)" || LATEST_BEDROCK_MODEL=""
-  if [ -z "$LATEST_BEDROCK_MODEL" ]; then
-    BEDROCK_MODEL_SKIP_REASON="Bedrock inference-profile lookup failed or returned no active profile in the configured model family."
-    echo "  $BEDROCK_MODEL_SKIP_REASON"
-  elif [ "$CURRENT_BEDROCK_MODEL" != "$LATEST_BEDROCK_MODEL" ] \
-       && [ "$(compare_bedrock_model "$CURRENT_BEDROCK_MODEL" "$LATEST_BEDROCK_MODEL")" = "newer" ]; then
-    echo "  - bedrock default model: ${CURRENT_BEDROCK_MODEL} -> ${LATEST_BEDROCK_MODEL}"
-    echo "context.bedrock.default_model_id|${CURRENT_BEDROCK_MODEL}|${LATEST_BEDROCK_MODEL}" >> "$BEDROCK_MODEL_RESULTS"
-  fi
+  for BEDROCK_MODEL_LEAF in default_model_id claude_code_default_model_id; do
+    CURRENT_BEDROCK_MODEL="$(extract_default_bedrock_model cdk.json "$BEDROCK_MODEL_LEAF")"
+    if [ -z "$CURRENT_BEDROCK_MODEL" ]; then
+      BEDROCK_MODEL_SKIP_REASON="Could not read context.bedrock.${BEDROCK_MODEL_LEAF} from cdk.json."
+      echo "  $BEDROCK_MODEL_SKIP_REASON"
+      continue
+    fi
+    LATEST_BEDROCK_MODEL="$(get_latest_bedrock_model "$CURRENT_BEDROCK_MODEL" us-east-1)" || LATEST_BEDROCK_MODEL=""
+    if [ -z "$LATEST_BEDROCK_MODEL" ]; then
+      BEDROCK_MODEL_SKIP_REASON="Bedrock inference-profile lookup failed or returned no active profile in the model family of context.bedrock.${BEDROCK_MODEL_LEAF}."
+      echo "  $BEDROCK_MODEL_SKIP_REASON"
+    elif [ "$CURRENT_BEDROCK_MODEL" != "$LATEST_BEDROCK_MODEL" ] \
+         && [ "$(compare_bedrock_model "$CURRENT_BEDROCK_MODEL" "$LATEST_BEDROCK_MODEL")" = "newer" ]; then
+      echo "  - bedrock ${BEDROCK_MODEL_LEAF}: ${CURRENT_BEDROCK_MODEL} -> ${LATEST_BEDROCK_MODEL}"
+      echo "context.bedrock.${BEDROCK_MODEL_LEAF}|${CURRENT_BEDROCK_MODEL}|${LATEST_BEDROCK_MODEL}" >> "$BEDROCK_MODEL_RESULTS"
+    fi
+  done
 fi
 
 BEDROCK_MODEL_COUNT="$(wc -l < "$BEDROCK_MODEL_RESULTS" 2>/dev/null | tr -d ' ')"

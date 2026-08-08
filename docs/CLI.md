@@ -114,8 +114,8 @@ Launch a fully configured [Claude Code](https://code.claude.com/docs/en/overview
 
 ```bash
 # Turn this terminal into an agent session: Claude Code on Amazon Bedrock
-# (defaults to cdk.json context.bedrock.default_model_id) with the GCO MCP
-# server + the recommended companion MCP servers wired in
+# (defaults to cdk.json context.bedrock.claude_code_default_model_id) with the
+# GCO MCP server + the recommended companion MCP servers wired in
 gco autopilot
 
 # Preview the launch plan without installing, writing, or launching
@@ -1170,7 +1170,7 @@ gco stacks regions set monitoring us-west-2 -y
 
 #### `gco stacks bedrock`
 
-Manage the Bedrock model default in cdk.json (`context.bedrock.default_model_id`) — the model/inference-profile ID GCO's advisory Bedrock features (capacity advisor, Mission sampling, autopilot) use unless explicitly overridden. Edits go through the managed-config engine: validated, atomic, idempotent, and audited. Sibling settings (`bedrock.thinking`) are preserved.
+Manage the two Bedrock model defaults in cdk.json: `context.bedrock.default_model_id` — the model/inference-profile ID GCO's advisory Bedrock features (capacity advisor, Mission sampling) use unless explicitly overridden — and `context.bedrock.claude_code_default_model_id`, the session model `gco autopilot` hands to Claude Code. The keys are independent: repointing one never repoints the other. Edits go through the managed-config engine: validated, atomic, idempotent, and audited. Sibling settings (`bedrock.thinking`, the other model key) are preserved.
 
 ```bash
 gco stacks bedrock COMMAND [OPTIONS]
@@ -1178,14 +1178,16 @@ gco stacks bedrock COMMAND [OPTIONS]
 
 **Subcommands:**
 
-- `show` - Show the configured default model ID and its backing cdk.json path (`gco stacks bedrock show`).
-- `set-model` - Set the default model/inference-profile ID (`gco stacks bedrock set-model`). IDs are free-form (custom profiles, marketplace models); validation mirrors the runtime reader — a non-empty string without surrounding whitespace.
+- `show` - Show both configured default model IDs and their backing cdk.json path (`gco stacks bedrock show`).
+- `set-model` - Set the advisory default model/inference-profile ID (`gco stacks bedrock set-model`). IDs are free-form (custom profiles, marketplace models); validation mirrors the runtime reader — a non-empty string without surrounding whitespace.
+- `set-claude-code-model` - Set the Claude Code session model `gco autopilot` launches with (`gco stacks bedrock set-claude-code-model`). Same free-form validation; explicit `--model`/`GCO_AUTOPILOT_MODEL` overrides still win at launch time.
 
 **Example:**
 
 ```bash
 gco stacks bedrock show
 gco stacks bedrock set-model global.anthropic.claude-opus-5 -y
+gco stacks bedrock set-claude-code-model us.anthropic.claude-sonnet-4-6 -y
 ```
 
 #### `gco stacks fsx`
@@ -4729,14 +4731,14 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_CONFIG` | Path to config file |
 | `GCO_REGIONAL_API` | Use regional API endpoints (`true`/`false`) |
 | `CDK_DOCKER` | Docker command (`docker` or `finch`) |
-| `GCO_AUTOPILOT_MODEL` | Override the Bedrock model `gco autopilot` launches Claude Code with (default: `cdk.json` `context.bedrock.default_model_id`; the `--model` flag wins over this). See [Autopilot](AUTOPILOT.md). |
+| `GCO_AUTOPILOT_MODEL` | Override the Bedrock model `gco autopilot` launches Claude Code with (default: `cdk.json` `context.bedrock.claude_code_default_model_id`; the `--model` flag wins over this). See [Autopilot](AUTOPILOT.md). |
 | `GCO_AUTOPILOT_SMALL_FAST_MODEL` | Optional Bedrock model for Claude Code's background/fast tasks (unset by default). |
 | `GCO_AUTOPILOT_CONFIG_DIR` | Directory for the generated autopilot MCP config and staged skill/agent imports (default: `~/.gco/autopilot`). |
 | `GCO_AUTOPILOT_PLUGIN_DIRS` | Colon-separated Claude Code plugin dirs/zips loaded into every `gco autopilot` session (merged with per-launch `--plugin` flags). |
 | `GCO_ENABLE_MISSION` | Gate the `gco mission` subcommand group (`true`/`false`). With the flag unset, every subcommand exits 2 with a hint. |
 | `GCO_ENABLE_ALL_TOOLS` | Umbrella flag that satisfies every per-tool gate including `GCO_ENABLE_MISSION`. |
 | `GCO_MISSION_STATE_BACKEND` | Persistence backend for sessions (`filesystem` or `dynamodb`). Unrecognised values fall back to filesystem with a one-line warning. |
-| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the shared `cdk.json` `context.bedrock.default_model_id` used by the CLI sampling backend (stock value: Anthropic Claude Opus 5, `global.anthropic.claude-opus-5`). Explicit overrides do not inherit the stock `thinking.effort=high` field. See [Customization → Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). |
+| `GCO_MISSION_BEDROCK_MODEL_ID` | Override the advisory `cdk.json` `context.bedrock.default_model_id` used by the CLI sampling backend (stock value: Anthropic Claude Opus 5, `global.anthropic.claude-opus-5`). Explicit overrides do not inherit the stock `thinking.effort=high` field. See [Customization → Bedrock Model Selection](CUSTOMIZATION.md#bedrock-model-selection). |
 | `GCO_MISSION_BEDROCK_REGION` | Override the default Bedrock region (`us-east-1`). |
 
 ## Examples
