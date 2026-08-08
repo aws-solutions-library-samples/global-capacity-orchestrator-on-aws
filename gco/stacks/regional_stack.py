@@ -5193,6 +5193,26 @@ class GCORegionalStack(Stack):
             )
         )
 
+        # E9006 checks EngineVersion against the enum embedded in the CDK's
+        # bundled CloudFormation resource spec, which lags new Aurora minor
+        # releases (at 17.10's release the spec listed 17.9 and even 18.3,
+        # but not 17.10). The pin in constants.py is validated against the
+        # authoritative source instead: the monthly dependency scan compares
+        # it with live ``rds describe-db-engine-versions`` output, and the
+        # live release validation deploys it for real. Same app-wide
+        # collection caveat as W9008 above; the compensating controls are
+        # those live checks, which a stale spec enum cannot see.
+        Validations.of(self.aurora_cluster).acknowledge(
+            Acknowledgment(
+                id="CloudFormation-Validate::E9006",
+                reason=(
+                    "EngineVersion is validated against live RDS (monthly "
+                    "dependency scan + live release validation); the CDK's "
+                    "embedded CloudFormation spec enum lags new Aurora minors."
+                ),
+            )
+        )
+
         # Construct-level cdk-nag suppressions for Aurora pgvector
         from gco.stacks.nag_suppressions import NagSuppression, acknowledge_nag_findings
 

@@ -158,8 +158,6 @@ frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
-gco-cli @ file:///Users/mevoracf/PROD-global-capacity-orchestrator-on-aws
-    # via gco-cli (pyproject.toml)
 greenlet==3.5.0
     # via playwright
 griffelib==2.0.2
