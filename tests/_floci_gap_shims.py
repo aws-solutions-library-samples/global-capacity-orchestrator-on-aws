@@ -110,9 +110,7 @@ def shim_floci_zone_id_lookup(events) -> None:
         if params.get("Filter.1.Name") != ["zone-id"]:
             return None  # not the fail-closed lookup; let the emulator answer
         requested = [
-            value[0]
-            for key, value in sorted(params.items())
-            if key.startswith("Filter.1.Value.")
+            value[0] for key, value in sorted(params.items()) if key.startswith("Filter.1.Value.")
         ]
         items = []
         for zone_id in requested:

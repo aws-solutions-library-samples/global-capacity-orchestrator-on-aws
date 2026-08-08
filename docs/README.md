@@ -34,6 +34,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 | [Operational Runbooks](RUNBOOKS.md) | Operators | Step-by-step incident response procedures for common failure scenarios |
 | [Maintenance](MAINTENANCE.md) | Maintainers | Routine upkeep: adding instance types, [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) version upgrades, base-image and CVE-suppression refreshes, dependency bumps |
 | [Live Release Validation](LIVE_RELEASE_VALIDATION.md) | Maintainers / operators | Run the local deploy-test-destroy harness and post its sanitized summary in a pull request comment; full reports stay local |
+| [Floci Testing](FLOCI_TESTING.md) | Contributors / maintainers | The emulated-AWS test layer between in-process mocks and real-account validation: how CI runs it, what it proves, known emulator gaps, and how `gco release validate --emulator-endpoint` rehearses the harness |
 | [Image Mirror](IMAGE_MIRROR.md) | Platform teams | Mirror Docker Hub add-on images into project-scoped [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) repositories with multi-architecture preservation |
 | [Forking](FORKING.md) | Anyone running their own copy | Take GCO into your own repository: repoint badges, clone URLs, the Pages site, and the OIDC trust-policy subject with `scripts/migrate_fork.py`, plus the manual follow-ups it cannot decide |
 

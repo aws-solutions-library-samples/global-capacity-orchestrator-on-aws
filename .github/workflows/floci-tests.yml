@@ -1,0 +1,189 @@
+# =============================================================================
+# floci-tests.yml — Emulated-AWS integration and E2E tests
+# =============================================================================
+#
+# Runs the opt-in Floci test layer (see docs/FLOCI_TESTING.md): production GCO
+# code issuing real AWS SDK requests against a local emulator speaking the
+# genuine wire protocol. This sits between the in-process moto mocks in
+# unit-tests.yml and a real-account run of the live validation harness.
+#
+# Jobs (alphabetical by display name):
+#   - floci:integration — stores/queues/secrets/S3/CloudFormation/harness-
+#     inventory tests (tests/test_floci_*.py minus the E2E) against the
+#     emulator service container
+#   - floci:e2e:release-validate — the real live-validation harness through
+#     `gco release validate --emulator-endpoint`: verified emulator opt-in,
+#     full preflight (identity pinning, STS, region discovery, cdk list over
+#     the real cloud assembly, CDKToolkit health), baseline capture, reports
+#
+# Safety: NO AWS credentials exist anywhere in this workflow. The test layer
+# invents a random 12-digit account id per session and refuses to run unless
+# STS echoes it back — behavior real AWS cannot imitate, because a fabricated
+# key id never passes real signature validation (tests/_floci.py and
+# scripts/live_release_validation/emulator.py enforce this fail-closed).
+#
+# The emulator image is pinned by digest for reproducibility. To upgrade:
+# bump the tag+digest here (docker manifest inspect floci/floci:<new-tag>),
+# re-run this workflow, and re-check the documented gap shims in
+# tests/_floci_gap_shims.py — see "Updating the Floci version" in
+# docs/FLOCI_TESTING.md.
+#
+# =============================================================================
+
+name: Floci Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GCO_FLOCI_ENDPOINT: "http://127.0.0.1:4566"
+  AWS_DEFAULT_REGION: "us-east-1"
+  AWS_REGION: "us-east-1"
+
+jobs:
+  floci-integration:
+    name: "floci:integration"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      floci:
+        image: floci/floci:1.6.0@sha256:eab36252ea43a4a73928423f0372219052c5c6f87207f6c4754db14b91d6ed30
+        ports:
+          - 4566:4566
+        env:
+          # In-memory state: every job starts from a blank emulator, which is
+          # exactly the determinism these tests want.
+          FLOCI_STORAGE_MODE: memory
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install dependencies
+        run: pip install -e ".[dev,mcp]"
+      - uses: ./.github/actions/build-lambda-package
+      - name: Wait for the emulator
+        # The service container maps onto localhost; a bounded readiness poll
+        # beats racing the first test against container startup.
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$GCO_FLOCI_ENDPOINT" || true)
+            if [ "$code" = "200" ] || [ "$code" = "404" ]; then
+              echo "Floci is answering HTTP ($code)."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Floci never became reachable at $GCO_FLOCI_ENDPOINT"
+          exit 1
+      - name: Run Floci integration tests
+        # -n auto is safe against one shared emulator: the session fixture
+        # gives each xdist worker its own random emulator account, and every
+        # resource name carries a per-test suffix.
+        run: |
+          pytest \
+            tests/test_floci_dynamodb_stores.py \
+            tests/test_floci_sqs_job_path.py \
+            tests/test_floci_secrets_and_cost.py \
+            tests/test_floci_stack_discovery.py \
+            tests/test_floci_harness_inventory.py \
+            -v --tb=short -n auto \
+            --junitxml=floci-integration-report.xml
+      - name: Floci container logs
+        if: failure()
+        run: docker logs "${{ job.services.floci.id }}" 2>&1 | tail -300
+      - name: Upload report
+        if: always()
+        uses: ./.github/actions/upload-artifact-with-retry
+        with:
+          name: floci-integration-report
+          path: floci-integration-report.xml
+          retention-days: 7
+
+  floci-e2e-release-validate:
+    name: "floci:e2e:release-validate"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      floci:
+        image: floci/floci:1.6.0@sha256:eab36252ea43a4a73928423f0372219052c5c6f87207f6c4754db14b91d6ed30
+        ports:
+          - 4566:4566
+        env:
+          FLOCI_STORAGE_MODE: memory
+    env:
+      # aws-cdk-lib wraps fs/child_process in performance.measure() telemetry;
+      # the full app synth inside `cdk list` crosses Node's 1M-entry buffer,
+      # warning about a perf_hooks leak while burning runner memory. This is
+      # upstream's own opt-out (aws-cdk-lib/core/lib/private/perf.js),
+      # verified to change nothing about synthesis output.
+      CDK_NO_PERF_BUILTINS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Give the checkout a branch identity
+        # actions/checkout leaves a detached HEAD; the harness preflight and
+        # the gco CLI both derive the branch via `git symbolic-ref`, which a
+        # detached HEAD fails. Any name works: the CLI passes its derived
+        # branch to the harness, which re-derives and compares — consistency,
+        # not a specific name, is the contract.
+        run: git switch --force-create floci-e2e
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+          cache-dependency-path: "package-lock.json"
+      - name: Install and verify the declared npm version
+        run: bash .github/scripts/use-pinned-npm.sh package.json
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: "requirements-lock.txt"
+      - name: Install locked CDK + Python dependencies
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          pip install -e ".[dev,mcp]"
+      - uses: ./.github/actions/build-lambda-package
+      - name: Wait for the emulator
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$GCO_FLOCI_ENDPOINT" || true)
+            if [ "$code" = "200" ] || [ "$code" = "404" ]; then
+              echo "Floci is answering HTTP ($code)."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Floci never became reachable at $GCO_FLOCI_ENDPOINT"
+          exit 1
+      - name: Run the live-validation E2E against the emulator
+        # The Node CDK CLI must be resolvable for the harness's `cdk list`.
+        run: |
+          export PATH="$PWD/node_modules/.bin:$PATH"
+          pytest tests/test_floci_live_validation_e2e.py \
+            -v --tb=short \
+            --junitxml=floci-e2e-report.xml
+      - name: Floci container logs
+        if: failure()
+        run: docker logs "${{ job.services.floci.id }}" 2>&1 | tail -300
+      - name: Upload report
+        if: always()
+        uses: ./.github/actions/upload-artifact-with-retry
+        with:
+          name: floci-e2e-report
+          path: floci-e2e-report.xml
+          retention-days: 7

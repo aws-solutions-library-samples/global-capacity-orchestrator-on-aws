@@ -736,6 +736,33 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "related": ["ARCHITECTURE", "ANALYTICS"],
     },
+    "FLOCI_TESTING": {
+        "summary": (
+            "Emulated-AWS test layer between in-process mocks and real-account "
+            "live validation: production code issuing genuine SDK requests "
+            "against a Floci emulator in CI, with zero AWS credentials."
+        ),
+        "topics": [
+            "ci",
+            "deployment",
+            "security",
+            "automation",
+        ],
+        "keywords": [
+            "floci",
+            "emulator",
+            "localstack alternative",
+            "integration tests",
+            "aws endpoint url",
+            "emulated aws",
+            "gco release validate",
+            "emulator endpoint",
+            "wire protocol",
+            "test layers",
+            "known emulator gaps",
+        ],
+        "related": ["LIVE_RELEASE_VALIDATION", "CLI", "MAINTENANCE"],
+    },
     "FORKING": {
         "summary": (
             "Take GCO into your own repository: repoint badges, clone URLs, the "

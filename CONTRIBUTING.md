@@ -466,6 +466,7 @@ The project uses GitHub Actions for automated testing. Every push and pull reque
 | Workflow file | README row | Purpose |
 |---------------|------------|---------|
 | `.github/workflows/unit-tests.yml` | Unit Tests | pytest with coverage, explicit offline accelerator catalog/NodePool validation, BATS, CLI smoke, CDK synth + config matrix, lockfile freshness, fresh install, workload import checks |
+| `.github/workflows/floci-tests.yml` | Floci Tests | Emulated-AWS layer (opt-in via `GCO_FLOCI_ENDPOINT`; see `docs/FLOCI_TESTING.md`): wire-level integration tests and the live-validation preflight+baseline E2E against a digest-pinned Floci emulator, zero AWS credentials |
 | `.github/workflows/integration-tests.yml` | Integration Tests | Per-Dockerfile build + functional container tests (boot, probes, auth fail-closed, SIGTERM), kind cluster E2E (with Calico for NetworkPolicy enforcement), K8s manifest schema, Lambda import validation, cross-module pytest, MCP server pytest |
 | `.github/workflows/security.yml` | Security | bandit, pip-audit, npm audit for every owned graph, trivy (filesystem + per-image), trufflehog, gitleaks, semgrep, checkov, KICS, and CodeQL for Python + JavaScript |
 | `.github/workflows/inference-streaming-proxy.yml` | — (no badge) | Native Node.js 24 tests for the streaming Lambda with 93% line/function/branch gates |
