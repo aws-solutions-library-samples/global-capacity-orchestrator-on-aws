@@ -118,8 +118,8 @@ def shim_floci_zone_id_lookup(events) -> None:
                 continue
             name, region = zone_names[zone_id]
             items.append(
-                f"<item><zoneId>{zone_id}</zoneId><zoneName>{name}</zoneName>"
-                f"<regionName>{region}</regionName><state>available</state></item>"
+                f"<item><zoneId>{zone_id}</zoneId><zoneName>{name}</zoneName>"  # nosemgrep: python.django.security.injection.raw-html-format.raw-html-format - EC2 XML wire payload served to botocore in-process, not HTML; values come from the hardcoded zone_names dict above
+                f"<regionName>{region}</regionName><state>available</state></item>"  # nosemgrep: python.django.security.injection.raw-html-format.raw-html-format - continuation of the same hardcoded XML payload
             )
         xml = (
             '<?xml version="1.0" encoding="UTF-8"?>'
