@@ -76,7 +76,67 @@ def shim_floci_missing_global_accelerator(events) -> None:
     events.register("before-send.global-accelerator.ListAccelerators", _synthesize)
 
 
+def shim_floci_zone_id_lookup(events) -> None:
+    """Answer zone-id-filtered ``DescribeAvailabilityZones`` with real mappings.
+
+    Third documented gap: Floci's EC2 does not model Availability Zone IDs,
+    but a credentialed CDK synth runs the regional stack's fail-closed
+    EKS-unsupported-AZ resolution, which filters
+    ``DescribeAvailabilityZones`` by ``zone-id`` and refuses to proceed when
+    any requested ID is missing (gco/stacks/regional_stack.py — correct
+    behavior against real AWS, where every ID resolves).
+
+    The shim intercepts ONLY requests carrying a ``zone-id`` filter (the
+    exact query that code path issues; unfiltered calls still reach the
+    emulator) and answers with the canonical id→name mapping for the IDs in
+    ``gco/stacks/constants.EKS_UNSUPPORTED_AZ_IDS``, using the reference
+    account layout. That keeps the fail-closed production logic exercised
+    end to end instead of bypassed.
+    """
+    from urllib.parse import parse_qs
+
+    # Canonical name for each unsupported zone id in the reference layout.
+    zone_names = {
+        "use1-az3": ("us-east-1c", "us-east-1"),
+        "usw1-az2": ("us-west-1b", "us-west-1"),
+        "cac1-az3": ("ca-central-1c", "ca-central-1"),
+    }
+
+    def _synthesize(request, **_kwargs):
+        body = request.body
+        if isinstance(body, bytes):
+            body = body.decode("utf-8", errors="replace")
+        params = parse_qs(body or "")
+        if params.get("Filter.1.Name") != ["zone-id"]:
+            return None  # not the fail-closed lookup; let the emulator answer
+        requested = [
+            value[0]
+            for key, value in sorted(params.items())
+            if key.startswith("Filter.1.Value.")
+        ]
+        items = []
+        for zone_id in requested:
+            if zone_id not in zone_names:
+                continue
+            name, region = zone_names[zone_id]
+            items.append(
+                f"<item><zoneId>{zone_id}</zoneId><zoneName>{name}</zoneName>"
+                f"<regionName>{region}</regionName><state>available</state></item>"
+            )
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<DescribeAvailabilityZonesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">'
+            "<requestId>floci-gap-shim</requestId>"
+            f"<availabilityZoneInfo>{''.join(items)}</availabilityZoneInfo>"
+            "</DescribeAvailabilityZonesResponse>"
+        )
+        return _local_response(request, xml.encode(), "text/xml")
+
+    events.register("before-send.ec2.DescribeAvailabilityZones", _synthesize)
+
+
 def apply_known_floci_gap_shims(events) -> None:
     """Install every documented Floci-gap shim on a botocore event system."""
     shim_floci_get_stack_policy(events)
     shim_floci_missing_global_accelerator(events)
+    shim_floci_zone_id_lookup(events)
