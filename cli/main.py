@@ -38,6 +38,7 @@ from .commands import (
     monitoring,
     nodepools,
     queue,
+    release,
     stacks,
     storage,
     tasks,
@@ -135,6 +136,7 @@ cli.add_command(autopilot)
 cli.add_command(jobs)
 cli.add_command(dag)
 cli.add_command(queue)
+cli.add_command(release)
 cli.add_command(templates)
 cli.add_command(webhooks)
 cli.add_command(capacity)

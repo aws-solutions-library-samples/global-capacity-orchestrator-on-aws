@@ -21,6 +21,7 @@ from .models_cmd import models
 from .monitoring_cmd import monitoring
 from .nodepools_cmd import nodepools
 from .queue_cmd import queue
+from .release_cmd import release
 from .stacks_cmd import stacks
 from .storage_cmd import storage
 from .tasks_cmd import tasks
@@ -44,6 +45,7 @@ __all__ = [
     "monitoring",
     "nodepools",
     "queue",
+    "release",
     "stacks",
     "storage",
     "tasks",

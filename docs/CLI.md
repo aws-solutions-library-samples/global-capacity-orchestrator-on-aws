@@ -27,6 +27,7 @@ Complete command-line interface documentation for GCO (Global Capacity Orchestra
   - [config-cmd](#config-cmd-commands)
   - [tasks](#tasks-commands)
   - [mission](#mission-commands)
+  - [release](#release-commands)
 - [Configuration](#configuration)
 - [Environment Variables](#environment-variables)
 - [Examples](#examples)
@@ -4640,6 +4641,35 @@ gco mission list --status running --output table
 ```
 
 ---
+
+### Release Commands
+
+Release validation lifecycle.
+
+#### `gco release validate`
+
+Run [live release validation](LIVE_RELEASE_VALIDATION.md) end to end with no interactive prompts. The command derives the expected commit SHA, branch, run id, and a private report directory outside the checkout, then executes `python -m scripts.live_release_validation` with the derived identity. Consent is expressed through explicit flags — there is deliberately nothing to confirm interactively, which makes the command scriptable while keeping accidental invocation implausible. The harness itself re-verifies every identity claim (account, SHA, branch, clean worktree, healthy `CDKToolkit` stacks) before acting.
+
+```bash
+gco release validate --expected-account 123456789012 \
+  --i-understand-this-deploys-and-destroys-infrastructure \
+  --confirm-kms-key-deletion
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--expected-account` | Required. Exact 12-digit AWS account id the run may touch; preflight fails on any mismatch with the caller identity. |
+| `--i-understand-this-deploys-and-destroys-infrastructure` | Required consent flag: the run deploys real, paid infrastructure and destroys it afterwards. |
+| `--confirm-kms-key-deletion` | Authorize scheduling this run's retained EKS KMS keys for their 7-day deletion window; required whenever the `deploy` action is selected. |
+| `--actions` | Harness actions to run (default `all`); dependencies are added automatically. A subset run reports `PARTIAL`, never `PASSED`. |
+| `--profile` | Topology profile to validate against cdk.json: `configured` (default), `single-region`, or `multi-region`. |
+| `--run-id` | Stable run id (default: UTC timestamp + commit SHA prefix). |
+| `--report-dir` | Report directory (default: `~/gco-live-release-validation-reports/<run-id>`, outside the checkout so the clean-worktree preflight holds). |
+| `--resume` | Resume an interrupted run; requires the original `--run-id` and `--report-dir`. |
+| `--protected-stack` | Additional non-project CloudFormation stack to preserve exactly (repeatable). |
+| `--emulator-endpoint` | Run the identical harness against a local AWS emulator ([Floci](FLOCI_TESTING.md)) instead of real AWS. The harness proves the endpoint is an emulator before touching anything. |
 
 ## Configuration
 

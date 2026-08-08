@@ -40,11 +40,24 @@ class _LiveValidationSignal(BaseException):
 
 
 def require_local_execution() -> None:
-    """Reject GitHub Actions before creating checkpoints or AWS clients."""
-    if os.environ.get("GITHUB_ACTIONS", "").strip().casefold() == "true":
+    """Reject GitHub Actions before creating checkpoints or AWS clients.
+
+    One verified exception: a run explicitly pointed at a local AWS emulator
+    (see ``emulator.py``) may execute in CI. The emulator proof runs first
+    and fails closed, so CI still cannot reach a real AWS account through
+    this path — a real endpoint fails the URL rules, and real credentials
+    fail the identity-echo probe.
+    """
+    if os.environ.get("GITHUB_ACTIONS", "").strip().casefold() != "true":
+        return
+    from .emulator import emulator_endpoint_requested, verify_emulator_endpoint
+
+    endpoint = emulator_endpoint_requested()
+    if endpoint is None:
         raise RuntimeError(
             "Live release validation is local-only and must not run in GitHub Actions"
         )
+    verify_emulator_endpoint(endpoint)
 
 
 class LiveValidationRunner:
