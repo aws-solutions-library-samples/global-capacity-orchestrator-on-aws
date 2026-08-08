@@ -19,8 +19,8 @@
 # Safety: NO AWS credentials exist anywhere in this workflow. The test layer
 # invents a random 12-digit account id per session and refuses to run unless
 # STS echoes it back — behavior real AWS cannot imitate, because a fabricated
-# key id never passes real signature validation (tests/_floci.py and
-# scripts/live_release_validation/emulator.py enforce this fail-closed).
+# key id never passes real signature validation (tests/_floci.py and the
+# harness's emulator seam enforce this fail-closed).
 #
 # The emulator image is pinned by digest for reproducibility. To upgrade:
 # bump the tag+digest here (docker manifest inspect floci/floci:<new-tag>),
