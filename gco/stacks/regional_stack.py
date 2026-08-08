@@ -5130,7 +5130,13 @@ class GCORegionalStack(Stack):
             self,
             "AuroraPgvectorCluster",
             engine=rds.DatabaseClusterEngine.aurora_postgres(
-                version=getattr(rds.AuroraPostgresEngineVersion, AURORA_POSTGRES_VERSION),
+                # ``of()`` rather than a ``VER_X_Y`` enum member: the pin in
+                # constants.py is a plain version string so an Aurora minor
+                # bump never has to wait for an aws-cdk-lib enum release.
+                version=rds.AuroraPostgresEngineVersion.of(
+                    AURORA_POSTGRES_VERSION,
+                    AURORA_POSTGRES_VERSION.split(".", 1)[0],
+                ),
             ),
             serverless_v2_min_capacity=aurora_config.get("min_acu", 0),
             serverless_v2_max_capacity=aurora_config.get("max_acu", 16),

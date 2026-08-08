@@ -39,7 +39,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: downloader
-        image: python:3.14.6-slim
+        image: python:3.14.7-slim
         command:
         - python
         - -c

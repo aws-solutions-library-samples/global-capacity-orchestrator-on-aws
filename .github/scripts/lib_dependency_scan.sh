@@ -245,9 +245,18 @@ compare_semver() {
 # The strict ``^v?X.Y.Z$`` filter this replaces matched nothing for every
 # suffix-tagged repository (NGC, GHCR Slurm, CUDA, PyTorch), which — under
 # ``pipefail`` — surfaced as a permanent "tag lookup failed" every month.
+#
+# Numeric components of five or more digits are treated as build/date
+# identifiers, not release numbers, and disqualify a candidate unless the
+# current pin itself carries one (a CalVer pin keeps comparing against
+# CalVer tags). Without this, ``alpine:3.21`` was "upgraded" to the
+# ``20260805`` date tag, ``kuberay/operator:v1.6.2`` to a ``9831375``
+# commit-numbered tag, and ``ray:2.56.1`` to the ``2.57.0.397131`` nightly.
 newer_same_variant_tag() {
   python3 -c "
 import re, sys
+
+WIDE = 10000  # five digits: build number, date stamp, or commit counter
 
 current = sys.argv[1]
 match = re.match(r'^v?(\d+(?:\.\d+)*)(.*)\$', current)
@@ -255,6 +264,7 @@ if not match:
     raise SystemExit(0)
 suffix = match.group(2)
 current_key = [int(part) for part in match.group(1).split('.')]
+current_is_calver = any(part >= WIDE for part in current_key)
 
 pattern = re.compile(r'^v?(\d+(?:\.\d+)*)' + re.escape(suffix) + r'\$')
 best_key = None
@@ -267,6 +277,8 @@ for line in sys.stdin:
     if candidate is None:
         continue
     key = [int(part) for part in candidate.group(1).split('.')]
+    if not current_is_calver and any(part >= WIDE for part in key):
+        continue
     if key <= current_key:
         continue
     if best_key is None or key > best_key:
@@ -313,36 +325,31 @@ print(count)
 
 # extract_aurora_versions <file>
 #
-# Extracts Aurora PostgreSQL engine versions from the constants module.
-# Prints one "major.minor" per line, sorted and deduplicated.
-# Falls back to reading constants.py directly if the module can't be imported.
+# Prints the pinned Aurora PostgreSQL engine version (``major.minor``) from
+# the constants module, importing it when possible and falling back to a
+# direct regex over ``constants.py``. The pin is a plain version string
+# applied through ``rds.AuroraPostgresEngineVersion.of()`` — there is no CDK
+# enum member to scan for. Output is validated to ``X.Y[.Z]`` shape so a
+# refactor of the constant can never leak a non-version into the RDS query.
 extract_aurora_versions() {
   local file="${1:-gco/stacks/regional_stack.py}"
   python3 -c "
-import sys
+import re, sys
+value = None
 try:
-    from gco.stacks.constants import AURORA_POSTGRES_VERSION_DISPLAY
-    print(AURORA_POSTGRES_VERSION_DISPLAY)
+    from gco.stacks.constants import AURORA_POSTGRES_VERSION
+    value = AURORA_POSTGRES_VERSION
 except ImportError:
-    # Fallback: read constants.py directly
-    import re, os
+    import os
     constants_path = os.path.join(os.path.dirname(sys.argv[1]), 'constants.py')
     if os.path.exists(constants_path):
         with open(constants_path) as f:
             text = f.read()
-        m = re.search(r'AURORA_POSTGRES_VERSION_DISPLAY\s*=\s*\"([^\"]+)\"', text)
+        m = re.search(r'^AURORA_POSTGRES_VERSION\s*=\s*\"([^\"]+)\"', text, re.M)
         if m:
-            print(m.group(1))
-    else:
-        # Last resort: scan the file for VER_XX_Y patterns
-        with open(sys.argv[1]) as f:
-            text = f.read()
-        seen = set()
-        for m in re.finditer(r'AuroraPostgresEngineVersion\.VER_(\d+)_(\d+)', text):
-            v = f'{m.group(1)}.{m.group(2)}'
-            if v not in seen:
-                seen.add(v)
-                print(v)
+            value = m.group(1)
+if value and re.fullmatch(r'\d+\.\d+(?:\.\d+)?', value):
+    print(value)
 " "$file" 2>/dev/null | sort -V
 }
 
@@ -725,33 +732,6 @@ for name in dir(aws_lambda.Runtime):
         versions.append((int(m.group(1)), name))
 if versions:
     print(max(versions)[1])
-" 2>/dev/null
-}
-
-# get_latest_aurora_postgres_version
-#
-# Imports ``aws_cdk.aws_rds`` and prints the highest ``VER_X_Y`` enum
-# member of ``AuroraPostgresEngineVersion`` (e.g. ``VER_17_9``). Empty
-# output when aws-cdk-lib isn't importable.
-#
-# Skips suffixed variants such as ``VER_17_9_LIMITLESS`` and
-# ``VER_15_4_R2`` — those aren't the canonical "latest minor" engine
-# version we pin, and including them would cause the comparison to
-# flap whenever AWS publishes a sidecar release line.
-get_latest_aurora_postgres_version() {
-  python3 -c "
-import re
-try:
-    from aws_cdk import aws_rds
-except Exception:
-    raise SystemExit(0)
-versions = []
-for name in dir(aws_rds.AuroraPostgresEngineVersion):
-    m = re.match(r'^VER_(\d+)_(\d+)$', name)
-    if m:
-        versions.append((int(m.group(1)), int(m.group(2)), name))
-if versions:
-    print(max(versions)[2])
 " 2>/dev/null
 }
 

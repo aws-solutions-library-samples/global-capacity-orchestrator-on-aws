@@ -73,7 +73,7 @@ spec:
       # ── Init container: download model weights to EFS if not cached ──
       initContainers:
       - name: model-downloader
-        image: python:3.14.6-slim
+        image: python:3.14.7-slim
         securityContext:
           runAsNonRoot: true
           runAsUser: 1000
@@ -142,7 +142,7 @@ spec:
       # Runs as root (image default) so pip installs into conda site-packages
       containers:
       - name: trainer
-        image: pytorch/pytorch:2.6.0-cuda12.6-cudnn9-devel
+        image: pytorch/pytorch:2.13.0-cuda12.6-cudnn9-devel
         command:
         - bash
         - -c

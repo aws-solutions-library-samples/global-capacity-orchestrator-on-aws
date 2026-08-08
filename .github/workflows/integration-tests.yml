@@ -1023,12 +1023,12 @@ jobs:
               print(f"OK: {binary} e_machine=0x{e_machine:X}")
           PY
       - name: Pre-pull the DinD probe base image (with retry)
-        # The inner build below is FROM alpine:3.21; warming the host
+        # The inner build below is FROM alpine:3.24.1; warming the host
         # daemon's cache here (the inner build talks to that same daemon
         # over the socket) keeps a registry blip from failing the probe.
         uses: ./.github/actions/docker-pull-with-retry
         with:
-          images: alpine:3.21
+          images: alpine:3.24.1
       - name: Verify Docker-in-Docker via host socket pass-through
         # `gco stacks deploy-all` drives `cdk deploy`, which shells out to
         # Docker to bundle Lambda assets. The dev container ships only the
@@ -1045,7 +1045,7 @@ jobs:
           # the container can see it via the workspace bind mount.
           mkdir -p /tmp/dind-probe
           cat > /tmp/dind-probe/Dockerfile <<'DOCKERFILE'
-          FROM alpine:3.21
+          FROM alpine:3.24.1
           RUN echo "dind-probe" > /ok
           CMD ["cat", "/ok"]
           DOCKERFILE
@@ -1063,7 +1063,7 @@ jobs:
           docker run --rm dind-probe:ci | grep -q '^dind-probe$'
 
           # Clean up the probe image so this job leaves the runner tidy.
-          docker image rm dind-probe:ci alpine:3.21 >/dev/null 2>&1 || true
+          docker image rm dind-probe:ci alpine:3.24.1 >/dev/null 2>&1 || true
 
   # --------------------------------------------------------------------------
   # Kind cluster E2E — verifies the Kubernetes manifests apply cleanly to a
@@ -1088,8 +1088,8 @@ jobs:
       # expose their versions to the monthly dependency drift scan.
       METRICS_SERVER_VERSION: "v0.9.0"
       METRICS_SERVER_SHA256: "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b"
-      CALICO_VERSION: "v3.31.5"
-      CALICO_SHA256: "d45842abe9f95afb4d346278eafb2e454dacdfb502d48cf1d5cede71a9046997"
+      CALICO_VERSION: "v3.32.1"
+      CALICO_SHA256: "a1df919d9721cf667accdc3e72848911b0cb25cfab7d2478ad0c996302c95744"
     steps:
       - uses: actions/checkout@v7
       - name: Reclaim runner disk space before Kind image builds

@@ -191,6 +191,33 @@ setup() {
     [ "$result" = "10.0.0" ]
 }
 
+@test "newer_same_variant_tag: date tags never beat a release-numbered pin" {
+    # Regression: alpine:3.21 was suggested the 20260805 date tag.
+    result="$(printf '%s\n' 3.22 3.24.1 20260805 \
+        | newer_same_variant_tag "3.21")"
+    [ "$result" = "3.24.1" ]
+}
+
+@test "newer_same_variant_tag: commit-counter tags are ignored" {
+    # Regression: kuberay/operator:v1.6.2 was suggested a 9831375 tag.
+    result="$(printf '%s\n' v1.6.2 9831375 \
+        | newer_same_variant_tag "v1.6.2")"
+    [ -z "$result" ]
+}
+
+@test "newer_same_variant_tag: nightly build components are ignored" {
+    # Regression: ray:2.56.1 was suggested the 2.57.0.397131 nightly.
+    result="$(printf '%s\n' 2.57.0 2.57.0.397131 \
+        | newer_same_variant_tag "2.56.1")"
+    [ "$result" = "2.57.0" ]
+}
+
+@test "newer_same_variant_tag: a CalVer pin keeps comparing against CalVer tags" {
+    result="$(printf '%s\n' 20250101 20260805 \
+        | newer_same_variant_tag "20250101")"
+    [ "$result" = "20260805" ]
+}
+
 # ── is_semver_tag ────────────────────────────────────────────────────────────
 
 @test "is_semver_tag: v1.2.3 is semver" {
@@ -291,62 +318,71 @@ setup() {
 
 # ── extract_aurora_versions ──────────────────────────────────────────────────
 
-@test "extract_aurora_versions: finds version from regional_stack.py" {
+@test "extract_aurora_versions: finds the pinned version via the constants module" {
     run extract_aurora_versions "gco/stacks/regional_stack.py"
     [ "$status" -eq 0 ]
-    # Should find a version like 17.9 or 16.6 (depends on constants module availability)
-    [[ "$output" =~ [0-9]+\.[0-9]+ ]]
+    [[ "$output" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
 }
 
-@test "extract_aurora_versions: returns sorted unique versions" {
-    # The function now imports from constants module first, so test with
-    # a file that has the VER_ pattern but also verify the regex fallback
-    # by temporarily making the import fail
-    run bash -c '
-        source .github/scripts/lib_dependency_scan.sh
-        tmpfile="$(mktemp)"
-        cat > "$tmpfile" <<EOF
-version=rds.AuroraPostgresEngineVersion.VER_16_6,
-version=rds.AuroraPostgresEngineVersion.VER_15_4,
-version=rds.AuroraPostgresEngineVersion.VER_16_6,
+# The extract_aurora_versions fallback tests shadow the installed gco package
+# with one whose __init__ raises ImportError. ``python3 -c`` puts the current
+# directory first on sys.path, so cd'ing into the shadow directory forces the
+# import branch to fail deterministically — regardless of whether the real
+# package is installed (it always is in the deps-scan workflow) — and the
+# regex-over-constants.py branch is what actually gets exercised.
+_aurora_fallback_shadow() {
+    local tmpdir="$1"
+    mkdir -p "${tmpdir}/gco"
+    echo 'raise ImportError("forced by test: exercise the regex fallback")' \
+        > "${tmpdir}/gco/__init__.py"
+    touch "${tmpdir}/regional_stack.py"
+}
+
+@test "extract_aurora_versions: regex fallback reads the plain version string" {
+    tmpdir="$(mktemp -d)"
+    _aurora_fallback_shadow "$tmpdir"
+    cat > "${tmpdir}/constants.py" <<'EOF'
+SOMETHING_ELSE = "x"
+AURORA_POSTGRES_VERSION = "16.6"
 EOF
-        # Force the regex fallback by running in a subshell without gco on PYTHONPATH
-        PYTHONPATH=/nonexistent python3 -c "
-import re, sys
-with open(sys.argv[1]) as f:
-    text = f.read()
-seen = set()
-for m in re.finditer(r\"AuroraPostgresEngineVersion\\.VER_(\d+)_(\d+)\", text):
-    v = f\"{m.group(1)}.{m.group(2)}\"
-    if v not in seen:
-        seen.add(v)
-        print(v)
-" "$tmpfile" | sort -V
-        rm -f "$tmpfile"
-    '
+    run bash -c "
+        source '$PWD/.github/scripts/lib_dependency_scan.sh'
+        cd '${tmpdir}'
+        extract_aurora_versions '${tmpdir}/regional_stack.py'
+    "
     [ "$status" -eq 0 ]
-    [ "$(echo "$output" | wc -l | tr -d ' ')" -eq 2 ]
-    [ "$(echo "$output" | head -1)" = "15.4" ]
-    [ "$(echo "$output" | tail -1)" = "16.6" ]
+    [ "$output" = "16.6" ]
+    rm -rf "$tmpdir"
 }
 
-@test "extract_aurora_versions: returns empty for file with no Aurora versions" {
-    # Force the regex fallback path
-    run bash -c '
-        source .github/scripts/lib_dependency_scan.sh
-        tmpfile="$(mktemp)"
-        echo "no aurora versions here" > "$tmpfile"
-        PYTHONPATH=/nonexistent python3 -c "
-import re, sys
-with open(sys.argv[1]) as f:
-    text = f.read()
-for m in re.finditer(r\"AuroraPostgresEngineVersion\\.VER_(\d+)_(\d+)\", text):
-    print(f\"{m.group(1)}.{m.group(2)}\")
-" "$tmpfile"
-        rm -f "$tmpfile"
-    '
+@test "extract_aurora_versions: non-version constant values are rejected" {
+    # A refactor that reintroduces an enum name must not leak into the RDS query.
+    tmpdir="$(mktemp -d)"
+    _aurora_fallback_shadow "$tmpdir"
+    cat > "${tmpdir}/constants.py" <<'EOF'
+AURORA_POSTGRES_VERSION = "VER_17_9"
+EOF
+    run bash -c "
+        source '$PWD/.github/scripts/lib_dependency_scan.sh'
+        cd '${tmpdir}'
+        extract_aurora_versions '${tmpdir}/regional_stack.py'
+    "
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "extract_aurora_versions: returns empty when no constants file exists" {
+    tmpdir="$(mktemp -d)"
+    _aurora_fallback_shadow "$tmpdir"
+    run bash -c "
+        source '$PWD/.github/scripts/lib_dependency_scan.sh'
+        cd '${tmpdir}'
+        extract_aurora_versions '${tmpdir}/regional_stack.py'
+    "
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
 }
 
 # ── extract_emr_versions ─────────────────────────────────────────────────────
@@ -978,7 +1014,9 @@ EOF
 @test "extract_constant_value: reads AURORA_POSTGRES_VERSION from real constants.py" {
     run extract_constant_value "AURORA_POSTGRES_VERSION" "gco/stacks/constants.py"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ ^VER_[0-9]+_[0-9]+$ ]]
+    # A plain version string applied via AuroraPostgresEngineVersion.of(),
+    # deliberately not a VER_X_Y enum name.
+    [[ "$output" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
 }
 
 @test "extract_constant_value: returns empty for unknown constant" {
@@ -1095,22 +1133,6 @@ EOF
     # (the positive test above already covers that case).
     python3 -c "import aws_cdk" 2>/dev/null && skip "aws-cdk-lib is installed; positive case is tested separately"
     run get_latest_lambda_python_runtime
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
-}
-
-# ── get_latest_aurora_postgres_version ──────────────────────────────────────
-
-@test "get_latest_aurora_postgres_version: returns enum name when aws-cdk-lib installed" {
-    python3 -c "import aws_cdk" 2>/dev/null || skip "aws-cdk-lib not installed"
-    run get_latest_aurora_postgres_version
-    [ "$status" -eq 0 ]
-    [[ "$output" =~ ^VER_[0-9]+_[0-9]+$ ]]
-}
-
-@test "get_latest_aurora_postgres_version: empty when aws-cdk-lib missing" {
-    python3 -c "import aws_cdk" 2>/dev/null && skip "aws-cdk-lib is installed; positive case is tested separately"
-    run get_latest_aurora_postgres_version
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }

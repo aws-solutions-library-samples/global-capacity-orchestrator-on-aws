@@ -10,8 +10,8 @@
 # Usage:
 #   kubectl apply -f examples/kueue-job.yaml
 #   # Submit jobs (they will be queued if resources are limited):
-#   kubectl create job test-job-1 --image=python:3.14.6-slim -n gco-jobs -- sleep 60
-#   kubectl create job test-job-2 --image=python:3.14.6-slim -n gco-jobs -- sleep 60
+#   kubectl create job test-job-1 --image=python:3.14.7-slim -n gco-jobs -- sleep 60
+#   kubectl create job test-job-2 --image=python:3.14.7-slim -n gco-jobs -- sleep 60
 #   # Inspect queue state:
 #   kubectl get clusterqueue
 #   kubectl get localqueue -n gco-jobs
@@ -101,7 +101,7 @@ spec:
         runAsGroup: 1000
       containers:
       - name: worker
-        image: python:3.14.6-slim
+        image: python:3.14.7-slim
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -148,7 +148,7 @@ spec:
         runAsGroup: 1000
       containers:
       - name: gpu-worker
-        image: nvidia/cuda:12.6.3-base-ubuntu24.04
+        image: nvidia/cuda:13.3.1-base-ubuntu24.04
         command: ['sh', '-c', 'nvidia-smi && sleep 30 && echo "GPU job done!"']
         securityContext:
           allowPrivilegeEscalation: false

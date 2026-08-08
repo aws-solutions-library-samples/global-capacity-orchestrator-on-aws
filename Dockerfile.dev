@@ -122,9 +122,9 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 #      https://nodejs.org/dist/<NODE_VERSION>/SHASUMS256.txt
 #      for node-<NODE_VERSION>-linux-{x64,arm64}.tar.gz.
 # Node's tarballs use x64/arm64 arch tags; amd64 maps to x64 below.
-ARG NODE_VERSION=v24.18.1
-ARG NODE_SHA256_AMD64=9f5eb6ac21845a66c493c91a253b1da32fd684e89e9b7202d4936982336be4ca
-ARG NODE_SHA256_ARM64=df224555a083b918e46260cc969838501b9f9a87140c1195e5b9597b56d5dae2
+ARG NODE_VERSION=v24.19.0
+ARG NODE_SHA256_AMD64=f625d97cd707df4ff96254916fbc5ff014f09c09effe5a1e0ca8f6d41a8789d4
+ARG NODE_SHA256_ARM64=d28c8a5bf0a808f0ed434a1dce8c54ae98f0371c0bd86ac58abc613f73e6643f
 RUN case "${TARGETARCH}" in \
         amd64)  NODE_ARCH="x64";   NODE_SHA256="${NODE_SHA256_AMD64}" ;; \
         arm64)  NODE_ARCH="arm64"; NODE_SHA256="${NODE_SHA256_ARM64}" ;; \
@@ -157,7 +157,7 @@ RUN npm install -g "npm@${NPM_VERSION}" \
 # (``aws-cdk``) and the CDK library (``aws-cdk-lib``) are versioned
 # independently — do not assume the two version strings match. Bump the
 # CLI in lockstep with `npm view aws-cdk version` when rebuilding.
-ARG CDK_VERSION=2.1134.0
+ARG CDK_VERSION=2.1135.1
 RUN npm install -g "aws-cdk@${CDK_VERSION}" \
     && cdk --version
 
@@ -177,7 +177,7 @@ RUN curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARC
 # preserved across rebuilds. Bump when a new feature or bugfix is needed
 # (see https://github.com/aws/aws-cli/blob/v2/CHANGELOG.rst).
 # AWS CLI v2 uses GNU arch tags (x86_64 / aarch64) in the install URL.
-ARG AWSCLI_VERSION=2.36.14
+ARG AWSCLI_VERSION=2.36.19
 RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
     && curl "https://awscli.amazonaws.com/awscli-exe-linux-${GNU_ARCH}-${AWSCLI_VERSION}.zip" -o "awscliv2.zip" \
     && unzip awscliv2.zip \
@@ -196,7 +196,7 @@ RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
 # Latest stable at pin time:
 #   https://download.docker.com/linux/static/stable/x86_64/
 #   https://download.docker.com/linux/static/stable/aarch64/
-ARG DOCKER_VERSION=29.7.1
+ARG DOCKER_VERSION=29.7.2
 RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
     && curl -fsSL "https://download.docker.com/linux/static/stable/${GNU_ARCH}/docker-${DOCKER_VERSION}.tgz" \
       -o /tmp/docker.tgz \
@@ -223,7 +223,7 @@ RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
 # plugin lives in a system cli-plugins path so the root user's docker
 # CLI discovers it. Pinned for reproducibility — bump in lockstep with
 # the deps-scan report. https://github.com/docker/buildx/releases
-ARG BUILDX_VERSION=v0.36.0
+ARG BUILDX_VERSION=v0.36.1
 RUN mkdir -p /usr/local/lib/docker/cli-plugins \
     && curl -fsSL "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-${TARGETARCH}" \
       -o /usr/local/lib/docker/cli-plugins/docker-buildx \
@@ -240,9 +240,9 @@ RUN mkdir -p /usr/local/lib/docker/cli-plugins \
 # other tool above: pinned direct vendor download + checksum. Bump procedure
 # (keep the three ARGs in lockstep, hashes from the per-artifact *.sha256
 # files on https://github.com/astral-sh/uv/releases):
-ARG UV_VERSION=0.12.1
-ARG UV_SHA256_AMD64=90b2f223fb69d19db49e117da601f64978593417988530aa733d456141b4bcbb
-ARG UV_SHA256_ARM64=769d373e146692c639b5fbaae33b331c297a32e03d30448772051902df52bbf4
+ARG UV_VERSION=0.12.3
+ARG UV_SHA256_AMD64=600cf9a742aca00d292673b16b5acffaa7b8c269a364ad0c2e79498dcb1fe101
+ARG UV_SHA256_ARM64=bb66cb52e7b1823aed1183630d8d8e5c958840d584a4c55ec10a4cfc168dcca2
 RUN case "${TARGETARCH}" in \
         amd64)  UV_TARGET="x86_64-unknown-linux-gnu";  UV_SHA256="${UV_SHA256_AMD64}" ;; \
         arm64)  UV_TARGET="aarch64-unknown-linux-gnu"; UV_SHA256="${UV_SHA256_ARM64}" ;; \

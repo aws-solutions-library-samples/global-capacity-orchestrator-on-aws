@@ -203,7 +203,7 @@ jobs:
     timeout-minutes: 15
     env:
       # Pin in lockstep with TRIVY_VERSION in cve-scan.yml.
-      TRIVY_VERSION: "v0.72.0"
+      TRIVY_VERSION: "v0.73.0"
     steps:
       - uses: actions/checkout@v7
       - name: Install pinned Trivy
@@ -249,7 +249,7 @@ jobs:
     # We rebuild here rather than passing images between workflows via
     # `workflow_call` — simpler and the build time is modest.
     env:
-      TRIVY_VERSION: "v0.72.0"
+      TRIVY_VERSION: "v0.73.0"
     strategy:
       fail-fast: false
       matrix:

@@ -262,9 +262,9 @@ GCO works with any containerized inference server. These frameworks have example
 |-----------|--------------|-------------|-------------|----------|
 | vLLM | `vllm/vllm-openai:v0.26.0` | 8000 | `/health` | OpenAI-compatible LLM serving |
 | TGI | `ghcr.io/huggingface/text-generation-inference:3.3.7` | 8080 | `/health` | HuggingFace model serving |
-| Triton | `nvcr.io/nvidia/tritonserver:24.01-py3` | 8000 | `/v2/health/ready` | Multi-framework model serving |
+| Triton | `nvcr.io/nvidia/tritonserver:26.07-py3` | 8000 | `/v2/health/ready` | Multi-framework model serving |
 | TorchServe | `pytorch/torchserve:latest-gpu` | 8080 | `/ping` | PyTorch model serving |
-| SGLang | `lmsysorg/sglang:v0.5.16` | 30000 | `/health` | High-throughput LLM serving with RadixAttention |
+| SGLang | `lmsysorg/sglang:v0.5.17` | 30000 | `/health` | High-throughput LLM serving with RadixAttention |
 
 ### vLLM Example
 
@@ -291,7 +291,7 @@ gco inference deploy tgi-mistral \
 
 ```bash
 gco inference deploy triton-models \
-  -i nvcr.io/nvidia/tritonserver:24.01-py3 \
+  -i nvcr.io/nvidia/tritonserver:26.07-py3 \
   --port 8000 \
   --health-path /v2/health/ready \
   --gpu-count 1 \

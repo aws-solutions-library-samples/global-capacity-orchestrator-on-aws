@@ -58,12 +58,12 @@ bandit==1.9.4
     #   gco-cli (pyproject.toml)
 beartype==0.22.9
     # via py-key-value-aio
-boto3==1.43.62
+boto3==1.43.67
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
     #   moto
-botocore==1.43.62
+botocore==1.43.67
     # via
     #   boto3
     #   gco-cli (pyproject.toml)
@@ -79,7 +79,7 @@ caio==0.9.25
     # via aiofile
 cattrs==25.3.0
     # via jsii
-cdk-nag==3.0.1
+cdk-nag==3.0.2
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -106,7 +106,7 @@ click==8.4.2
     #   uvicorn
 cloudpickle==3.1.2
     # via pydocket
-constructs==10.8.0
+constructs==10.8.1
     # via
     #   aws-cdk-lib
     #   cdk-nag
@@ -122,7 +122,6 @@ cryptography==50.0.0
     #   joserfc
     #   moto
     #   pyjwt
-    #   secretstorage
 cyclopts==4.11.0
     # via fastmcp-slim
 distlib==0.4.0
@@ -145,11 +144,11 @@ fastapi==0.141.1
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-fastmcp==3.4.5
+fastmcp==3.4.6
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-fastmcp-slim==3.4.5
+fastmcp-slim==3.4.6
     # via fastmcp
 filelock==3.29.0
     # via
@@ -159,6 +158,8 @@ frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
+gco-cli @ file:///Users/mevoracf/PROD-global-capacity-orchestrator-on-aws
+    # via gco-cli (pyproject.toml)
 greenlet==3.5.0
     # via playwright
 griffelib==2.0.2
@@ -179,7 +180,7 @@ httpx==0.28.1
     #   mcp
 httpx-sse==0.4.3
     # via mcp
-hypothesis==6.164.0
+hypothesis==6.165.2
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
@@ -202,10 +203,6 @@ jaraco-context==6.1.2
     # via keyring
 jaraco-functools==4.4.0
     # via keyring
-jeepney==0.9.0
-    # via
-    #   keyring
-    #   secretstorage
 jmespath==1.1.0
     # via
     #   boto3
@@ -506,14 +503,12 @@ rpds-py==0.30.0
     # via
     #   jsonschema
     #   referencing
-ruff==0.16.1
+ruff==0.16.2
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
 s3transfer==0.19.0
     # via boto3
-secretstorage==3.5.0
-    # via keyring
 shellingham==1.5.4
     # via typer
 six==1.17.0
@@ -525,7 +520,7 @@ sortedcontainers==2.4.0
     # via hypothesis
 sse-starlette==3.4.1
     # via mcp
-starlette==1.3.1
+starlette==1.6.0
     # via
     #   fastapi
     #   fastmcp-slim
@@ -593,7 +588,7 @@ urllib3==2.7.0
     #   requests
     #   responses
     #   types-requests
-uvicorn==0.52.0
+uvicorn==0.52.1
     # via
     #   fastmcp-slim
     #   gco-cli

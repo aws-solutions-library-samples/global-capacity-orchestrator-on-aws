@@ -42,7 +42,7 @@ spec:
           fsGroup: 1000
         containers:
         - name: ray-head
-          image: rayproject/ray:2.56.1
+          image: rayproject/ray:2.57.0
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false  # Ray needs to write to /tmp
@@ -88,7 +88,7 @@ spec:
           fsGroup: 1000
         containers:
         - name: ray-worker
-          image: rayproject/ray:2.56.1
+          image: rayproject/ray:2.57.0
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false  # Ray needs to write to /tmp

@@ -32,8 +32,8 @@
 #   - Pre-commit hook revisions in .pre-commit-config.yaml compared
 #     against the latest tag published upstream (GitHub API)
 #   - CDK enum constants from gco/stacks/constants.py compared against the
-#     installed aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, LAMBDA_NODEJS_RUNTIME,
-#     AURORA_POSTGRES_VERSION)
+#     installed aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, LAMBDA_NODEJS_RUNTIME;
+#     the Aurora engine is a plain version string checked against live RDS)
 #   - Latest stable Python release from endoflife.date — public endpoint
 #   - CI tooling the workflows install by hand: Trivy (TRIVY_VERSION),
 #     actionlint (ACTIONLINT_VERSION), Helm and kubectl (HELM_VERSION /
@@ -754,11 +754,12 @@ if ! aws sts get-caller-identity >/dev/null 2>&1; then
   AURORA_SKIP_REASON="No AWS credentials available (scan needs rds:DescribeDBEngineVersions). Configure OIDC to enable."
   echo "  $AURORA_SKIP_REASON"
 else
-  # Extract pinned Aurora PostgreSQL versions from regional_stack.py
-  # Pattern: AuroraPostgresEngineVersion.VER_XX_Y
+  # The pinned Aurora PostgreSQL version (AURORA_POSTGRES_VERSION in
+  # gco/stacks/constants.py — a plain version string applied through
+  # AuroraPostgresEngineVersion.of(), so no CDK enum is involved).
   AURORA_VERSIONS="$(extract_aurora_versions "gco/stacks/regional_stack.py")"
   if [ -z "$AURORA_VERSIONS" ]; then
-    AURORA_SKIP_REASON="Could not read Aurora PostgreSQL engine pins from gco/stacks/regional_stack.py."
+    AURORA_SKIP_REASON="Could not read AURORA_POSTGRES_VERSION from gco/stacks/constants.py."
     echo "  $AURORA_SKIP_REASON"
   else
     while read -r current_ver; do
@@ -1275,11 +1276,15 @@ PRECOMMIT_COUNT="$(wc -l < "$PRECOMMIT_RESULTS" 2>/dev/null | tr -d ' ')"
 # library, or simply because the latest published release added one)
 # but ``constants.py`` still pins an older one.
 #
-# Three enums are tracked today:
+# Two enums are tracked today:
 #
 #   - ``LAMBDA_PYTHON_RUNTIME`` → ``aws_cdk.aws_lambda.Runtime.PYTHON_X_Y``
 #   - ``LAMBDA_NODEJS_RUNTIME`` → ``aws_cdk.aws_lambda.Runtime.NODEJS_<major>_X``
-#   - ``AURORA_POSTGRES_VERSION`` → ``aws_cdk.aws_rds.AuroraPostgresEngineVersion.VER_X_Y``
+#
+# The Aurora engine deliberately is NOT an enum: constants.py pins a plain
+# version string applied through ``AuroraPostgresEngineVersion.of()``, and
+# the "Aurora PostgreSQL engine" section validates it against the live RDS
+# API — the authoritative source — instead of the CDK library's catalog.
 #
 # The deps-scan workflow installs the latest ``aws-cdk-lib`` for this
 # section; locally the helper just reflects whatever's already on the
@@ -1328,19 +1333,6 @@ else
     fi
   fi
 
-  # Aurora PostgreSQL engine version enum
-  AURORA_ENUM_CURRENT="$(extract_constant_value AURORA_POSTGRES_VERSION)"
-  AURORA_ENUM_LATEST="$(get_latest_aurora_postgres_version)"
-  if [ -z "$AURORA_ENUM_CURRENT" ] || [ -z "$AURORA_ENUM_LATEST" ]; then
-    mark_scan_incomplete "Could not parse the current or latest Aurora PostgreSQL enum."
-  elif [ "$AURORA_ENUM_CURRENT" != "$AURORA_ENUM_LATEST" ]; then
-    cur_v="$(echo "$AURORA_ENUM_CURRENT" | sed -E 's/^VER_([0-9]+)_([0-9]+)$/\1.\2/')"
-    lat_v="$(echo "$AURORA_ENUM_LATEST"  | sed -E 's/^VER_([0-9]+)_([0-9]+)$/\1.\2/')"
-    if [ "$(compare_semver "$cur_v" "$lat_v")" = "newer" ]; then
-      echo "  - AURORA_POSTGRES_VERSION: ${AURORA_ENUM_CURRENT} -> ${AURORA_ENUM_LATEST}"
-      echo "AURORA_POSTGRES_VERSION|aws_rds.AuroraPostgresEngineVersion|${AURORA_ENUM_CURRENT}|${AURORA_ENUM_LATEST}" >> "$CDK_ENUM_RESULTS"
-    fi
-  fi
 fi
 
 CDK_ENUM_COUNT="$(wc -l < "$CDK_ENUM_RESULTS" 2>/dev/null | tr -d ' ')"

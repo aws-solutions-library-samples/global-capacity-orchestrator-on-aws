@@ -46,8 +46,8 @@ def _workflow_step(relative_path: str, step_name: str) -> str:
         ),
         (
             ".github/workflows/integration-tests.yml",
-            "v3.31.5",
-            "d45842abe9f95afb4d346278eafb2e454dacdfb502d48cf1d5cede71a9046997",
+            "v3.32.1",
+            "a1df919d9721cf667accdc3e72848911b0cb25cfab7d2478ad0c996302c95744",
         ),
         (
             ".github/workflows/integration-tests.yml",
@@ -125,8 +125,8 @@ def test_downloaded_release_assets_have_committed_checksums(
         (
             ".github/workflows/integration-tests.yml",
             "Install Calico for NetworkPolicy enforcement",
-            'CALICO_VERSION: "v3.31.5"',
-            'CALICO_SHA256: "d45842abe9f95afb4d346278eafb2e454dacdfb502d48cf1d5cede71a9046997"',
+            'CALICO_VERSION: "v3.32.1"',
+            'CALICO_SHA256: "a1df919d9721cf667accdc3e72848911b0cb25cfab7d2478ad0c996302c95744"',
             "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
             'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
         ),
