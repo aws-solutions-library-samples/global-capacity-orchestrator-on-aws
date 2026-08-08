@@ -84,7 +84,7 @@ source ~/.zshrc                # or ~/.bashrc — the script prints which file i
 gco autopilot                  # offers the pinned Claude Code install, then launches
 ```
 
-`gco autopilot` turns your terminal into a fully configured [Claude Code](https://code.claude.com/docs/en/overview) session for GCO: an [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) backend using your AWS credentials (defaulting to GCO's canonical Claude Opus 5 inference profile, overridable to any Claude model on Bedrock with `-m`), the [GCO MCP server](gco_mcp/README.md), and every [recommended companion MCP server](gco_mcp/README.md#recommended-companion-mcp-servers) already wired in. Then just ask for what you want — *"deploy everything"*, *"where is p5 capacity cheapest right now?"*, *"submit examples/simple-job.yaml to the region with the most capacity"*. Sessions resume where you left off (`--continue`, or say yes to the prompt), the GCO MCP server's opt-in tool groups are one flag away (`-e mission`, `-e all-tools`), your own skills/agents/plugins come along for the ride (`--skills`, `--agents`, `--plugin`), and `--dry-run` previews the whole plan first. See [docs/AUTOPILOT.md](docs/AUTOPILOT.md).
+`gco autopilot` turns your terminal into a fully configured [Claude Code](https://code.claude.com/docs/en/overview) session for GCO: an [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) backend using your AWS credentials (defaulting to GCO's Claude Code default — the Claude Opus 5 inference profile — overridable to any Claude model on Bedrock with `-m`), the [GCO MCP server](gco_mcp/README.md), and every [recommended companion MCP server](gco_mcp/README.md#recommended-companion-mcp-servers) already wired in. Then just ask for what you want — *"deploy everything"*, *"where is p5 capacity cheapest right now?"*, *"submit examples/simple-job.yaml to the region with the most capacity"*. Sessions resume where you left off (`--continue`, or say yes to the prompt), the GCO MCP server's opt-in tool groups are one flag away (`-e mission`, `-e all-tools`), your own skills/agents/plugins come along for the ride (`--skills`, `--agents`, `--plugin`), and `--dry-run` previews the whole plan first. See [docs/AUTOPILOT.md](docs/AUTOPILOT.md).
 
 **Recommended: run everything from the dev container.** GCO pins exact versions of a lot of Python packages ([CDK](https://docs.aws.amazon.com/cdk/v2/guide/work-with-cdk-python.html), [AWS SDKs](https://pypi.org/project/boto3/), [FastAPI](https://fastapi.tiangolo.com/), [mypy](https://mypy-lang.org/), [Ruff](https://docs.astral.sh/ruff/), etc.), and installing them on top of an existing Python environment is the most common source of "it doesn't install" reports. The dev container ships a fully resolved environment (Python 3.14, Node.js 24, CDK, [kubectl](https://kubernetes.io/docs/reference/kubectl/), [AWS CLI](https://aws.amazon.com/cli/), Docker CLI + [Buildx](https://github.com/docker/buildx), all Python deps) so you skip the whole problem.
 
@@ -141,7 +141,7 @@ cd global-capacity-orchestrator-on-aws && pipx install -e .
 
 See the [Quick Start](#quick-start) for the full install + first-job walkthrough, or [`docs/CLI.md`](docs/CLI.md) for every CLI command.
 
-> **💡 New to the codebase?** GCO ships with the **GCO MCP server** — an [MCP server](gco_mcp/) exposing 134 tools by default (up to 179 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with [MCP](https://modelcontextprotocol.io/) support (like [Kiro](https://kiro.dev)) and explore GCO conversationally — ask questions about the codebase instead of reading repository files directly: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [gco_mcp/README.md](gco_mcp/README.md).
+> **💡 New to the codebase?** GCO ships with the **GCO MCP server** — an [MCP server](gco_mcp/) exposing 134 tools by default (up to 180 with feature flags) that index the whole project: docs, examples, source code, K8s manifests, and scripts. Connect it to an AI-powered IDE with [MCP](https://modelcontextprotocol.io/) support (like [Kiro](https://kiro.dev)) and explore GCO conversationally — ask questions about the codebase instead of reading repository files directly: *"How does region recommendation work?"*, *"Walk me through the inference deployment flow"*. See [gco_mcp/README.md](gco_mcp/README.md).
 
 <details>
 <summary><b>Table of Contents</b></summary>
@@ -588,7 +588,7 @@ This is host-socket pass-through, not true Docker-in-Docker. Anyone with access 
 │   ├── regional-api-proxy/              # Regional API Gateway → internal ALB proxy
 │   └── secret-rotation/                 # Daily secret rotation
 │
-├── gco_mcp/                             # MCP server for LLM interaction (134 tools default, up to 179 with feature flags)
+├── gco_mcp/                             # MCP server for LLM interaction (134 tools default, up to 180 with feature flags)
 ├── scripts/                             # Utility scripts (version bump, cluster access setup)
 └── tests/                               # PyTest + BATS test suites (counts tracked via badges)
 ```

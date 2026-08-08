@@ -33,6 +33,7 @@ from click.testing import CliRunner
 from cli.main import cli
 from cli.managed_config import (
     BEDROCK_DEFAULT_MODEL,
+    CLAUDE_CODE_DEFAULT_MODEL,
     DEPLOYMENT_REGION_SCALARS,
     REGIONAL_DEPLOYMENT_REGIONS,
     ChangeReport,
@@ -41,6 +42,7 @@ from cli.managed_config import (
     get_bedrock_model_status,
     get_deployment_regions_status,
     remove_deployment_region,
+    set_claude_code_default_model,
     set_default_bedrock_model,
     set_deployment_region_role,
 )
@@ -56,6 +58,7 @@ REGION_TOOLS = (
     "remove_deployment_region",
     "set_deployment_region",
     "set_default_bedrock_model",
+    "set_claude_code_default_model",
 )
 
 BASE_CONFIG: dict = {
@@ -70,6 +73,7 @@ BASE_CONFIG: dict = {
         },
         "bedrock": {
             "default_model_id": "global.anthropic.claude-opus-5",
+            "claude_code_default_model_id": "global.anthropic.claude-opus-5",
             "thinking": {"effort": "high"},
         },
         "project_name": "gco",
@@ -648,13 +652,27 @@ class TestEngineScalars:
         with pytest.raises(ManagedConfigError, match="must be a JSON string"):
             set_deployment_region_role("global", "us-east-1", config_path=path)
 
-    def test_set_bedrock_model_preserves_thinking_sibling(self, cdk_json: Path):
+    def test_set_bedrock_model_preserves_siblings(self, cdk_json: Path):
         report = set_default_bedrock_model("us.amazon.nova-2-lite-v1:0", config_path=cdk_json)
         assert report.changed is True
         written = json.loads(cdk_json.read_text(encoding="utf-8"))
         bedrock = written["context"]["bedrock"]
         assert bedrock["default_model_id"] == "us.amazon.nova-2-lite-v1:0"
         assert bedrock["thinking"] == {"effort": "high"}
+        # Repointing the advisory default never repoints autopilot.
+        assert bedrock["claude_code_default_model_id"] == "global.anthropic.claude-opus-5"
+
+    def test_set_claude_code_model_preserves_siblings(self, cdk_json: Path):
+        report = set_claude_code_default_model(
+            "us.anthropic.claude-sonnet-4-6", config_path=cdk_json
+        )
+        assert report.changed is True
+        written = json.loads(cdk_json.read_text(encoding="utf-8"))
+        bedrock = written["context"]["bedrock"]
+        assert bedrock["claude_code_default_model_id"] == "us.anthropic.claude-sonnet-4-6"
+        assert bedrock["thinking"] == {"effort": "high"}
+        # Repointing autopilot never repoints the advisory features.
+        assert bedrock["default_model_id"] == "global.anthropic.claude-opus-5"
 
     def test_set_bedrock_model_empty_rejected(self, cdk_json: Path):
         with pytest.raises(ManagedConfigError, match="non-empty string"):
@@ -664,9 +682,24 @@ class TestEngineScalars:
         with pytest.raises(ManagedConfigError, match="whitespace"):
             set_default_bedrock_model(" model-id ", config_path=cdk_json)
 
-    def test_bedrock_status_reads_configured_value(self, cdk_json: Path):
+    def test_set_claude_code_model_empty_rejected(self, cdk_json: Path):
+        with pytest.raises(
+            ManagedConfigError,
+            match="bedrock.claude_code_default_model_id must be a non-empty string",
+        ):
+            set_claude_code_default_model("   ", config_path=cdk_json)
+
+    def test_set_claude_code_model_surrounding_whitespace_rejected(self, cdk_json: Path):
+        with pytest.raises(
+            ManagedConfigError,
+            match="bedrock.claude_code_default_model_id must not have",
+        ):
+            set_claude_code_default_model(" model-id ", config_path=cdk_json)
+
+    def test_bedrock_status_reads_both_configured_values(self, cdk_json: Path):
         status = get_bedrock_model_status(config_path=cdk_json)
         assert status["default_model_id"] == "global.anthropic.claude-opus-5"
+        assert status["claude_code_default_model_id"] == "global.anthropic.claude-opus-5"
         assert status["config_path"] == str(cdk_json)
 
     def test_bedrock_container_materialized_when_absent(self, tmp_path: Path):
@@ -678,6 +711,17 @@ class TestEngineScalars:
         written = json.loads(path.read_text(encoding="utf-8"))
         assert written["context"]["bedrock"] == {
             "default_model_id": "global.anthropic.claude-opus-5"
+        }
+
+    def test_claude_code_leaf_materialized_when_absent(self, tmp_path: Path):
+        path = tmp_path / "cdk.json"
+        path.write_text(json.dumps({"context": {"project_name": "gco"}}), encoding="utf-8")
+        report = set_claude_code_default_model("global.anthropic.claude-opus-5", config_path=path)
+        assert report.changed is True
+        assert report.old == ""  # the reader-level "unset" default
+        written = json.loads(path.read_text(encoding="utf-8"))
+        assert written["context"]["bedrock"] == {
+            "claude_code_default_model_id": "global.anthropic.claude-opus-5"
         }
 
 
@@ -829,7 +873,7 @@ class TestRegionsCli:
 
 
 class TestBedrockCli:
-    def test_show_reports_model_and_path(self, cdk_json: Path):
+    def test_show_reports_both_models_and_path(self, cdk_json: Path):
         runner = CliRunner()
         result = runner.invoke(
             cli,
@@ -838,6 +882,45 @@ class TestBedrockCli:
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         assert payload["default_model_id"] == "global.anthropic.claude-opus-5"
+        assert payload["claude_code_default_model_id"] == "global.anthropic.claude-opus-5"
+
+    def test_set_claude_code_model_with_yes_writes(self, cdk_json: Path):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "stacks",
+                "bedrock",
+                "set-claude-code-model",
+                "us.anthropic.claude-sonnet-4-6",
+                "--config-path",
+                str(cdk_json),
+                "-y",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "set 'us.anthropic.claude-sonnet-4-6'" in result.output
+        written = json.loads(cdk_json.read_text(encoding="utf-8"))
+        bedrock = written["context"]["bedrock"]
+        assert bedrock["claude_code_default_model_id"] == "us.anthropic.claude-sonnet-4-6"
+        assert bedrock["default_model_id"] == "global.anthropic.claude-opus-5"
+
+    def test_set_claude_code_model_empty_exits_nonzero(self, cdk_json: Path):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "stacks",
+                "bedrock",
+                "set-claude-code-model",
+                "  ",
+                "--config-path",
+                str(cdk_json),
+                "-y",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "refusing to update" in result.output
 
     def test_set_model_with_yes_writes(self, cdk_json: Path):
         runner = CliRunner()
@@ -960,6 +1043,21 @@ class TestMcpRegionToolsArgv:
             "-y",
         ]
 
+    @patch.dict(os.environ, {"GCO_ENABLE_CONFIG_MANAGEMENT": "true"})
+    def test_set_claude_code_model_argv(self):
+        importlib.reload(run_mcp)
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.set_claude_code_default_model(model_id="global.anthropic.claude-opus-5")
+            cmd = mock.call_args[0][0]
+        assert cmd[-5:] == [
+            "stacks",
+            "bedrock",
+            "set-claude-code-model",
+            "global.anthropic.claude-opus-5",
+            "-y",
+        ]
+
 
 # =============================================================================
 # Registry contract
@@ -987,3 +1085,9 @@ class TestRegistryContract:
         assert key.key_id == "bedrock.default_model_id"
         assert key.container == "bedrock"
         assert key.leaf == "default_model_id"
+
+    def test_claude_code_registry_entry_shape(self):
+        key = CLAUDE_CODE_DEFAULT_MODEL
+        assert key.key_id == "bedrock.claude_code_default_model_id"
+        assert key.container == "bedrock"
+        assert key.leaf == "claude_code_default_model_id"

@@ -649,3 +649,23 @@ if is_enabled(FLAG_CONFIG_MANAGEMENT):
                 (e.g. us.amazon.nova-2-lite-v1:0).
         """
         return cli_runner._run_cli("stacks", "bedrock", "set-model", model_id, "-y")
+
+    @mcp.tool(tags={"low-risk", "stacks"})
+    @audit_logged
+    def set_claude_code_default_model(model_id: str) -> str:
+        """[gated by GCO_ENABLE_CONFIG_MANAGEMENT]
+
+        Set cdk.json bedrock.claude_code_default_model_id (autopilot model).
+
+        The session model gco autopilot hands to Claude Code, independent of
+        the advisory default_model_id consumed by Mission sampling and the
+        capacity advisor. Config-only and idempotent; validation mirrors the
+        runtime reader (non-empty, no surrounding whitespace). Sibling
+        settings are preserved; explicit --model / GCO_AUTOPILOT_MODEL
+        overrides still take precedence at launch time.
+
+        Args:
+            model_id: Bedrock model or inference-profile ID
+                (e.g. us.anthropic.claude-sonnet-4-6).
+        """
+        return cli_runner._run_cli("stacks", "bedrock", "set-claude-code-model", model_id, "-y")

@@ -208,6 +208,7 @@ class TestFeatureFlags:
                 "remove_deployment_region",
                 "set_deployment_region",
                 "set_default_bedrock_model",
+                "set_claude_code_default_model",
             },
         }
         assert actual == expected

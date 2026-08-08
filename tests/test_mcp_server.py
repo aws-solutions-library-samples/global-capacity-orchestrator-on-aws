@@ -209,8 +209,9 @@ class TestToolRegistration:
             expected += 1  # gated by GCO_ENABLE_LOCAL_STORAGE_SYNC
         if "add_deployment_region" in tool_names:
             # list/add/remove/set_deployment_region + set_default_bedrock_model
-            # register together under GCO_ENABLE_CONFIG_MANAGEMENT.
-            expected += 5
+            # + set_claude_code_default_model register together under
+            # GCO_ENABLE_CONFIG_MANAGEMENT.
+            expected += 6
         if "mission_start" in tool_names:
             # The nine mission_* tools register together under GCO_ENABLE_MISSION.
             expected += 9
@@ -479,6 +480,7 @@ class TestToolRegistration:
                     "remove_deployment_region",
                     "set_deployment_region",
                     "set_default_bedrock_model",
+                    "set_claude_code_default_model",
                 }
             )
         # The nine mission_* tools register together under GCO_ENABLE_MISSION.

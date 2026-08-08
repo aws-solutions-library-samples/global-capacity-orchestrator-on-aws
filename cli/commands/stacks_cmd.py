@@ -895,12 +895,14 @@ def regions_set(config: Any, role: Any, region: Any, config_path: Any, yes: Any)
 @stacks.group("bedrock")
 @pass_config
 def bedrock_cmd(config: Any) -> None:
-    """Manage the Bedrock model default in cdk.json.
+    """Manage the Bedrock model defaults in cdk.json.
 
-    Edits context.bedrock.default_model_id — the model/inference-profile ID
-    GCO's advisory Bedrock features (capacity advisor, Mission sampling,
-    autopilot) use unless explicitly overridden. Edits go through the
-    managed-config engine: validated, atomic, idempotent, and audited.
+    Two independent keys live under context.bedrock: default_model_id — the
+    model/inference-profile ID GCO's advisory Bedrock features (capacity
+    advisor, Mission sampling) use unless explicitly overridden — and
+    claude_code_default_model_id, the session model `gco autopilot` hands
+    to Claude Code. Edits go through the managed-config engine: validated,
+    atomic, idempotent, and audited.
     """
     pass
 
@@ -909,7 +911,7 @@ def bedrock_cmd(config: Any) -> None:
 @click.option("--config-path", help="Explicit cdk.json to use (default: nearest in cwd/parents)")
 @pass_config
 def bedrock_show(config: Any, config_path: Any) -> None:
-    """Show the configured Bedrock default model ID and its backing path."""
+    """Show both configured Bedrock model defaults and their backing path."""
     from ..managed_config import ManagedConfigError, get_bedrock_model_status
 
     formatter = get_output_formatter(config)
@@ -928,12 +930,14 @@ def bedrock_show(config: Any, config_path: Any) -> None:
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 @pass_config
 def bedrock_set_model(config: Any, model_id: Any, config_path: Any, yes: Any) -> None:
-    """Set context.bedrock.default_model_id.
+    """Set context.bedrock.default_model_id (advisory features).
 
+    This is the default consumed by the capacity advisor and Mission
+    sampling; `gco autopilot` has its own key (see set-claude-code-model).
     Model and inference-profile IDs are free-form (custom profiles,
     marketplace models), so validation mirrors the runtime reader: a
     non-empty string without surrounding whitespace. Sibling settings
-    (bedrock.thinking) are preserved.
+    (bedrock.thinking, bedrock.claude_code_default_model_id) are preserved.
 
     Examples:
         gco stacks bedrock set-model us.amazon.nova-pro-v1:0
@@ -957,6 +961,50 @@ def bedrock_set_model(config: Any, model_id: Any, config_path: Any, yes: Any) ->
         formatter.print_info(
             "Advisory features pick this up on their next run; explicit "
             "--model/env overrides still take precedence"
+        )
+    else:
+        formatter.print_info(report.summary())
+
+
+@bedrock_cmd.command("set-claude-code-model")
+@click.argument("model_id")
+@click.option("--config-path", help="Explicit cdk.json to use (default: nearest in cwd/parents)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def bedrock_set_claude_code_model(config: Any, model_id: Any, config_path: Any, yes: Any) -> None:
+    """Set context.bedrock.claude_code_default_model_id.
+
+    This is the session model `gco autopilot` hands to Claude Code, kept
+    separate from the advisory default (see set-model) so repointing the
+    interactive agent never repoints Mission sampling or the capacity
+    advisor. Validation mirrors the runtime reader: a non-empty string
+    without surrounding whitespace. Sibling settings are preserved.
+
+    Examples:
+        gco stacks bedrock set-claude-code-model us.anthropic.claude-sonnet-4-6
+        gco stacks bedrock set-claude-code-model us.anthropic.claude-opus-4-7 -y
+    """
+    from ..managed_config import ManagedConfigError, set_claude_code_default_model
+
+    formatter = get_output_formatter(config)
+
+    if not yes:
+        click.confirm(
+            f"Set bedrock.claude_code_default_model_id to {model_id} in cdk.json?",
+            abort=True,
+        )
+
+    try:
+        report = set_claude_code_default_model(model_id, config_path=config_path)
+    except ManagedConfigError as e:
+        formatter.print_error(str(e))
+        sys.exit(1)
+
+    if report.changed:
+        formatter.print_success(report.summary())
+        formatter.print_info(
+            "New autopilot sessions pick this up at launch; explicit "
+            "--model/GCO_AUTOPILOT_MODEL overrides still take precedence"
         )
     else:
         formatter.print_info(report.summary())
