@@ -119,25 +119,32 @@ class _PinnedManifestBundle:
 
 
 PINNED_GATEWAY_CRD_BUNDLES = (
+    # Controller v3.5.0 is built against Gateway API v1.6.0 and requires the
+    # CRDs to be updated BEFORE the controller (release notes: upgrading the
+    # controller first silently disables gateway reconciliation until the
+    # CRDs catch up — exactly the stale-Accepted failure the 2026-08 live
+    # validation caught under the v1.5.0 bundle). Keep these two bundles and
+    # the aws-load-balancer-controller chart version in charts.yaml in
+    # lockstep when bumping either.
     _PinnedManifestBundle(
-        name="gateway-api-standard-v1.5.0",
+        name="gateway-api-standard-v1.6.0",
         url=(
             "https://github.com/kubernetes-sigs/gateway-api/releases/download/"
-            "v1.5.0/standard-install.yaml"
+            "v1.6.0/standard-install.yaml"
         ),
-        size=1_023_753,
-        sha256="510338cf6709f84410efcce5269268f4c7c5067efdc5d04c75aa2fd2f8380c96",
-        object_count=10,
-        crd_count=8,
+        size=1_170_953,
+        sha256="a557172e8348f758479e9ee4000bbbb4b4aa48302a6b73461823ea5349bad56d",
+        object_count=12,
+        crd_count=10,
     ),
     _PinnedManifestBundle(
-        name="aws-lbc-gateway-v3.4.2",
+        name="aws-lbc-gateway-v3.5.0",
         url=(
             "https://raw.githubusercontent.com/kubernetes-sigs/"
-            "aws-load-balancer-controller/v3.4.2/config/crd/gateway/gateway-crds.yaml"
+            "aws-load-balancer-controller/v3.5.0/config/crd/gateway/gateway-crds.yaml"
         ),
-        size=65_111,
-        sha256="89983f8b43b1b85c3d065d6f0007ee1fa2bffe8790282b9a57ccc9a355f65bd7",
+        size=129_368,
+        sha256="fce68bbfc74b4ed7dbea675f46981cbef1fffc8981cf19c0c1e7a2e9d6464862",
         object_count=3,
         crd_count=3,
     ),

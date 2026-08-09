@@ -30,16 +30,13 @@ charts:
     repo_name: eks
     repo_url: https://aws.github.io/eks-charts
     chart: aws-load-balancer-controller
-    # Deliberately held at 3.4.3: controller v3.5.0 restructures Gateway API
-    # support into separate L4/L7 controller instances, and under it this
-    # deployment's GatewayClass/Gateway/HTTPRoute stopped being reconciled
-    # (Accepted conditions stale, observedGeneration never set) — caught by
-    # the 2026-08 live release validation, which failed topology and tore the
-    # run down. Chart values and rendered templates are identical between
-    # 3.4.3 and 3.5.0 except the image tag, so this is a controller behavior
-    # change that needs its own migration PR with cluster-level debugging,
-    # not a routine monthly bump.
-    version: "3.4.3"
+    # 3.5.0 requires Gateway API CRDs v1.6.0 installed BEFORE the controller
+    # (its release notes; upgrading the controller first silently stops
+    # gateway reconciliation — the 2026-08 live validation caught exactly
+    # that under the older v1.5.0 CRD bundle). Bump this version only in
+    # lockstep with PINNED_GATEWAY_CRD_BUNDLES in
+    # lambda/helm-installer/handler.py.
+    version: "3.5.0"
     namespace: kube-system
     create_namespace: false
     wait: true

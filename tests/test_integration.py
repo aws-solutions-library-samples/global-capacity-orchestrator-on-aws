@@ -261,7 +261,7 @@ class TestKubernetesManifests:
             "batch/v1",
             "networking.k8s.io/v1",
             "gateway.networking.k8s.io/v1",
-            "gateway.k8s.aws/v1beta1",
+            "gateway.k8s.aws/v1",
             "rbac.authorization.k8s.io/v1",
             "storage.k8s.io/v1",
             "policy/v1",

@@ -13,7 +13,7 @@ metadata:
 spec:
   controllerName: gateway.k8s.aws/alb
 ---
-apiVersion: gateway.k8s.aws/v1beta1
+apiVersion: gateway.k8s.aws/v1
 kind: TargetGroupConfiguration
 metadata:
   name: gco-default-target-group
@@ -37,7 +37,7 @@ spec:
       - key: deregistration_delay.timeout_seconds
         value: "900"
 ---
-apiVersion: gateway.k8s.aws/v1beta1
+apiVersion: gateway.k8s.aws/v1
 kind: LoadBalancerConfiguration
 metadata:
   name: gco-gateway-load-balancer
