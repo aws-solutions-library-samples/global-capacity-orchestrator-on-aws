@@ -698,3 +698,9 @@ class TestGatewayLockstepValidation:
         )
         assert len(errors) == 1
         assert "does not declare sigs.k8s.io/gateway-api" in errors[0]
+
+    def test_go_mod_fetch_refuses_non_semver_versions(self) -> None:
+        # The fetch URL interpolates the chart version; anything that is not
+        # strict semver is refused before any network use.
+        with pytest.raises(RuntimeError, match="non-semver controller version"):
+            validator.fetch_lbc_go_mod("3.5.0/../../evil")

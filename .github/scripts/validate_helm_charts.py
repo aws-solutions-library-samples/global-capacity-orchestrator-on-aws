@@ -541,13 +541,19 @@ def fetch_lbc_go_mod(controller_version: str) -> str:
     import urllib.error
     import urllib.request
 
+    if not re.fullmatch(r"\d+\.\d+\.\d+", controller_version):
+        raise RuntimeError(
+            f"refusing go.mod fetch for non-semver controller version {controller_version!r}"
+        )
     url = _LBC_GO_MOD_URL_TEMPLATE.format(version=controller_version)
     last_error: Exception | None = None
     for attempt in range(1, _GO_MOD_FETCH_ATTEMPTS + 1):
         try:
-            with urllib.request.urlopen(  # noqa: S310 - fixed https host
-                url, timeout=_GO_MOD_FETCH_TIMEOUT_SECONDS
-            ) as response:
+            with (
+                urllib.request.urlopen(  # nosemgrep: dynamic-urllib-use-detected - fixed https://raw.githubusercontent.com template; the only variable is a strictly semver-validated version segment, so no scheme or host injection is possible  # noqa: S310
+                    url, timeout=_GO_MOD_FETCH_TIMEOUT_SECONDS
+                ) as response
+            ):
                 return str(response.read().decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last_error = exc
