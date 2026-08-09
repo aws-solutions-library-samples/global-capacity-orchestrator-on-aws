@@ -210,3 +210,23 @@ CVE-2026-56852 exp:2026-09-22
 # then drop this entry.
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-50163
 CVE-2026-50163 exp:2026-09-22
+
+# CVE-2025-47273 (setuptools 70.3.0, fixed 78.1.1) and GHSA-6v7p-g79w-8964
+# (msgpack 1.1.2, fixed 1.2.1) — both live only inside the AWS CLI v2
+# vendored bundle (usr/local/aws-cli/v2/2.36.19/dist/) in the dev image,
+# not in our resolvable dependency tree (msgpack appears nowhere in
+# requirements-lock.txt, and site-packages setuptools is current).
+#
+# Not clearable by a pin bump: 2.36.19 is the newest AWS CLI v2 release
+# (this PR just bumped to it); the vendored versions are chosen by the AWS
+# CLI's own build. Clears when a newer AWS CLI release rebuilds its bundle
+# with patched deps — bump AWSCLI_VERSION in Dockerfile.dev and re-check.
+#
+# Low runtime risk: the dev image is a contributor/CI tool that is never
+# deployed; the flagged code paths run only inside `aws` CLI invocations
+# against operator-supplied input.
+#
+# Advisories: https://nvd.nist.gov/vuln/detail/CVE-2025-47273
+#             https://github.com/advisories/GHSA-6v7p-g79w-8964
+CVE-2025-47273 exp:2026-10-15
+GHSA-6v7p-g79w-8964 exp:2026-10-15
