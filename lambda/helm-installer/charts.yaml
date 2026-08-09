@@ -30,7 +30,16 @@ charts:
     repo_name: eks
     repo_url: https://aws.github.io/eks-charts
     chart: aws-load-balancer-controller
-    version: "3.5.0"
+    # Deliberately held at 3.4.3: controller v3.5.0 restructures Gateway API
+    # support into separate L4/L7 controller instances, and under it this
+    # deployment's GatewayClass/Gateway/HTTPRoute stopped being reconciled
+    # (Accepted conditions stale, observedGeneration never set) — caught by
+    # the 2026-08 live release validation, which failed topology and tore the
+    # run down. Chart values and rendered templates are identical between
+    # 3.4.3 and 3.5.0 except the image tag, so this is a controller behavior
+    # change that needs its own migration PR with cluster-level debugging,
+    # not a routine monthly bump.
+    version: "3.4.3"
     namespace: kube-system
     create_namespace: false
     wait: true
