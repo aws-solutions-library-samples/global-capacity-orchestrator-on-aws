@@ -61,14 +61,14 @@ def test_lambda_verifier_discovers_and_imports_every_handler(lambda_verifier: An
 
 def _dev_outputs() -> dict[tuple[str, ...], str]:
     return {
-        ("node", "--version"): "v24.18.1",
+        ("node", "--version"): "v24.19.0",
         ("npm", "--version"): "12.0.2",
-        ("cdk", "--version"): "2.1134.0 (build abc123)",
-        ("aws", "--version"): "aws-cli/2.36.14 Python/3.13.11 Linux/6.11",
-        ("docker", "--version"): "Docker version 29.7.1, build deadbeef",
-        ("docker", "buildx", "version"): "github.com/docker/buildx v0.36.0 abc123",
-        ("uv", "--version"): "uv 0.12.1 (abc123 2026-08-01)",
-        ("uvx", "--version"): "uvx 0.12.1 (abc123 2026-08-01)",
+        ("cdk", "--version"): "2.1135.1 (build abc123)",
+        ("aws", "--version"): "aws-cli/2.36.19 Python/3.13.11 Linux/6.11",
+        ("docker", "--version"): "Docker version 29.7.2, build deadbeef",
+        ("docker", "buildx", "version"): "github.com/docker/buildx v0.36.1 abc123",
+        ("uv", "--version"): "uv 0.12.3 (abc123 2026-08-01)",
+        ("uvx", "--version"): "uvx 0.12.3 (abc123 2026-08-01)",
         (
             "kubectl",
             "version",
@@ -94,14 +94,14 @@ def test_dev_verifier_accepts_only_matching_runtime_versions(container_verifier:
     )
 
     assert actual == {
-        "Node.js": "v24.18.1",
+        "Node.js": "v24.19.0",
         "npm": "12.0.2",
-        "CDK": "2.1134.0",
-        "AWS CLI": "2.36.14",
-        "Docker CLI": "29.7.1",
-        "Buildx": "v0.36.0",
-        "uv": "0.12.1",
-        "uvx": "0.12.1",
+        "CDK": "2.1135.1",
+        "AWS CLI": "2.36.19",
+        "Docker CLI": "29.7.2",
+        "Buildx": "v0.36.1",
+        "uv": "0.12.3",
+        "uvx": "0.12.3",
         "kubectl": "v1.36.3",
     }
 

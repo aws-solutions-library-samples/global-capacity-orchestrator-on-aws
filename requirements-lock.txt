@@ -201,6 +201,10 @@ jaraco-context==6.1.2
     # via keyring
 jaraco-functools==4.4.0
     # via keyring
+jeepney==0.9.0
+    # via
+    #   keyring
+    #   secretstorage
 jmespath==1.1.0
     # via
     #   boto3
@@ -507,6 +511,8 @@ ruff==0.16.2
     #   gco-cli (pyproject.toml)
 s3transfer==0.19.0
     # via boto3
+secretstorage==3.5.0
+    # via keyring
 shellingham==1.5.4
     # via typer
 six==1.17.0
