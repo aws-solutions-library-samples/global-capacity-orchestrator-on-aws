@@ -94,6 +94,13 @@ NON_MANIFEST_FILENAMES = frozenset({"pipeline-dag.yaml"})
 SCHEMA_UNAVAILABLE_SKIPS = (
     "ray.io/v1/RayCluster",  # KubeRay — not in datreeio/CRDs-catalog
     "batch.volcano.sh/v1alpha1/Job",  # Volcano — not in datreeio/CRDs-catalog
+    # AWS LBC gateway CRDs at their v1 storage version (v3.5.0+) — the
+    # datreeio catalog only carries the deprecated v1beta1 schemas. These two
+    # resources are instead schema-validated against the exact pinned CRD
+    # bundle by validate_helm_charts.py's gateway-lockstep check, which is
+    # stronger than the catalog lookup this skip bypasses.
+    "gateway.k8s.aws/v1/LoadBalancerConfiguration",
+    "gateway.k8s.aws/v1/TargetGroupConfiguration",
 )
 
 # kubeconform's own default schema catalog (upstream Kubernetes resources).

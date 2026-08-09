@@ -479,6 +479,163 @@ def validate_online(
     return errors
 
 
+# ---------------------------------------------------------------------------
+# Gateway API / aws-load-balancer-controller lockstep
+#
+# The controller is built against an exact ``sigs.k8s.io/gateway-api`` release
+# (declared in its go.mod) and its own gateway CRDs ship per controller tag.
+# GCO pins three coupled artifacts in two different files:
+#
+#   * the aws-load-balancer-controller chart version (charts.yaml, this file's
+#     usual input),
+#   * the ``gateway-api-standard-vX.Y.Z`` CRD bundle, and
+#   * the ``aws-lbc-gateway-vX.Y.Z`` CRD bundle
+#     (both in lambda/helm-installer/handler.py PINNED_GATEWAY_CRD_BUNDLES).
+#
+# When the chart moved to 3.5.0 while the standard bundle stayed at v1.5.0,
+# the controller silently stopped reconciling gateways — nothing failed until
+# the live release validation deployed the pair. These checks encode the
+# contract so the drift fails CI instead:
+#
+#   offline: the aws-lbc-gateway bundle version must equal the pinned chart
+#     version (they ship from the same controller tag).
+#   online: the controller tag's go.mod names its required gateway-api
+#     release; the pinned standard bundle must be at least that (major.minor).
+# ---------------------------------------------------------------------------
+
+_HANDLER_PATH = _REPO_ROOT / "lambda" / "helm-installer" / "handler.py"
+_LBC_CHART_KEY = "aws-load-balancer-controller"
+_GATEWAY_API_BUNDLE_RE = re.compile(r'name="gateway-api-standard-v(\d+\.\d+\.\d+)"')
+_LBC_BUNDLE_RE = re.compile(r'name="aws-lbc-gateway-v(\d+\.\d+\.\d+)"')
+_GO_MOD_GATEWAY_API_RE = re.compile(r"^\s*sigs\.k8s\.io/gateway-api\s+v(\d+\.\d+\.\d+)", re.M)
+_LBC_GO_MOD_URL_TEMPLATE = (
+    "https://raw.githubusercontent.com/kubernetes-sigs/"
+    "aws-load-balancer-controller/v{version}/go.mod"
+)
+_GO_MOD_FETCH_ATTEMPTS = 3
+_GO_MOD_FETCH_TIMEOUT_SECONDS = 15
+
+
+def parse_pinned_gateway_bundles(handler_source: str) -> tuple[str | None, str | None]:
+    """Return (gateway-api standard bundle version, aws-lbc bundle version)."""
+    gateway_api = _GATEWAY_API_BUNDLE_RE.search(handler_source)
+    lbc = _LBC_BUNDLE_RE.search(handler_source)
+    return (
+        gateway_api.group(1) if gateway_api else None,
+        lbc.group(1) if lbc else None,
+    )
+
+
+def gateway_api_requirement_from_go_mod(go_mod_text: str) -> str | None:
+    """Return the gateway-api release the controller's go.mod declares."""
+    match = _GO_MOD_GATEWAY_API_RE.search(go_mod_text)
+    return match.group(1) if match else None
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def fetch_lbc_go_mod(controller_version: str) -> str:
+    """Fetch the controller tag's go.mod, retrying transient HTTP failures."""
+    import urllib.error
+    import urllib.request
+
+    url = _LBC_GO_MOD_URL_TEMPLATE.format(version=controller_version)
+    last_error: Exception | None = None
+    for attempt in range(1, _GO_MOD_FETCH_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(  # noqa: S310 - fixed https host
+                url, timeout=_GO_MOD_FETCH_TIMEOUT_SECONDS
+            ) as response:
+                return str(response.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            if attempt < _GO_MOD_FETCH_ATTEMPTS:
+                time.sleep(2**attempt)
+    raise RuntimeError(f"could not fetch {url}: {last_error}")
+
+
+def validate_gateway_lockstep(
+    charts: dict[str, Any],
+    *,
+    handler_source: str | None = None,
+    go_mod_fetcher: Any = None,
+    online: bool = False,
+    require_entry: bool = True,
+) -> list[str]:
+    """Check the chart / CRD-bundle lockstep contract; return error strings.
+
+    Offline: the ``aws-lbc-gateway`` bundle version must equal the pinned
+    chart version. Online (adds one HTTPS fetch): the pinned standard
+    gateway-api bundle must satisfy the requirement in the controller tag's
+    go.mod. With ``require_entry`` (the default, used for the repository's
+    real charts.yaml) a missing chart entry or renamed handler constants are
+    reported rather than skipped — this guard exists precisely for refactors
+    that move them. ``main()`` disables ``require_entry`` for explicitly
+    supplied ``--charts`` fixture files that legitimately omit the entry.
+    """
+    errors: list[str] = []
+    entry = charts.get(_LBC_CHART_KEY)
+    if not isinstance(entry, dict) or not entry.get("version"):
+        if require_entry:
+            return [f"gateway lockstep: no {_LBC_CHART_KEY!r} entry with a version in charts.yaml"]
+        return []
+    chart_version = str(entry["version"]).lstrip("v")
+
+    if handler_source is None:
+        try:
+            handler_source = _HANDLER_PATH.read_text(encoding="utf-8")
+        except OSError as exc:
+            return [f"gateway lockstep: cannot read {_HANDLER_PATH}: {exc}"]
+
+    gateway_api_pin, lbc_pin = parse_pinned_gateway_bundles(handler_source)
+    if gateway_api_pin is None or lbc_pin is None:
+        return [
+            "gateway lockstep: PINNED_GATEWAY_CRD_BUNDLES in "
+            "lambda/helm-installer/handler.py no longer names a "
+            "'gateway-api-standard-vX.Y.Z' and an 'aws-lbc-gateway-vX.Y.Z' "
+            "bundle; update this check alongside any rename"
+        ]
+
+    if lbc_pin != chart_version:
+        errors.append(
+            f"gateway lockstep: aws-lbc-gateway CRD bundle v{lbc_pin} does not match "
+            f"the pinned {_LBC_CHART_KEY} chart {chart_version} — the controller's "
+            "gateway CRDs ship per controller tag; bump both together "
+            "(charts.yaml + PINNED_GATEWAY_CRD_BUNDLES in lambda/helm-installer/handler.py)"
+        )
+
+    if not online:
+        return errors
+
+    fetcher = go_mod_fetcher or fetch_lbc_go_mod
+    try:
+        go_mod_text = fetcher(chart_version)
+    except RuntimeError as exc:
+        errors.append(f"gateway lockstep: {exc}")
+        return errors
+
+    required = gateway_api_requirement_from_go_mod(go_mod_text)
+    if required is None:
+        errors.append(
+            f"gateway lockstep: go.mod for {_LBC_CHART_KEY} v{chart_version} does not "
+            "declare sigs.k8s.io/gateway-api — upstream layout changed; update this check"
+        )
+        return errors
+
+    if _version_tuple(gateway_api_pin)[:2] < _version_tuple(required)[:2]:
+        errors.append(
+            f"gateway lockstep: {_LBC_CHART_KEY} {chart_version} is built against "
+            f"gateway-api v{required} (its go.mod), but the pinned standard CRD bundle "
+            f"is v{gateway_api_pin}. Upgrading the controller without its Gateway API "
+            "CRDs silently stops gateway reconciliation (caught live, 2026-08). Bump "
+            "'gateway-api-standard' in lambda/helm-installer/handler.py to at least "
+            f"v{required} in the same change"
+        )
+    return errors
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
@@ -552,6 +709,16 @@ def main(argv: list[str] | None = None) -> int:
                 "note: 'helm' not found on PATH; running structural checks only. "
                 "Pass --mode online in CI to require the resolve/render checks."
             )
+
+    errors.extend(
+        validate_gateway_lockstep(
+            charts,
+            online=run_online,
+            # Fixture chart files passed via --charts may legitimately omit
+            # the controller entry; the repository's real charts.yaml may not.
+            require_entry=args.charts.resolve() == _DEFAULT_CHARTS.resolve(),
+        )
+    )
 
     refs = build_refs(charts, enabled_only=args.enabled_only)
     if run_online:

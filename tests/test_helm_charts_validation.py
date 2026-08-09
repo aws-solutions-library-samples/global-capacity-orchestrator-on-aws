@@ -541,3 +541,160 @@ class TestValidateOnlineRetriesEveryNetworkCall:
         assert any(c.startswith("helm repo add kedacore") for c in joined)
         assert any(c == "helm repo update" for c in joined)
         assert any("show chart kedacore/keda" in c for c in joined)
+
+
+# ---------------------------------------------------------------------------
+# Gateway API / aws-load-balancer-controller lockstep
+# ---------------------------------------------------------------------------
+
+_HANDLER_FIXTURE = """
+PINNED_GATEWAY_CRD_BUNDLES = (
+    _PinnedManifestBundle(
+        name="gateway-api-standard-v1.6.0",
+        url="https://example.invalid/standard-install.yaml",
+    ),
+    _PinnedManifestBundle(
+        name="aws-lbc-gateway-v3.5.0",
+        url="https://example.invalid/gateway-crds.yaml",
+    ),
+)
+"""
+
+_GO_MOD_FIXTURE = """
+module sigs.k8s.io/aws-load-balancer-controller/v3
+
+go 1.24
+
+require (
+\tgithub.com/aws/aws-sdk-go-v2 v1.32.0
+\tsigs.k8s.io/gateway-api v1.6.0
+)
+"""
+
+
+def _lbc_charts(version: str = "3.5.0") -> dict:
+    # Shaped like ``load_charts`` output: the unwrapped ``charts:`` mapping.
+    return {
+        "aws-load-balancer-controller": {
+            "enabled": True,
+            "repo_name": "eks",
+            "repo_url": "https://aws.github.io/eks-charts",
+            "chart": "aws-load-balancer-controller",
+            "version": version,
+            "namespace": "kube-system",
+        }
+    }
+
+
+class TestGatewayLockstepParsers:
+    def test_parses_both_bundle_versions(self) -> None:
+        assert validator.parse_pinned_gateway_bundles(_HANDLER_FIXTURE) == (
+            "1.6.0",
+            "3.5.0",
+        )
+
+    def test_missing_bundles_parse_as_none(self) -> None:
+        assert validator.parse_pinned_gateway_bundles("nothing here") == (None, None)
+
+    def test_go_mod_requirement_extraction(self) -> None:
+        assert validator.gateway_api_requirement_from_go_mod(_GO_MOD_FIXTURE) == "1.6.0"
+        assert validator.gateway_api_requirement_from_go_mod("module x") is None
+
+    def test_real_handler_and_charts_are_in_lockstep_offline(self) -> None:
+        # The committed repository state must satisfy its own contract.
+        charts = validator.load_charts(validator._DEFAULT_CHARTS)
+        assert validator.validate_gateway_lockstep(charts, online=False) == []
+
+
+class TestGatewayLockstepValidation:
+    def test_matching_versions_pass_online(self) -> None:
+        errors = validator.validate_gateway_lockstep(
+            _lbc_charts(),
+            handler_source=_HANDLER_FIXTURE,
+            go_mod_fetcher=lambda version: _GO_MOD_FIXTURE,
+            online=True,
+        )
+        assert errors == []
+
+    def test_lbc_bundle_chart_skew_fails_offline(self) -> None:
+        errors = validator.validate_gateway_lockstep(
+            _lbc_charts(version="3.6.0"),
+            handler_source=_HANDLER_FIXTURE,
+            online=False,
+        )
+        assert len(errors) == 1
+        assert "aws-lbc-gateway CRD bundle v3.5.0" in errors[0]
+        assert "3.6.0" in errors[0]
+
+    def test_stale_gateway_api_bundle_fails_online(self) -> None:
+        # The 2026-08 incident shape: controller requires a newer gateway-api
+        # than the pinned standard bundle provides.
+        newer_go_mod = _GO_MOD_FIXTURE.replace("gateway-api v1.6.0", "gateway-api v1.7.0")
+        errors = validator.validate_gateway_lockstep(
+            _lbc_charts(),
+            handler_source=_HANDLER_FIXTURE,
+            go_mod_fetcher=lambda version: newer_go_mod,
+            online=True,
+        )
+        assert len(errors) == 1
+        assert "built against gateway-api v1.7.0" in errors[0]
+        assert "v1.6.0" in errors[0]
+
+    def test_newer_pinned_bundle_than_required_passes(self) -> None:
+        older_go_mod = _GO_MOD_FIXTURE.replace("gateway-api v1.6.0", "gateway-api v1.5.1")
+        errors = validator.validate_gateway_lockstep(
+            _lbc_charts(),
+            handler_source=_HANDLER_FIXTURE,
+            go_mod_fetcher=lambda version: older_go_mod,
+            online=True,
+        )
+        assert errors == []
+
+    def test_offline_mode_never_calls_the_fetcher(self) -> None:
+        errors = validator.validate_gateway_lockstep(
+            _lbc_charts(),
+            handler_source=_HANDLER_FIXTURE,
+            go_mod_fetcher=lambda version: pytest.fail("offline must not fetch"),
+            online=False,
+        )
+        assert errors == []
+
+    def test_fetch_failure_is_reported_not_swallowed(self) -> None:
+        def _boom(version: str) -> str:
+            raise RuntimeError("could not fetch https://example.invalid/go.mod: timed out")
+
+        errors = validator.validate_gateway_lockstep(
+            _lbc_charts(),
+            handler_source=_HANDLER_FIXTURE,
+            go_mod_fetcher=_boom,
+            online=True,
+        )
+        assert len(errors) == 1
+        assert "could not fetch" in errors[0]
+
+    def test_missing_chart_entry_is_an_error_for_the_real_charts_file(self) -> None:
+        errors = validator.validate_gateway_lockstep({}, online=False, require_entry=True)
+        assert len(errors) == 1
+        assert "no 'aws-load-balancer-controller' entry" in errors[0]
+
+    def test_missing_chart_entry_is_skipped_for_fixture_files(self) -> None:
+        assert validator.validate_gateway_lockstep({}, online=False, require_entry=False) == []
+
+    def test_renamed_handler_bundles_fail_loudly(self) -> None:
+        errors = validator.validate_gateway_lockstep(
+            _lbc_charts(),
+            handler_source="PINNED_GATEWAY_CRD_BUNDLES = ()",
+            online=False,
+        )
+        assert len(errors) == 1
+        assert "no longer names" in errors[0]
+
+    def test_go_mod_without_gateway_api_fails_loudly(self) -> None:
+        errors = validator.validate_gateway_lockstep(
+            _lbc_charts(),
+            handler_source=_HANDLER_FIXTURE,
+            go_mod_fetcher=lambda version: "module x\n",
+            online=True,
+        )
+        assert len(errors) == 1
+        assert "does not declare sigs.k8s.io/gateway-api" in errors[0]
