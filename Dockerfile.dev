@@ -289,6 +289,13 @@ COPY gco/_version.py ./gco/_version.py
 #   - The shell-level ``for`` loop around the call provides a final
 #     belt-and-suspenders retry if all the above still hits an
 #     unrecoverable network blip; pip is idempotent under re-run.
+# The slim base bundles whatever setuptools its snapshot carried
+# (3.14.7-slim regressed to 70.3.0, which Trivy flags for
+# CVE-2025-47273). Upgrade it explicitly to the same release pyproject's
+# [build-system] pins, so the environment's global setuptools and the
+# build backend can't drift apart and the CVE scan sees a fixed version.
+RUN pip install --no-cache-dir setuptools==84.0.0
+
 RUN for attempt in 1 2 3; do \
         if pip install --no-cache-dir \
             --retries 10 --timeout 120 --resume-retries 5 \
