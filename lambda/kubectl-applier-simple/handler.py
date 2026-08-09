@@ -96,13 +96,13 @@ _GATEWAY_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
     "HTTPRoute": ("gateway.networking.k8s.io", "v1", "httproutes", False),
     "LoadBalancerConfiguration": (
         "gateway.k8s.aws",
-        "v1beta1",
+        "v1",
         "loadbalancerconfigurations",
         False,
     ),
     "TargetGroupConfiguration": (
         "gateway.k8s.aws",
-        "v1beta1",
+        "v1",
         "targetgroupconfigurations",
         False,
     ),

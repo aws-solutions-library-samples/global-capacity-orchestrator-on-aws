@@ -2242,3 +2242,83 @@ class TestManifestValidationTaskEvidence:
             "failed",
             "token=failed-token Deployment/demo/api is not ready",
         )
+
+
+def _parse_manifest_documents(manifest: Path) -> list[dict]:
+    """Parse a repo manifest, substituting unresolved {{PLACEHOLDER}} tokens.
+
+    The applier replaces template variables before parsing; mirror that so
+    templated manifests stay parseable for these consistency checks.
+    """
+    import re as _re
+
+    text = _re.sub(r"\{\{[A-Z0-9_]+\}\}", "placeholder", manifest.read_text(encoding="utf-8"))
+    return [doc for doc in yaml.safe_load_all(text) if isinstance(doc, dict)]
+
+
+class TestGatewayCustomObjectMapConsistency:
+    """The applier's GVK map must agree with the manifests it applies.
+
+    The 2026-08 Gateway API migration moved post-helm-gateway.yaml to
+    gateway.k8s.aws/v1 while _GATEWAY_CUSTOM_OBJECTS still said v1beta1 —
+    nothing failed until a live deploy's kubectl apply. This pins the two
+    surfaces together: every gateway-family resource in the manifests
+    directory must resolve to exactly the (group, version) the applier's
+    map will use to create, patch, and tear it down.
+    """
+
+    def test_manifest_gateway_api_versions_match_the_applier_map(self, handler_module) -> None:
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        gateway_groups = {
+            group for group, _v, _p, _s in handler_module._GATEWAY_CUSTOM_OBJECTS.values()
+        }
+
+        seen: list[tuple[str, str, str]] = []
+        mismatches: list[str] = []
+        for manifest in sorted(manifests_dir.glob("*.yaml")):
+            for doc in _parse_manifest_documents(manifest):
+                api_version = str(doc.get("apiVersion", ""))
+                kind = str(doc.get("kind", ""))
+                group, _, version = api_version.partition("/")
+                if group not in gateway_groups:
+                    continue
+                seen.append((manifest.name, kind, api_version))
+                mapped = handler_module._GATEWAY_CUSTOM_OBJECTS.get(kind)
+                if mapped is None:
+                    mismatches.append(
+                        f"{manifest.name}: {kind} ({api_version}) has no "
+                        "_GATEWAY_CUSTOM_OBJECTS entry"
+                    )
+                    continue
+                mapped_group, mapped_version = mapped[0], mapped[1]
+                if (group, version) != (mapped_group, mapped_version):
+                    mismatches.append(
+                        f"{manifest.name}: {kind} is {api_version} but "
+                        f"_GATEWAY_CUSTOM_OBJECTS maps {mapped_group}/{mapped_version} — "
+                        "the applier would create/patch/delete a different API version "
+                        "than the manifest declares"
+                    )
+
+        assert seen, "expected gateway-family resources in the manifests directory"
+        assert not mismatches, "\n".join(mismatches)
+
+    def test_every_mapped_gateway_kind_appears_in_a_manifest(self, handler_module) -> None:
+        # The inverse direction: a map entry nothing uses is dead weight that
+        # can silently rot; force it to be pruned or exercised.
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        used_kinds = set()
+        gateway_groups = {
+            group for group, _v, _p, _s in handler_module._GATEWAY_CUSTOM_OBJECTS.values()
+        }
+        for manifest in sorted(manifests_dir.glob("*.yaml")):
+            for doc in _parse_manifest_documents(manifest):
+                group = str(doc.get("apiVersion", "")).partition("/")[0]
+                if group in gateway_groups:
+                    used_kinds.add(str(doc.get("kind", "")))
+
+        unused = set(handler_module._GATEWAY_CUSTOM_OBJECTS) - used_kinds
+        assert not unused, f"_GATEWAY_CUSTOM_OBJECTS maps kinds no manifest uses: {sorted(unused)}"
