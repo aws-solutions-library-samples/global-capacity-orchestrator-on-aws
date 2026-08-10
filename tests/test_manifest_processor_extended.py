@@ -2074,3 +2074,54 @@ class TestSATokenAutoMountInjectionProperty:
             f"but after injection it became {pod_spec['automountServiceAccountToken']} "
             f"for kind={kind}"
         )
+
+
+class TestTrustedImageSourceLockstep:
+    """Keep the fail-closed code defaults and cdk.json policy in lockstep.
+
+    ``cdk.json job_validation_policy`` is the authoritative deploy-time
+    allowlist; ``DEFAULT_TRUSTED_REGISTRIES`` / ``DEFAULT_TRUSTED_DOCKERHUB_ORGS``
+    are the fail-closed fallbacks both services use when deployment wiring is
+    absent. Divergence produces environment-dependent acceptance of the same
+    manifest — the exact drift that let ``lmsysorg`` be trusted at deploy time
+    but rejected by the fallback (and ``vllm``/``ghcr.io/huggingface``, used by
+    shipped inference examples, be rejected everywhere).
+    """
+
+    @staticmethod
+    def _policy() -> dict:
+        import json
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        context = json.loads((root / "cdk.json").read_text(encoding="utf-8"))["context"]
+        return context["job_validation_policy"]
+
+    def test_registry_defaults_match_cdk_policy(self) -> None:
+        from gco.services.manifest_processor import DEFAULT_TRUSTED_REGISTRIES
+
+        assert set(DEFAULT_TRUSTED_REGISTRIES) == set(self._policy()["trusted_registries"])
+
+    def test_dockerhub_org_defaults_match_cdk_policy(self) -> None:
+        from gco.services.manifest_processor import DEFAULT_TRUSTED_DOCKERHUB_ORGS
+
+        assert set(DEFAULT_TRUSTED_DOCKERHUB_ORGS) == set(
+            self._policy()["trusted_dockerhub_orgs"]
+        )
+
+    def test_shipped_inference_example_images_are_trusted(self) -> None:
+        """Every image in examples/inference-*.yaml must clear the default gate."""
+        from pathlib import Path
+
+        import yaml
+
+        from gco.services.manifest_processor import ManifestProcessor
+
+        processor = ManifestProcessor("lockstep-test", "us-east-1", {})
+        root = Path(__file__).resolve().parent.parent
+        for path in sorted((root / "examples").glob("inference-*.yaml")):
+            for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+                if not doc or doc.get("kind") != "Deployment":
+                    continue
+                ok, reason = processor._validate_image_sources(doc)
+                assert ok, f"{path.name}: {reason}"

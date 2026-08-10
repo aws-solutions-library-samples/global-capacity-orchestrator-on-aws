@@ -110,6 +110,10 @@ DEFAULT_TRUSTED_REGISTRIES = (
     "k8s.gcr.io",
     "public.ecr.aws",
     "nvcr.io",
+    # Org-scoped GHCR prefix (matched via the startswith branch) for the
+    # HuggingFace TGI image shipped in examples/inference-tgi.yaml. Scoped to
+    # the org rather than all of ghcr.io on purpose.
+    "ghcr.io/huggingface",
 )
 DEFAULT_TRUSTED_DOCKERHUB_ORGS = (
     "nvidia",
@@ -119,6 +123,12 @@ DEFAULT_TRUSTED_DOCKERHUB_ORGS = (
     "huggingface",
     "amazon",
     "bitnami",
+    # Official orgs of the vLLM and SGLang projects — the images shipped in
+    # examples/inference-vllm.yaml and examples/inference-sglang.yaml. Kept in
+    # lockstep with cdk.json job_validation_policy.trusted_dockerhub_orgs (see
+    # tests/test_manifest_processor_extended.py).
+    "vllm",
+    "lmsysorg",
     "gco",
 )
 
