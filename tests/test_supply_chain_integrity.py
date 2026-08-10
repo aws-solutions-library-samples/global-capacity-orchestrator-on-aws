@@ -254,9 +254,17 @@ def test_new_authenticated_pins_are_in_monthly_drift_inventory() -> None:
     assert '"projectcalico/calico"' in scanner
     assert "extract_python_string_constant" in scanner
     assert "AWS_CLI_IMAGE gco/services/inference_monitor.py" in scanner
-    assert "skopeo inspect --raw" in scanner
-    assert 'AWS_CLI_COMMITTED_DIGEST="${AWS_CLI_RUNTIME_IMAGE##*@}"' in scanner
-    assert 'AWS_CLI_COMMITTED_DIGEST" != "$AWS_CLI_PUBLISHED_DIGEST' in scanner
+    # The digest-freshness mechanics moved into shared lib helpers so every
+    # digest-pinned image (AWS CLI runtime + live-validation smoke images)
+    # gets the same committed-vs-published comparison.
+    library = _read(".github/scripts/lib_dependency_scan.sh")
+    assert "skopeo inspect --raw" in library
+    assert "split_pinned_image_ref" in library
+    assert "published_manifest_digest" in library
+    assert "check_pinned_digest" in scanner
+    assert 'check_pinned_digest "$AWS_CLI_RUNTIME_IMAGE"' in scanner
+    assert "scripts/live_release_validation/manifests/" in scanner
+    assert 'if [ "$committed" != "$published" ]; then' in scanner
 
 
 def test_dependency_scanner_remains_directly_executable() -> None:
