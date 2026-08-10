@@ -11,6 +11,7 @@ reloads the handler with sys.modules cleanup so each test runs
 against a fresh import.
 """
 
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
@@ -1733,6 +1734,53 @@ class TestAuthoritativeManifestPlanner:
         assert [item["name"] for item in plan["phases"]["base"]] == ["required"]
         assert plan["featureGates"]["base"] == ["{{OPTIONAL_FEATURE_ENABLED}}"]
         assert plan["skipped"]["base"] == ["20-optional.yaml:unreplaced-placeholders"]
+
+    def test_planner_accepts_the_real_manifest_directory_fully_enabled(self, handler_module):
+        """Every kind in the shipped manifests must pass planning.
+
+        Regression: the 2026-09 live validation deploy failed because the
+        Kueue default-queue kinds were added to the apply dispatch and the
+        custom-object map but not to _SUPPORTED_MANIFEST_KINDS — planning
+        rejected them at deploy time, hours into a live run. Plan the real
+        directory with every feature gate resolved so a kind the planner
+        does not know can never reach a live cluster first.
+        """
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        token_re = re.compile(r"\{\{[A-Za-z0-9_]+\}\}")
+        quantity_tokens = {"{{QUOTA_MAX_CPU}}", "{{QUOTA_MAX_MEMORY}}", "{{QUOTA_MAX_GPU}}"}
+        integer_prefixes = ("{{QP_", "{{LIMIT_", "{{QUOTA_MAX_PODS}}")
+        replacements: dict[str, str] = {
+            "{{VPC_ENDPOINT_CIDR_BLOCKS}}": '- ipBlock:\n            cidr: "10.0.0.0/16"',
+        }
+        for manifest in sorted(manifests_dir.glob("*.yaml")):
+            for token in token_re.findall(manifest.read_text(encoding="utf-8")):
+                if token in replacements:
+                    continue
+                if token in quantity_tokens or token.startswith(integer_prefixes):
+                    replacements[token] = "1"
+                else:
+                    replacements[token] = "stub-value"
+
+        plan = handler_module.plan_manifests(str(manifests_dir), replacements)
+
+        # Post-helm files legitimately appear in base's skip list as
+        # deferred-to-post-helm; with every gate resolved, nothing may be
+        # skipped for an unreplaced placeholder in either phase.
+        unresolved_skips = [
+            entry
+            for phase in ("base", "post-helm")
+            for entry in plan["skipped"][phase]
+            if not entry.endswith(":deferred-to-post-helm")
+        ]
+        assert not unresolved_skips, (
+            f"with every gate resolved, no file may be skipped: {unresolved_skips}"
+        )
+        planned_kinds = {
+            item["kind"] for phase in ("base", "post-helm") for item in plan["phases"][phase]
+        }
+        assert {"ClusterQueue", "LocalQueue", "ResourceFlavor", "NetworkPolicy"} <= planned_kinds
 
     def test_rejects_duplicate_identity_across_phases(self, handler_module, tmp_path):
         manifest = yaml.safe_dump(

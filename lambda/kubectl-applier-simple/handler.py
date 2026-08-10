@@ -155,8 +155,11 @@ _SUPPORTED_MANIFEST_KINDS = frozenset(
         "PersistentVolume",
         "PersistentVolumeClaim",
         "Pod",
+        "ClusterQueue",
+        "LocalQueue",
         "PodDisruptionBudget",
         "PodMonitor",
+        "ResourceFlavor",
         "ResourceQuota",
         "Role",
         "RoleBinding",
@@ -174,6 +177,7 @@ _SUPPORTED_MANIFEST_KINDS = frozenset(
 _CLUSTER_SCOPED_KINDS = frozenset(
     {
         "APIService",
+        "ClusterQueue",
         "ClusterRole",
         "ClusterRoleBinding",
         "CustomResourceDefinition",
@@ -183,6 +187,7 @@ _CLUSTER_SCOPED_KINDS = frozenset(
         "Namespace",
         "NodePool",
         "PersistentVolume",
+        "ResourceFlavor",
         "StorageClass",
     }
 )
