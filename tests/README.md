@@ -636,6 +636,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_inference_manager_extended.py` | Extended tests for cli/inference.InferenceManager. |
 | `test_inference_store.py` | Tests for gco/services/inference_store.InferenceEndpointStore. |
 | `test_jobs_dag_extended.py` | Extended tests for cli/jobs.py and cli/dag.py. |
+| `test_helm_enablement_overrides.py` | The `helm_enabled_overrides` CDK context: parsing/validation of the comma-separated override value (`gco.stacks.regional_stack._parse_helm_enabled_overrides`), the single enablement resolver shared by the chart map and the applier gates (`_helm_chart_enabled`: mandatory charts ignore toggles, overrides force on, missing keys default enabled), and the `{{KUEUE_ENABLED}}`/`{{SLURM_ENABLED}}` gate replacements that make the Kueue default queues and Slurm NetworkPolicies apply exactly when their scheduler does. |
 | `test_kubectl_applier.py` | Tests for the kubectl-applier Lambda (lambda/kubectl-applier-simple/handler.py). |
 | `test_kubectl_helpers.py` | Tests for cli/kubectl_helpers.update_kubeconfig. |
 | `test_kubectl_helpers_extended.py` | Extended tests for cli/kubectl_helpers.update_kubeconfig. |
