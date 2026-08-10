@@ -457,6 +457,15 @@ These are risk categories, not blanket path exemptions. A CLI command that mutat
 
 When required, obtain explicit account and KMS-deletion authorization, run `python -m scripts.live_release_validation --actions all` only on a developer's local machine, and post a sanitized summary comment (run ID, exact SHA, overall status, per-action statuses) on the pull request. The full reports enumerate the validation account's ID, ARNs, and endpoint URLs: keep them local alongside `checkpoint.json`, and share a full report only through a private maintainer channel. Never invoke the harness from GitHub Actions. See the [Live Release Validation runbook](docs/LIVE_RELEASE_VALIDATION.md) for the safety gates and complete command.
 
+### Example Manifest Validation
+
+Changes under `examples/` carry their own validation bar, enforced by the same risk framing:
+
+- **Any change** (including comment/doc edits): `gco examples validate --static-only` must pass. CI runs the identical checks (`tests/test_example_job_validation.py`), covering YAML validity, transport-gate acceptance for the documented submission path, workload namespaces, and three-way symmetry between `examples/`, the spec registry (`scripts/example_job_validation/specs.py`), and the `gco_mcp` example catalog.
+- **Behavior changes** (image, command, resources, scheduler, target namespace, new or removed example): additionally run a live validation scoped to the affected examples — `gco examples validate --examples <name>` with the same account/consent/KMS flags as live release validation — and post a sanitized per-example summary on the pull request. The same report-privacy rules apply.
+
+See the [Example Job Validation guide](docs/EXAMPLE_VALIDATION.md) for the full pipeline, per-example criteria, and scoping flags.
+
 ### CI/CD Pipeline
 
 The project uses GitHub Actions for automated testing. Every push and pull request runs six primary workflows in parallel, plus four satellite workflows triggered by a successful test run, a schedule, or a manual dispatch.

@@ -4675,6 +4675,47 @@ gco release validate --expected-account 123456789012 \
 | `--protected-stack` | Additional non-project CloudFormation stack to preserve exactly (repeatable). |
 | `--emulator-endpoint` | Run the identical harness against a local AWS emulator ([Floci](FLOCI_TESTING.md)) instead of real AWS. The harness proves the endpoint is an emulator before touching anything. |
 
+---
+
+### Examples Commands
+
+Validate the shipped example manifests under `examples/`.
+
+#### `gco examples validate`
+
+Run [example-job validation](EXAMPLE_VALIDATION.md): deploy the configured GCO topology (force-enabling any optional schedulers or infrastructure features the selected examples need), execute every selected example through its **documented** submission path (`gco jobs submit`/`submit-sqs`/`submit-direct`, `gco dag run`, or `kubectl apply` over the CLI's own SSM-tunnel machinery), verify per-example success criteria, clean each example up, destroy everything, and write per-example reports. `--static-only` runs the offline contract checks in seconds with no AWS access and no consent flags — it is the minimum bar for any change under `examples/` (CI enforces the same checks).
+
+```bash
+# Offline checks only (fast; no AWS):
+gco examples validate --static-only
+
+# Full live run of every example:
+gco examples validate --expected-account 123456789012 \
+  --i-understand-this-deploys-and-destroys-infrastructure \
+  --confirm-kms-key-deletion
+
+# Live-validate just the example you changed:
+gco examples validate --examples gpu-job --expected-account 123456789012 \
+  --i-understand-this-deploys-and-destroys-infrastructure \
+  --confirm-kms-key-deletion
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--static-only` | Run only the offline checks (parse, transport-gate acceptance, namespace policy, spec/catalog symmetry) and exit; needs no account or consent flags. |
+| `--expected-account` | Exact 12-digit AWS account id the run may touch (required for live runs). |
+| `--i-understand-this-deploys-and-destroys-infrastructure` | Required consent flag for live runs. |
+| `--confirm-kms-key-deletion` | Authorize scheduling this run's retained EKS KMS keys for their 7-day deletion window; required for live runs. |
+| `--examples` | Only validate these examples (comma-separated file stems; default: all). Required helm charts and infrastructure features are derived from the selection. |
+| `--skip-examples` | Exclude these examples from the selection. |
+| `--actions` | Harness actions to run (default `all`); dependencies are added automatically. |
+| `--run-id` | Stable run id (default: UTC timestamp + commit SHA prefix). |
+| `--report-dir` | Report directory (default: `~/gco-example-job-validation-reports/<run-id>`). |
+| `--resume` | Resume an interrupted run; requires the original `--run-id` and `--report-dir`. |
+| `--protected-stack` | Additional non-project CloudFormation stack to preserve exactly (repeatable). |
+
 ## Configuration
 
 ### Config File

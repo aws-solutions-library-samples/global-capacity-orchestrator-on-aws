@@ -29,6 +29,7 @@ from .commands import (
     config_cmd,
     costs,
     dag,
+    examples,
     files,
     images,
     inference,
@@ -137,6 +138,7 @@ cli.add_command(jobs)
 cli.add_command(dag)
 cli.add_command(queue)
 cli.add_command(release)
+cli.add_command(examples)
 cli.add_command(templates)
 cli.add_command(webhooks)
 cli.add_command(capacity)

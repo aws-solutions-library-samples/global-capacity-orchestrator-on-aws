@@ -12,6 +12,7 @@ from .cluster_cmd import cluster
 from .config_cmd import config_cmd
 from .costs_cmd import costs
 from .dag_cmd import dag
+from .examples_cmd import examples
 from .files_cmd import files
 from .images_cmd import images
 from .inference_cmd import inference
@@ -36,6 +37,7 @@ __all__ = [
     "config_cmd",
     "costs",
     "dag",
+    "examples",
     "files",
     "images",
     "inference",

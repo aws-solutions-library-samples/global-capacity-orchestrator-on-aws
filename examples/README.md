@@ -871,6 +871,26 @@ Then redeploy: `gco stacks deploy-all -y`
 
 ## Testing Your Manifests
 
+### Changing an example in this directory?
+
+Every example here is covered by [example-job validation](../docs/EXAMPLE_VALIDATION.md):
+
+```bash
+# Minimum bar for ANY change (seconds, offline; CI runs the same checks):
+gco examples validate --static-only
+
+# Required when you changed an example's BEHAVIOR — live-run just that example:
+gco examples validate --examples <name> \
+  --expected-account <ACCOUNT_ID> \
+  --i-understand-this-deploys-and-destroys-infrastructure \
+  --confirm-kms-key-deletion
+```
+
+Adding or removing an example also requires a spec entry in
+`scripts/example_job_validation/specs.py` and a catalog entry in
+`gco_mcp/resources/docs.py` — CI enforces three-way symmetry between this
+directory, the spec registry, and the catalog.
+
 ### Dry Run
 
 Test without actually creating resources:
