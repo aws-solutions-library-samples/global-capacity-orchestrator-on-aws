@@ -273,6 +273,9 @@ class TestKubernetesManifests:
             "apiregistration.k8s.io/v1",
             "keda.sh/v1alpha1",
             "monitoring.coreos.com/v1",
+            # Kueue default queue topology (post-helm-kueue-default-queues.yaml);
+            # keep in lockstep with _QUEUEING_CUSTOM_OBJECTS in the applier.
+            "kueue.x-k8s.io/v1beta1",
         }
 
         for filepath in manifest_files:
