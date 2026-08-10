@@ -43,6 +43,45 @@ from gco.stacks.constants import (
 
 logger = logging.getLogger(__name__)
 
+#: CDK context key that force-enables optional infrastructure features for one
+#: deploy without touching cdk.json — the infrastructure sibling of the
+#: ``helm_enabled_overrides`` context handled in ``gco/stacks/regional_stack.py``.
+#: Used by validation harnesses (``gco examples validate``) whose preflight
+#: requires a clean worktree.
+FEATURE_OVERRIDE_CONTEXT_KEY = "feature_enabled_overrides"
+
+#: The cdk.json blocks whose ``enabled`` flag the override may force on. Kept
+#: deliberately narrow: each of these is a self-contained regional feature the
+#: examples exercise (Aurora pgvector, Valkey Serverless, FSx for Lustre).
+FEATURE_OVERRIDE_KEYS = frozenset({"aurora_pgvector", "valkey", "fsx_lustre"})
+
+
+def parse_feature_enabled_overrides(raw: object) -> frozenset[str]:
+    """Parse and validate the ``feature_enabled_overrides`` context value.
+
+    Accepts a comma-separated string (the only shape the CDK CLI can pass with
+    ``--context``) or a list of strings (cdk.json-style). Unknown names raise
+    at synth time with the valid list — identical semantics to
+    ``_parse_helm_enabled_overrides``.
+    """
+    if raw is None:
+        return frozenset()
+    if isinstance(raw, str):
+        names = [part.strip() for part in raw.split(",") if part.strip()]
+    elif isinstance(raw, list) and all(isinstance(part, str) for part in raw):
+        names = [part.strip() for part in raw if part.strip()]
+    else:
+        raise ConfigValidationError(
+            f"{FEATURE_OVERRIDE_CONTEXT_KEY} must be a comma-separated string or string list"
+        )
+    unknown = sorted(set(names) - FEATURE_OVERRIDE_KEYS)
+    if unknown:
+        valid = ", ".join(sorted(FEATURE_OVERRIDE_KEYS))
+        raise ConfigValidationError(
+            f"Unknown {FEATURE_OVERRIDE_CONTEXT_KEY} name(s): {', '.join(unknown)}. Valid: {valid}"
+        )
+    return frozenset(names)
+
 
 class ConfigValidationError(Exception):
     """Raised when configuration validation fails."""
@@ -1104,7 +1143,16 @@ class ConfigLoader:
                                 **region_node_group,
                             }
 
+        if self._feature_override_enabled("fsx_lustre"):
+            merged_config["enabled"] = True
         return merged_config
+
+    def _feature_override_enabled(self, feature_key: str) -> bool:
+        """True when ``feature_enabled_overrides`` context forces this feature on."""
+        overrides = parse_feature_enabled_overrides(
+            self.app.node.try_get_context(FEATURE_OVERRIDE_CONTEXT_KEY)
+        )
+        return feature_key in overrides
 
     def get_valkey_config(self) -> dict[str, Any]:
         """Get Valkey Serverless cache configuration.
@@ -1124,7 +1172,10 @@ class ConfigLoader:
         }
         valkey_ctx = self.app.node.try_get_context("valkey")
         valkey_config: dict[str, Any] = valkey_ctx if isinstance(valkey_ctx, dict) else {}
-        return {**default_config, **valkey_config}
+        merged = {**default_config, **valkey_config}
+        if self._feature_override_enabled("valkey"):
+            merged["enabled"] = True
+        return merged
 
     def get_aurora_pgvector_config(self) -> dict[str, Any]:
         """Get Aurora Serverless v2 + pgvector vector database configuration.
@@ -1146,7 +1197,10 @@ class ConfigLoader:
         }
         aurora_ctx = self.app.node.try_get_context("aurora_pgvector")
         aurora_config: dict[str, Any] = aurora_ctx if isinstance(aurora_ctx, dict) else {}
-        return {**default_config, **aurora_config}
+        merged = {**default_config, **aurora_config}
+        if self._feature_override_enabled("aurora_pgvector"):
+            merged["enabled"] = True
+        return merged
 
     def get_analytics_config(self) -> dict[str, Any]:
         """Get optional analytics environment configuration.
