@@ -16,10 +16,10 @@ import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
-from scripts.live_release_validation.__main__ import (
-    _path_from_root,
-    _repository_root,
-    _split_actions,
+from scripts.live_release_validation.cli_args import (
+    path_from_root,
+    repository_root,
+    split_csv_names,
 )
 from scripts.live_release_validation.models import (
     ValidationReport,
@@ -75,7 +75,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--actions",
-        type=_split_actions,
+        type=split_csv_names,
         default=("all",),
         metavar="NAME[,NAME...]",
         help="Selectable actions; dependencies are added automatically (default: all)",
@@ -150,12 +150,12 @@ def _settings_from_args(
         parser.error("--expected-branch is required")
     if args.run_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", args.run_id):
         parser.error("--run-id must be 1-80 safe filename characters")
-    root = _repository_root(args.repo_root)
+    root = repository_root(args.repo_root)
     run_id = args.run_id or (
         datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + args.expected_sha[:12].lower()
     )
-    report_dir = _path_from_root(root, args.report_dir, Path(".example-job-validation") / run_id)
-    checkpoint = _path_from_root(root, args.checkpoint, report_dir / "checkpoint.json")
+    report_dir = path_from_root(root, args.report_dir, Path(".example-job-validation") / run_id)
+    checkpoint = path_from_root(root, args.checkpoint, report_dir / "checkpoint.json")
     protected = tuple(dict.fromkeys(("CDKToolkit", "GCOGitHubOIDCStack", *args.protected_stack)))
     return ExampleRunSettings(
         run_id=run_id,
@@ -175,7 +175,7 @@ def _settings_from_args(
 
 
 def _run_static_only(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    root = _repository_root(args.repo_root)
+    root = repository_root(args.repo_root)
     names = list(_select_examples(parser, args))
     findings = run_static_checks(root, names)
     failed = [finding for finding in findings if not finding.passed]

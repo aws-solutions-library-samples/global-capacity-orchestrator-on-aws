@@ -5,13 +5,13 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import subprocess
 import sys
 import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .checks.schedulers import OPTIONAL_SCHEDULERS
+from .cli_args import path_from_root, repository_root, split_csv_names
 from .models import (
     RunSettings,
     ValidationReport,
@@ -21,36 +21,10 @@ from .models import (
 from .registry import build_action_registry
 from .runner import LiveValidationRunner, require_local_execution
 
-
-def _repository_root(value: str | None) -> Path:
-    if value:
-        root = Path(value).expanduser().resolve()
-    else:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise ValueError("Run from a Git checkout or pass --repo-root")
-        root = Path(result.stdout.strip()).resolve()
-    if not (root / ".git").exists() or not (root / "cdk.json").is_file():
-        raise ValueError(f"Not a GCO repository root: {root}")
-    return root
-
-
-def _split_actions(value: str) -> tuple[str, ...]:
-    actions = tuple(dict.fromkeys(item.strip() for item in value.split(",") if item.strip()))
-    if not actions:
-        raise argparse.ArgumentTypeError("--actions must name at least one action")
-    return actions
-
-
-def _path_from_root(root: Path, value: str | None, default: Path) -> Path:
-    path = Path(value).expanduser() if value else default
-    candidate = path if path.is_absolute() else root / path
-    return Path(os.path.abspath(os.fspath(candidate)))
+# Backwards-compatible aliases for this module's historical private helpers.
+_repository_root = repository_root
+_split_actions = split_csv_names
+_path_from_root = path_from_root
 
 
 def _build_parser() -> argparse.ArgumentParser:

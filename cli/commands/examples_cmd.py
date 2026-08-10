@@ -16,6 +16,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NoReturn
 
 import click
 
@@ -24,7 +25,7 @@ from .release_cmd import CONSENT_FLAG, _repo_root, _run_git
 _ACCOUNT_RE = re.compile(r"\d{12}")
 
 
-def _fail(message: str) -> None:
+def _fail(message: str) -> NoReturn:
     raise click.ClickException(message)
 
 
@@ -214,7 +215,9 @@ def examples_validate(
     click.echo(f"branch:     {expected_branch}")
     click.echo(f"account:    {expected_account}")
     click.echo(f"actions:    {','.join(sorted(selected_actions))}")
-    click.echo(f"examples:   {selected or 'all'}" + (f" minus {skip_examples}" if skip_examples else ""))
+    click.echo(
+        f"examples:   {selected or 'all'}" + (f" minus {skip_examples}" if skip_examples else "")
+    )
     click.echo(f"report-dir: {resolved_report_dir}")
 
     result = subprocess.run(command, cwd=repo_root, env=dict(os.environ), check=False)

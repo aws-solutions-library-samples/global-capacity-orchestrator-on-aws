@@ -2105,9 +2105,7 @@ class TestTrustedImageSourceLockstep:
     def test_dockerhub_org_defaults_match_cdk_policy(self) -> None:
         from gco.services.manifest_processor import DEFAULT_TRUSTED_DOCKERHUB_ORGS
 
-        assert set(DEFAULT_TRUSTED_DOCKERHUB_ORGS) == set(
-            self._policy()["trusted_dockerhub_orgs"]
-        )
+        assert set(DEFAULT_TRUSTED_DOCKERHUB_ORGS) == set(self._policy()["trusted_dockerhub_orgs"])
 
     def test_shipped_inference_example_images_are_trusted(self) -> None:
         """Every image in examples/inference-*.yaml must clear the default gate."""
@@ -2115,13 +2113,12 @@ class TestTrustedImageSourceLockstep:
 
         import yaml
 
-        from gco.services.manifest_processor import ManifestProcessor
+        from gco.services.manifest_processor import validate_image_sources
 
-        processor = ManifestProcessor("lockstep-test", "us-east-1", {})
         root = Path(__file__).resolve().parent.parent
         for path in sorted((root / "examples").glob("inference-*.yaml")):
             for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
                 if not doc or doc.get("kind") != "Deployment":
                     continue
-                ok, reason = processor._validate_image_sources(doc)
+                ok, reason = validate_image_sources(doc)
                 assert ok, f"{path.name}: {reason}"

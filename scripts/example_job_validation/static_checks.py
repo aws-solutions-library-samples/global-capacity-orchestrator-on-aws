@@ -168,9 +168,10 @@ def check_transport_acceptance(parsed: ParsedExample) -> list[StaticFinding]:
     """API/SQS-documented examples must clear the deployed validation gates."""
     if parsed.spec.submission not in {SUBMIT_DIRECT, SUBMIT_SQS, SUBMIT_API}:
         return []
-    from gco.services.manifest_processor import ManifestProcessor, validate_resource_kind
+    # Module-level pure functions: no Kubernetes client construction, so the
+    # checks run on machines with no kubeconfig (CI runners, fresh laptops).
+    from gco.services.manifest_processor import validate_image_sources, validate_resource_kind
 
-    processor = ManifestProcessor("static-checks", "us-east-1", {})
     findings: list[StaticFinding] = []
     for doc in parsed.documents:
         label = f"{doc.get('kind')}/{(doc.get('metadata') or {}).get('name')}"
@@ -186,7 +187,7 @@ def check_transport_acceptance(parsed: ParsedExample) -> list[StaticFinding]:
                     detail=kind_reason or "",
                 )
             )
-        image_ok, image_reason = processor._validate_image_sources(doc)
+        image_ok, image_reason = validate_image_sources(doc)
         findings.append(
             StaticFinding(
                 example=parsed.name,
