@@ -63,11 +63,19 @@ def require_local_execution() -> None:
 class LiveValidationRunner:
     """Run selected live actions and always report and clean up."""
 
-    def __init__(self, settings: RunSettings):
+    def __init__(
+        self,
+        settings: RunSettings,
+        registry: dict[str, ActionDefinition] | None = None,
+    ):
         require_local_execution()
         ensure_private_run_directory(settings.report_dir, settings.checkpoint_path)
         self.settings = settings
-        self.registry = build_action_registry()
+        # A sibling harness (scripts/example_job_validation) reuses this runner
+        # with its own action registry; the default remains the live release
+        # validation registry.
+        self.registry = registry if registry is not None else build_action_registry()
+        self._deploy_dependent_actions = self._derive_deploy_dependent_actions(self.registry)
         self.selected_actions = self._resolve_actions(settings.requested_actions)
         self._previous_cwd = Path.cwd()
         os.chdir(settings.repo_root)
@@ -93,15 +101,14 @@ class LiveValidationRunner:
             self.job_manager = JobManager(self.config)
             self.job_manager._aws_client = self.aws_client
             self.stack_manager = StackManager(self.config, project_root=settings.repo_root)
-            if settings.optional_schedulers:
-                # Force-enable the requested off-by-default schedulers for
+            extra_cdk_context = settings.extra_cdk_context()
+            if extra_cdk_context:
+                # Force-enable the requested off-by-default features for
                 # every CDK invocation of this run (deploy, destroy, list all
                 # synthesize the same graph) without touching cdk.json — the
-                # preflight clean-worktree rule stays intact and the override
-                # is part of the checkpoint identity.
-                self.stack_manager.set_extra_cdk_context(
-                    {"helm_enabled_overrides": ",".join(settings.optional_schedulers)}
-                )
+                # preflight clean-worktree rule stays intact and the overrides
+                # are part of the checkpoint identity.
+                self.stack_manager.set_extra_cdk_context(extra_cdk_context)
             self.context = RunContext(
                 settings=settings,
                 checkpoint=self.checkpoint,
@@ -139,6 +146,35 @@ class LiveValidationRunner:
     def _handle_signal(self, signum: int, _frame: Any) -> None:
         self._received_signal = signum
         raise _LiveValidationSignal(signum)
+
+    @staticmethod
+    def _derive_deploy_dependent_actions(
+        registry: dict[str, ActionDefinition],
+    ) -> frozenset[str]:
+        """Actions that must not resume incomplete once teardown is recorded.
+
+        Derived from the registry rather than hardcoded: ``deploy`` itself plus
+        every action that transitively depends on it — except the teardown pair
+        (``destroy``/``final-inventory``), which exist precisely to run against
+        a destroyed deployment.
+        """
+
+        def depends_on_deploy(name: str, seen: frozenset[str] = frozenset()) -> bool:
+            if name == "deploy":
+                return True
+            if name in seen:
+                return False
+            return any(
+                depends_on_deploy(dep, seen | {name})
+                for dep in registry[name].dependencies
+                if dep in registry
+            )
+
+        return frozenset(
+            name
+            for name in registry
+            if name not in {"destroy", "final-inventory"} and depends_on_deploy(name)
+        )
 
     @staticmethod
     def _load_cdk_context(repo_root: Path) -> tuple[dict[str, Any], tuple[str, ...]]:
@@ -273,8 +309,7 @@ class LiveValidationRunner:
 
         if (
             self.checkpoint.destroyed
-            and definition.name
-            in {"deploy", "topology", "api", "sqs", "central-queue", "schedulers", "convergence"}
+            and definition.name in self._deploy_dependent_actions
             and definition.name not in self.checkpoint.completed_actions
         ):
             raise RuntimeError(
