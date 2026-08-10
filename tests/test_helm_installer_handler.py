@@ -1776,6 +1776,42 @@ class TestHealthMonitorQuiesce:
         assert success is False
         assert "Forbidden" in message
 
+    def test_missing_namespace_is_idempotent_absence(self):
+        """A deploy that failed before base manifests never created gco-system.
+
+        Regression (2026-09 live validation, run sched241-1ae7c0d3): the
+        quiesce step treated the namespace NotFound as fatal, the HelmTeardown
+        custom resource FAILED, and the whole stack wedged DELETE_FAILED.
+        Nothing-was-ever-there must succeed exactly like
+        deployment-already-gone.
+        """
+        absence = 'Error from server (NotFound): namespaces "gco-system" not found'
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(1, stderr=absence),
+                _completed(1, stderr=absence),
+            ]
+            success, message = helm_handler.quiesce_health_monitor("/tmp/kc")
+
+        assert success is True
+        assert message == "Health monitor quiesced"
+
+    def test_missing_deployment_is_idempotent_absence(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(
+                    1,
+                    stderr=(
+                        'Error from server (NotFound): deployments.apps "health-monitor" not found'
+                    ),
+                ),
+                _completed(1, stderr="error: no matching resources found"),
+            ]
+            success, message = helm_handler.quiesce_health_monitor("/tmp/kc")
+
+        assert success is True
+        assert message == "Health monitor quiesced"
+
     def test_handle_task_surfaces_quiesce_failure_and_cleans_kubeconfig(self):
         event = {
             "Action": "quiesce_health_monitor",

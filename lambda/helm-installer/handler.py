@@ -790,6 +790,13 @@ def quiesce_health_monitor(kubeconfig: str, namespace: str = "gco-system") -> tu
             'deployments.apps "health-monitor" not found',
             'deployment.apps "health-monitor" not found',
             'deployment "health-monitor" not found',
+            # A deploy that failed before the base manifests applied never
+            # created the namespace at all; there is nothing to quiesce, and
+            # treating this as fatal wedged a stack DELETE_FAILED on the
+            # HelmTeardown custom resource (2026-09 live validation, run
+            # sched241-1ae7c0d3). Nothing-was-ever-there is as idempotent as
+            # deployment-already-gone.
+            f'namespaces "{namespace}" not found',
         )
         if not any(signature in lowered for signature in exact_absence):
             return False, f"Failed to scale health-monitor to zero: {scale_error}"
@@ -816,7 +823,13 @@ def quiesce_health_monitor(kubeconfig: str, namespace: str = "gco-system") -> tu
 
     if wait.returncode != 0:
         wait_error = (wait.stderr or wait.stdout).strip()
-        if "no matching resources found" not in wait_error.lower():
+        lowered_wait = wait_error.lower()
+        wait_absence = (
+            "no matching resources found",
+            # Same never-created-namespace case as the scale step above.
+            f'namespaces "{namespace}" not found',
+        )
+        if not any(signature in lowered_wait for signature in wait_absence):
             return False, f"Failed waiting for health-monitor pods: {wait_error}"
 
     return True, "Health monitor quiesced"
