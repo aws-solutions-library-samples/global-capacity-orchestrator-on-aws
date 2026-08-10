@@ -3032,3 +3032,76 @@ class TestRegionalStackEksControlPlaneAzExclusion:
         # No credentials env => no filtering => control plane uses all private subnets.
         assert stack.eks_unsupported_az_names == []
         assert {s.availability_zone for s in stack.eks_control_plane_subnets} == set(self._SIX_AZS)
+
+
+class TestAddonTolerationShapes:
+    """Accelerator tolerations must follow each add-on component's shape.
+
+    DaemonSet-shaped components (CSI node agents, the Pod Identity agent)
+    need the accelerator-taint tolerations to run on GPU/Neuron/EFA nodes.
+    Deployment-shaped components (metrics-server, CSI controllers) must NOT
+    carry them: a toleration makes EKS Auto Mode consider the tainted GPU
+    pools for plain CPU pods, and live release validation run
+    sched241-350ffc7d observed exactly that — two g4dn.xlarge NodeClaims
+    requesting ``nvidia.com/gpu: "0"`` launched for metrics-server/CSI
+    controller replicas during the deploy pod surge, then churned and
+    failed the nvidia-device-plugin convergence gate.
+    """
+
+    @staticmethod
+    def _synthesize_addons() -> dict[str, str]:
+        """Synthesize the regional stack; return AddonName -> ConfigurationValues."""
+        from unittest.mock import MagicMock, patch
+
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-regional-addon-tolerations",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106 - test fixture ARN with fake account ID, not a real secret
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+            template = assertions.Template.from_stack(stack)
+        addons: dict[str, str] = {}
+        for resource in template.find_resources("AWS::EKS::Addon").values():
+            properties = resource.get("Properties", {})
+            addons[str(properties.get("AddonName"))] = str(
+                properties.get("ConfigurationValues", "")
+            )
+        return addons
+
+    def test_deployment_shaped_addons_do_not_tolerate_accelerator_taints(self) -> None:
+        addons = self._synthesize_addons()
+        assert "nvidia.com/gpu" not in addons.get("metrics-server", ""), (
+            "metrics-server is Deployment-shaped; an accelerator toleration lets "
+            "Auto Mode provision GPU nodes for it"
+        )
+        efs_config = addons.get("aws-efs-csi-driver", "")
+        assert (
+            '"controller"' not in efs_config
+            or "nvidia.com/gpu" not in (efs_config.split('"controller"', 1)[1])
+        ), "the EFS CSI controller (Deployment) must not tolerate accelerator taints"
+
+    def test_daemonset_shaped_addons_tolerate_accelerator_taints(self) -> None:
+        addons = self._synthesize_addons()
+        efs_config = addons.get("aws-efs-csi-driver", "")
+        assert '"node"' in efs_config and "nvidia.com/gpu" in efs_config, (
+            "the EFS CSI node DaemonSet must tolerate accelerator taints so "
+            "volumes mount on GPU/Neuron/EFA nodes"
+        )
+        assert "nvidia.com/gpu" in addons.get("eks-pod-identity-agent", "")

@@ -1348,9 +1348,18 @@ class GCORegionalStack(Stack):
     # ── Shared toleration config for EKS add-ons ──────────────────────────
     # All GCO nodepools apply taints (nvidia.com/gpu, aws.amazon.com/neuron,
     # vpc.amazonaws.com/efa) that prevent DaemonSet pods from scheduling.
-    # Every add-on that runs a DaemonSet (or may schedule on tainted nodes)
-    # must tolerate these taints so that storage drivers, metrics agents, and
-    # other infrastructure components work on every node type.
+    # Every add-on component that runs as a DaemonSet (storage drivers' node
+    # agents, metrics/log agents, node exporters) must tolerate these taints
+    # so infrastructure works on every node type.
+    #
+    # Deployment-shaped add-on components (metrics-server, the CSI
+    # *controllers*) must NOT carry these tolerations: a toleration makes
+    # EKS Auto Mode consider the tainted accelerator pools for them, and
+    # during a deploy's pod surge it will happily launch GPU instances for
+    # zero-GPU pods and then consolidation-flap them — live release
+    # validation run sched241-350ffc7d caught exactly that (two g4dn.xlarge
+    # NodeClaims requesting ``nvidia.com/gpu: "0"``, churned mid-install,
+    # failing the nvidia-device-plugin convergence check).
     _ADDON_NODE_TOLERATIONS = [
         {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
         {"key": "aws.amazon.com/neuron", "operator": "Exists", "effect": "NoSchedule"},
@@ -1389,6 +1398,10 @@ class GCORegionalStack(Stack):
         Note: Metrics Server doesn't require an IRSA role as it only needs
         in-cluster permissions which are handled by its service account.
         """
+        # Deployment-shaped: no accelerator tolerations on purpose (see
+        # _ADDON_NODE_TOLERATIONS) — metrics-server runs fine on the default
+        # CPU pool and a toleration invites Auto Mode to launch GPU nodes
+        # for it during deploy pod surges.
         eks.Addon(
             self,
             "MetricsServerAddon",
@@ -1396,9 +1409,6 @@ class GCORegionalStack(Stack):
             addon_name="metrics-server",
             addon_version=EKS_ADDON_METRICS_SERVER,
             preserve_on_delete=False,
-            configuration_values={
-                "tolerations": self._ADDON_NODE_TOLERATIONS,
-            },
         )
 
     def _create_efs_csi_driver_addon(self) -> None:
@@ -1434,10 +1444,10 @@ class GCORegionalStack(Stack):
             addon_version=EKS_ADDON_EFS_CSI_DRIVER,
             preserve_on_delete=False,
             configuration_values={
+                # DaemonSet node agent must run on every node type; the
+                # Deployment-shaped controller deliberately carries no
+                # accelerator tolerations (see _ADDON_NODE_TOLERATIONS).
                 "node": {
-                    "tolerations": self._ADDON_NODE_TOLERATIONS,
-                },
-                "controller": {
                     "tolerations": self._ADDON_NODE_TOLERATIONS,
                 },
             },
@@ -5497,10 +5507,10 @@ class GCORegionalStack(Stack):
             addon_version=EKS_ADDON_FSX_CSI_DRIVER,
             preserve_on_delete=False,
             configuration_values={
+                # DaemonSet node agent must run on every node type; the
+                # Deployment-shaped controller deliberately carries no
+                # accelerator tolerations (see _ADDON_NODE_TOLERATIONS).
                 "node": {
-                    "tolerations": self._ADDON_NODE_TOLERATIONS,
-                },
-                "controller": {
                     "tolerations": self._ADDON_NODE_TOLERATIONS,
                 },
             },
