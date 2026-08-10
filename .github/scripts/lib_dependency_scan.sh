@@ -306,6 +306,44 @@ tag_listed() {
   grep -qxF -e "$tag" -e "v${tag#v}" -e "${tag#v}" <<< "$raw_tags"
 }
 
+# split_pinned_image_ref <repo:tag@sha256:digest>
+#
+# Validate and decompose a digest-pinned image reference, printing
+# ``repository|tag|digest`` on one line. Returns non-zero with no output for
+# anything that is not exactly the ``repo:tag@sha256:<64 hex>`` shape —
+# tag-only references, digest-only references, and malformed digests all
+# fail, so callers can gate the digest-freshness check on the return code.
+split_pinned_image_ref() {
+  local ref="$1"
+  if ! [[ "$ref" =~ ^([^@:]+(:[0-9]+)?(/[^@:]+)*):([^@]+)@(sha256:[0-9a-f]{64})$ ]]; then
+    return 1
+  fi
+  printf '%s|%s|%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[4]}" "${BASH_REMATCH[5]}"
+}
+
+# published_manifest_digest <repository:tag>
+#
+# Print the tag's current top-level manifest digest (``sha256:<64 hex>``) as
+# published by the registry. Hashes the raw manifest bytes rather than
+# selecting a platform child, because committed pins are multi-architecture
+# manifest-list digests. Returns non-zero with no output on transport
+# failure or an implausible hash, so callers distinguish "registry
+# unreachable" from "digest moved".
+published_manifest_digest() {
+  local tagged_image="$1" manifest digest
+  manifest="$(mktemp)"
+  if ! skopeo inspect --raw "docker://${tagged_image}" > "$manifest" 2>/dev/null; then
+    rm -f "$manifest"
+    return 1
+  fi
+  digest="sha256:$(sha256sum "$manifest" | awk '{print $1}')"
+  rm -f "$manifest"
+  if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    return 1
+  fi
+  printf '%s\n' "$digest"
+}
+
 # parse_accelerator_drift_count <json-summary-file>
 #
 # Validates the machine-readable output from

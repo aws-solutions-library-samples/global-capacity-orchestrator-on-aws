@@ -497,31 +497,56 @@ fi
 echo "Checking AWS CLI runtime image (gco/services/inference_monitor.py)..."
 AWS_CLI_RUNTIME_IMAGE="$(extract_python_string_constant \
   AWS_CLI_IMAGE gco/services/inference_monitor.py)"
-if [[ "$AWS_CLI_RUNTIME_IMAGE" =~ ^[^@]+:[^@]+@sha256:[0-9a-f]{64}$ ]]; then
-  AWS_CLI_TAGGED_IMAGE="${AWS_CLI_RUNTIME_IMAGE%@sha256:*}"
-  AWS_CLI_REPOSITORY="${AWS_CLI_TAGGED_IMAGE%:*}"
-  AWS_CLI_TAG="${AWS_CLI_TAGGED_IMAGE##*:}"
-  AWS_CLI_COMMITTED_DIGEST="${AWS_CLI_RUNTIME_IMAGE##*@}"
-  printf '%s\n' "$AWS_CLI_TAGGED_IMAGE" >> "$ALL_IMAGES"
-
-  # Hash the raw top-level manifest rather than selecting a platform-specific
-  # child. The committed digest is a multi-architecture manifest-list digest.
-  AWS_CLI_MANIFEST="$(mktemp)"
-  if ! skopeo inspect --raw "docker://${AWS_CLI_TAGGED_IMAGE}" \
-    > "$AWS_CLI_MANIFEST" 2>/dev/null; then
-    mark_scan_incomplete "Container manifest lookup failed for ${AWS_CLI_TAGGED_IMAGE}."
-  else
-    AWS_CLI_PUBLISHED_DIGEST="sha256:$(sha256sum "$AWS_CLI_MANIFEST" | awk '{print $1}')"
-    if ! [[ "$AWS_CLI_PUBLISHED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-      mark_scan_incomplete "Container manifest digest was invalid for ${AWS_CLI_TAGGED_IMAGE}."
-    elif [ "$AWS_CLI_COMMITTED_DIGEST" != "$AWS_CLI_PUBLISHED_DIGEST" ]; then
-      echo "  - ${AWS_CLI_TAGGED_IMAGE}: committed digest does not match the tag"
-      echo "${AWS_CLI_REPOSITORY}|${AWS_CLI_TAG}@${AWS_CLI_COMMITTED_DIGEST}|${AWS_CLI_TAG}@${AWS_CLI_PUBLISHED_DIGEST}" >> "$DOCKER_RESULTS"
-    fi
+# check_pinned_digest <repo:tag@sha256:digest> <origin label>
+#
+# Shared digest-freshness check for every digest-pinned image the repository
+# commits: verify the tag's currently published manifest-list digest still
+# equals the committed one. A moved digest is a drift row (the tag was
+# re-pushed upstream — the pin is stale); an unreachable registry or an
+# implausible response marks the scan incomplete.
+check_pinned_digest() {
+  local pinned_ref="$1" origin="$2" parts repository tag committed published
+  if ! parts="$(split_pinned_image_ref "$pinned_ref")"; then
+    mark_scan_incomplete "Could not parse an immutable image reference from ${origin}."
+    return
   fi
-  rm -f "$AWS_CLI_MANIFEST"
+  repository="$(echo "$parts" | cut -d'|' -f1)"
+  tag="$(echo "$parts" | cut -d'|' -f2)"
+  committed="$(echo "$parts" | cut -d'|' -f3)"
+  printf '%s:%s\n' "$repository" "$tag" >> "$ALL_IMAGES"
+
+  if ! published="$(published_manifest_digest "${repository}:${tag}")"; then
+    mark_scan_incomplete "Container manifest lookup failed for ${repository}:${tag}."
+    return
+  fi
+  if [ "$committed" != "$published" ]; then
+    echo "  - ${repository}:${tag}: committed digest does not match the tag (${origin})"
+    echo "${repository}|${tag}@${committed}|${tag}@${published}" >> "$DOCKER_RESULTS"
+  fi
+}
+
+if [[ "$AWS_CLI_RUNTIME_IMAGE" =~ ^[^@]+:[^@]+@sha256:[0-9a-f]{64}$ ]]; then
+  check_pinned_digest "$AWS_CLI_RUNTIME_IMAGE" "gco/services/inference_monitor.py"
 else
   mark_scan_incomplete "Could not parse an immutable AWS_CLI_IMAGE from gco/services/inference_monitor.py."
+fi
+
+# The live-validation smoke manifests pin every image by tag AND manifest-list
+# digest (tests/test_live_release_validation.py enforces the shape). The tag
+# half already rides the normal drift check above; this pass keeps the digest
+# half honest too, so an upstream same-tag re-push shows up as drift instead
+# of silently diverging from what a validation run would actually pull.
+echo "Checking live-validation smoke image digests (scripts/live_release_validation/manifests)..."
+SMOKE_PINNED_REFS="$(grep -rhoE \
+  "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+@sha256:[0-9a-f]{64}" \
+  scripts/live_release_validation/manifests/ 2>/dev/null | sed 's/^image: //' | sort -u)"
+if [ -z "$SMOKE_PINNED_REFS" ]; then
+  mark_scan_incomplete "No digest-pinned smoke images found under scripts/live_release_validation/manifests/."
+else
+  while read -r pinned_ref; do
+    [ -z "$pinned_ref" ] && continue
+    check_pinned_digest "$pinned_ref" "live-validation smoke manifest"
+  done <<< "$SMOKE_PINNED_REFS"
 fi
 
 sort -u "$ALL_IMAGES" | while read -r img; do

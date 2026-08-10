@@ -3843,7 +3843,7 @@ class TestReportCompletionStatus:
 class TestSmokeManifestSupplyChain:
     _PINNED_IMAGES = (
         "docker.io/library/busybox:1.38.0@"
-        "sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d",
+        "sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616",
         # The Slurm probe needs a Python runtime for its slurmrestd round trip.
         "docker.io/library/python:3.14.7-slim@"
         "sha256:83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910",

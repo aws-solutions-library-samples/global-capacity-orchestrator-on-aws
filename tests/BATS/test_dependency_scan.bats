@@ -241,6 +241,62 @@ setup() {
     ! tag_listed "1.2.3" "$(printf '%s\n' 1.2.30 11.2.3 1.2.3-slim)"
 }
 
+@test "split_pinned_image_ref: decomposes a digest-pinned reference" {
+    digest="fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d"
+    run split_pinned_image_ref "docker.io/library/busybox:1.38.0@sha256:${digest}"
+    [ "$status" -eq 0 ]
+    [ "$output" = "docker.io/library/busybox|1.38.0|sha256:${digest}" ]
+}
+
+@test "split_pinned_image_ref: rejects tag-only and digest-only references" {
+    run split_pinned_image_ref "docker.io/library/busybox:1.38.0"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    run split_pinned_image_ref "docker.io/library/busybox@sha256:$(printf 'a%.0s' {1..64})"
+    [ "$status" -ne 0 ]
+}
+
+@test "split_pinned_image_ref: rejects a malformed digest" {
+    run split_pinned_image_ref "docker.io/library/busybox:1.38.0@sha256:deadbeef"
+    [ "$status" -ne 0 ]
+}
+
+@test "split_pinned_image_ref: every committed smoke image parses" {
+    # The digest-freshness scan section is only as good as its ability to
+    # parse what the harness manifests actually commit.
+    found=0
+    while read -r ref; do
+        [ -z "$ref" ] && continue
+        found=1
+        run split_pinned_image_ref "$ref"
+        [ "$status" -eq 0 ]
+    done < <(grep -rhoE \
+        "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+@sha256:[0-9a-f]{64}" \
+        scripts/live_release_validation/manifests/ | sed 's/^image: //' | sort -u)
+    [ "$found" -eq 1 ]
+}
+
+@test "published_manifest_digest: hashes the raw manifest bytes" {
+    tmpdir="$(mktemp -d)"
+    printf '%s\n' '#!/bin/bash' 'printf "manifest-bytes"' > "$tmpdir/skopeo"
+    chmod +x "$tmpdir/skopeo"
+    expected="sha256:$(printf 'manifest-bytes' | sha256sum | awk '{print $1}')"
+    PATH="$tmpdir:$PATH" run published_manifest_digest "docker.io/library/busybox:1.38.0"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$expected" ]
+    rm -rf "$tmpdir"
+}
+
+@test "published_manifest_digest: transport failure returns nonzero, no output" {
+    tmpdir="$(mktemp -d)"
+    printf '%s\n' '#!/bin/bash' 'exit 1' > "$tmpdir/skopeo"
+    chmod +x "$tmpdir/skopeo"
+    PATH="$tmpdir:$PATH" run published_manifest_digest "docker.io/library/busybox:1.38.0"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
 @test "tag_listed: fails for an absent tag" {
     # The true-positive path: rayproject/ray:2.57.0 was withdrawn upstream
     # after being pinned; the INCOMPLETE for it was correct and the check
