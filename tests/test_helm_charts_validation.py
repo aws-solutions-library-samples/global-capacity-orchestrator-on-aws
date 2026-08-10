@@ -704,3 +704,72 @@ class TestGatewayLockstepValidation:
         # strict semver is refused before any network use.
         with pytest.raises(RuntimeError, match="non-semver controller version"):
             validator.fetch_lbc_go_mod("3.5.0/../../evil")
+
+
+class TestSlinkySlurmValuesShape:
+    """Pin the slinky-slurm values in the LIVE charts.yaml to the chart's schema.
+
+    Helm merges unknown value keys silently, so a misspelled key deploys a
+    half-configured cluster with no error anywhere. Both shapes below were
+    caught live by the release-validation ``schedulers`` action (run
+    sched241-6b8520b2-r2): a camelCase ``nodeSets`` list was ignored — the
+    cluster came up with **zero slurmd workers** — and with no enabled
+    ``partitions`` entry slurmctld had no default partition, so every
+    partition-less submission (``sbatch --wrap``, the REST probe,
+    ``examples/slurm-cluster-job.yaml``) failed with rc 2001.
+
+    Chart schema reference: ``helm show values oci://ghcr.io/slinkyproject/charts/slurm``
+    — ``nodesets`` is a lowercase MAP keyed by NodeSet name; ``partitions`` is
+    a map whose entries carry ``enabled`` + ``configMap``.
+    """
+
+    @pytest.fixture(scope="class")
+    def slinky_values(self) -> dict:
+        import yaml
+
+        charts = yaml.safe_load(LIVE_CHARTS.read_text(encoding="utf-8"))["charts"]
+        return charts["slinky-slurm"]["values"]
+
+    def test_no_camelcase_nodesets_key(self, slinky_values: dict) -> None:
+        assert "nodeSets" not in slinky_values, (
+            "slinky-slurm values use camelCase 'nodeSets' — the chart's key is "
+            "lowercase 'nodesets'; Helm ignores the unknown key and deploys a "
+            "Slurm cluster with zero workers"
+        )
+
+    def test_nodesets_is_nonempty_map_of_maps(self, slinky_values: dict) -> None:
+        nodesets = slinky_values.get("nodesets")
+        assert isinstance(nodesets, dict) and nodesets, (
+            "slinky-slurm values must define 'nodesets' as a non-empty map "
+            "keyed by NodeSet name (list shapes are silently ignored)"
+        )
+        for name, spec in nodesets.items():
+            assert isinstance(spec, dict), f"nodesets.{name} must be a mapping"
+            assert "name" not in spec, (
+                f"nodesets.{name} carries a 'name' key — that's the list shape; "
+                "the map key IS the NodeSet name"
+            )
+
+    def test_default_partition_exists_and_spans_nodesets(self, slinky_values: dict) -> None:
+        partitions = slinky_values.get("partitions")
+        assert isinstance(partitions, dict) and partitions, (
+            "slinky-slurm values must define 'partitions' — without one, "
+            "slurmctld has no default partition and every partition-less "
+            "submission fails with rc 2001"
+        )
+        enabled = {
+            name: spec
+            for name, spec in partitions.items()
+            if isinstance(spec, dict) and spec.get("enabled")
+        }
+        assert enabled, "at least one partitions entry must set enabled: true"
+        defaults = [
+            name
+            for name, spec in enabled.items()
+            if str((spec.get("configMap") or {}).get("Default", "")).upper() == "YES"
+        ]
+        assert defaults, (
+            "exactly one enabled partition must carry configMap.Default: 'YES' so "
+            "sbatch/REST submissions without an explicit partition are accepted"
+        )
+        assert len(defaults) == 1, f"multiple default partitions defined: {defaults}"

@@ -423,9 +423,13 @@ charts:
         podSpec:
           nodeSelector:
             kubernetes.io/os: linux
-      # Worker nodes (slurmd)
-      nodeSets:
-        - name: workers
+      # Worker nodes (slurmd). The chart's schema is a lowercase ``nodesets``
+      # MAP keyed by NodeSet name — a camelCase ``nodeSets`` list is silently
+      # ignored by Helm and the cluster comes up with zero workers (caught by
+      # the live release validation ``schedulers`` action; see
+      # tests/test_helm_charts_validation.py for the shape guard).
+      nodesets:
+        workers:
           replicas: 2
           slurmd:
             image:
@@ -441,6 +445,20 @@ charts:
           podSpec:
             nodeSelector:
               kubernetes.io/os: linux
+      # Slurm partitions. Without an enabled partition carrying
+      # ``Default: "YES"`` slurmctld has no default partition and every
+      # partition-less submission (sbatch --wrap, the REST probe,
+      # examples/slurm-cluster-job.yaml) fails with rc 2001
+      # ("No partition specified or system default partition").
+      partitions:
+        all:
+          enabled: true
+          nodesets:
+            - ALL
+          configMap:
+            Default: "YES"
+            State: UP
+            MaxTime: UNLIMITED
       # Login pods are disabled by default. GCO submits Slurm jobs via the
       # Kubernetes API (gco jobs submit-direct), not via SSH. Enabling the
       # login set creates a separate LoadBalancer (NLB), which adds cost and is
