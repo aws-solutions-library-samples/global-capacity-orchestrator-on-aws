@@ -1,0 +1,148 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gco-live-slurm-__RUN_TOKEN__
+  namespace: gco-jobs
+  annotations:
+    # The cluster-managed gco-jobs/default-deny-ingress policy selects all pods.
+    checkov.io/skip1: CKV2_K8S_6=Protected by the cluster-managed gco-jobs default-deny-ingress NetworkPolicy
+  labels:
+    app.kubernetes.io/name: gco-live-release-validation
+    gco.aws/validation-run: __RUN_TOKEN__
+    gco.aws/validation-path: slurm
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gco-live-release-validation
+        gco.aws/validation-run: __RUN_TOKEN__
+        gco.aws/validation-path: slurm
+        # Grants NetworkPolicy access to the Slurm REST API port (see
+        # allow-slurm-client-* in post-helm-slurm-network.yaml).
+        gco.aws/slurm-client: "true"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: probe
+          # Python 3.14.7-slim multi-platform index from the official Docker Hub tag API:
+          # https://hub.docker.com/v2/repositories/library/python/tags/3.14.7-slim
+          image: docker.io/library/python:3.14.7-slim@sha256:83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-c"]
+          args:
+            - |
+              # Strict Slurm REST probe: submit a real batch job through the
+              # Slinky slurmrestd Service and require COMPLETED. Any failure
+              # exits nonzero so the validation Job fails; the marker prints
+              # only after Slurm itself ran the work to completion.
+              import base64, hashlib, hmac, json, sys, time
+              import urllib.error, urllib.request
+
+              RESTAPI = "http://slinky-slurm-restapi.gco-jobs.svc.cluster.local:6820"
+              API_VER = "v0.0.44"
+
+              with open("/etc/slurm-jwt/jwt.key", "rb") as handle:
+                  key = handle.read().strip()
+
+              def b64(data: bytes) -> bytes:
+                  return base64.urlsafe_b64encode(data).rstrip(b"=")
+
+              def make_jwt(user="slurm", lifespan=900) -> str:
+                  header = b64(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+                  now = int(time.time())
+                  payload = b64(json.dumps({"exp": now + lifespan, "iat": now, "sun": user}).encode())
+                  sig = b64(hmac.new(key, header + b"." + payload, hashlib.sha256).digest())
+                  return (header + b"." + payload + b"." + sig).decode()
+
+              def api_call(path, data=None, method="GET"):
+                  request = urllib.request.Request(
+                      f"{RESTAPI}/slurm/{API_VER}/{path}",
+                      data=data,
+                      headers={
+                          "X-SLURM-USER-NAME": "slurm",
+                          "X-SLURM-USER-TOKEN": make_jwt(),
+                          "Content-Type": "application/json",
+                      },
+                      method=method,
+                  )
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      return json.loads(response.read())
+
+              def fail(message: str) -> None:
+                  print(f"SLURM PROBE FAILED: {message}")
+                  sys.exit(1)
+
+              submission = json.dumps({
+                  "job": {
+                      "name": "gco-live-validation",
+                      "current_working_directory": "/tmp",
+                      "standard_output": "/tmp/gco-live-validation.out",
+                      "environment": ["PATH=/usr/bin:/bin"],
+                  },
+                  "script": "#!/bin/bash\nhostname\necho slurm-ran-this\n",
+              }).encode()
+
+              # Fresh clusters take a while to register slurmd nodes; retry the
+              # submission window before declaring the control plane unreachable.
+              job_id = None
+              submit_error = "no submission attempted"
+              for attempt in range(10):
+                  try:
+                      result = api_call("job/submit", data=submission, method="POST")
+                      job_id = result.get("job_id")
+                      if job_id:
+                          break
+                      submit_error = f"submit response missing job_id: {result}"
+                  except Exception as exc:  # noqa: BLE001 - report the last failure
+                      submit_error = str(exc)
+                  time.sleep(30)
+              if not job_id:
+                  fail(f"job submission never succeeded: {submit_error}")
+              print(f"submitted slurm job {job_id}")
+
+              # Nodes may still be powering up; allow the queue time to run it.
+              state: list = []
+              deadline = time.time() + 600
+              while time.time() < deadline:
+                  time.sleep(10)
+                  try:
+                      status = api_call(f"job/{job_id}")
+                  except Exception:  # noqa: BLE001 - transient poll errors are retried
+                      continue
+                  jobs = status.get("jobs", [])
+                  state = jobs[0].get("job_state", []) if jobs else []
+                  if any(terminal in state for terminal in ("COMPLETED", "FAILED", "CANCELLED", "TIMEOUT")):
+                      break
+              if "COMPLETED" not in state:
+                  fail(f"slurm job {job_id} finished in state {state or 'unknown'}")
+              print(f"slurm job {job_id} COMPLETED")
+              print("GCO_LIVE_SLURM___RUN_TOKEN__")
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: slurm-jwt
+              mountPath: /etc/slurm-jwt
+              readOnly: true
+      volumes:
+        - name: slurm-jwt
+          secret:
+            secretName: slinky-slurm-auth-jwt

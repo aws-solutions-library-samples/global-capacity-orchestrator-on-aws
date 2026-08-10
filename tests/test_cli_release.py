@@ -86,6 +86,15 @@ class TestConsentGates:
         assert len(fake_processes.harness_calls) == 1
         assert "--confirm-kms-key-deletion" not in fake_processes.harness_calls[0]["command"]
 
+    def test_workload_actions_imply_deploy_for_the_kms_gate(self, fake_processes):
+        """`--actions api` expands to deploy inside the harness; the KMS
+        consent gate must fire for it exactly as it does for `deploy`."""
+        for actions in ("api", "sqs", "schedulers", "destroy"):
+            result = _invoke("--expected-account", "123456789012", CONSENT, "--actions", actions)
+            assert result.exit_code != 0, f"--actions {actions} skipped the KMS gate"
+            assert "--confirm-kms-key-deletion" in result.output
+        assert fake_processes.harness_calls == []
+
     def test_resume_requires_run_id_and_report_dir(self, fake_processes):
         result = _invoke(*BASE, "--resume")
         assert result.exit_code != 0
@@ -172,6 +181,19 @@ class TestHarnessInvocation:
         assert result.exit_code == 0
         env = fake_processes.harness_calls[0]["env"]
         assert "GCO_LIVE_VALIDATION_EMULATOR" not in env
+
+    def test_optional_schedulers_flag_is_forwarded_verbatim(self, fake_processes):
+        result = _invoke(*BASE, "--optional-schedulers", "yunikorn,slurm")
+        assert result.exit_code == 0, result.output
+        command = fake_processes.harness_calls[0]["command"]
+        index = command.index("--optional-schedulers")
+        assert command[index + 1] == "yunikorn,slurm"
+        assert "schedulers:" in result.output, "the echo must show the forced enablement"
+
+    def test_optional_schedulers_absent_by_default(self, fake_processes):
+        result = _invoke(*BASE)
+        assert result.exit_code == 0
+        assert "--optional-schedulers" not in fake_processes.harness_calls[0]["command"]
 
 
 class TestRepoRootValidation:

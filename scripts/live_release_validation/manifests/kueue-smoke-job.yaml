@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gco-live-kueue-__RUN_TOKEN__
+  namespace: gco-jobs
+  annotations:
+    # The cluster-managed gco-jobs/default-deny-ingress policy selects all pods.
+    checkov.io/skip1: CKV2_K8S_6=Protected by the cluster-managed gco-jobs default-deny-ingress NetworkPolicy
+  labels:
+    app.kubernetes.io/name: gco-live-release-validation
+    gco.aws/validation-run: __RUN_TOKEN__
+    gco.aws/validation-path: kueue
+    # Kueue's mutating webhook suspends every Job carrying this label at
+    # admission; it only unsuspends after the workload is admitted through
+    # the deployed gco-default LocalQueue → gco-cluster-queue quota, so
+    # completion proves queue admission actually happened.
+    kueue.x-k8s.io/queue-name: gco-default
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gco-live-release-validation
+        gco.aws/validation-run: __RUN_TOKEN__
+        gco.aws/validation-path: kueue
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: smoke
+          # BusyBox 1.38.0 multi-platform index from the official Docker Hub tag API:
+          # https://hub.docker.com/v2/repositories/library/busybox/tags/1.38.0
+          image: docker.io/library/busybox:1.38.0@sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "echo GCO_LIVE_KUEUE___RUN_TOKEN__"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi

@@ -93,6 +93,15 @@ class LiveValidationRunner:
             self.job_manager = JobManager(self.config)
             self.job_manager._aws_client = self.aws_client
             self.stack_manager = StackManager(self.config, project_root=settings.repo_root)
+            if settings.optional_schedulers:
+                # Force-enable the requested off-by-default schedulers for
+                # every CDK invocation of this run (deploy, destroy, list all
+                # synthesize the same graph) without touching cdk.json — the
+                # preflight clean-worktree rule stays intact and the override
+                # is part of the checkpoint identity.
+                self.stack_manager.set_extra_cdk_context(
+                    {"helm_enabled_overrides": ",".join(settings.optional_schedulers)}
+                )
             self.context = RunContext(
                 settings=settings,
                 checkpoint=self.checkpoint,
@@ -265,7 +274,7 @@ class LiveValidationRunner:
         if (
             self.checkpoint.destroyed
             and definition.name
-            in {"deploy", "topology", "api", "sqs", "central-queue", "convergence"}
+            in {"deploy", "topology", "api", "sqs", "central-queue", "schedulers", "convergence"}
             and definition.name not in self.checkpoint.completed_actions
         ):
             raise RuntimeError(

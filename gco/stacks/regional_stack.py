@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -212,6 +213,105 @@ def _service_image_asset_excludes(*included_paths: str) -> list[str]:
     return list(_SERVICE_IMAGE_COMMON_EXCLUDES) + [
         path for path in _SERVICE_IMAGE_BUILD_INPUTS if path not in included
     ]
+
+
+#: CDK context key that force-enables optional Helm charts for one deploy
+#: without editing cdk.json (comma-separated cdk.json helm-block key names,
+#: e.g. ``--context helm_enabled_overrides=yunikorn,slurm``). The live release
+#: validation harness uses this to exercise off-by-default schedulers against
+#: an otherwise pristine checkout; it is equally useful for trying one
+#: scheduler ahead of a config change. Overrides can only ENABLE — a chart
+#: disabled by an operator stays disabled unless named here.
+_HELM_OVERRIDE_CONTEXT_KEY = "helm_enabled_overrides"
+
+#: Every cdk.json helm-block key _get_enabled_charts understands. Kept in
+#: lockstep with its chart_map so an override typo fails the synth loudly
+#: instead of silently deploying without the requested chart.
+_HELM_CHART_CONFIG_KEYS = frozenset(
+    {
+        "aws_load_balancer_controller",
+        "keda",
+        "aws_efa_device_plugin",
+        "aws_neuron_device_plugin",
+        "volcano",
+        "kuberay",
+        "cert_manager",
+        "slurm",
+        "yunikorn",
+        "kueue",
+    }
+)
+
+#: Charts that are mandatory platform components; the cdk.json toggle is
+#: ignored for these (see _get_enabled_charts for the rationale).
+_MANDATORY_CHART_KEYS = frozenset({"aws_load_balancer_controller", "keda"})
+
+
+def _parse_helm_enabled_overrides(raw: object) -> frozenset[str]:
+    """Parse and validate the ``helm_enabled_overrides`` context value.
+
+    Accepts a comma-separated string (the only shape the CDK CLI can pass
+    with ``--context``) or a list of strings (cdk.json-style), returning the
+    validated set of helm-block keys to force-enable. Unknown names raise at
+    synth time with the valid list.
+    """
+    if raw is None:
+        return frozenset()
+    if isinstance(raw, str):
+        names = [part.strip() for part in raw.split(",") if part.strip()]
+    elif isinstance(raw, list) and all(isinstance(part, str) for part in raw):
+        names = [part.strip() for part in raw if part.strip()]
+    else:
+        raise ValueError(
+            f"{_HELM_OVERRIDE_CONTEXT_KEY} must be a comma-separated string or string list"
+        )
+    unknown = sorted(set(names) - _HELM_CHART_CONFIG_KEYS)
+    if unknown:
+        valid = ", ".join(sorted(_HELM_CHART_CONFIG_KEYS))
+        raise ValueError(
+            f"Unknown {_HELM_OVERRIDE_CONTEXT_KEY} name(s): {', '.join(unknown)}. Valid: {valid}"
+        )
+    return frozenset(names)
+
+
+def _helm_chart_enabled(
+    helm_config: Mapping[str, Any],
+    overrides: frozenset[str],
+    config_key: str,
+) -> bool:
+    """Resolve one helm-block key's effective enablement.
+
+    Single source of truth shared by _get_enabled_charts and the
+    kubectl-applier gate replacements so the installed chart set and the
+    gated manifests can never disagree: mandatory charts are always on, a
+    context override forces on, and otherwise the cdk.json toggle decides
+    (missing key defaults to enabled, matching the historical behavior).
+    """
+    if config_key in _MANDATORY_CHART_KEYS or config_key in overrides:
+        return True
+    chart_config = helm_config.get(config_key, {})
+    return bool(chart_config.get("enabled", True)) if isinstance(chart_config, dict) else True
+
+
+def _compute_kubectl_scheduler_replacements(
+    *, kueue_enabled: bool, slurm_enabled: bool
+) -> dict[str, str]:
+    """Build the kubectl-applier replacements that gate scheduler manifests.
+
+    When Kueue is enabled the ``{{KUEUE_ENABLED}}`` gate resolves so the
+    default queue topology (post-helm-kueue-default-queues.yaml) applies;
+    when Slurm is enabled the ``{{SLURM_ENABLED}}`` gate resolves so the
+    Slinky NetworkPolicies (post-helm-slurm-network.yaml) apply. A disabled
+    scheduler leaves its placeholder unreplaced, the applier skips the file,
+    and _FEATURE_RESOURCE_INVENTORY prunes previously applied objects — the
+    same optional-feature gating observability, FSx, and Valkey use.
+    """
+    replacements: dict[str, str] = {}
+    if kueue_enabled:
+        replacements["{{KUEUE_ENABLED}}"] = "true"
+    if slurm_enabled:
+        replacements["{{SLURM_ENABLED}}"] = "true"
+    return replacements
 
 
 def _compute_kubectl_observability_replacements(
@@ -3028,6 +3128,19 @@ class GCORegionalStack(Stack):
                 ),
             )
         )
+        # Scheduler gates: resolve through the same enablement helper that
+        # selects the Helm charts, so the default Kueue queue topology and the
+        # Slinky Slurm NetworkPolicies apply exactly when their scheduler does.
+        _helm_config = self.node.try_get_context("helm") or {}
+        _helm_overrides = _parse_helm_enabled_overrides(
+            self.node.try_get_context(_HELM_OVERRIDE_CONTEXT_KEY)
+        )
+        image_replacements.update(
+            _compute_kubectl_scheduler_replacements(
+                kueue_enabled=_helm_chart_enabled(_helm_config, _helm_overrides, "kueue"),
+                slurm_enabled=_helm_chart_enabled(_helm_config, _helm_overrides, "slurm"),
+            )
+        )
 
         # Cost monitoring (on by default): gate the cost-monitor Deployment
         # and the Grafana cost dashboard on the toggle via the same
@@ -3827,17 +3940,25 @@ class GCORegionalStack(Stack):
         ]
 
         # Charts that are mandatory platform components and cannot be disabled
-        # via cdk.json. KEDA is always installed: it backs the built-in SQS
-        # queue processor (a ScaledJob) and is the only metrics bridge that lets
-        # autoscalers consume GPU/CloudWatch metrics (the keda-metrics-apiserver
-        # serves external.metrics.k8s.io). Disabling it would silently break
-        # both, so the cdk.json toggle is ignored for KEDA.
-        mandatory_chart_keys = {"aws_load_balancer_controller", "keda"}
+        # via cdk.json (see _MANDATORY_CHART_KEYS). KEDA is always installed:
+        # it backs the built-in SQS queue processor (a ScaledJob) and is the
+        # only metrics bridge that lets autoscalers consume GPU/CloudWatch
+        # metrics (the keda-metrics-apiserver serves external.metrics.k8s.io).
+        # Disabling it would silently break both, so the cdk.json toggle is
+        # ignored for KEDA. A `helm_enabled_overrides` context value (see
+        # _parse_helm_enabled_overrides) can force optional charts on for one
+        # deploy without editing cdk.json.
+        if {key for key, _names in chart_map} != _HELM_CHART_CONFIG_KEYS:
+            raise RuntimeError(
+                "chart_map keys drifted from _HELM_CHART_CONFIG_KEYS; update both together"
+            )
+        overrides = _parse_helm_enabled_overrides(
+            self.node.try_get_context(_HELM_OVERRIDE_CONTEXT_KEY)
+        )
 
         enabled_charts = []
         for config_key, chart_names in chart_map:
-            chart_config = helm_config.get(config_key, {})
-            if config_key in mandatory_chart_keys or chart_config.get("enabled", True):
+            if _helm_chart_enabled(helm_config, overrides, config_key):
                 enabled_charts.extend(chart_names)
 
         # kube-prometheus-stack is driven by the separate on-by-default

@@ -1,0 +1,60 @@
+# Default Kueue queue topology for the gco-jobs namespace.
+#
+# Kueue only manages Jobs that carry a `kueue.x-k8s.io/queue-name` label, and
+# a labeled Job stays suspended forever unless that LocalQueue exists and its
+# ClusterQueue admits the workload. Until this file existed GCO installed the
+# Kueue controller but created no queues at all, so the documented quickstart
+# ("add the queue-name label") only worked after operators hand-applied the
+# queue objects from examples/kueue-job.yaml — and the 2026-09 live release
+# validation had no admissible queue to prove Kueue against.
+#
+# Quotas mirror the gco-jobs namespace ResourceQuota (04-resource-quotas.yaml)
+# so Kueue admission can never promise more than the namespace allows.
+#
+# Gated on {{KUEUE_ENABLED}}: GCORegionalStack substitutes it only when the
+# cdk.json helm.kueue toggle (or a helm_enabled_overrides context override)
+# enables the Kueue chart; otherwise the unreplaced placeholder makes the
+# applier skip this file, and _FEATURE_RESOURCE_INVENTORY prunes the objects
+# on a later disable (same mechanism as FSx/Valkey/observability).
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: gco-default-flavor
+  labels:
+    project: gco
+    gco.io/kueue-enabled: "{{KUEUE_ENABLED}}"
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: gco-cluster-queue
+  labels:
+    project: gco
+    gco.io/kueue-enabled: "{{KUEUE_ENABLED}}"
+spec:
+  # Workload namespaces are constrained by the submission transports
+  # (job_validation_policy.allowed_namespaces), not by the queue.
+  namespaceSelector: {}
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+    - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+      flavors:
+        - name: gco-default-flavor
+          resources:
+            - name: "cpu"
+              nominalQuota: "{{QUOTA_MAX_CPU}}"
+            - name: "memory"
+              nominalQuota: "{{QUOTA_MAX_MEMORY}}"
+            - name: "nvidia.com/gpu"
+              nominalQuota: "{{QUOTA_MAX_GPU}}"
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: gco-default
+  namespace: gco-jobs
+  labels:
+    project: gco
+    gco.io/kueue-enabled: "{{KUEUE_ENABLED}}"
+spec:
+  clusterQueue: gco-cluster-queue

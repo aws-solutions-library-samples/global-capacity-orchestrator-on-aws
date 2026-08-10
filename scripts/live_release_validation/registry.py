@@ -27,6 +27,7 @@ from .actions import (
     action_final_inventory,
     action_opencost,
     action_preflight,
+    action_schedulers,
     action_sqs_lifecycle,
     action_topology,
 )
@@ -89,6 +90,12 @@ def build_action_registry() -> dict[str, ActionDefinition]:
             "Run the idempotent DynamoDB-backed queue lifecycle",
             ("topology",),
             action_central_queue_lifecycle,
+        ),
+        ActionDefinition(
+            "schedulers",
+            "Prove every enabled batch scheduler against a scheduling-gated workload",
+            ("topology",),
+            action_schedulers,
         ),
         ActionDefinition(
             "opencost",

@@ -142,6 +142,19 @@ _INTEGER_PLACEHOLDER_TOKENS: frozenset[str] = frozenset(
     }
 )
 
+# Placeholders that sit in Kubernetes *quantity* positions (e.g. the Kueue
+# ClusterQueue `nominalQuota` fields in post-helm-kueue-default-queues.yaml,
+# which reuse the namespace-quota tokens). CRD catalog schemas enforce the
+# quantity regex, which the generic stub fails; a literal 1 is valid whether
+# the position is quoted or bare.
+_QUANTITY_PLACEHOLDER_TOKENS: frozenset[str] = frozenset(
+    {
+        "{{QUOTA_MAX_CPU}}",
+        "{{QUOTA_MAX_MEMORY}}",
+        "{{QUOTA_MAX_GPU}}",
+    }
+)
+
 # Every other placeholder (quoted string values, and the couple of bare
 # `image: {{...}}` lines) renders fine as a generic string stub — YAML
 # treats an unquoted bare word as a string scalar automatically.
@@ -158,7 +171,7 @@ def render_placeholders(text: str) -> str:
     """
     for token, stub in _STRUCTURAL_STUBS.items():
         text = text.replace(token, stub)
-    for token in _INTEGER_PLACEHOLDER_TOKENS:
+    for token in _INTEGER_PLACEHOLDER_TOKENS | _QUANTITY_PLACEHOLDER_TOKENS:
         text = text.replace(token, "1")
     return _PLACEHOLDER_RE.sub(_GENERIC_STUB, text)
 

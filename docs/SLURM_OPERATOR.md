@@ -90,6 +90,13 @@ kubectl apply -f examples/slurm-cluster-job.yaml
 kubectl logs job/slurm-test -n gco-jobs -f
 ```
 
+The gco-jobs namespace default-denies pod-to-pod traffic, so Slurm
+connectivity is label-gated by the cluster-managed policies applied with the
+Slurm toggle (`post-helm-slurm-network.yaml`): Slinky's own pods
+(`app.kubernetes.io/part-of: slurm`) may talk to each other, and any pod
+labeled `gco.aws/slurm-client: "true"` — like the example job — may reach the
+REST API on port 6820. A job pod without that label cannot reach slurmrestd.
+
 ### Interactive access via the controller pod
 
 The login set is disabled by default to avoid creating an unnecessary NLB.

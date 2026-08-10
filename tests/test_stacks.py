@@ -1008,6 +1008,58 @@ class TestStackManagerOperations:
         ]
         assert process.communicate_timeouts == [None]
 
+    def test_extra_cdk_context_applies_to_every_app_evaluating_command(self):
+        """Registered context pairs ride deploy, destroy, AND list identically.
+
+        The live-validation harness force-enables optional schedulers through
+        this seam; if `cdk list` synthesized a different graph than `cdk
+        deploy`, the orchestrators' stack discovery and the deployed stacks
+        could disagree.
+        """
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        manager._cdk_path = "cdk"
+        manager.set_extra_cdk_context({"helm_enabled_overrides": "slurm,yunikorn"})
+        for subcommand in (["list"], ["deploy", "gco-us-east-1"], ["destroy", "gco-us-east-1"]):
+            process = _FakePopenProcess(stdout="", stderr="")
+            with (
+                patch.object(manager, "_ensure_cdk_toolchain"),
+                patch.object(manager, "_ensure_lambda_build"),
+                patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+            ):
+                manager._run_cdk(subcommand, capture_output=True)
+            argv = mock_popen.call_args.args[0]
+            assert argv[: 1 + len(subcommand)] == ["cdk", *subcommand]
+            index = argv.index("--context")
+            assert argv[index + 1] == "helm_enabled_overrides=slurm,yunikorn"
+
+    def test_extra_cdk_context_never_touches_non_app_commands(self):
+        """Non-synthesizing commands (e.g. bootstrap) stay unmodified."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        manager._cdk_path = "cdk"
+        manager.set_extra_cdk_context({"helm_enabled_overrides": "slurm"})
+        process = _FakePopenProcess(stdout="", stderr="")
+        with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build"),
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+        ):
+            manager._run_cdk(["bootstrap"], capture_output=True)
+        assert "--context" not in mock_popen.call_args.args[0]
+
+    def test_extra_cdk_context_rejects_unroundtrippable_keys(self):
+        """Keys that cannot survive the CDK CLI's key=value form are refused."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        with pytest.raises(ValueError, match="Invalid CDK context key"):
+            manager.set_extra_cdk_context({"bad=key": "value"})
+        with pytest.raises(ValueError, match="Invalid CDK context key"):
+            manager.set_extra_cdk_context({"": "value"})
+
     @pytest.mark.parametrize(
         "command",
         (["list"], ["synth"], ["diff"], ["deploy"], ["destroy"]),

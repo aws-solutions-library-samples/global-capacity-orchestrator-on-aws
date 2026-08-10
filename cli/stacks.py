@@ -983,6 +983,27 @@ class StackManager:
         self._active_cdk_processes: dict[int, Any] = {}
         self._active_cdk_lock = Lock()
         self._cdk_cancel_event = Event()
+        # Extra `--context key=value` pairs appended to every app-evaluating
+        # CDK invocation (deploy/destroy/diff/list/synth). Set once via
+        # set_extra_cdk_context; used by the live release validation harness
+        # to force-enable optional Helm charts (helm_enabled_overrides) for a
+        # run without mutating the checked-out cdk.json.
+        self._extra_cdk_context: dict[str, str] = {}
+
+    def set_extra_cdk_context(self, context: Mapping[str, str]) -> None:
+        """Register `--context` pairs for every subsequent CDK invocation.
+
+        Keys and values must be plain strings without shell metacharacters'
+        risk (argv is passed as a list, never a shell string); a key that is
+        empty or contains ``=`` is refused because it could not round-trip
+        through the CDK CLI's ``key=value`` form unambiguously.
+        """
+        validated: dict[str, str] = {}
+        for key, value in context.items():
+            if not key or "=" in key:
+                raise ValueError(f"Invalid CDK context key: {key!r}")
+            validated[str(key)] = str(value)
+        self._extra_cdk_context = validated
 
     def _find_project_root(self) -> Path:
         """Find the project root by looking for cdk.json."""
@@ -1550,6 +1571,11 @@ class StackManager:
         # them centrally rather than relying on individual command wrappers.
         if command and command[0] in {"deploy", "destroy", "diff", "list", "synth"}:
             self._ensure_lambda_build()
+            # Apply registered context overrides uniformly to every
+            # app-evaluating command so deploy, destroy, and the stack listing
+            # all synthesize the same graph (see set_extra_cdk_context).
+            for key, value in sorted(self._extra_cdk_context.items()):
+                command = [*command, "--context", f"{key}={value}"]
 
         full_env = os.environ.copy()
 

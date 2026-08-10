@@ -11,6 +11,7 @@ import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .checks.schedulers import OPTIONAL_SCHEDULERS
 from .models import (
     RunSettings,
     ValidationReport,
@@ -130,6 +131,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "KMS keys for deletion after stack teardown"
         ),
     )
+    parser.add_argument(
+        "--optional-schedulers",
+        type=_split_actions,
+        default=(),
+        metavar="NAME[,NAME...]",
+        help=(
+            "Force-enable off-by-default schedulers for this run's deploy so the "
+            "schedulers action can prove them (yunikorn, slurm, or all)"
+        ),
+    )
     parser.epilog = "Actions: " + ", ".join(registry)
     return parser
 
@@ -156,6 +167,16 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     ):
         if getattr(args, option) <= 0:
             parser.error(f"--{option.replace('_', '-')} must be positive")
+    valid_optional = set(OPTIONAL_SCHEDULERS)
+    unknown_schedulers = sorted(set(args.optional_schedulers) - valid_optional - {"all"})
+    if unknown_schedulers:
+        parser.error(
+            "--optional-schedulers accepts "
+            + ", ".join((*OPTIONAL_SCHEDULERS, "all"))
+            + f"; got: {', '.join(unknown_schedulers)}"
+        )
+    if "all" in args.optional_schedulers and len(args.optional_schedulers) != 1:
+        parser.error("--optional-schedulers 'all' cannot be combined with individual names")
 
 
 def _settings_from_args(
@@ -197,6 +218,11 @@ def _settings_from_args(
         destroy_retry_delay_seconds=args.destroy_retry_delay_seconds,
         confirm_kms_key_deletion=args.confirm_kms_key_deletion,
         resume=args.resume,
+        optional_schedulers=(
+            OPTIONAL_SCHEDULERS
+            if "all" in args.optional_schedulers
+            else tuple(sorted(set(args.optional_schedulers)))
+        ),
     )
 
 

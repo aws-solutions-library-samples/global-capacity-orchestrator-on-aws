@@ -107,6 +107,16 @@ def release() -> None:
     help="Harness actions to run; dependencies are added automatically.",
 )
 @click.option(
+    "--optional-schedulers",
+    "optional_schedulers",
+    default=None,
+    metavar="NAME[,NAME...]",
+    help=(
+        "Force-enable off-by-default schedulers (yunikorn, slurm, or all) for "
+        "this run's deploy so the schedulers action proves them too."
+    ),
+)
+@click.option(
     "--profile",
     type=click.Choice(["configured", "single-region", "multi-region"]),
     default="configured",
@@ -146,6 +156,7 @@ def release_validate(
     authorized: bool,
     confirm_kms_key_deletion: bool,
     actions: str,
+    optional_schedulers: str | None,
     profile: str,
     run_id: str | None,
     report_dir: Path | None,
@@ -171,12 +182,18 @@ def release_validate(
     selected = {name.strip() for name in actions.split(",") if name.strip()}
     if not selected:
         _fail("--actions must name at least one action")
-    deploy_selected = bool(selected & {"all", "deploy"})
+    # Every action other than preflight/baseline transitively depends on
+    # deploy, and the harness expands dependencies automatically — so any
+    # such selection deploys real infrastructure and creates retained EKS
+    # KMS keys, not just a literal `deploy`/`all`.
+    deploy_selected = bool(selected & {"all", "deploy"}) or bool(
+        selected - {"preflight", "baseline"}
+    )
     if deploy_selected and not confirm_kms_key_deletion:
         _fail(
-            "The deploy action creates retained EKS KMS keys; add "
-            "--confirm-kms-key-deletion to authorize scheduling exactly this run's "
-            "keys for deletion during cleanup."
+            "The selected actions imply the deploy action, which creates retained "
+            "EKS KMS keys; add --confirm-kms-key-deletion to authorize scheduling "
+            "exactly this run's keys for deletion during cleanup."
         )
     if resume and (run_id is None or report_dir is None):
         _fail(
@@ -227,6 +244,8 @@ def release_validate(
     ]
     if confirm_kms_key_deletion:
         command.append("--confirm-kms-key-deletion")
+    if optional_schedulers:
+        command.extend(["--optional-schedulers", optional_schedulers])
     if resume:
         command.append("--resume")
     for name in protected_stack:
@@ -237,6 +256,8 @@ def release_validate(
     click.echo(f"branch:     {expected_branch}")
     click.echo(f"account:    {expected_account}")
     click.echo(f"actions:    {','.join(sorted(selected))}")
+    if optional_schedulers:
+        click.echo(f"schedulers: {optional_schedulers} (force-enabled for this run)")
     click.echo(f"report-dir: {resolved_report_dir}")
     if emulator_endpoint:
         click.echo(f"emulator:   {emulator_endpoint} (verified by the harness before use)")

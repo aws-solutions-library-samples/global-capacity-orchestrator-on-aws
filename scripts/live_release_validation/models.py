@@ -274,6 +274,11 @@ class RunSettings:
     destroy_retry_delay_seconds: int = 30
     confirm_kms_key_deletion: bool = False
     resume: bool = False
+    #: Off-by-default schedulers force-enabled for this run's deploy (threaded
+    #: to CDK as the ``helm_enabled_overrides`` context; see the ``schedulers``
+    #: action). Part of the resume identity: a resumed run must deploy and
+    #: validate the same chart set it started with.
+    optional_schedulers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Normalize output paths without resolving symlinks and enforce one run directory."""
@@ -300,6 +305,7 @@ class RunSettings:
             "requested_actions": list(self.requested_actions),
             "protected_stack_names": list(self.protected_stack_names),
             "confirm_kms_key_deletion": self.confirm_kms_key_deletion,
+            "optional_schedulers": list(self.optional_schedulers),
         }
 
 

@@ -42,6 +42,18 @@ matches the action name printed in the run log. The one deliberate exception is
 lifecycle over two different transports, and splitting them would duplicate the
 lifecycle rather than clarify it.
 
+The `schedulers` action (`actions/schedulers.py`, enablement resolution in
+`checks/schedulers.py`) runs one scheduling-gated probe Job per enabled batch
+scheduler through the shared API-transport lifecycle in `checks/jobs.py`
+(`_run_api_transport_lifecycle`, also the body of the `api` action). The probe
+manifests live in `manifests/*-smoke-job.yaml`; each completes only if its
+scheduler actually scheduled it (foreign `schedulerName`, Kueue queue
+admission, or a real slurmrestd round trip). Off-by-default schedulers are
+skipped with their configuration source unless the run passes
+`--optional-schedulers` — which the runner threads to every CDK invocation as
+the `helm_enabled_overrides` context so the deployed chart set, the applier's
+gated manifests, and the probes all resolve enablement identically.
+
 ## How a run executes
 
 `runner.py` resolves the requested actions (expanding dependencies), then for

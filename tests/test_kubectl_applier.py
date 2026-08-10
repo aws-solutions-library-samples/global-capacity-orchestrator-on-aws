@@ -2322,3 +2322,97 @@ class TestGatewayCustomObjectMapConsistency:
 
         unused = set(handler_module._GATEWAY_CUSTOM_OBJECTS) - used_kinds
         assert not unused, f"_GATEWAY_CUSTOM_OBJECTS maps kinds no manifest uses: {sorted(unused)}"
+
+
+class TestQueueingCustomObjectMapConsistency:
+    """_QUEUEING_CUSTOM_OBJECTS must agree with the manifests, both directions.
+
+    Same regression class the gateway map guards against: an applier map
+    whose (group, version) drifts from the manifests fails only on a live
+    deploy's apply. The Kueue default-queue topology gets the identical pin.
+    """
+
+    def test_manifest_kueue_api_versions_match_the_applier_map(self, handler_module) -> None:
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        queueing_groups = {
+            group for group, _v, _p, _s in handler_module._QUEUEING_CUSTOM_OBJECTS.values()
+        }
+
+        seen: list[tuple[str, str, str]] = []
+        mismatches: list[str] = []
+        for manifest in sorted(manifests_dir.glob("*.yaml")):
+            for doc in _parse_manifest_documents(manifest):
+                api_version = str(doc.get("apiVersion", ""))
+                kind = str(doc.get("kind", ""))
+                group, _, version = api_version.partition("/")
+                if group not in queueing_groups:
+                    continue
+                seen.append((manifest.name, kind, api_version))
+                mapped = handler_module._QUEUEING_CUSTOM_OBJECTS.get(kind)
+                if mapped is None:
+                    mismatches.append(
+                        f"{manifest.name}: {kind} ({api_version}) has no "
+                        "_QUEUEING_CUSTOM_OBJECTS entry"
+                    )
+                    continue
+                if (group, version) != (mapped[0], mapped[1]):
+                    mismatches.append(
+                        f"{manifest.name}: {kind} is {api_version} but "
+                        f"_QUEUEING_CUSTOM_OBJECTS maps {mapped[0]}/{mapped[1]}"
+                    )
+        assert seen, "expected kueue queue resources in the manifests directory"
+        assert not mismatches, "\n".join(mismatches)
+
+    def test_every_mapped_queueing_kind_appears_in_a_manifest(self, handler_module) -> None:
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        queueing_groups = {
+            group for group, _v, _p, _s in handler_module._QUEUEING_CUSTOM_OBJECTS.values()
+        }
+        used_kinds = set()
+        for manifest in sorted(manifests_dir.glob("*.yaml")):
+            for doc in _parse_manifest_documents(manifest):
+                group = str(doc.get("apiVersion", "")).partition("/")[0]
+                if group in queueing_groups:
+                    used_kinds.add(str(doc.get("kind", "")))
+        unused = set(handler_module._QUEUEING_CUSTOM_OBJECTS) - used_kinds
+        assert not unused, f"_QUEUEING_CUSTOM_OBJECTS maps kinds no manifest uses: {sorted(unused)}"
+
+    def test_the_two_custom_object_maps_never_overlap(self, handler_module) -> None:
+        # The apply dispatch consults the gateway map first; an overlapping
+        # kind would silently take the gateway (group, version) and its
+        # ALB-finalizer teardown semantics.
+        overlap = set(handler_module._GATEWAY_CUSTOM_OBJECTS) & set(
+            handler_module._QUEUEING_CUSTOM_OBJECTS
+        )
+        assert not overlap, f"custom-object maps overlap on kinds: {sorted(overlap)}"
+
+    def test_kueue_prune_inventory_matches_the_gated_manifest(self, handler_module) -> None:
+        """Every object in the gated queue manifest is pruned on disable."""
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        gated = manifests_dir / "post-helm-kueue-default-queues.yaml"
+        expected = {
+            (str(doc.get("apiVersion")), str(doc.get("kind")), str(doc["metadata"]["name"]))
+            for doc in _parse_manifest_documents(gated)
+        }
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY[("{{KUEUE_ENABLED}}", True)]
+        pruned = {(api_version, kind, name) for api_version, kind, _ns, name in inventory}
+        assert pruned == expected
+
+    def test_slurm_prune_inventory_matches_the_gated_manifest(self, handler_module) -> None:
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        gated = manifests_dir / "post-helm-slurm-network.yaml"
+        expected = {
+            (str(doc.get("apiVersion")), str(doc.get("kind")), str(doc["metadata"]["name"]))
+            for doc in _parse_manifest_documents(gated)
+        }
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY[("{{SLURM_ENABLED}}", True)]
+        pruned = {(api_version, kind, name) for api_version, kind, _ns, name in inventory}
+        assert pruned == expected

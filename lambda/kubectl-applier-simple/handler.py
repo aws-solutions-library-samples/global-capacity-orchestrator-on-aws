@@ -108,6 +108,18 @@ _GATEWAY_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
     ),
 }
 
+# Kueue queue-topology resources applied by post-helm-kueue-default-queues.yaml.
+# Kept separate from _GATEWAY_CUSTOM_OBJECTS because gateway kinds get the
+# ALB-finalizer teardown treatment while these are ordinary CRs; the same
+# group/version/plural/scope discipline applies so apply and pruning cannot
+# drift onto different objects. tests/test_kubectl_applier.py pins this map
+# against the manifests directory exactly like the gateway map.
+_QUEUEING_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
+    "ResourceFlavor": ("kueue.x-k8s.io", "v1beta1", "resourceflavors", True),
+    "ClusterQueue": ("kueue.x-k8s.io", "v1beta1", "clusterqueues", True),
+    "LocalQueue": ("kueue.x-k8s.io", "v1beta1", "localqueues", False),
+}
+
 # Services annotated with this marker are validated for exact existence only;
 # a ready EndpointSlice endpoint is not required. Reserved for Services whose
 # backends schedule exclusively onto accelerator nodes that a fresh cluster
@@ -426,6 +438,18 @@ _FEATURE_RESOURCE_INVENTORY: dict[
     ),
     ("{{QUEUE_PROCESSOR_IMAGE}}", True): (
         ("keda.sh/v1alpha1", "ScaledJob", "gco-system", "sqs-queue-processor"),
+    ),
+    ("{{KUEUE_ENABLED}}", True): (
+        # Deletion order matters: the LocalQueue references the ClusterQueue,
+        # which references the ResourceFlavor.
+        ("kueue.x-k8s.io/v1beta1", "LocalQueue", "gco-jobs", "gco-default"),
+        ("kueue.x-k8s.io/v1beta1", "ClusterQueue", None, "gco-cluster-queue"),
+        ("kueue.x-k8s.io/v1beta1", "ResourceFlavor", None, "gco-default-flavor"),
+    ),
+    ("{{SLURM_ENABLED}}", True): (
+        ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-cluster-internal"),
+        ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-client-to-restapi"),
+        ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-client-egress"),
     ),
     ("{{COST_MONITORING_ENABLED}}", False): (
         ("apps/v1", "Deployment", "gco-system", "cost-monitor"),
@@ -1072,8 +1096,10 @@ def apply_manifests(
                             else:
                                 raise
 
-                    elif kind in _GATEWAY_CUSTOM_OBJECTS:
-                        group, version, plural, cluster_scoped = _GATEWAY_CUSTOM_OBJECTS[kind]
+                    elif kind in _GATEWAY_CUSTOM_OBJECTS or kind in _QUEUEING_CUSTOM_OBJECTS:
+                        group, version, plural, cluster_scoped = (
+                            _GATEWAY_CUSTOM_OBJECTS.get(kind) or _QUEUEING_CUSTOM_OBJECTS[kind]
+                        )
                         try:
                             if cluster_scoped:
                                 custom_api.create_cluster_custom_object(

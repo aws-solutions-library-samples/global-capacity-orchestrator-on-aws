@@ -9,6 +9,8 @@ import time
 from typing import Any, cast
 from urllib.parse import quote
 
+from cli.jobs import resolve_submission_identity
+
 from ..constants import (
     _CENTRAL_MANAGED_BY_LABEL,
     _CENTRAL_ORIGINAL_NAME_ANNOTATION,
@@ -454,3 +456,98 @@ def _register_job(
     if reactivate_deleted:
         _reactivate_deleted_job_record(ctx, record)
     return record
+
+
+def _run_api_transport_lifecycle(
+    ctx: RunContext,
+    *,
+    manifest_filename: str,
+    path: str,
+    marker_prefix: str,
+) -> dict[str, Any]:
+    """Run one manifest's complete authenticated-API Job lifecycle.
+
+    The crash-safe submission dance shared by the ``api`` action and every
+    scheduler probe: register the deterministic record, persist the envelope,
+    reconcile any escaped prior submission, submit through the manifest API,
+    then observe appearance, completion, the log marker, and deletion. The
+    marker is ``GCO_LIVE_<MARKER_PREFIX>_<run token>`` and must be emitted by
+    the manifest's workload.
+    """
+    manifests, name, namespace = _load_manifest(ctx, manifest_filename)
+    token = _run_token(ctx.settings.run_id)
+    marker = f"GCO_LIVE_{marker_prefix}_{token}"
+    execution_region = ctx.deployment_regions[0]
+    record = _register_job(
+        ctx,
+        name=name,
+        namespace=namespace,
+        execution_region=execution_region,
+        path=path,
+    )
+    envelope = {
+        "transport": "api",
+        "manifests": manifests,
+        "namespace": namespace,
+        "execution_region": execution_region,
+        "transport_region": record.get("transport_region"),
+        "labels": {_RUN_JOB_LABEL: token},
+    }
+    ctx.prepare_job_submission(record, envelope=envelope, resumable=False)
+
+    existing = _get_owned_job(ctx, record)
+    submission: dict[str, Any] | None = None
+    state = str(record.get("submission_state") or "")
+    if existing is None and state == "submitting":
+        existing = _wait_for_ambiguous_job_reconciliation(ctx, record)
+        if existing is None:
+            reason = (
+                f"{path} submission crossed a non-idempotent boundary but no Job "
+                "appeared; automatic replay is forbidden"
+            )
+            ctx.block_job_submission(record, reason)
+            raise RuntimeError(reason)
+    elif existing is None and state == "submitted":
+        existing = _wait_for_owned_job_appearance(ctx, record)
+    elif existing is None and state == "blocked":
+        raise RuntimeError(
+            str(record.get("submission_blocked_reason") or f"{path} submission blocked")
+        )
+
+    if existing is None:
+        if state != "prepared":
+            raise RuntimeError(f"Cannot submit {path} Job from state {state!r}")
+        ctx.begin_job_submission(
+            record,
+            reconciliation_timeout_seconds=_job_appearance_timeout(ctx),
+        )
+        submission = ctx.job_manager.submit_job(
+            manifests,
+            namespace=namespace,
+            target_region=record.get("transport_region"),
+            labels={_RUN_JOB_LABEL: token},
+        )
+        submitted_name, submitted_namespace = resolve_submission_identity(
+            submission,
+            fallback_name=name,
+            fallback_namespace=namespace,
+        )
+        if submitted_name != name or submitted_namespace != namespace:
+            raise RuntimeError(
+                f"{path} submission identity mismatch: "
+                f"expected {namespace}/{name}, got {submitted_namespace}/{submitted_name}"
+            )
+        response_region = submission.get("region")
+        if response_region is not None and str(response_region) != execution_region:
+            raise RuntimeError(
+                f"{path} submission executed in {response_region}, expected {execution_region}"
+            )
+        ctx.finish_job_submission(
+            record,
+            submission,
+            appearance_timeout_seconds=_job_appearance_timeout(ctx),
+        )
+
+    lifecycle = _complete_job_lifecycle(ctx, record=record, marker=marker)
+    lifecycle["submission"] = submission or {"reconciled_existing_job": True}
+    return lifecycle
