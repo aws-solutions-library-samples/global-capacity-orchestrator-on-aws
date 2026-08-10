@@ -345,6 +345,7 @@ Every Lambda handler test in this repo now loads via this helper. The legacy `sy
 | File | Description |
 |------|-------------|
 | `test_ci_runtime_verifiers.py` | Behavioral contracts for `.github/scripts/verify_lambda_imports.py` and `verify_container_tool_versions.py`: discovers and imports all 14 tracked Python Lambda handlers in bounded isolated subprocesses, parses every reviewed Dockerfile tool pin, accepts exact runtime matches for the development and helm-installer images, and rejects valid-but-different versions. |
+| `test_structured_logging_sanitizer.py` | `gco/services/structured_logging.py::sanitize_log_value` — the single log-injection (CWE-117) barrier for untrusted logged values. Pins the neutralization contract: CR/LF become literal `\r`/`\n` sequences, Unicode line separators (NEL, U+2028, U+2029) and all other control characters (ANSI escapes, NUL, DEL, TAB) become `?`, printable text including non-ASCII passes through unchanged, non-strings are coerced, and no output ever contains a raw control character. |
 | `test_supply_chain_integrity.py` | Offline provenance and workflow-policy guards: binds downloaded releases to committed checksums, rejects mutable remote installers, requires authenticated kind/Finch inputs, keeps new pins in monthly drift inventory, enforces fail-closed dependency-scan reporting, pins the official AWS CLI image by digest, preserves atomic release publication and native amd64/arm64 image coverage, and verifies the runtime-verifier and bounded scanner-prepull wiring. |
 
 ### Script Tests
