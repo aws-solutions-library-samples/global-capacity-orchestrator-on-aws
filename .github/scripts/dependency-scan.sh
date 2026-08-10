@@ -416,7 +416,10 @@ check_image() {
   # No newer family member. If the pinned tag itself is no longer listed,
   # the pin points at something the registry stopped advertising (renamed
   # variant scheme, withdrawn tag) — that deserves eyes, not silence.
-  if ! printf '%s\n' "$raw_tags" | grep -qxF -e "$current_tag" -e "v${current_tag#v}" -e "${current_tag#v}"; then
+  # tag_listed reads the list from an argument, not a printf pipe: under
+  # pipefail, grep -q's early exit gave printf SIGPIPE on large tag lists
+  # and inverted "tag present" into a false INCOMPLETE (2026-09 scan).
+  if ! tag_listed "$current_tag" "$raw_tags"; then
     mark_scan_incomplete "Pinned tag ${current_tag} is no longer listed by ${registry}/${repo}."
   fi
 }

@@ -218,6 +218,36 @@ setup() {
     [ "$result" = "20260805" ]
 }
 
+# ── tag_listed ───────────────────────────────────────────────────────────────
+
+@test "tag_listed: finds an early tag in a list larger than the pipe buffer" {
+    # Regression (2026-09 scan): the old printf-into-grep -q pipeline took
+    # SIGPIPE under pipefail whenever the match landed before the end of a
+    # >64KiB tag list (docker.io/library/python, nvcr.io tritonserver, ...),
+    # inverting "tag present" into a false INCOMPLETE. Build a list well past
+    # the pipe buffer with the pinned tag near the top.
+    local big_list
+    big_list="$(printf '3.14.7-slim\n'; seq -f 'tag-%.0f-suffix' 1 30000)"
+    set -o pipefail
+    tag_listed "3.14.7-slim" "$big_list"
+}
+
+@test "tag_listed: accepts a v-prefix mismatch in either direction" {
+    tag_listed "v1.2.3" "$(printf '%s\n' one 1.2.3 two)"
+    tag_listed "1.2.3" "$(printf '%s\n' one v1.2.3 two)"
+}
+
+@test "tag_listed: exact match only, not substrings" {
+    ! tag_listed "1.2.3" "$(printf '%s\n' 1.2.30 11.2.3 1.2.3-slim)"
+}
+
+@test "tag_listed: fails for an absent tag" {
+    # The true-positive path: rayproject/ray:2.57.0 was withdrawn upstream
+    # after being pinned; the INCOMPLETE for it was correct and the check
+    # must keep firing when the tag is genuinely unlisted.
+    ! tag_listed "2.57.0" "$(printf '%s\n' 2.56.0 2.56.1 2.57.0.106e80)"
+}
+
 # ── is_semver_tag ────────────────────────────────────────────────────────────
 
 @test "is_semver_tag: v1.2.3 is semver" {

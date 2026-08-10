@@ -288,6 +288,24 @@ if best_tag:
 " "$1" 2>/dev/null
 }
 
+# tag_listed <tag> <raw_tags>
+#
+# Whether <raw_tags> (a newline-separated registry tag list passed as one
+# argument, not on stdin) lists <tag> exactly, accepting a leading ``v`` on
+# either side. Exists because the obvious spelling —
+# ``printf '%s\n' "$raw_tags" | grep -qxF …`` — is wrong under ``pipefail``
+# for large repositories: ``grep -q`` exits at the first match and closes
+# the pipe, ``printf`` takes SIGPIPE/EPIPE while still writing tag lists
+# bigger than the pipe buffer (python has ~3900 tags, tritonserver ~2600),
+# and the pipeline reports failure for a tag that is in fact listed. That
+# inverted into false "pinned tag is no longer listed" INCOMPLETE findings
+# in the 2026-09 scan. A herestring keeps grep's stdin writer-free, so
+# early exit has nothing to signal.
+tag_listed() {
+  local tag="$1" raw_tags="$2"
+  grep -qxF -e "$tag" -e "v${tag#v}" -e "${tag#v}" <<< "$raw_tags"
+}
+
 # parse_accelerator_drift_count <json-summary-file>
 #
 # Validates the machine-readable output from
