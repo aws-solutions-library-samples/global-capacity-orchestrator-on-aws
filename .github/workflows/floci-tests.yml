@@ -64,6 +64,12 @@ jobs:
           # In-memory state: every job starts from a blank emulator, which is
           # exactly the determinism these tests want.
           FLOCI_STORAGE_MODE: memory
+        volumes:
+          # Floci's ECR CreateRepository is Docker-backed and needs the host
+          # socket; without it the emulator answers InternalFailure and the
+          # image-lookup Floci tests skip themselves (see
+          # docs/FLOCI_TESTING.md gap 4). Runner-local socket, pinned image.
+          - /var/run/docker.sock:/var/run/docker.sock
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.0.0

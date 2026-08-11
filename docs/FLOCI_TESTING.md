@@ -122,9 +122,11 @@ subprocesses receive them via `tests/_floci_sitecustomize/`):
    answers only that filtered query with the canonical id→name mapping so
    the fail-closed logic stays exercised instead of bypassed.
 4. **ECR repository creation** is Docker-backed inside Floci and requires a
-   Docker socket. It works on GitHub runners; under Finch/containerd-only
-   local setups `CreateRepository` fails with `InternalFailure`, and the
-   `image-lookup` tests skip themselves with that reason.
+   Docker socket in the emulator container. The `floci:integration` job
+   mounts the runner's socket so the `image-lookup` paths run for real in
+   CI; under Finch/containerd-only local setups (no socket to mount)
+   `CreateRepository` fails with `InternalFailure` and those tests skip
+   themselves with that reason.
 5. **EC2 capacity APIs** (`GetSpotPlacementScores`,
    `DescribeSpotPriceHistory`, `DescribeCapacityBlockOfferings`) reject with
    `ClientError`. No shim: the capacity poller's degraded-signal handling is
