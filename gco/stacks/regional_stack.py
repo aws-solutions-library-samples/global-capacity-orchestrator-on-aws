@@ -5263,6 +5263,22 @@ class GCORegionalStack(Stack):
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
         )
 
+        # RDS creates the exported postgresql log group itself, outside
+        # CloudFormation, and never deletes it — live example-job validation
+        # run ex241-edf33111-r2 found it as the only post-teardown residue.
+        # Pre-creating the group under the exact name RDS uses
+        # (/aws/rds/cluster/<cluster-identifier>/<export>) hands its whole
+        # lifecycle to this stack; RDS then writes into the existing group.
+        aurora_log_group = logs.LogGroup(
+            self,
+            "AuroraPgvectorPostgresqlLogs",
+            log_group_name=(
+                f"/aws/rds/cluster/{project_name}-pgvector-{self.deployment_region}/postgresql"
+            ),
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
         # Aurora Serverless v2 cluster with PostgreSQL 16 + pgvector
         self.aurora_cluster = rds.DatabaseCluster(
             self,
@@ -5305,6 +5321,10 @@ class GCORegionalStack(Stack):
             monitoring_interval=Duration.seconds(60),
             cluster_identifier=f"{project_name}-pgvector-{self.deployment_region}",
         )
+        # The group must exist before the cluster starts exporting, and must
+        # outlive it on delete (reverse order) so late writes cannot recreate
+        # an unowned group.
+        self.aurora_cluster.node.add_dependency(aurora_log_group)
 
         # aws-cdk-lib >= 2.262 ships a built-in "CloudFormation Validate"
         # pack whose W9008 wants StorageEncrypted on every CfnDBInstance. The

@@ -504,6 +504,25 @@ def test_optional_data_services_are_private_and_discoverable(feature_stack):
         "PrivateSubnet" in json.dumps(subnet) for subnet in subnet_group["Properties"]["SubnetIds"]
     )
 
+    # RDS creates the exported postgresql log group outside CloudFormation
+    # and never deletes it (post-teardown residue caught live by example-job
+    # validation run ex241-edf33111-r2). The stack must pre-create the group
+    # under the exact name RDS uses so teardown owns it.
+    log_group_id, log_group = _single_resource(
+        template,
+        "AWS::Logs::LogGroup",
+        "AuroraPgvectorPostgresqlLogs",
+    )
+    assert log_group["Properties"]["LogGroupName"] == (
+        f"/aws/rds/cluster/gco-test-pgvector-{_REGION}/postgresql"
+    )
+    assert log_group["DeletionPolicy"] == "Delete"
+    _, cluster = _single_resource(template, "AWS::RDS::DBCluster", "AuroraPgvectorCluster")
+    assert cluster["Properties"]["DBClusterIdentifier"] == f"gco-test-pgvector-{_REGION}"
+    assert log_group_id in cluster.get("DependsOn", []), (
+        "the cluster must depend on the pre-created group so exports never race it"
+    )
+
 
 def test_convergence_payload_carries_enabled_features_and_security_policy(feature_stack):
     _stack, template = feature_stack
