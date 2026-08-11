@@ -51,16 +51,27 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        fsGroup: 1000
       containers:
       - name: tgi
         image: ghcr.io/huggingface/text-generation-inference:3.3.7
         securityContext:
           allowPrivilegeEscalation: false
         ports:
-        - containerPort: 80
+        - containerPort: 8080
         env:
         - name: MODEL_ID
           value: "mistralai/Mistral-7B-Instruct-v0.3"
+        # The TGI launcher reads every flag from the environment; the image
+        # default is port 80, which an unprivileged user (runAsUser above)
+        # cannot bind — the router would exit at startup and the pod would
+        # crash-loop while showing phase Running.
+        - name: PORT
+          value: "8080"
+        # The image's baked-in cache path is owned by root; point the model
+        # cache at the writable volume below so downloads work as uid 1000.
+        - name: HUGGINGFACE_HUB_CACHE
+          value: "/data"
         - name: MAX_INPUT_TOKENS
           value: "2048"
         - name: MAX_TOTAL_TOKENS
@@ -76,18 +87,31 @@ spec:
             cpu: "8"
             memory: "32Gi"
             nvidia.com/gpu: "1"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /data
+        # Model download + load can take many minutes for Mistral-7B; the
+        # startup probe owns that window (up to 20 min) so the liveness
+        # probe never kills a pod that is still fetching weights.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          periodSeconds: 15
+          failureThreshold: 80
         livenessProbe:
           httpGet:
             path: /health
-            port: 80
-          initialDelaySeconds: 180
+            port: 8080
           periodSeconds: 15
         readinessProbe:
           httpGet:
             path: /health
-            port: 80
-          initialDelaySeconds: 90
+            port: 8080
           periodSeconds: 10
+      volumes:
+      - name: model-cache
+        emptyDir: {}
       tolerations:
       - key: nvidia.com/gpu
         operator: Equal
@@ -110,6 +134,6 @@ spec:
     app: tgi-mistral
   ports:
   - port: 80
-    targetPort: 80
+    targetPort: 8080
     protocol: TCP
   type: ClusterIP
