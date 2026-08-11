@@ -1563,6 +1563,106 @@ class TestDeterministicTopologyReadiness:
         assert "resource_utilization" in sample["error"]
 
 
+class TestRolledBackLogGroupCheckpoint:
+    """A rolled-back create must not fail teardown over its own deleted groups.
+
+    Live failure this pins (example-job validation run ex241-2913b044): the
+    regional stack rolled back during create, CloudFormation deleted the
+    non-retained state-machine log group, and the pre-destroy checkpoint's
+    fail-closed absence check then aborted the guaranteed cleanup — stranding
+    every remaining stack. Absence of a log group under a rolled-back stack is
+    the expected rollback outcome and must be recorded, then skipped; under a
+    live stack it stays a hard failure.
+    """
+
+    _REGION = "us-east-1"
+    _STACK = "gco-live-us-east-1"
+    _GROUP = "gco-live-us-east-1-HelmInstallStateMachineLogGroup-XYZ"
+
+    def _environment(self, *, stack_status: str, resource_status: str) -> SimpleNamespace:
+        ctx = _context(
+            state={
+                "target_stack_regions": {self._STACK: self._REGION},
+                "log_group_cleanup_token": "b" * 32,
+            }
+        )
+        ctx.checkpoint.created_at = "2026-08-11T00:00:00+00:00"
+
+        cfn = MagicMock(name="cloudformation")
+        cfn.get_paginator.return_value.paginate.return_value = [
+            {
+                "StackResourceSummaries": [
+                    {
+                        "ResourceType": "AWS::Logs::LogGroup",
+                        "LogicalResourceId": "HelmInstallStateMachineLogGroup",
+                        "PhysicalResourceId": self._GROUP,
+                        "ResourceStatus": resource_status,
+                    }
+                ]
+            }
+        ]
+        logs = MagicMock(name="logs")
+        lambda_client = MagicMock(name="lambda")
+
+        def client(service: str, *, region_name: str, **_kwargs):
+            assert region_name == self._REGION
+            return {"cloudformation": cfn, "logs": logs, "lambda": lambda_client}[service]
+
+        ctx.session.client.side_effect = client
+        stack_record = {
+            "stack_id": (
+                f"arn:aws:cloudformation:{self._REGION}:123456789012:stack/{self._STACK}/sid"
+            )
+        }
+        live_stack = {
+            "status": stack_status,
+            "tags": {constants._RUN_STACK_TAG: "run-123"},
+        }
+        return SimpleNamespace(ctx=ctx, logs=logs, stack_record=stack_record, live_stack=live_stack)
+
+    def _invoke(self, environment: SimpleNamespace) -> list[dict[str, object]]:
+        with (
+            patch_live_validation_helper(
+                "_owned_stack_record", return_value=environment.stack_record
+            ),
+            patch_live_validation_helper("describe_stack", return_value=environment.live_stack),
+            patch_live_validation_helper(
+                "_validated_owned_log_group_identity",
+                return_value=(self._REGION, self._GROUP),
+            ),
+            patch_live_validation_helper(
+                "_observe_log_group_stability",
+                return_value={"status": "absent"},
+            ),
+        ):
+            return ownership_log_groups._checkpoint_owned_log_groups(environment.ctx)
+
+    def test_rollback_deleted_group_is_recorded_and_skipped(self) -> None:
+        environment = self._environment(
+            stack_status="ROLLBACK_COMPLETE",
+            # Rolled-back creates leave DELETE_COMPLETE tombstones; the widened
+            # filter admits them precisely to catch groups that survived.
+            resource_status="DELETE_COMPLETE",
+        )
+        self._invoke(environment)
+
+        incidents = environment.ctx.checkpoint.state["log_group_checkpoint_incidents"]
+        assert [item["phase"] for item in incidents] == ["checkpoint-explicit-group-absence"], (
+            "the absent group must still be recorded as a checkpoint incident"
+        )
+        owned = environment.ctx.checkpoint.state.get("owned_log_groups", [])
+        assert owned == [], "a genuinely deleted group must not be adopted"
+        environment.logs.create_log_group.assert_not_called()
+
+    def test_live_stack_missing_group_still_fails_closed(self) -> None:
+        environment = self._environment(
+            stack_status="CREATE_COMPLETE",
+            resource_status="CREATE_COMPLETE",
+        )
+        with pytest.raises(RuntimeError, match="absent before teardown"):
+            self._invoke(environment)
+
+
 class TestRetainedLogCleanupGenerationFencing:
     _REGION = "us-east-1"
     _NAME = "gco-live-provider-log"
