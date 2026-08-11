@@ -62,7 +62,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `20-29` | Storage | [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), FSx Lustre, cluster-shared bucket, Valkey, Aurora pgvector, observability gp3 |
 | `30-39` | System services | health-monitor, manifest-processor, inference-monitor |
 | `40-49` | NodePools | GPU (x86, ARM), inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) (training + mooncake), Neuron, CPU |
-| `50-59` | Device plugins & GPU observability | NVIDIA device plugin, DCGM exporter |
+| `50-59` | GPU observability | DCGM exporter |
 | `post-helm-*` | Post-Helm | Resources needing Helm CRDs: Gateway API entrypoint, KEDA ScaledJob, Prometheus monitors, Grafana dashboards/rotation, Kueue metrics RBAC |
 
 ## Files
@@ -114,7 +114,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 
 | File | Contents |
 |------|----------|
-| `51-dcgm-exporter.yaml` | DCGM exporter `DaemonSet` + device-counters `ConfigMap` (GPU metrics for Prometheus) — **pruned when observability is disabled** |
+| `50-dcgm-exporter.yaml` | DCGM exporter `DaemonSet` + device-counters `ConfigMap` (GPU metrics for Prometheus) — **pruned when observability is disabled** |
 
 There is deliberately no NVIDIA device plugin manifest: EKS Auto Mode ships
 the device plugin built into the node (it is not visible as a DaemonSet) and

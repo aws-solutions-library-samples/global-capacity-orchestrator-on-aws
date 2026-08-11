@@ -34,7 +34,7 @@ compact: true
 #
 # === Kubernetes Checks ===
 # Kubernetes check skips for third-party GPU components are defined inline in
-# the manifests (e.g. lambda/kubectl-applier-simple/manifests/51-dcgm-exporter.yaml)
+# the manifests (e.g. lambda/kubectl-applier-simple/manifests/50-dcgm-exporter.yaml)
 # using checkov:skip comments for better traceability.
 skip-check:
   # Dockerfile checks
