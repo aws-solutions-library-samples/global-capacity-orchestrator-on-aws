@@ -497,12 +497,18 @@ jq '.context.job_validation_policy.allowed_namespaces' cdk.json
    ```json
    "job_validation_policy": {
      "resource_quotas": {
-       "max_cpu_per_manifest": "32",
-       "max_memory_per_manifest": "128Gi",
-       "max_gpu_per_manifest": 8
+       "max_cpu_per_manifest": "400",
+       "max_memory_per_manifest": "4096Gi",
+       "max_gpu_per_manifest": 32
      }
    }
    ```
+
+   Synth enforces `resource_quota.container_max_* <= *_per_manifest <=
+   resource_quota.max_*`, so lowering a per-manifest cap below the
+   per-container `LimitRange` ceiling (or raising it above the namespace
+   `ResourceQuota`) fails the deploy; adjust the `resource_quota` context
+   together with the caps (see docs/CUSTOMIZATION.md).
 
    Then: `gco stacks deploy gco-<REGION> -y`
 

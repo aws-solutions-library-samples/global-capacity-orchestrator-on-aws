@@ -21,9 +21,10 @@ Security Validations:
 Environment Variables:
     CLUSTER_NAME: Name of the EKS cluster
     REGION: AWS region of the cluster
-    MAX_CPU_PER_MANIFEST: Maximum CPU (millicores) per manifest (default: 10000)
-    MAX_MEMORY_PER_MANIFEST: Maximum memory per manifest (default: 32Gi)
-    MAX_GPU_PER_MANIFEST: Maximum GPUs per manifest (default: 4)
+    MAX_CPU_PER_MANIFEST: Maximum CPU per manifest (default: 384 cores — see
+        gco.stacks.constants.DEFAULT_MANIFEST_RESOURCE_CAPS)
+    MAX_MEMORY_PER_MANIFEST: Maximum memory per manifest (default: 4096Gi)
+    MAX_GPU_PER_MANIFEST: Maximum GPUs per manifest (default: 16)
     ALLOWED_NAMESPACES: Comma-separated list of allowed namespaces
     VALIDATION_ENABLED: Enable/disable validation (default: true)
 
@@ -58,6 +59,7 @@ from gco.models import (
     ResourceStatus,
 )
 from gco.services.structured_logging import configure_structured_logging, sanitize_log_value
+from gco.stacks.constants import DEFAULT_MANIFEST_RESOURCE_CAPS
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Generated at (UTC): 2026-07-18T01:03:40Z
@@ -405,14 +407,28 @@ class ManifestProcessor:
         # Timeout for Kubernetes API calls (seconds)
         self._k8s_timeout = int(os.environ.get("K8S_API_TIMEOUT", "30"))
 
-        # Resource quotas and limits
+        # Resource quotas and limits. Defaults come from the shared source of
+        # truth (gco.stacks.constants.DEFAULT_MANIFEST_RESOURCE_CAPS): two
+        # full accelerator-node slices, validated at synth against the
+        # LimitRange / namespace-quota layering invariant.
         self.max_cpu_per_manifest = self._parse_cpu_string(
-            config_dict.get("max_cpu_per_manifest", "10")
+            config_dict.get(
+                "max_cpu_per_manifest",
+                DEFAULT_MANIFEST_RESOURCE_CAPS["max_cpu_per_manifest"],
+            )
         )
         self.max_memory_per_manifest = self._parse_memory_string(
-            config_dict.get("max_memory_per_manifest", "32Gi")
+            config_dict.get(
+                "max_memory_per_manifest",
+                DEFAULT_MANIFEST_RESOURCE_CAPS["max_memory_per_manifest"],
+            )
         )
-        self.max_gpu_per_manifest = int(config_dict.get("max_gpu_per_manifest", 4))
+        self.max_gpu_per_manifest = int(
+            config_dict.get(
+                "max_gpu_per_manifest",
+                DEFAULT_MANIFEST_RESOURCE_CAPS["max_gpu_per_manifest"],
+            )
+        )
         # Hard-reject accelerator jobs that lack a matching node toleration.
         # Kept in sync with queue_processor.REQUIRE_ACCELERATOR_TOLERATION.
         require_accelerator_toleration = config_dict.get("require_accelerator_toleration", True)
@@ -1666,9 +1682,20 @@ def create_manifest_processor_from_env() -> ManifestProcessor:
 
     # Load configuration from environment
     config_dict = {
-        "max_cpu_per_manifest": os.getenv("MAX_CPU_PER_MANIFEST", "10"),
-        "max_memory_per_manifest": os.getenv("MAX_MEMORY_PER_MANIFEST", "32Gi"),
-        "max_gpu_per_manifest": int(os.getenv("MAX_GPU_PER_MANIFEST", "4")),
+        "max_cpu_per_manifest": os.getenv(
+            "MAX_CPU_PER_MANIFEST",
+            str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_cpu_per_manifest"]),
+        ),
+        "max_memory_per_manifest": os.getenv(
+            "MAX_MEMORY_PER_MANIFEST",
+            str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_memory_per_manifest"]),
+        ),
+        "max_gpu_per_manifest": int(
+            os.getenv(
+                "MAX_GPU_PER_MANIFEST",
+                str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_gpu_per_manifest"]),
+            )
+        ),
         "require_accelerator_toleration": parse_boolean_environment(
             "REQUIRE_ACCELERATOR_TOLERATION", True
         ),

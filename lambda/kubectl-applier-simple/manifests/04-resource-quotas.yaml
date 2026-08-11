@@ -7,7 +7,14 @@
 # LimitRange provides per-container defaults (so users don't have to specify
 # requests on every container) and caps the maximum size a single container
 # can request, preventing a single mis-configured pod from consuming the
-# entire namespace quota.
+# entire namespace quota. The default per-container maxima are one full
+# accelerator-node slice (p5.48xlarge / trn2.48xlarge: 192 vCPU, 2 TiB,
+# 8 GPUs) so full-node distributed-training pods — e.g.
+# examples/efa-distributed-training.yaml — are admissible out of the box;
+# a LimitRange rejection surfaces only as FailedCreate namespace events
+# while the Job sits podless, which is why the ceilings are validated at
+# synth against gco/stacks/constants.py:DEFAULT_RESOURCE_QUOTA (values must
+# parse, and container_max_* must fit inside max_*).
 #
 # All values are configurable via the `resource_quota` context in cdk.json
 # and substituted by the kubectl-applier Lambda at deploy time.

@@ -147,9 +147,9 @@
         "gco-jobs"
       ],
       "resource_quotas": {
-        "max_cpu_per_manifest": "10",
-        "max_memory_per_manifest": "32Gi",
-        "max_gpu_per_manifest": 4
+        "max_cpu_per_manifest": "384",
+        "max_memory_per_manifest": "4096Gi",
+        "max_gpu_per_manifest": 16
       },
       "require_accelerator_toleration": true,
       "trusted_registries": [
@@ -196,15 +196,15 @@
       ]
     },
 
-    "_comment_resource_quota": "K8s ResourceQuota / LimitRange values applied to the gco-jobs namespace. max_*: namespace-wide ceilings. container_max_*: per-container ceilings (LimitRange). Tune these to match the cluster's expected multi-tenant footprint.",
+    "_comment_resource_quota": "K8s ResourceQuota / LimitRange values applied to the gco-jobs namespace. max_*: namespace-wide ceilings on aggregate requests. container_max_*: per-container ceilings (LimitRange max), sized by default to one full accelerator-node slice (p5.48xlarge / trn2.48xlarge: 192 vCPU, 2 TiB, 8 GPUs) so full-node distributed-training pods are admissible out of the box. Values are validated at synth: each must parse as a Kubernetes quantity and every container_max_* must fit inside its max_* ceiling. Defaults live in gco/stacks/constants.py (DEFAULT_RESOURCE_QUOTA); keep this block in lockstep.",
     "resource_quota": {
-      "max_cpu": "100",
-      "max_memory": "512Gi",
+      "max_cpu": "400",
+      "max_memory": "4096Gi",
       "max_gpu": "32",
       "max_pods": "50",
-      "container_max_cpu": "10",
-      "container_max_memory": "64Gi",
-      "container_max_gpu": "4"
+      "container_max_cpu": "192",
+      "container_max_memory": "2048Gi",
+      "container_max_gpu": "8"
     },
 
     "_comment_resource_thresholds": "Health monitor thresholds that drive the /api/v1/health regional capacity report. cpu_threshold / memory_threshold / gpu_threshold are utilization percentages above which the region is reported as 'busy'; set any to -1 to disable that dimension. The 80 defaults leave headroom above the platform baseline: on right-sized EKS Auto Mode nodes an idle cluster running the observability stack already sits near 65-70% memory, which a 60 threshold misreported as unhealthy. pending_pods_threshold counts pods in Pending state. pending_requested_cpu_vcpus / pending_requested_memory_gb / pending_requested_gpus sum unscheduled resource requests across pending pods.",

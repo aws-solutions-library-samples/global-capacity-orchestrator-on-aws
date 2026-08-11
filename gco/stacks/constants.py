@@ -549,3 +549,88 @@ Keep this tag in lockstep with ``cli/images.py:_DISAGGREGATED_DEFAULT_IMAGE``
 (the disaggregated role-pod default); bump both together when validating a new
 vLLM release and never use a mutable/rolling tag such as ``latest``.
 """
+
+
+# ---------------------------------------------------------------------------
+# gco-jobs resource governance defaults (ResourceQuota + LimitRange)
+# ---------------------------------------------------------------------------
+
+DEFAULT_RESOURCE_QUOTA: Mapping[str, str] = MappingProxyType(
+    {
+        # Namespace-wide aggregate ceilings (ResourceQuota on requests.*):
+        # sized to hold two full accelerator-node training pods side by side
+        # with CPU headroom for the surrounding jobs.
+        "max_cpu": "400",
+        "max_memory": "4096Gi",
+        "max_gpu": "32",
+        "max_pods": "50",
+        # Per-container ceilings (LimitRange max): one full accelerator-node
+        # slice — p5.48xlarge / trn2.48xlarge expose 192 vCPUs, 2 TiB memory,
+        # and 8 GPUs, and one-pod-per-node is the standard unit of
+        # distributed training. Anything smaller rejects the platform's own
+        # EFA training example at pod admission (observed live: example-job
+        # validation run ex241-df723811, where the previous 10-CPU/64Gi/4-GPU
+        # caps left the Job permanently podless with only namespace events
+        # explaining why).
+        "container_max_cpu": "192",
+        "container_max_memory": "2048Gi",
+        "container_max_gpu": "8",
+    }
+)
+"""Default ``resource_quota`` context for the gco-jobs namespace.
+
+Single source of truth shared by the regional stack (which substitutes these
+into ``04-resource-quotas.yaml`` and validates overrides against the
+``container_max_* <= max_*`` invariant) and the example-job validation static
+checks (which prove every shipped example fits these defaults offline).
+"""
+
+
+def parse_k8s_quantity(value: object) -> float:
+    """Parse a Kubernetes resource quantity into a float of base units.
+
+    Supports the quantity forms GCO's manifests actually use: bare integers
+    and decimals (``8``, ``0.5``), CPU millicores (``250m``), and the binary
+    and decimal suffixes (``Ki Mi Gi Ti Pi`` / ``k M G T P``).
+
+    Raises:
+        ValueError: If the value is not a parseable quantity.
+    """
+    text = str(value).strip()
+    if not text:
+        raise ValueError("empty resource quantity")
+    binary = {"Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40, "Pi": 2**50}
+    decimal = {"k": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15}
+    for suffix, factor in binary.items():
+        if text.endswith(suffix):
+            return float(text[: -len(suffix)]) * factor
+    if text.endswith("m"):
+        return float(text[:-1]) / 1000.0
+    for suffix, factor in decimal.items():
+        if text.endswith(suffix):
+            return float(text[: -len(suffix)]) * factor
+    return float(text)
+
+
+DEFAULT_MANIFEST_RESOURCE_CAPS: Mapping[str, object] = MappingProxyType(
+    {
+        # Front-door budget for one API/SQS-submitted manifest, enforced by
+        # the manifest and queue processors before anything reaches the
+        # cluster: two full accelerator-node slices, i.e. the canonical
+        # two-node distributed-training manifest
+        # (examples/efa-distributed-training.yaml). Layering invariant,
+        # validated at synth: container_max_* (LimitRange) <= per-manifest
+        # cap <= max_* (namespace ResourceQuota) on every dimension — the
+        # front door must never reject a manifest whose pods the namespace
+        # would admit, and must never accept one it cannot possibly run.
+        "max_cpu_per_manifest": "384",
+        "max_memory_per_manifest": "4096Gi",
+        "max_gpu_per_manifest": 16,
+    }
+)
+"""Default ``job_validation_policy.resource_quotas`` for submitted manifests.
+
+Single source of truth shared by the manifest/queue processors (their
+built-in defaults), the regional stack (which substitutes and validates the
+cdk.json overrides), and the example-job validation static checks.
+"""

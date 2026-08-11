@@ -4710,6 +4710,7 @@ gco examples validate --examples gpu-job --expected-account 123456789012 \
 | `--confirm-kms-key-deletion` | Authorize scheduling this run's retained EKS KMS keys for their 7-day deletion window; required for live runs. |
 | `--examples` | Only validate these examples (comma-separated file stems; default: all). Required helm charts and infrastructure features are derived from the selection. |
 | `--skip-examples` | Exclude these examples from the selection. |
+| `--max-parallel` | Maximum examples running concurrently in the examples action (default `0` = all selected at once; `1` = serial). Not part of the resume identity. |
 | `--actions` | Harness actions to run (default `all`); dependencies are added automatically. |
 | `--run-id` | Stable run id (default: UTC timestamp + commit SHA prefix). |
 | `--report-dir` | Report directory (default: `~/gco-example-job-validation-reports/<run-id>`). |

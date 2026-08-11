@@ -100,6 +100,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run only the offline checks (no AWS access) and exit",
     )
+    parser.add_argument(
+        "--max-parallel",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Maximum examples running concurrently in the examples action "
+            "(default 0 = all selected at once; 1 = serial)"
+        ),
+    )
     parser.add_argument("--run-id", help="Stable run/checkpoint identifier")
     parser.add_argument(
         "--report-dir", help="Report directory (default: .example-job-validation/<run-id>)"
@@ -150,6 +160,8 @@ def _settings_from_args(
         parser.error("--expected-branch is required")
     if args.run_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", args.run_id):
         parser.error("--run-id must be 1-80 safe filename characters")
+    if args.max_parallel < 0:
+        parser.error("--max-parallel must be >= 0 (0 = all selected at once)")
     root = repository_root(args.repo_root)
     run_id = args.run_id or (
         datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + args.expected_sha[:12].lower()
@@ -171,6 +183,7 @@ def _settings_from_args(
         confirm_kms_key_deletion=args.confirm_kms_key_deletion,
         resume=args.resume,
         selected_examples=_select_examples(parser, args),
+        max_parallel_examples=args.max_parallel,
     )
 
 

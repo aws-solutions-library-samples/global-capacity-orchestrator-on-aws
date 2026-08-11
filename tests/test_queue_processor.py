@@ -108,7 +108,11 @@ def _sqs_resp(manifests, job_id="abc123"):
 
 
 @pytest.fixture(autouse=True)
-def _env(monkeypatch):
+def _env(monkeypatch, _scrub_qp_env):
+    # Depends on _scrub_qp_env so the scrub deterministically runs first;
+    # autouse fixtures of equal scope have no guaranteed relative order, and
+    # the scrub deletes the exact variables this fixture sets. (Latent until
+    # the shipped default GPU cap rose above this fixture's value.)
     monkeypatch.setenv("JOB_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/q")
     monkeypatch.setenv("AWS_REGION", "us-east-1")
     monkeypatch.setenv("ALLOWED_NAMESPACES", "gco-jobs")

@@ -85,9 +85,9 @@ class MockConfigLoader:
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
             "allowed_namespaces": ["gco-jobs"],
             "resource_quotas": {
-                "max_cpu_per_manifest": "10",
-                "max_memory_per_manifest": "32Gi",
-                "max_gpu_per_manifest": 4,
+                "max_cpu_per_manifest": "24",
+                "max_memory_per_manifest": "96Gi",
+                "max_gpu_per_manifest": 8,
             },
         }
 
@@ -2240,7 +2240,7 @@ class TestQueueProcessorConfig:
         assert "gco-jobs" in policy["allowed_namespaces"]
         # Resource caps now live under the shared job_validation_policy
         # section (both processors read the same values).
-        assert policy["resource_quotas"]["max_gpu_per_manifest"] == 4
+        assert policy["resource_quotas"]["max_gpu_per_manifest"] == 16
 
     def test_queue_processor_defaults_match_docs(self):
         """Ensure cdk.json defaults match what's documented in CUSTOMIZATION.md."""
@@ -2253,8 +2253,8 @@ class TestQueueProcessorConfig:
 
         assert qp["successful_jobs_history"] == 20
         assert qp["failed_jobs_history"] == 10
-        assert policy["resource_quotas"]["max_cpu_per_manifest"] == "10"
-        assert policy["resource_quotas"]["max_memory_per_manifest"] == "32Gi"
+        assert policy["resource_quotas"]["max_cpu_per_manifest"] == "384"
+        assert policy["resource_quotas"]["max_memory_per_manifest"] == "4096Gi"
 
 
 class TestAuroraPgvector:

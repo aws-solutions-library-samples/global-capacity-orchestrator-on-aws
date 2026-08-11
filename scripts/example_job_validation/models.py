@@ -22,6 +22,12 @@ class ExampleRunSettings(RunSettings):
     #: Example names (file stems) to validate this run, in registry order.
     selected_examples: tuple[str, ...] = ()
 
+    #: Maximum examples running concurrently inside the examples action.
+    #: 0 means "all selected at once". Deliberately NOT part of identity():
+    #: parallelism changes execution pacing, not what is validated, so a
+    #: checkpointed run may resume with a different setting.
+    max_parallel_examples: int = 0
+
     def __post_init__(self) -> None:
         super().__post_init__()
         unknown = sorted(set(self.selected_examples) - set(EXAMPLE_SPECS))
@@ -30,6 +36,8 @@ class ExampleRunSettings(RunSettings):
                 f"Unknown example name(s): {', '.join(unknown)}. "
                 f"Valid: {', '.join(sorted(EXAMPLE_SPECS))}"
             )
+        if self.max_parallel_examples < 0:
+            raise ValueError("max_parallel_examples must be >= 0 (0 = no limit)")
         # The scheduler charts the selection needs are threaded through the
         # same optional_schedulers field the base class already carries so
         # identity(), resume checks, and extra_cdk_context() stay coherent.

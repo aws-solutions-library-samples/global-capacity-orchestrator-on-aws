@@ -2138,12 +2138,49 @@ For namespace allowlisting, resource caps, and security toggles (shared between 
 "job_validation_policy": {
   "allowed_namespaces": ["gco-jobs"],
   "resource_quotas": {
-    "max_cpu_per_manifest": "10",
-    "max_memory_per_manifest": "32Gi",
-    "max_gpu_per_manifest": 4
+    "max_cpu_per_manifest": "384",
+    "max_memory_per_manifest": "4096Gi",
+    "max_gpu_per_manifest": 16
   }
 }
 ```
+
+The caps limit what a single submitted manifest may request in total (summed
+across all containers). They sit between two other enforcement layers, and
+synth validates the ordering so the three always tell one story:
+
+- `resource_quota.container_max_*` (the gco-jobs `LimitRange`) caps each
+  container; a manifest cap below it would reject manifests whose single
+  container the cluster admits.
+- `resource_quota.max_*` (the gco-jobs `ResourceQuota`) caps the namespace
+  aggregate; a manifest cap above it would accept manifests whose pods can
+  never all run.
+
+The defaults size a per-manifest budget of two full accelerator nodes
+(2 × p5.48xlarge: 384 vCPUs, 16 GPUs) so the shipped distributed-training
+examples pass the front door unchanged.
+
+The per-container and namespace layers live under the top-level
+`resource_quota` context (substituted into the gco-jobs `ResourceQuota` and
+`LimitRange` manifests at deploy time), with defaults sized for one full
+accelerator node per container and two nodes plus headroom per namespace:
+
+```json
+"resource_quota": {
+  "max_cpu": "400",
+  "max_memory": "4096Gi",
+  "max_gpu": "32",
+  "max_pods": "50",
+  "container_max_cpu": "192",
+  "container_max_memory": "2048Gi",
+  "container_max_gpu": "8"
+}
+```
+
+Overrides are validated at synth: unknown keys, unparseable quantities, a
+container ceiling above its namespace ceiling, or a manifest cap outside the
+`container_max_* <= *_per_manifest <= max_*` ordering all fail the deploy
+with a message naming the offending pair.
 
 ### Disabling the Built-In Consumer
 

@@ -80,6 +80,14 @@ def examples() -> None:
     help="Run only the offline checks (no AWS access, no consent flags needed).",
 )
 @click.option(
+    "--max-parallel",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default="0 (all selected at once)",
+    metavar="N",
+    help="Maximum examples running concurrently in the examples action (1 = serial).",
+)
+@click.option(
     "--actions",
     default="all",
     show_default=True,
@@ -112,6 +120,7 @@ def examples_validate(
     selected: str | None,
     skip_examples: str | None,
     static_only: bool,
+    max_parallel: int,
     actions: str,
     run_id: str | None,
     report_dir: Path | None,
@@ -203,6 +212,8 @@ def examples_validate(
         str(resolved_report_dir / "checkpoint.json"),
         *selection_args,
     ]
+    if max_parallel:
+        command.extend(["--max-parallel", str(max_parallel)])
     if confirm_kms_key_deletion:
         command.append("--confirm-kms-key-deletion")
     if resume:

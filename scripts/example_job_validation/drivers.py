@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +33,12 @@ from .specs import (
     VCJOB_COMPLETES,
 )
 from .static_checks import ParsedExample
+
+#: boto3 Session.client() is not thread-safe (client creation mutates shared
+#: loader state); every client creation against the run's shared session must
+#: hold this lock when examples run in parallel. The created clients ARE safe
+#: to use concurrently.
+BOTO_CLIENT_LOCK = threading.Lock()
 
 _POLL_SECONDS = 15
 
@@ -190,6 +197,41 @@ def _pod_diagnostics(kubectl: KubectlRunner, namespace: str, selector: str) -> s
     return out.strip()
 
 
+def _job_admission_rejection(kubectl: KubectlRunner, namespace: str, name: str) -> str | None:
+    """Return the rejection message when the Job's pods are forbidden.
+
+    A LimitRange or ResourceQuota rejection never becomes a Job condition:
+    the controller retries pod creation forever, the Job stays podless, and
+    the only signal is ``FailedCreate ... forbidden`` namespace events.
+    Waiting the full example timeout on such a job is pure burn (observed
+    live: example-job validation run ex241-df723811, 40 minutes against the
+    old per-container GPU ceiling) — surface the event message immediately.
+    ResourceQuota rejections (``exceeded quota``) are the one retriable
+    shape: under parallel example submission the namespace quota is
+    transiently full, the Job controller retries pod creation, and the pods
+    land once peers finish. Never fail fast on those; each message is
+    evaluated separately so a transient quota event cannot mask a permanent
+    LimitRange rejection emitted for the same Job.
+    """
+    code, out, _ = kubectl(
+        "get",
+        "events",
+        "-n",
+        namespace,
+        "--field-selector",
+        f"involvedObject.kind=Job,involvedObject.name={name},reason=FailedCreate",
+        "-o",
+        'jsonpath={range .items[*]}{.message}{"\\n"}{end}',
+        timeout=60,
+    )
+    if code != 0:
+        return None
+    for message in out.splitlines():
+        if "forbidden" in message and "exceeded quota" not in message:
+            return message[-600:]
+    return None
+
+
 def wait_jobs_complete(
     parsed: ParsedExample, kubectl: KubectlRunner, *, timeout: int
 ) -> dict[str, Any]:
@@ -212,6 +254,12 @@ def wait_jobs_complete(
                 )
                 raise ExampleValidationError(
                     f"Job {namespace}/{name} failed: {message} :: last logs: {logs[-800:]}"
+                )
+            rejection = _job_admission_rejection(kubectl, namespace, name)
+            if rejection is not None:
+                raise ExampleValidationError(
+                    f"Job {namespace}/{name} pods are rejected at admission and can never "
+                    f"run: {rejection}"
                 )
         if all(state == "complete" for state in pending.values()):
             return {"jobs": {f"{ns}/{name}": "complete" for (ns, name) in jobs}}
@@ -390,8 +438,14 @@ class KedaDemoQueue:
     queue_url: str = ""
     queue_arn: str = ""
 
+    def _sqs(self) -> Any:
+        # boto3 Session.client() is not thread-safe; examples may run in
+        # parallel threads. The returned client is safe to use concurrently.
+        with BOTO_CLIENT_LOCK:
+            return self.session.client("sqs", region_name=self.region)
+
     def create(self, operator_role_arn: str) -> dict[str, Any]:
-        sqs = self.session.client("sqs", region_name=self.region)
+        sqs = self._sqs()
         name = f"gco-keda-demo-{self.run_id}"[:80]
         self.queue_url = sqs.create_queue(QueueName=name)["QueueUrl"]
         attrs = sqs.get_queue_attributes(QueueUrl=self.queue_url, AttributeNames=["QueueArn"])
@@ -415,6 +469,4 @@ class KedaDemoQueue:
 
     def destroy(self) -> None:
         if self.queue_url:
-            self.session.client("sqs", region_name=self.region).delete_queue(
-                QueueUrl=self.queue_url
-            )
+            self._sqs().delete_queue(QueueUrl=self.queue_url)

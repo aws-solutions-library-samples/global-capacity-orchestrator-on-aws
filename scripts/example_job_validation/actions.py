@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,8 @@ def _capacity_skip_reason(ctx: RunContext, region: str, quota_code: str) -> str 
     """Return a skip reason when the account has zero quota for the family."""
     if not quota_code:
         return None
-    client = ctx.session.client("service-quotas", region_name=region)
+    with drivers.BOTO_CLIENT_LOCK:
+        client = ctx.session.client("service-quotas", region_name=region)
     try:
         quota = client.get_service_quota(ServiceCode="ec2", QuotaCode=quota_code)
         value = float(quota["Quota"]["Value"])
@@ -161,44 +163,78 @@ def _run_one_example(
 
 
 def action_examples(ctx: RunContext) -> dict[str, Any]:
-    """Run the selected examples in registry order inside one cluster session."""
+    """Run the selected examples in parallel inside one cluster session.
+
+    Every example is self-contained (own workload names, own temp manifest,
+    own cleanup), so all selected examples are submitted at once and each
+    thread drives its example's full documented flow: submit, wait on the
+    success criteria, clean up. GPU node provisioning and image pulls — the
+    dominant wall-clock costs — overlap instead of serializing. Transient
+    ``exceeded quota`` admission rejections while peers hold the namespace
+    quota are expected and retried by the Job controller (the fail-fast in
+    ``drivers`` deliberately exempts them). ``max_parallel_examples``
+    throttles the pool; 0 means all selected examples at once.
+    """
     selected = list(getattr(ctx.settings, "selected_examples", ()) or EXAMPLE_SPECS)
     region = ctx.deployment_regions[0]
     cluster_name = f"{ctx.config.project_name}-{region}"
     state: dict[str, Any] = ctx.checkpoint.state.setdefault("examples", {})
 
-    results: list[ExampleRunResult] = []
-    with kube.cluster_session(ctx.settings.repo_root, cluster_name, region) as kubectl:
-        for name in selected:
-            previous = state.get(name)
-            if isinstance(previous, dict) and previous.get("status") == "passed":
-                results.append(
-                    ExampleRunResult(
-                        name=name,
-                        status="passed",
-                        submission=str(previous.get("submission", "")),
-                        detail="checkpoint: already passed in this run",
-                    )
-                )
-                continue
-            print(f"[example] {name} ({EXAMPLE_SPECS[name].submission})")
-            result = _run_one_example(ctx, name, region, kubectl)
-            results.append(result)
+    results: dict[str, ExampleRunResult] = {}
+    pending: list[str] = []
+    for name in selected:
+        previous = state.get(name)
+        if isinstance(previous, dict) and previous.get("status") == "passed":
+            results[name] = ExampleRunResult(
+                name=name,
+                status="passed",
+                submission=str(previous.get("submission", "")),
+                detail="checkpoint: already passed in this run",
+            )
+        else:
+            pending.append(name)
+
+    def run_example(name: str, kubectl: kube.KubectlRunner) -> None:
+        print(f"[example] {name} ({EXAMPLE_SPECS[name].submission}) started")
+        result = _run_one_example(ctx, name, region, kubectl)
+        with ctx.state_lock:
+            results[name] = result
             state[name] = result.to_dict()
             ctx.persist()
-            print(f"[example] {name}: {result.status} ({result.duration_seconds:.1f}s)")
+        print(f"[example] {name}: {result.status} ({result.duration_seconds:.1f}s)")
 
+    limit = int(getattr(ctx.settings, "max_parallel_examples", 0) or 0)
+    workers = min(len(pending), limit) if limit > 0 else len(pending)
+    if pending:
+        with kube.cluster_session(ctx.settings.repo_root, cluster_name, region) as kubectl:
+            if workers == 1:
+                for name in pending:
+                    run_example(name, kubectl)
+            else:
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="example") as pool:
+                    futures = {pool.submit(run_example, name, kubectl): name for name in pending}
+                    for future, name in futures.items():
+                        # Surface unexpected (non-validation) errors with the
+                        # example's name; ExampleValidationError is already
+                        # converted to a failed result inside the thread.
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            raise RuntimeError(f"example {name} crashed: {exc}") from exc
+
+    ordered = [results[name] for name in selected if name in results]
     summary = {
         "region": region,
-        "results": [result.to_dict() for result in results],
-        "passed": sum(1 for item in results if item.status == "passed"),
-        "skipped": sum(1 for item in results if item.status == "skipped"),
-        "failed": sum(1 for item in results if item.status == "failed"),
+        "results": [result.to_dict() for result in ordered],
+        "max_parallel": workers,
+        "passed": sum(1 for item in ordered if item.status == "passed"),
+        "skipped": sum(1 for item in ordered if item.status == "skipped"),
+        "failed": sum(1 for item in ordered if item.status == "failed"),
     }
     ctx.checkpoint.state["examples_summary"] = summary
     ctx.persist()
     if summary["failed"]:
-        failed_names = [item.name for item in results if item.status == "failed"]
+        failed_names = [item.name for item in ordered if item.status == "failed"]
         raise RuntimeError(
             f"{summary['failed']} example(s) failed: {', '.join(failed_names)} "
             "(per-example evidence is in the report details)"

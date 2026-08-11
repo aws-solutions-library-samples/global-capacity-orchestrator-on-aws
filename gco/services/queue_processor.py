@@ -93,6 +93,7 @@ from gco.services.manifest_processor import (
     DEFAULT_TRUSTED_REGISTRIES,
     validate_resource_kind,
 )
+from gco.stacks.constants import DEFAULT_MANIFEST_RESOURCE_CAPS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,7 +108,6 @@ def _parse_cpu_string(cpu_str: str) -> int:
     Accepts:
       - Millicore suffix: "500m" -> 500
       - Whole cores: "4" -> 4000
-      - Bare millicore counts: "10000" (when > 999) stays as millicores
     """
     if not cpu_str:
         return 0
@@ -162,9 +162,30 @@ ALLOWED_KINDS = (
     if _allowed_kinds_env is None
     else {kind.strip() for kind in _allowed_kinds_env.split(",") if kind.strip()}
 )
-MAX_CPU = _parse_cpu_string(os.environ.get("MAX_CPU_PER_MANIFEST", "10000"))  # millicores
-MAX_MEMORY = _parse_memory_string(os.environ.get("MAX_MEMORY_PER_MANIFEST", "32Gi"))  # bytes
-MAX_GPU = int(os.environ.get("MAX_GPU_PER_MANIFEST", "4"))
+# Defaults come from the shared source of truth
+# (gco.stacks.constants.DEFAULT_MANIFEST_RESOURCE_CAPS - two full
+# accelerator-node slices) so both submission front doors and the deployed
+# cdk.json values tell one story. The old inline fallback here was "10000",
+# which this parser reads as 10,000 whole cores - a thousandfold looser than
+# the REST processor's fallback of the same era.
+MAX_CPU = _parse_cpu_string(
+    os.environ.get(
+        "MAX_CPU_PER_MANIFEST",
+        str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_cpu_per_manifest"]),
+    )
+)  # millicores
+MAX_MEMORY = _parse_memory_string(
+    os.environ.get(
+        "MAX_MEMORY_PER_MANIFEST",
+        str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_memory_per_manifest"]),
+    )
+)  # bytes
+MAX_GPU = int(
+    os.environ.get(
+        "MAX_GPU_PER_MANIFEST",
+        str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_gpu_per_manifest"]),
+    )
+)
 
 # Accelerator resource keys and their node taint keys (taint key == resource
 # key for all three). Kept in sync with the mirror in

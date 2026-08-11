@@ -46,9 +46,14 @@ gco examples validate --static-only --examples gpu-job
 No AWS access. For every example: the YAML parses; documents documented to
 travel the API/SQS transports clear the exact deployed gates (kind/GVK
 allowlist, trusted image sources); namespaced documents target a
-provisioned workload namespace; and the spec registry, the `examples/`
-directory, and the `gco_mcp` `EXAMPLE_METADATA` catalog stay in three-way
-symmetry (including each entry's documented submission command).
+provisioned workload namespace; every gco-jobs workload fits the deployed
+resource governance (per-container `LimitRange` ceilings, per-manifest
+caps, and the namespace `ResourceQuota`, evaluated against the same
+defaults the stack deploys — a manifest that admission would reject
+forever fails here in seconds instead of burning a live timeout); and the
+spec registry, the `examples/` directory, and the `gco_mcp`
+`EXAMPLE_METADATA` catalog stay in three-way symmetry (including each
+entry's documented submission command).
 `tests/test_example_job_validation.py` runs the same checks in CI, so
 drift fails the PR that introduces it.
 
@@ -74,6 +79,16 @@ yunikorn) and examples that need optional infrastructure thread
 `feature_enabled_overrides` (`aurora_pgvector`, `valkey`, `fsx_lustre`)
 into every CDK invocation of the run — cdk.json is never rewritten, so the
 clean-worktree preflight holds.
+
+Within the `examples` action, all selected examples run **in parallel** by
+default: each is self-contained (own workload names, own temp manifest,
+own cleanup), so node provisioning and image pulls — the dominant costs —
+overlap instead of serializing. `--max-parallel N` throttles the pool
+(`1` restores serial execution) and may differ between a run and its
+resume. While peers hold namespace quota, `exceeded quota` admission
+rejections are expected and retried by Kubernetes; only permanent
+rejections (for example a container over the `LimitRange` ceiling) fail an
+example immediately instead of waiting out its timeout.
 
 ## How Each Example Runs
 

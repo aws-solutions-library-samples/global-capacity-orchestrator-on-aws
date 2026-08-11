@@ -117,6 +117,8 @@ from gco.stacks.aws_load_balancer_controller_policy import (
 )
 from gco.stacks.constants import (
     AURORA_POSTGRES_VERSION,
+    DEFAULT_MANIFEST_RESOURCE_CAPS,
+    DEFAULT_RESOURCE_QUOTA,
     EKS_ADDON_CLOUDWATCH_OBSERVABILITY,
     EKS_ADDON_EFS_CSI_DRIVER,
     EKS_ADDON_FSX_CSI_DRIVER,
@@ -129,6 +131,7 @@ from gco.stacks.constants import (
     backend_tls_certificate_arn_parameter_name,
     cluster_shared_ssm_parameter_prefix,
     cost_report_bucket_name,
+    parse_k8s_quantity,
     regional_shared_bucket_name_prefix,
     regional_shared_ssm_parameter_prefix,
 )
@@ -245,6 +248,130 @@ _HELM_CHART_CONFIG_KEYS = frozenset(
 #: Charts that are mandatory platform components; the cdk.json toggle is
 #: ignored for these (see _get_enabled_charts for the rationale).
 _MANDATORY_CHART_KEYS = frozenset({"aws_load_balancer_controller", "keda"})
+
+
+#: (container ceiling, namespace ceiling) pairs the resource-quota invariant
+#: compares; every dimension a container can request must fit the namespace.
+_RESOURCE_QUOTA_INVARIANTS = (
+    ("container_max_cpu", "max_cpu"),
+    ("container_max_memory", "max_memory"),
+    ("container_max_gpu", "max_gpu"),
+)
+
+
+def _validated_resource_quota(raw: object) -> dict[str, str]:
+    """Merge the ``resource_quota`` context over defaults and validate it.
+
+    The values are substituted verbatim into the gco-jobs ResourceQuota and
+    LimitRange manifests, where a typo or an incoherent pair (a per-container
+    ceiling that exceeds the namespace ceiling) previously deployed silently
+    and only surfaced as pods being forbidden at admission — with the reason
+    visible in namespace events alone. Fail the synth instead.
+
+    Raises:
+        ValueError: If the context is not a mapping, carries an unknown key,
+            a value that does not parse as a Kubernetes quantity, or a
+            per-container ceiling exceeding its namespace ceiling.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"cdk.json context 'resource_quota' must be an object, got {type(raw).__name__}"
+        )
+    unknown = sorted(set(raw) - set(DEFAULT_RESOURCE_QUOTA))
+    if unknown:
+        allowed = ", ".join(sorted(DEFAULT_RESOURCE_QUOTA))
+        raise ValueError(
+            f"cdk.json context 'resource_quota' has unknown key(s) {unknown}; allowed: {allowed}"
+        )
+    merged = {key: str(raw.get(key, default)) for key, default in DEFAULT_RESOURCE_QUOTA.items()}
+    parsed: dict[str, float] = {}
+    for key, value in merged.items():
+        try:
+            parsed[key] = parse_k8s_quantity(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"resource_quota.{key}={value!r} is not a valid Kubernetes quantity"
+            ) from exc
+        if parsed[key] < 0:
+            raise ValueError(f"resource_quota.{key}={value!r} must not be negative")
+    for container_key, namespace_key in _RESOURCE_QUOTA_INVARIANTS:
+        if parsed[container_key] > parsed[namespace_key]:
+            raise ValueError(
+                f"resource_quota.{container_key}={merged[container_key]!r} exceeds "
+                f"resource_quota.{namespace_key}={merged[namespace_key]!r}: a container "
+                "that passes the LimitRange could never be admitted by the namespace "
+                "ResourceQuota"
+            )
+    return merged
+
+
+#: (per-manifest cap, container ceiling, namespace ceiling) triples for the
+#: cross-layer invariant: container_max_* <= *_per_manifest <= max_*.
+_MANIFEST_CAP_INVARIANTS = (
+    ("max_cpu_per_manifest", "container_max_cpu", "max_cpu"),
+    ("max_memory_per_manifest", "container_max_memory", "max_memory"),
+    ("max_gpu_per_manifest", "container_max_gpu", "max_gpu"),
+)
+
+
+def _validated_manifest_caps(raw: object, resource_quota: dict[str, str]) -> dict[str, str]:
+    """Merge ``job_validation_policy.resource_quotas`` over defaults; validate.
+
+    Three layers govern job resources and must tell one story: the
+    manifest/queue processors cap what a single submitted manifest may total
+    (these values), the LimitRange caps each container, and the namespace
+    ResourceQuota caps the aggregate. Enforce
+    ``container_max_* <= *_per_manifest <= max_*`` at synth so the front door
+    never rejects a manifest whose pods the namespace would admit and never
+    accepts one that can never run — previously the defaults disagreed
+    (per-manifest 4 GPUs vs the platform's own 16-GPU EFA training example).
+
+    Raises:
+        ValueError: On unknown keys, unparseable quantities, or a violated
+            layering invariant.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(
+            "cdk.json context 'job_validation_policy.resource_quotas' must be an "
+            f"object, got {type(raw).__name__}"
+        )
+    unknown = sorted(set(raw) - set(DEFAULT_MANIFEST_RESOURCE_CAPS))
+    if unknown:
+        allowed = ", ".join(sorted(DEFAULT_MANIFEST_RESOURCE_CAPS))
+        raise ValueError(
+            "cdk.json context 'job_validation_policy.resource_quotas' has unknown "
+            f"key(s) {unknown}; allowed: {allowed}"
+        )
+    merged = {
+        key: str(raw.get(key, default)) for key, default in DEFAULT_MANIFEST_RESOURCE_CAPS.items()
+    }
+    parsed: dict[str, float] = {}
+    for key, value in merged.items():
+        try:
+            parsed[key] = parse_k8s_quantity(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"job_validation_policy.resource_quotas.{key}={value!r} is not a "
+                "valid Kubernetes quantity"
+            ) from exc
+    for manifest_key, container_key, namespace_key in _MANIFEST_CAP_INVARIANTS:
+        container_value = parse_k8s_quantity(resource_quota[container_key])
+        namespace_value = parse_k8s_quantity(resource_quota[namespace_key])
+        if parsed[manifest_key] < container_value:
+            raise ValueError(
+                f"job_validation_policy.resource_quotas.{manifest_key}="
+                f"{merged[manifest_key]!r} is below resource_quota.{container_key}="
+                f"{resource_quota[container_key]!r}: the front door would reject a "
+                "manifest whose single container the LimitRange admits"
+            )
+        if parsed[manifest_key] > namespace_value:
+            raise ValueError(
+                f"job_validation_policy.resource_quotas.{manifest_key}="
+                f"{merged[manifest_key]!r} exceeds resource_quota.{namespace_key}="
+                f"{resource_quota[namespace_key]!r}: the front door would accept a "
+                "manifest the namespace ResourceQuota can never admit"
+            )
+    return merged
 
 
 def _parse_helm_enabled_overrides(raw: object) -> frozenset[str]:
@@ -2957,7 +3084,10 @@ class GCORegionalStack(Stack):
         # etc.) stay under manifest_processor.
         mp_config = self.config.get_manifest_processor_config()
         job_policy = self.node.try_get_context("job_validation_policy") or {}
-        job_quotas = job_policy.get("resource_quotas", {})
+        job_quotas = _validated_manifest_caps(
+            job_policy.get("resource_quotas", {}),
+            _validated_resource_quota(self.node.try_get_context("resource_quota") or {}),
+        )
         allowed_kinds = job_policy.get(
             "allowed_kinds",
             [
@@ -3034,11 +3164,9 @@ class GCORegionalStack(Stack):
             # monitor's /<project>/alb-hostname-<region> sync in the global region).
             "{{GLOBAL_REGION}}": self.config.get_global_region(),
             # Manifest processor resource quotas (sourced from shared policy).
-            "{{MP_MAX_CPU_PER_MANIFEST}}": str(job_quotas.get("max_cpu_per_manifest", "10")),
-            "{{MP_MAX_MEMORY_PER_MANIFEST}}": str(
-                job_quotas.get("max_memory_per_manifest", "32Gi")
-            ),
-            "{{MP_MAX_GPU_PER_MANIFEST}}": str(job_quotas.get("max_gpu_per_manifest", 4)),
+            "{{MP_MAX_CPU_PER_MANIFEST}}": job_quotas["max_cpu_per_manifest"],
+            "{{MP_MAX_MEMORY_PER_MANIFEST}}": job_quotas["max_memory_per_manifest"],
+            "{{MP_MAX_GPU_PER_MANIFEST}}": job_quotas["max_gpu_per_manifest"],
             # Require accelerator (GPU/Neuron/EFA) jobs to carry a matching
             # toleration (shared policy). Mirrored on the SQS path via
             # {{QP_REQUIRE_ACCELERATOR_TOLERATION}} so neither path is a bypass.
@@ -3192,18 +3320,21 @@ class GCORegionalStack(Stack):
 
         # Resource governance for gco-jobs namespace: ResourceQuota caps aggregate
         # resource consumption across the namespace, LimitRange caps per-container
-        # maxima. Values come from cdk.json `resource_quota` context with defaults
-        # sized for a modest multi-tenant dev cluster.
-        resource_quota = self.node.try_get_context("resource_quota") or {}
-        image_replacements["{{QUOTA_MAX_CPU}}"] = str(resource_quota.get("max_cpu", "100"))
-        image_replacements["{{QUOTA_MAX_MEMORY}}"] = str(resource_quota.get("max_memory", "512Gi"))
-        image_replacements["{{QUOTA_MAX_GPU}}"] = str(resource_quota.get("max_gpu", "32"))
-        image_replacements["{{QUOTA_MAX_PODS}}"] = str(resource_quota.get("max_pods", "50"))
-        image_replacements["{{LIMIT_MAX_CPU}}"] = str(resource_quota.get("container_max_cpu", "10"))
-        image_replacements["{{LIMIT_MAX_MEMORY}}"] = str(
-            resource_quota.get("container_max_memory", "64Gi")
+        # maxima. Values come from cdk.json `resource_quota` context merged
+        # over gco.stacks.constants.DEFAULT_RESOURCE_QUOTA (per-container
+        # maxima sized to one full accelerator-node slice) and validated at
+        # synth: every value must parse as a Kubernetes quantity and the
+        # container maxima must fit inside the namespace ceilings.
+        resource_quota = _validated_resource_quota(
+            self.node.try_get_context("resource_quota") or {}
         )
-        image_replacements["{{LIMIT_MAX_GPU}}"] = str(resource_quota.get("container_max_gpu", "4"))
+        image_replacements["{{QUOTA_MAX_CPU}}"] = resource_quota["max_cpu"]
+        image_replacements["{{QUOTA_MAX_MEMORY}}"] = resource_quota["max_memory"]
+        image_replacements["{{QUOTA_MAX_GPU}}"] = resource_quota["max_gpu"]
+        image_replacements["{{QUOTA_MAX_PODS}}"] = resource_quota["max_pods"]
+        image_replacements["{{LIMIT_MAX_CPU}}"] = resource_quota["container_max_cpu"]
+        image_replacements["{{LIMIT_MAX_MEMORY}}"] = resource_quota["container_max_memory"]
+        image_replacements["{{LIMIT_MAX_GPU}}"] = resource_quota["container_max_gpu"]
 
         if self.queue_processor_enabled:
             image_replacements["{{QUEUE_PROCESSOR_IMAGE}}"] = self.queue_processor_image.image_uri
@@ -3230,15 +3361,11 @@ class GCORegionalStack(Stack):
             # with the REST manifest processor. Source them from the
             # job_validation_policy section so a single change in cdk.json
             # takes effect on both submission paths at the next deploy.
-            image_replacements["{{QP_MAX_GPU_PER_MANIFEST}}"] = str(
-                job_quotas.get("max_gpu_per_manifest", 4)
-            )
-            image_replacements["{{QP_MAX_CPU_PER_MANIFEST}}"] = str(
-                job_quotas.get("max_cpu_per_manifest", "10")
-            )
-            image_replacements["{{QP_MAX_MEMORY_PER_MANIFEST}}"] = str(
-                job_quotas.get("max_memory_per_manifest", "32Gi")
-            )
+            image_replacements["{{QP_MAX_GPU_PER_MANIFEST}}"] = job_quotas["max_gpu_per_manifest"]
+            image_replacements["{{QP_MAX_CPU_PER_MANIFEST}}"] = job_quotas["max_cpu_per_manifest"]
+            image_replacements["{{QP_MAX_MEMORY_PER_MANIFEST}}"] = job_quotas[
+                "max_memory_per_manifest"
+            ]
             image_replacements["{{QP_TRUSTED_REGISTRIES}}"] = ",".join(
                 _augment_trusted_registries_with_project_ecr(
                     job_policy.get("trusted_registries", []),

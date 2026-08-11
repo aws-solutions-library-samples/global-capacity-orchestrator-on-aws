@@ -233,6 +233,162 @@ def check_spec_shape(name: str) -> StaticFinding:
     )
 
 
+#: Container resource dimensions governed by the gco-jobs LimitRange, mapped
+#: to their per-container default ceiling key in DEFAULT_RESOURCE_QUOTA.
+_LIMIT_RANGE_DIMENSIONS = {
+    "cpu": "container_max_cpu",
+    "memory": "container_max_memory",
+    "nvidia.com/gpu": "container_max_gpu",
+}
+
+#: Aggregate request dimensions governed by the gco-jobs ResourceQuota.
+_QUOTA_DIMENSIONS = {
+    "cpu": "max_cpu",
+    "memory": "max_memory",
+    "nvidia.com/gpu": "max_gpu",
+}
+
+
+def check_resource_governance_fit(parsed: ParsedExample) -> list[StaticFinding]:
+    """Every example must be admissible under the default gco-jobs governance.
+
+    A container exceeding the LimitRange maxima is rejected at pod creation
+    with only namespace events explaining why, and the Job sits podless until
+    the caller gives up — the previous defaults rejected the platform's own
+    EFA training example exactly that way (live run ex241-df723811). Proving
+    the fit offline keeps the shipped examples and the shipped guardrails
+    from contradicting each other again. Only gco-jobs-namespaced pod specs
+    are checked: the LimitRange and ResourceQuota bind that namespace.
+    """
+    from gco.stacks.constants import DEFAULT_RESOURCE_QUOTA, parse_k8s_quantity
+
+    findings: list[StaticFinding] = []
+    for doc in parsed.documents:
+        kind = str(doc.get("kind", ""))
+        metadata = doc.get("metadata") or {}
+        if metadata.get("namespace", "gco-jobs") != "gco-jobs":
+            continue
+        pod_spec, replicas = _pod_spec_and_parallelism(doc, kind)
+        if pod_spec is None:
+            continue
+        containers = list(pod_spec.get("containers") or []) + list(
+            pod_spec.get("initContainers") or []
+        )
+        aggregate: dict[str, float] = dict.fromkeys(_QUOTA_DIMENSIONS, 0.0)
+        for container in containers:
+            resources = container.get("resources") or {}
+            requests = resources.get("requests") or {}
+            limits = resources.get("limits") or {}
+            for dimension, ceiling_key in _LIMIT_RANGE_DIMENSIONS.items():
+                ceiling = parse_k8s_quantity(DEFAULT_RESOURCE_QUOTA[ceiling_key])
+                for source_name, source in (("requests", requests), ("limits", limits)):
+                    if dimension not in source:
+                        continue
+                    value = parse_k8s_quantity(source[dimension])
+                    findings.append(
+                        StaticFinding(
+                            example=parsed.name,
+                            check=(
+                                f"LimitRange fit ({kind}/{metadata.get('name')}: "
+                                f"{container.get('name')} {source_name}.{dimension})"
+                            ),
+                            passed=value <= ceiling,
+                            detail=""
+                            if value <= ceiling
+                            else (
+                                f"{source[dimension]} exceeds the default per-container "
+                                f"ceiling {DEFAULT_RESOURCE_QUOTA[ceiling_key]} "
+                                f"({ceiling_key})"
+                            ),
+                        )
+                    )
+            for dimension in _QUOTA_DIMENSIONS:
+                if dimension in requests:
+                    aggregate[dimension] += parse_k8s_quantity(requests[dimension])
+        for dimension, quota_key in _QUOTA_DIMENSIONS.items():
+            total = aggregate[dimension] * replicas
+            quota = parse_k8s_quantity(DEFAULT_RESOURCE_QUOTA[quota_key])
+            findings.append(
+                StaticFinding(
+                    example=parsed.name,
+                    check=(
+                        f"ResourceQuota fit ({kind}/{metadata.get('name')}: "
+                        f"{replicas}x pod requests.{dimension})"
+                    ),
+                    passed=total <= quota,
+                    detail=""
+                    if total <= quota
+                    else (
+                        f"aggregate {total:g} exceeds the default namespace quota "
+                        f"{DEFAULT_RESOURCE_QUOTA[quota_key]} ({quota_key})"
+                    ),
+                )
+            )
+        if parsed.spec.submission in {SUBMIT_API, SUBMIT_SQS}:
+            findings.extend(
+                _manifest_cap_findings(parsed, kind, str(metadata.get("name")), aggregate, replicas)
+            )
+    return findings
+
+
+#: Front-door budget dimensions (manifest/queue processor caps) by
+#: DEFAULT_MANIFEST_RESOURCE_CAPS key.
+_MANIFEST_CAP_DIMENSIONS = {
+    "cpu": "max_cpu_per_manifest",
+    "memory": "max_memory_per_manifest",
+    "nvidia.com/gpu": "max_gpu_per_manifest",
+}
+
+
+def _manifest_cap_findings(
+    parsed: ParsedExample,
+    kind: str,
+    name: str,
+    aggregate: dict[str, float],
+    replicas: int,
+) -> list[StaticFinding]:
+    """API/SQS-submitted manifests must also fit the front-door budget.
+
+    The manifest and queue processors cap what one submitted manifest may
+    total; an example the front door rejects while kubectl admits it (or
+    vice versa) means the layers contradict each other.
+    """
+    from gco.stacks.constants import DEFAULT_MANIFEST_RESOURCE_CAPS, parse_k8s_quantity
+
+    findings: list[StaticFinding] = []
+    for dimension, cap_key in _MANIFEST_CAP_DIMENSIONS.items():
+        total = aggregate[dimension] * replicas
+        cap = parse_k8s_quantity(DEFAULT_MANIFEST_RESOURCE_CAPS[cap_key])
+        findings.append(
+            StaticFinding(
+                example=parsed.name,
+                check=f"manifest-cap fit ({kind}/{name}: {replicas}x pod requests.{dimension})",
+                passed=total <= cap,
+                detail=""
+                if total <= cap
+                else (
+                    f"aggregate {total:g} exceeds the default per-manifest cap "
+                    f"{DEFAULT_MANIFEST_RESOURCE_CAPS[cap_key]} ({cap_key})"
+                ),
+            )
+        )
+    return findings
+
+
+def _pod_spec_and_parallelism(doc: dict[str, Any], kind: str) -> tuple[dict[str, Any] | None, int]:
+    """Extract the pod template spec and concurrent-pod count for a workload."""
+    spec = doc.get("spec") or {}
+    if kind == "Job":
+        template_spec = ((spec.get("template") or {}).get("spec")) or None
+        return template_spec, int(spec.get("parallelism", 1) or 1)
+    if kind in {"Deployment", "StatefulSet"}:
+        template_spec = ((spec.get("template") or {}).get("spec")) or None
+        return template_spec, int(spec.get("replicas", 1) or 1)
+    if kind == "Pod":
+        return spec or None, 1
+    return None, 1
+
+
 def run_static_checks(repo_root: Path, names: list[str] | None = None) -> list[StaticFinding]:
     """Run every offline check; returns findings (all must pass)."""
     findings = check_registry_symmetry(repo_root)
@@ -244,4 +400,5 @@ def run_static_checks(repo_root: Path, names: list[str] | None = None) -> list[S
         findings.append(check_submission_matches_catalog(repo_root, name))
         findings.extend(check_transport_acceptance(parsed))
         findings.extend(check_namespaces(parsed))
+        findings.extend(check_resource_governance_fit(parsed))
     return findings

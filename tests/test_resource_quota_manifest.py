@@ -33,13 +33,13 @@ PLACEHOLDERS = (
 
 # Default substitution values that mirror cdk.json defaults.
 DEFAULT_SUBSTITUTIONS = {
-    "QUOTA_MAX_CPU": "100",
-    "QUOTA_MAX_MEMORY": "512Gi",
+    "QUOTA_MAX_CPU": "400",
+    "QUOTA_MAX_MEMORY": "4096Gi",
     "QUOTA_MAX_GPU": "32",
     "QUOTA_MAX_PODS": "50",
-    "LIMIT_MAX_CPU": "10",
-    "LIMIT_MAX_MEMORY": "64Gi",
-    "LIMIT_MAX_GPU": "4",
+    "LIMIT_MAX_CPU": "192",
+    "LIMIT_MAX_MEMORY": "2048Gi",
+    "LIMIT_MAX_GPU": "8",
 }
 
 
@@ -109,8 +109,8 @@ class TestResourceQuota:
 
     def test_default_values_from_cdk_json(self, quota):
         hard = quota["spec"]["hard"]
-        assert hard["requests.cpu"] == "100"
-        assert hard["requests.memory"] == "512Gi"
+        assert hard["requests.cpu"] == "400"
+        assert hard["requests.memory"] == "4096Gi"
         assert hard["requests.nvidia.com/gpu"] == "32"
         assert hard["pods"] == "50"
 
@@ -154,10 +154,10 @@ class TestLimitRange:
         Kubernetes auto-propagates LimitRange ``max`` to ``default`` when
         ``default`` is unspecified for the same resource. Without an explicit
         zero on an extended resource like ``nvidia.com/gpu``, every container
-        in a pod gets the max value (4) as an implicit request, so a
+        in a pod gets the max value (8) as an implicit request, so a
         3-container control-plane pod (e.g. the Slinky Slurm controller with
         slurmctld + log sidecar + OTel sidecar) ends up demanding a single
-        node with 12 GPUs — unsatisfiable on any g4dn/g5/g6/p3/p4/p5 instance.
+        node with 24 GPUs — unsatisfiable on any single GPU instance GCO pools offer.
         """
         default = limit_range["spec"]["limits"][0]["default"]
         request = limit_range["spec"]["limits"][0]["defaultRequest"]
@@ -165,10 +165,13 @@ class TestLimitRange:
         assert request["nvidia.com/gpu"] == 0 or request["nvidia.com/gpu"] == "0"
 
     def test_max_values_from_cdk_json(self, limit_range):
+        # One full accelerator-node slice (p5.48xlarge / trn2.48xlarge):
+        # anything smaller rejects full-node distributed-training pods at
+        # admission (live run ex241-df723811).
         maxes = limit_range["spec"]["limits"][0]["max"]
-        assert maxes["cpu"] == 10 or maxes["cpu"] == "10"
-        assert maxes["memory"] == "64Gi"
-        assert maxes["nvidia.com/gpu"] == 4 or maxes["nvidia.com/gpu"] == "4"
+        assert maxes["cpu"] == 192 or maxes["cpu"] == "192"
+        assert maxes["memory"] == "2048Gi"
+        assert maxes["nvidia.com/gpu"] == 8 or maxes["nvidia.com/gpu"] == "8"
 
 
 class TestPlaceholderSubstitution:
@@ -233,7 +236,7 @@ class TestPlaceholderSubstitution:
 
 
 class TestDefaultsMatchCdkJson:
-    """Regression guard: Python defaults must match cdk.json defaults."""
+    """Regression guard: constants defaults must match cdk.json defaults."""
 
     @pytest.fixture
     def cdk_defaults(self):
@@ -241,37 +244,151 @@ class TestDefaultsMatchCdkJson:
             cdk = json.load(f)
         return cdk["context"]["resource_quota"]
 
-    @pytest.fixture
-    def stack_source(self):
-        return REGIONAL_STACK_PATH.read_text()
+    def test_cdk_json_mirrors_default_resource_quota(self, cdk_defaults):
+        # DEFAULT_RESOURCE_QUOTA (gco/stacks/constants.py) is the single
+        # source of truth the regional stack merges context over; cdk.json
+        # documents the same values for operators. If either side drifts,
+        # operators on older config files get silently different limits
+        # than operators with fresh defaults.
+        from gco.stacks.constants import DEFAULT_RESOURCE_QUOTA
 
-    @pytest.mark.parametrize(
-        "cdk_key,default_value",
-        [
-            ("max_cpu", '"100"'),
-            ("max_memory", '"512Gi"'),
-            ("max_gpu", '"32"'),
-            ("max_pods", '"50"'),
-            ("container_max_cpu", '"10"'),
-            ("container_max_memory", '"64Gi"'),
-            ("container_max_gpu", '"4"'),
-        ],
-    )
-    def test_stack_default_matches_cdk_json(
-        self, stack_source, cdk_defaults, cdk_key, default_value
-    ):
-        # The `.get(key, default)` call in regional_stack.py must use the same
-        # value as cdk.json -- otherwise operators on older config files would
-        # get silently different limits than operators with fresh defaults.
-        assert cdk_key in cdk_defaults, f"cdk.json missing resource_quota.{cdk_key}"
-        unquoted_default = default_value.strip('"')
-        assert cdk_defaults[cdk_key] == unquoted_default, (
-            f"cdk.json resource_quota.{cdk_key}={cdk_defaults[cdk_key]!r} "
-            f"does not match expected {unquoted_default!r}"
+        assert dict(cdk_defaults) == dict(DEFAULT_RESOURCE_QUOTA)
+
+    def test_stack_reads_defaults_from_constants(self):
+        # The stack must consume the shared defaults (via the validated
+        # helper), not carry its own inline copies.
+        source = REGIONAL_STACK_PATH.read_text()
+        assert "_validated_resource_quota(" in source
+        assert 'resource_quota.get("max_cpu"' not in source
+
+
+class TestValidatedResourceQuota:
+    """Synth-time validation of the resource_quota context.
+
+    The values are substituted verbatim into the gco-jobs ResourceQuota and
+    LimitRange manifests; before this validation a typo or an incoherent
+    pair deployed silently and surfaced only as pods forbidden at admission
+    (live example-job validation run ex241-df723811).
+    """
+
+    @staticmethod
+    def _validate(raw):
+        from gco.stacks.regional_stack import _validated_resource_quota
+
+        return _validated_resource_quota(raw)
+
+    def test_empty_context_yields_defaults(self):
+        from gco.stacks.constants import DEFAULT_RESOURCE_QUOTA
+
+        assert self._validate({}) == dict(DEFAULT_RESOURCE_QUOTA)
+
+    def test_partial_override_merges_over_defaults(self):
+        merged = self._validate({"container_max_gpu": "4"})
+        assert merged["container_max_gpu"] == "4"
+        assert merged["max_gpu"] == "32"
+
+    def test_non_mapping_context_is_rejected(self):
+        with pytest.raises(ValueError, match="must be an object"):
+            self._validate("not-a-dict")
+
+    def test_unknown_key_is_rejected(self):
+        with pytest.raises(ValueError, match="unknown key"):
+            self._validate({"max_cpus": "100"})
+
+    def test_unparseable_quantity_is_rejected(self):
+        with pytest.raises(ValueError, match="not a valid Kubernetes quantity"):
+            self._validate({"container_max_memory": "64G i"})
+
+    def test_container_ceiling_may_not_exceed_namespace_ceiling(self):
+        with pytest.raises(ValueError, match="could never be admitted"):
+            self._validate({"container_max_gpu": "64"})
+
+    def test_mixed_units_compare_correctly(self):
+        # 1Ti fits inside the 4096Gi namespace default; quantities must be
+        # compared numerically, not lexically.
+        merged = self._validate({"container_max_memory": "1Ti"})
+        assert merged["container_max_memory"] == "1Ti"
+
+
+class TestValidatedManifestCaps:
+    """Synth-time validation of job_validation_policy.resource_quotas.
+
+    These caps are what the manifest/queue processors enforce per submitted
+    manifest; the layering invariant (container LimitRange <= per-manifest
+    cap <= namespace quota) is what keeps the three enforcement layers
+    telling one story. The old defaults disagreed (4-GPU manifest cap vs
+    the platform's own 16-GPU EFA training example).
+    """
+
+    @staticmethod
+    def _validate(raw, quota=None):
+        from gco.stacks.regional_stack import (
+            _validated_manifest_caps,
+            _validated_resource_quota,
         )
-        # And the matching `.get(cdk_key, default_value)` must live in the stack.
-        needle = f'resource_quota.get("{cdk_key}", {default_value})'
-        assert needle in stack_source, (
-            f"Expected `{needle}` in regional_stack.py but did not find it. "
-            "The Python default and cdk.json default have drifted."
+
+        return _validated_manifest_caps(raw, _validated_resource_quota(quota or {}))
+
+    def test_empty_context_yields_defaults(self):
+        from gco.stacks.constants import DEFAULT_MANIFEST_RESOURCE_CAPS
+
+        assert self._validate({}) == {
+            key: str(value) for key, value in DEFAULT_MANIFEST_RESOURCE_CAPS.items()
+        }
+
+    def test_partial_override_merges_over_defaults(self):
+        merged = self._validate({"max_gpu_per_manifest": "8"})
+        assert merged["max_gpu_per_manifest"] == "8"
+        assert merged["max_cpu_per_manifest"] == "384"
+
+    def test_non_mapping_context_is_rejected(self):
+        with pytest.raises(ValueError, match="must be an object"):
+            self._validate(["max_gpu_per_manifest"])
+
+    def test_unknown_key_is_rejected(self):
+        with pytest.raises(ValueError, match="unknown key"):
+            self._validate({"max_gpus_per_manifest": 8})
+
+    def test_unparseable_quantity_is_rejected(self):
+        with pytest.raises(ValueError, match="not a valid Kubernetes quantity"):
+            self._validate({"max_memory_per_manifest": "lots"})
+
+    def test_cap_below_container_ceiling_is_rejected(self):
+        # A manifest cap below the LimitRange container maximum means the
+        # front door rejects manifests whose single container the namespace
+        # would happily admit.
+        with pytest.raises(ValueError, match="below resource_quota.container_max_gpu"):
+            self._validate({"max_gpu_per_manifest": 4})
+
+    def test_cap_above_namespace_quota_is_rejected(self):
+        # A manifest cap above the namespace quota accepts manifests whose
+        # pods can never all run.
+        with pytest.raises(ValueError, match="exceeds resource_quota.max_gpu"):
+            self._validate({"max_gpu_per_manifest": 64})
+
+    def test_custom_quota_moves_the_bounds(self):
+        merged = self._validate(
+            {"max_gpu_per_manifest": 4},
+            quota={"container_max_gpu": "2", "max_gpu": "8"},
         )
+        assert merged["max_gpu_per_manifest"] == "4"
+
+
+class TestManifestCapsMatchCdkJson:
+    """Regression guard: manifest-cap constants must match cdk.json."""
+
+    def test_cdk_json_mirrors_default_manifest_caps(self):
+        from gco.stacks.constants import DEFAULT_MANIFEST_RESOURCE_CAPS
+
+        with CDK_JSON_PATH.open() as f:
+            cdk = json.load(f)
+        documented = cdk["context"]["job_validation_policy"]["resource_quotas"]
+        assert documented == dict(DEFAULT_MANIFEST_RESOURCE_CAPS)
+
+    def test_stack_reads_caps_from_constants(self):
+        source = REGIONAL_STACK_PATH.read_text()
+        assert "_validated_manifest_caps(" in source
+        # The old inline fallback copies are exactly what let the defaults
+        # drift apart; the stack must not carry its own values.
+        assert '"max_gpu_per_manifest", 4' not in source
+        assert '.get("max_cpu_per_manifest", "10")' not in source
