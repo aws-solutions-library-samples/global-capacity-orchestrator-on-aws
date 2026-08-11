@@ -5158,7 +5158,14 @@ class GCORegionalStack(Stack):
             ),
         )
 
-        private_subnet_ids = [s.subnet_id for s in self.vpc.private_subnets]
+        # ElastiCache Serverless accepts only 2-3 subnets ("Serverless Cache
+        # should have total subnetIds between 2 and 3" — caught live by the
+        # example-job validation run ex241-2913b044 in us-east-1, where the
+        # VPC's span-every-AZ layout yields six private subnets). CDK orders
+        # ``vpc.private_subnets`` deterministically by AZ, so taking the
+        # first three keeps the selection stable across deploys; the cache
+        # is reachable from every subnet regardless (routing, not placement).
+        private_subnet_ids = [s.subnet_id for s in self.vpc.private_subnets[:3]]
 
         self.valkey_cache = elasticache.CfnServerlessCache(
             self,
