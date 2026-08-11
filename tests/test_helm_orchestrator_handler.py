@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import random
 import re
 import zlib
 from datetime import UTC, datetime
@@ -381,19 +382,70 @@ class TestOnEvent:
         sfn.stop_execution.assert_called_once_with(executionArn=_EXECUTION_ARN)
         assert ssm.put_parameter.call_count == 2
 
-    def test_replay_input_over_advanced_parameter_limit_fails_before_writes(self, orchestrator):
+    def test_encoded_replay_input_over_advanced_parameter_limit_fails_before_writes(
+        self, orchestrator
+    ):
         handler, sfn = orchestrator
         ssm = MagicMock()
-        props = self._props(ImageReplacements={"oversized": "x" * (8 * 1024)})
-
+        # Only the ENCODED (zlib+base64) size is bounded — that is what SSM
+        # stores. An incompressible payload keeps the encoding over the limit.
+        incompressible = random.Random(241).randbytes(24 * 1024).hex()
+        props = self._props(ImageReplacements={"oversized": incompressible})
         with (
             patch.object(handler, "_ssm", return_value=ssm),
             pytest.raises(ValueError, match="SSM Parameter Store supports at most 8192 bytes"),
         ):
             handler.on_event({"RequestType": "Update", "ResourceProperties": props})
-
         ssm.put_parameter.assert_not_called()
         sfn.start_execution.assert_not_called()
+
+    def test_large_but_compressible_replay_input_is_accepted(self, orchestrator):
+        # Regression (live: example-job validation run ex241-edf33111-r2):
+        # enabling every optional chart pushed the raw canonical JSON past
+        # 8 KiB while its zlib+base64 encoding stayed well under the limit.
+        # The old raw-bytes gate rejected exactly that deployment.
+        handler, sfn = orchestrator
+        ssm = MagicMock()
+        sfn.start_execution.return_value = {
+            "executionArn": _EXECUTION_ARN,
+            "startDate": _START_DATE,
+        }
+        charts = {
+            f"chart-{index:02d}": {
+                "namespace": "gco-system",
+                "values": {
+                    "image": {"repository": "registry.example/repeated/name"},
+                    "resources": {
+                        "requests": {"cpu": "100m", "memory": "128Mi"},
+                        "limits": {"cpu": "500m", "memory": "512Mi"},
+                    },
+                    "tolerations": [],
+                    "podAnnotations": {"gco.aws/component": "optional-chart"},
+                },
+            }
+            for index in range(40)
+        }
+        props = self._props(Charts=charts, EnabledCharts=sorted(charts))
+        raw_input = dict(
+            ClusterName=props["ClusterName"],
+            Region=props["Region"],
+            RegistryRegion=props["RegistryRegion"],
+            ProjectName=props["ProjectName"],
+            EnabledCharts=props["EnabledCharts"],
+            Charts=props["Charts"],
+            KedaOperatorRoleArn=props.get("KedaOperatorRoleArn"),
+            ImageReplacements=props.get("ImageReplacements", {}),
+            DeploymentToken=props["DeploymentTimestamp"],
+        )
+        raw_size = len(handler._canonical_json(raw_input).encode())
+        assert raw_size > 8 * 1024, "the fixture must reproduce the >8KiB raw shape"
+
+        with patch.object(handler, "_ssm", return_value=ssm):
+            result = handler.on_event({"RequestType": "Update", "ResourceProperties": props})
+
+        assert result["Data"]["ExecutionArn"] == _EXECUTION_ARN
+        encoded = ssm.put_parameter.call_args_list[0].kwargs["Value"]
+        assert len(encoded) <= 8 * 1024, "the persisted encoding must fit the SSM bound"
 
     def test_missing_deployment_timestamp_fails_before_start(self, orchestrator):
         handler, sfn = orchestrator
