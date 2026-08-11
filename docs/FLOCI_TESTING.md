@@ -78,20 +78,29 @@ committed tests, not inferred from Floci's docs):
 
 | Service | GCO path under test | Depth |
 |---|---|---|
-| DynamoDB | `TemplateStore`/`WebhookStore`/`JobStore`/`InferenceEndpointStore` | Meaningful behavior: conditional writes, GSIs, pagination, waiters |
+| DynamoDB | `TemplateStore`/`WebhookStore`/`JobStore`/`InferenceEndpointStore`; `capacity-poller` snapshot writes | Meaningful behavior: conditional writes, GSIs, pagination, waiters |
 | SQS | `queue_processor` consume path, queue+DLQ redrive pair | Meaningful behavior incl. server-side redrive to the DLQ |
 | S3 | `CostMonitor` Parquet reports; presigned URLs | Meaningful behavior incl. `head_object` idempotency |
-| Secrets Manager | `auth_middleware` token load + rotation stages | Meaningful behavior (AWSCURRENT/AWSPENDING overlap) |
-| CloudFormation | `GCOAWSClient` discovery; harness fingerprints; E2E CDKToolkit/`cdk list` | Stack materialization, outputs, waiters, tags (see gaps) |
+| Secrets Manager | `auth_middleware` token load + rotation stages; `secret-rotation` Lambda four-step protocol | Meaningful behavior (staging labels, promotion, per-token idempotency) |
+| CloudFormation | `GCOAWSClient` discovery; harness fingerprints; `cross-region-aggregator` bridge discovery; E2E CDKToolkit/`cdk list` | Stack materialization, outputs, waiters, tags, fail-closed + bounded-stale discovery (see gaps) |
 | STS | preflight/emulator identity verification | Control plane (identity echo) |
-| EC2 | enabled-region discovery | Control plane (see AZ-id gap) |
+| EC2 | enabled-region discovery; VPC/subnet scaffolding for ALB fixtures; `capacity-poller` degraded-signal path (spot/capacity-block APIs reject with `ClientError`) | Control plane (see AZ-id and capacity-API gaps) |
 | SSM | `aws_ssm` helpers; CFN-provisioned parameters | Meaningful behavior |
-| EKS / ELBv2 / Lambda / Logs / Step Functions / IAM / KMS / ECR / API Gateway / Tagging API | Harness inventory scanners | Control-plane list/describe only |
+| Step Functions | `helm-orchestrator` provider (start/adopt/fence), `helm-installer` teardown provider (ordered delete, drain, `is_complete`) | Meaningful behavior: named executions, `ExecutionAlreadyExists` adoption, stop confirmation, Fail-state error/cause |
+| ELBv2 | `regional-api-proxy` ownership validation; `ga-registration` tag/hostname ALB discovery | Meaningful behavior: real internal ALBs, tags, fail-closed rejections |
+| ECR | `image-lookup` adopt-or-create custom resource | Meaningful behavior in CI (create/adopt/delete); local Finch hosts skip (gap 4) |
+| EKS / Lambda / Logs / IAM / KMS / API Gateway / Tagging API | Harness inventory scanners | Control-plane list/describe only |
 | CloudWatch | `metrics_publisher` | Accepts writes (no query assertions) |
 
 Still mocked (unit layer only): Kubernetes API interactions (kind E2E owns
 live-cluster behavior), Bedrock advisors, Cost Explorer analytics, Cognito
-analytics users, SageMaker/EFS/FSx cleanup paths.
+analytics users, SageMaker/EFS/FSx cleanup paths (`analytics-cleanup`,
+`analytics-presigned-url`), CloudFormation drift detection
+(`drift-detection`; `DetectStackDrift` is absent from the emulator), the
+Global Accelerator and EKS halves of `ga-registration`, and every
+kubeconfig-dependent Lambda path (`kubectl-applier-simple`,
+`helm-installer` worker, `tls-certificate-manager`): emulator EKS clusters
+never reach `ACTIVE`, so in-cluster behavior cannot be exercised honestly.
 
 ## Known emulator gaps
 
@@ -114,7 +123,17 @@ subprocesses receive them via `tests/_floci_sitecustomize/`):
    the fail-closed logic stays exercised instead of bypassed.
 4. **ECR repository creation** is Docker-backed inside Floci and requires a
    Docker socket. It works on GitHub runners; under Finch/containerd-only
-   local setups `CreateRepository` fails with `InternalFailure`.
+   local setups `CreateRepository` fails with `InternalFailure`, and the
+   `image-lookup` tests skip themselves with that reason.
+5. **EC2 capacity APIs** (`GetSpotPlacementScores`,
+   `DescribeSpotPriceHistory`, `DescribeCapacityBlockOfferings`) reject with
+   `ClientError`. No shim: the capacity poller's degraded-signal handling is
+   the production behavior under test.
+6. **Step Functions `ListExecutions`** keeps returning stopped executions
+   under `statusFilter=RUNNING`. The teardown drain-loop's
+   eventually-reports-zero contract therefore stays in the unit suite; the
+   wire-level tests cover start/stop/adopt/describe semantics, which the
+   emulator models faithfully.
 
 ## Where the E2E stops, and why
 

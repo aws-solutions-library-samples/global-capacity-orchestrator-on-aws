@@ -100,6 +100,8 @@ jobs:
             tests/test_floci_secrets_and_cost.py \
             tests/test_floci_stack_discovery.py \
             tests/test_floci_harness_inventory.py \
+            tests/test_floci_lambda_orchestration.py \
+            tests/test_floci_lambda_regional.py \
             -v --tb=short -n auto \
             --junitxml=floci-integration-report.xml
       - name: Floci container logs
