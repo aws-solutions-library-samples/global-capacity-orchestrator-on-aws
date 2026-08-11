@@ -511,8 +511,8 @@ def test_node_exporter_is_not_marked_do_not_disrupt(kps_entry) -> None:
 
 
 def test_no_daemonset_manifest_is_marked_do_not_disrupt() -> None:
-    # Same hazard applied to the manifests GCO ships (nvidia-device-plugin,
-    # dcgm-exporter, ...): a DaemonSet must never carry do-not-disrupt.
+    # Same hazard applied to the manifests GCO ships (dcgm-exporter, ...):
+    # a DaemonSet must never carry do-not-disrupt.
     offenders: list[str] = []
     for path in sorted(_MANIFESTS_DIR.glob("*.yaml")):
         text = path.read_text(encoding="utf-8")

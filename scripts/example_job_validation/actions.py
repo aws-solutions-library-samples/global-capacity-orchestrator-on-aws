@@ -83,38 +83,6 @@ def _prepare_keda_manifest(parsed: Any, queue_url: str, region: str, manifest_pa
     return drivers.write_temp_manifest(documents, f"-{parsed.name}.yaml")
 
 
-def _timeslicing_setup(kubectl: kube.KubectlRunner) -> None:
-    path = drivers.write_temp_manifest([drivers.TIMESLICING_CONFIGMAP], "-timeslice-cm.yaml")
-    code, _, err = kubectl("apply", "-f", str(path))
-    if code != 0:
-        raise ExampleValidationError(f"time-slicing ConfigMap apply failed: {err[:400]}")
-    kubectl(
-        "rollout",
-        "restart",
-        "daemonset/nvidia-device-plugin-daemonset",
-        "-n",
-        "kube-system",
-    )
-
-
-def _timeslicing_teardown(kubectl: kube.KubectlRunner) -> None:
-    kubectl(
-        "delete",
-        "configmap",
-        "nvidia-device-plugin-config",
-        "-n",
-        "kube-system",
-        "--ignore-not-found",
-    )
-    kubectl(
-        "rollout",
-        "restart",
-        "daemonset/nvidia-device-plugin-daemonset",
-        "-n",
-        "kube-system",
-    )
-
-
 def _run_one_example(
     ctx: RunContext,
     name: str,
@@ -142,7 +110,6 @@ def _run_one_example(
     manifest_path, mutations = drivers.apply_mutations(parsed)
     evidence: dict[str, Any] = {}
     keda_queue: drivers.KedaDemoQueue | None = None
-    timeslicing = spec.setup_driver == "timeslicing-configmap"
     try:
         if spec.setup_driver == "keda-demo-queue":
             role_arn = _keda_operator_role_arn(kubectl)
@@ -154,9 +121,6 @@ def _run_one_example(
                 parsed, keda_queue.queue_url, region, manifest_path
             )
             mutations["ScaledJob.triggers.queueURL"] = "disposable demo queue for this run"
-        elif timeslicing:
-            _timeslicing_setup(kubectl)
-            evidence["setup"] = {"timeslicing": "ConfigMap applied, device plugin restarted"}
 
         evidence["submission"] = drivers.submit_example(
             parsed, manifest_path, repo_root=ctx.settings.repo_root, region=region, kubectl=kubectl
@@ -194,8 +158,6 @@ def _run_one_example(
     finally:
         if keda_queue is not None:
             keda_queue.destroy()
-        if timeslicing:
-            _timeslicing_teardown(kubectl)
 
 
 def action_examples(ctx: RunContext) -> dict[str, Any]:

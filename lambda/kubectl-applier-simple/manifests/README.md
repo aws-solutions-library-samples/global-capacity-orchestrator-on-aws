@@ -110,12 +110,19 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `45-nodepool-cpu-general.yaml` | General CPU pool (c/m/r families) — spot-preferred, no GPUs |
 | `46-nodepool-mooncake-efa.yaml` | Mooncake EFA pool (p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200) — disaggregated/store/both inference over RoCE; excludes A100-40GB p4d |
 
-### Device Plugins & GPU Observability (50–59)
+### GPU Observability (50–59)
 
 | File | Contents |
 |------|----------|
-| `50-nvidia-device-plugin.yaml` | NVIDIA device plugin `DaemonSet` (advertises `nvidia.com/gpu`) |
 | `51-dcgm-exporter.yaml` | DCGM exporter `DaemonSet` + device-counters `ConfigMap` (GPU metrics for Prometheus) — **pruned when observability is disabled** |
+
+There is deliberately no NVIDIA device plugin manifest: EKS Auto Mode ships
+the device plugin built into the node (it is not visible as a DaemonSet) and
+advertises `nvidia.com/gpu` natively. A community device plugin cannot
+initialize NVML on Auto Mode nodes (the runtime never injects the NVIDIA
+driver libraries for it) and crash-loops, permanently failing convergence —
+the applier's legacy sweep instead deletes the DaemonSet GCO used to ship
+here from upgraded clusters.
 
 ### Post-Helm (applied after Helm installs CRDs)
 

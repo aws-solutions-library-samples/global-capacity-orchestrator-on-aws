@@ -30,7 +30,7 @@ def _has_gpu(meta: dict[str, str | list[str]]) -> bool:
     """Treat anything other than ``"no"``/``""`` as GPU-bearing.
 
     The ``gpu`` field carries values like ``"NVIDIA"``, ``"NVIDIA + EFA"``,
-    ``"Trainium"``, ``"Inferentia"``, ``"NVIDIA (time-sliced)"``, and
+    ``"Trainium"``, ``"Inferentia"``, and
     ``"optional"`` — all of which should match ``gpu="yes"``.
     """
     return str(meta.get("gpu", "no")) not in ("", "no")

@@ -62,7 +62,7 @@ class ExampleSpec:
     #: Accelerator requirement: "" (none), "nvidia", "neuron", or "efa".
     accelerator: str = ""
     #: Named setup/teardown driver hooks (implemented in checks/examples.py):
-    #: "timeslicing-configmap" or "keda-demo-queue".
+    #: "keda-demo-queue".
     setup_driver: str = ""
     #: Deliberate, report-disclosed manifest mutations applied before
     #: submission, as (json-path-ish description, replacement) pairs.
@@ -139,15 +139,6 @@ EXAMPLE_SPECS: dict[str, ExampleSpec] = {
         # --- GPU / accelerator jobs ---------------------------------------
         ExampleSpec(
             "gpu-job", SUBMIT_SQS, JOB_COMPLETES, accelerator="nvidia", timeout_seconds=1800
-        ),
-        ExampleSpec(
-            "gpu-timeslicing-job",
-            KUBECTL_APPLY,
-            JOB_COMPLETES,
-            accelerator="nvidia",
-            setup_driver="timeslicing-configmap",
-            timeout_seconds=1800,
-            notes="applies the documented time-slicing ConfigMap, restarts the device plugin, and reverts both afterwards",
         ),
         ExampleSpec(
             "multi-gpu-training",

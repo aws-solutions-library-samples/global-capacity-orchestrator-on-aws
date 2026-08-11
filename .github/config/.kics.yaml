@@ -1,7 +1,7 @@
 # KICS Configuration for GCO (Global Capacity Orchestrator on AWS)
 # This file configures KICS security scanning exclusions for findings that are:
 # - False positives (e.g., VPC Flow Logs already enabled)
-# - By design (e.g., NVIDIA device plugin requires host path access)
+# - By design (e.g., DCGM exporter requires SYS_ADMIN for NVML on EKS Auto Mode)
 # - Cost prohibitive (e.g., Shield Advanced, Network Firewall)
 # - Example files (not production code)
 
@@ -20,11 +20,6 @@ exclude-queries:
   # ============================================================================
   # BY DESIGN - Required for functionality
   # ============================================================================
-  # NVIDIA Device Plugin requires host path access for GPU device management
-  # The plugin needs access to /var/lib/kubelet/device-plugins to register GPUs
-  - 302736f4-b16c-41b8-befe-c0baffa0bd9d  # Container Host Path Volume Mount
-  - 5308a7a8-06f8-45ac-bf10-791fe21de46e  # Workload Mounting With Sensitive OS Directory
-  - b7652612-de4e-4466-a0bf-1cd81f0c6063  # Volume Mount With OS Directory Write Permissions
   # NVIDIA DCGM exporter requires CAP_SYS_ADMIN for NVML driver-library injection on
   # EKS Auto Mode (matches AWS's own amazon-cloudwatch-observability dcgm-exporter).
   # It is the only GCO workload that adds SYS_ADMIN; NET_RAW and every other capability

@@ -518,11 +518,10 @@ spec:
     eks.amazonaws.com/instance-family: g5
 ```
 
-### GPU Time-Slicing (Fractional GPUs)
+### Fractional / Shared GPUs
 
-You can share a single GPU across multiple pods using NVIDIA time-slicing. The NVIDIA device plugin is already installed (as a standalone DaemonSet, with [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) providing the GPU drivers), but time-slicing is not enabled by default. To enable it, apply a ConfigMap that sets the number of replicas per physical GPU (e.g., `replicas: 4` makes one GPU appear as four schedulable units). The kube-scheduler can then place several lightweight workloads onto one GPU node. Note that [Karpenter](https://karpenter.sh/) does not currently account for time-slicing replicas when provisioning nodes ([kubernetes-sigs/karpenter#729](https://github.com/kubernetes-sigs/karpenter/issues/729)), so it may over-provision initially.
-
-See `examples/gpu-timeslicing-job.yaml` for a complete example with setup instructions.
+GCO runs on [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html), which ships the NVIDIA driver **and** device plugin built into the node (the plugin is not visible as a DaemonSet). GPU sharing via the device plugin's time-slicing ConfigMap is therefore not available: there is no cluster-managed device plugin to configure, and installing the community plugin alongside the built-in one does not work (it cannot initialize NVML on Auto Mode nodes and crash-loops).
+For workloads that don't need a full dedicated GPU, use the fractional-GPU instance sizes already present in the default `gpu-x86-pool` (`g6f` / `gr6f` expose a slice of an L4 as a whole `nvidia.com/gpu` unit), or right-size onto the smallest suitable family (e.g. `g4dn.xlarge`). Constrain placement with `eks.amazonaws.com/instance-family` node selectors as shown above.
 
 ## Customizing Services
 

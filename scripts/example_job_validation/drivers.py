@@ -418,21 +418,3 @@ class KedaDemoQueue:
             self.session.client("sqs", region_name=self.region).delete_queue(
                 QueueUrl=self.queue_url
             )
-
-
-TIMESLICING_CONFIGMAP = {
-    "apiVersion": "v1",
-    "kind": "ConfigMap",
-    "metadata": {"name": "nvidia-device-plugin-config", "namespace": "kube-system"},
-    "data": {
-        "config.yaml": (
-            "version: v1\n"
-            "sharing:\n"
-            "  timeSlicing:\n"
-            "    renameByDefault: false\n"
-            "    resources:\n"
-            "      - name: nvidia.com/gpu\n"
-            "        replicas: 4\n"
-        )
-    },
-}

@@ -54,21 +54,7 @@ EXAMPLE_METADATA: dict[str, dict[str, str | list[str]]] = {
             "test GPU node provisioning",
             "smoke test CUDA",
         ],
-        "related": ["multi-gpu-training", "gpu-timeslicing-job", "simple-job"],
-    },
-    "gpu-timeslicing-job": {
-        "category": "Jobs & Training",
-        "summary": "Fractional GPU via NVIDIA time-slicing — multiple pods share one physical GPU.",
-        "gpu": "NVIDIA (time-sliced)",
-        "opt_in": "NVIDIA device plugin time-slicing ConfigMap",
-        "submission": "kubectl apply -f examples/gpu-timeslicing-job.yaml",
-        "keywords": ["gpu", "timeslicing", "fractional", "shared gpu", "nvidia"],
-        "instance_types": ["g5.xlarge", "g6.xlarge"],
-        "use_cases": [
-            "share one GPU between multiple pods",
-            "lower cost for small inference workloads",
-        ],
-        "related": ["gpu-job", "multi-gpu-training"],
+        "related": ["multi-gpu-training", "simple-job"],
     },
     "multi-gpu-training": {
         "category": "Jobs & Training",

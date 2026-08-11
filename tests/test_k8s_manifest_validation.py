@@ -128,10 +128,6 @@ class TestStaticPodTokenBoundaries:
             "path": "token",
         }
 
-    def test_nvidia_plugin_disables_api_token(self) -> None:
-        (daemonset,) = self._documents("50-nvidia-device-plugin.yaml")
-        assert daemonset["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
-
 
 # ── render_placeholders ───────────────────────────────────────────────────────
 

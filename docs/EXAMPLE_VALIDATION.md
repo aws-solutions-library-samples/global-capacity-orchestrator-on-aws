@@ -87,7 +87,7 @@ enablement, capacity gates, timeouts, and any disclosed mutations.
 | `gco jobs submit-sqs` | simple, gpu, sqs-job-submission | Job completes |
 | `gco jobs submit-direct` | storage/data examples, megatrain, inference pairs | Job completes / Deployment Available + Service endpoints |
 | `gco dag run` | pipeline-dag (+ its two step files) | DAG run exits 0, steps complete |
-| `kubectl apply` (documented for CRDs) | kueue, volcano, yunikorn, slurm, ray, keda, timeslicing, multi-gpu, model-download | Jobs complete / vcjob Completed / RayCluster ready / ScaledJob spawns Jobs |
+| `kubectl apply` (documented for CRDs) | kueue, volcano, yunikorn, slurm, ray, keda, multi-gpu, model-download | Jobs complete / vcjob Completed / RayCluster ready / ScaledJob spawns Jobs |
 
 `kubectl` reaches the PRIVATE EKS endpoint through the CLI's own
 SSM-tunnel machinery (`gco cluster tunnel --via-ssm auto` internals): the
@@ -96,16 +96,13 @@ harness provisions the ephemeral bastion, points kubeconfig at the tunnel
 bastion down with the session — so `gco jobs submit-direct`, which shells
 out to kubectl, works unmodified too.
 
-Special drivers, both fully reverted afterwards:
+Special drivers, fully reverted afterwards:
 
 - **keda-scaled-job** — creates a disposable demo SQS queue, seeds
   synthetic messages, grants the KEDA operator read-only queue metrics via
   a queue policy (the example's documented prerequisites), substitutes the
   placeholder `queueURL`, requires KEDA to spawn observer Jobs, then
   deletes the queue.
-- **gpu-timeslicing-job** — applies the documented NVIDIA time-slicing
-  ConfigMap, restarts the device plugin, runs the job, then removes the
-  ConfigMap and restarts the plugin again.
 
 Disclosed mutations: inference examples whose default model is
 HuggingFace-gated (vLLM's Llama 3.1, TGI's Mistral) are validated with the

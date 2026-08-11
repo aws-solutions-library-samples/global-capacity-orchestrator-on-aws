@@ -3045,7 +3045,7 @@ class TestAddonTolerationShapes:
     sched241-350ffc7d observed exactly that — two g4dn.xlarge NodeClaims
     requesting ``nvidia.com/gpu: "0"`` launched for metrics-server/CSI
     controller replicas during the deploy pod surge, then churned and
-    failed the nvidia-device-plugin convergence gate.
+    failed GPU DaemonSet convergence gates.
     """
 
     @staticmethod

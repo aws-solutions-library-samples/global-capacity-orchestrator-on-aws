@@ -36,6 +36,25 @@ def handler_module():
         sys.modules.pop("handler", None)
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_legacy_sweep(request):
+    """Empty the legacy-removal inventory for every test by default.
+
+    ``apply_manifests`` base passes unconditionally sweep
+    ``_LEGACY_REMOVED_RESOURCES``; with an empty inventory
+    ``_delete_exact_resources`` returns before building a Kubernetes client,
+    so the many base-pass tests that mock ``handler.client`` stay isolated.
+    ``TestLegacyRemovedResources`` opts out to exercise the real inventory.
+    """
+    owner = type(request.instance).__name__ if request.instance is not None else ""
+    if "handler_module" not in request.fixturenames or owner == "TestLegacyRemovedResources":
+        yield
+        return
+    handler = request.getfixturevalue("handler_module")
+    with patch.object(handler, "_LEGACY_REMOVED_RESOURCES", ()):
+        yield
+
+
 class TestPostHelmDeferral:
     """Tests for the post-helm- filename prefix convention."""
 
@@ -411,6 +430,110 @@ class TestDisabledFeaturePruning:
         assert result["PruneFailures"] == failure
         assert result["FailedCount"] == 1
         assert result["Failed"] == f"prune:{failure}"
+
+
+class TestLegacyRemovedResources:
+    """Objects shipped by earlier releases are swept from upgraded clusters."""
+
+    def test_inventory_targets_the_removed_nvidia_device_plugin(self, handler_module):
+        # EKS Auto Mode provides the NVIDIA device plugin built into the node;
+        # the community DaemonSet GCO used to ship crash-loops there (NVML
+        # ERROR_LIBRARY_NOT_FOUND) and must be deleted from upgraded clusters.
+        assert (
+            "apps/v1",
+            "DaemonSet",
+            "kube-system",
+            "nvidia-device-plugin-daemonset",
+        ) in handler_module._LEGACY_REMOVED_RESOURCES
+
+    def test_no_legacy_entry_still_ships_as_a_manifest(self, handler_module):
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        shipped = "\n".join(
+            path.read_text(encoding="utf-8") for path in sorted(manifests_dir.glob("*.yaml"))
+        )
+        for _, _, _, name in handler_module._LEGACY_REMOVED_RESOURCES:
+            assert name not in shipped, f"{name} is swept as legacy but still shipped"
+
+    def test_sweep_deletes_exact_resource(self, handler_module):
+        mock_resource = MagicMock()
+        mock_dynamic = MagicMock()
+        mock_dynamic.resources.get.return_value = mock_resource
+        delete_options = MagicMock()
+
+        with (
+            patch.object(handler_module.dynamic, "DynamicClient", return_value=mock_dynamic),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            patch.object(handler_module.client, "V1DeleteOptions", return_value=delete_options),
+        ):
+            result = handler_module._prune_legacy_removed_resources()
+
+        mock_dynamic.resources.get.assert_called_once_with(api_version="apps/v1", kind="DaemonSet")
+        mock_resource.delete.assert_called_once_with(
+            name="nvidia-device-plugin-daemonset",
+            namespace="kube-system",
+            body=delete_options,
+        )
+        assert result == {
+            "pruned": ["apps/v1/DaemonSet/kube-system/nvidia-device-plugin-daemonset"],
+            "failed": [],
+        }
+
+    def test_sweep_missing_resource_is_noop(self, handler_module):
+        from kubernetes.client.rest import ApiException
+
+        missing_resource = MagicMock()
+        missing_resource.delete.side_effect = ApiException(status=404, reason="Not Found")
+        mock_dynamic = MagicMock()
+        mock_dynamic.resources.get.return_value = missing_resource
+
+        with (
+            patch.object(handler_module.dynamic, "DynamicClient", return_value=mock_dynamic),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            patch.object(handler_module.client, "V1DeleteOptions", return_value=MagicMock()),
+        ):
+            result = handler_module._prune_legacy_removed_resources()
+
+        assert result == {"pruned": [], "failed": []}
+
+    def test_base_pass_runs_the_sweep_and_post_helm_does_not(self, handler_module, tmp_path):
+        (tmp_path / "00-ns.yaml").write_text(
+            yaml.dump(
+                {
+                    "apiVersion": "v1",
+                    "kind": "Namespace",
+                    "metadata": {"name": "test-ns"},
+                }
+            )
+        )
+        swept = "apps/v1/DaemonSet/kube-system/nvidia-device-plugin-daemonset"
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch.object(
+                handler_module,
+                "_prune_legacy_removed_resources",
+                return_value={"pruned": [swept], "failed": []},
+            ) as mock_sweep,
+            patch("handler.client") as mock_client,
+        ):
+            mock_client.CoreV1Api.return_value = MagicMock()
+            mock_client.AppsV1Api.return_value = MagicMock()
+            mock_client.RbacAuthorizationV1Api.return_value = MagicMock()
+            mock_client.NetworkingV1Api.return_value = MagicMock()
+            mock_client.CustomObjectsApi.return_value = MagicMock()
+
+            base = handler_module.apply_manifests(
+                "test-cluster", "us-east-1", str(tmp_path), {}, post_helm=False
+            )
+            post_helm = handler_module.apply_manifests(
+                "test-cluster", "us-east-1", str(tmp_path), {}, post_helm=True
+            )
+
+        mock_sweep.assert_called_once_with()
+        assert base["PrunedCount"] == 1
+        assert base["Pruned"] == swept
+        assert post_helm["PrunedCount"] == 0
 
 
 class TestPrometheusOperatorCRDs:

@@ -17,7 +17,6 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
   - [EFS Output Job](#efs-output-job)
   - [FSx for Lustre Job](#fsx-for-lustre-job)
   - [GPU Job](#gpu-job)
-  - [GPU Time-Slicing Job](#gpu-time-slicing-job)
   - [Inference Frameworks](#inference-frameworks)
   - [Inferentia Job](#inferentia-job)
   - [KEDA Autoscaled Job](#keda-autoscaled-job)
@@ -56,7 +55,6 @@ This directory contains example Kubernetes manifests you can use with GCO (Globa
 | [EFS Output](#efs-output-job) | `efs-output-job.yaml` | Storage | — | — |
 | [FSx Lustre](#fsx-for-lustre-job) | `fsx-lustre-job.yaml` | Storage | — | [FSx](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) |
 | [GPU Job](#gpu-job) | `gpu-job.yaml` | Jobs | ✅ | — |
-| [GPU Time-Slicing](#gpu-time-slicing-job) | `gpu-timeslicing-job.yaml` | Jobs | ✅ | ConfigMap |
 | [Inferentia](#inferentia-job) | `inferentia-job.yaml` | Accelerator | [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/) | — |
 | [SGLang](#inference-frameworks) | `inference-sglang.yaml` | Inference | ✅ | — |
 | [TGI](#inference-frameworks) | `inference-tgi.yaml` | Inference | ✅ | — |
@@ -280,25 +278,6 @@ kubectl logs job/gpu-test-job
 **Requirements:** GPU nodepools (included by default), NVIDIA device plugin (included by default).
 
 **When to use:** ML model training, GPU-accelerated workloads, testing GPU availability.
-
----
-
-### GPU Time-Slicing Job
-
-**File:** `gpu-timeslicing-job.yaml`
-
-Uses a fractional GPU via NVIDIA time-slicing. Multiple pods share a single physical GPU by taking turns, letting you run lightweight GPU workloads without dedicating a full GPU to each pod.
-
-**Usage:**
-
-```bash
-kubectl apply -f examples/gpu-timeslicing-job.yaml
-kubectl logs job/gpu-timeslice-job -n gco-jobs
-```
-
-**Requirements:** GPU nodepools (default), NVIDIA device plugin with time-slicing ConfigMap applied (not enabled by default — see manifest comments for setup).
-
-**When to use:** Inference workloads that don't need a full GPU, dev/test GPU workloads, reducing GPU costs by sharing hardware.
 
 ---
 

@@ -1359,7 +1359,7 @@ class GCORegionalStack(Stack):
     # zero-GPU pods and then consolidation-flap them — live release
     # validation run sched241-350ffc7d caught exactly that (two g4dn.xlarge
     # NodeClaims requesting ``nvidia.com/gpu: "0"``, churned mid-install,
-    # failing the nvidia-device-plugin convergence check).
+    # failing GPU DaemonSet convergence checks).
     _ADDON_NODE_TOLERATIONS = [
         {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
         {"key": "aws.amazon.com/neuron", "operator": "Exists", "effect": "NoSchedule"},
