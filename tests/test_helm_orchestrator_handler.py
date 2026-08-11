@@ -426,17 +426,17 @@ class TestOnEvent:
             for index in range(40)
         }
         props = self._props(Charts=charts, EnabledCharts=sorted(charts))
-        raw_input = dict(
-            ClusterName=props["ClusterName"],
-            Region=props["Region"],
-            RegistryRegion=props["RegistryRegion"],
-            ProjectName=props["ProjectName"],
-            EnabledCharts=props["EnabledCharts"],
-            Charts=props["Charts"],
-            KedaOperatorRoleArn=props.get("KedaOperatorRoleArn"),
-            ImageReplacements=props.get("ImageReplacements", {}),
-            DeploymentToken=props["DeploymentTimestamp"],
-        )
+        raw_input = {
+            "ClusterName": props["ClusterName"],
+            "Region": props["Region"],
+            "RegistryRegion": props["RegistryRegion"],
+            "ProjectName": props["ProjectName"],
+            "EnabledCharts": props["EnabledCharts"],
+            "Charts": props["Charts"],
+            "KedaOperatorRoleArn": props.get("KedaOperatorRoleArn"),
+            "ImageReplacements": props.get("ImageReplacements", {}),
+            "DeploymentToken": props["DeploymentTimestamp"],
+        }
         raw_size = len(handler._canonical_json(raw_input).encode())
         assert raw_size > 8 * 1024, "the fixture must reproduce the >8KiB raw shape"
 
