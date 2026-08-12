@@ -38,10 +38,11 @@
       "Owner": "platform-team"
     },
 
-    "_comment_bedrock": "Model defaults for GCO's optional Bedrock-powered features, resolved through gco/bedrock.py. default_model_id and thinking.effort are the advisory defaults: Mission sampling and the capacity advisor consume them, and canonical reasoning translation applies only to that model. claude_code_default_model_id is the session model `gco autopilot` hands to Claude Code (per-launch overrides: --model flag or GCO_AUTOPILOT_MODEL); future agent runners get their own sibling key. Explicit command/environment model overrides always take precedence and never inherit model-specific thinking fields. Both keys ship the same Anthropic profile, which requires the one-time Anthropic first-time-use case form per account (https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html); see docs/CUSTOMIZATION.md (Bedrock Model Selection).",
+    "_comment_bedrock": "Model defaults for GCO's optional Bedrock-powered features, resolved through gco/bedrock.py. default_model_id and thinking.effort are the advisory defaults: Mission sampling and the capacity advisor consume them, and canonical reasoning translation applies only to that model. claude_code_default_model_id is the session model `gco autopilot` hands to Claude Code (per-launch overrides: --model flag or GCO_AUTOPILOT_MODEL); future agent runners get their own sibling key. embedding_model_id is the text-embedding model mission memory uses to embed directives; its output dimensionality must stay compatible with mission_memory.dimensions (see _comment_mission_memory - changing either after index creation invalidates search results). Explicit command/environment model overrides always take precedence and never inherit model-specific thinking fields. The two Anthropic keys ship the same profile, which requires the one-time Anthropic first-time-use case form per account (https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html); see docs/CUSTOMIZATION.md (Bedrock Model Selection).",
     "bedrock": {
       "default_model_id": "global.anthropic.claude-opus-5",
       "claude_code_default_model_id": "global.anthropic.claude-opus-5",
+      "embedding_model_id": "amazon.titan-embed-text-v2:0",
       "thinking": {
         "effort": "high"
       }
@@ -263,6 +264,14 @@
       "snapshot_retention_limit": 1
     },
 
+    "_comment_mission_memory": "Mission memory - recall across mission sessions, enabled by default. When enabled, GCOGlobalStack adds a DynamoDB table ({project}-mission-memory) with a vector index over embedded mission directives; completed missions write one memory item (directive embedding + model-written lessons/followups) and later missions retrieve the most similar past sessions into their sampling prompts. Memory is SHARED INSTITUTIONAL MEMORY: items are keyed by session only, so every operator in the account sees every operator's mission lessons. Cost is negligible (PAY_PER_REQUEST table with one small item per completed mission plus one embedding call at session end); set enabled=false to opt out. retention_days: DynamoDB TTL window for memory items. dimensions: embedding vector width - MUST match the bedrock.embedding_model_id output width and is a ONE-WAY DOOR (immutable after index creation, as are the COSINE distance function and the index projection; changing any of them means deleting and recreating the index, orphaning existing embeddings). top_k: how many similar past missions retrieval feeds into the sampling prompt. Retrieval and writes are best-effort and never fail a mission. See docs/MISSION.md (Mission memory).",
+    "mission_memory": {
+      "enabled": true,
+      "retention_days": 365,
+      "dimensions": 1024,
+      "distance_function": "COSINE",
+      "top_k": 3
+    },
     "_comment_aurora_pgvector": "Aurora Serverless v2 PostgreSQL with pgvector. enabled: master toggle. min_acu / max_acu: Aurora Capacity Unit range; min_acu=0 enables scale-to-zero. backup_retention_days: automated backup TTL. deletion_protection: blocks accidental cluster deletion when true. See docs/CUSTOMIZATION.md (Configure Aurora pgvector) and https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html.",
     "aurora_pgvector": {
       "enabled": false,

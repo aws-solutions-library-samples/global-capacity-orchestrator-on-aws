@@ -167,6 +167,9 @@ class ConfigLoader:
         # Validate historical capacity surface config (optional block)
         self._validate_capacity_history_config()
 
+        # Validate mission-memory configuration (recall across mission sessions)
+        self._validate_mission_memory_config()
+
     #: Allowed ``project_name`` format (#139). ``project_name`` is the
     #: deployment's unique prefix and flows into S3 bucket names, the Cognito
     #: hosted-UI domain prefix, SSM parameter paths, IAM role names, and
@@ -767,6 +770,75 @@ class ConfigLoader:
                 raise ConfigValidationError(
                     f"historical.enabled_regions contains invalid region '{region}'. "
                     f"Valid regions: {sorted(self.VALID_REGIONS)}"
+                )
+
+    #: Distance functions the DynamoDB vector-index API accepts. The choice is
+    #: immutable after index creation, so a typo must fail at synth time.
+    MISSION_MEMORY_DISTANCE_FUNCTIONS = frozenset({"COSINE", "DOT_PRODUCT", "EUCLIDEAN"})
+
+    #: DynamoDB vector-index maximum dimensionality (service quota).
+    MISSION_MEMORY_MAX_DIMENSIONS = 4096
+
+    def _validate_mission_memory_config(self) -> None:
+        """Validate the ``mission_memory`` block in cdk.json.
+
+        The block is optional; absence means the shipped defaults apply
+        (feature on). When present, types are validated so a typo fails fast
+        at synth time — especially the one-way-door fields (``dimensions``,
+        ``distance_function``) that cannot be corrected after the vector
+        index exists:
+
+        - ``enabled``: bool if present.
+        - ``retention_days`` / ``top_k``: positive ints if present.
+        - ``dimensions``: positive int <= 4096 if present.
+        - ``distance_function``: one of COSINE / DOT_PRODUCT / EUCLIDEAN.
+        """
+        mission_memory_ctx = self.app.node.try_get_context("mission_memory")
+        if not isinstance(mission_memory_ctx, dict):
+            return
+
+        if "enabled" in mission_memory_ctx and not isinstance(mission_memory_ctx["enabled"], bool):
+            raise ConfigValidationError(
+                f"mission_memory.enabled must be a bool, got "
+                f"{type(mission_memory_ctx['enabled']).__name__}: "
+                f"{mission_memory_ctx['enabled']!r}"
+            )
+
+        for int_field in ("retention_days", "top_k"):
+            if int_field not in mission_memory_ctx:
+                continue
+            value = mission_memory_ctx[int_field]
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ConfigValidationError(
+                    f"mission_memory.{int_field} must be a positive integer, got {value!r}"
+                )
+
+        if "dimensions" in mission_memory_ctx:
+            dimensions = mission_memory_ctx["dimensions"]
+            if (
+                not isinstance(dimensions, int)
+                or isinstance(dimensions, bool)
+                or dimensions <= 0
+                or dimensions > self.MISSION_MEMORY_MAX_DIMENSIONS
+            ):
+                raise ConfigValidationError(
+                    "mission_memory.dimensions must be a positive integer <= "
+                    f"{self.MISSION_MEMORY_MAX_DIMENSIONS} (DynamoDB vector-index "
+                    f"limit), got {dimensions!r}. This is a one-way door: it is "
+                    "immutable after index creation and must match the "
+                    "bedrock.embedding_model_id output width."
+                )
+
+        if "distance_function" in mission_memory_ctx:
+            distance = mission_memory_ctx["distance_function"]
+            if (
+                not isinstance(distance, str)
+                or distance not in self.MISSION_MEMORY_DISTANCE_FUNCTIONS
+            ):
+                valid = ", ".join(sorted(self.MISSION_MEMORY_DISTANCE_FUNCTIONS))
+                raise ConfigValidationError(
+                    f"mission_memory.distance_function must be one of {valid}, got "
+                    f"{distance!r}. This is immutable after index creation."
                 )
 
     def get_project_name(self) -> str:
@@ -1526,6 +1598,42 @@ class ConfigLoader:
     def get_capacity_history_enabled(self) -> bool:
         """Return whether the historical capacity surface is enabled."""
         return bool(self.get_capacity_history_config()["enabled"])
+
+    def get_mission_memory_config(self) -> dict[str, Any]:
+        """Get the mission-memory configuration (recall across mission sessions).
+
+        Returns the merged ``mission_memory`` block from cdk.json layered on
+        top of the defaults below. The feature is ON by default — memory is
+        cheap (one small PAY_PER_REQUEST item plus one embedding call per
+        completed mission) and silently missing recall is the worse failure
+        mode; set ``mission_memory.enabled: false`` to opt out.
+
+        Keys:
+            - enabled: provision the mission-memory table + vector index and
+              activate best-effort write/retrieval in the engine (default True)
+            - retention_days: DynamoDB TTL window for memory items (default 365)
+            - dimensions: embedding vector width (default 1024). ONE-WAY DOOR:
+              immutable after index creation and must match the configured
+              ``bedrock.embedding_model_id`` output width.
+            - distance_function: vector distance metric (default COSINE);
+              immutable after index creation.
+            - top_k: similar past missions retrieved into the sampling prompt
+              (default 3)
+        """
+        default_config: dict[str, Any] = {
+            "enabled": True,
+            "retention_days": 365,
+            "dimensions": 1024,
+            "distance_function": "COSINE",
+            "top_k": 3,
+        }
+        mission_memory_ctx = self.app.node.try_get_context("mission_memory")
+        mission_memory_config = mission_memory_ctx if isinstance(mission_memory_ctx, dict) else {}
+        return {**default_config, **mission_memory_config}
+
+    def get_mission_memory_enabled(self) -> bool:
+        """Return whether mission memory is enabled."""
+        return bool(self.get_mission_memory_config()["enabled"])
 
     def get_tags(self) -> dict[str, str]:
         """Get common tags from configuration"""

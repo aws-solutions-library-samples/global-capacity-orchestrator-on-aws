@@ -51,6 +51,7 @@ from tests._scaffold_replay import (  # noqa: E402
 # profile today; each pin moves on its own.
 _EXPECTED_DEFAULT_MODEL_ID = "global.anthropic.claude-opus-5"
 _EXPECTED_CLAUDE_CODE_MODEL_ID = "global.anthropic.claude-opus-5"
+_EXPECTED_EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
 _EXPECTED_FIXTURE_NAME = "global_anthropic_claude_opus_5.json"
 _EXPECTED_THINKING = {"effort": "high"}
 _RUNTIME_SOURCE_ROOTS = ("cli", "gco", "gco_mcp", "scripts", ".github/scripts")
@@ -237,8 +238,17 @@ def test_cdk_json_contains_exactly_the_managed_default_model_keys() -> None:
     assert bedrock == {
         "default_model_id": _EXPECTED_DEFAULT_MODEL_ID,
         "claude_code_default_model_id": _EXPECTED_CLAUDE_CODE_MODEL_ID,
+        "embedding_model_id": _EXPECTED_EMBEDDING_MODEL_ID,
         "thinking": _EXPECTED_THINKING,
     }
+
+
+def test_embedding_default_resolves_through_the_canonical_accessor() -> None:
+    """Mission memory's embedding model comes from the same canonical file,
+    with validation independent of the advisory keys."""
+    from gco.bedrock import get_default_embedding_model_id
+
+    assert get_default_embedding_model_id(PROJECT_ROOT / "cdk.json") == _EXPECTED_EMBEDDING_MODEL_ID
 
 
 def test_default_high_thinking_translates_to_native_converse_fields() -> None:

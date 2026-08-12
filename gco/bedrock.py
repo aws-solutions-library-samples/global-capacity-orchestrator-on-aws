@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 _BEDROCK_CONTEXT_KEY = "bedrock"
 _DEFAULT_MODEL_ID_KEY = "default_model_id"
 _CLAUDE_CODE_MODEL_ID_KEY = "claude_code_default_model_id"
+_EMBEDDING_MODEL_ID_KEY = "embedding_model_id"
 _THINKING_KEY = "thinking"
 _THINKING_EFFORT_KEY = "effort"
 # Effort levels accepted in ``cdk.json``. This is deliberately the
@@ -199,6 +200,20 @@ def _claude_code_model_id_from_payload(payload: Any, path: Path) -> str:
     return model_id.strip()
 
 
+def _embedding_model_id_from_payload(payload: Any, path: Path) -> str:
+    """Extract and validate the text-embedding model default."""
+    bedrock = _bedrock_block_from_payload(payload, path)
+
+    model_id = bedrock.get(_EMBEDDING_MODEL_ID_KEY)
+    if not isinstance(model_id, str) or not model_id.strip():
+        raise BedrockModelConfigurationError(
+            f"{path}: context.{_BEDROCK_CONTEXT_KEY}.{_EMBEDDING_MODEL_ID_KEY} "
+            "must be a non-empty string. Mission memory embeds directives with "
+            "this model; add the key to the deployment config."
+        )
+    return model_id.strip()
+
+
 def _canonical_payload(cdk_json_path: Path | None) -> tuple[Any, Path]:
     """Load and JSON-parse the selected canonical config, failing closed."""
     path = cdk_json_path.resolve() if cdk_json_path is not None else _canonical_cdk_json_path()
@@ -247,6 +262,25 @@ def get_default_bedrock_model_id(cdk_json_path: Path | None = None) -> str:
 def get_default_bedrock_thinking_effort(cdk_json_path: Path | None = None) -> str:
     """Return the canonical default model's validated reasoning effort."""
     return get_default_bedrock_configuration(cdk_json_path).thinking_effort
+
+
+def get_default_embedding_model_id(cdk_json_path: Path | None = None) -> str:
+    """Return the checked-in text-embedding model default from ``cdk.json``.
+
+    This is the model mission memory uses to embed directives for the
+    ``{project}-mission-memory`` vector index. It is deliberately independent
+    of the advisory ``default_model_id``: embedding and text generation are
+    different model families, and validation is equally independent — a
+    malformed advisory ``thinking`` block cannot fail this accessor.
+
+    The model's output dimensionality is a one-way door: the vector index is
+    created with ``mission_memory.dimensions`` and query vectors must come
+    from the same model at the same width, or search results are meaningless.
+    Path selection and trust boundaries match
+    :func:`get_default_bedrock_configuration`.
+    """
+    payload, path = _canonical_payload(cdk_json_path)
+    return _embedding_model_id_from_payload(payload, path)
 
 
 def get_default_claude_code_model_id(cdk_json_path: Path | None = None) -> str:
