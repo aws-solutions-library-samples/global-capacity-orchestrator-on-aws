@@ -576,6 +576,7 @@ __all__ = [
     "get_default_bedrock_model_id",
     "get_default_bedrock_thinking_effort",
     "get_default_claude_code_model_id",
+    "get_default_embedding_model_id",
     "is_bedrock_ftu_form_error",
     "raise_if_bedrock_ftu_form_error",
 ]

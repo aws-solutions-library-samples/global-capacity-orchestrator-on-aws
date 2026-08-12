@@ -108,6 +108,13 @@ structured audit event, so a run is fully reconstructable from its audit trail.
 | [`final_report.py`](final_report.py) | Builds and atomically persists the durable JSON final report that ends a session, capturing the directive, criteria, budget, full iteration history, and terminal verdict. |
 | [`audit.py`](audit.py) | Thin Mission-specific audit emitters for phase, verdict, and sampling events, each writing one structured entry through the shared audit logger. |
 
+### Mission Memory
+
+| Module | Description |
+|--------|-------------|
+| [`embeddings.py`](embeddings.py) | Embeds a directive through the configured [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) embedding model, returning the vector the mission-memory index stores and queries. Every failure raises a typed `EmbeddingError` so callers decide whether to swallow. |
+| [`memory.py`](memory.py) | `MissionMemoryStore` — writes one memory item per completed session and searches the `directive-embedding-index` [DynamoDB vector index](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/VectorSearch.html) for similar past missions. Table and index names resolve lazily from SSM; absent or backfilling infrastructure degrades to a typed "unavailable" error, never a failed mission. |
+
 ### Wiring Helpers
 
 | Module | Description |
