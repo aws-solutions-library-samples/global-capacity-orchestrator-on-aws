@@ -27,11 +27,15 @@ Two layers, matching what each CI stage can afford:
         proves the chart renders to Kubernetes manifests (installable) with
         the values ``charts.yaml`` ships.
 
-    Every network-touching helm call (repo add/update, show chart, template)
-    is issued through ``_run_with_retry``, which retries a fixed number of
-    times with exponential backoff and takes the first success. An intermittent
-    registry blip is ridden out in-process instead of forcing a manual job
-    rerun, while a genuinely bad pin fails on every attempt and still surfaces.
+    Two retry layers ride out intermittent registry failures instead of
+    forcing a manual job rerun. Inner: every network-touching helm call
+    (repo add/update, show chart, template) goes through ``_run_with_retry``
+    — a fixed number of attempts with exponential backoff, first success
+    wins. Outer: charts still failing after the first sweep get a bounded
+    number of re-passes (default one more, ~30s later) behind a fresh
+    ``helm repo add`` + index refresh, covering outages that outlast a
+    single command's retry window. A genuinely bad pin fails every attempt
+    of every pass and still surfaces.
 
 By default *every* chart in the file is validated, including entries with
 ``enabled: false``: those are toggled on via ``cdk.json``, so their pinned
@@ -395,18 +399,117 @@ def _render_chart(
     return None
 
 
+def _sync_classic_repos(
+    classic: dict[str, str],
+    helm_binary: str,
+    env: dict[str, str],
+    *,
+    verbose: bool = False,
+) -> list[str]:
+    """``helm repo add`` every classic repo and refresh the index once.
+
+    Returns error strings for repos that could not be added. The index
+    refresh is network-bound too — it goes through the same retry so a blip
+    there doesn't cascade into spurious "cannot resolve" errors downstream.
+    """
+    errors: list[str] = []
+    for repo_name, repo_url in classic.items():
+        rc, _out, err = _run_with_retry(
+            [helm_binary, "repo", "add", repo_name, repo_url, "--force-update"],
+            env,
+            verbose=verbose,
+            description=f"helm repo add {repo_name}",
+        )
+        if rc != 0:
+            errors.append(f"helm repo add {repo_name} ({repo_url}) failed: {_tail(err)}")
+    if classic:
+        _run_with_retry(
+            [helm_binary, "repo", "update"],
+            env,
+            timeout=180,
+            verbose=verbose,
+            description="helm repo update",
+        )
+    return errors
+
+
+def _validate_refs(
+    refs: list[ChartRef],
+    helm_binary: str,
+    env: dict[str, str],
+    *,
+    skip_template: bool = False,
+    verbose: bool = False,
+) -> dict[str, list[str]]:
+    """Resolve + render each chart; return ``{chart name: [errors]}`` for failures."""
+    failures: dict[str, list[str]] = {}
+    for ref in refs:
+        ref_str = ref.reference()
+        label = f"{ref.name} {ref.version} ({ref_str})"
+        chart_errors: list[str] = []
+
+        rc, out, err = _run_with_retry(
+            [helm_binary, "show", "chart", ref_str, "--version", ref.version],
+            env,
+            verbose=verbose,
+            description=f"helm show chart {ref.name}",
+        )
+        if rc != 0:
+            chart_errors.append(
+                f"{ref.name}: helm cannot resolve {ref_str} at version "
+                f"{ref.version!r}: {_tail(err)}"
+            )
+            if verbose:
+                print(f"FAIL  resolve  {label}")
+            failures[ref.name] = chart_errors
+            continue
+
+        resolved = _chart_version_from_show(out)
+        if resolved and not _versions_match(resolved, ref.version):
+            chart_errors.append(
+                f"{ref.name}: requested version {ref.version!r} but helm resolved {resolved!r}"
+            )
+        if verbose:
+            print(f"ok    resolve  {label}")
+
+        if not skip_template:
+            render_error = _render_chart(ref, ref_str, helm_binary, env, verbose=verbose)
+            if render_error:
+                chart_errors.append(f"{ref.name}: {render_error}")
+                if verbose:
+                    print(f"FAIL  render   {label}")
+            elif verbose:
+                print(f"ok    render   {label}")
+
+        if chart_errors:
+            failures[ref.name] = chart_errors
+    return failures
+
+
 def validate_online(
     refs: list[ChartRef],
     *,
     helm_binary: str = "helm",
     skip_template: bool = False,
     verbose: bool = False,
+    passes: int = 2,
+    repass_delay: float = 30.0,
 ) -> list[str]:
     """Resolve (and, unless skipped, render) each chart at its pinned version.
 
     Returns a list of human-readable error strings (empty == every chart is
     resolvable and renderable). Runs against an isolated Helm home so it is
     safe to invoke on a developer machine.
+
+    Retry model, outer layer: the per-command retry in ``_run_with_retry``
+    rides out blips that clear within one command's ~40-second attempt
+    window, but a registry outage lasting a few minutes fails several charts
+    on every inner attempt and used to fail the job (observed live: a rerun
+    of the unchanged job passed). So after the first sweep, the charts that
+    failed get up to ``passes - 1`` additional sweeps, each preceded by a
+    ``repass_delay`` pause and a fresh repo add + index refresh. Only
+    failures that survive every pass are reported; a genuinely bad pin fails
+    every pass and still surfaces.
     """
     errors: list[str] = []
     if not refs:
@@ -414,67 +517,32 @@ def validate_online(
 
     with tempfile.TemporaryDirectory(prefix="gco-helm-validate-") as tmp:
         env = _helm_env(Path(tmp))
-
-        # 1. Add every classic (non-OCI) repo once, then refresh the index.
         classic = {ref.repo_name: ref.repo_url for ref in refs if not ref.use_oci}
-        for repo_name, repo_url in classic.items():
-            rc, _out, err = _run_with_retry(
-                [helm_binary, "repo", "add", repo_name, repo_url, "--force-update"],
-                env,
-                verbose=verbose,
-                description=f"helm repo add {repo_name}",
-            )
-            if rc != 0:
-                errors.append(f"helm repo add {repo_name} ({repo_url}) failed: {_tail(err)}")
-        if classic:
-            # Index refresh is network-bound too — retry it so a blip here
-            # doesn't cascade into spurious "cannot resolve" errors below.
-            _run_with_retry(
-                [helm_binary, "repo", "update"],
-                env,
-                timeout=180,
-                verbose=verbose,
-                description="helm repo update",
-            )
 
-        # 2. Resolve + render each chart at exactly its pinned version.
-        for ref in refs:
-            ref_str = ref.reference()
-            label = f"{ref.name} {ref.version} ({ref_str})"
+        repo_errors = _sync_classic_repos(classic, helm_binary, env, verbose=verbose)
+        failures = _validate_refs(
+            refs, helm_binary, env, skip_template=skip_template, verbose=verbose
+        )
 
-            rc, out, err = _run_with_retry(
-                [helm_binary, "show", "chart", ref_str, "--version", ref.version],
-                env,
-                verbose=verbose,
-                description=f"helm show chart {ref.name}",
-            )
-            if rc != 0:
-                errors.append(
-                    f"{ref.name}: helm cannot resolve {ref_str} at version "
-                    f"{ref.version!r}: {_tail(err)}"
-                )
-                if verbose:
-                    print(f"FAIL  resolve  {label}")
-                continue
-
-            resolved = _chart_version_from_show(out)
-            if resolved and not _versions_match(resolved, ref.version):
-                errors.append(
-                    f"{ref.name}: requested version {ref.version!r} but helm resolved {resolved!r}"
-                )
+        for extra_pass in range(2, max(passes, 1) + 1):
+            if not failures and not repo_errors:
+                break
             if verbose:
-                print(f"ok    resolve  {label}")
+                print(
+                    f"re-pass {extra_pass}/{passes}: retrying "
+                    f"{len(failures)} failed chart(s) in {repass_delay:.0f}s "
+                    "(fresh repo index)"
+                )
+            time.sleep(repass_delay)
+            repo_errors = _sync_classic_repos(classic, helm_binary, env, verbose=verbose)
+            retry_refs = [ref for ref in refs if ref.name in failures]
+            failures = _validate_refs(
+                retry_refs, helm_binary, env, skip_template=skip_template, verbose=verbose
+            )
 
-            if skip_template:
-                continue
-
-            render_error = _render_chart(ref, ref_str, helm_binary, env, verbose=verbose)
-            if render_error:
-                errors.append(f"{ref.name}: {render_error}")
-                if verbose:
-                    print(f"FAIL  render   {label}")
-            elif verbose:
-                print(f"ok    render   {label}")
+        errors.extend(repo_errors)
+        for ref in refs:
+            errors.extend(failures.get(ref.name, []))
 
     return errors
 
