@@ -410,6 +410,30 @@ def cleanup_example(
     parsed: ParsedExample, manifest_path: Path, kubectl: KubectlRunner
 ) -> dict[str, Any]:
     """Delete everything the example created and verify it is gone."""
+    if parsed.spec.submission == DAG_RUN:
+        # A DAG example's file is a pipeline SPEC, not a Kubernetes manifest
+        # (kubectl cannot decode it — observed live in run ex241-4bf01801);
+        # what actually ran on the cluster are the step manifests it names.
+        repo_root = parsed.path.parent.parent
+        deleted: list[str] = []
+        for document in parsed.documents:
+            for step in document.get("steps", []):
+                step_manifest = repo_root / str(step.get("manifest", ""))
+                code, out, err = kubectl(
+                    "delete",
+                    "-f",
+                    str(step_manifest),
+                    "--ignore-not-found",
+                    "--wait=true",
+                    timeout=300,
+                )
+                if code != 0:
+                    raise ExampleValidationError(
+                        f"cleanup failed for {parsed.name} step "
+                        f"{step.get('name', '?')}: {err.strip()[:500]}"
+                    )
+                deleted.extend(line for line in out.strip().splitlines() if line)
+        return {"deleted": deleted[:20]}
     code, out, err = kubectl(
         "delete", "-f", str(manifest_path), "--ignore-not-found", "--wait=true", timeout=300
     )

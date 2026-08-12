@@ -72,6 +72,18 @@ spec:
           value: "4096"
         - name: DTYPE
           value: "auto"
+        # The image has no passwd entry for uid 1000 (runAsUser above), so
+        # anything calling getpass.getuser() — torch's compile-cache setup
+        # does at import — dies with "getpwuid(): uid not found". LOGNAME /
+        # USER satisfy that lookup without touching /etc/passwd, and HOME
+        # points the HF model cache at a writable path (the image default
+        # is root's home, unwritable as uid 1000).
+        - name: LOGNAME
+          value: "vllm"
+        - name: USER
+          value: "vllm"
+        - name: HOME
+          value: "/tmp"
         args:
         - "--model"
         - "$(MODEL)"

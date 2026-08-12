@@ -54,6 +54,56 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        fsGroup: 1000
+      # Materialize the TorchServe config and (possibly empty) model store
+      # on the EFS volume. Without the config TorchServe exits immediately
+      # ("--ts-config file not found"), and its built-in defaults bind
+      # 127.0.0.1, which kubelet probes against the pod IP can never reach —
+      # the explicit 0.0.0.0 binds are what make readiness observable.
+      # Serving an empty model store is the documented initial state; archive
+      # models with torch-model-archiver (see header) to register them.
+      initContainers:
+      - name: torchserve-config
+        image: python:3.14.7-slim
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+        command:
+        - python
+        - -c
+        - |
+          import os
+          os.makedirs("/models/model-store", exist_ok=True)
+          config = "\n".join([
+              "inference_address=http://0.0.0.0:8080",
+              "management_address=http://0.0.0.0:8081",
+              "metrics_address=http://0.0.0.0:8082",
+              "model_store=/models/model-store",
+              "",
+          ])
+          path = "/models/config.properties"
+          if not os.path.exists(path):
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(config)
+              print(f"wrote {path}")
+          else:
+              print(f"{path} already present, leaving it untouched")
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+          subPath: torchserve
       containers:
       - name: torchserve
         image: pytorch/torchserve:0.12.0-gpu
@@ -69,6 +119,7 @@ spec:
         args:
         - "torchserve"
         - "--start"
+        - "--foreground"
         - "--model-store=/models/model-store"
         - "--ts-config=/models/config.properties"
         - "--ncs"

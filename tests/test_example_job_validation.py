@@ -549,3 +549,40 @@ class TestParallelExamples:
         monkeypatch.setattr(actions, "_run_one_example", fake_run)
         with pytest.raises(RuntimeError, match=f"example {names[1]} crashed"):
             actions.action_examples(self._ctx(tmp_path, names))
+
+
+class TestDagCleanup:
+    """DAG examples are pipeline SPECS, not Kubernetes manifests: cleanup
+    must delete the step manifests the DAG ran, never `kubectl delete -f`
+    the spec file itself (kubectl cannot decode it — observed live in run
+    ex241-4bf01801, where an otherwise-successful DAG failed at cleanup)."""
+
+    def test_dag_cleanup_deletes_step_manifests_not_the_spec(self) -> None:
+        from scripts.example_job_validation.static_checks import parse_example
+
+        parsed = parse_example(REPO_ROOT, "pipeline-dag")
+        deleted: list[str] = []
+
+        def kubectl(*args: str, timeout: int = 120, **_kwargs):
+            assert args[0] == "delete"
+            deleted.append(args[2])
+            return 0, "job.batch/x deleted", ""
+
+        evidence = drivers.cleanup_example(parsed, parsed.path, kubectl)
+        assert deleted, "DAG cleanup deleted nothing"
+        assert all(path.endswith(".yaml") for path in deleted)
+        assert not any(path.endswith("pipeline-dag.yaml") for path in deleted)
+        step_names = {Path(path).stem for path in deleted}
+        assert step_names == {"dag-step-preprocess", "dag-step-train"}
+        assert evidence["deleted"] == ["job.batch/x deleted", "job.batch/x deleted"]
+
+    def test_dag_cleanup_surfaces_step_delete_failures(self) -> None:
+        from scripts.example_job_validation.static_checks import parse_example
+
+        parsed = parse_example(REPO_ROOT, "pipeline-dag")
+
+        def kubectl(*_args: str, timeout: int = 120, **_kwargs):
+            return 1, "", "boom"
+
+        with pytest.raises(drivers.ExampleValidationError, match="cleanup failed for pipeline-dag"):
+            drivers.cleanup_example(parsed, parsed.path, kubectl)

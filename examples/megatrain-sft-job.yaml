@@ -158,9 +158,16 @@ spec:
           echo "Local path: ${MODEL_PATH}"
           echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'detecting...')"
 
-          # Install git and clone MegaTrain at a pinned commit for
-          # reproducibility (HEAD at time of example authoring).
-          conda install -y -q -c conda-forge git=2.51.0 > /dev/null 2>&1
+          # Install git only if the image lacks it, via apt (the devel image
+          # is Ubuntu and the trainer runs as root). Never via conda: recent
+          # conda releases abort non-interactive installs over unaccepted
+          # channel terms-of-service, and a silenced install turned that into
+          # an invisible instant failure under `set -e` (live run
+          # ex241-4bf01801: the job died right after its banner with no
+          # diagnostic output). Keep install output visible.
+          command -v git || (apt-get update -qq && apt-get install -y -qq git)
+          # Clone MegaTrain at a pinned commit for reproducibility (HEAD at
+          # time of example authoring).
           git clone https://github.com/DLYuanGod/MegaTrain.git /tmp/megatrain
           git -C /tmp/megatrain checkout 919520f07182c0d4d3e9765b2f915702e71c11a4
 
