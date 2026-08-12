@@ -100,7 +100,7 @@ enablement, capacity gates, timeouts, and any disclosed mutations.
 |---|---|---|
 | `gco jobs submit` (API) | inferentia, trainium | Job completes |
 | `gco jobs submit-sqs` | simple, gpu, sqs-job-submission | Job completes |
-| `gco jobs submit-direct` | storage/data examples, megatrain, inference pairs | Job completes / Deployment Available + Service endpoints |
+| `gco jobs submit-direct` | storage/data examples, efa training, inference pairs | Job completes / Deployment Available + Service endpoints |
 | `gco dag run` | pipeline-dag (+ its two step files) | DAG run exits 0, steps complete |
 | `kubectl apply` (documented for CRDs) | kueue, volcano, yunikorn, slurm, ray, keda, multi-gpu, model-download | Jobs complete / vcjob Completed / RayCluster ready / ScaledJob spawns Jobs |
 
@@ -147,7 +147,7 @@ raw files.
 gco examples validate --examples slurm-cluster-job ...
 
 # Everything except the long GPU training examples:
-gco examples validate --skip-examples megatrain-sft-job,multi-gpu-training ...
+gco examples validate --skip-examples efa-distributed-training,multi-gpu-training ...
 
 # Resume an interrupted run (exact identity required):
 gco examples validate --resume --run-id <id> --report-dir <dir> ...

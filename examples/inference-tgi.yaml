@@ -51,8 +51,7 @@ spec:
       # startup refreshes the dynamic-linker cache for the bundled conda
       # libraries, and as an unprivileged user the launcher dies unable to
       # load libpython ("error while loading shared libraries") — observed
-      # live in run ex241-4bf01801. Same documented tradeoff as the
-      # MegaTrain example's trainer container.
+      # live in run ex241-4bf01801.
       containers:
       - name: tgi
         image: ghcr.io/huggingface/text-generation-inference:3.3.7

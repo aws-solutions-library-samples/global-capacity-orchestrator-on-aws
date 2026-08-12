@@ -78,7 +78,7 @@ EXAMPLE_METADATA: dict[str, dict[str, str | list[str]]] = {
             "distributed PyTorch DDP training",
             "scale a training job across multiple GPUs",
         ],
-        "related": ["gpu-job", "efa-distributed-training", "megatrain-sft-job"],
+        "related": ["gpu-job", "efa-distributed-training", "trainium-job"],
     },
     "efa-distributed-training": {
         "category": "Jobs & Training",
@@ -98,22 +98,7 @@ EXAMPLE_METADATA: dict[str, dict[str, str | list[str]]] = {
             "high-bandwidth NCCL all-reduce",
             "large-scale model pretraining",
         ],
-        "related": ["multi-gpu-training", "trainium-job", "megatrain-sft-job"],
-    },
-    "megatrain-sft-job": {
-        "category": "Jobs & Training",
-        "summary": "SFT fine-tuning of Qwen2.5-1.5B on a single GPU using MegaTrain. Downloads weights to EFS.",
-        "gpu": "NVIDIA",
-        "opt_in": "",
-        "submission": "gco jobs submit-direct examples/megatrain-sft-job.yaml -r us-east-1",
-        "keywords": ["sft", "fine-tuning", "qwen", "megatrain", "llm training"],
-        "instance_types": ["g5.xlarge", "g5.12xlarge", "g6.xlarge"],
-        "use_cases": [
-            "supervised fine-tuning of an LLM",
-            "single-GPU SFT on Qwen",
-            "fine-tune a small open-source model",
-        ],
-        "related": ["multi-gpu-training", "model-download-job", "efa-distributed-training"],
+        "related": ["multi-gpu-training", "trainium-job", "gpu-job"],
     },
     "model-download-job": {
         "category": "Jobs & Training",
@@ -127,7 +112,7 @@ EXAMPLE_METADATA: dict[str, dict[str, str | list[str]]] = {
             "stage HuggingFace weights on EFS",
             "warm a model cache before serving",
         ],
-        "related": ["megatrain-sft-job", "inference-vllm", "efs-output-job"],
+        "related": ["inference-vllm", "inference-tgi", "efs-output-job"],
     },
     "sqs-job-submission": {
         "category": "Jobs & Training",

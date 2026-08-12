@@ -68,7 +68,7 @@ class ExampleSpec:
     #: submission, as (json-path-ish description, replacement) pairs.
     mutations: dict[str, str] = field(default_factory=dict)
     #: Per-example completion timeout. GPU examples get longer defaults to
-    #: absorb node provisioning; megatrain absorbs a model download + training.
+    #: absorb node provisioning.
     timeout_seconds: int = 900
     #: Skip unless the account has usable capacity for this instance family
     #: (checked via service quotas before submission); empty = never skipped.
@@ -147,14 +147,6 @@ EXAMPLE_SPECS: dict[str, ExampleSpec] = {
             accelerator="nvidia",
             timeout_seconds=2400,
             notes="indexed Job + headless Service; completion requires all indexes",
-        ),
-        ExampleSpec(
-            "megatrain-sft-job",
-            SUBMIT_DIRECT,
-            JOB_COMPLETES,
-            accelerator="nvidia",
-            timeout_seconds=3600,
-            notes="downloads Qwen2.5-1.5B to EFS then runs a short SFT pass on one GPU",
         ),
         ExampleSpec(
             "efa-distributed-training",
