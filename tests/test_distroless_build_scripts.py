@@ -475,3 +475,132 @@ class TestDockerfileSmokeWiring:
             f"{dockerfile.name}: builder must COPY build_scratch_rootfs.py and "
             "runtime_smoke.py together into /opt/build/"
         )
+
+
+# ---------------------------------------------------------------------------
+# Service images must never import synth-only code
+# ---------------------------------------------------------------------------
+
+
+class TestServiceEntryModulesShipWithoutStacks:
+    """Every service image's smoke entry module must import without gco.stacks.
+
+    The CDK service-image assets exclude ``gco/stacks/**`` from their build
+    context (``_SERVICE_IMAGE_COMMON_EXCLUDES``: synth-only code must never
+    rebuild service images), so any import of ``gco.stacks`` from a service
+    module passes every offline test and then fails the distroless runtime
+    smoke at deploy time — observed live when the resource-governance
+    defaults briefly lived under ``gco.stacks.constants`` (run
+    ex241-85d0ae2f). This walk is the offline mirror of that build gate:
+    statically follow every gco-internal import reachable from each
+    dockerfile's declared entry module and reject the walk if it reaches
+    ``gco.stacks``. Runtime-shared values belong in top-level modules such
+    as ``gco.resource_governance``.
+    """
+
+    _SMOKE_ENTRY = re.compile(r'runtime_smoke\.py",\s*"(gco\.[a-z_.]+)"')
+
+    @staticmethod
+    def _module_file(name: str) -> Path | None:
+        relative = Path(*name.split("."))
+        for candidate in (
+            REPO_ROOT / relative.with_suffix(".py"),
+            REPO_ROOT / relative / "__init__.py",
+        ):
+            if candidate.is_file():
+                return candidate
+        return None
+
+    @classmethod
+    def _gco_imports(cls, module: str, source: str) -> set[str]:
+        """Every gco-internal module name ``module`` imports (runtime only)."""
+        import ast
+
+        tree = ast.parse(source)
+        type_checking_nodes: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If):
+                test = node.test
+                name = getattr(test, "id", getattr(test, "attr", ""))
+                if name == "TYPE_CHECKING":
+                    for child in ast.walk(node):
+                        type_checking_nodes.add(id(child))
+        found: set[str] = set()
+        for node in ast.walk(tree):
+            if id(node) in type_checking_nodes:
+                continue
+            if isinstance(node, ast.Import):
+                found.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    package_parts = module.split(".")[: -node.level]
+                    base = ".".join([*package_parts, node.module] if node.module else package_parts)
+                else:
+                    base = node.module or ""
+                if base:
+                    found.add(base)
+                    # `from pkg import sub` may bind a submodule, not an attr.
+                    for alias in node.names:
+                        if cls._module_file(f"{base}.{alias.name}"):
+                            found.add(f"{base}.{alias.name}")
+        return {name for name in found if name == "gco" or name.startswith("gco.")}
+
+    def _reachable_gco_modules(self, entry: str) -> set[str]:
+        seen: set[str] = set()
+        frontier = [entry]
+        while frontier:
+            module = frontier.pop()
+            if module in seen:
+                continue
+            seen.add(module)
+            path = self._module_file(module)
+            if path is None:
+                continue
+            for imported in self._gco_imports(module, path.read_text(encoding="utf-8")):
+                if imported not in seen:
+                    frontier.append(imported)
+                # Importing gco.a.b also imports packages gco and gco.a.
+                parts = imported.split(".")
+                for end in range(1, len(parts)):
+                    parent = ".".join(parts[:end])
+                    if parent not in seen:
+                        frontier.append(parent)
+        return seen
+
+    def _entry_modules(self) -> dict[str, str]:
+        entries: dict[str, str] = {}
+        for dockerfile in SERVICE_DOCKERFILES:
+            match = self._SMOKE_ENTRY.search(dockerfile.read_text(encoding="utf-8"))
+            if match:
+                entries[dockerfile.name] = match.group(1)
+        return entries
+
+    def test_every_service_dockerfile_declares_a_smoke_entry(self) -> None:
+        entries = self._entry_modules()
+        assert sorted(entries) == [path.name for path in SERVICE_DOCKERFILES]
+        for dockerfile, entry in entries.items():
+            assert self._module_file(entry) is not None, (
+                f"{dockerfile} smoke-tests {entry}, which does not exist"
+            )
+
+    def test_no_entry_module_reaches_gco_stacks(self) -> None:
+        violations: dict[str, list[str]] = {}
+        for dockerfile, entry in self._entry_modules().items():
+            reached = self._reachable_gco_modules(entry)
+            stacks = sorted(
+                name for name in reached if name == "gco.stacks" or name.startswith("gco.stacks.")
+            )
+            if stacks:
+                violations[f"{dockerfile} ({entry})"] = stacks
+        assert not violations, (
+            "service entry modules transitively import synth-only gco.stacks "
+            f"(excluded from their image build context): {violations}"
+        )
+
+    def test_walk_actually_traverses_transitive_imports(self) -> None:
+        # Sanity: the manifest-api entry must reach the processor module and
+        # the shared runtime governance module through the walk; an
+        # accidentally inert walker would make the guard above vacuous.
+        reached = self._reachable_gco_modules("gco.services.manifest_api")
+        assert "gco.services.manifest_processor" in reached
+        assert "gco.resource_governance" in reached

@@ -22,7 +22,7 @@ Environment Variables:
     CLUSTER_NAME: Name of the EKS cluster
     REGION: AWS region of the cluster
     MAX_CPU_PER_MANIFEST: Maximum CPU per manifest (default: 384 cores — see
-        gco.stacks.constants.DEFAULT_MANIFEST_RESOURCE_CAPS)
+        gco.resource_governance.DEFAULT_MANIFEST_RESOURCE_CAPS)
     MAX_MEMORY_PER_MANIFEST: Maximum memory per manifest (default: 4096Gi)
     MAX_GPU_PER_MANIFEST: Maximum GPUs per manifest (default: 16)
     ALLOWED_NAMESPACES: Comma-separated list of allowed namespaces
@@ -58,8 +58,8 @@ from gco.models import (
     ManifestSubmissionResponse,
     ResourceStatus,
 )
+from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
 from gco.services.structured_logging import configure_structured_logging, sanitize_log_value
-from gco.stacks.constants import DEFAULT_MANIFEST_RESOURCE_CAPS
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Generated at (UTC): 2026-07-18T01:03:40Z
@@ -408,7 +408,7 @@ class ManifestProcessor:
         self._k8s_timeout = int(os.environ.get("K8S_API_TIMEOUT", "30"))
 
         # Resource quotas and limits. Defaults come from the shared source of
-        # truth (gco.stacks.constants.DEFAULT_MANIFEST_RESOURCE_CAPS): two
+        # truth (gco.resource_governance.DEFAULT_MANIFEST_RESOURCE_CAPS): two
         # full accelerator-node slices, validated at synth against the
         # LimitRange / namespace-quota layering invariant.
         self.max_cpu_per_manifest = self._parse_cpu_string(

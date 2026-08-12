@@ -87,13 +87,13 @@ from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 from gco.manifest_security_policy import parse_boolean_environment
 from gco.models import ResourceStatus
+from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
 from gco.services.manifest_processor import (
     DEFAULT_ALLOWED_KINDS,
     DEFAULT_TRUSTED_DOCKERHUB_ORGS,
     DEFAULT_TRUSTED_REGISTRIES,
     validate_resource_kind,
 )
-from gco.stacks.constants import DEFAULT_MANIFEST_RESOURCE_CAPS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -163,7 +163,7 @@ ALLOWED_KINDS = (
     else {kind.strip() for kind in _allowed_kinds_env.split(",") if kind.strip()}
 )
 # Defaults come from the shared source of truth
-# (gco.stacks.constants.DEFAULT_MANIFEST_RESOURCE_CAPS - two full
+# (gco.resource_governance.DEFAULT_MANIFEST_RESOURCE_CAPS - two full
 # accelerator-node slices) so both submission front doors and the deployed
 # cdk.json values tell one story. The old inline fallback here was "10000",
 # which this parser reads as 10,000 whole cores - a thousandfold looser than
