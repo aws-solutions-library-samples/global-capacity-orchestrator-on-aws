@@ -140,6 +140,21 @@ class MockConfigLoader:
             "enabled_regions": [],
         }
 
+    def get_mission_memory_enabled(self):
+        return bool(self.get_mission_memory_config()["enabled"])
+
+    def get_mission_memory_config(self):
+        # Disabled in the mock so pre-existing stack-test templates stay
+        # unchanged; the mission-memory stack tests override this to exercise
+        # the enabled (shipped-default) path explicitly.
+        return {
+            "enabled": False,
+            "retention_days": 365,
+            "dimensions": 1024,
+            "distance_function": "COSINE",
+            "top_k": 3,
+        }
+
     def get_cluster_observability_config(self):
         # Mirrors the on-by-default cdk.json cluster_observability defaults so
         # regional synth exercises the real (enabled) observability path.

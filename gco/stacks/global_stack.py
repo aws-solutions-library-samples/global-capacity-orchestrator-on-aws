@@ -213,6 +213,12 @@ class GCOGlobalStack(Stack):
         if self.config.get_capacity_history_enabled():
             self._create_capacity_poller()
 
+        # Mission memory add-on (gated by mission_memory.enabled in cdk.json,
+        # ON by default): a DynamoDB table with a vector index over embedded
+        # mission directives, giving the mission engine recall across sessions.
+        if self.config.get_mission_memory_enabled():
+            self._create_mission_memory()
+
         # Global Accelerator is available only in the commercial ``aws``
         # partition. Other coherent AWS partitions retain all shared resources
         # and use their IAM-authenticated regional API bridges directly rather
@@ -492,6 +498,193 @@ class GCOGlobalStack(Stack):
                         "point-in-time recovery enabled. The poller re-collects this "
                         "data continuously, so an AWS Backup plan is unnecessary for "
                         "this optional add-on."
+                    ),
+                },
+            ],
+        )
+
+    def _create_mission_memory(self) -> None:
+        """Create the mission-memory table and its directive vector index.
+
+        Gated by ``mission_memory.enabled`` in cdk.json (ON by default).
+        Completed missions write one memory item (the operator directive, its
+        embedding, and the model-written lessons / recommended follow-ups);
+        later missions retrieve the most similar past directives into their
+        sampling prompts. Memory is shared institutional memory: items are
+        keyed by session only, so every operator in the account sees every
+        operator's mission lessons.
+
+        The vector index CANNOT be expressed declaratively — CloudFormation's
+        ``AWS::DynamoDB::Table`` has no vector-index property at all, and CDK
+        has no L1/L2 support — so it is created by an ``AwsCustomResource``
+        calling the DynamoDB ``UpdateTable`` control-plane API against the
+        freshly created (and therefore empty — no backfill wait needed)
+        table. ``UpdateTable`` returns before the index reaches ACTIVE;
+        runtime consumers tolerate a not-yet-ready index as part of their
+        best-effort posture. Index parameters (dimensions, distance function,
+        the INCLUDE projection) are one-way doors: immutable after creation.
+        """
+        from aws_cdk import custom_resources as cr
+
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        project_name = self.config.get_project_name()
+        memory_config = self.config.get_mission_memory_config()
+        dimensions = int(memory_config["dimensions"])
+        distance_function = str(memory_config["distance_function"])
+        index_name = "directive-embedding-index"
+
+        self.mission_memory_table = dynamodb.Table(
+            self,
+            "MissionMemoryTable",
+            table_name=f"{project_name}-mission-memory",
+            partition_key=dynamodb.Attribute(
+                name="session_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            # Vector indexes require on-demand billing.
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True
+            ),
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            time_to_live_attribute="ttl",
+        )
+
+        # Dedicated, pre-created execution role for the custom resource —
+        # same rationale as the regional stack's shared AwsCustomResource
+        # role: letting CDK auto-generate the role from ``policy=`` races
+        # IAM's global propagation window on cold deploys.
+        index_role = iam.Role(
+            self,
+            "MissionMemoryIndexRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            description=(
+                "Execution role for the mission-memory vector-index custom "
+                "resource (DynamoDB UpdateTable/DescribeTable on the "
+                "mission-memory table only)."
+            ),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                )
+            ],
+        )
+        index_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["dynamodb:UpdateTable", "dynamodb:DescribeTable"],
+                resources=[self.mission_memory_table.table_arn],
+            )
+        )
+
+        vector_index_updates = [
+            {
+                "Create": {
+                    "IndexName": index_name,
+                    "VectorConfiguration": {
+                        "VectorAttributeName": "directive_embedding",
+                        "Dimensions": dimensions,
+                        "DistanceFunction": distance_function,
+                    },
+                    "SearchSchema": [
+                        {
+                            "AttributeName": "final_verdict",
+                            "SearchSchemaElementType": "INLINE_FILTER",
+                        }
+                    ],
+                    "Projection": {
+                        "ProjectionType": "INCLUDE",
+                        "NonKeyAttributes": [
+                            "directive",
+                            "lessons",
+                            "recommended_followups",
+                            "final_verdict",
+                            "verdict_reason",
+                            "iteration_count",
+                            "completed_at",
+                        ],
+                    },
+                }
+            }
+        ]
+        vector_index = cr.AwsCustomResource(
+            self,
+            "MissionMemoryVectorIndex",
+            on_create=cr.AwsSdkCall(
+                service="DynamoDB",
+                action="updateTable",
+                parameters={
+                    "TableName": self.mission_memory_table.table_name,
+                    "VectorIndexUpdates": vector_index_updates,
+                },
+                physical_resource_id=cr.PhysicalResourceId.of(
+                    f"{project_name}-mission-memory-vector-index"
+                ),
+            ),
+            on_delete=cr.AwsSdkCall(
+                service="DynamoDB",
+                action="updateTable",
+                parameters={
+                    "TableName": self.mission_memory_table.table_name,
+                    "VectorIndexUpdates": [{"Delete": {"IndexName": index_name}}],
+                },
+            ),
+            role=index_role,
+        )
+        # The table must be ACTIVE before UpdateTable can add an index.
+        vector_index.node.add_dependency(self.mission_memory_table)
+        vector_index.node.add_dependency(index_role)
+
+        # SSM is the established runtime/cross-region discovery contract;
+        # MissionMemoryStore resolves both names lazily the same way
+        # DynamoDBBackend resolves the missions table.
+        ssm.StringParameter(
+            self,
+            "MissionMemoryTableNameParam",
+            parameter_name=f"/{project_name}/mission-memory-table-name",
+            string_value=self.mission_memory_table.table_name,
+            description="DynamoDB table name for mission memory items",
+        )
+        ssm.StringParameter(
+            self,
+            "MissionMemoryIndexNameParam",
+            parameter_name=f"/{project_name}/mission-memory-index-name",
+            string_value=index_name,
+            description="Vector index name over embedded mission directives",
+        )
+        CfnOutput(
+            self,
+            "MissionMemoryTableName",
+            value=self.mission_memory_table.table_name,
+            description="DynamoDB table name for mission memory items",
+            export_name=f"{project_name}-mission-memory-table-name",
+        )
+        CfnOutput(
+            self,
+            "MissionMemoryTableArn",
+            value=self.mission_memory_table.table_arn,
+            description="DynamoDB table ARN for mission memory items",
+            export_name=f"{project_name}-mission-memory-table-arn",
+        )
+
+        # Backup coverage: join the existing DynamoDB backup plan rather than
+        # acknowledging DynamoDBInBackupPlan twice. The plan is created by
+        # _create_backup_plan earlier in __init__, so the selection exists.
+        self.backup_plan.add_selection(
+            "MissionMemoryTableSelection",
+            resources=[backup.BackupResource.from_dynamo_db_table(self.mission_memory_table)],
+        )
+
+        acknowledge_nag_findings(
+            index_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM4",
+                    "reason": (
+                        "AWSLambdaBasicExecutionRole provides the standard CloudWatch "
+                        "Logs permissions every Lambda needs."
                     ),
                 },
             ],
