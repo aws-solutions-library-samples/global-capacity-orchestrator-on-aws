@@ -414,26 +414,20 @@ class CapacityChecker:
         try:
             pricing = self._session.client("pricing", region_name="us-east-1")
 
-            region_names = {
-                "us-east-1": "US East (N. Virginia)",
-                "us-east-2": "US East (Ohio)",
-                "us-west-1": "US West (N. California)",
-                "us-west-2": "US West (Oregon)",
-                "eu-west-1": "EU (Ireland)",
-                "eu-west-2": "EU (London)",
-                "eu-central-1": "EU (Frankfurt)",
-                "ap-northeast-1": "Asia Pacific (Tokyo)",
-                "ap-southeast-1": "Asia Pacific (Singapore)",
-                "ap-southeast-2": "Asia Pacific (Sydney)",
-            }
-
-            location = region_names.get(region, region)
-
+            # Filter on the regionCode product attribute — the AWS region
+            # identifier itself — never on the human-readable location name.
+            # The former ten-entry region-name map silently returned None
+            # for every region outside it, and Price List location strings
+            # are not derivable from any published source (eu-north-1 is
+            # "EU (Stockholm)", not "Europe (Stockholm)"), so a name map is
+            # inherently fragile. regionCode removes the class of bug:
+            # verified to return identical prices for all ten formerly
+            # mapped regions and correct prices for previously failing ones.
             response = pricing.get_products(
                 ServiceCode="AmazonEC2",
                 Filters=[
                     {"Type": "TERM_MATCH", "Field": "instanceType", "Value": instance_type},
-                    {"Type": "TERM_MATCH", "Field": "location", "Value": location},
+                    {"Type": "TERM_MATCH", "Field": "regionCode", "Value": region},
                     {"Type": "TERM_MATCH", "Field": "operatingSystem", "Value": "Linux"},
                     {"Type": "TERM_MATCH", "Field": "tenancy", "Value": "Shared"},
                     {"Type": "TERM_MATCH", "Field": "preInstalledSw", "Value": "NA"},
