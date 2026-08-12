@@ -123,6 +123,13 @@ spec:
         - "--model-store=/models/model-store"
         - "--ts-config=/models/config.properties"
         - "--ncs"
+        # TorchServe's built-in token authorization (default-on) rejects
+        # unauthenticated requests with HTTP 400 — including kubelet's
+        # /ping probes, so the pod restarts forever while the server is
+        # healthy (live run ex241-ace8e651). AuthN/AuthZ for the endpoint
+        # is the API Gateway's job (SigV4, see docs/INFERENCE.md); the
+        # in-pod token adds nothing behind it.
+        - "--disable-token-auth"
         resources:
           requests:
             cpu: "2"

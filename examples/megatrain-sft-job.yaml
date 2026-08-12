@@ -17,8 +17,8 @@
 # Notes:
 #   - The devel image is required (not runtime) because MegaTrain builds a
 #     CUDA extension at install time.
-#   - The trainer runs as root because conda's site-packages aren't
-#     writable as non-root in the PyTorch devel image.
+#   - The trainer runs as root because the image's Python site-packages
+#     aren't writable as non-root in the PyTorch devel image.
 #   - flash_attention_2 is installed at runtime and requires Ampere+ GPUs
 #     (A10G, L4, A100, H100, …) — T4/Turing is not supported.
 #   - For larger models (7B+), raise memory requests and use an instance
@@ -67,7 +67,7 @@ spec:
       annotations:
         karpenter.sh/do-not-disrupt: "true"
     spec:
-      # Init container runs as non-root; trainer needs root for conda pip
+      # Init container runs as non-root; trainer needs root for pip installs
       securityContext:
         fsGroup: 1000
       # ── Init container: download model weights to EFS if not cached ──
@@ -139,7 +139,7 @@ spec:
         - name: shared-storage
           mountPath: /mnt/gco
       # ── Main container: MegaTrain SFT training ──
-      # Runs as root (image default) so pip installs into conda site-packages
+      # Runs as root (image default) so pip installs into system site-packages
       containers:
       - name: trainer
         image: pytorch/pytorch:2.13.0-cuda12.6-cudnn9-devel
@@ -171,9 +171,14 @@ spec:
           git clone https://github.com/DLYuanGod/MegaTrain.git /tmp/megatrain
           git -C /tmp/megatrain checkout 919520f07182c0d4d3e9765b2f915702e71c11a4
 
-          # Install MegaTrain in-place (builds CUDA extension with the image's torch)
-          pip install -q -e /tmp/megatrain
-          pip install -q \
+          # Install MegaTrain in-place (builds CUDA extension with the
+          # image's torch). Current pytorch/pytorch images ship torch in
+          # Ubuntu's system Python (no conda), which PEP 668 marks
+          # externally managed; --break-system-packages is the sanctioned
+          # override for a disposable container (live run ex241-ace8e651
+          # died on exactly that refusal).
+          pip install -q --break-system-packages -e /tmp/megatrain
+          pip install -q --break-system-packages \
             accelerate==1.13.0 \
             transformers==5.5.4 \
             flash-attn==2.8.3 \
