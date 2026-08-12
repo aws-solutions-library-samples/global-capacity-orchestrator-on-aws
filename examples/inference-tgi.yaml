@@ -47,11 +47,12 @@ spec:
         project: gco
         gco.io/type: inference
     spec:
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
+      # The TGI container runs as the image's default user (root): its
+      # startup refreshes the dynamic-linker cache for the bundled conda
+      # libraries, and as an unprivileged user the launcher dies unable to
+      # load libpython ("error while loading shared libraries") — observed
+      # live in run ex241-4bf01801. Same documented tradeoff as the
+      # MegaTrain example's trainer container.
       containers:
       - name: tgi
         image: ghcr.io/huggingface/text-generation-inference:3.3.7
@@ -62,14 +63,13 @@ spec:
         env:
         - name: MODEL_ID
           value: "mistralai/Mistral-7B-Instruct-v0.3"
-        # The TGI launcher reads every flag from the environment; the image
-        # default is port 80, which an unprivileged user (runAsUser above)
-        # cannot bind — the router would exit at startup and the pod would
-        # crash-loop while showing phase Running.
+        # The TGI launcher reads every flag from the environment (exactly
+        # how MODEL_ID is injected); serve on 8080 rather than the image
+        # default of 80 so nothing depends on binding a privileged port.
         - name: PORT
           value: "8080"
-        # The image's baked-in cache path is owned by root; point the model
-        # cache at the writable volume below so downloads work as uid 1000.
+        # Keep the model cache on the pod-lifetime volume below rather than
+        # the container's writable layer.
         - name: HUGGINGFACE_HUB_CACHE
           value: "/data"
         - name: MAX_INPUT_TOKENS
