@@ -11,6 +11,7 @@ Regional ALB registration is performed separately by each regional stack only
 when the accelerator topology exists.
 """
 
+import json
 from typing import Any
 
 from aws_cdk import (
@@ -289,7 +290,17 @@ class GCOGlobalStack(Stack):
         from aws_cdk import aws_events_targets as events_targets
         from aws_cdk import aws_sqs as sqs
 
+        # Function-local on purpose: the capacity->metric-field naming rule and
+        # the Spot Placement Score pool catalog each have exactly one source of
+        # truth (cli/capacity/history.py and scripts/accelerator_catalog.py),
+        # and the poller Lambda cannot import either, so this stack serializes
+        # them into its environment at synth time. Synthesis always runs from a
+        # repository checkout (the CDK app and Lambda assets require one), but
+        # the installed wheel ships gco.stacks without scripts/, so a
+        # module-level import would break mere importability of this module.
+        from cli.capacity.history import metric_field_for_target_capacity
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
+        from scripts.accelerator_catalog import INSTANCE_POOLS
 
         project_name = self.config.get_project_name()
         historical = self.config.get_capacity_history_config()
@@ -302,6 +313,25 @@ class GCOGlobalStack(Stack):
         # sibling fields above.
         block_duration_hours = int(historical["capacity_block_duration_hours"])
         long_block_duration_hours = int(historical["capacity_block_long_duration_hours"])
+        # Serialized with compact separators: Lambda caps the whole environment
+        # at 4 KB, and the pool catalog plus the watch list are the two big
+        # values (~2.9 KB total today). ``spot_score_target_capacities`` is
+        # validated against the supported set at config load, so the naming
+        # function cannot raise here for a config that passed validation.
+        spot_score_target_capacities_env = json.dumps(
+            [
+                {
+                    "target_capacity": capacity,
+                    "metric_field": metric_field_for_target_capacity(capacity),
+                }
+                for capacity in historical["spot_score_target_capacities"]
+            ],
+            separators=(",", ":"),
+        )
+        instance_pools_env = json.dumps(
+            [{"name": pool.name, "members": list(pool.members)} for pool in INSTANCE_POOLS],
+            separators=(",", ":"),
+        )
 
         self.capacity_history_table = dynamodb.Table(
             self,
@@ -376,6 +406,8 @@ class GCOGlobalStack(Stack):
                 "CAPACITY_HISTORY_RETENTION_DAYS": str(retention_days),
                 "CAPACITY_BLOCK_DURATION_HOURS": str(block_duration_hours),
                 "CAPACITY_BLOCK_LONG_DURATION_HOURS": str(long_block_duration_hours),
+                "SPOT_SCORE_TARGET_CAPACITIES": spot_score_target_capacities_env,
+                "INSTANCE_POOLS": instance_pools_env,
             },
             tracing=lambda_.Tracing.ACTIVE,
             description=(

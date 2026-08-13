@@ -2301,7 +2301,7 @@ Query the historical capacity surface, an optional add-on to the global stack (n
 
 #### `gco capacity history show`
 
-Show the recorded capacity time-series (spot score, spot price, AZ coverage, queue depth, capacity-block availability) for an instance type in a region.
+Show the recorded capacity time-series (pooled spot placement scores at each configured target capacity, spot price, AZ coverage, queue depth, capacity-block availability) for an instance type in a region. Columns follow the store's metric registry, so newly configured metrics appear automatically.
 
 ```bash
 gco capacity history show [OPTIONS]
@@ -2346,7 +2346,7 @@ gco capacity history stats -i g5.xlarge -r us-east-1
 
 #### `gco capacity history patterns`
 
-Show a day-of-week by hour heatmap grid of average spot placement scores, plus the best historical windows.
+Show a day-of-week by hour heatmap grid of a metric's historical averages (default: the pooled spot placement score at target capacity 1), plus the best historical windows.
 
 ```bash
 gco capacity history patterns [OPTIONS]
@@ -2359,11 +2359,13 @@ gco capacity history patterns [OPTIONS]
 | `--instance-type` | `-i` | EC2 instance type (required) |
 | `--region` | `-r` | AWS region (required) |
 | `--hours` | `-H` | Hours of history to analyze (default 168 = 7 days) |
+| `--metric` | `-m` | Metric to aggregate (default `spot_score`); accepts any recorded metric field, including the per-target-capacity scores `spot_score_at_10` and `spot_score_at_50` |
 
 **Example:**
 
 ```bash
 gco capacity history patterns -i g5.xlarge -r us-east-1
+gco capacity history patterns -i p5.48xlarge -r us-east-1 -m spot_score_at_10
 ```
 
 #### `gco capacity predict`

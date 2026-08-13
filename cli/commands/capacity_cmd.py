@@ -9,6 +9,7 @@ from botocore.exceptions import ClientError
 from gco.bedrock import BEDROCK_FTU_REMEDIATION, is_bedrock_ftu_form_error
 
 from ..capacity import get_capacity_checker
+from ..capacity.history import METRIC_FIELDS
 from ..config import GCOConfig
 from ..output import format_capacity_table, get_output_formatter
 
@@ -1314,20 +1315,10 @@ def history_show(config: Any, instance_type: Any, region: Any, hours: Any) -> No
                 f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes)."
             )
             return
-        formatter.print(
-            trend,
-            columns=[
-                "timestamp",
-                "spot_score",
-                "spot_price",
-                "az_count",
-                "queue_depth",
-                "capacity_blocks_available",
-                "capacity_blocks_total",
-                "capacity_blocks_long_available",
-                "capacity_blocks_long_total",
-            ],
-        )
+        # Columns derive from the store's exported metric registry so a new
+        # metric (e.g. another SPS target capacity) appears here without a
+        # hand-maintained literal drifting out of date.
+        formatter.print(trend, columns=["timestamp", *METRIC_FIELDS])
     except Exception as e:
         if _history_disabled(e):
             formatter.print_warning(_HISTORY_DISABLED_HINT)
@@ -1385,14 +1376,27 @@ def history_stats(config: Any, instance_type: Any, region: Any, hours: Any) -> N
 @click.option("--instance-type", "-i", required=True, help="EC2 instance type")
 @click.option("--region", "-r", required=True, help="AWS region")
 @click.option("--hours", "-H", default=168, help="Hours of history (default 168 = 7 days)")
+@click.option(
+    "--metric",
+    "-m",
+    # Accepted values derive from the store's exported metric registry, so the
+    # multi-capacity SPS fields (and any future metric) are selectable without
+    # updating a literal here.
+    type=click.Choice(METRIC_FIELDS),
+    default="spot_score",
+    show_default=True,
+    help="Metric to aggregate into the day/hour grid",
+)
 @pass_config
-def history_patterns(config: Any, instance_type: Any, region: Any, hours: Any) -> None:
-    """Show a day/hour heatmap grid of average spot scores."""
+def history_patterns(config: Any, instance_type: Any, region: Any, hours: Any, metric: Any) -> None:
+    """Show a day/hour heatmap grid of a metric's averages (default spot_score)."""
     from ..capacity.history import get_capacity_history_store
 
     formatter = get_output_formatter(config)
     try:
-        patterns = get_capacity_history_store().get_temporal_patterns(instance_type, region, hours)
+        patterns = get_capacity_history_store().get_temporal_patterns(
+            instance_type, region, hours, metric=metric
+        )
         if not patterns["patterns"]:
             formatter.print_warning(
                 f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes)."

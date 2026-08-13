@@ -880,7 +880,8 @@ INSTANCE_POOLS: tuple[InstancePool, ...] = (
 #: pricing and Capacity Block observation from the capacity poller, but no
 #: Spot Placement Score: each lacks two interchangeable peers in the watch
 #: list, and padding a pool with unrelated types just to reach the AWS
-#: three-type minimum is exactly the practice requirement 1.4 forbids.
+#: three-type minimum would make the score describe hardware the workload
+#: cannot actually run on — a worse lie than having no score at all.
 #:
 #: - g4dn.12xlarge (4x T4) and g4dn.metal (8x T4): no other multi-GPU 16 GB types.
 #: - g5g.16xlarge and g5g.metal (2x T4G): a two-member arm64 pool is invalid.
