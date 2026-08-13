@@ -92,6 +92,7 @@ __all__ = [
     "MissionValidationError",
     "OBSERVATION_FIELD_BYTE_CAP",
     "OBSERVATION_FIELD_TRUNCATE_TO",
+    "PRIOR_MISSIONS_BYTE_CAP",
     "PROMPT_BYTE_BUDGET",
     "RECENT_ITERATIONS_LIMIT",
     "STRATEGY_REVISION_SCHEMA",
@@ -162,6 +163,31 @@ RECENT_ITERATIONS_LIMIT: int = 5
 #: in this case) and the same truncation marker convention applies.
 ENVIRONMENT_CONTEXT_BYTE_CAP: int = 4096
 
+#: Byte cap for the optional prior-missions block (``=== Prior similar
+#: missions ===``). Its own truncation domain for the same reason as
+#: :data:`ENVIRONMENT_CONTEXT_BYTE_CAP`: retrieved lessons are
+#: free-text of unbounded length and must never crowd the rest of the
+#: prompt out of :data:`PROMPT_BYTE_BUDGET`.
+PRIOR_MISSIONS_BYTE_CAP: int = 4096
+
+#: The memory-item fields the prior-missions block passes through to
+#: the prompt — the vector index's ``INCLUDE`` projection plus the key
+#: and the similarity score. Anything else a future projection might
+#: surface is dropped so the block's shape stays stable.
+_PRIOR_MISSION_FIELDS: frozenset[str] = frozenset(
+    {
+        "session_id",
+        "directive",
+        "lessons",
+        "recommended_followups",
+        "final_verdict",
+        "verdict_reason",
+        "iteration_count",
+        "completed_at",
+        "score",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Environment context summarisation
@@ -212,6 +238,49 @@ def _summarise_environment_context(env: Mapping[str, Any]) -> dict[str, Any]:
         # regardless of which key happened to be biggest first.
         working["_dropped_fields"] = sorted(dropped)
     return working
+
+
+# ---------------------------------------------------------------------------
+# Prior-missions summarisation
+# ---------------------------------------------------------------------------
+
+
+def _summarise_prior_missions(
+    missions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return a JSON-safe, byte-capped summary of retrieved prior missions.
+
+    Rendered into the prompt under ``=== Prior similar missions ===``.
+    The input is the :meth:`mcp.mission.memory.MissionMemoryStore.search_similar`
+    result list, ordered most-similar-first.
+
+    Three guarantees on the output:
+
+    1. Only the fields in :data:`_PRIOR_MISSION_FIELDS` pass through,
+       emitted in sorted-key order — so two semantically-identical
+       inputs produce a byte-identical block (the determinism property
+       every prompt section pins down), and a recreated index with a
+       wider projection cannot change the block's shape.
+    2. Each mission's ``lessons`` field is truncated to
+       :data:`OBSERVATION_FIELD_TRUNCATE_TO` bytes with
+       :data:`TRUNCATION_MARKER` when it exceeds
+       :data:`OBSERVATION_FIELD_BYTE_CAP` — one verbose write-up must
+       not evict every other retrieved mission.
+    3. The serialised list fits in :data:`PRIOR_MISSIONS_BYTE_CAP`
+       UTF-8 bytes. When it does not, the *least similar* mission (the
+       list tail) is dropped first, repeating until under cap.
+    """
+    summarised: list[dict[str, Any]] = []
+    for mission in missions:
+        entry = {key: mission[key] for key in sorted(_PRIOR_MISSION_FIELDS) if key in mission}
+        lessons = entry.get("lessons")
+        if isinstance(lessons, str) and _utf8_len(lessons) > OBSERVATION_FIELD_BYTE_CAP:
+            entry["lessons"] = _truncate_serialised(lessons)
+        summarised.append(entry)
+
+    while _utf8_len(_dumps(summarised)) > PRIOR_MISSIONS_BYTE_CAP and summarised:
+        summarised.pop()
+    return summarised
 
 
 # ---------------------------------------------------------------------------
@@ -607,6 +676,14 @@ class SamplingPrompt:
     #: stays byte-identical to the pre-environment-context shape —
     #: that's what every existing determinism test pins down.
     environment_context: Mapping[str, Any] | None = field(default=None)
+    #: Optional list of similar past missions retrieved from the
+    #: mission-memory vector index (most-similar-first), gathered once
+    #: per engine wiring and reused on every iteration's prompt.
+    #: ``None`` (the default) suppresses the ``=== Prior similar
+    #: missions ===`` section entirely — the same byte-identical
+    #: contract as :attr:`environment_context`, and what keeps every
+    #: pre-memory prompt (and the determinism suite) unchanged.
+    prior_missions: Sequence[Mapping[str, Any]] | None = field(default=None)
 
     # ---- Strategy_Revision rendering --------------------------------------
 
@@ -743,6 +820,19 @@ class SamplingPrompt:
             env_summary = _summarise_environment_context(self.environment_context)
             sections.append("=== Environment context (slow-moving live signals) ===")
             sections.append(_dumps(env_summary, indent=2))
+            sections.append("")
+        if self.prior_missions is not None:
+            # Institutional memory: the closest past missions by directive
+            # similarity, with their lessons and verdicts. Advisory only —
+            # summarised and byte-capped in its own truncation domain.
+            sections.append("=== Prior similar missions (institutional memory) ===")
+            sections.append(
+                "Lessons and outcomes from the most similar past missions, "
+                "most similar first. Treat them as advisory context: they "
+                "may suggest which tools or query shapes worked before, or "
+                "what to avoid repeating."
+            )
+            sections.append(_dumps(_summarise_prior_missions(self.prior_missions), indent=2))
             sections.append("")
         sections.append(f"=== {recent_header} ===")
         sections.append(_dumps(list(iterations), indent=2))
@@ -1566,6 +1656,7 @@ async def maybe_sample_strategy_revision(
     remaining_wall_clock_secs: float | None,
     allow_scripts: bool,
     environment_context: Mapping[str, Any] | None = None,
+    prior_missions: Sequence[Mapping[str, Any]] | None = None,
 ) -> SamplingUsed | SamplingFallback:
     """Consult the advisory LLM for a Strategy_Revision, or fall back.
 
@@ -1619,6 +1710,7 @@ async def maybe_sample_strategy_revision(
         allow_scripts=allow_scripts,
         tool_schemas=tool_schemas,
         environment_context=environment_context,
+        prior_missions=prior_missions,
     )
 
     # ---- Transport: backend.sample. --------------------------------------

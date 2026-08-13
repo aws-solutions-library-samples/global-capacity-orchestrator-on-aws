@@ -302,6 +302,12 @@ class MissionMemoryStore:
             PartialCredentialsError,
         )
 
+        # Resolve the table name before embedding: on a deployment without
+        # the feature the SSM lookup raises MissionMemoryUnavailableError
+        # cheaply, so a disabled stack never pays a Bedrock embedding call
+        # just to discover there is nowhere to write.
+        table_name = self._resolve_table_name()
+
         directive = str(session.get("directive_text") or "")
         vector = self._embed(directive)
 
@@ -327,7 +333,7 @@ class MissionMemoryStore:
         }
 
         try:
-            self._get_client().put_item(TableName=self._resolve_table_name(), Item=item)
+            self._get_client().put_item(TableName=table_name, Item=item)
         except (NoCredentialsError, PartialCredentialsError) as err:
             raise MissionMemoryUnavailableError(
                 f"no AWS credentials — {_UNAVAILABLE_HINT}"
@@ -386,13 +392,19 @@ class MissionMemoryStore:
         if int(top_k) < 1:
             raise MissionMemoryError(f"top_k must be a positive integer, got {top_k!r}")
 
+        # Resolve names before embedding — same rationale as write_memory:
+        # a deployment without the feature fails fast on the SSM lookup
+        # instead of paying an embedding call first.
+        table_name = self._resolve_table_name()
+        index_name = self._resolve_index_name()
+
         vector = self._embed(directive)
 
         # Request-shape gotcha: SearchVector is a plain list of number
         # attribute values — the {"L": ...} wrapper is a write-side shape.
         request: dict[str, Any] = {
-            "TableName": self._resolve_table_name(),
-            "IndexName": self._resolve_index_name(),
+            "TableName": table_name,
+            "IndexName": index_name,
             "SearchVector": [_number_attr(v) for v in vector],
             "TopK": int(top_k),
         }
