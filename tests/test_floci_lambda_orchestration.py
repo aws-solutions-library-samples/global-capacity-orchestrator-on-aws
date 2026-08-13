@@ -105,7 +105,13 @@ class TestSecretRotationLifecycle:
             Name=unique_name("gco-signing-key"),
             SecretString=json.dumps({"description": "seed", "token": "seed-token"}),
         )["ARN"]
-        return handler, secret_arn
+        yield handler, secret_arn
+        # Force-delete so the secret vanishes immediately instead of
+        # lingering in a recovery window: leftovers pollute the session's
+        # shared emulator account and fail the live-validation harness's
+        # inventory gate on single long-lived emulator runs (CI's fresh
+        # emulator per job masked this).
+        secretsmanager.delete_secret(SecretId=secret_arn, ForceDeleteWithoutRecovery=True)
 
     def _step(self, handler, secret_arn: str, token: str, step: str) -> None:
         handler.lambda_handler(

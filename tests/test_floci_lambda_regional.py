@@ -67,7 +67,12 @@ class TestCapacityPoller:
             BillingMode="PAY_PER_REQUEST",
         )
         dynamodb.get_waiter("table_exists").wait(TableName=table_name)
-        return table_name
+        yield table_name
+        # Leaving the table behind pollutes the session's shared emulator
+        # account and fails the live-validation harness's inventory gate,
+        # which requires a GCO-resource-free account (single long-lived
+        # emulator runs; CI's fresh emulator per job masked this).
+        dynamodb.delete_table(TableName=table_name)
 
     def test_poll_writes_degraded_snapshot_when_capacity_apis_reject(
         self, history_table, monkeypatch
