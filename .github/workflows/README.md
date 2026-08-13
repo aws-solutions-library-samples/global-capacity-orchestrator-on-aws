@@ -33,6 +33,7 @@ Workflows outside the four badged gates above. Most are schedule- or dispatch-dr
 | `cve-scan.yml` | Weekly cron + manual | Re-run trivy against current CVE databases |
 | `pages.yml` | `workflow_run` after Unit Tests on `main` | Publish the HTML coverage report + shields.io badge JSON to GitHub Pages. Split out of Unit Tests so a Pages outage can't fail the test gate |
 | `mooncake-image.yml` | `push`: `main`, PR, manual | Contract-test the real upstream Mooncake vLLM image GCO defaults to — proxy `/healthz`, store-config loader, KV-connector names. Not CVE-scanned (upstream image); version drift is caught by `deps-scan` |
+| `grafana-dashboards.yml` | `push`: `main`, PR (paths-filtered), manual | Prove the exact Grafana image the pinned kube-prometheus-stack chart ships accepts the curated dashboard ConfigMaps: extract the payloads, resolve the image via `helm template` at the `charts.yaml` pin, boot it with sidecar-shaped file provisioning, and require every uid to answer with `meta.provisioned=true` and an error-free provisioning log. Runs only when the dashboards, the chart pin, or the check itself change |
 
 The accelerator check deliberately has two tiers: `unit-tests.yml` runs only the
 checked-in deterministic validator, while `deps-scan.yml` adds sequential,
