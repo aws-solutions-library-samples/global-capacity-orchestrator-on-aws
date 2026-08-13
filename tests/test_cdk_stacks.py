@@ -236,6 +236,22 @@ class MockConfigLoader:
             "top_k": 3,
         }
 
+    def get_vector_store_enabled(self):
+        return False
+
+    def get_vector_store_config(self):
+        return {
+            "enabled": False,
+            "dimensions": 1024,
+            "distance_function": "COSINE",
+            "embedding_model_id": "amazon.titan-embed-text-v2:0",
+            "replica_regions": [],
+            "corpus_prefix": "vector-corpus/",
+        }
+
+    def get_vector_store_replica_regions(self):
+        return [region for region in self.get_regions() if region != self.get_global_region()]
+
 
 class TestGlobalStackSynth:
     """Tests for Global Stack synthesis."""

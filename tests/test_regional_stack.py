@@ -155,6 +155,32 @@ class MockConfigLoader:
             "top_k": 3,
         }
 
+    def get_vector_store_enabled(self):
+        return bool(self.get_vector_store_config()["enabled"])
+
+    def get_vector_store_config(self):
+        # Disabled in the mock (matching the shipped default) so pre-existing
+        # stack-test templates stay unchanged; the vector-store stack tests
+        # override this to exercise the enabled path explicitly.
+        return {
+            "enabled": False,
+            "dimensions": 1024,
+            "distance_function": "COSINE",
+            "embedding_model_id": "amazon.titan-embed-text-v2:0",
+            "replica_regions": [],
+            "corpus_prefix": "vector-corpus/",
+        }
+
+    def get_vector_store_replica_regions(self):
+        # Mirrors ConfigLoader.get_vector_store_replica_regions: configured
+        # replica_regions when non-empty, else the regional deployment list,
+        # both minus the global region (the primary).
+        config = self.get_vector_store_config()
+        configured = [str(region) for region in config["replica_regions"]]
+        candidates = configured or self.get_regions()
+        global_region = self.get_global_region()
+        return [region for region in candidates if region != global_region]
+
     def get_cluster_observability_config(self):
         # Mirrors the on-by-default cdk.json cluster_observability defaults so
         # regional synth exercises the real (enabled) observability path.
