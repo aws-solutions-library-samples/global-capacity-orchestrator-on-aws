@@ -85,6 +85,13 @@ class TestMissionMemoryEnabled:
         create = json.loads(_resolve_joins(next(iter(custom.values()))["Properties"]["Create"]))
         assert create["service"] == "DynamoDB"
         assert create["action"] == "updateTable"
+        # The INLINE_FILTER attribute must be declared in the same
+        # UpdateTable call (live-verified: the service rejects the
+        # SearchSchema otherwise, and CreateTable cannot carry the
+        # definition because it is unused by any key schema there).
+        assert create["parameters"]["AttributeDefinitions"] == [
+            {"AttributeName": "final_verdict", "AttributeType": "S"}
+        ]
         updates = create["parameters"]["VectorIndexUpdates"]
         assert len(updates) == 1
         spec = updates[0]["Create"]

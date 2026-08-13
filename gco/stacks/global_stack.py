@@ -624,6 +624,17 @@ class GCOGlobalStack(Stack):
                 action="updateTable",
                 parameters={
                     "TableName": self.mission_memory_table.table_name,
+                    # Any attribute an index references must be declared in
+                    # AttributeDefinitions, and for an index added through
+                    # UpdateTable the declaration rides in the same call —
+                    # the standard add-a-GSI pattern, verified live: without
+                    # it the service rejects the SearchSchema with "One
+                    # element in SearchSchema is not defined in attribute
+                    # definitions". It cannot ride on CreateTable instead;
+                    # CreateTable rejects definitions unused by key schemas.
+                    "AttributeDefinitions": [
+                        {"AttributeName": "final_verdict", "AttributeType": "S"}
+                    ],
                     "VectorIndexUpdates": vector_index_updates,
                 },
                 physical_resource_id=cr.PhysicalResourceId.of(
