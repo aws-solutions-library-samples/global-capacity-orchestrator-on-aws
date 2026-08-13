@@ -76,6 +76,18 @@ class MockConfigLoader:
             "enabled_regions": [],
         }
 
+    def get_mission_memory_enabled(self):
+        return False
+
+    def get_mission_memory_config(self):
+        return {
+            "enabled": False,
+            "retention_days": 365,
+            "dimensions": 1024,
+            "distance_function": "COSINE",
+            "top_k": 3,
+        }
+
 
 def _synth(app: cdk.App, construct_id: str = "test-global-stack") -> assertions.Template:
     stack = GCOGlobalStack(app, construct_id, config=cast(ConfigLoader, MockConfigLoader(app)))

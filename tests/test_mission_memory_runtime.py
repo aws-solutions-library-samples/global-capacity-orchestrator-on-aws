@@ -653,6 +653,9 @@ def test_floci_search_vectors_placeholder() -> None:
     The Floci emulator layer (``GCO_FLOCI_ENDPOINT``, see
     ``docs/FLOCI_TESTING.md``) exercises the production DynamoDB stores
     over the real wire protocol, but it does not implement the
-    ``SearchVectors`` API, so the mission-memory search path cannot be
-    emulator-tested. An AWS-credentialed smoke test covers it instead.
+    ``SearchVectors`` API, so the mission-memory *search* path cannot be
+    emulator-tested; an AWS-credentialed smoke test covers it instead.
+    The plain-DynamoDB write and list paths ARE emulator-tested — see
+    ``tests/test_floci_mission_memory.py``, which also pins the
+    SearchVectors gap itself as a typed error.
     """
