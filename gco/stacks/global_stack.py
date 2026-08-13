@@ -630,7 +630,32 @@ class GCOGlobalStack(Stack):
                     "TableName": self.mission_memory_table.table_name,
                     "VectorIndexUpdates": [{"Delete": {"IndexName": index_name}}],
                 },
+                # Teardown must never wedge the stack. If creation failed
+                # (index absent) or the table is already gone, deleting the
+                # index answers ValidationException / ResourceNotFoundException
+                # — swallowing them is safe because stack deletion removes the
+                # table (and with it any index) anyway. Without this, a failed
+                # create rolls back into DELETE_FAILED on this very resource,
+                # which is exactly what the first live deploy hit.
+                ignore_error_codes_matching="ResourceNotFoundException|ValidationException",
             ),
+            # The Lambda behind AwsCustomResource ships the runtime's bundled
+            # AWS SDK for JavaScript, which lags the API models: a bundled SDK
+            # that predates vector indexes silently DROPS the unknown
+            # VectorIndexUpdates member at serialization, and DynamoDB then
+            # rejects the bare UpdateTable with "At least one of
+            # ProvisionedThroughput, BillingMode, ... is required". boto3
+            # having the API (design §0.1) says nothing about this Lambda's
+            # SDK. install_latest_aws_sdk fetches a current SDK on first
+            # invocation so the member survives. Verified live: the bundled
+            # SDK reproduces the failure, the installed SDK creates the index.
+            # The floating fetch is bounded risk: it runs only on stack
+            # create/delete/update (never on a data path), and an npm failure
+            # falls back to the bundled SDK with a logged warning. Revisit
+            # once the bundled runtime SDK knows VectorIndexUpdates (drop the
+            # flag for determinism), or if Phase 2 multiplies these custom
+            # resources (a shared pinned provider Lambda becomes worth it).
+            install_latest_aws_sdk=True,
             role=index_role,
         )
         # The table must be ACTIVE before UpdateTable can add an index.

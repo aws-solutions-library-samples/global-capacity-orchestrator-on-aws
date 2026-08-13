@@ -118,6 +118,58 @@ class TestMissionMemoryEnabled:
             {"Delete": {"IndexName": "directive-embedding-index"}}
         ]
 
+    def test_custom_resource_installs_a_current_sdk(self):
+        """The vector-index call MUST NOT run on the runtime's bundled SDK.
+
+        Live-deploy regression guard: the AwsCustomResource Lambda ships the
+        Lambda runtime's bundled AWS SDK for JavaScript, and a bundled SDK
+        that predates vector indexes silently drops the unknown
+        ``VectorIndexUpdates`` member at serialization — DynamoDB then
+        rejects the bare UpdateTable with "At least one of
+        ProvisionedThroughput, BillingMode, ... is required", the create
+        fails, and (before the delete-path fix below) rollback wedged in
+        DELETE_FAILED. ``InstallLatestAwsSdk: true`` is the fix; anyone
+        removing it re-introduces a deploy-time failure that no unit test
+        of the payload shape can see, so it is pinned here.
+        """
+        template = _synth(_EnabledConfig())
+        custom = _index_custom_resources(template)
+        props = next(iter(custom.values()))["Properties"]
+        # CDK renders the explicit opt-in as boolean true (the default it
+        # replaces rendered as the string "false" in the failed deploy).
+        assert props["InstallLatestAwsSdk"] is True
+
+    def test_delete_tolerates_absent_index_so_teardown_never_wedges(self):
+        """A failed create must roll back cleanly, not strand the stack.
+
+        If index creation failed (or the table is already gone), the
+        on-delete UpdateTable answers ValidationException /
+        ResourceNotFoundException. Without ``ignoreErrorCodesMatching``
+        the custom resource reports DELETE_FAILED and the whole stack
+        wedges in ROLLBACK_FAILED — exactly what the first live deploy
+        hit. Swallowing those two codes on delete is safe: stack
+        deletion removes the table (and any index on it) regardless.
+        """
+        template = _synth(_EnabledConfig())
+        custom = _index_custom_resources(template)
+        delete = json.loads(_resolve_joins(next(iter(custom.values()))["Properties"]["Delete"]))
+        assert delete["ignoreErrorCodesMatching"] == "ResourceNotFoundException|ValidationException"
+
+    def test_botocore_model_knows_the_vector_update_member(self):
+        """Document the API-model dependency the provisioning payload rides on.
+
+        The ``VectorIndexUpdates`` member must exist in the current SDK
+        models — the custom resource installs a current JS SDK for exactly
+        this reason, and this assertion (against botocore, the model source
+        this repo can see) fails loudly if the payload is ever reshaped
+        against an SDK generation that lacks the API.
+        """
+        import botocore.session
+
+        model = botocore.session.get_session().get_service_model("dynamodb")
+        update_table = model.operation_model("UpdateTable").input_shape
+        assert "VectorIndexUpdates" in update_table.members
+
     def test_index_role_scoped_to_the_table_only(self):
         template = _synth(_EnabledConfig())
         policies = template.find_resources("AWS::IAM::Policy")
