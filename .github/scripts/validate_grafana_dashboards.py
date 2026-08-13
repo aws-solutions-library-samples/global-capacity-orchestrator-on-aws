@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import os
 import re
@@ -131,7 +132,14 @@ def read_chart_pin(charts_yaml: Path, chart: str = "kube-prometheus-stack") -> d
     raise ValidationError(f"no {chart} entry found in {charts_yaml}")
 
 
-_RETRIABLE_FETCH_ERRORS = (urllib.error.URLError, TimeoutError, json.JSONDecodeError)
+# Polling a Grafana that is still booting sees the whole zoo of transport
+# failures: connection refused, docker-proxy accepting then resetting the
+# socket (raw ConnectionResetError, not wrapped in URLError), and half-open
+# responses (http.client.RemoteDisconnected). OSError covers URLError,
+# TimeoutError, and every Connection*Error; HTTPException covers the
+# half-open cases. urllib.error.HTTPError is caught separately first, so
+# real HTTP status codes are still returned rather than swallowed here.
+_RETRIABLE_FETCH_ERRORS = (OSError, http.client.HTTPException, json.JSONDecodeError)
 
 
 def _get(url: str, auth: tuple[str, str] | None = None, timeout: float = 10.0) -> tuple[int, Any]:

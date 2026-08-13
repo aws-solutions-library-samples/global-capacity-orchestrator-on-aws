@@ -245,6 +245,24 @@ def test_chart_pin_is_readable_for_the_ci_image_resolution() -> None:
     assert pin["repo_url"].startswith("https://"), pin
 
 
+def test_fetch_treats_startup_transport_failures_as_retriable() -> None:
+    """A booting Grafana resets or refuses connections; the poll must retry.
+
+    docker-proxy accepts the published port before Grafana listens, so the
+    first health probes can die with a raw ConnectionResetError rather than
+    a URLError — caught live on the CI runner.
+    """
+    from unittest.mock import patch
+
+    for boot_noise in (
+        ConnectionResetError(104, "Connection reset by peer"),
+        ConnectionRefusedError(111, "Connection refused"),
+        TimeoutError("timed out"),
+    ):
+        with patch.object(script.urllib.request, "urlopen", side_effect=boot_noise):
+            assert script._get("http://127.0.0.1:3000/api/health") == (0, None)
+
+
 def test_extraction_rejects_a_malformed_payload(tmp_path: Path) -> None:
     """The whole point: a stray comma must fail loudly, not ship silently."""
     manifest = tmp_path / "post-helm-grafana-broken.yaml"
