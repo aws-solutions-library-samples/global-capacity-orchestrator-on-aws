@@ -450,6 +450,85 @@ class TestRegionalWiring:
         assert "vector-store" not in blob
 
 
+class _BothIndexFeaturesConfig(_EnabledConfig):
+    """Vector store AND mission memory enabled — the singleton-role case."""
+
+    def get_mission_memory_enabled(self):
+        return True
+
+    def get_mission_memory_config(self):
+        return {
+            "enabled": True,
+            "retention_days": 365,
+            "dimensions": 1024,
+            "distance_function": "COSINE",
+            "top_k": 3,
+        }
+
+
+class TestSingletonCustomResourceRole:
+    """Both vector-index features must share one custom-resource role.
+
+    ``cr.AwsCustomResource`` Lambdas are a per-stack singleton that runs
+    with the role of whichever instance is constructed first. The first
+    live deploy with both features enabled failed exactly here: the
+    vector-store index's UpdateTable executed under the mission-memory
+    role and was denied. These tests pin the fix — one shared role,
+    each feature contributing only its own table-scoped statement.
+    """
+
+    def test_both_index_custom_resources_share_one_service_token(self):
+        template = _synth(_BothIndexFeaturesConfig())
+        custom = {
+            lid: res
+            for lid, res in template.find_resources("Custom::AWS").items()
+            if "VectorIndexUpdates" in json.dumps(res.get("Properties", {}).get("Create"))
+        }
+        assert len(custom) == 2
+        tokens = {json.dumps(res["Properties"]["ServiceToken"]) for res in custom.values()}
+        assert len(tokens) == 1, "both index custom resources must hit the singleton Lambda"
+
+    def test_the_shared_role_carries_both_tables_scoped_statements(self):
+        template = _synth(_BothIndexFeaturesConfig())
+        update_statements = []
+        for res in template.find_resources("AWS::IAM::Policy").values():
+            for stmt in res["Properties"]["PolicyDocument"]["Statement"]:
+                actions = stmt.get("Action")
+                actions = [actions] if isinstance(actions, str) else actions
+                if actions and "dynamodb:UpdateTable" in actions:
+                    update_statements.append(stmt)
+
+        # Two statements — one per feature — each scoped to exactly its
+        # own table, never a wildcard.
+        assert len(update_statements) == 2
+        resources_blob = json.dumps([stmt["Resource"] for stmt in update_statements])
+        assert "MissionMemoryTable" in resources_blob
+        assert "VectorStoreTable" in resources_blob
+        assert "*" not in resources_blob
+
+        # And both statements live on the ONE shared role.
+        roles = {
+            lid
+            for lid, res in template.find_resources("AWS::IAM::Policy").items()
+            if "dynamodb:UpdateTable" in json.dumps(res["Properties"]["PolicyDocument"])
+            for lid in [json.dumps(res["Properties"]["Roles"])]
+        }
+        assert len(roles) == 1
+
+    def test_single_feature_deployments_carry_only_their_own_grant(self):
+        # Vector store alone: one UpdateTable statement, vector table only.
+        template = _synth(_EnabledConfig())
+        blob = json.dumps(template.to_json())
+        assert "MissionMemoryTable" not in blob
+        statements = [
+            stmt
+            for res in template.find_resources("AWS::IAM::Policy").values()
+            for stmt in res["Properties"]["PolicyDocument"]["Statement"]
+            if "dynamodb:UpdateTable" in json.dumps(stmt.get("Action"))
+        ]
+        assert len(statements) == 1
+
+
 class TestVectorStoreDisabled:
     def test_no_store_table_or_custom_resource(self):
         # Region-agnostic synth on purpose: every pre-existing global-stack

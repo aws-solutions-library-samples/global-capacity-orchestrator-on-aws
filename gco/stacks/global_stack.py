@@ -573,8 +573,6 @@ class GCOGlobalStack(Stack):
         """
         from aws_cdk import custom_resources as cr
 
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
-
         project_name = self.config.get_project_name()
         memory_config = self.config.get_mission_memory_config()
         dimensions = int(memory_config["dimensions"])
@@ -599,25 +597,10 @@ class GCOGlobalStack(Stack):
             time_to_live_attribute="ttl",
         )
 
-        # Dedicated, pre-created execution role for the custom resource —
-        # same rationale as the regional stack's shared AwsCustomResource
-        # role: letting CDK auto-generate the role from ``policy=`` races
-        # IAM's global propagation window on cold deploys.
-        index_role = iam.Role(
-            self,
-            "MissionMemoryIndexRole",
-            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
-            description=(
-                "Execution role for the mission-memory vector-index custom "
-                "resource (DynamoDB UpdateTable/DescribeTable on the "
-                "mission-memory table only)."
-            ),
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "service-role/AWSLambdaBasicExecutionRole"
-                )
-            ],
-        )
+        # Shared, pre-created execution role for the singleton
+        # AwsCustomResource Lambda; this feature contributes its own
+        # table-scoped statement (see _vector_index_custom_resource_role).
+        index_role = self._vector_index_custom_resource_role()
         index_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -767,8 +750,47 @@ class GCOGlobalStack(Stack):
             resources=[backup.BackupResource.from_dynamo_db_table(self.mission_memory_table)],
         )
 
+    def _vector_index_custom_resource_role(self) -> iam.Role:
+        """Return the execution role shared by every vector-index custom resource.
+
+        ``cr.AwsCustomResource`` Lambdas are a per-stack SINGLETON: every
+        instance shares one provider function, and that function executes
+        with the role of whichever instance is constructed *first*.
+        Live-earned on the first vector-store deploy: with mission memory
+        enabled, the vector-store index's ``UpdateTable`` ran under the
+        mission-memory role and was denied on the vector-store table. One
+        shared role — created lazily by the first feature to need it, with
+        each feature adding only its own table-scoped statements — makes
+        the composition explicit and order-independent, while a deployment
+        with a single feature enabled still carries only that feature's
+        grants. Pre-created (rather than CDK's ``policy=`` auto-role) for
+        the same IAM-propagation reason as the regional stack's shared
+        AwsCustomResource role.
+        """
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        existing: iam.Role | None = getattr(self, "_index_custom_resource_role", None)
+        if existing is not None:
+            return existing
+
+        role = iam.Role(
+            self,
+            "VectorIndexCustomResourceRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            description=(
+                "Shared execution role for the singleton AwsCustomResource "
+                "Lambda that creates DynamoDB vector indexes (mission memory "
+                "and the vector store); each enabled feature contributes only "
+                "its own table-scoped UpdateTable/DescribeTable statement."
+            ),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                )
+            ],
+        )
         acknowledge_nag_findings(
-            index_role,
+            role,
             [
                 {
                     "id": "AwsSolutions-IAM4",
@@ -779,6 +801,8 @@ class GCOGlobalStack(Stack):
                 },
             ],
         )
+        self._index_custom_resource_role = role
+        return role
 
     def _create_vector_store(self) -> None:
         """Create the globally replicated vector-store table and its index.
@@ -813,8 +837,6 @@ class GCOGlobalStack(Stack):
         """
         from aws_cdk import custom_resources as cr
 
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
-
         project_name = self.config.get_project_name()
         store_config = self.config.get_vector_store_config()
         dimensions = int(store_config["dimensions"])
@@ -841,23 +863,11 @@ class GCOGlobalStack(Stack):
             encryption=dynamodb.TableEncryptionV2.aws_managed_key(),
         )
 
-        # Dedicated, pre-created execution role — same IAM-propagation
-        # rationale as the mission-memory index role.
-        index_role = iam.Role(
-            self,
-            "VectorStoreIndexRole",
-            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
-            description=(
-                "Execution role for the vector-store index custom resource "
-                "(DynamoDB UpdateTable/DescribeTable on the vector-store "
-                "table only)."
-            ),
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "service-role/AWSLambdaBasicExecutionRole"
-                )
-            ],
-        )
+        # Shared, pre-created execution role for the singleton
+        # AwsCustomResource Lambda; this feature contributes its own
+        # table-scoped statement (see _vector_index_custom_resource_role,
+        # which documents the live-earned singleton-role failure).
+        index_role = self._vector_index_custom_resource_role()
         index_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -971,19 +981,6 @@ class GCOGlobalStack(Stack):
         self.backup_plan.add_selection(
             "VectorStoreTableSelection",
             resources=[backup.BackupResource.from_dynamo_db_table(self.vector_store_table)],
-        )
-
-        acknowledge_nag_findings(
-            index_role,
-            [
-                {
-                    "id": "AwsSolutions-IAM4",
-                    "reason": (
-                        "AWSLambdaBasicExecutionRole provides the standard CloudWatch "
-                        "Logs permissions every Lambda needs."
-                    ),
-                },
-            ],
         )
 
     def _create_vector_ingest(self) -> None:
