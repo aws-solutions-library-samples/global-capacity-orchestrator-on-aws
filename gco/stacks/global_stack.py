@@ -223,9 +223,12 @@ class GCOGlobalStack(Stack):
         # Vector store add-on (gated by vector_store.enabled in cdk.json,
         # OFF by default): a globally replicated DynamoDB table with a vector
         # index over an S3-ingested document corpus, giving workloads in every
-        # deployment region local-latency semantic search.
+        # deployment region local-latency semantic search. The ingest Lambda
+        # watches the cluster-shared bucket's corpus prefix and writes
+        # embedded chunks to the table's primary replica.
         if self.config.get_vector_store_enabled():
             self._create_vector_store()
+            self._create_vector_ingest()
 
         # Global Accelerator is available only in the commercial ``aws``
         # partition. Other coherent AWS partitions retain all shared resources
@@ -982,6 +985,199 @@ class GCOGlobalStack(Stack):
                 },
             ],
         )
+
+    def _create_vector_ingest(self) -> None:
+        """Create the S3-triggered ingest Lambda for the vector store.
+
+        Objects dropped under ``vector_store.corpus_prefix`` on the always-on
+        cluster-shared bucket invoke the ``lambda/vector-ingest`` handler
+        asynchronously; it chunks, embeds (Bedrock), and writes items to the
+        vector-store table created by :meth:`_create_vector_store`. Uploading
+        a corpus is therefore a plain S3 write — ``gco vector ingest`` wraps
+        it, but any S3 client works.
+
+        The bucket notification is additive: it synthesizes a separate
+        ``Custom::S3BucketNotifications`` resource (plus CDK's singleton
+        handler Lambda), so the disabled path leaves the cluster-shared
+        bucket's own template byte-identical. The execution role carries the
+        pipeline's write-only identity — object reads under the corpus
+        prefix, ``PutItem`` on the table, and ``InvokeModel`` on the
+        configured embedding model; the read path (``SearchVectors``)
+        belongs to the regional workload role and the CLI, never to ingest.
+        """
+        from aws_cdk import aws_s3_notifications as s3_notifications
+        from aws_cdk import aws_sqs as sqs
+
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        store_config = self.config.get_vector_store_config()
+        corpus_prefix = str(store_config["corpus_prefix"])
+        embedding_model_id = str(store_config["embedding_model_id"])
+        dimensions = int(store_config["dimensions"])
+
+        ingest_role = iam.Role(
+            self,
+            "VectorIngestRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            description=(
+                "Execution role for the vector-store ingest Lambda: corpus-prefix "
+                "object reads, vector-store PutItem, and embedding-model InvokeModel."
+            ),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                )
+            ],
+        )
+        ingest_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["s3:GetObject"],
+                resources=[f"{self.cluster_shared_bucket.bucket_arn}/{corpus_prefix}*"],
+            )
+        )
+        # The bucket is KMS-encrypted with the cluster-shared key; GetObject
+        # needs Decrypt on it.
+        ingest_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["kms:Decrypt"],
+                resources=[self.cluster_shared_kms_key.key_arn],
+            )
+        )
+        ingest_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["dynamodb:PutItem"],
+                resources=[self.vector_store_table.table_arn],
+            )
+        )
+        # The embedding model is a foundation model (account-less ARN) in
+        # this (global) region — the same region the table's primary replica
+        # and this Lambda live in.
+        ingest_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["bedrock:InvokeModel"],
+                resources=[
+                    f"arn:{self.partition}:bedrock:{self.region}::foundation-model/"
+                    f"{embedding_model_id}"
+                ],
+            )
+        )
+
+        # Async-invoke failures (after Lambda's built-in retries) land here
+        # rather than vanishing; the DLQ message carries the original S3
+        # event for replay.
+        ingest_dlq = sqs.Queue(
+            self,
+            "VectorIngestDlq",
+            retention_period=Duration.days(14),
+            enforce_ssl=True,
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        self.vector_ingest_lambda = lambda_.Function(
+            self,
+            "VectorIngestFunction",
+            runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
+            handler="handler.lambda_handler",
+            code=lambda_.Code.from_asset("lambda/vector-ingest"),
+            timeout=Duration.minutes(5),
+            memory_size=512,
+            role=ingest_role,
+            dead_letter_queue=ingest_dlq,
+            environment={
+                "VECTOR_STORE_TABLE_NAME": self.vector_store_table.table_name,
+                "EMBEDDING_MODEL_ID": embedding_model_id,
+                "EMBEDDING_DIMENSIONS": str(dimensions),
+                "CORPUS_PREFIX": corpus_prefix,
+            },
+            tracing=lambda_.Tracing.ACTIVE,
+            description=(
+                "Vector-store ingest (opt-in global-stack add-on): chunks and embeds "
+                "corpus objects from the cluster-shared bucket into the vector store."
+            ),
+        )
+
+        self.cluster_shared_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3_notifications.LambdaDestination(self.vector_ingest_lambda),
+            s3.NotificationKeyFilter(prefix=corpus_prefix),
+        )
+
+        acknowledge_nag_findings(
+            ingest_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM4",
+                    "reason": (
+                        "AWSLambdaBasicExecutionRole provides the standard CloudWatch "
+                        "Logs permissions every Lambda needs."
+                    ),
+                },
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The object-read grant is scoped to the vector corpus prefix "
+                        "of the cluster-shared bucket; ingest must read every object "
+                        "dropped under it, and S3 object grants require a key wildcard."
+                    ),
+                    "appliesTo": [
+                        f"Resource::<ClusterSharedBucket45D6691E.Arn>/{corpus_prefix}*",
+                    ],
+                },
+            ],
+        )
+        acknowledge_nag_findings(
+            ingest_dlq,
+            [
+                {
+                    "id": "AwsSolutions-SQS3",
+                    "reason": (
+                        "This queue is the dead-letter queue for the ingest Lambda's "
+                        "async invocations; a DLQ for a DLQ is circular."
+                    ),
+                },
+                {
+                    "id": "Serverless-SQSRedrivePolicy",
+                    "reason": (
+                        "This queue is itself the dead-letter queue for the ingest "
+                        "Lambda's async invocations, so it does not need its own "
+                        "redrive policy; a DLQ for a DLQ is circular."
+                    ),
+                },
+            ],
+        )
+        # CDK's bucket-notification wiring synthesizes a singleton handler
+        # Lambda whose auto-generated role needs s3:PutBucketNotification on
+        # every bucket it manages — the API supports no resource scoping.
+        notifications_handler = self.node.try_find_child(
+            "BucketNotificationsHandler050a0587b7544547bf325f094a3db834"
+        )
+        if notifications_handler is not None:
+            acknowledge_nag_findings(
+                notifications_handler,
+                [
+                    {
+                        "id": "AwsSolutions-IAM4",
+                        "reason": (
+                            "CDK's singleton S3 bucket-notifications handler attaches "
+                            "AWSLambdaBasicExecutionRole for CloudWatch Logs."
+                        ),
+                    },
+                    {
+                        "id": "AwsSolutions-IAM5",
+                        "reason": (
+                            "s3:PutBucketNotification supports no resource-level "
+                            "scoping; CDK's singleton notifications handler requires "
+                            "the wildcard to manage bucket notification configuration."
+                        ),
+                        "appliesTo": ["Resource::*"],
+                    },
+                ],
+            )
 
     def _create_outputs(self) -> None:
         """Create CloudFormation outputs for cross-stack references."""

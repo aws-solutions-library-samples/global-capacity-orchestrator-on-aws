@@ -274,6 +274,64 @@ class TestVectorStoreEnabled:
         assert "VectorStoreTable" in blob
 
 
+class TestVectorIngestWiring:
+    def test_notification_watches_the_corpus_prefix_for_creates(self):
+        template = _synth(_EnabledConfig())
+        notifications = template.find_resources("Custom::S3BucketNotifications")
+        assert len(notifications) == 1
+        config = next(iter(notifications.values()))["Properties"]["NotificationConfiguration"]
+        (lambda_config,) = config["LambdaFunctionConfigurations"]
+        assert lambda_config["Events"] == ["s3:ObjectCreated:*"]
+        assert lambda_config["Filter"]["Key"]["FilterRules"] == [
+            {"Name": "prefix", "Value": "vector-corpus/"}
+        ]
+
+    def test_ingest_function_shape_env_and_dlq(self):
+        template = _synth(_EnabledConfig())
+        functions = {
+            lid: res
+            for lid, res in template.find_resources("AWS::Lambda::Function").items()
+            if "Vector-store ingest" in str(res.get("Properties", {}).get("Description", ""))
+        }
+        assert len(functions) == 1
+        props = next(iter(functions.values()))["Properties"]
+        assert props["Timeout"] == 300
+        assert props["MemorySize"] == 512
+        env = props["Environment"]["Variables"]
+        assert env["EMBEDDING_MODEL_ID"] == "amazon.titan-embed-text-v2:0"
+        assert env["EMBEDDING_DIMENSIONS"] == "1024"
+        assert env["CORPUS_PREFIX"] == "vector-corpus/"
+        assert "Ref" in json.dumps(env["VECTOR_STORE_TABLE_NAME"])
+        # Async failures land in the dedicated DLQ after Lambda's retries.
+        assert "TargetArn" in props["DeadLetterConfig"]
+
+    def test_ingest_role_carries_the_write_only_identity(self):
+        # GetObject scoped to the corpus prefix, PutItem on the table,
+        # InvokeModel on the one embedding model — and none of the read
+        # path (SearchVectors/GetItem/Query belong to workloads and the
+        # CLI, never to ingest).
+        template = _synth(_EnabledConfig())
+        statements = []
+        for res in template.find_resources("AWS::IAM::Policy").values():
+            statements.extend(res["Properties"]["PolicyDocument"]["Statement"])
+        blob = json.dumps(statements)
+        actions = {
+            action
+            for stmt in statements
+            for action in (
+                [stmt["Action"]] if isinstance(stmt.get("Action"), str) else stmt.get("Action", [])
+            )
+        }
+        assert "dynamodb:PutItem" in actions
+        assert "bedrock:InvokeModel" in actions
+        assert "s3:GetObject" in actions
+        assert "vector-corpus/*" in blob
+        assert "foundation-model/amazon.titan-embed-text-v2:0" in blob
+        assert "dynamodb:SearchVectors" not in actions
+        assert "dynamodb:GetItem" not in actions
+        assert "dynamodb:Query" not in actions
+
+
 class TestVectorStoreDisabled:
     def test_no_store_table_or_custom_resource(self):
         # Region-agnostic synth on purpose: every pre-existing global-stack
@@ -283,6 +341,14 @@ class TestVectorStoreDisabled:
         assert template.find_resources("AWS::DynamoDB::GlobalTable") == {}
         assert _index_custom_resources(template) == {}
 
+    def test_disabled_path_leaves_the_shared_bucket_unwatched(self):
+        # The ingest notification is additive (a separate
+        # Custom::S3BucketNotifications resource); disabled deployments
+        # must carry neither it nor its singleton handler, leaving the
+        # cluster-shared bucket's template exactly as before the feature.
+        template = _synth(MockConfigLoader(), env=None)
+        assert template.find_resources("Custom::S3BucketNotifications") == {}
+
     def test_disabled_template_carries_no_feature_traces(self):
         # With the feature shipped OFF by default, the disabled path is the
         # compatibility contract: no resource names, SSM paths, or exports
@@ -291,3 +357,5 @@ class TestVectorStoreDisabled:
         blob = json.dumps(template)
         assert "vector-store" not in blob
         assert "VectorStore" not in blob
+        assert "vector-corpus" not in blob
+        assert "VectorIngest" not in blob
