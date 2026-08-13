@@ -32,21 +32,28 @@ from cli.status import (
     REGION_SOURCE_CDK_JSON,
     REGION_SOURCE_FLAG,
     SECTION_CAPACITY,
+    SECTION_JOBS,
     SECTION_ORDER,
     SECTION_QUEUE,
     SECTION_REGIONS,
     SECTION_STACKS,
+    SEVERITY_ERROR,
+    SEVERITY_WARN,
     STATUS_EMPTY,
     STATUS_ERROR,
     STATUS_OK,
     STATUS_PARTIAL,
     STATUS_SKIPPED,
     STATUS_UNAVAILABLE,
+    Finding,
+    Section,
+    _derive_overall,
     _gather_capacity,
     _gather_inference,
     _gather_jobs,
     _gather_queue,
     _gather_stacks,
+    derive_findings,
     gather_fleet_status,
     resolve_regions,
 )
@@ -725,3 +732,359 @@ def test_gather_marks_opt_in_sections_skipped_by_default() -> None:
     assert nodepools.status == STATUS_SKIPPED
     assert nodepools.reason is not None
     assert "--with-nodepools" in nodepools.reason
+
+
+# ---------------------------------------------------------------------------
+# Findings
+# ---------------------------------------------------------------------------
+
+
+def _stack_finding_entry(name: str, region: str, status: str | None, health: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "region": region,
+        "status": status,
+        "health": health,
+        "updated_time": None,
+    }
+
+
+def _stacks_section(
+    expected: list[dict[str, Any]], optional: list[dict[str, Any]] | None = None
+) -> Section:
+    return Section(
+        name=SECTION_STACKS,
+        status=STATUS_OK,
+        data={"expected": expected, "optional": optional or []},
+    )
+
+
+def test_finding_error_for_a_rolled_back_expected_stack() -> None:
+    sections = {
+        SECTION_STACKS: _stacks_section(
+            [
+                _stack_finding_entry(
+                    "test-gco-us-west-2", "us-west-2", "UPDATE_ROLLBACK_COMPLETE", HEALTH_UNHEALTHY
+                )
+            ]
+        )
+    }
+
+    findings = derive_findings(sections)
+
+    assert findings == [
+        Finding(
+            severity=SEVERITY_ERROR,
+            section=SECTION_STACKS,
+            message="test-gco-us-west-2 is UPDATE_ROLLBACK_COMPLETE in us-west-2",
+        )
+    ]
+
+
+def test_finding_error_for_unavailable_region_telemetry() -> None:
+    sections = {
+        SECTION_CAPACITY: Section(
+            name=SECTION_CAPACITY,
+            status=STATUS_UNAVAILABLE,
+            data={
+                "by_region": {
+                    "us-east-1": {
+                        "telemetry_status": STATUS_UNAVAILABLE,
+                        "unavailable_signals": ["queue", "gpu", "cpu"],
+                    }
+                }
+            },
+        )
+    }
+
+    findings = derive_findings(sections)
+
+    assert findings == [
+        Finding(
+            severity=SEVERITY_ERROR,
+            section=SECTION_CAPACITY,
+            message="us-east-1 telemetry is unavailable",
+        )
+    ]
+
+
+def test_finding_warn_for_an_absent_expected_stack_says_not_readable() -> None:
+    sections = {
+        SECTION_STACKS: _stacks_section(
+            [_stack_finding_entry("test-gco-monitoring", "us-east-2", None, HEALTH_NOT_DEPLOYED)]
+        )
+    }
+
+    findings = derive_findings(sections)
+
+    assert len(findings) == 1
+    assert findings[0].severity == SEVERITY_WARN
+    assert findings[0].message == "test-gco-monitoring is absent or not readable in us-east-2"
+
+
+def test_finding_warn_for_a_dead_letter_queue_with_messages() -> None:
+    sections = {
+        SECTION_QUEUE: Section(
+            name=SECTION_QUEUE,
+            status=STATUS_OK,
+            data={
+                "by_region": {
+                    "us-west-2": {"available": 0, "in_flight": 0, "delayed": 0, "dlq": 2},
+                    "us-east-1": {"available": 3, "in_flight": 1, "delayed": 0, "dlq": 0},
+                }
+            },
+        )
+    }
+
+    findings = derive_findings(sections)
+
+    assert findings == [
+        Finding(
+            severity=SEVERITY_WARN,
+            section=SECTION_QUEUE,
+            message="us-west-2 dead-letter queue holds 2 messages",
+        )
+    ]
+
+
+def test_finding_warn_for_a_single_dlq_message_is_singular() -> None:
+    sections = {
+        SECTION_QUEUE: Section(
+            name=SECTION_QUEUE,
+            status=STATUS_OK,
+            data={"by_region": {"us-east-1": {"dlq": 1}}},
+        )
+    }
+
+    findings = derive_findings(sections)
+
+    assert findings[0].message == "us-east-1 dead-letter queue holds 1 message"
+
+
+def test_finding_ignores_unknown_dlq_depth() -> None:
+    sections = {
+        SECTION_QUEUE: Section(
+            name=SECTION_QUEUE,
+            status=STATUS_OK,
+            data={"by_region": {"us-east-1": {"dlq": None}}},
+        )
+    }
+
+    assert derive_findings(sections) == []
+
+
+def test_finding_warn_for_an_in_progress_stack() -> None:
+    sections = {
+        SECTION_STACKS: _stacks_section(
+            [
+                _stack_finding_entry(
+                    "test-gco-us-east-1", "us-east-1", "UPDATE_IN_PROGRESS", HEALTH_IN_PROGRESS
+                )
+            ]
+        )
+    }
+
+    findings = derive_findings(sections)
+
+    assert findings == [
+        Finding(
+            severity=SEVERITY_WARN,
+            section=SECTION_STACKS,
+            message="test-gco-us-east-1 is UPDATE_IN_PROGRESS in us-east-1",
+        )
+    ]
+
+
+def test_finding_warn_for_partial_region_telemetry_names_the_signals() -> None:
+    sections = {
+        SECTION_CAPACITY: Section(
+            name=SECTION_CAPACITY,
+            status=STATUS_PARTIAL,
+            data={
+                "by_region": {
+                    "us-west-2": {
+                        "telemetry_status": STATUS_PARTIAL,
+                        "unavailable_signals": ["gpu"],
+                    }
+                }
+            },
+        )
+    }
+
+    findings = derive_findings(sections)
+
+    assert findings == [
+        Finding(
+            severity=SEVERITY_WARN,
+            section=SECTION_CAPACITY,
+            message="us-west-2 telemetry is partial (unavailable: gpu)",
+        )
+    ]
+
+
+def test_finding_warn_for_a_truncated_job_count_scan() -> None:
+    sections = {
+        SECTION_JOBS: Section(
+            name=SECTION_JOBS,
+            status=STATUS_OK,
+            data={
+                "totals": {"total": 41, "queued": 3, "running": 1},
+                "by_region": {},
+                "complete": False,
+                "records_evaluated": 41,
+            },
+        )
+    }
+
+    findings = derive_findings(sections)
+
+    assert len(findings) == 1
+    assert findings[0].severity == SEVERITY_WARN
+    assert findings[0].section == SECTION_JOBS
+    assert "truncated after 41 records" in findings[0].message
+    assert "floor" in findings[0].message
+
+
+def test_findings_ignore_optional_stacks_entirely() -> None:
+    sections = {
+        SECTION_STACKS: _stacks_section(
+            expected=[
+                _stack_finding_entry(
+                    "test-gco-global", "us-east-2", "UPDATE_COMPLETE", HEALTH_HEALTHY
+                )
+            ],
+            optional=[
+                _stack_finding_entry(
+                    "test-gco-analytics", "us-east-2", "UPDATE_ROLLBACK_COMPLETE", HEALTH_UNHEALTHY
+                )
+            ],
+        )
+    }
+
+    assert derive_findings(sections) == []
+
+
+def test_findings_order_errors_before_warns() -> None:
+    sections = {
+        SECTION_STACKS: _stacks_section(
+            [
+                _stack_finding_entry("test-gco-monitoring", "us-east-2", None, HEALTH_NOT_DEPLOYED),
+                _stack_finding_entry(
+                    "test-gco-us-west-2", "us-west-2", "UPDATE_ROLLBACK_COMPLETE", HEALTH_UNHEALTHY
+                ),
+            ]
+        ),
+        SECTION_QUEUE: Section(
+            name=SECTION_QUEUE,
+            status=STATUS_OK,
+            data={"by_region": {"us-west-2": {"dlq": 2}}},
+        ),
+        SECTION_CAPACITY: Section(
+            name=SECTION_CAPACITY,
+            status=STATUS_UNAVAILABLE,
+            data={"by_region": {"us-east-1": {"telemetry_status": STATUS_UNAVAILABLE}}},
+        ),
+    }
+
+    findings = derive_findings(sections)
+
+    severities = [finding.severity for finding in findings]
+    assert severities == [SEVERITY_ERROR, SEVERITY_ERROR, SEVERITY_WARN, SEVERITY_WARN]
+
+
+def test_findings_are_empty_for_a_clean_document() -> None:
+    sections = {
+        SECTION_STACKS: _stacks_section(
+            [
+                _stack_finding_entry(
+                    "test-gco-global", "us-east-2", "CREATE_COMPLETE", HEALTH_HEALTHY
+                )
+            ]
+        ),
+        SECTION_QUEUE: Section(
+            name=SECTION_QUEUE, status=STATUS_OK, data={"by_region": {"us-east-1": {"dlq": 0}}}
+        ),
+        SECTION_CAPACITY: Section(
+            name=SECTION_CAPACITY,
+            status=STATUS_OK,
+            data={"by_region": {"us-east-1": {"telemetry_status": "complete"}}},
+        ),
+        SECTION_JOBS: Section(
+            name=SECTION_JOBS, status=STATUS_OK, data={"complete": True, "records_evaluated": 4}
+        ),
+    }
+
+    assert derive_findings(sections) == []
+
+
+def test_findings_skip_sections_with_no_data() -> None:
+    sections = {
+        SECTION_STACKS: Section(name=SECTION_STACKS, status=STATUS_UNAVAILABLE),
+        SECTION_QUEUE: Section(name=SECTION_QUEUE, status=STATUS_UNAVAILABLE),
+        SECTION_CAPACITY: Section(name=SECTION_CAPACITY, status=STATUS_UNAVAILABLE),
+        SECTION_JOBS: Section(name=SECTION_JOBS, status=STATUS_UNAVAILABLE),
+    }
+
+    assert derive_findings(sections) == []
+
+
+# ---------------------------------------------------------------------------
+# Overall verdict derivation
+# ---------------------------------------------------------------------------
+
+
+def _ok_sections() -> dict[str, Section]:
+    return {name: Section(name=name, status=STATUS_OK) for name in SECTION_ORDER}
+
+
+def test_overall_ok_for_a_clean_document() -> None:
+    assert _derive_overall(_ok_sections(), []) == (OVERALL_OK, [])
+
+
+def test_overall_skipped_sections_alone_never_degrade() -> None:
+    sections = _ok_sections()
+    sections["costs"] = Section(name="costs", status=STATUS_SKIPPED, reason="not requested")
+    sections["nodepools"] = Section(name="nodepools", status=STATUS_SKIPPED, reason="not requested")
+
+    assert _derive_overall(sections, []) == (OVERALL_OK, [])
+
+
+def test_overall_degrades_per_section_status() -> None:
+    for degraded_status in (STATUS_PARTIAL, STATUS_UNAVAILABLE, STATUS_ERROR):
+        sections = _ok_sections()
+        sections[SECTION_QUEUE] = Section(
+            name=SECTION_QUEUE, status=degraded_status, reason="because"
+        )
+
+        overall, degraded = _derive_overall(sections, [])
+
+        assert overall == OVERALL_DEGRADED, degraded_status
+        assert degraded == [SECTION_QUEUE]
+
+
+def test_overall_error_finding_degrades_and_names_the_section() -> None:
+    finding = Finding(severity=SEVERITY_ERROR, section=SECTION_STACKS, message="rolled back")
+
+    overall, degraded = _derive_overall(_ok_sections(), [finding])
+
+    assert overall == OVERALL_DEGRADED
+    assert degraded == [SECTION_STACKS]
+
+
+def test_overall_warn_finding_degrades_without_naming_the_section() -> None:
+    finding = Finding(severity=SEVERITY_WARN, section=SECTION_QUEUE, message="dlq depth 2")
+
+    overall, degraded = _derive_overall(_ok_sections(), [finding])
+
+    assert overall == OVERALL_DEGRADED
+    assert degraded == []
+
+
+def test_overall_degraded_list_follows_section_order() -> None:
+    sections = _ok_sections()
+    sections[SECTION_CAPACITY] = Section(name=SECTION_CAPACITY, status=STATUS_PARTIAL, reason="x")
+    finding = Finding(severity=SEVERITY_ERROR, section=SECTION_STACKS, message="rolled back")
+
+    _, degraded = _derive_overall(sections, [finding])
+
+    assert degraded == [SECTION_STACKS, SECTION_CAPACITY]

@@ -715,6 +715,110 @@ def _gather_nodepools(config: GCOConfig, requested: bool, workload: list[str]) -
 
 
 # ---------------------------------------------------------------------------
+# Findings
+# ---------------------------------------------------------------------------
+
+
+def derive_findings(sections: dict[str, Section]) -> list[Finding]:
+    """Derive the findings list from an already-gathered document.
+
+    A pure function over section data: it issues no AWS calls, so it cannot
+    fail in a new way or slow the gather down. The rule set is closed and
+    small on purpose — an open-ended heuristic layer becomes a source of
+    false alarms. Only expected stacks produce findings; optional stacks may
+    legitimately be undeployed. The result is ordered ``error`` before
+    ``warn``, each in document order.
+    """
+    errors: list[Finding] = []
+    warns: list[Finding] = []
+
+    stacks = sections.get(SECTION_STACKS)
+    if stacks is not None:
+        for entry in stacks.data.get("expected", []):
+            name = entry.get("name")
+            region = entry.get("region")
+            health = entry.get("health")
+            if health == HEALTH_UNHEALTHY:
+                errors.append(
+                    Finding(
+                        severity=SEVERITY_ERROR,
+                        section=SECTION_STACKS,
+                        message=f"{name} is {entry.get('status')} in {region}",
+                    )
+                )
+            elif health == HEALTH_NOT_DEPLOYED:
+                # get_stack_status cannot distinguish a missing stack from
+                # denied access, so the wording must not assert absence.
+                warns.append(
+                    Finding(
+                        severity=SEVERITY_WARN,
+                        section=SECTION_STACKS,
+                        message=f"{name} is absent or not readable in {region}",
+                    )
+                )
+            elif health == HEALTH_IN_PROGRESS:
+                warns.append(
+                    Finding(
+                        severity=SEVERITY_WARN,
+                        section=SECTION_STACKS,
+                        message=f"{name} is {entry.get('status')} in {region}",
+                    )
+                )
+
+    queue = sections.get(SECTION_QUEUE)
+    if queue is not None:
+        for region, entry in queue.data.get("by_region", {}).items():
+            depth = entry.get("dlq")
+            if isinstance(depth, int) and depth > 0:
+                plural = "" if depth == 1 else "s"
+                warns.append(
+                    Finding(
+                        severity=SEVERITY_WARN,
+                        section=SECTION_QUEUE,
+                        message=f"{region} dead-letter queue holds {depth} message{plural}",
+                    )
+                )
+
+    capacity = sections.get(SECTION_CAPACITY)
+    if capacity is not None:
+        for region, entry in capacity.data.get("by_region", {}).items():
+            telemetry = entry.get("telemetry_status")
+            if telemetry == STATUS_UNAVAILABLE:
+                errors.append(
+                    Finding(
+                        severity=SEVERITY_ERROR,
+                        section=SECTION_CAPACITY,
+                        message=f"{region} telemetry is unavailable",
+                    )
+                )
+            elif telemetry == STATUS_PARTIAL:
+                signals = ", ".join(entry.get("unavailable_signals", [])) or "unknown"
+                warns.append(
+                    Finding(
+                        severity=SEVERITY_WARN,
+                        section=SECTION_CAPACITY,
+                        message=f"{region} telemetry is partial (unavailable: {signals})",
+                    )
+                )
+
+    jobs = sections.get(SECTION_JOBS)
+    if jobs is not None and jobs.data and jobs.data.get("complete", True) is False:
+        evaluated = jobs.data.get("records_evaluated")
+        warns.append(
+            Finding(
+                severity=SEVERITY_WARN,
+                section=SECTION_JOBS,
+                message=(
+                    f"the job-count scan was truncated after {evaluated} records; "
+                    "totals are a floor, not a count"
+                ),
+            )
+        )
+
+    return errors + warns
+
+
+# ---------------------------------------------------------------------------
 # Verdict derivation
 # ---------------------------------------------------------------------------
 
@@ -791,7 +895,7 @@ def gather_fleet_status(
             sections[name] = _regions_unavailable_section(name)
     sections.update(_run_sections_concurrently(gatherers))
 
-    findings: list[Finding] = []
+    findings = derive_findings(sections)
     overall, degraded = _derive_overall(sections, findings)
 
     return FleetStatus(
