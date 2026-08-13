@@ -36,9 +36,14 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _AUTOPILOT_SOURCE = _REPO_ROOT / "cli" / "autopilot.py"
 _MCP_README = _REPO_ROOT / "gco_mcp" / "README.md"
 
-#: The two companions removed after they stopped starting against the
-#: current ``mcp`` SDK. They must never reappear in generated configs.
-_PRUNED_PACKAGES = ("mcp-server-fetch", "mcp-server-calculator")
+#: Companions removed from the recommendation set. The first two stopped
+#: starting against the current ``mcp`` SDK; the documentation server was
+#: dropped from the lineup. None may reappear in generated configs.
+_PRUNED_PACKAGES = (
+    "mcp-server-fetch",
+    "mcp-server-calculator",
+    "@andrea9293/mcp-documentation-server",
+)
 
 
 @pytest.fixture

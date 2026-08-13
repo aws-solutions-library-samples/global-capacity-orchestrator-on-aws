@@ -166,13 +166,6 @@ COMPANION_MCP_SERVERS: tuple[CompanionServer, ...] = (
         args=("-y", "mcp-deepwiki@latest"),
     ),
     CompanionServer(
-        name="documentation",
-        registry="npm",
-        package="@andrea9293/mcp-documentation-server",
-        command="npx",
-        args=("-y", "@andrea9293/mcp-documentation-server"),
-    ),
-    CompanionServer(
         name="playwright",
         registry="npm",
         package="@playwright/mcp",
