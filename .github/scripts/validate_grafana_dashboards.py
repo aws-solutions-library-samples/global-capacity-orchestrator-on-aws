@@ -131,6 +131,9 @@ def read_chart_pin(charts_yaml: Path, chart: str = "kube-prometheus-stack") -> d
     raise ValidationError(f"no {chart} entry found in {charts_yaml}")
 
 
+_RETRIABLE_FETCH_ERRORS = (urllib.error.URLError, TimeoutError, json.JSONDecodeError)
+
+
 def _get(url: str, auth: tuple[str, str] | None = None, timeout: float = 10.0) -> tuple[int, Any]:
     """GET a Grafana API URL, returning (status, parsed JSON or None)."""
     if not url.startswith(("http://", "https://")):
@@ -140,11 +143,15 @@ def _get(url: str, auth: tuple[str, str] | None = None, timeout: float = 10.0) -
         token = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode()
         request.add_header("Authorization", f"Basic {token}")
     try:
+        # The URL is assembled from the --url flag this CI job passes for its
+        # own localhost container plus repo-controlled dashboard uids, and the
+        # scheme check above rejects anything that is not plain HTTP(S).
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         return exc.code, None
-    except urllib.error.URLError, TimeoutError, json.JSONDecodeError:
+    except _RETRIABLE_FETCH_ERRORS:
         return 0, None
 
 
