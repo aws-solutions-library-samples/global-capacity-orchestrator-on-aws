@@ -119,6 +119,25 @@ class TestStacksHelp:
         assert result.exit_code == 0
 
 
+class TestStatusHelp:
+    """Tests for the top-level status command help."""
+
+    def test_status_help(self, runner):
+        """Test status help."""
+        result = runner.invoke(cli, ["status", "--help"])
+        assert result.exit_code == 0
+        assert "--with-costs" in result.output
+        assert "--with-nodepools" in result.output
+        assert "--watch" in result.output
+        assert "--fail-on-findings" in result.output
+
+    def test_status_appears_in_main_help(self, runner):
+        """The bare command is listed alongside the groups in gco --help."""
+        result = runner.invoke(cli, ["--help"])
+        assert result.exit_code == 0
+        assert "status" in result.output
+
+
 class TestCapacityHelp:
     """Tests for capacity command help."""
 

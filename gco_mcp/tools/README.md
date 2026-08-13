@@ -24,6 +24,7 @@ flag-to-tool mapping.
 | `inference.py` | 20 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `configure_mooncake_store`, `mooncake_topology_status`, `populate_kv_cache` |
 | `costs.py` | 14 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast`, `cost_workloads`, `cost_allocation_status`, `cost_allocation_activate`, `cost_k8s_namespaces`, `cost_k8s_regions`, `cost_k8s_trend`, `cost_k8s_top`, `cost_report_status`, `cost_report_list`, `cost_report_generate` |
 | `stacks.py` | 29 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `addons_status`, `valkey_status`, `aurora_status`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `addons_install` (gated), `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated), `list_deployment_regions` (gated), `add_deployment_region` (gated), `remove_deployment_region` (gated), `set_deployment_region` (gated), `set_mission_default_model` (gated), `set_capacity_advisor_default_model` (gated), `set_claude_code_default_model` (gated) |
+| `status.py` | 1 | `fleet_status` |
 | `storage.py` | 7 | `list_storage_contents`, `list_file_systems`, `list_storage_buckets`, `files_get`, `files_access_points`, `upload_to_regional_bucket` (gated by `GCO_ENABLE_MODEL_UPLOAD`), `sync_storage_bucket` (gated by `GCO_ENABLE_LOCAL_STORAGE_SYNC`) |
 | `models.py` | 4 | `list_models`, `get_model_uri`, `models_upload` (gated), `delete_model` (gated) |
 | `nodepools.py` | 5 | `nodepools_list`, `nodepools_describe`, `nodepools_create_odcr`, `nodepools_create_capacity_block`, `delete_nodepool` (gated) |
@@ -165,6 +166,12 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `stack_status` | Get detailed status of a CloudFormation stack. |
 | `stack_synth` | `gco stacks synth` — synthesize CloudFormation templates from CDK. |
 | `valkey_status` | `gco stacks valkey status` — show Valkey cache stack status. |
+
+### `status.py`
+
+| Tool | Description |
+|------|-------------|
+| `fleet_status` | `gco status` — whole-fleet deployment status as one document. |
 
 ### `storage.py`
 

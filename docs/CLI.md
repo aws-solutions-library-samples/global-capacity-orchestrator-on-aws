@@ -8,6 +8,7 @@ Complete command-line interface documentation for GCO (Global Capacity Orchestra
 - [Global Options](#global-options)
 - [Commands](#commands)
   - [autopilot](#autopilot-command)
+  - [status](#status-commands)
   - [jobs](#jobs-commands)
   - [queue](#queue-commands)
   - [templates](#templates-commands)
@@ -150,6 +151,99 @@ gco autopilot -y -- --continue
 ```
 
 If the `claude` binary is missing, autopilot offers to install the exact pinned release via `npm install -g` — Claude Code is intentionally not baked into the dev container, so setup happens on first use and stays reproducible (the monthly deps-scan tracks the pin).
+
+### Status Commands
+
+One read-only command that answers "what is my deployment doing right now?" across every
+configured region — the aggregate view that otherwise takes `gco stacks status`,
+`gco queue stats`, `gco jobs list --all-regions`, `gco capacity status`, and
+`gco inference list` run separately and joined by hand. The same document backs the
+`fleet_status` MCP tool, so an agent learns the whole fleet state in one call.
+
+| Command | Description |
+|---------|-------------|
+| `gco status` | Aggregate fleet status document: stacks, queue, jobs, capacity, inference |
+
+```bash
+# Whole-fleet summary across the configured deployment regions
+gco status
+
+# One region only
+gco status -r us-east-1
+
+# The full document for scripts and agents
+gco status --output json
+
+# Include the billed and cluster-bound sections
+gco status --with-costs --with-nodepools
+
+# Refresh in place while watching a deploy or a queue drain
+gco status --watch 10
+
+# Back a health check: exit 1 when an error-severity finding is present
+gco status --fail-on-findings
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--region`, `-r` | Restrict the gather to a single region |
+| `--with-costs` | Include the `costs` section (Cost Explorer bills per `GetCostAndUsage` request) |
+| `--with-nodepools` | Include the `nodepools` section (needs a reachable cluster API endpoint; private endpoints report `unavailable` and point at `gco cluster tunnel`) |
+| `--watch SECONDS` | Re-gather and redraw on an interval (minimum 5 seconds; table output only). With `--with-costs`, the costs section is re-fetched at most every 15 minutes and carries an `as_of` timestamp |
+| `--fail-on-findings` | Exit 1 after rendering when any `error`-severity finding is present |
+
+**Sections.** Each is gathered independently, in parallel, under a 30-second
+per-section timeout. The default set is Tier 1: free control-plane reads that
+need no cluster reachability. Tier 2 costs money per call and Tier 3 needs the
+Kubernetes API, so both are opt-in flags.
+
+| Section | Tier | Source |
+|---------|------|--------|
+| `regions` | 1 | `cdk.json` deployment topology (no AWS call) |
+| `stacks` | 1 | CloudFormation status per expected stack, plus deployed optional stacks |
+| `queue` | 1 | SQS job-queue and dead-letter-queue depth per region |
+| `jobs` | 1 | Job counts by region and status from the queue-statistics API |
+| `capacity` | 1 | Queue depth and GPU/CPU utilization per region, with telemetry provenance |
+| `inference` | 1 | Inference endpoint desired state from the global registry |
+| `costs` | 2 | Cost Explorer 30-day total by service, plus cost-allocation-tag status (`--with-costs`) |
+| `nodepools` | 3 | Karpenter NodePools per region after an endpoint reachability probe (`--with-nodepools`) |
+
+**Section status vocabulary.** Every section carries a `status`; anything that
+is not `ok` or `empty` also carries a human-readable `reason` and the raw
+`errors`. The distinction between `empty` and `unavailable` is the point:
+"there are no jobs" and "I could not find out whether there are jobs" lead to
+opposite decisions.
+
+| Status | Meaning |
+|--------|---------|
+| `ok` | Read succeeded, data present |
+| `empty` | Read succeeded, genuinely nothing there — a success, not a degradation |
+| `partial` | Some regions or signals worked, others did not |
+| `unavailable` | Could not be attempted, for a known reason (stack absent, private endpoint, no `cdk.json`) |
+| `error` | Attempted and failed unexpectedly, or exceeded the section timeout |
+| `skipped` | Not requested (an opt-in section without its flag) |
+
+**Findings.** The document carries a `findings` list of what looks wrong, each
+entry shaped `{severity, section, message}` with severity `error` or `warn` —
+for example a stack in a rollback state, a non-empty dead-letter queue, a
+region with unavailable telemetry, or a truncated job-count scan. Findings are
+derived from the gathered data only (no extra AWS calls), ordered `error`
+before `warn`, and rendered first in table mode. The top-level `overall` field
+is `ok` or `degraded`, with a `degraded` list naming the responsible sections;
+skipped sections alone never degrade the document.
+
+The JSON document — section names, the status vocabulary, and the finding
+shape — is the command's public contract: `generated_at`, `project_name`,
+`overall`, `degraded`, `findings`, and `sections`. Exit code is 0 whenever a
+document was produced, even when degraded; only `--fail-on-findings` maps an
+`error`-severity finding to exit 1.
+
+`gco status` reports the deployment that `cdk.json` declares. Without a
+checkout it degrades honestly instead of scanning every AWS region — run from
+a checkout or pass `--region`. `gco stacks list` remains the tool for
+discovering stacks wherever they exist.
 
 ### Jobs Commands
 
