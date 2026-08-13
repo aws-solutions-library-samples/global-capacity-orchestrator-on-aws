@@ -362,10 +362,15 @@ not inherit the default's reasoning fields.
 Because it is a deployment configuration value — not a `pyproject.toml` entry,
 a Dockerfile `FROM`, or a manifest image — Dependabot never sees it. The monthly
 [`deps-scan`](../.github/CI.md#dependency-scan-script) closes that gap: its
-**Bedrock default model** check reads the `cdk.json` context value, lists the
-system-defined inference profiles in `us-east-1`, and flags a newer release **in
-the same model family** — a future global Claude Opus release, never a jump to
-a different scope, tier, or provider (that is a choice, not drift). Family
+**Bedrock default model** check reads each managed `cdk.json` context value and
+flags a newer release **in the same model family** — a future global Claude
+Opus release, never a jump to a different scope, tier, or provider (that is a
+choice, not drift). The generation keys (`default_model_id`,
+`claude_code_default_model_id`) compare against the system-defined inference
+profiles in `us-east-1`; `embedding_model_id` — Mission memory's text-embedding
+model, resolved through `gco.bedrock.get_default_embedding_model_id()` — is a
+plain foundation model, so it compares against
+`bedrock list-foundation-models --by-output-modality EMBEDDING` instead. Family
 derivation tolerates all three revision shapes Bedrock ships
 (`-vMAJOR:MINOR`, a bare `-vMAJOR`, and no suffix at all), so one model line
 stays one family. The check needs AWS
@@ -400,6 +405,15 @@ deliberately):
 3. Run the Mission and capacity suites, then open a PR. The consistency guard
    proves both runtime aliases and the dependency scanner still resolve the
    same `cdk.json` value.
+
+When the flagged key is `context.bedrock.embedding_model_id`, treat the row as
+a planning signal rather than a routine bump: vectors are only comparable to
+vectors produced by the same model, and every Mission-memory item records its
+`embedding_model_id` for exactly this reason. Adopting a newer embedding model
+means re-embedding existing items (or segregating old and new vectors) before
+changing the pin, and updating `_EXPECTED_EMBEDDING_MODEL_ID` in
+`tests/test_default_bedrock_model_consistency.py` alongside the `cdk.json`
+value.
 
 Picking a *different* model — for regulatory, data-residency, model-governance,
 or cost reasons, or to avoid the Anthropic FTU form — rather than tracking
@@ -466,8 +480,9 @@ resolved lockfile, so a clean checkout installs the same graph CI ran.
   Dockerfile `ARG`s, `lambda/helm-installer/charts.yaml`,
   `gco/stacks/constants.py`, the Python-constant Mooncake default image in
   `cli/images.py`, and the Bedrock models at `cdk.json`
-  `context.bedrock.default_model_id` and
-  `context.bedrock.claude_code_default_model_id` (see
+  `context.bedrock.default_model_id`,
+  `context.bedrock.claude_code_default_model_id`, and
+  `context.bedrock.embedding_model_id` (see
   [Refreshing the Bedrock default model](#refreshing-the-bedrock-default-model)).
   These are tracked by the monthly scan rather than Dependabot.
 

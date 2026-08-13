@@ -1114,6 +1114,82 @@ if cands:
 " "$current" 2>/dev/null
 }
 
+# get_latest_bedrock_embedding_model <current_id> [region]
+#
+# Prints the newest ACTIVE text-embedding foundation model in the same
+# model family as <current_id> (see bedrock_model_family), as reported by
+# ``aws bedrock list-foundation-models --by-output-modality EMBEDDING``.
+# Used by the Bedrock-model drift check for
+# ``context.bedrock.embedding_model_id`` — Mission memory's embedding
+# default, resolved at runtime through
+# ``gco.bedrock.get_default_embedding_model_id()``.
+#
+# Embedding models are plain foundation models, not system-defined
+# inference profiles, so this is a separate lookup from
+# get_latest_bedrock_model; the family scoping and integer-tuple version
+# ranking are deliberately identical. A newer same-family release (e.g. a
+# Titan Text Embeddings v3) is reported as drift; a different provider or
+# model line never is. Embedding drift is advisory-with-a-caveat: stored
+# vectors are only comparable to vectors from the same model, so adopting
+# a newer embedding model means re-embedding or segregating existing
+# data, not just bumping the pin (the drift report's remediation text
+# says so).
+#
+# Region defaults to us-east-1 (the Mission memory default region).
+# Models without a numeric version key are ignored because they cannot be
+# ordered safely; non-ACTIVE lifecycles (e.g. LEGACY) are skipped. Empty
+# output on any failure tells the caller to mark the check skipped.
+#
+# IAM action: bedrock:ListFoundationModels (already granted to the scan
+# role alongside bedrock:ListInferenceProfiles).
+get_latest_bedrock_embedding_model() {
+  local current="$1"
+  local region="${2:-us-east-1}"
+  if [ -z "$current" ] || ! [[ "$current" =~ [0-9] ]]; then
+    return 0
+  fi
+  aws bedrock list-foundation-models \
+    --by-output-modality EMBEDDING \
+    --region "$region" \
+    --output json 2>/dev/null \
+  | python3 -c "
+import json, re, sys
+current = sys.argv[1]
+def family(mid):
+    # Keep in lockstep with bedrock_model_family above: the revision
+    # suffix is optional and its ``:MINOR`` half is too.
+    core = re.sub(r'-v\d+(?::\d+)?\Z', '', mid)
+    parts = core.split('.')
+    if len(parts) >= 3:
+        geo, provider, name = parts[0], parts[1], '.'.join(parts[2:])
+    elif len(parts) == 2:
+        geo, provider, name = '', parts[0], parts[1]
+    else:
+        geo, provider, name = '', '', core
+    tokens = [t for t in name.split('-') if t and not t.isdigit()]
+    prefix = '.'.join([p for p in (geo, provider) if p])
+    return prefix + ('.' + '-'.join(tokens) if tokens else '')
+def key(mid):
+    return [int(n) for n in re.findall(r'\d+', mid)]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+target = family(current)
+cands = []
+for model in data.get('modelSummaries', []) or []:
+    mid = model.get('modelId', '') or ''
+    lifecycle = (model.get('modelLifecycle') or {}).get('status') or 'ACTIVE'
+    if lifecycle != 'ACTIVE':
+        continue
+    if mid and key(mid) and family(mid) == target:
+        cands.append(mid)
+if cands:
+    cands.sort(key=key)
+    print(cands[-1])
+" "$current" 2>/dev/null
+}
+
 # =============================================================================
 # Expanded coverage helpers
 # =============================================================================

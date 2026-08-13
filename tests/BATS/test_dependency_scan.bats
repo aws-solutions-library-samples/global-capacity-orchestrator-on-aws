@@ -1782,6 +1782,107 @@ SHIM
     [ -z "$output" ]
 }
 
+# ── get_latest_bedrock_embedding_model ──────────────────────────────────
+#
+# Mission memory's embedding default (context.bedrock.embedding_model_id)
+# is a plain foundation model, so its drift lookup shells out to
+# ``aws bedrock list-foundation-models --by-output-modality EMBEDDING``
+# instead of the inference-profile listing. Same shim pattern as the
+# get_latest_bedrock_model tests: family scoping, lifecycle filtering, and
+# version ranking run offline against canned JSON.
+
+@test "extract_default_bedrock_model: reads the embedding leaf from cdk.json" {
+    expected="$(python3 -c '
+import json
+with open("cdk.json") as handle:
+    print(json.load(handle)["context"]["bedrock"]["embedding_model_id"])
+')"
+    [ -n "$expected" ]
+    run extract_default_bedrock_model "cdk.json" "embedding_model_id"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$expected" ]
+}
+
+@test "get_latest_bedrock_embedding_model: returns the newest ACTIVE same-family model" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/aws" <<'SHIM'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"modelSummaries":[
+  {"modelId":"amazon.titan-embed-text-v1","modelLifecycle":{"status":"ACTIVE"}},
+  {"modelId":"amazon.titan-embed-text-v2:0","modelLifecycle":{"status":"ACTIVE"}},
+  {"modelId":"amazon.titan-embed-text-v3:0","modelLifecycle":{"status":"ACTIVE"}},
+  {"modelId":"amazon.titan-embed-image-v9:0","modelLifecycle":{"status":"ACTIVE"}},
+  {"modelId":"cohere.embed-english-v9","modelLifecycle":{"status":"ACTIVE"}},
+  {"modelId":"amazon.titan-embed-text-v9:0","modelLifecycle":{"status":"LEGACY"}}
+]}
+JSON
+SHIM
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_embedding_model \
+        "amazon.titan-embed-text-v2:0" us-east-1
+    [ "$status" -eq 0 ]
+    # v3:0 is the newest ACTIVE titan-embed-text; the LEGACY v9:0 is skipped
+    # and other families (titan-embed-image, cohere) are filtered out.
+    [ "$output" = "amazon.titan-embed-text-v3:0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_embedding_model: no drift when the pin is newest" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/aws" <<'SHIM'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"modelSummaries":[
+  {"modelId":"amazon.titan-embed-text-v1","modelLifecycle":{"status":"ACTIVE"}},
+  {"modelId":"amazon.titan-embed-text-v2:0","modelLifecycle":{"status":"ACTIVE"}}
+]}
+JSON
+SHIM
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_embedding_model \
+        "amazon.titan-embed-text-v2:0" us-east-1
+    [ "$status" -eq 0 ]
+    [ "$output" = "amazon.titan-embed-text-v2:0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_embedding_model: tolerates a missing modelLifecycle" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/aws" <<'SHIM'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"modelSummaries":[
+  {"modelId":"amazon.titan-embed-text-v2:0"},
+  {"modelId":"amazon.titan-embed-text-v4:0"}
+]}
+JSON
+SHIM
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_embedding_model \
+        "amazon.titan-embed-text-v2:0" us-east-1
+    [ "$status" -eq 0 ]
+    [ "$output" = "amazon.titan-embed-text-v4:0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_embedding_model: empty when the aws call fails" {
+    tmpdir="$(mktemp -d)"
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$tmpdir/aws"
+    chmod +x "$tmpdir/aws"
+    PATH="$tmpdir:$PATH" run get_latest_bedrock_embedding_model \
+        "amazon.titan-embed-text-v2:0" us-east-1
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_bedrock_embedding_model: empty for empty input" {
+    run get_latest_bedrock_embedding_model ""
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 # ── get_latest_github_release_tag ───────────────────────────────────────────
 #
 # Same split as get_latest_precommit_hook_release: the owner/repo guard

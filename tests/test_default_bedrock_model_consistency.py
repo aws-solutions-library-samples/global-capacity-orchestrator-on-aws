@@ -219,8 +219,9 @@ def test_default_model_is_a_system_defined_inference_profile_id(model_id: str) -
     ``-vMAJOR:MINOR`` revision is optional — Anthropic ships newer profiles
     without one (``global.anthropic.claude-opus-5``) — but when it is present it
     must carry the ``:MINOR`` half, because the scanner strips exactly that
-    form when deriving a model family. The scanner reads both defaults, so
-    both must satisfy the comparator's contract.
+    form when deriving a model family. The scanner reads both generation
+    defaults, so both must satisfy the comparator's contract (the embedding
+    default is a foundation model with its own shape test below).
     """
     assert model_id.startswith(("global.", "us.", "eu.", "apac.", "jp.")), model_id
     geography, _, remainder = model_id.partition(".")
@@ -228,6 +229,26 @@ def test_default_model_is_a_system_defined_inference_profile_id(model_id: str) -
     assert geography and provider and model_name, model_id
     if "-v" in model_name:
         assert ":" in model_name.rsplit("-v", 1)[-1], model_id
+
+
+def test_embedding_default_shape_matches_the_scanner_comparator() -> None:
+    """The embedding default stays orderable by the dependency scanner.
+
+    ``embedding_model_id`` is a plain foundation-model id (no geography
+    segment — it is not an inference profile), and the scanner's
+    ``get_latest_bedrock_embedding_model`` skips ids without a numeric
+    version key because they cannot be ranked. When the ``-v`` revision is
+    present it must carry the ``:MINOR`` half, matching exactly what the
+    family derivation strips, so one Titan embedding line stays one family.
+    """
+    provider, _, model_name = _EXPECTED_EMBEDDING_MODEL_ID.partition(".")
+    assert provider and model_name, _EXPECTED_EMBEDDING_MODEL_ID
+    assert "." not in model_name, "embedding default must not be an inference-profile id"
+    assert any(char.isdigit() for char in model_name), (
+        "the scanner cannot rank a version-less embedding id"
+    )
+    if "-v" in model_name:
+        assert ":" in model_name.rsplit("-v", 1)[-1], _EXPECTED_EMBEDDING_MODEL_ID
 
 
 def test_cdk_json_contains_exactly_the_managed_default_model_keys() -> None:
