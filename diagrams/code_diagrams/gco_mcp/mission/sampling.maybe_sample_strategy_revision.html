@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-07-18T01:03:40Z">
+        <meta name="gco-generated-at" content="2026-08-13T01:19:51Z">
         <title>Mission strategy-revision sampling (orchestrator + deterministic fallback)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -206,98 +206,98 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op5116=>operation: 'Consult the advisory LLM for a Strategy_Revision, or fall back.\n\n    Returns a :class:`SamplingUsed` when the bound backend produces a\n    JSON object that clears schema validation and the catalog checks.\n    Returns a :class:`SamplingFallback` carrying the deterministic\n    rationale from\n    :func:`mission.decide.build_revision_rationale_template` on every\n    rejection class. Emits exactly one\n    :func:`mission.audit.emit_sampling_event` per call.\n    '
-op5118=>operation: session_id = session['session_id']
-op5120=>operation: iteration_index = iteration['iteration_index']
-op5122=>operation: template = _decide.build_revision_rationale_template(session, iteration)
-cond5125=>condition: if backend is None
-sub5129=>subroutine: _mission_audit.emit_sampling_event(session_id, iteration_index, sampling_purpose='strategy_revision', sampling_status='disabled', sampling_backend='none')
-io5134=>inputoutput: output: SamplingFallback(rationale=template, reason='no_backend_resolved', backend_name='none', model_id=None)
-e5132=>end: end function return
-op5140=>operation: backend_name = backend.backend_name
-op5142=>operation: model_id = backend.model_id
-op5144=>operation: recent_iterations = list(session['iterations'][-RECENT_ITERATIONS_LIMIT:])
-op5146=>operation: tool_schemas = _extract_tool_json_schemas(allowlist, registered_tools)
-op5148=>operation: prompt = SamplingPrompt(directive=session['directive_text'], success_criteria=session['criteria'], criteria_status=iteration['criteria_evaluation'], recent_iterations=recent_iterations, tool_allowlist=allowlist, tool_docstrings=tool_docstrings, remaining_iterations=remaining_iterations, remaining_wall_clock_secs=remaining_wall_clock_secs, allow_scripts=allow_scripts, tool_schemas=tool_schemas, environment_context=environment_context)
-op5153=>operation: output_text = await backend.sample(prompt)
-cond5150=>condition: exception raised?
-cond5155=>condition: except SamplingTransportError as err
-sub5159=>subroutine: _mission_audit.emit_sampling_event(session_id, iteration_index, sampling_purpose='strategy_revision', sampling_status='rejected', sampling_backend=backend_name, sampling_model_id=model_id or None, validation_error=err.code)
-io5164=>inputoutput: output: SamplingFallback(rationale=template, reason='transport_error', backend_name=backend_name, model_id=model_id)
-e5162=>end: end function return
-op5173=>operation: parsed = _extract_json_object(output_text)
-cond5170=>condition: exception raised?
-cond5175=>condition: except json.JSONDecodeError
-sub5179=>subroutine: _mission_audit.emit_sampling_event(session_id, iteration_index, sampling_purpose='strategy_revision', sampling_status='rejected', sampling_backend=backend_name, sampling_model_id=model_id or None, validation_error='json_parse')
-io5184=>inputoutput: output: SamplingFallback(rationale=template, reason='json_parse', backend_name=backend_name, model_id=model_id)
-e5182=>end: end function return
-sub5193=>subroutine: _validate_revision_schema(parsed)
-cond5190=>condition: exception raised?
-cond5195=>condition: except ValueError
-sub5199=>subroutine: _mission_audit.emit_sampling_event(session_id, iteration_index, sampling_purpose='strategy_revision', sampling_status='rejected', sampling_backend=backend_name, sampling_model_id=model_id or None, validation_error='schema_mismatch')
-io5204=>inputoutput: output: SamplingFallback(rationale=template, reason='schema_mismatch', backend_name=backend_name, model_id=model_id)
-e5202=>end: end function return
-sub5213=>subroutine: validate_strategy_against_catalog(parsed['next_strategy'], allowlist, registered_tools, allow_scripts)
-cond5210=>condition: exception raised?
-cond5215=>condition: except MissionValidationError as err
-op5219=>operation: details = err.details or {}
-op5221=>operation: reason = details.get('reason', 'validation_error')
-sub5223=>subroutine: _mission_audit.emit_sampling_event(session_id, iteration_index, sampling_purpose='strategy_revision', sampling_status='rejected', sampling_backend=backend_name, sampling_model_id=model_id or None, validation_error=str(reason))
-io5228=>inputoutput: output: SamplingFallback(rationale=template, reason=str(reason), backend_name=backend_name, model_id=model_id)
-e5226=>end: end function return
-op5234=>operation: _input_tokens = getattr(backend, 'last_input_tokens', None)
-op5236=>operation: _output_tokens = getattr(backend, 'last_output_tokens', None)
-sub5238=>subroutine: _mission_audit.emit_sampling_event(session_id, iteration_index, sampling_purpose='strategy_revision', sampling_status='used', sampling_backend=backend_name, sampling_model_id=model_id or None, model_output_bytes=len(output_text.encode('utf-8')), input_tokens=_input_tokens, output_tokens=_output_tokens)
-io5243=>inputoutput: output: SamplingUsed(output_text=output_text, parsed=parsed, backend_name=backend_name, model_id=model_id)
-e5241=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op94=>operation: 'Consult the advisory LLM for a Strategy_Revision, or fall back.\n\n    Returns a :class:`SamplingUsed` when the bound backend produces a\n    JSON object that clears schema validation and the catalog checks.\n    Returns a :class:`SamplingFallback` carrying the deterministic\n    rationale from\n    :func:`mission.decide.build_revision_rationale_template` on every\n    rejection class. Emits exactly one\n    :func:`mission.audit.emit_sampling_event` per call.\n    '
+op96=>operation: session_id = session['session_id']
+op98=>operation: iteration_index = iteration['iteration_index']
+op100=>operation: template = _decide.build_revision_rationale_template(session, iteration)
+cond103=>condition: if backend is None
+sub107=>subroutine: _mission_audit.emit_sampling_event(session_id, iteration_index, sampling_purpose='strategy_revision', sampling_status='disabled', sampling_backend='none')
+io112=>inputoutput: output: SamplingFallback(rationale=template, reason='no_backend_resolved', backend_name='none', model_id=None)
+e110=>end: end function return
+op118=>operation: backend_name = backend.backend_name
+op120=>operation: model_id = backend.model_id
+op122=>operation: recent_iterations = list(session['iterations'][-RECENT_ITERATIONS_LIMIT:])
+op124=>operation: tool_schemas = _extract_tool_json_schemas(allowlist, registered_tools)
+op126=>operation: prompt = SamplingPrompt(directive=session['directive_text'], success_criteria=session['criteria'], criteria_status=iteration['criteria_evaluation'], recent_iterations=recent_iterations, tool_allowlist=allowlist, tool_docstrings=tool_docstrings, remaining_iterations=remaining_iterations, remaining_wall_clock_secs=remaining_wall_clock_secs, allow_scripts=allow_scripts, tool_schemas=tool_schemas, environment_context=environment_context, prior_missions=prior_missions)
+op131=>operation: output_text = await backend.sample(prompt)
+cond128=>condition: exception raised?
+cond133=>condition: except SamplingTransportError as err
+sub137=>subroutine: _mission_audit.emit_sampling_event(session_id, iteration_index, sampling_purpose='strategy_revision', sampling_status='rejected', sampling_backend=backend_name, sampling_model_id=model_id or None, validation_error=err.code)
+io142=>inputoutput: output: SamplingFallback(rationale=template, reason='transport_error', backend_name=backend_name, model_id=model_id)
+e140=>end: end function return
+op151=>operation: parsed = _extract_json_object(output_text)
+cond148=>condition: exception raised?
+cond153=>condition: except json.JSONDecodeError
+sub157=>subroutine: _mission_audit.emit_sampling_event(session_id, iteration_index, sampling_purpose='strategy_revision', sampling_status='rejected', sampling_backend=backend_name, sampling_model_id=model_id or None, validation_error='json_parse')
+io162=>inputoutput: output: SamplingFallback(rationale=template, reason='json_parse', backend_name=backend_name, model_id=model_id)
+e160=>end: end function return
+sub171=>subroutine: _validate_revision_schema(parsed)
+cond168=>condition: exception raised?
+cond173=>condition: except ValueError
+sub177=>subroutine: _mission_audit.emit_sampling_event(session_id, iteration_index, sampling_purpose='strategy_revision', sampling_status='rejected', sampling_backend=backend_name, sampling_model_id=model_id or None, validation_error='schema_mismatch')
+io182=>inputoutput: output: SamplingFallback(rationale=template, reason='schema_mismatch', backend_name=backend_name, model_id=model_id)
+e180=>end: end function return
+sub191=>subroutine: validate_strategy_against_catalog(parsed['next_strategy'], allowlist, registered_tools, allow_scripts)
+cond188=>condition: exception raised?
+cond193=>condition: except MissionValidationError as err
+op197=>operation: details = err.details or {}
+op199=>operation: reason = details.get('reason', 'validation_error')
+sub201=>subroutine: _mission_audit.emit_sampling_event(session_id, iteration_index, sampling_purpose='strategy_revision', sampling_status='rejected', sampling_backend=backend_name, sampling_model_id=model_id or None, validation_error=str(reason))
+io206=>inputoutput: output: SamplingFallback(rationale=template, reason=str(reason), backend_name=backend_name, model_id=model_id)
+e204=>end: end function return
+op212=>operation: _input_tokens = getattr(backend, 'last_input_tokens', None)
+op214=>operation: _output_tokens = getattr(backend, 'last_output_tokens', None)
+sub216=>subroutine: _mission_audit.emit_sampling_event(session_id, iteration_index, sampling_purpose='strategy_revision', sampling_status='used', sampling_backend=backend_name, sampling_model_id=model_id or None, model_output_bytes=len(output_text.encode('utf-8')), input_tokens=_input_tokens, output_tokens=_output_tokens)
+io221=>inputoutput: output: SamplingUsed(output_text=output_text, parsed=parsed, backend_name=backend_name, model_id=model_id)
+e219=>end: end function return
 
-op5116->op5118
-op5118->op5120
-op5120->op5122
-op5122->cond5125
-cond5125(yes)->sub5129
-sub5129->io5134
-io5134->e5132
-cond5125(no)->op5140
-op5140->op5142
-op5142->op5144
-op5144->op5146
-op5146->op5148
-op5148->op5153
-op5153->cond5150
-cond5150(yes)->cond5155
-cond5155(yes)->sub5159
-sub5159->io5164
-io5164->e5162
-cond5155(no)->op5173
-op5173->cond5170
-cond5170(yes)->cond5175
-cond5175(yes)->sub5179
-sub5179->io5184
-io5184->e5182
-cond5175(no)->sub5193
-sub5193->cond5190
-cond5190(yes)->cond5195
-cond5195(yes)->sub5199
-sub5199->io5204
-io5204->e5202
-cond5195(no)->sub5213
-sub5213->cond5210
-cond5210(yes)->cond5215
-cond5215(yes)->op5219
-op5219->op5221
-op5221->sub5223
-sub5223->io5228
-io5228->e5226
-cond5215(no)->op5234
-op5234->op5236
-op5236->sub5238
-sub5238->io5243
-io5243->e5241
-cond5210(no)->op5234
-cond5190(no)->sub5213
-cond5170(no)->sub5193
-cond5150(no)->op5173
+op94->op96
+op96->op98
+op98->op100
+op100->cond103
+cond103(yes)->sub107
+sub107->io112
+io112->e110
+cond103(no)->op118
+op118->op120
+op120->op122
+op122->op124
+op124->op126
+op126->op131
+op131->cond128
+cond128(yes)->cond133
+cond133(yes)->sub137
+sub137->io142
+io142->e140
+cond133(no)->op151
+op151->cond148
+cond148(yes)->cond153
+cond153(yes)->sub157
+sub157->io162
+io162->e160
+cond153(no)->sub171
+sub171->cond168
+cond168(yes)->cond173
+cond173(yes)->sub177
+sub177->io182
+io182->e180
+cond173(no)->sub191
+sub191->cond188
+cond188(yes)->cond193
+cond193(yes)->op197
+op197->op199
+op199->sub201
+sub201->io206
+io206->e204
+cond193(no)->op212
+op212->op214
+op214->sub216
+sub216->io221
+io221->e219
+cond188(no)->op212
+cond168(no)->sub191
+cond148(no)->sub171
+cond128(no)->op151
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -307,10 +307,10 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-07-18T01:03:40Z -->
+        <!-- Generated at (UTC): 2026-08-13T01:19:51Z -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 10px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-07-18T01:03:40Z">2026-07-18T01:03:40Z</time>
+            Generated at (UTC): <time datetime="2026-08-13T01:19:51Z">2026-08-13T01:19:51Z</time>
           </p>
           <div id="canvas"></div>
         </div>

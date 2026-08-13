@@ -1517,10 +1517,11 @@ The monthly `deps-scan` workflow (`.github/scripts/dependency-scan.sh`) checks t
 
 ## Bedrock Model Selection
 
-GCO uses an Amazon Bedrock model for two optional, **advisory** features:
+GCO uses an Amazon Bedrock model for three optional, **advisory** features:
 
 - **Mission sampling** — the goal-directed Mission engine can ask a model for strategy-revision rationales and final-report lessons (`gco mission ...`).
 - **Capacity advisor** — `gco capacity ai-recommend` and `gco capacity predict` send capacity data to a model for a placement/timing recommendation, and the `ai_recommend` MCP tool does the same.
+- **Mission memory embedding** — [mission memory](MISSION.md#mission-memory) embeds directives with a separate text-embedding model (`context.bedrock.embedding_model_id`, stock value `amazon.titan-embed-text-v2:0`) to write and query the mission-memory vector index.
 
 Both default to **Anthropic Claude Opus 5** through its system-defined global
 cross-Region inference profile (`global.anthropic.claude-opus-5`). It is the
@@ -1653,13 +1654,22 @@ export GCO_AUTOPILOT_MODEL="us.anthropic.claude-sonnet-4-6"   # Claude Code sess
 |------|------|
 | `cdk.json` | `context.bedrock.default_model_id`, `context.bedrock.thinking.effort` (advisory: capacity advisor + Mission sampling) |
 | `cdk.json` | `context.bedrock.claude_code_default_model_id` (the model `gco autopilot` hands to Claude Code) |
+| `cdk.json` | `context.bedrock.embedding_model_id` (the text-embedding model [mission memory](MISSION.md#mission-memory) uses for its vector index) |
 
-The two model keys are deliberately independent so repointing the interactive
+The model keys are deliberately independent so repointing the interactive
 agent never repoints advisory Converse calls, and vice versa (`gco stacks
-bedrock set-model` / `set-claude-code-model` edit them safely). Every consumer
-resolves its key through `gco.bedrock`. The same `cdk.json` is shipped as
-package data so installed CLI and MCP entry points retain the defaults when
-they run outside a source checkout.
+bedrock set-model` / `set-claude-code-model` edit the first two safely). Every
+consumer resolves its key through `gco.bedrock`. The same `cdk.json` is
+shipped as package data so installed CLI and MCP entry points retain the
+defaults when they run outside a source checkout.
+
+The embedding key carries a **one-way-door coupling**: the mission-memory
+vector index is created with `mission_memory.dimensions` (default 1024,
+matching Titan Text Embeddings V2's default width), that width is immutable
+after index creation, and query vectors must come from the same model at the
+same width or similarity results are meaningless. Changing the embedding
+model therefore means recreating the index and re-embedding stored items
+(`gco mission memory backfill`) — think once before repointing it.
 `tests/test_default_bedrock_model_consistency.py` guards the resolver,
 compatibility aliases, package-data declaration, inference-profile shape,
 reasoning translation, and captured fixture.
