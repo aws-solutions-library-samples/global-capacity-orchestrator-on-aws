@@ -385,6 +385,11 @@ class GCOGlobalStack(Stack):
                     "ec2:DescribeCapacityBlockOfferings",
                     "ec2:DescribeCapacityReservations",
                     "ec2:DescribeAvailabilityZones",
+                    # The poller's region-enablement pre-check probes each
+                    # configured region with a single-region DescribeRegions
+                    # call. Discovered live: without this grant the probe
+                    # fails with UnauthorizedOperation for every region.
+                    "ec2:DescribeRegions",
                 ],
                 resources=["*"],
             )

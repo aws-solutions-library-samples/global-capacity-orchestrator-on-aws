@@ -251,12 +251,28 @@ def _region_is_enabled(region: str) -> bool:
     (gco/config/config_loader.py), replicated inline because this module must
     not import gco/cli: a describe_regions call naming the single region
     succeeds only when the region is enabled.
+
+    ``UnauthorizedOperation`` is deliberately treated as *enabled*: it means
+    the regional endpoint accepted the credentials (a not-enabled region
+    rejects the token before authorization) but the role lacks
+    ``ec2:DescribeRegions``. Skipping in that case would silently turn one
+    missing IAM grant into zero snapshots account-wide — observed live on
+    first deploy — so the probe fails open with a distinct warning and lets
+    the per-call error isolation surface any real regional failures.
     """
     try:
         ec2 = boto3.client("ec2", region_name=region)
         ec2.describe_regions(RegionNames=[region])
         return True
     except Exception as exc:
+        if _error_code(exc) == "UnauthorizedOperation":
+            logger.warning(
+                "region-enablement probe for %s is not permitted (the poller role lacks "
+                "ec2:DescribeRegions); treating the region as enabled and polling it — "
+                "grant ec2:DescribeRegions to restore the pre-check",
+                region,
+            )
+            return True
         logger.warning(
             "region %s is not enabled for this account (describe_regions probe failed: %s); "
             "skipping it — no snapshots will be written for this region",

@@ -488,6 +488,31 @@ class TestLambdaHandler:
         for call in ec2.get_spot_placement_scores.call_args_list:
             assert "eu-bad-1" not in call.kwargs["RegionNames"]
 
+    def test_unauthorized_probe_fails_open_and_polls_the_region(self, handler, monkeypatch, caplog):
+        # Discovered live: without ec2:DescribeRegions the probe raised
+        # UnauthorizedOperation for every region and the poller wrote zero
+        # snapshots account-wide. An endpoint that rejects the probe for lack
+        # of permission has already accepted the credentials, so the region
+        # is enabled; the poller must poll it and name the missing grant.
+        _set_env(monkeypatch)
+        mock_table = MagicMock()
+        ec2 = _fake_ec2()
+
+        class _UnauthorizedError(Exception):
+            response = {"Error": {"Code": "UnauthorizedOperation"}}
+
+        ec2.describe_regions.side_effect = _UnauthorizedError("no ec2:DescribeRegions")
+        with (
+            caplog.at_level("WARNING"),
+            patch.object(handler, "boto3", _fake_boto3(mock_table, ec2)),
+        ):
+            result = handler.lambda_handler({}, None)
+
+        assert result["regions_polled"] == ["us-east-1"]
+        assert result["regions_skipped_not_enabled"] == []
+        assert result["written"] == 1
+        assert any("ec2:DescribeRegions" in record.message for record in caplog.records)
+
     def test_structured_summary_reports_sps_counters(self, handler, monkeypatch):
         _set_env(monkeypatch)
         mock_table = MagicMock()

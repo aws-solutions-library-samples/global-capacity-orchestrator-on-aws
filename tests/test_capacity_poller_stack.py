@@ -80,6 +80,25 @@ class TestCapacityPollerAddOnEnabled:
         assert env["CAPACITY_BLOCK_DURATION_HOURS"] == "24"
         assert env["CAPACITY_BLOCK_LONG_DURATION_HOURS"] == "1512"
 
+    def test_poller_role_can_probe_region_enablement(self):
+        # Discovered live: the region pre-check needs ec2:DescribeRegions or
+        # every probe fails UnauthorizedOperation. Pin the grant so an IAM
+        # regression cannot silently disable the pre-check again.
+        template = _synth(_EnabledConfig())
+        policies = template.find_resources("AWS::IAM::Policy")
+        actions = [
+            action
+            for policy in policies.values()
+            for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+            for action in (
+                statement["Action"]
+                if isinstance(statement["Action"], list)
+                else [statement["Action"]]
+            )
+        ]
+        assert "ec2:DescribeRegions" in actions
+        assert "ec2:GetSpotPlacementScores" in actions
+
     def test_target_capacities_env_derives_from_the_history_exports(self):
         # The env value is the configured capacities paired with field names
         # from cli/capacity/history.py — the naming rule's single source of
