@@ -143,14 +143,15 @@ jobs:
       - name: Validate accelerator catalog and NodePools
         # Deterministic and credential-free: the mutable EC2 catalog is checked
         # only by the monthly deps scan, while PRs validate the reviewed catalog,
-        # Karpenter families, and exact capacity-history watch list.
+        # Karpenter families, the exact capacity-history watch list, and the
+        # Spot Placement Score instance pools.
         #
         # Runs on one shard only: it is a whole-repo policy check, not part of
         # the sharded suite, so repeating it per shard would only add minutes.
         if: matrix.shard == 1
         run: |
           python scripts/accelerator_catalog.py validate
-          pytest tests/test_accelerator_catalog.py -q
+          pytest tests/test_accelerator_catalog.py tests/test_accelerator_pools.py -q
       - name: Run pytest with coverage
         # -n auto distributes tests across all available CPU cores via
         # pytest-xdist. The production asset publisher now uses per-asset
