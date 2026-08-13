@@ -104,19 +104,24 @@ def _patch_boto3_session(client: Any) -> mock._patch:
 
 
 class _FakeDynamoClient:
-    """Records ``put_item`` / ``search_vectors`` calls; replays or raises."""
+    """Records ``put_item`` / ``search_vectors`` / ``scan`` calls; replays or raises."""
 
     def __init__(
         self,
         search_response: dict[str, Any] | None = None,
         put_raises: Exception | None = None,
         search_raises: Exception | None = None,
+        scan_responses: list[dict[str, Any]] | None = None,
+        scan_raises: Exception | None = None,
     ) -> None:
         self._search_response = search_response or {"SearchResults": []}
         self._put_raises = put_raises
         self._search_raises = search_raises
+        self._scan_responses = list(scan_responses or [{"Items": []}])
+        self._scan_raises = scan_raises
         self.put_calls: list[dict[str, Any]] = []
         self.search_calls: list[dict[str, Any]] = []
+        self.scan_calls: list[dict[str, Any]] = []
 
     def put_item(self, **kwargs: Any) -> dict[str, Any]:
         self.put_calls.append(kwargs)
@@ -129,6 +134,12 @@ class _FakeDynamoClient:
         if self._search_raises is not None:
             raise self._search_raises
         return self._search_response
+
+    def scan(self, **kwargs: Any) -> dict[str, Any]:
+        self.scan_calls.append(kwargs)
+        if self._scan_raises is not None:
+            raise self._scan_raises
+        return self._scan_responses[min(len(self.scan_calls) - 1, len(self._scan_responses) - 1)]
 
 
 def _client_error(code: str, operation: str) -> ClientError:
@@ -467,6 +478,86 @@ class TestSearchSimilar:
         with pytest.raises(MissionMemoryError, match="does not match"):
             store.search_similar("directive")
         assert client.search_calls == []
+
+
+# ---------------------------------------------------------------------------
+# memory.MissionMemoryStore — list path
+# ---------------------------------------------------------------------------
+
+
+def _scan_item(session_id: str, completed_at: str) -> dict[str, Any]:
+    return {
+        "session_id": {"S": session_id},
+        "directive": {"S": f"directive for {session_id}"},
+        "final_verdict": {"S": "complete"},
+        "verdict_reason": {"S": "criteria_met"},
+        "iteration_count": {"N": "4"},
+        "created_at": {"S": "2026-08-01T00:00:00+00:00"},
+        "completed_at": {"S": completed_at},
+        "embedding_model_id": {"S": "unit-test-embed-model"},
+    }
+
+
+class TestListMemories:
+    def test_paginates_sorts_newest_first_and_projects(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pages = [
+            {
+                "Items": [
+                    _scan_item("sess-old", "2026-07-01T00:00:00+00:00"),
+                    _scan_item("sess-new", "2026-08-03T00:00:00+00:00"),
+                ],
+                "LastEvaluatedKey": {"session_id": {"S": "sess-new"}},
+            },
+            {"Items": [_scan_item("sess-mid", "2026-07-15T00:00:00+00:00")]},
+        ]
+        client = _FakeDynamoClient(scan_responses=pages)
+        store = _make_store(client, monkeypatch)
+
+        memories = store.list_memories()
+
+        assert [m["session_id"] for m in memories] == ["sess-new", "sess-mid", "sess-old"]
+        assert memories[0]["iteration_count"] == 4  # Decimal -> int
+        assert len(client.scan_calls) == 2  # followed the pagination cursor
+        assert client.scan_calls[1]["ExclusiveStartKey"] == {"session_id": {"S": "sess-new"}}
+        for call in client.scan_calls:
+            assert call["TableName"] == "memory-table"
+            # The embedding vector must never leave DynamoDB on the list path.
+            assert "directive_embedding" not in call["ProjectionExpression"]
+
+    def test_limit_caps_after_sorting(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        page = {
+            "Items": [
+                _scan_item("sess-old", "2026-07-01T00:00:00+00:00"),
+                _scan_item("sess-new", "2026-08-03T00:00:00+00:00"),
+                _scan_item("sess-mid", "2026-07-15T00:00:00+00:00"),
+            ]
+        }
+        client = _FakeDynamoClient(scan_responses=[page])
+        store = _make_store(client, monkeypatch)
+
+        memories = store.list_memories(limit=2)
+
+        # The newest two — the cap applies after the sort, not before.
+        assert [m["session_id"] for m in memories] == ["sess-new", "sess-mid"]
+
+    def test_limit_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        store = _make_store(_FakeDynamoClient(), monkeypatch)
+        with pytest.raises(MissionMemoryError, match="limit"):
+            store.list_memories(limit=0)
+
+    def test_resource_not_found_is_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = _FakeDynamoClient(scan_raises=_client_error("ResourceNotFoundException", "Scan"))
+        store = _make_store(client, monkeypatch)
+        with pytest.raises(MissionMemoryUnavailableError, match="not found"):
+            store.list_memories()
+
+    def test_no_credentials_is_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = _FakeDynamoClient(scan_raises=NoCredentialsError())
+        store = _make_store(client, monkeypatch)
+        with pytest.raises(MissionMemoryUnavailableError, match="credentials"):
+            store.list_memories()
 
 
 # ---------------------------------------------------------------------------

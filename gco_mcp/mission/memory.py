@@ -6,13 +6,15 @@
 one memory item per completed Mission session, searchable by directive
 similarity through the ``directive-embedding-index`` vector index.
 
-Two operations:
+Three operations:
 
 * :meth:`MissionMemoryStore.write_memory` — embed the session's
   directive and ``PutItem`` the memory record (verdict, lessons,
   followups, provenance).
 * :meth:`MissionMemoryStore.search_similar` — embed a query directive
   and ``SearchVectors`` the index for the closest past missions.
+* :meth:`MissionMemoryStore.list_memories` — ``Scan`` the base table
+  for summaries (no embedding involved), newest completion first.
 
 Resolution conventions, copied from their precedents:
 
@@ -450,3 +452,78 @@ class MissionMemoryStore:
                 item["score"] = float(score)
             results.append(item)
         return results
+
+    def list_memories(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return memory-item summaries, most recently completed first.
+
+        Backs ``gco mission memory list``: a paginated ``Scan`` over the
+        base table (the vector index's ``SearchVectors`` is a similarity
+        query, not a listing API) projecting only the summary fields —
+        the embedding vector never leaves DynamoDB. The table holds one
+        small item per completed mission, so a full scan is cheap at
+        this scale.
+
+        Args:
+            limit: Maximum summaries to return after sorting by
+                ``completed_at`` descending. Must be positive.
+
+        Raises:
+            MissionMemoryUnavailableError: Table absent / feature not
+                provisioned / no credentials / endpoint unreachable.
+            MissionMemoryError: ``limit`` < 1 or any other failure.
+        """
+        from botocore.exceptions import (
+            BotoCoreError,
+            ClientError,
+            NoCredentialsError,
+            PartialCredentialsError,
+        )
+
+        if int(limit) < 1:
+            raise MissionMemoryError(f"limit must be a positive integer, got {limit!r}")
+
+        table_name = self._resolve_table_name()
+        projection = (
+            "session_id, directive, final_verdict, verdict_reason, "
+            "iteration_count, created_at, completed_at, embedding_model_id"
+        )
+
+        from boto3.dynamodb.types import TypeDeserializer
+
+        deserializer = TypeDeserializer()
+        items: list[dict[str, Any]] = []
+        exclusive_start_key: dict[str, Any] | None = None
+        try:
+            while True:
+                request: dict[str, Any] = {
+                    "TableName": table_name,
+                    "ProjectionExpression": projection,
+                }
+                if exclusive_start_key is not None:
+                    request["ExclusiveStartKey"] = exclusive_start_key
+                response = self._get_client().scan(**request)
+                items.extend(
+                    {key: _plain(deserializer.deserialize(value)) for key, value in raw.items()}
+                    for raw in response.get("Items", [])
+                )
+                exclusive_start_key = response.get("LastEvaluatedKey")
+                if not exclusive_start_key:
+                    break
+        except (NoCredentialsError, PartialCredentialsError) as err:
+            raise MissionMemoryUnavailableError(
+                f"no AWS credentials — {_UNAVAILABLE_HINT}"
+            ) from err
+        except ClientError as err:
+            code = err.response.get("Error", {}).get("Code")
+            if code == "ResourceNotFoundException":
+                raise MissionMemoryUnavailableError(
+                    f"table {self._table_name!r} not found — {_UNAVAILABLE_HINT}"
+                ) from err
+            raise MissionMemoryError(f"mission-memory list failed: {err}") from err
+        except BotoCoreError as err:
+            raise MissionMemoryUnavailableError(
+                f"DynamoDB unreachable — {_UNAVAILABLE_HINT}"
+            ) from err
+
+        items.sort(key=lambda item: str(item.get("completed_at") or ""), reverse=True)
+        return items[: int(limit)]

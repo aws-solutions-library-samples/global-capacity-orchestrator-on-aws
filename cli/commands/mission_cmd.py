@@ -154,7 +154,9 @@ def mission_cmd() -> None:
 
     Subcommands manage Mission sessions: ``start``, ``status``,
     ``iterate``, ``checkpoint``, ``complete``, ``abort``, ``resume``,
-    ``history``, ``list``.
+    ``history``, ``list``, plus the ``memory`` group
+    (``search`` / ``list`` / ``backfill``) over the institutional
+    mission-memory index.
 
     Gated by the ``GCO_ENABLE_MISSION`` environment variable. With
     the flag unset, every subcommand prints a one-line hint to stderr
@@ -1527,3 +1529,205 @@ def mission_run_cmd(
 
     # ---- Step 3: iterate to completion. ---------------------------------
     _run_to_completion(session_id, dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
+# memory
+# ---------------------------------------------------------------------------
+
+_MEMORY_UNAVAILABLE_HINT = (
+    "Mission memory is not available. The table and vector index ship with the "
+    "global stack (mission_memory.enabled in cdk.json, on by default): run "
+    "'gco stacks deploy gco-global', or wait for the vector index to finish "
+    "backfilling after the first deployment. See docs/MISSION.md."
+)
+
+
+def _build_memory_store() -> Any:
+    """Construct the mission-memory store (SSM-lazy; free until first use)."""
+    from mission.memory import MissionMemoryStore  # noqa: PLC0415
+
+    return MissionMemoryStore()
+
+
+def _exit_memory_unavailable(err: Exception) -> None:
+    """Print the deployment hint and a structured envelope, then exit 1."""
+    click.echo(_MEMORY_UNAVAILABLE_HINT, err=True)
+    _emit_error("mission_memory_unavailable", {"message": str(err)})
+    raise SystemExit(1)
+
+
+@mission_cmd.group("memory")
+def mission_memory_cmd() -> None:
+    """Institutional memory across Mission sessions.
+
+    Completed missions are embedded into the ``{project}-mission-memory``
+    DynamoDB vector index; these subcommands search it (``search``),
+    list what it holds (``list``), and seed it from existing
+    Final_Reports (``backfill``). Requires the mission-memory add-on
+    deployed with the global stack.
+    """
+
+
+@mission_memory_cmd.command("search")
+@click.argument("directive")
+@click.option(
+    "--top-k",
+    type=int,
+    default=3,
+    show_default=True,
+    help="Number of similar past missions to return.",
+)
+@click.option(
+    "--verdict",
+    type=click.Choice(["complete", "terminate"]),
+    default=None,
+    help="Only return missions that ended with this terminal verdict.",
+)
+@click.option(
+    "--output",
+    type=click.Choice(["json", "table"]),
+    default="json",
+    show_default=True,
+)
+def mission_memory_search_cmd(directive: str, top_k: int, verdict: str | None, output: str) -> None:
+    """Search mission memory for missions similar to DIRECTIVE."""
+    from mission.memory import MissionMemoryUnavailableError  # noqa: PLC0415
+
+    try:
+        results = _build_memory_store().search_similar(
+            directive, top_k=top_k, final_verdict=verdict
+        )
+    except MissionMemoryUnavailableError as err:
+        _exit_memory_unavailable(err)
+    except Exception as err:  # noqa: BLE001 — CLI boundary: envelope, don't traceback
+        _emit_error("mission_memory_search_failed", {"message": str(err)})
+        raise SystemExit(1) from None
+
+    if output == "table":
+        header = f"  {'SCORE':>6}  {'SESSION ID':<40}  {'VERDICT':<9}  DIRECTIVE"
+        click.echo(header)
+        click.echo("  " + "-" * (len(header) - 2))
+        for entry in results:
+            score = entry.get("score")
+            score_text = f"{score:.3f}" if isinstance(score, (int, float)) else "-"
+            sid = (entry.get("session_id") or "")[:40]
+            fv = (entry.get("final_verdict") or "")[:9]
+            dt = entry.get("directive") or ""
+            click.echo(f"  {score_text:>6}  {sid:<40}  {fv:<9}  {dt}")
+    else:
+        _emit_json({"results": results})
+
+
+@mission_memory_cmd.command("list")
+@click.option(
+    "--limit",
+    type=int,
+    default=50,
+    show_default=True,
+    help="Maximum memory items to return (newest completion first).",
+)
+@click.option(
+    "--output",
+    type=click.Choice(["json", "table"]),
+    default="json",
+    show_default=True,
+)
+def mission_memory_list_cmd(limit: int, output: str) -> None:
+    """List what mission memory currently holds."""
+    from mission.memory import MissionMemoryUnavailableError  # noqa: PLC0415
+
+    try:
+        memories = _build_memory_store().list_memories(limit=limit)
+    except MissionMemoryUnavailableError as err:
+        _exit_memory_unavailable(err)
+    except Exception as err:  # noqa: BLE001 — CLI boundary: envelope, don't traceback
+        _emit_error("mission_memory_list_failed", {"message": str(err)})
+        raise SystemExit(1) from None
+
+    if output == "table":
+        header = f"  {'COMPLETED':<25}  {'SESSION ID':<40}  {'VERDICT':<9}  {'ITER':>5}  DIRECTIVE"
+        click.echo(header)
+        click.echo("  " + "-" * (len(header) - 2))
+        for entry in memories:
+            ca = (entry.get("completed_at") or "")[:25]
+            sid = (entry.get("session_id") or "")[:40]
+            fv = (entry.get("final_verdict") or "")[:9]
+            it = entry.get("iteration_count", 0)
+            dt = entry.get("directive") or ""
+            click.echo(f"  {ca:<25}  {sid:<40}  {fv:<9}  {it:>5}  {dt}")
+    else:
+        _emit_json({"memories": memories})
+
+
+@mission_memory_cmd.command("backfill")
+@click.option(
+    "--root",
+    type=click.Path(file_okay=False),
+    default=None,
+    help=(
+        "Directory holding *.report.json Final_Reports to embed. Defaults "
+        "to the filesystem mission root (~/.gco/missions)."
+    ),
+)
+def mission_memory_backfill_cmd(root: str | None) -> None:
+    """Seed mission memory from existing Final_Reports.
+
+    Reads every ``*.report.json`` under the report root, embeds each
+    report's directive, and writes one memory item per terminal report
+    — so memory is useful on day one instead of accumulating from zero.
+    Re-running is safe: writes are keyed on ``session_id`` and simply
+    overwrite (re-embedding the same directive).
+    """
+    from mission.memory import MissionMemoryUnavailableError  # noqa: PLC0415
+    from mission.state import FilesystemBackend  # noqa: PLC0415
+
+    report_root = Path(root) if root is not None else FilesystemBackend().root
+    reports = sorted(report_root.glob("*.report.json"))
+    store = _build_memory_store()
+
+    written = 0
+    skipped = 0
+    failures: list[dict[str, str]] = []
+    for report_path in reports:
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as err:
+            failures.append({"file": report_path.name, "error": f"unreadable report: {err}"})
+            continue
+        verdict = str(report.get("final_verdict") or "") if isinstance(report, dict) else ""
+        if (
+            not isinstance(report, dict)
+            or not report.get("session_id")
+            or not str(report.get("directive_text") or "").strip()
+            or verdict not in ("complete", "terminate")
+        ):
+            # Not a terminal Final_Report shape — count it, don't fail it.
+            skipped += 1
+            continue
+        try:
+            store.write_memory(
+                report,
+                verdict,
+                str(report.get("final_verdict_reason") or ""),
+                str(report.get("lessons") or ""),
+                [str(item) for item in report.get("recommended_followups") or []],
+            )
+            written += 1
+        except MissionMemoryUnavailableError as err:
+            # Infrastructure absent: no later report can succeed either.
+            _exit_memory_unavailable(err)
+        except Exception as err:  # noqa: BLE001 — per-report isolation
+            failures.append({"file": report_path.name, "error": str(err)})
+
+    payload: dict[str, Any] = {
+        "written": written,
+        "skipped": skipped,
+        "failed": len(failures),
+        "root": str(report_root),
+    }
+    if failures:
+        payload["failures"] = failures
+    _emit_json(payload)
+    if failures:
+        raise SystemExit(1)

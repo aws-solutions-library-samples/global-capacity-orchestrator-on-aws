@@ -174,12 +174,12 @@ class TestToolRegistration:
         tools = asyncio.run(run_mcp.mcp._list_tools())
         # The default registry intentionally contains 134 read-only or low-risk
         # tools (125 before the cost allocation/k8s/report family added 9).
-        # Optional families add 45 more when every flag is enabled:
+        # Optional families add 47 more when every flag is enabled:
         # capacity purchase (2), image publish (3), destructive operations (15),
         # model upload (2), infrastructure deploy (4), infrastructure destroy
         # (2), local metrics (1), semantic progress (1), local storage sync (1),
-        # config management (5), and Mission (9). The all-flags ceiling is
-        # therefore 179.
+        # config management (6), and Mission (10). The all-flags ceiling is
+        # therefore 181.
         base_count = 134
         tool_names = [t.name for t in tools]
         expected = base_count
@@ -213,8 +213,8 @@ class TestToolRegistration:
             # GCO_ENABLE_CONFIG_MANAGEMENT.
             expected += 6
         if "mission_start" in tool_names:
-            # The nine mission_* tools register together under GCO_ENABLE_MISSION.
-            expected += 9
+            # The ten mission_* tools register together under GCO_ENABLE_MISSION.
+            expected += 10
         assert len(tools) == expected
 
     def test_all_tool_names(self):
@@ -483,7 +483,7 @@ class TestToolRegistration:
                     "set_claude_code_default_model",
                 }
             )
-        # The nine mission_* tools register together under GCO_ENABLE_MISSION.
+        # The ten mission_* tools register together under GCO_ENABLE_MISSION.
         if "mission_start" in names:
             expected.update(
                 {
@@ -496,6 +496,7 @@ class TestToolRegistration:
                     "mission_resume",
                     "mission_history",
                     "mission_list",
+                    "mission_memory_search",
                 }
             )
         assert names == expected

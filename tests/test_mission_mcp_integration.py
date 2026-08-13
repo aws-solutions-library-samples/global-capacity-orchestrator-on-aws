@@ -1,7 +1,7 @@
 """Live MCP integration tests for the Mission tool surface.
 
 Boots the FastMCP server in-process via ``Client(run_mcp.mcp)`` and
-drives the full nine-tool ``mission_*`` lifecycle through the actual
+drives the full ten-tool ``mission_*`` lifecycle through the actual
 JSON-RPC protocol layer — tool discovery, ``mission_start``,
 ``mission_iterate`` (with the live FastMCP tool registry as the
 dispatcher target), ``mission_status``, ``mission_history``,
@@ -79,6 +79,7 @@ _MISSION_TOOL_NAMES = (
     "mission_resume",
     "mission_history",
     "mission_list",
+    "mission_memory_search",
 )
 
 
@@ -87,7 +88,7 @@ def _force_unregister_mission_tools() -> None:
 
     The FastMCP ``mcp`` instance is module-level in ``gco_mcp/server.py``
     and survives ``importlib.reload(run_mcp)``. Once a flag-set test
-    registers the nine ``mission_*`` tools, those registrations
+    registers the ten ``mission_*`` tools, those registrations
     persist on the live singleton — which would leak into flag-unset
     tests in other files. Clear them before each test in this file so
     we always know whether the post-reload snapshot reflects the test's
@@ -181,7 +182,7 @@ class TestMissionMcpToolDiscovery:
         for name in _MISSION_TOOL_NAMES:
             assert name not in names, f"{name!r} leaked into the default registry"
 
-    async def test_all_nine_mission_tools_register_when_flag_set(
+    async def test_all_ten_mission_tools_register_when_flag_set(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:

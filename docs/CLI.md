@@ -4410,7 +4410,7 @@ in this order:
 4. Otherwise sampling is off and the loop runs deterministically.
 
 <details>
-<summary>All <code>gco mission</code> commands (11) — click to expand</summary>
+<summary>All <code>gco mission</code> commands (14) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -4425,6 +4425,9 @@ in this order:
 | [`gco mission resume SESSION_ID`](#gco-mission-resume-session_id) | Transition a paused session back to `running`. |
 | [`gco mission history SESSION_ID`](#gco-mission-history-session_id) | Get the iteration history of a session. |
 | [`gco mission list`](#gco-mission-list) | List Mission sessions across the configured backend. |
+| [`gco mission memory search DIRECTIVE`](#gco-mission-memory-search-directive) | Search mission memory for missions similar to a directive. |
+| [`gco mission memory list`](#gco-mission-memory-list) | List what mission memory currently holds. |
+| [`gco mission memory backfill`](#gco-mission-memory-backfill) | Seed mission memory from existing Final_Reports. |
 
 </details>
 
@@ -4643,6 +4646,63 @@ gco mission list [OPTIONS]
 ```bash
 gco mission list --status running --output table
 ```
+
+#### `gco mission memory search DIRECTIVE`
+
+Search [mission memory](MISSION.md#mission-memory) for the completed missions most similar to
+`DIRECTIVE`. The directive is embedded with the configured Bedrock embedding
+model and matched against the `{project}-mission-memory` DynamoDB vector
+index — the same institutional memory the engine consults on sampling
+sessions. Results carry each mission's directive, lessons, recommended
+follow-ups, verdict, and a similarity score.
+
+```bash
+gco mission memory search "reduce validation loss on the demo model" --top-k 5
+```
+
+**Options:**
+
+- `--top-k N` — Number of similar past missions to return (default: `3`).
+- `--verdict complete|terminate` — Only return missions that ended with this terminal verdict.
+- `--output table|json` — Output format (default: `json`).
+
+Requires the mission-memory add-on (`mission_memory.enabled` in `cdk.json`,
+on by default) deployed with the global stack. When the table or index is
+absent — or the vector index is still backfilling after first deployment —
+the command prints a deployment hint and exits `1`.
+
+#### `gco mission memory list`
+
+List what mission memory currently holds, newest completion first. Summaries
+only (session id, directive, verdict, iteration count, timestamps, embedding
+model) — use [`gco mission memory search DIRECTIVE`](#gco-mission-memory-search-directive) to retrieve lessons.
+
+```bash
+gco mission memory list --limit 20 --output table
+```
+
+**Options:**
+
+- `--limit N` — Maximum memory items to return (default: `50`).
+- `--output table|json` — Output format (default: `json`).
+
+#### `gco mission memory backfill`
+
+Seed mission memory from existing Final_Reports: reads every
+`*.report.json` under the report root, embeds each terminal report's
+directive, and writes one memory item per report — so recall is useful on
+day one instead of accumulating from zero. Re-running is safe: writes are
+keyed on `session_id` and simply overwrite. Non-terminal or malformed files
+are counted as `skipped`; per-report write failures are isolated, listed in
+the output, and turn the exit code to `1`.
+
+```bash
+gco mission memory backfill
+```
+
+**Options:**
+
+- `--root DIR` — Directory holding `*.report.json` Final_Reports (default: the filesystem mission root, `~/.gco/missions`).
 
 ---
 

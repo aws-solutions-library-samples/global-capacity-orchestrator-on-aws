@@ -14,7 +14,7 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
 default registration the server exposes 134 tools; with every flag enabled the
-ceiling is 180. See [Feature Flags](../README.md#feature-flags) for the
+ceiling is 181. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
@@ -38,7 +38,7 @@ flag-to-tool mapping.
 | `config.py` | 1 | `config_get` |
 | `metrics.py` | 4 | `metrics_cloudwatch_get`, `metrics_from_job_logs`, `metrics_from_shared_storage_file` (default-on); `metrics_from_local_file` (gated by `GCO_ENABLE_LOCAL_METRICS`, default-off) — all `safe` |
 | `semantic_progress.py` | 1 | `metrics_semantic_progress` (gated by `GCO_ENABLE_SEMANTIC_PROGRESS`, default-off) — `safe` LLM-as-judge progress score |
-| `mission.py` | 9 | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list` — all gated by `GCO_ENABLE_MISSION` |
+| `mission.py` | 10 | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list`, `mission_memory_search` — all gated by `GCO_ENABLE_MISSION` |
 | `docs.py` | 1 | `find_docs` (documentation discovery) |
 | `examples.py` | 1 | `find_examples` (example-manifest discovery) |
 | `tasks.py` | 3 | `task_status`, `task_tail` (read-only observability), `task_prune` (gated local cleanup) |
@@ -318,6 +318,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `mission_history` | Get iteration history for a Mission session. |
 | `mission_iterate` | Run iteration(s) on a Mission session. |
 | `mission_list` | List Mission sessions. |
+| `mission_memory_search` | Search mission memory for similar past missions by directive. |
 | `mission_resume` | Resume a paused Mission session. |
 | `mission_start` | Start a new Mission session. |
 | `mission_status` | Get the full state of a Mission session. |
