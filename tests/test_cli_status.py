@@ -153,4 +153,196 @@ def test_status_table_mode_exits_zero(runner: CliRunner) -> None:
     result, _ = _invoke(runner, [], config=_config(output_format="table"))
 
     assert result.exit_code == 0, result.output
-    assert "ok" in result.output
+    assert "ok" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Table rendering
+# ---------------------------------------------------------------------------
+
+
+def _rich_document() -> FleetStatus:
+    """A document exercising every section status the renderer must show."""
+    return FleetStatus(
+        generated_at="2026-08-13T18:22:04+00:00",
+        project_name="test-gco",
+        overall=OVERALL_DEGRADED,
+        degraded=["stacks", "capacity", "nodepools"],
+        findings=[
+            Finding(
+                severity="error",
+                section="stacks",
+                message="test-gco-us-west-2 is UPDATE_ROLLBACK_COMPLETE in us-west-2",
+            ),
+            Finding(
+                severity="warn",
+                section="queue",
+                message="us-west-2 dead-letter queue holds 2 messages",
+            ),
+        ],
+        sections={
+            "regions": Section(
+                name="regions",
+                status=STATUS_OK,
+                data={
+                    "global": "us-east-2",
+                    "api_gateway": "us-east-2",
+                    "monitoring": "us-east-2",
+                    "workload": ["us-east-1", "us-west-2"],
+                    "source": "cdk.json",
+                },
+            ),
+            "stacks": Section(
+                name="stacks",
+                status=STATUS_OK,
+                data={
+                    "expected": [
+                        {
+                            "name": "test-gco-us-west-2",
+                            "region": "us-west-2",
+                            "status": "UPDATE_ROLLBACK_COMPLETE",
+                            "health": "unhealthy",
+                            "updated_time": None,
+                        }
+                    ],
+                    "optional": [
+                        {
+                            "name": "test-gco-regional-api-us-east-1",
+                            "region": "us-east-1",
+                            "status": "CREATE_COMPLETE",
+                            "health": "healthy",
+                            "updated_time": None,
+                        }
+                    ],
+                },
+            ),
+            "queue": Section(
+                name="queue",
+                status=STATUS_OK,
+                data={
+                    "by_region": {
+                        "us-east-1": {"available": 3, "in_flight": 1, "delayed": 0, "dlq": 0},
+                        "us-west-2": {"available": 0, "in_flight": 0, "delayed": 0, "dlq": 2},
+                    },
+                    "totals": {"available": 3, "in_flight": 1, "delayed": 0, "dlq": 2},
+                },
+            ),
+            "jobs": Section(
+                name="jobs",
+                status=STATUS_OK,
+                data={
+                    "totals": {"total": 41, "queued": 3, "running": 1},
+                    "by_region": {"us-east-1": {"queued": 3, "running": 1}},
+                    "complete": False,
+                    "records_evaluated": 41,
+                },
+            ),
+            "capacity": Section(
+                name="capacity",
+                status="partial",
+                reason="1 of 2 regions reported incomplete telemetry",
+                errors=["us-west-2: GPU telemetry returned no datapoints"],
+                data={
+                    "by_region": {
+                        "us-east-1": {
+                            "queue_depth": 3,
+                            "running_jobs": 1,
+                            "gpu_utilization": 62.5,
+                            "cpu_utilization": 31.0,
+                            "telemetry_status": "complete",
+                            "unavailable_signals": [],
+                        },
+                        "us-west-2": {
+                            "queue_depth": 0,
+                            "running_jobs": 0,
+                            "gpu_utilization": 0.0,
+                            "cpu_utilization": 12.0,
+                            "telemetry_status": "partial",
+                            "unavailable_signals": ["gpu"],
+                        },
+                    }
+                },
+            ),
+            "inference": Section(
+                name="inference", status="empty", data={"totals": {}, "count": 0, "endpoints": []}
+            ),
+            "costs": Section(
+                name="costs",
+                status=STATUS_SKIPPED,
+                reason="not requested; pass --with-costs (Cost Explorer bills per request)",
+            ),
+            "nodepools": Section(
+                name="nodepools",
+                status=STATUS_UNAVAILABLE,
+                reason="cluster endpoint is private; open a tunnel with `gco cluster tunnel`",
+            ),
+        },
+    )
+
+
+def test_status_table_renders_every_section_status_with_reasons(runner: CliRunner) -> None:
+    result, _ = _invoke(
+        runner, [], config=_config(output_format="table"), document=_rich_document()
+    )
+
+    assert result.exit_code == 0, result.output
+    output = result.output
+    assert "Fleet status: DEGRADED" in output
+    assert "degraded sections: stacks, capacity, nodepools" in output
+    # Sections in every status render, with reasons for the degraded ones.
+    assert "regions [ok]" in output
+    assert "capacity [partial]" in output
+    assert "1 of 2 regions reported incomplete telemetry" in output
+    assert "inference [empty]" in output
+    assert "costs [skipped]" in output
+    assert "not requested; pass --with-costs" in output
+    assert "nodepools [unavailable]" in output
+    assert "gco cluster tunnel" in output
+
+
+def test_status_table_renders_findings_above_section_detail(runner: CliRunner) -> None:
+    result, _ = _invoke(
+        runner, [], config=_config(output_format="table"), document=_rich_document()
+    )
+
+    output = result.output
+    finding_pos = output.index("UPDATE_ROLLBACK_COMPLETE in us-west-2")
+    first_section_pos = output.index("regions [ok]")
+    assert finding_pos < first_section_pos
+    assert "[error] stacks:" in output
+    assert "[warn] queue:" in output
+
+
+def test_status_table_states_the_absence_of_findings_explicitly(runner: CliRunner) -> None:
+    result, _ = _invoke(runner, [], config=_config(output_format="table"))
+
+    assert "Findings: none" in result.output
+
+
+def test_status_table_names_drill_down_commands(runner: CliRunner) -> None:
+    result, _ = _invoke(
+        runner, [], config=_config(output_format="table"), document=_rich_document()
+    )
+
+    output = result.output
+    assert "gco queue stats" in output
+    assert "gco capacity status" in output
+    assert "gco inference list" in output
+
+
+def test_status_table_and_json_render_the_same_document(runner: CliRunner) -> None:
+    document = _rich_document()
+    table_result, _ = _invoke(runner, [], config=_config(output_format="table"), document=document)
+    json_result, _ = _invoke(runner, [], config=_config(output_format="json"), document=document)
+
+    payload = json.loads(json_result.stdout)
+    # The same values from the one document appear in both renderings.
+    assert payload["overall"] == "degraded"
+    assert "Fleet status: DEGRADED" in table_result.output
+    assert payload["sections"]["queue"]["data"]["by_region"]["us-west-2"]["dlq"] == 2
+    assert "dlq 2" in table_result.output
+    assert payload["findings"][0]["message"] in table_result.output
+    assert payload["sections"]["capacity"]["reason"] in table_result.output
+    # The truncated-scan marker renders in both.
+    assert payload["sections"]["jobs"]["data"]["complete"] is False
+    assert "TRUNCATED after 41 records" in table_result.output
