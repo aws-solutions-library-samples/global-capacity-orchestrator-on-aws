@@ -722,6 +722,10 @@ class ConfigLoader:
         - ``retention_days`` / ``poll_interval_minutes``: positive ints if present.
         - ``watch_instance_types`` / ``enabled_regions``: lists of strings if present.
         - every region in ``enabled_regions`` must be a known AWS region.
+        - ``spot_score_target_capacities``: non-empty list of positive
+          integers (booleans rejected), every value a member of the supported
+          set exported by ``cli/capacity/history.py`` — metric fields are
+          statically named, so an unsupported capacity has nowhere to land.
         """
         historical_ctx = self.app.node.try_get_context("historical")
         if not isinstance(historical_ctx, dict):
@@ -771,6 +775,34 @@ class ConfigLoader:
                     f"historical.enabled_regions contains invalid region '{region}'. "
                     f"Valid regions: {sorted(self.VALID_REGIONS)}"
                 )
+
+        if "spot_score_target_capacities" in historical_ctx:
+            # Function-local import: cli/capacity/history.py owns the supported
+            # set and the capacity->field naming rule, and imports nothing from
+            # gco, so validation and storage cannot drift apart.
+            from cli.capacity.history import SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES
+
+            capacities = historical_ctx["spot_score_target_capacities"]
+            if (
+                not isinstance(capacities, list)
+                or not capacities
+                or not all(
+                    isinstance(value, int) and not isinstance(value, bool) and value > 0
+                    for value in capacities
+                )
+            ):
+                raise ConfigValidationError(
+                    "historical.spot_score_target_capacities must be a non-empty list "
+                    f"of positive integers, got {capacities!r}"
+                )
+            for value in capacities:
+                if value not in SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES:
+                    raise ConfigValidationError(
+                        "historical.spot_score_target_capacities contains unsupported "
+                        f"target capacity {value!r}. Supported target capacities: "
+                        f"{list(SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES)} (each needs a "
+                        "statically declared metric field; see cli/capacity/history.py)"
+                    )
 
     #: Distance functions the DynamoDB vector-index API accepts. The choice is
     #: immutable after index creation, so a typo must fail at synth time.
@@ -1500,6 +1532,11 @@ class ConfigLoader:
             - capacity_block_long_duration_hours: long Capacity Block probe
               duration in hours (default 1512 = 63 days); 0 disables the long
               probe and its ``capacity_blocks_long_*`` metrics
+            - spot_score_target_capacities: Spot Placement Score target
+              capacities the poller snapshots per instance pool (default
+              [1, 10, 50]); a subset selector over the supported set exported
+              by ``cli/capacity/history.py``, where capacity 1 keeps the
+              original ``spot_score`` field and N > 1 writes ``spot_score_at_N``
             - watch_instance_types: instance types the poller snapshots
             - enabled_regions: regions to poll; empty means all deployed regions
         """
@@ -1509,6 +1546,7 @@ class ConfigLoader:
             "poll_interval_minutes": 15,
             "capacity_block_duration_hours": 24,
             "capacity_block_long_duration_hours": 63 * 24,
+            "spot_score_target_capacities": [1, 10, 50],
             "watch_instance_types": [
                 "g4dn.12xlarge",
                 "g4dn.16xlarge",

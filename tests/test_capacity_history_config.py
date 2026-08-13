@@ -7,6 +7,10 @@ import re
 import aws_cdk as cdk
 import pytest
 
+from cli.capacity.history import (
+    SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES,
+    metric_field_for_target_capacity,
+)
 from gco.config.config_loader import ConfigLoader, ConfigValidationError
 from scripts.accelerator_catalog import Catalog
 
@@ -31,6 +35,16 @@ class TestDefaults:
         expected_types = list(Catalog.load().instance_types)
         assert cfg["watch_instance_types"] == expected_types
         assert cfg["enabled_regions"] == []
+        assert cfg["spot_score_target_capacities"] == [1, 10, 50]
+
+    def test_default_target_capacities_are_the_supported_set(self, valid_cdk_context):
+        # The default selects every supported capacity, and each one resolves
+        # to a statically declared metric field. If the supported set in
+        # cli/capacity/history.py moves, this default must move with it.
+        cfg = _loader(valid_cdk_context).get_capacity_history_config()
+        assert cfg["spot_score_target_capacities"] == list(SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES)
+        for capacity in cfg["spot_score_target_capacities"]:
+            assert metric_field_for_target_capacity(capacity)
 
     def test_default_watch_instance_types_are_well_formed(self, valid_cdk_context):
         # Guard the default watch list shape so an accidental edit (dupes,
@@ -80,6 +94,19 @@ class TestEnabledOverride:
         # 0 is a valid value: it disables the long probe.
         assert cfg["capacity_block_long_duration_hours"] == 0
 
+    def test_target_capacity_subset_override_merges(self, valid_cdk_context):
+        # A subset of the supported set is valid and replaces the default
+        # list wholesale while every other default survives the merge.
+        loader = _loader(valid_cdk_context, {"spot_score_target_capacities": [1, 10]})
+        cfg = loader.get_capacity_history_config()
+        assert cfg["spot_score_target_capacities"] == [1, 10]
+        assert cfg["retention_days"] == 90
+        assert cfg["watch_instance_types"] == list(Catalog.load().instance_types)
+
+    def test_single_supported_capacity_is_valid(self, valid_cdk_context):
+        loader = _loader(valid_cdk_context, {"spot_score_target_capacities": [50]})
+        assert loader.get_capacity_history_config()["spot_score_target_capacities"] == [50]
+
 
 class TestValidation:
     @pytest.mark.parametrize(
@@ -97,6 +124,15 @@ class TestValidation:
             {"watch_instance_types": "g5.xlarge"},
             {"watch_instance_types": [1, 2]},
             {"enabled_regions": ["not-a-region"]},
+            {"spot_score_target_capacities": []},
+            {"spot_score_target_capacities": "10"},
+            {"spot_score_target_capacities": 10},
+            {"spot_score_target_capacities": [0]},
+            {"spot_score_target_capacities": [-1]},
+            {"spot_score_target_capacities": [1.5]},
+            {"spot_score_target_capacities": ["10"]},
+            {"spot_score_target_capacities": [True]},
+            {"spot_score_target_capacities": [1, 7]},
         ],
     )
     def test_invalid_historical_raises(self, valid_cdk_context, historical):
@@ -107,3 +143,20 @@ class TestValidation:
         # 0 disables the long probe and must not raise.
         loader = _loader(valid_cdk_context, {"capacity_block_long_duration_hours": 0})
         assert loader.get_capacity_history_config()["capacity_block_long_duration_hours"] == 0
+
+    def test_unsupported_capacity_error_names_value_and_supported_set(self, valid_cdk_context):
+        # The error must let an operator fix the typo without reading code:
+        # the offending value and the full supported set are both named.
+        with pytest.raises(ConfigValidationError) as excinfo:
+            _loader(valid_cdk_context, {"spot_score_target_capacities": [1, 7]})
+        message = str(excinfo.value)
+        assert "spot_score_target_capacities" in message
+        assert "7" in message
+        assert str(list(SUPPORTED_SPOT_SCORE_TARGET_CAPACITIES)) in message
+
+    def test_malformed_capacity_list_error_names_the_value(self, valid_cdk_context):
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"non-empty list of positive integers.*\[True\]",
+        ):
+            _loader(valid_cdk_context, {"spot_score_target_capacities": [True]})
